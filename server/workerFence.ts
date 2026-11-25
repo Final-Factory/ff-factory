@@ -14,6 +14,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
+import { openChildren } from '../machine/lowIntegrity.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -27,6 +28,8 @@ export interface WorkerFence {
   darwinCache: string;
   /** More folders a worker may write (the Unity slots mailbox when it is not in the root). */
   extraWritable?: string[];
+  /** The root children workers write (lowIntegrity.ts openChildren, w5569); absent: openChildren(root). */
+  open?: string[];
 }
 
 /** An SBPL string literal. */
@@ -47,7 +50,10 @@ export function seatbeltProfile(f: WorkerFence): string {
     '(allow default)',
     ';; Every file write is refused, except below. Later rules win.',
     '(deny file-write*)',
-    `(allow file-write* (subpath ${lit(f.root)}))`,
+    ';; only the root folders workers write (w5569): a portal, an instances folder or a new root folder stays read-only',
+    '(allow file-write*',
+    ...(f.open ?? openChildren(f.root)).map((c) => `  (subpath ${lit(path.join(f.root, c))})`),
+    ')',
     ';; device nodes every shell writes to',
     '(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx")',
     '  (literal "/dev/dtracehelper") (literal "/dev/random") (literal "/dev/urandom")',
@@ -92,13 +98,14 @@ const confstr = (name: string) => execFileSync('/usr/bin/getconf', [name], { enc
  * The fence for this daemon's agents, or undefined when it is off: daemon.json `workerFence` is not "seatbelt", the
  * machine is not a Mac, it has no worker root, or sandbox-exec is missing.
  */
-export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
+export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
   if (o.setting !== 'seatbelt' || (o.platform ?? process.platform) !== 'darwin' || !o.root) return undefined;
   if (!(o.exists ?? fs.existsSync)(SANDBOX_EXEC)) return undefined;
   const get = o.getconf ?? confstr;
   return {
     kind: 'seatbelt',
     root: real(o.root),
+    open: openChildren(o.root, o.workFolders, READ_ONLY_IN_ROOT.subpaths),
     home: real(o.home),
     darwinTemp: real(get('DARWIN_USER_TEMP_DIR')),
     darwinCache: real(get('DARWIN_USER_CACHE_DIR')),

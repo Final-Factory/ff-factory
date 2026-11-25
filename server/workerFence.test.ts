@@ -22,7 +22,19 @@ test('fenceFor: off unless the setting is "seatbelt" on a Mac with a root and sa
   assert.equal(f?.darwinTemp, '/t/DARWIN_USER_TEMP_DIR');
 });
 
-test('the profile refuses every write, then allows the root, then takes the daemon, main clone and secrets back', () => {
+test('the profile opens only the root folders workers write: no blanket root, no portal, instances or runners (w5569)', () => {
+  const p = seatbeltProfile(F);
+  assert.ok(!p.includes('(subpath "/Users/p/ffw")'), 'no blanket grant of the root');
+  for (const c of ['tmp', 'sandboxes', 'repo', 'cache', 'tools']) assert.ok(p.includes(`(subpath "${path.join('/Users/p/ffw', c)}")`), c);
+  for (const c of ['instances', 'demos', 'ben-factory', 'ffu-runners']) assert.ok(!p.includes(path.join('/Users/p/ffw', c)), c);
+  const back = p.lastIndexOf('(deny file-write*');
+  for (const c of ['daemon', 'secrets']) assert.ok(p.indexOf(path.join('/Users/p/ffw', c)) > back, `${c} only in the read-only block`);
+  const f = fenceFor({ setting: 'seatbelt', root: '/r', platform: 'darwin', home: '/h', exists: () => true, getconf: (n) => `/t/${n}`, workFolders: [path.join('/r', 'work', 'temp'), path.join('/r', 'secrets', 'x')] });
+  assert.ok(f?.open?.includes('work') && f.open.includes('tmp'));
+  assert.ok(!f?.open?.includes('secrets') && !f?.open?.includes('daemon'));
+});
+
+test('the profile refuses every write, then allows the worker folders, then takes the daemon and secrets back', () => {
   const p = seatbeltProfile(F);
   const at = (s: string) => {
     const i = p.indexOf(s);
@@ -30,10 +42,10 @@ test('the profile refuses every write, then allows the root, then takes the daem
     return i;
   };
   assert.ok(at('(allow default)') < at('(deny file-write*)'));
-  assert.ok(at('(deny file-write*)') < at('(allow file-write* (subpath "/Users/p/ffw"))'));
+  assert.ok(at('(deny file-write*)') < at('(subpath "/Users/p/ffw/tmp")'));
   const back = p.lastIndexOf('(deny file-write*');
-  assert.ok(back > at('(allow file-write* (subpath "/Users/p/ffw"))'), 'the read-only denies come after the root allow (later rules win)');
-  assert.ok(!p.includes('/Users/p/ffw/repo"'), 'the main clone stays writable: worktree git writes its index and objects there');
+  assert.ok(back > at('(subpath "/Users/p/ffw/tmp")'), 'the read-only denies come after the worker folders (later rules win)');
+  assert.ok(p.indexOf(`(subpath "${path.join('/Users/p/ffw', 'repo')}")`) < back, 'the main clone stays writable: worktree git writes its index and objects there');
   for (const s of ['(subpath "/Users/p/ffw/daemon")', '(subpath "/Users/p/ffw/secrets")', '(literal "/Users/p/ffw/root.json")']) assert.ok(at(s) > back, s);
   // No blanket home or /tmp allowance: only named paths in them.
   assert.ok(!p.includes('(subpath "/Users/p")'));

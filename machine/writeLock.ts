@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
+import { openChildren } from './lowIntegrity.ts';
 
 /** The launcher beside this file. */
 export const FF_LANDLOCK = path.join(import.meta.dirname, 'ff-landlock.py');
@@ -18,7 +19,7 @@ export const FF_LANDLOCK = path.join(import.meta.dirname, 'ff-landlock.py');
 export const LOCKED_CHILDREN = ['daemon', 'secrets'] as const;
 
 export interface WriteLockPaths {
-  /** The worker root (`~/ffw`). Every folder in it is writable except the daemon's and `secrets`. */
+  /** The worker root (`~/ffw`). Only the folders workers write are writable (lowIntegrity.ts openChildren, w5569). */
   root: string;
   /** The daemon's folder, when it is not `<root>/daemon`. */
   appDir?: string;
@@ -38,6 +39,8 @@ export interface WriteLockPaths {
   home?: string;
   /** More writable folders, each with its reason in daemon.json (`writeLockExtra`). */
   extra?: string[];
+  /** The configured temp and sandboxes folders: one in the root opens its root child too (w5569). */
+  workFolders?: (string | undefined)[];
 }
 
 /** ff-landlock.py's arguments for a worker (everything before `--`). */
@@ -47,7 +50,10 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   const except = new Set<string>(LOCKED_CHILDREN);
   if (path.dirname(app) === root) except.add(path.basename(app));
   // /dev: null, tty, shm, the GPU. /proc: a process's own oom_score_adj (Unity sets it); file modes still decide the rest.
-  const args = ['--rw', '/dev', '--rw', '/proc', '--rw-children', root, ...[...except].sort().flatMap((n) => ['--except', n])];
+  const args = ['--rw', '/dev', '--rw', '/proc'];
+  // Only the root's folders workers write (w5569, as Windows since w5539): a portal, an instances folder or any new root
+  // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only).
+  for (const c of openChildren(root, p.workFolders ?? [], except)) args.push('--rw', path.join(root, c));
   for (const r of p.extraRoots ?? []) args.push('--rw', r);
   if (p.maxEventsFile) args.push('--rw', p.maxEventsFile);
   if (p.unitySlots) args.push('--rw', p.unitySlots);

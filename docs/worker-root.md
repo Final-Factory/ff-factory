@@ -716,7 +716,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   ledger and Claude keys: one edit from a Low worker ran at Medium there. lothsahn: "File it: make the BEAST instances
   folder unwritable by workers". `lowTargets` now labels only `WORKER_CHILDREN` and keeps the rest Medium; a folder a
   worker tool needs to write is added to that list in the same change that makes the tool write there, never by
-  labelling it by hand. The Landlock and Seatbelt fences (4.2) still open every child but `daemon` and `secrets`.
+  labelling it by hand. The Linux Landlock lock and the Mac Seatbelt fence open the same list since w5569 (4.2).
 - **A Low process sees only Low processes.** tasklist, Get-Process and CIM list about 24 rows: no daemon, and no Medium
   editor or node. Never judge from inside a worker whether a Medium process is running.
 - **The firewall cmdlets are denied** (`Get-NetFirewallApplicationFilter`: "Access is denied", PermissionDenied). The
@@ -756,7 +756,7 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 
 | Path | Why |
 |---|---|
-| every child folder of the root except `daemon` and `secrets` | the work; the daemon's folder (or `appDir` if it sits in the root under another name) and the secrets stay read-only. `repo` must stay writable: sandbox worktrees keep their git data in it |
+| the root's folders workers write: `WORKER_CHILDREN` (`machine/lowIntegrity.ts` `openChildren`, w5569), plus the root folder that holds a configured `tempDir` or sandboxes folder, never `daemon`, `secrets` or the daemon's own folder | the work. `repo` must stay writable: sandbox worktrees keep their git data there. A listed folder missing when the agent starts is skipped, so read-only for that agent |
 | `extraRoots` | folders of the install that live outside the root |
 | `maxEventsFile` and the Unity slots mailbox, only where `daemon.json` puts them outside the root | ffdiscord appends Max's events (`FF_MAX_EVENTS`); the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps both inside it (`<root>/max`, `<root>/unity-slots`, w5377), so they need no rule |
 | `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |
@@ -764,6 +764,14 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 | `/tmp` | Unity ignores TMPDIR for its Package Manager socket (`/tmp/Unity-Upm-<pid>.sock`: without it the editor exits 1), its shader compiler's lock (`/tmp/Unity-ShaderCompilerIPC-*.lock`) and `/tmp/.dotnet/shm` (without them it aborts at shader compiler start). |
 | `/dev`, `/proc` | null, tty, shm and the GPU; Unity writes its own `oom_score_adj`. Ordinary file modes still apply |
 | `writeLockExtra` | anything else a machine needs, each with its reason |
+
+**Only the listed root folders** (w5569, following w5539 on Windows; lothsahn: "File it: make the BEAST instances
+folder unwritable by workers"). Until then the lock (`--rw-children root --except daemon --except secrets`) and the Mac
+Seatbelt profile (`(allow file-write* (subpath root))`) opened every root folder, so a portal, an instances folder, CI
+runners or any new folder in the root was writable by every worker. Both now grant each `openChildren` folder by name,
+and the daemon says once, when the lock or fence comes on, which root folders it keeps read-only ("root folders kept
+read-only: ..."): a folder a worker tool writes that is missing there goes into `WORKER_CHILDREN` in the change that
+makes the tool write it.
 
 **Why not systemd.** w5297 picked `systemd-run --user` with ProtectSystem=strict, ProtectHome=read-only and
 ReadWritePaths. On biscuit that unit starts but **does nothing**: every write still succeeded (home, /tmp, a stand-in

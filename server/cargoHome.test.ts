@@ -45,10 +45,10 @@ test('w5501: the daemon, ffu-slot take and the fences agree the cargo home is in
   const t = lowTargets({ root, appDir: path.join(root, 'daemon'), children: ['cache', 'daemon', 'secrets', 'ffu-runners', 'tools'].map((name) => ({ name, dir: true })) });
   assert.ok(t.dirs.includes(path.join(root, 'cache')), 'cache is labelled Low');
   assert.ok(!t.dirs.includes(path.join(root, 'ffu-runners')), 'the runners stay Medium, so a CARGO_HOME there is moved');
-  // Linux Landlock: every root child but daemon and secrets is writable.
+  // Linux Landlock: `cache` is one of the root folders workers write (w5569).
   const args = writeLockArgs({ root });
-  assert.deepEqual(args.slice(args.indexOf('--rw-children'), args.indexOf('--rw-children') + 2), ['--rw-children', root]);
-  assert.ok(!args.includes('cache'), 'cache is not an --except');
+  assert.ok(args.includes(path.join(root, 'cache')), 'cache is writable');
+  assert.ok(!args.includes(path.join(root, 'ffu-runners')), 'the runners are not');
 });
 
 function tree(t: { after: (fn: () => void) => void }) {

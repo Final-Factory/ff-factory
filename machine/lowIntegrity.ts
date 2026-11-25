@@ -45,6 +45,18 @@ export const WORKER_CHILDREN = [
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];
 
+/**
+ * The root children the Linux Landlock lock and the Mac Seatbelt fence open to workers (w5569): WORKER_CHILDREN, plus the
+ * root child that holds each `extra` the config puts in the root (its temp or sandboxes folder elsewhere than tmp and
+ * sandboxes), less `closed` (daemon, secrets, the daemon's own folder). Names as written: these file systems match case.
+ */
+export function openChildren(root: string, extra: (string | undefined)[] = [], closed: Iterable<string> = MEDIUM_CHILDREN): string[] {
+  const shut = new Set(closed);
+  const open = new Set(WORKER_CHILDREN);
+  for (const e of extra) if (e && inside(path.resolve(e), path.resolve(root)) && !same(e, root)) open.add(path.relative(path.resolve(root), path.resolve(e)).split(/[\\/]/)[0]);
+  return [...open].filter((c) => !shut.has(c)).sort();
+}
+
 export interface LowTargetsInput {
   root: string;
   /** The daemon's folder: kept Medium where it sits inside the root. */
