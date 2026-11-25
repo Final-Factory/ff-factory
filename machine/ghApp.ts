@@ -148,7 +148,47 @@ export function ghEnvFor(args: readonly string[], env: Record<string, string | u
   return out;
 }
 
-/** The real gh: the first on PATH that is not in `skipDir` (the shim's own folder): gh.exe on Windows, gh elsewhere. */
+/** Whether `exe` is one of our own gh shims (installGhAppShims writes this line second), not a real gh. */
+export function isGhAppShim(exe: string): boolean {
+  try {
+    const fd = fs.openSync(exe, 'r');
+    try {
+      const b = Buffer.alloc(256);
+      const n = fs.readSync(fd, b, 0, b.length, 0);
+      return b.subarray(0, n).toString('latin1').includes('# FF Factory: gh');
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The shim folder the helper skips (lockout re-review B5 of #1193): the one the new shim names (FF_GH_APP_BIN), else the one
+ * beside an older run's tokens file (FF_GH_APP_FILE, before w5547), else the one beside the helper itself
+ * (`<app dir>/app/machine/ghApp.ts` -> `<app dir>/gh-app/bin`). So a shim and a helper from different builds (a rollback, a
+ * revert, the window between a code swap and the daemon's restart) never pick the shim as the real gh.
+ */
+export function ghShimSkipDir(env: Record<string, string | undefined>, helper = import.meta.filename): string {
+  if (env.FF_GH_APP_BIN) return env.FF_GH_APP_BIN;
+  if (env.FF_GH_APP_FILE) return path.join(path.dirname(env.FF_GH_APP_FILE), 'bin');
+  return ghAppPaths(path.resolve(path.dirname(helper), '..', '..')).bin;
+}
+
+/** How deep gh shims may call each other (a gh alias or extension that runs gh again) before the helper refuses (B5). */
+export const GH_SHIM_MAX_DEPTH = 4;
+
+/**
+ * A file in gh-app/ that holds nothing (B5): a run's FF_GH_APP_FILE, so a helper from before w5547 (a rollback or a revert)
+ * skips gh-app/bin and reads no tokens, falling back to the run's GH_TOKEN. Never written.
+ */
+export const GH_APP_MOVED_FILE = 'tokens.moved';
+
+/**
+ * The real gh: the first on PATH that is not in `skipDir` (the shim's own folder) and is not one of our shims: gh.exe on
+ * Windows, gh elsewhere.
+ */
 export function findRealGh(pathValue: string | undefined, skipDir: string | undefined, platform = process.platform): string | undefined {
   const norm = (p: string) => (platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
   const skip = skipDir ? norm(skipDir) : undefined;
@@ -158,6 +198,7 @@ export function findRealGh(pathValue: string | undefined, skipDir: string | unde
     try {
       if (!fs.statSync(exe).isFile()) continue;
       if (platform !== 'win32') fs.accessSync(exe, fs.constants.X_OK);
+      if (isGhAppShim(exe)) continue;
       return exe;
     } catch {
       // not here
@@ -198,8 +239,14 @@ export interface GhAppSetup {
  */
 export function ghAppRunEnv(specEnv: Record<string, string | undefined> | undefined, setup: GhAppSetup | undefined, pathKey: string, currentPath: string | undefined, sessionFile?: string): Record<string, string> {
   if (!setup || !specEnv?.FF_GH_APP_NAMES || !specEnv.GH_TOKEN || !sessionFile) return {};
-  // Never the machine's file (w5547): the run reads only its own.
-  return { FF_GH_APP_SESSION_FILE: sessionFile, FF_GH_APP_HELPER: setup.helper, [pathKey]: [setup.bin, currentPath].filter(Boolean).join(path.delimiter) };
+  // Never the machine's file (w5547): the run reads only its own. FF_GH_APP_FILE names a file that holds nothing, for a helper
+  // from before w5547 (lockout re-review B5): it skips gh-app/bin by it and reads no tokens, instead of running the shim again.
+  return {
+    FF_GH_APP_SESSION_FILE: sessionFile,
+    FF_GH_APP_FILE: path.join(path.dirname(setup.file), GH_APP_MOVED_FILE),
+    FF_GH_APP_HELPER: setup.helper,
+    [pathKey]: [setup.bin, currentPath].filter(Boolean).join(path.delimiter),
+  };
 }
 
 /**
@@ -230,12 +277,18 @@ function main(argv: string[]): number {
   if (argv[0] === 'gh') {
     const args = argv.slice(1);
     const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-    const gh = findRealGh(process.env[key], process.env.FF_GH_APP_BIN);
+    const depth = Number(process.env.FF_GH_APP_DEPTH) || 0;
+    if (depth >= GH_SHIM_MAX_DEPTH) {
+      process.stderr.write(`gh: the FF Factory gh shim was entered ${depth + 1} times in a row; refusing so it cannot run itself without end\n`);
+      return 126;
+    }
+    const gh = findRealGh(process.env[key], ghShimSkipDir(process.env));
     if (!gh) {
       process.stderr.write('gh: not found on PATH (the FF Factory gh shim found no gh after its own folder)\n');
       return 127;
     }
-    const r = spawnSync(gh, args, { stdio: 'inherit', env: ghEnvFor(args, process.env, tokens, remotesOf(process.cwd()), Date.now()) as NodeJS.ProcessEnv, windowsHide: false });
+    const env = { ...ghEnvFor(args, process.env, tokens, remotesOf(process.cwd()), Date.now()), FF_GH_APP_DEPTH: String(depth + 1) };
+    const r = spawnSync(gh, args, { stdio: 'inherit', env: env as NodeJS.ProcessEnv, windowsHide: false });
     return r.status ?? 1;
   }
   process.stderr.write('usage: ghApp.ts credential get | ghApp.ts gh [args]\n');

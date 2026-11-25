@@ -1941,7 +1941,7 @@ export class MachineManager {
     if (action === 'read-fence-off' || action === 'read-fence-warn' || action === 'read-fence-on') {
       await this.linkControl(m.id, action);
       const mode = action.slice('read-fence-'.length);
-      return `${m.id}: the worker read fence is ${mode} for runs started from now on${mode === 'on' ? ' once its probe passes' : ' (Windows: any No-Read-Up label taken off)'}; its daemon log says what the probe found.`;
+      return `${m.id}: the worker read fence is ${mode} for runs started from now on${mode === 'on' ? ' once its probe passes' : ' (Windows: any No-Read-Up label taken off; macOS and Linux: runs already going keep the read rules they started with until they end)'}; its daemon log says what the probe found.`;
     }
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);

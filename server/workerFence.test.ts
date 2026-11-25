@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, ownTranscriptOf, seatbeltProfile, sessionIdOf, type WorkerFence } from './workerFence.ts';
-import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
+import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
 import { projectSlug } from './claudeHome.ts';
 
 const F: WorkerFence = { kind: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p', darwinTemp: '/private/var/folders/xx/T', darwinCache: '/private/var/folders/xx/C' };
@@ -164,6 +164,10 @@ test('w5546: writeInPlace keeps the file (same inode), so a Landlock grant or a 
   assert.equal(fs.statSync(f).ino, ino, 'the same file');
   assert.equal(fs.readFileSync(f, 'utf8'), '{"b":1}', 'cut to the new length');
   assert.equal(readFenceMode(dir), 'off', 'off by default');
+  // Lockout re-review B4 of #1193: no `on` on Linux while a self-update swaps the code folder by rename.
+  assert.match(readFenceOnRefusal('linux') ?? '', /refused on Linux/);
+  assert.equal(readFenceOnRefusal('darwin'), undefined);
+  assert.equal(readFenceOnRefusal('win32'), undefined);
   writeReadFenceMode(dir, 'warn');
   assert.equal(readFenceMode(dir), 'warn');
   writeReadFenceMode(dir, 'on');

@@ -27,6 +27,18 @@ export function readFenceMode(appDir: string): ReadFenceMode {
   }
 }
 
+/**
+ * Why `on` is refused on this OS, or undefined (lockout re-review B4 of #1193). Linux: Landlock gives the daemon's `app`
+ * folder back by inode when a run starts, and a self-update swaps `app` by rename (scripts/worker/linkJob.ts), so every run
+ * going at an update would lose git's credential helper, the gh shim, ff-pr and unity-slot until it ends, and no switch can
+ * lift Landlock from a running process. `warn` still probes there.
+ */
+export function readFenceOnRefusal(platform: string = process.platform): string | undefined {
+  return platform === 'linux'
+    ? 'read-fence-on is refused on Linux for now: a self-update swaps the daemon code folder by rename, and Landlock would leave every run already going without git push, gh, ff-pr and unity-slot until it ends (lockout re-review B4 of #1193, docs/worker-fence.md). Use read-fence-warn.'
+    : undefined;
+}
+
 export function writeReadFenceMode(appDir: string, mode: ReadFenceMode): void {
   if (mode === 'off') fs.rmSync(readFenceModeFile(appDir), { force: true });
   else fs.writeFileSync(readFenceModeFile(appDir), `${mode}\n`);

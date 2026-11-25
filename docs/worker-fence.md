@@ -157,6 +157,12 @@ Runs already going keep the fence they started with; the write fence never chang
 | `warn` | no read rules | as `off` | yes, logged |
 | `on` | the read rules, once a probe has passed | No-Read-Up set at each start and at the switch | yes; a probe that finds a path workers need refused, or cannot judge one, leaves runs without read rules until one passes |
 
+**`on` is refused on Linux for now** (lockout re-review B4 of #1193, machine/readFence.ts `readFenceOnRefusal`): the switch
+answers with the reason, and a `read-fence` file that says `on` there is read as `warn`. See "Linux, a self-update" below:
+until the code folder survives an update, `on` would cost every running worker git push, gh, ff-pr and unity-slot at each
+update. macOS and Linux: switching to `off` or `warn` covers runs started afterwards only; Seatbelt and Landlock cannot be
+lifted from a running process, so runs already going keep the read rules they started with until they end.
+
 The probe (`probeReadFence`, machine/daemon.ts) runs at daemon start and at each switch, in a child of the daemon's own
 under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read rules): node opens each closed path (the
 secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
@@ -178,7 +184,10 @@ Limits:
   `person-play.json`, `published.jsonl`, its own tokens folder) are folders or written in place.
 - **Linux, a self-update** (in `on` mode): the update puts the new code in a new `app` folder (scripts/worker/linkJob.ts),
   which a run that outlives the update was never granted, so until that run ends its gh helper, git credential helper and
-  `unity-slot` (all `node <daemon>/app/machine/...`) are refused. New runs are fine. Windows has the same window until the
+  `unity-slot` (all `node <daemon>/app/machine/...`) are refused. New runs are fine. This is why `on` is refused on Linux
+  until the code moves to a folder that survives the swap (a given-back `code/{app,app.old,app.new}`, or shims at a fixed
+  path). Related: `~/.gitconfig` rewritten by rename after a run started (`git config --global`, `gh auth setup-git`) is
+  unreadable to that run, and git treats that as fatal; a per-run `GIT_CONFIG_GLOBAL` in a given-back folder would avoid it. Windows has the same window until the
   restarted daemon's start sets the labels again (about a minute on LothDesktop).
 
 - **Linux**: a file made directly in one of the closed paths' parent folders after the run started (a new file straight in
@@ -186,6 +195,12 @@ Limits:
 - **Windows**: every Low worker shares one Low token, so the `gh-app/sessions` folder is readable by all of them: each file
   holds only the apps that run was given, but a worker could read another run's file on the same machine. macOS and Linux
   give each run only its own.
+- **The gh shim across builds** (lockout re-review B5 of #1193): the helper skips the shim's folder (`FF_GH_APP_BIN`, else
+  the folder beside `FF_GH_APP_FILE`, else `gh-app/bin` beside the helper itself, machine/ghApp.ts `ghShimSkipDir`), never
+  takes a file that is one of our shims as the real gh (`isGhAppShim`), and refuses after `GH_SHIM_MAX_DEPTH` nested entries
+  (`FF_GH_APP_DEPTH`). A run still gets `FF_GH_APP_FILE`, naming `gh-app/tokens.moved`, which is never written: a helper from
+  before w5547 (a rollback by linkJob, a revert of #1193) then skips `gh-app/bin` and reads no token, falling back to
+  `GH_TOKEN`, instead of running the shim again without end.
 - **Windows, BEAST**: its `daemon` and `secrets` are junctions into `C:\ffw-anchor`, which the fence does not touch, so they
   stay readable there until a person decides otherwise.
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence

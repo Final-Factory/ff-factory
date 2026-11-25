@@ -12,7 +12,7 @@ import { machineRunEnv } from './secrets.ts';
 import { githubCredentialEnv, GITHUB_HELPER } from './launch.ts';
 import { GITHUB_APP_PERMISSIONS } from '../shared/githubRequirements.ts';
 import { appTokenFor, ghRepoOf, gitRemoteRepo, repoKey, repoOfUrl, type GhAppToken } from '../shared/githubAppRoute.ts';
-import { credentialAnswer, findRealGh, ghAppRunEnv, ghAppSessionSetup, ghEnvFor, installGhAppShims, readGhAppTokens, refreshSessionTokens, sessionApps, sessionTokensFile, writeGhAppTokens, writeSessionTokens } from '../machine/ghApp.ts';
+import { credentialAnswer, findRealGh, GH_APP_MOVED_FILE, ghAppPaths, ghAppRunEnv, ghShimSkipDir, ghAppSessionSetup, ghEnvFor, installGhAppShims, readGhAppTokens, refreshSessionTokens, sessionApps, sessionTokensFile, writeGhAppTokens, writeSessionTokens } from '../machine/ghApp.ts';
 import type { RunOptions, RunResult } from './proc.ts';
 
 /**
@@ -339,7 +339,7 @@ test('the daemon side: the tokens file round trip (0600), the run environment on
   assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a' }, setup, 'PATH', '/usr/bin'), {}, 'no vault GitHub token: nothing');
   assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x'), {}, 'no session file: nothing (w5547)');
   const own = path.join(dir, 'gh-app', 'sessions', 's1', 'tokens.json');
-  assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x', own), { FF_GH_APP_SESSION_FILE: own, FF_GH_APP_HELPER: '!helper credential', Path: [setup.bin, 'C:\\x'].join(path.delimiter) });
+  assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x', own), { FF_GH_APP_SESSION_FILE: own, FF_GH_APP_FILE: path.join(dir, 'gh-app', GH_APP_MOVED_FILE), FF_GH_APP_HELPER: '!helper credential', Path: [setup.bin, 'C:\\x'].join(path.delimiter) });
   assert.ok(!Object.values(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'PATH', '', own)).includes(file), 'the machine file is never in a run environment (w5547)');
   // gh: the first one on PATH that is not in the shim's folder.
   const real = path.join(dir, 'real');
@@ -349,6 +349,45 @@ test('the daemon side: the tokens file round trip (0600), the run environment on
   for (const d of [setup.bin, real]) fs.writeFileSync(path.join(d, exe), '', { mode: 0o755 });
   assert.equal(findRealGh([setup.bin, real].join(path.delimiter), setup.bin), path.join(real, exe));
   assert.equal(findRealGh(setup.bin, setup.bin), undefined);
+});
+
+test('lockout re-review B5 of #1193: the gh helper never picks a shim as the real gh, whatever build wrote the shim', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-b5-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const appDir = path.join(dir, 'daemon');
+  const p = ghAppPaths(appDir);
+  // A shim as an older build wrote it, under the name the helper looks for here (gh, or gh.exe on Windows).
+  const exe = process.platform === 'win32' ? 'gh.exe' : 'gh';
+  installGhAppShims(p.bin, '/usr/bin/node', [], path.join(appDir, 'app', 'machine', 'ghApp.ts'));
+  if (exe !== 'gh') fs.copyFileSync(path.join(p.bin, 'gh'), path.join(p.bin, exe));
+  const real = path.join(dir, 'real');
+  fs.mkdirSync(real);
+  fs.writeFileSync(path.join(real, exe), 'ELF', { mode: 0o755 });
+  // The skip: the new shim's own, else an older run's tokens file's, else the one beside the helper.
+  assert.equal(ghShimSkipDir({ FF_GH_APP_BIN: '/x/bin' }), '/x/bin');
+  assert.equal(ghShimSkipDir({ FF_GH_APP_FILE: path.join(p.dir, 'tokens.json') }), p.bin);
+  assert.equal(ghShimSkipDir({}, path.join(appDir, 'app', 'machine', 'ghApp.ts')), p.bin);
+  // An old shim (no FF_GH_APP_BIN) with a skip that misses it: the shim is still not taken (the measured loop of the re-review).
+  assert.equal(findRealGh([p.bin, real].join(path.delimiter), undefined), path.join(real, exe));
+  assert.equal(findRealGh([p.bin, real].join(path.delimiter), path.join(dir, 'elsewhere')), path.join(real, exe));
+  assert.equal(findRealGh(p.bin, undefined), undefined, 'only the shim on PATH: no gh, never the shim');
+  // A run's FF_GH_APP_FILE names a file that holds nothing, so a helper from before w5547 skips gh-app/bin and reads no token.
+  const env = ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, { bin: p.bin, file: p.file, helper: '!h' }, 'PATH', '/usr/bin', path.join(p.sessions, 's', 'tokens.json'));
+  assert.equal(path.join(path.dirname(env.FF_GH_APP_FILE), 'bin'), p.bin);
+  assert.equal(fs.existsSync(env.FF_GH_APP_FILE), false);
+  assert.deepEqual(readGhAppTokens(env.FF_GH_APP_FILE), []);
+});
+
+test('lockout re-review B5 of #1193: a helper that runs into its own shim again refuses at the depth limit', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-depth-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const helper = path.resolve('machine/ghApp.ts');
+  const r = spawnSync(process.execPath, [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), helper, 'gh', '--version'], {
+    encoding: 'utf8',
+    env: { ...process.env, FF_GH_APP_DEPTH: '4', PATH: dir },
+  });
+  assert.equal(r.status, 126, r.stderr);
+  assert.match(r.stderr, /refusing so it cannot run itself without end/);
 });
 
 test('w5547: a run gets its own file with only the apps its spec named; naming another app in its shell gets nothing', (t) => {
