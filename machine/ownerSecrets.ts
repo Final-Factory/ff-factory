@@ -12,6 +12,7 @@
  * fenced run, and the login reaches only the runs that have no token of their own (docs/worker-fence.md, "Owner secrets").
  */
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 
 export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain';
@@ -139,4 +140,19 @@ export function machineGhToken(run: TokenRun = realTokenRun): string | undefined
   } catch {
     return undefined;
   }
+}
+
+/**
+ * The gh config folder of a fenced run that has a token (its own or the machine's), inside the worker root: empty of any
+ * login, so gh starts without reading the owner's ~/.config/gh (denied to the fence). Made once; a failure to make it
+ * leaves gh to say so in the run.
+ */
+export function workerGhConfigDir(root: string): string {
+  const dir = path.join(root, 'gh-worker');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    /* gh reports a missing folder itself */
+  }
+  return dir;
 }

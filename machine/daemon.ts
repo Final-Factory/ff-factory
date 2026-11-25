@@ -78,7 +78,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, machineGhEnv, machineGhToken } from './ownerSecrets.ts';
+import { hasOwnGithub, machineGhEnv, machineGhToken, workerGhConfigDir } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, installGhAppShims, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -2834,10 +2834,14 @@ export class Daemon {
     // daemon (machineGh), never as the login's folder: GH_CONFIG_DIR is only the fallback when the daemon read no token.
     const ghMachine = spec.sandbox && !hasOwnGithub(spec.env) ? this.machineGh() : {};
     const ghDir = spec.sandbox && !hasOwnGithub(spec.env) && !ghMachine.GH_TOKEN ? low?.gh : undefined;
+    // w5548 probe (m5, 2026-11-25): with the owner's gh folder denied, gh refuses to start even with a token ("failed to
+    // load config: open ~/.config/gh/config.yml: operation not permitted"), so a token-holding fenced run on macOS or Linux
+    // gets an empty gh folder of its own in the root. Windows already moves gh's APPDATA into the root (lowEnv).
+    const ghOwn: Record<string, string> = spec.sandbox && this.cfg.root && process.platform !== 'win32' && (hasOwnGithub(spec.env) || ghMachine.GH_TOKEN) ? { GH_CONFIG_DIR: workerGhConfigDir(this.cfg.root) } : {};
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, ghDir), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slots.dir, { ...process.env, ...spec.env }) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...ghMachine, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...ghMachine, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   private ghMemo?: { at: number; token?: string };
