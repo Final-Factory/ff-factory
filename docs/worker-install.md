@@ -699,8 +699,9 @@ rule to the tailnet") it allowed every address, so on BEAST anything on its LAN 
   only): ...` with the addresses read (`from`), the counts read, and each connection to the node's listening ports from
   outside loopback and the tailnet (`peer`; "could not see" when the node was not seen running or the read failed). That
   warning leaves out "Windows Firewall", so the rollout does not rerun the tools elevated for it, and a repair for a
-  missing or stale rule keeps the node's rule from any address (`firewall.ps1 -AgentNodeAnyAddress`). An install
-  (`firewall.ps1 -AgentNode` without it) still makes it tailnet only. **Enforce stage (a later PR):** once every machine's
+  missing or stale rule keeps the node's rule from any address (`firewall.ps1 -AgentNodeAnyAddress`), and so does an
+  elevated update, which reads the node's rule first (`agentNodeRuleWide`; an unread rule counts as wide, so it is never
+  narrowed blind). A fresh install (`firewall.ps1 -AgentNode` without it) still makes it tailnet only. **Enforce stage (a later PR):** once every machine's
   warnings show no outside connection, the wide case triggers the elevated rewrite. No person at the machine.
 - **Revert** (back to any address), with no person at the machine: revert the PR first (otherwise the next tools
   rollout narrows it again), then over the portal's ssh, elevated (the ops worker):
