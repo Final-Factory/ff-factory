@@ -639,8 +639,12 @@ export async function touchedWhy(p: string, cutoffMs: number, budget = 200_000):
   return undefined;
 }
 
-/** Bytes at or under `p` (symlinks not followed), up to `budget` entries. */
-export async function sizeOf(p: string, budget = 2_000_000): Promise<number> {
+/**
+ * Bytes at or under `p` (symlinks not followed), up to `budget` entries. With `links` (w5766), a file with more than one hard
+ * link counts once per set: its device and inode (bigint: NTFS file ids pass 2^53, as freeableBytes) go in `links`, and a
+ * later link to it adds nothing. One whose inode is unknown (0) counts every time, as without `links`.
+ */
+export async function sizeOf(p: string, budget = 2_000_000, links?: Set<string>): Promise<number> {
   const stack = [p];
   let bytes = 0;
   let seen = 0;
@@ -649,7 +653,12 @@ export async function sizeOf(p: string, budget = 2_000_000): Promise<number> {
     try {
       const st = await fs.promises.lstat(cur);
       if (st.isDirectory()) for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
-      else bytes += st.size;
+      else if (links && st.nlink > 1) {
+        const big = await fs.promises.lstat(cur, { bigint: true });
+        const key = `${big.dev}:${big.ino}`;
+        if (big.ino === 0n || !links.has(key)) bytes += st.size;
+        if (big.ino !== 0n) links.add(key);
+      } else bytes += st.size;
     } catch {
       // gone or unreadable
     }

@@ -1,12 +1,14 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { CAP_LIMITS, CAP_WATCH, capLedgerLine, capNote, capsFor, capsModeOf, eventCount, ownCgroup, parsePs, startWorkerCaps, tempWatch, toolPids, toolsToEnd, treeOf, type CapHit } from '../machine/workerCaps.ts';
+import { CAP_LIMITS, CAP_WATCH, anonBytes, capLedgerLine, capNote, capsFor, capsModeOf, eventCount, ownCgroup, parsePs, sameProcess, sparedByEnv, sparedPids, startWorkerCaps, tempWatch, toolPids, toolsToEnd, treeOf, type CapHit, type PsRow } from '../machine/workerCaps.ts';
 import { capNotesHook, pushCapNote } from './workerCapNotes.ts';
-import { workerTempDir } from '../machine/agentHost.ts';
+import { EventEmitter } from 'node:events';
+import { HostedSession, hostCommand, workerTempDir, type HostDeps, type HostStart } from '../machine/agentHost.ts';
+import type { SessionInfo } from '../shared/types.ts';
 
 // w5554: one worker's agent host and everything it starts are capped on memory, processes and temp disk, so a runaway or
 // hijacked worker cannot fill a machine. These tests run their runaways only inside their own process trees.
@@ -75,13 +77,19 @@ test('w5554: the mode is warn unless daemon.json says off or enforce; a typo nev
   for (const bad of ['Enforce', 'on', '', null, 1, {}]) assert.equal(capsModeOf(bad), 'warn');
 });
 
-test('w5554: a warn note and ledger line say plainly that nothing was stopped', () => {
+test('w5554/w5766: a warn note reads as a note: nothing was stopped, carry on, one tip, a line in the report', () => {
   const h: CapHit = { kind: 'memory', limit: 51.2e9, seen: 60e9, ended: 0, warn: true };
-  assert.match(capNote(h), /would have hit your memory cap \(51\.2 GB for the agent and every tool it runs, 60\.0 GB\)/);
-  assert.match(capNote(h), /warn-only: nothing was stopped/);
-  assert.doesNotMatch(capNote(h), /stopped your tools|ended \d/);
-  assert.equal(capLedgerLine('0123456789abcdef', h), 'worker 01234567 would have hit its memory cap (51.2 GB for the agent and every tool it runs, 60.0 GB) (warn-only: nothing was stopped; w5554)');
-  assert.match(capLedgerLine('0123456789abcdef', { kind: 'processes', limit: 2048, seen: 3000, ended: 0, warn: true }) ?? '', /would have hit its process cap \(2048 at once, 3000 running\) \(warn-only: nothing was stopped/);
+  const n = capNote(h);
+  assert.match(n, /^For your information: your tools went past the memory cap \(51\.2 GB for the agent and every tool it runs, 60\.0 GB\)/);
+  assert.match(n, /nothing was stopped and you can carry on/);
+  assert.match(n, /running fewer keeps you clear of the cap/);
+  assert.match(n, /Please mention it in your report\.$/);
+  // w5766 (the reviews of w5554): no wording that reads as a stop or a fault
+  assert.doesNotMatch(n, /stopped your tools|ended \d|would have hit|Before you go on|must/);
+  assert.match(capNote({ ...h, kind: 'temp', limit: 60e9, seen: 61e9 }), /rm -rf "\$TMPDIR\/<name>"/);
+  assert.match(capNote({ ...h, kind: 'processes', limit: 2048, seen: 3000 }), /keeps starting processes/);
+  assert.equal(capLedgerLine('0123456789abcdef', h), 'worker 01234567 went past its memory cap (51.2 GB for the agent and every tool it runs, 60.0 GB) (measured only: nothing was stopped; w5554)');
+  assert.match(capLedgerLine('0123456789abcdef', { kind: 'processes', limit: 2048, seen: 3000, ended: 0, warn: true }) ?? '', /went past its process cap \(2048 at once, 3000 running\) \(measured only: nothing was stopped/);
   // the kernel acted (Linux enforce): said, with nothing of ours ended
   const k: CapHit = { kind: 'memory', limit: 51.2e9, ended: 0, kernel: true };
   assert.match(capNote(k), /the kernel ended the biggest process of your scope.*ended nothing else/);
@@ -100,6 +108,87 @@ test('w5554: tools are ended only when the process list proves who the host is',
   assert.deepEqual(noHost.pids, []);
   assert.match(noHost.why ?? '', /host \(pid 99\) is not in the process list/);
   assert.deepEqual(toolsToEnd(rows, 10, [11, 12, 77]).pids, [12], 'a pid the list lacks is left alone');
+});
+
+test('w5766: a kill re-reads the list and ends a pid only if it is the same process (pid, parent, start time)', () => {
+  const rows = parsePs('  10     1   100 Tue Nov 25 10:00:01 2026\n  12    11   200 Tue Nov 25  10:05:00 2026\n  13 12 300\n');
+  assert.deepEqual(rows[0], { pid: 10, ppid: 1, rss: 100 * 1024, start: 'Tue Nov 25 10:00:01 2026' });
+  assert.equal(rows[1]!.start, 'Tue Nov 25 10:05:00 2026', 'runs of spaces (a padded day) are one');
+  assert.equal(rows[2]!.start, undefined, 'a ps without lstart still parses');
+  const a: PsRow = { pid: 12, ppid: 11, rss: 0, start: 'Tue Nov 25 10:05:00 2026' };
+  assert.equal(sameProcess(a, { ...a, rss: 999 }), true, 'memory moves; the process is the same');
+  assert.equal(sameProcess(a, { ...a, start: 'Tue Nov 25 10:05:02 2026' }), false, 'a reused pid starts later');
+  assert.equal(sameProcess(a, { ...a, ppid: 1 }), false);
+  assert.equal(sameProcess(a, undefined), false, 'gone');
+  assert.equal(sameProcess({ ...a, start: undefined }, { ...a, start: undefined }), false, 'no start time: it cannot be told apart, so it is not ended');
+});
+
+test('w5766: a kill spares the Unity MCP server and ff-leftovers launch programs, by their environment', () => {
+  assert.equal(sparedByEnv({ session: 's1', mcp: '1' }), true, 'UnityMCP (and its uvx and python)');
+  assert.equal(sparedByEnv({ person: 's1' }), true, 'a program started for a person');
+  assert.equal(sparedByEnv({ session: 's1', person: 's1' }), false, 'a session of its own: a tool that set the marker');
+  assert.equal(sparedByEnv({ session: 's1' }), false);
+  assert.equal(sparedByEnv(undefined), false);
+  assert.deepEqual([...sparedPids(new Map([[5, { session: 's', mcp: '1' }], [6, { session: 's' }], [7, { person: 's' }]]))], [5, 7]);
+});
+
+test('w5766: Linux memory is the anonymous memory of memory.stat, not the page cache', () => {
+  assert.equal(anonBytes('anon 4096\nfile 9000000000\nkernel 100\n'), 4096);
+  assert.equal(anonBytes('file 9000000000\nanon_thp 0\n'), -1, 'anon_thp is not anon');
+  assert.equal(anonBytes(''), -1);
+});
+
+const hostInfo = (kind: SessionInfo['kind']): SessionInfo => ({ id: 'w5766-host', kind, title: 'w5766', status: 'running', permissionMode: 'default', createdAt: new Date().toISOString(), lastActivityAt: new Date().toISOString(), turns: 1, costUsd: 0, pendingPermissions: [] });
+const hostStart = (kind: SessionInfo['kind'], capsMode?: HostStart['capsMode']): HostStart => ({ hostProtocol: 1, info: hostInfo(kind), seq: 0, spec: { cwd: os.tmpdir() } as never, editorUp: undefined, ...(capsMode ? { capsMode } : {}) }) as HostStart;
+
+test("w5766: Linux: a worker host's scope gets MemoryMax and TasksMax only in enforce", () => {
+  const linux = { platform: 'linux' as const, usable: () => true, oom: () => true, limitsOk: () => true };
+  const lim = (c: { args: string[] }) => c.args.filter((a) => /^(MemoryMax|TasksMax)=/.test(a));
+  const enforce = hostCommand('/x/hosts/w5766', hostStart('worker', 'enforce'), linux);
+  assert.equal(enforce.bin, 'systemd-run');
+  assert.deepEqual(lim(enforce), [`MemoryMax=${capsFor().memoryBytes}`, `TasksMax=${capsFor().tasks}`]);
+  assert.equal(enforce.limited, true);
+  for (const mode of ['warn', 'off', undefined, 'enforced'] as (HostStart['capsMode'] | undefined)[]) {
+    const c = hostCommand('/x/hosts/w5766', hostStart('worker', mode), linux);
+    assert.equal(c.bin, 'systemd-run', `${mode}: still its own scope`);
+    assert.deepEqual(lim(c), [], `${mode}: no limits`);
+    assert.equal(c.capped, false);
+  }
+  assert.deepEqual(lim(hostCommand('/x/hosts/w5766', hostStart('orchestrator', 'enforce'), linux)), [], 'an orchestrator is never capped');
+  assert.deepEqual(lim(hostCommand('/x/hosts/w5766', hostStart('worker', 'enforce'), { ...linux, oom: () => false })), [], 'no OOMPolicy=continue: no limits (w2884)');
+  assert.equal(hostCommand('/x/hosts/w5766', hostStart('worker', 'enforce'), { platform: 'win32' }).bin, process.execPath, 'not Linux: no scope');
+});
+
+test("w5766: the daemon's caps mode reaches the host's start record", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w5766-start-'));
+  try {
+    for (const mode of ['off', 'warn', 'enforce'] as const) {
+      const starts: HostStart[] = [];
+      const deps: HostDeps = {
+        root,
+        out: () => undefined,
+        events: new EventEmitter(),
+        handlers: () => ({}),
+        spec: () => ({ cwd: root }) as never,
+        editorUp: () => undefined,
+        changed: () => undefined,
+        log: () => undefined,
+        launch: (_dir, start) => {
+          starts.push(start);
+          throw new Error('no host process in this test');
+        },
+        stopping: () => undefined,
+        capsMode: () => mode,
+      };
+      const s = new HostedSession({ ...hostInfo('worker'), id: `w5766-${mode}` }, 0, deps);
+      s.send('hello', 'orchestrator');
+      s.detach();
+      assert.equal(starts.length, 1, mode);
+      assert.equal(starts[0]!.capsMode, mode);
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Linux: the scope's own cgroup and its event counters", () => {
@@ -251,6 +340,101 @@ test('a temp folder over its cap ends the tools, not the host or its claude', { 
       }
     });
   } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// Three tools: a plain one, one marked as the Unity MCP server (it has its claude's session too), one started for a person.
+// One line: the stand-in host takes a line per command.
+const MARKED = `const { spawn } = require('child_process'); const env = (x) => { const e = { ...process.env, ...x }; for (const k of Object.keys(e)) if (e[k] === null) delete e[k]; return e; }; const go = (name, x) => { const p = spawn(process.execPath, ['-e', 'setInterval(() => 0, 1000)'], { stdio: 'ignore', env: env(x) }); console.log(name + ' ' + p.pid); }; go('tool', { FF_SESSION_ID: 'w5766-test' }); go('mcp', { FF_SESSION_ID: 'w5766-test', FF_UNITY_MCP: '1' }); go('person', { FF_SESSION_ID: null, FF_FOR_PERSON: 'w5766-test' }); setInterval(() => 0, 1000);`;
+
+test('w5766: an enforce temp stop ends the tools but spares the Unity MCP server and a program started for a person', { timeout: 180_000 }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffa-w5766-'));
+  const app = appDir();
+  try {
+    await withHost(async (h) => {
+      const hits: CapHit[] = [];
+      const logs: string[] = [];
+      const stop = await startWorkerCaps({ caps: { memoryBytes: 64 * GiB, processes: 500, tasks: 5000, tempBytes: 1_000_000 }, mode: 'enforce', tempDir: tmp, appDir: app, onCap: (x) => hits.push(x), log: (s) => logs.push(s), hostPid: h.proc.pid, watch: { POLL_MS: 200, TEMP_EVERY_MS: 300 } });
+      const pidOf = (name: string) => Number(h.lines.find((l) => l.startsWith(`${name} `))?.split(' ')[1]);
+      try {
+        h.claude(MARKED);
+        const claude = Number((await h.until(/^claude \d+/)).split(' ')[1]);
+        assert.ok(await until(() => ['tool', 'mcp', 'person'].every((n) => pidOf(n) > 0), 60_000), JSON.stringify(h.lines));
+        // the environments are set before the read (a process's env is fixed at its start)
+        await new Promise((r) => setTimeout(r, 1000));
+        fs.writeFileSync(path.join(tmp, 'big'), Buffer.alloc(2_000_000));
+        const hit = await capHit(hits, 120_000);
+        assert.equal(hit.kind, 'temp');
+        assert.ok(await until(() => !alive(pidOf('tool')), 10_000), `the plain tool was ended: ${JSON.stringify({ hit, logs })}`);
+        assert.equal(alive(pidOf('mcp')), true, `UnityMCP was spared: ${JSON.stringify(logs)}`);
+        assert.equal(alive(pidOf('person')), true, "the person's program was spared");
+        assert.equal(alive(claude), true);
+        assert.equal(alive(h.proc.pid!), true);
+        assert.ok(logs.some((l) => /spared 2 process\(es\) of UnityMCP or ff-leftovers launch/.test(l)), JSON.stringify(logs));
+      } finally {
+        await stop();
+        for (const n of ['mcp', 'person']) {
+          try {
+            process.kill(pidOf(n), 'SIGKILL');
+          } catch {
+            // gone
+          }
+        }
+      }
+    });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('w5766: environments that cannot be read end nothing', { timeout: 60_000 }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffa-w5766-'));
+  const victim = sleeper();
+  try {
+    fs.writeFileSync(path.join(tmp, 'big'), Buffer.alloc(2_000_000));
+    const hits: CapHit[] = [];
+    const logs: string[] = [];
+    // the tree path (no job, no scope): the host 7 with its claude 8, and the victim as its tool
+    const rows: PsRow[] = [{ pid: 7, ppid: 1, rss: 0, start: 'a' }, { pid: 8, ppid: 7, rss: 0, start: 'a' }, { pid: victim.pid!, ppid: 8, rss: 0, start: 'a' }];
+    const stop = await startWorkerCaps({ caps: { memoryBytes: 64 * GiB, processes: 2048, tasks: 5000, tempBytes: 1_000_000 }, mode: 'enforce', platform: 'darwin', hostPid: 7, ps: () => rows, readEnvs: async () => { throw new Error('ps -E failed'); }, tempDir: tmp, appDir: os.tmpdir(), onCap: (x) => hits.push(x), log: (s) => logs.push(s), watch: { POLL_MS: 50, TEMP_EVERY_MS: 100 } });
+    const hit = await capHit(hits, 20_000);
+    assert.equal(hit.ended, 0);
+    assert.equal(alive(victim.pid!), true);
+    assert.ok(logs.some((l) => /ended nothing: the tools' environments could not be read.*ps -E failed/.test(l)), JSON.stringify(logs));
+    await stop();
+  } finally {
+    victim.kill('SIGKILL');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('w5766: a pid that names another process by the time of the kill is left alone (pid reuse)', { timeout: 60_000 }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffa-w5766-'));
+  const same = sleeper();
+  const reused = sleeper();
+  try {
+    fs.writeFileSync(path.join(tmp, 'big'), Buffer.alloc(2_000_000));
+    const hits: CapHit[] = [];
+    const logs: string[] = [];
+    let reads = 0;
+    // every read shows `reused` started again (a new start time: another process got its pid) and `same` unchanged
+    const ps = (): PsRow[] => [
+      { pid: 7, ppid: 1, rss: 0, start: 'Tue Nov 25 10:00:00 2026' },
+      { pid: 8, ppid: 7, rss: 0, start: 'Tue Nov 25 10:00:01 2026' },
+      { pid: same.pid!, ppid: 8, rss: 0, start: 'Tue Nov 25 10:01:00 2026' },
+      { pid: reused.pid!, ppid: 8, rss: 0, start: `Tue Nov 25 10:02:${String(reads++ % 60).padStart(2, '0')} 2026` },
+    ];
+    const stop = await startWorkerCaps({ caps: { memoryBytes: 64 * GiB, processes: 2048, tasks: 5000, tempBytes: 1_000_000 }, mode: 'enforce', platform: 'darwin', hostPid: 7, ps, readEnvs: async () => new Map(), tempDir: tmp, appDir: os.tmpdir(), onCap: (x) => hits.push(x), log: (s) => logs.push(s), watch: { POLL_MS: 60_000, TEMP_EVERY_MS: 100 } });
+    const hit = await capHit(hits, 20_000);
+    assert.equal(hit.ended, 1, JSON.stringify({ hit, logs }));
+    assert.ok(await until(() => !alive(same.pid!), 10_000), 'the same process was ended');
+    assert.equal(alive(reused.pid!), true, 'the reused pid was not');
+    assert.ok(logs.some((l) => /left 1 process\(es\) whose pid now names another process \(pid reuse\)/.test(l)), JSON.stringify(logs));
+    await stop();
+  } finally {
+    same.kill('SIGKILL');
+    reused.kill('SIGKILL');
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -484,11 +668,23 @@ test('Windows warn: the job holds no memory limit, its peak commit is polled and
 });
 
 // Git Bash, where a worker runs most of its tools: the one Claude Code uses (a worker's, its own Git), else Git for Windows';
-// absent on a runner without either.
-const GIT_BASH =
-  process.platform === 'win32'
-    ? [process.env.CLAUDE_CODE_GIT_BASH_PATH, path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe')].find((b): b is string => !!b && fs.existsSync(b))
-    : undefined;
+// absent on a runner without either. One that exists but cannot start here is skipped too (w5766, from w5719's review: in a
+// worker, a second MSYS runtime in one session died with NtCreateDirectoryObject 0xC0000022, and the test failed on its 60 s
+// wait instead of skipping).
+const gitBash = (candidates = [process.env.CLAUDE_CODE_GIT_BASH_PATH, path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe')]): string | undefined => {
+  if (process.platform !== 'win32') return undefined;
+  const bash = candidates.find((b): b is string => !!b && fs.existsSync(b));
+  if (!bash) return undefined;
+  const r = spawnSync(bash, ['-c', 'echo ok'], { encoding: 'utf8', timeout: 20_000, windowsHide: true });
+  return r.status === 0 && r.stdout.trim() === 'ok' ? bash : undefined;
+};
+const GIT_BASH = gitBash();
+
+test('the Git Bash probe skips one that exists but cannot run `echo ok` (w5766)', { skip: process.platform !== 'win32' }, () => {
+  // node exists and starts, but `node -c "echo ok"` checks a script that is not there: not a working bash.
+  assert.equal(gitBash([process.execPath]), undefined, 'a bash that cannot start is no Git Bash');
+  assert.equal(gitBash([path.join(os.tmpdir(), 'no-such-bash.exe')]), undefined, 'a missing one is none either');
+});
 
 test("Windows warn: what Git Bash starts stays in the job and is counted (no breakaway)", { skip: !GIT_BASH, timeout: 120_000 }, async () => {
   const app = appDir();
@@ -509,20 +705,21 @@ test("Windows warn: what Git Bash starts stays in the job and is counted (no bre
   });
 });
 
-test('Linux warn: the scope has no limits; its memory.peak and pids.peak are read and reported over the caps, once', { timeout: 60_000 }, async () => {
-  const cg = fakeScope({ 'memory.peak': '1000000000\n', 'pids.peak': '5\n', 'memory.events.local': 'oom_kill 0\n', 'pids.events': 'max 0\n' });
+test('Linux warn: the scope has no limits; its anonymous memory and pids.peak are read and reported over the caps, once', { timeout: 60_000 }, async () => {
+  // memory.peak counts page cache (a worker that read a big clone looked full): w5766 reads memory.stat's anon instead
+  const cg = fakeScope({ 'memory.stat': 'anon 1000000000\nfile 50000000000\n', 'memory.peak': '60000000000\n', 'pids.peak': '5\n', 'memory.events.local': 'oom_kill 0\n', 'pids.events': 'max 0\n' });
   try {
     const hits: CapHit[] = [];
     const logs: string[] = [];
     const stop = await startWorkerCaps({ caps: { memoryBytes: 8e9, processes: 2048, tasks: 10, tempBytes: 1e12 }, platform: 'linux', cgroup: cg.dir, appDir: os.tmpdir(), onCap: (x) => hits.push(x), log: (s) => logs.push(s), watch: { POLL_MS: 50 } });
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(hits.length, 0, 'under the caps');
-    cg.set('memory.peak', '9000000000\n');
+    cg.set('memory.stat', 'anon 9000000000\nfile 50000000000\n');
     cg.set('pids.peak', '50\n');
     assert.ok(await until(() => hits.length === 2, 10_000), JSON.stringify(hits));
     assert.deepEqual(hits.find((x) => x.kind === 'memory'), { kind: 'memory', limit: 8e9, seen: 9e9, ended: 0, warn: true });
     assert.deepEqual(hits.find((x) => x.kind === 'processes'), { kind: 'processes', limit: 10, seen: 50, ended: 0, warn: true });
-    cg.set('memory.peak', '12000000000\n');
+    cg.set('memory.stat', 'anon 12000000000\nfile 50000000000\n');
     await new Promise((r) => setTimeout(r, 400));
     assert.equal(hits.length, 2, 'once per kind per REPEAT_MS');
     await stop();
@@ -536,7 +733,7 @@ test('Linux warn: the scope has no limits; its memory.peak and pids.peak are rea
   }
 });
 
-test('Linux warn: an older kernel without *.peak is read from memory.current and pids.current', { timeout: 60_000 }, async () => {
+test('Linux warn: an older kernel without memory.stat or *.peak is read from memory.current and pids.current', { timeout: 60_000 }, async () => {
   const cg = fakeScope({ 'memory.current': '9000000000\n', 'pids.current': '3\n' });
   try {
     const hits: CapHit[] = [];

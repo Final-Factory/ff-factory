@@ -110,7 +110,7 @@ jobs:
           set -o pipefail
           # npm run test:coverage, with TEST_FLAGS: node takes options only before the files. PowerShell 7 (pwsh, on
           # the runner) runs the scripts' tests that need no Windows (server/testPowershell.ts).
-          node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --test-shard=${{ matrix.shard }}/2 --test-reporter=lcov --test-reporter-destination="$RUNNER_TEMP/unit.lcov" --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts machine/*.test.ts 2>&1 | tee coverage.txt
+          node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --test-shard=${{ matrix.shard }}/2 --test-reporter=lcov --test-reporter-destination="$RUNNER_TEMP/unit.lcov" --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts scripts/worker/*.test.ts machine/*.test.ts 2>&1 | tee coverage.txt
       - name: Test files' time (a file whose process outlives its tests fails here)
         if: always()
         shell: bash

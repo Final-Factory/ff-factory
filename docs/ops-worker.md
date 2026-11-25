@@ -847,7 +847,9 @@ plugin's version before and after, per machine.
   `WARNING: <why>; nothing in it was overwritten; this run publishes from a fresh clone (1 of 3 publishes in a row ...)`
   and the publish goes on (w5597). The same fault on 3 publishes in a row (files but no `.git`: at once) moves the
   checkout to `<root>/tools-medium/final-factory-agents.broken`, the one backup kept, and clones it again (w5776,
-  `server/agentTools.ts` REPAIR_AFTER); the count is in `final-factory-agents.repair.json` beside it. Nobody repairs it by hand.
+  `server/agentTools.ts` REPAIR_AFTER); the count is in `final-factory-agents.repair.json` beside it. The new clone is
+  made first in `final-factory-agents.new` and swapped in only once it worked, so a repair with no network leaves the old
+  checkout in place, keeps the count and tries again next publish (w5787's review). Nobody repairs it by hand.
 - **A failure on one machine** (`Agent tools FAILED: <why>`, with the run's own lines under it as `tools: ...`) changes
   nothing about its daemon, rolls nothing back, and the next machine carries on. The report's last line asks for a line to
   the user when any machine says FAILED, NOT PUBLISHED or OFFLINE.
