@@ -86,7 +86,7 @@ import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { trustedGh } from './evidenceGate.ts';
-import { hasOwnGithub, judgeToolLeg, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
+import { hasOwnGithub, judgeToolLeg, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -3068,7 +3068,7 @@ export class Daemon {
     // w5747: wired in ownerSecrets.ts ownerRunWiring, whose test pins what follows the switch and what follows the token.
     const ow = ownerRunWiring({ sandbox: !!spec.sandbox, enforced: !readOff, platform: process.platform, home: os.homedir(), env: process.env, specEnv: spec.env, root: this.cfg.root, machineGh: () => this.machineGh() });
     const { ghMachine, owner } = ow;
-    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
+    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
     const readFence = baseFence && ow.ownerSecrets ? { ...baseFence, readDenied: [...(baseFence.readDenied ?? []), ...owner], ownerSecrets: ow.ownerSecrets } : baseFence;
     const fence = readFence && readOff ? { ...readFence, readOff: true } : readFence && ownDir ? { ...readFence, readAllowed: [...(readFence.readAllowed ?? []), ownDir] } : readFence;
@@ -3397,7 +3397,9 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && !readFenceOnRefusal();
+    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
+    const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
+    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
   }
 
   /**
@@ -3429,7 +3431,7 @@ export class Daemon {
         process.platform === 'darwin' && ownerFence
           ? fencedArgv(ownerFence, cmd, args)
           : process.platform === 'linux' && lock
-            ? ['python3', FF_LANDLOCK, ...lock, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), '--', cmd, ...args]
+            ? ['python3', FF_LANDLOCK, ...lock, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), '--', cmd, ...args]
             : undefined;
       const argv = fenced(process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open]);
       if (!argv) {
@@ -3446,12 +3448,16 @@ export class Daemon {
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
       if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock);
       if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
       log(`read fence (${mode}): the probe could not run (${(e as Error).message}); runs start without read rules`);
     }
   }
+
+  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
+  private ownerSocketsOpen: string[] = ['(not probed)'];
 
   /**
    * w5747: the probe's tool legs (ownerSecrets.ts ownerToolLegs), each run under the probe's fence with the owner rules: gh
@@ -3485,14 +3491,18 @@ export class Daemon {
 
   /**
    * w5748: whether a fenced run reaches the Secret Service (the gh keyring login) and the ssh and gpg agents: a child of the
-   * daemon's own, under the run's lock and read rules, connects to each owner socket and closes it, sending nothing. Logged
-   * in warn and on modes; a failure to run it is logged and changes nothing.
+   * daemon's own, under the lock, read rules and socket denies a run gets in on mode, connects to each owner socket and
+   * closes it, sending nothing. On Linux `on` takes effect only once it finds every one refused; a probe that fails to run
+   * keeps the read rules off (a warn, never a lockout).
    */
   private async probeOwnerSockets(mode: ReadFenceMode, lock: string[]): Promise<void> {
+    this.ownerSocketsOpen = ['(not probed)'];
     try {
       const socks = ownerSocketProbeTargets(ownerSocketPaths({ runtimeDir: process.env.XDG_RUNTIME_DIR, env: process.env }));
-      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
-      log(sayOwnerSocketProbe(mode, socks, r.stdout).line);
+      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, ...ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR), '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
+      const said = sayOwnerSocketProbe(mode, socks, r.stdout);
+      this.ownerSocketsOpen = r.code === 0 ? said.open : [`(the probe exited ${r.code})`];
+      log(said.line);
     } catch (e) {
       log(`read fence (${mode}, linux) owner sockets: the probe could not run (${(e as Error).message})`);
     }

@@ -141,8 +141,8 @@ export const SOCKET_PROBE_SCRIPT =
   "const net=require('net');console.log('abi '+(process.env.FF_LANDLOCK_ABI||'?'));process.argv.slice(1).forEach((p,i)=>{const s=net.createConnection({path:p});const t=setTimeout(()=>{console.log(i+' timeout');s.destroy()},5000);s.on('connect',()=>{clearTimeout(t);console.log(i+' ok');s.destroy()});s.on('error',(e)=>{clearTimeout(t);console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))})})";
 
 /**
- * One log line for the owner-socket probe (w5748). Warn only: what it finds changes no run (docs/worker-fence.md, "The
- * Secret Service and the agents").
+ * One log line for the owner-socket probe (w5748), and the sockets it found reachable: on Linux `on` waits for none
+ * (docs/worker-fence.md, "The Secret Service and the agents").
  */
 export function sayOwnerSocketProbe(mode: ReadFenceMode, socks: readonly string[], stdout: string): { line: string; open: string[] } {
   const abi = /^abi (\S+)$/m.exec(stdout)?.[1] ?? '?';

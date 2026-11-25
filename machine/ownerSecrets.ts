@@ -347,3 +347,13 @@ function statOr(p: string): fs.Stats | undefined {
     return undefined;
   }
 }
+
+/**
+ * ff-landlock.py's `--deny-unix` arguments for the owner sockets (w5748), added to a run's lock with the read fence's other
+ * owner rules (on its own off switch, `read-fence-off`). Only the runtime folder's: a deny outside it (an `SSH_AUTH_SOCK`
+ * in /tmp) would refuse every socket an outside process makes later beside it (ff-landlock.py unix_grants grants only the
+ * siblings there at start). Effective from Landlock ABI 9; the probe tells whether they are (probeOwnerSockets).
+ */
+export function ownerSocketDenyArgs(runtimeDir: string | undefined): string[] {
+  return ownerSocketPaths({ runtimeDir, env: {} }).flatMap((p) => ['--deny-unix', p]);
+}
