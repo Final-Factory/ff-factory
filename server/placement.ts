@@ -18,6 +18,11 @@ export interface Computer {
   /** The machine id ("beast", "lothdesktop", "m5"). */
   id: string;
   online: boolean;
+  /**
+   * Why its worker fence failed (w5555), or undefined: its daemon refuses every sandbox worker's start so none runs
+   * unfenced, so it takes no work of any kind until the fence is fixed or switched off on purpose.
+   */
+  fenceFailed?: string;
   /** Agent processes up in its sandboxes; an idle one holds its memory too. */
   live: number;
   /** Of those, mid-turn (what its agent limit counts since w384). */
@@ -336,6 +341,7 @@ export const memPct = (p: Pick<Computer, 'memUsedBytes' | 'memTotalBytes'>): num
 export function busyReasons(p: Computer): string[] {
   const out: string[] = [];
   if (!p.online) out.push('offline');
+  if (p.fenceFailed) out.push(`worker fence failed: ${p.fenceFailed}`);
   if (p.midTurn >= p.maxAgents) out.push(`${p.midTurn} agents mid-turn of ${p.maxAgents}`);
   const pct = memPct(p);
   if (pct !== undefined && pct >= RAM_BUSY_PCT) out.push(`RAM ${pct}% used`);
@@ -369,6 +375,7 @@ export const hasRoom = (p: Computer) => busyReasons(p).length === 0;
 export function agentBusyReasons(p: Computer): string[] {
   const out: string[] = [];
   if (!p.online) out.push('offline');
+  if (p.fenceFailed) out.push(`worker fence failed: ${p.fenceFailed}`);
   if (p.midTurn >= p.maxAgents) out.push(`${p.midTurn} agents mid-turn of ${p.maxAgents}`);
   if (p.agentSeats !== undefined && p.agentSeats <= 0) out.push('no agent seat in any sandbox');
   return out;

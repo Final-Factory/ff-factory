@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
-import { redactInPlace, redactSecrets, redactValue } from './secrets.ts';
+import { Worker } from 'node:worker_threads';
+import { knownSecretValues, redactInPlace, redactSecrets, redactValue } from './secrets.ts';
 
 /**
  * Redact secrets already on disk (w1584): what was written before a store redacted, or before a token shape was known.
@@ -20,7 +21,7 @@ const SKIP_DIRS = new Set(['attachments', 'uploads', 'secrets', '.git', 'node_mo
 /** What is text a store wrote: JSON lines, JSON, logs, text, Markdown; also a saved generation (`state.json.1`) or gzip of one. */
 const TEXT_FILE = /\.(?:jsonl|json|log|txt|md)(?:\.\d+)?(?:\.gz)?$/i;
 /** Larger files are left alone and named (read whole into memory). */
-const MAX_BYTES = 1024 * 1024 * 1024;
+export const MAX_BYTES = 1024 * 1024 * 1024;
 
 const markers = (s: string) => s.split('[redacted').length - 1;
 
@@ -57,10 +58,13 @@ export function redactFileText(name: string, text: string): { text: string; n: n
   return { text: out, n: out === text ? 0 : Math.max(1, markers(out) - markers(text)) };
 }
 
+/** Where a masked copy of `file` is written before it replaces it (scrubFiles skips such a file). */
+export const scrubTmp = (file: string) => `${file}.scrub-${process.pid}.tmp`;
+
 /** Write `data` over `file` by a rename, keeping its mode and (as root) its owner, so the portal can still read it. */
 function replaceFile(file: string, data: string | Buffer) {
   const st = fs.statSync(file);
-  const tmp = `${file}.scrub-${process.pid}.tmp`;
+  const tmp = scrubTmp(file);
   fs.writeFileSync(tmp, data, { mode: st.mode & 0o777 });
   try {
     if (process.getuid?.() === 0) fs.chownSync(tmp, st.uid, st.gid);
@@ -92,7 +96,11 @@ export interface ScrubReport {
   errors: { file: string; error: string }[];
   /** Files over the size limit, not read. */
   skipped: string[];
+  /** The start-up scrub (w5613): its longest piece of work on the portal's own thread, in ms (starting the thread, a swap). */
+  longestTurnMs?: number;
 }
+
+export const emptyReport = (): ScrubReport => ({ scanned: 0, files: [], total: 0, errors: [], skipped: [] });
 
 /** Every text file below `roots` (files or folders) that a store writes, minus the ones that hold secrets on purpose. */
 export function scrubFiles(roots: readonly string[]): string[] {
@@ -122,7 +130,7 @@ export function scrubFiles(roots: readonly string[]): string[] {
 
 /** Scrub every file below `roots`. A dry run only counts. */
 export function scrubTree(roots: readonly string[], o: { dryRun?: boolean } = {}): ScrubReport {
-  const report: ScrubReport = { scanned: 0, files: [], total: 0, errors: [], skipped: [] };
+  const report = emptyReport();
   for (const file of scrubFiles(roots)) {
     try {
       if (fs.statSync(file).size > MAX_BYTES) {
@@ -157,16 +165,108 @@ export function reportLines(r: ScrubReport, o: { dryRun?: boolean; remaining?: n
 
 /**
  * Raise when the masking learns something new (a token shape): each portal then scrubs its data folder again at its next
- * start. 2 (w1688): every value in its URL-encoded, base64 and JSON-escaped forms too.
+ * start. 2 (w1688): every value in its URL-encoded, base64 and JSON-escaped forms too. 3 (w5526): JWTs, AWS access keys,
+ * Slack tokens, Bearer credentials and passwords in URLs (shared/secretShapes.ts).
  */
-export const SCRUB_VERSION = 2;
+export const SCRUB_VERSION = 3;
 /** `<dataDir>/secret-scrub.json`: the scrub version this data folder was last scrubbed at, when, and how many were masked. */
 export const SCRUB_MARKER = 'secret-scrub.json';
 
+/** A masked copy the scrub's thread wrote (`tmp`) of `file` as it read it: its inode, the bytes read, its mtime then. */
+export interface ScrubCommit {
+  file: string;
+  tmp: string;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  /** Secrets masked in what was read. */
+  n: number;
+  gz: boolean;
+}
+/** The portal's answer: swapped in with this many masked, gone (deleted meanwhile), changed (read it again) or an error code. */
+export type ScrubReply = { ok: number } | { gone: true } | { changed: true } | { error: string };
+
 /**
- * The portal's own pass at start: once per SCRUB_VERSION, every file below its data folder, one file per turn of the event
- * loop so the portal keeps answering. Each file is read and replaced within one turn, so nothing the portal appends in
- * between is lost. Logs paths and counts. Resolves to the report, or undefined when the folder is scrubbed already.
+ * Swap a masked copy in, on the portal's own thread and within one turn (w5613), so no write of the portal's lands between
+ * the check and the rename. A file only appended to since the read (same inode, longer) keeps what was appended, masked here
+ * (a few lines); a file replaced, cut or rewritten since is read again by the thread (`changed`). The copy is removed on
+ * anything but `ok`.
+ */
+export function commitScrubbed(c: ScrubCommit): ScrubReply {
+  const drop = () => fs.rmSync(c.tmp, { force: true });
+  let st: fs.Stats;
+  try {
+    st = fs.statSync(c.file);
+  } catch {
+    drop();
+    return { gone: true };
+  }
+  try {
+    let n = c.n;
+    if (st.ino !== c.ino || st.size < c.size || (st.size === c.size && st.mtimeMs !== c.mtimeMs) || (st.size > c.size && c.gz)) {
+      drop();
+      return { changed: true };
+    }
+    if (st.size > c.size) {
+      const tail = Buffer.alloc(st.size - c.size);
+      const fd = fs.openSync(c.file, 'r');
+      try {
+        fs.readSync(fd, tail, 0, tail.length, c.size);
+      } finally {
+        fs.closeSync(fd);
+      }
+      const clean = redactFileText(path.basename(c.file), tail.toString('utf8'));
+      fs.appendFileSync(c.tmp, clean.text);
+      n += clean.n;
+    }
+    fs.renameSync(c.tmp, c.file);
+    return { ok: n };
+  } catch (e) {
+    drop();
+    return { error: (e as NodeJS.ErrnoException).code ?? (e as Error).name };
+  }
+}
+
+/**
+ * The walk, the reads and the masking on a thread of their own (server/scrubThread.ts), each masked copy swapped in on this
+ * thread by commitScrubbed. Rejects when the thread could not run.
+ */
+function scrubOnThread(dataDir: string): Promise<ScrubReport> {
+  return new Promise((resolve, reject) => {
+    let longest = 0;
+    const timed = <T>(fn: () => T): T => {
+      const t0 = performance.now();
+      try {
+        return fn();
+      } finally {
+        longest = Math.max(longest, performance.now() - t0);
+      }
+    };
+    const w = timed(() => new Worker(new URL('./scrubThread.ts', import.meta.url), { workerData: { dataDir, values: [...knownSecretValues()] } }));
+    let done = false;
+    w.on('message', (m: { commit?: ScrubCommit; done?: ScrubReport }) => {
+      if (m.commit) {
+        const c = m.commit;
+        w.postMessage(timed(() => commitScrubbed(c)));
+      } else if (m.done) {
+        done = true;
+        resolve({ ...m.done, longestTurnMs: Math.round(longest) });
+        void w.terminate();
+      }
+    });
+    w.on('error', (e) => reject(e));
+    w.on('exit', (code) => {
+      if (!done) reject(new Error(`the scrub thread stopped (exit ${code})`));
+    });
+  });
+}
+
+/**
+ * The portal's own pass at start: once per SCRUB_VERSION, every file below its data folder. The reading and masking run on
+ * a thread of their own so the portal keeps answering (w5613: on this thread, one big transcript held the event loop 10 s);
+ * each masked file is swapped in on this thread in one turn, so nothing the portal appends meanwhile is lost. Logs paths and
+ * counts. Resolves to the report, or undefined when the folder is scrubbed already or the thread could not run (logged; the
+ * next start tries again).
  */
 export async function scrubAtStart(dataDir: string, log: (line: string) => void, o: { force?: boolean } = {}): Promise<ScrubReport | undefined> {
   const marker = path.join(dataDir, SCRUB_MARKER);
@@ -175,17 +275,16 @@ export async function scrubAtStart(dataDir: string, log: (line: string) => void,
   } catch {
     // never scrubbed
   }
-  const report: ScrubReport = { scanned: 0, files: [], total: 0, errors: [], skipped: [] };
-  for (const file of scrubFiles([dataDir])) {
-    await new Promise((r) => setImmediate(r));
-    const one = scrubTree([file]);
-    report.scanned += one.scanned;
-    report.files.push(...one.files);
-    report.total += one.total;
-    report.errors.push(...one.errors);
-    report.skipped.push(...one.skipped);
+  let report: ScrubReport;
+  const started = performance.now();
+  try {
+    report = await scrubOnThread(dataDir);
+  } catch (e) {
+    log(`could not scrub the data folder (${(e as NodeJS.ErrnoException).code ?? (e as Error).name}): the next start scrubs again`);
+    return undefined;
   }
   for (const line of reportLines(report)) if (report.total || report.errors.length || line.startsWith('scanned')) log(line);
+  log(`scrubbed on its own thread in ${((performance.now() - started) / 1000).toFixed(1)} s; the longest piece on the portal's thread took ${report.longestTurnMs} ms`);
   try {
     fs.writeFileSync(marker, JSON.stringify({ version: SCRUB_VERSION, at: new Date().toISOString(), redacted: report.total }) + '\n', { mode: 0o600 });
   } catch (e) {

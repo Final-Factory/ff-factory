@@ -57,6 +57,28 @@ before redeploying by hand.
 
 - **Auth.** A 256-bit token per machine; the portal keeps only its SHA-256 (state.json) and compares
   in constant time. `/machine` is on the public Funnel URL, so a bad token is logged and throttled.
+- **The daemon link is tailnet-only** (w5575, finding 3 of the w5450 network audit; `server/machineLinkGate.ts`). Every
+  `/machine` request and upgrade (`/machine`, `/machine/live/<id>`, `/machine/whoami`, `/machine/attachments/...`, all of
+  `/machine/*`) is judged by `tailnetOnly` (`server/remoteChat.ts`): Tailscale's Funnel header refuses it, and the client
+  address (`clientAddress`, `server/clientAddress.ts`: the last X-Forwarded-For entry, believed only from a proxy on this
+  machine such as Tailscale Serve; any other peer by its own socket address) must be loopback, `100.64.0.0/10` or
+  `fd7a:115c:a1e0::/48`. The owner's setting `machineLinkTailnet` picks what happens, read live (no restart):
+  - `warn` (the default while unset): every connection is let in as before, and one that would be refused is logged
+    `machine link: WOULD REFUSE <route> from <address> ... : <why>` (once per address, route and reason an hour);
+  - `enforce`: it is answered 403 and closed, before its token is read, and logged `machine link: refused ...`;
+  - `off`: no check and no log.
+
+  Each daemon link that opens is logged `machine <id>: link from <address>`, so the portal's journal lists the address
+  every machine connects from: `portal_logs` source `portal`, grep `link from` and grep `WOULD REFUSE`. Enforce is turned
+  on only once those show every machine on a tailnet address and no would-be refusal of a daemon.
+
+  **Recovery, with no person at any machine:** if enforce cuts a daemon off (its link drops and `machine link: refused`
+  lines carry its address), Ben's or Lothsahn's orchestrator calls `set_app_config` with `machineLinkTailnet` `"off"`
+  (or `"warn"`). The portal VM runs the orchestrators, so this needs no daemon; it applies at once, and a refused daemon
+  gets in on its next redial (a daemon redials forever after a refusal, at most 30 s apart: `reconnectDelayMs`,
+  `machine/daemon.ts`). Without an orchestrator: the ops worker (on the portal VM) or anyone with
+  the VM's shell sets `"machineLinkTailnet": "off"` in the portal's `config.json` and runs `fffctl restart`; or a revert
+  of the enforcing commit merged on GitHub deploys by itself.
 - **Sessions.** The portal creates the session record and tells the daemon what to launch (a
   serialisable launch spec: cwd, model, brief, tools, guard settings, budget). Transcript sequence
   numbers are assigned by the daemon, starting from the portal's last one, so a session resumes
@@ -1045,7 +1067,7 @@ portal (`unity` and `switch_branch` with a machine alone are refused, and the da
   orchestrator's bench audit sees them.
 
   **What the exclusive tickets cost, per hour** (w1996, lothsahn: "We're wasting system resources like crazy locking beast
-  down to a single timing job"): the queue's history lives only on its machine (`<root>/tmp/bench.queue/history.jsonl`, rotated to
+  down to a single timing job"): the queue's history lives only on its machine (`<root>/daemon/bench.queue/history.jsonl` since w5545, rotated to
   `history.1.jsonl` at 5 MB). Each daemon reads both (`machine/benchHours.ts`), works out the last 72 UTC hours and sends them
   as `bench_hours` after each welcome and every hour; the portal merges them into `data/bench-hours.json` (14 days, the newest
   report of an hour wins; `server/benchHoursStore.ts`). A worker reads them with `portal_logs {source: "bench_hours"}` to compare
@@ -1072,6 +1094,30 @@ on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
 portal never sends it one: it says the daemon is being redeployed.
 
+### Git in a worker's checkout runs no program the worker named (w5541)
+
+A worker writes its checkout's git config freely (`git config` in its worktree writes the clone's shared config, and a
+`.git` file can point at a git folder it made), so every git call the daemon, the agent host or another Medium process
+makes goes through `server/safeGit.ts`: `run()` (`server/proc.ts`), the worker's `exec()` and `machine/prFlow.ts` fence
+git by themselves, and a direct child_process call uses `gitExecFileSync`/`gitSpawnSync`/`gitSpawn`/`gitExecFile`.
+The fence is command-scope config (it outranks every config file): `core.fsmonitor=false`, `core.hooksPath` on
+`server/gitHooks` (git-lfs's four hooks and no other, so a push still uploads LFS objects; its lock hooks (post-checkout, post-commit, post-merge) run only where `.gitattributes` marks something `lockable`, since git-lfs on every commit made them over three times slower; `git lfs install`/`update`
+keep the repository's folder, since they write hooks there), the `cat` pager, `:` editors, no signing, remote transports only https, http, ssh and
+file; `--no-ext-diff --no-textconv` on `diff`/`log`/`show`; and keys a repository names freely (a filter's `clean`, a
+diff `textconv`, a merge driver, a credential helper, `core.sshCommand`, git-lfs transfer agents) read by one `git config`
+call and set back to the user's or system's value, else a neutral one (git-lfs's own filter for `filter.lfs.*`).
+That last part has a race: a key written between the scan and the call wins, so it narrows the gap without closing it.
+A repository-set `url.<base>.insteadOf` cannot be overridden by value (the longest prefix wins and the repository's entry
+wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). Not covered: `lfs.url`
+in a repository's config (git-lfs would send LFS objects there; the GitHub token's helper answers only github.com).
+
+`worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools/final-factory-agents` to origin/master, but
+runs `registerAgents.sh` from a fresh shallow clone in a new temp folder, made with no global config, no system config
+(but on Windows) and the fence, and removed after; the script, hooks and config in the root's checkout never run.
+`server/safeGit.test.ts` fails on a git spawn that skips the helper and shows with a marker file that the daemon's status,
+diff, commit and log calls run no planted fsmonitor, filter, textconv, `diff.external` or hook, in a `git worktree` and
+behind a `.git` file.
+
 ### Placing work
 
 A sandbox whose agent is **between turns** (w475, w509, w643; [orchestrators.md](orchestrators.md), "Agent states": alive
@@ -1088,7 +1134,7 @@ none live or unused, the most recent activity first within each.
 it; `server/machines.ts` `NO_TIMED_RUNS` makes m5 one by default, with lothsahn's words: "The m5 should not be used for
 timing runs because Ben runs stuff on it personally"). Placement never sends timed or exclusive-lock work there (its
 Capacity line says "no timed runs"), and a start pinned to it for such work is refused back to the caller. Its daemon writes
-`no_timed_runs` {why, elsewhere} into `<root>/tmp/bench.queue/priorities.json` (`machine/benchLock.ts`
+`no_timed_runs` {why, elsewhere} into `<root>/daemon/bench.queue/priorities.json` (w5545; `machine/benchLock.ts`
 `writeBenchPriorities`), and the game repo's `scripts/bench/bench_queue.py` then refuses every exclusive ticket there,
 naming the computers that take them. Builds, editors, coding and tests go there as before (shared tickets).
 
@@ -1473,6 +1519,12 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its
   turn and marks `slot.json` with a fingerprint no build has (`linkInto`), so `player_slots.py` refills the slot at that
   sandbox's next launch.
+- **Checked by content before it runs** (w5574, from w5542's audit): those folders and the piece cache are in the worker
+  root, so a worker could leave a file of the same size there. A build is kept from an earlier run, and a leg's player
+  starts, only while its folder holds exactly the order's files, each piece hashing to the SHA-256 the order names, and
+  nothing else (`buildProblem` in machine/timedRunner.ts; a planted DLL beside the exe is refused too). A laid-out build
+  that fails it is removed with the bad cached piece and the run fails; a leg that fails it fails the run. The hashing
+  reads the whole player before each leg (about 2 GB), outside the leg's timed part.
 
 While a run is queued or sent to a computer whose agent cap is 1, it is no `single_worker` for its bench queue
 (`MachineManager.singleWorker`): its own worker's turn ends at 30 minutes again while the run waits. What the timing machine runs is the build's own
@@ -1728,7 +1780,7 @@ LothDesktop and Beast, not just when BEAST is full").
     handover says "Moved (w1600)" and what to stage. A conversation does not cross computers (Claude Code keeps its
     transcript on the old one's disk), so the request goes on in a new session; `PlaceAgain` still places a resumed worker
     only on its own machine.
-  - **BEAST's bench lock.** Timed runs there hold `$FF_WORKER_ROOT/tmp/bench.lock` for their whole length (the game repo's
+  - **BEAST's bench lock.** Timed runs there hold the bench lock (`$FF_WORKER_ROOT/daemon/bench.lock` since w5545, taken through the daemon) for their whole length (the game repo's
     `scripts/bench/quiet_gate.sh`, w1438). The daemon reads it with its stats (`machine/benchLock.ts`; one older than 40
     minutes is a killed run's and does not count) and the Capacity line shows "its bench lock is held since HH:MMZ (owner):
     a timed run". While it is held, a worker on Live view work there is refused `unity start`/`restart` and `live_view
@@ -2470,6 +2522,10 @@ machines?}` (protocol 8, w466) sends every connected daemon the new base URL. No
   relocate every connected daemon, write the outcome to `data/relocate.result.json`, then `drain.done`, and hold for the
   stop ([restart.md](restart.md), "Files in data"). The VM's `fffctl migrate --cut-over` writes it over ssh, so the
   daemons move while the old portal still answers their acks, and before it stops.
+
+**Pinned hosts** (w5576, [portal-pin.md](portal-pin.md)): a daemon follows a relocate only to a host in
+`PINNED_PORTAL_HOSTS` (machine/portalPin.ts). Stage 1 warns only. Add the new host, and let the rollout reach every
+machine, before you relocate.
 
 **The portal's own host as a machine** (BEAST, `local`) is reached without ssh and dials the portal at loopback. When
 the portal leaves it, `convert_machine {machine, to: "ssh", ssh_host, portal_url}` (w466, docs/portal-on-ffbox-host.md

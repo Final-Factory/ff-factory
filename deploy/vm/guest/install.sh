@@ -55,16 +55,38 @@ fi
 
 log "2/10 apt sources: NodeSource node_$NODE_MAJOR.x, GitHub CLI, Tailscale"
 codename=${VERSION_CODENAME:?}
-key() { # URL DEST [dearmor]
-  [ -s "$2" ] && return 0
-  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would fetch the key $1 to $2"; return 0; fi
-  install -d -m 0755 "$(dirname "$2")"
-  if [ "${3:-}" = dearmor ]; then curl -fsSL "$1" | gpg --dearmor -o "$2"; else curl -fsSL -o "$2" "$1"; fi
-  chmod 0644 "$2"
+# Each repository has its own keyring (signed-by= in its source line below), and its key is trusted only by a pinned
+# fingerprint (w5530, security audit finding 22): downloaded to a temp file, checked by verify_key_fprs (lib.sh; a
+# mismatch aborts the install before anything is written), then written to the keyring. A keyring already there is
+# checked the same way, so a rerun also catches a swapped key.
+# Where each fingerprint comes from (read 2026-11-24):
+#  - GitHub CLI: the two fingerprints github.com/cli/cli docs/install_linux.md lists for its packages and repository
+#    metadata. The 2C61... key expires 2026-09 and 7F38... replaces it; the keyring file holds both, so both are pinned.
+#  - NodeSource 6F71F525...: the key served at deb.nodesource.com/gpgkey/nodesource-repo.gpg.key ("NSolid
+#    <nsolid-gpg@nodesource.com>", created 2016, re-signed 2026, same fingerprint). NodeSource's docs
+#    (github.com/nodesource/distributions) publish no fingerprint: this one was read from the vendor's own key URL over TLS.
+#  - Tailscale 2596A99E...: "Tailscale Inc. (Package repository signing key)", identical in the jammy and noble files at
+#    pkgs.tailscale.com/stable/ubuntu. Tailscale's docs publish no fingerprint either: read from pkgs.tailscale.com over TLS.
+# A vendor that rotates its key makes this fail loudly: take the new fingerprint from the vendor's docs, not the download.
+FPR_NODESOURCE=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
+FPR_GITHUB_CLI=(2C6106201985B60E6C7AC87323F3D4EA75716059 7F38BBB59D064DBCB3D84D725612B36462313325)
+FPR_TAILSCALE=2596A99EAAB33821893C0A79458CA832957F5868
+key() { # URL DEST dearmor|raw FINGERPRINT...
+  local url=$1 dest=$2 mode=$3 tmp
+  shift 3
+  if [ -s "$dest" ]; then verify_key_fprs "$dest" "$@"; return 0; fi
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would fetch the key $url, check it against $*, and write it to $dest"; return 0; fi
+  tmp=$(mktemp)
+  curl -fsSL -o "$tmp" "$url" || { rm -f "$tmp"; die "could not download the apt key $url"; }
+  (verify_key_fprs "$tmp" "$@") || { rm -f "$tmp"; exit 1; }
+  install -d -m 0755 "$(dirname "$dest")"
+  if [ "$mode" = dearmor ]; then gpg --batch --yes --dearmor -o "$dest" <"$tmp"; else cp "$tmp" "$dest"; fi
+  rm -f "$tmp"
+  chmod 0644 "$dest"
 }
-key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key /etc/apt/keyrings/nodesource.gpg dearmor
-key https://cli.github.com/packages/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg
-key "https://pkgs.tailscale.com/stable/ubuntu/$codename.noarmor.gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg
+key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key /etc/apt/keyrings/nodesource.gpg dearmor "$FPR_NODESOURCE"
+key https://cli.github.com/packages/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg raw "${FPR_GITHUB_CLI[@]}"
+key "https://pkgs.tailscale.com/stable/ubuntu/$codename.noarmor.gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg raw "$FPR_TAILSCALE"
 c=""
 c+=$(echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_$NODE_MAJOR.x nodistro main" | write_file /etc/apt/sources.list.d/nodesource.list 0644)
 c+=$(printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' | write_file /etc/apt/preferences.d/nodesource 0644)
@@ -112,8 +134,10 @@ run_cmd passwd -l "$FFF_USER" >/dev/null
 run_cmd install -d -m 1770 -o root -g "$FFF_USER" "$FFF_ROOT"
 run_cmd chown "root:$FFF_USER" "$FFF_ROOT"
 run_cmd chmod 1770 "$FFF_ROOT"
+# fff's own folders: fff can swap any of them for a symbolic link, so fff_dir (lib.sh, w5531) refuses one and never
+# follows it, where install -d -o would have given the link's target to fff.
 for d in /home /config /data /agents /review /sandboxes /secrets; do
-  run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT$d"
+  fff_dir "$FFF_ROOT$d"
 done
 run_cmd install -d -m 0755 -o root -g root "$FFF_ROOT/app"
 run_cmd install -d -m 0700 -o root -g root "$FFF_ROOT/backup"
@@ -140,11 +164,11 @@ if [ ! -f "$BACKUP_SSH_KEY" ]; then
 fi
 if [ ! -f "$FFF_ROOT/home/.ssh/id_ed25519" ]; then
   # The portal's own key for deploying machine daemons (docs, 4.3): authorize its .pub with from= on each machine.
-  run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/home/.ssh"
+  fff_dir "$FFF_ROOT/home/.ssh"
   [ "$DRY_RUN" = 1 ] || as_fff ssh-keygen -q -t ed25519 -N '' -C "fff-portal@$(hostname -s)" -f "$FFF_ROOT/home/.ssh/id_ed25519"
 fi
 # The server reads Max's Discord token from here (server/discordConfig.ts): the portal's own copy, never FFBox's.
-run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/home/.config" "$FFF_ROOT/home/.config/ffbox"
+fff_dir "$FFF_ROOT/home/.config" "$FFF_ROOT/home/.config/ffbox"
 
 log "5/10 the VM's own firewall (table inet fff_guest)"
 host_rule=""
@@ -227,7 +251,8 @@ if [ -f "$FFF_ROOT/config/config.json" ]; then
     warn "$FFF_ROOT/config/config.json has no \"host\": the portal now listens on 127.0.0.1 only and the host's health check will fail; set \"host\": \"0.0.0.0\" (the VM's firewall limits who reaches it; docs/portal-bind-address.md)"
   fi
 else
-  write_file "$FFF_ROOT/config/config.json" 0600 "$FFF_USER:$FFF_USER" <"$here/config.vm.example.json" >/dev/null
+  # Written by fff (fff_write, w5531): a link fff left at the name would have led root's write elsewhere.
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would write $FFF_ROOT/config/config.json"; else fff_write "$FFF_ROOT/config/config.json" <"$here/config.vm.example.json"; fi
   log "written from config.vm.example.json; set ownerName (docs, 'Installing')"
 fi
 url_changed=0

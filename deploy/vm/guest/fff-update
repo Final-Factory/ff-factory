@@ -27,6 +27,10 @@
 #                            origin/<branch>) and print the release folder.
 #   fff-update init [REF]    the first release (install.sh).
 set -o errexit -o nounset -o pipefail
+# What root writes here is for fff to read (the clone's objects: the bundles a machine updates from; the releases fff runs).
+# activate runs inside fff-portal.service, whose UMask=0077 a "+" ExecStartPre keeps, so without this its fetch wrote
+# objects only root could read and every machine's update bundle failed (w5593). Private files set their own mode.
+umask 022
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
@@ -40,7 +44,8 @@ current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 # the same in both, which is what npm ci would install anyway (seconds instead of half a minute). The caches tools write
 # into node_modules are left out, so nothing writes through a link into the running release's files.
 # The old release must be a checked root's one; the links are root's (the kernel's protected_hardlinks refuses fff a
-# link to root's file), and only the folders are fff's for the build, so fff can add files but change none of them.
+# link to root's file), and only the folders become fff's for the build (prepare), so fff can add files but change none
+# of them. Run while NEW is still root's (w5531).
 deps_from() {
   local old=$1 new=$2 sub=$3 f
   [ -n "$old" ] && release_ok "$old" && [ -d "$old/$sub/node_modules" ] && [ ! -L "$old/$sub/node_modules" ] || return 1
@@ -48,7 +53,6 @@ deps_from() {
   rm -rf "$new/$sub/node_modules"
   cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
   rm -rf "$new/$sub/node_modules/.cache" "$new/$sub/node_modules/.vite" "$new/$sub/node_modules/.tmp"
-  find "$new/$sub/node_modules" -type d -exec chown "$FFF_USER:$FFF_USER" {} +
 }
 
 # ensure_repo: root's bare clone of $FFF_REPO_URL. One fff made (before w5505) is replaced by a new clone, since fff
@@ -88,7 +92,8 @@ ensure_repo() {
     log "replaced fff's clone with root's"
   fi
   chown -R -h root:root "$REPO"
-  chmod -R go-w "$REPO"
+  # a+rX: fff's git reads every object (bundles, version); this also mends what a run under umask 077 wrote (w5593).
+  chmod -R go-w,a+rX "$REPO"
   git_root -C "$REPO" remote set-url origin "$FFF_REPO_URL"
   # git 2.46 or later reads a trailing /* (Ubuntu 26.04 has it).
   for w in "$REPO" "$RELEASES/*"; do
@@ -99,7 +104,7 @@ ensure_repo() {
 # prepare [REF]: build REF beside the running release and print its folder. Every step is checked here: this runs in
 # $(...) and under "if", where bash ignores errexit, so a failed npm ci would otherwise still mark the release ready.
 prepare() {
-  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t
+  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t reused
   log "fetching $ref"
   t=$(date +%s)
   own_app
@@ -127,16 +132,23 @@ prepare() {
   fi
   git_root -C "$REPO" worktree prune >&2 || true
   git_root -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
-  # fff builds it (npm ci, the web build); harden_release makes it root's afterwards.
-  chown -R -h "$FFF_USER:$FFF_USER" "$dir"
   cur=$(current_dir)
+  reused=" "
   for sub in . web; do
     if [ "$cur" != "$dir" ] && deps_from "$cur" "$dir" "$sub"; then
       log "building ${sha:0:12}: $sub dependencies unchanged, node_modules reused from $(basename "$cur")"
-    else
-      log "building ${sha:0:12}: npm ci ($sub)"
-      as_fff_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || die "npm ci in $sub failed"
+      reused+="$sub "
     fi
+  done
+  # fff builds it (npm ci, the web build); harden_release makes it root's afterwards. Given to fff from the bottom up
+  # (-depth, chown -h), so each folder above the one root changes is still root's and fff cannot have swapped it for a
+  # link (w5531); the files of the reused node_modules stay root's links.
+  find "$dir" -depth \( -type d -o \( ! -path "$dir/node_modules/*" ! -path "$dir/web/node_modules/*" \) \) \
+    -exec chown -h "$FFF_USER:$FFF_USER" {} +
+  for sub in . web; do
+    case $reused in *" $sub "*) continue ;; esac
+    log "building ${sha:0:12}: npm ci ($sub)"
+    as_fff_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || die "npm ci in $sub failed"
   done
   log "building ${sha:0:12}: web build"
   as_fff_in "$dir" npm --prefix web run build --silent >&2 || die "the web build failed"
@@ -319,18 +331,34 @@ cmd_activate() {
 # back there from its file in the secrets folder (the start of a newer release moves it out again). Nothing else needs
 # undoing: config keeps claudeAccounts.orchestrator "vault", which those releases read too.
 restore_inline_hash() {
-  local cfg=$FFF_ROOT/config/config.json f h tmp
+  local cfg=$FFF_ROOT/config/config.json f h
   [ -f "$1/server/configMigration.ts" ] && return 0
   f=$(jq -r '.providers.ffbox.tokenSha256File // ""' "$cfg" 2>/dev/null) || return 0
   [ -n "$f" ] && [ -s "$f" ] || return 0
-  h=$(tr -d '[:space:]' <"$f")
+  # fff reads the file config.json names and edits its own config (w5531: root would follow a link fff put there).
+  h=$(as_fff cat -- "$f" | tr -d '[:space:]') || h=""
   [[ $h =~ ^[0-9a-f]{64}$ ]] || { warn "$f does not hold one SHA-256: FFBox's connector hash not put back into config.json"; return 0; }
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  if ! jq --arg h "$h" '.providers.ffbox.tokenSha256 = $h' "$cfg" >"$tmp"; then rm -f "$tmp"; warn "could not put FFBox's connector hash back into config.json"; return 0; fi
-  chown --reference="$cfg" "$tmp"
-  chmod --reference="$cfg" "$tmp"
-  mv -f "$tmp" "$cfg"
+  no_link "$cfg" "putting FFBox's connector hash back into config.json" || return 0
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  if ! as_fff sh -c 't=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg h "$2" ".providers.ffbox.tokenSha256 = \$h" "$1" >"$t" &&
+    chmod --reference="$1" "$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$h"; then
+    warn "could not put FFBox's connector hash back into config.json"; return 0
+  fi
   log "FFBox's connector hash put back into config.json for $(basename "$1"), a release from before w1078"
+}
+
+# portal_unit_back DIR: a rollback keeps the newer system setup (refresh_scripts), except fff-portal.service, which says
+# how the code gets its vault key: OpenFile= since w5506, LoadCredential= before (docs/vault.md). Code from before w5506
+# under the newer unit would find no key and its vault would hand out nothing, so the older release's own unit goes back.
+portal_unit_back() {
+  local u=$1/deploy/vm/guest/units/fff-portal.service
+  [ -f "$u" ] || return 0
+  cmp -s "$u" /etc/systemd/system/fff-portal.service && return 0
+  if install -m 0644 "$u" /etc/systemd/system/fff-portal.service && systemctl daemon-reload; then
+    log "fff-portal.service from $(basename "$1") put back, so its code gets its vault key the way it expects (w5506)"
+  else
+    warn "putting back fff-portal.service from $(basename "$1") failed: its vault may find no key"
+  fi
 }
 
 cmd_rollback() {
@@ -345,6 +373,7 @@ cmd_rollback() {
   ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
   restore_inline_hash "$prev"
   refresh_scripts "$prev"
+  portal_unit_back "$prev"
   rm -f "$DATA/update.verifying.json"
   jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \
     '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $a}' | data_write update.result.json

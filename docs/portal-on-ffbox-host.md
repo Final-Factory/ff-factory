@@ -546,6 +546,12 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
   read-only release folders"). `activate` runs as root, so it trusts nothing `fff` can write:
   - `/srv/fff` is `root:fff 1770` (sticky: `fff` cannot rename `app/`), `app/`, `app/releases/` and `app/repo.git` are
     `root:root 0755`. `fff` reads them through `safe.directory` entries in its git config.
+  - **Readable by `fff`, whatever umask root runs under** (w5593): `fff`'s git reads `repo.git`'s objects to make the
+    bundle every machine updates from (`server/machineLink.ts`). `activate` runs in `fff-portal.service`, whose
+    `UMask=0077` its `+` `ExecStartPre` keeps, so `fff-update` sets `umask 022` itself, and `ensure_repo` runs
+    `chmod -R go-w,a+rX` on the clone at every `prepare` and `init`, which mends objects an earlier run left `0400` in
+    `0700` folders. Without it (2026-11-25, 06:03Z) one `activate` build wrote such objects and every daemon's rollout
+    failed with `git bundle failed (128): error: unable to open loose object ...: Permission denied`.
   - After `npm` (as `fff`) the release is handed to root: `chown -R root:root`, `chmod -R go-w`, setuid bits cleared,
     tracked files rewritten (`git checkout-index -af`) and no process may still hold a writable file or shared map in it
     (`writers_in`, from `/proc`). A `.ready` file names the commit.
@@ -595,7 +601,12 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
    - **Neither answers 3 times in a row:** `virsh reset`, logged and alerted.
    - **Never during the first boot**, before the agent has answered once (cloud-init installs it, then upgrades and may
      reboot): an alert after 30 minutes, never a reset.
-   - **Never within 5 minutes of QEMU's start, nor during the nightly cycle.**
+   - **Never within 5 minutes of QEMU's start or of the guest's last reboot, nor during the nightly cycle.** A reboot
+     inside a running QEMU (cloud-init's after its first upgrade, a reset) restarts the grace: `fff-vm events` notes
+     libvirt's `reboot` event (w5608: the watch reset a guest 11 s into the reboot cloud-init asked for, and its ssh
+     then hung for the e2e's whole 900 s wait).
+   - **Checks are spaced from the end of the last one** (`OnUnitInactiveSec`): a check that waits out its 10 s timeouts
+     no longer starts the next one at once, so "N in a row" spans at least N intervals.
    - **At most 3 resets in 6 hours;** after that only alerts, since a VM that keeps dying needs a person.
 4. **The watchdog is the second layer.** If the guest's kernel or PID 1 hangs, nobody pets `i6300esb` and QEMU resets
    the VM *(measured in CI: a guest that stops petting it is reset; `fff-vm-events` reports the watchdog event)*. A

@@ -6,6 +6,8 @@
 //      and SHA-256 against the message, which came on this machine's own authenticated link;
 //   2. fetches it into the install's checkout (<appDir>/src: git checks every object, so the commit is the portal's to the
 //      byte) and checks the commit out;
+//      Then (w5516) it checks the commit is on ff-factory's main on GitHub (checkPublished): the portal only deploys commits
+//      on main, so a commit that is not there is refused, whoever sent it;
 //   3. writes the job (<appDir>/update/job.json) and starts scripts/worker/linkJob.ts from that commit as the OS's own job
 //      (machine/osJob.ts), which runs the installer's update and puts the old code back when the new daemon does not come
 //      back, then writes <appDir>/update/result.json;
@@ -13,11 +15,12 @@
 //
 // No module here may need an npm package: linkJob.ts imports these from a checkout that has none.
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { gitExecFile } from '../server/safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { FromDaemon, LinkUpdateFlags, LinkUpdateReport, ToDaemon } from '../server/machineProtocol.ts';
+import { notePortalRedirect } from './portalPin.ts';
 import { launchJob, removeJob } from './osJob.ts';
 
 /** The largest bundle a daemon takes (ff-factory's whole history was 19 MB in October 2026). */
@@ -155,6 +158,7 @@ export async function downloadBundle(
       try {
         const from = size;
         const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal });
+        notePortalRedirect(url, res);
         if (res.status >= 400 && res.status < 500) {
           await res.body?.cancel();
           throw new Final(`the portal answered ${res.status} for the update's bundle`);
@@ -203,7 +207,7 @@ export async function downloadBundle(
 
 const git = (args: string[], timeoutMs = 5 * 60_000) =>
   new Promise<string>((resolve, reject) =>
-    execFile('git', args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, stdout, stderr) =>
+    gitExecFile(args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, stdout, stderr) =>
       err ? reject(new Error(`git ${args[0] === '-C' ? args[2] : args[0]} failed: ${String(stderr || err.message).trim().split('\n').pop()}`)) : resolve(String(stdout)),
     ),
   );
@@ -212,7 +216,7 @@ const git = (args: string[], timeoutMs = 5 * 60_000) =>
  * Fetch the bundle into the install's checkout and check `commit` out there (git verifies every object it takes, so what is
  * checked out is the portal's commit exactly). A checkout that is missing is made. Exported for tests.
  */
-export async function checkoutFromBundle(src: string, bundle: string, commit: string): Promise<void> {
+export async function checkoutFromBundle(src: string, bundle: string, commit: string, verify?: (src: string) => Promise<void>): Promise<void> {
   if (!fs.existsSync(path.join(src, '.git'))) {
     fs.mkdirSync(src, { recursive: true });
     await git(['init', '--quiet', src]);
@@ -223,7 +227,31 @@ export async function checkoutFromBundle(src: string, bundle: string, commit: st
   await git(['-C', src, 'fetch', '--quiet', '--no-tags', bundle, '+HEAD:refs/ff-update/portal']);
   const got = (await git(['-C', src, 'rev-parse', '--verify', 'refs/ff-update/portal^{commit}'])).trim();
   if (got !== commit) throw new Error(`the bundle holds commit ${got.slice(0, 12)}, not ${commit.slice(0, 12)} as the portal said: nothing was changed`);
+  if (verify) await verify(src);
   await git(['-C', src, '-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--force', '--detach', commit]);
+}
+
+/** Where ff-factory's code is published: a daemon takes over its link only commits on this branch (w5516). */
+export interface PublishedOrigin {
+  url: string;
+  branch: string;
+}
+export const FF_PUBLISHED: PublishedOrigin = { url: 'https://github.com/Final-Factory/ff-factory.git', branch: 'main' };
+
+/**
+ * w5516 (the w5452 audit's finding 11): the portal sends the commit and the bundle's hash itself, so the bundle check alone
+ * trusts the portal. This fetches the published branch into the install's checkout (refs/remotes/ff-published/<branch>,
+ * anonymous) and refuses a commit that is not on it. Exported for tests.
+ */
+export async function checkPublished(src: string, commit: string, origin: PublishedOrigin = FF_PUBLISHED): Promise<void> {
+  if (!/^[\w.-]+$/.test(origin.branch)) throw new Error(`the published branch "${origin.branch}" is not a branch name`);
+  const ref = `refs/remotes/ff-published/${origin.branch}`;
+  await git(['-C', src, 'fetch', '--quiet', '--no-tags', origin.url, `+refs/heads/${origin.branch}:${ref}`], 3 * 60_000).catch((e) => {
+    throw new Error(`could not read ${origin.branch} at ${origin.url} to check commit ${commit.slice(0, 12)} is published there (${(e as Error).message}): nothing was changed`);
+  });
+  await git(['-C', src, 'merge-base', '--is-ancestor', commit, ref]).catch(() => {
+    throw new Error(`commit ${commit.slice(0, 12)} is not on ${origin.branch} at ${origin.url}: refused, nothing was changed`);
+  });
 }
 
 /** The worker install the daemon runs from (root.json): its service name and platform, or undefined. */
@@ -306,6 +334,11 @@ export interface SelfUpdaterDeps {
   remove?: typeof removeJob;
   fetch?: typeof fetch;
   now?: () => number;
+  /**
+   * Where a commit must be published before it is checked out (w5516): GitHub's ff-factory main unless daemon.json's
+   * `updateOrigin` names another (the link end-to-end test's local repository). Read at each update.
+   */
+  published?: () => PublishedOrigin | undefined;
 }
 
 /**
@@ -415,7 +448,7 @@ export class SelfUpdater {
     try {
       this.deps.log(`update over the link: ${msg.form} to ff-factory ${msg.commit.slice(0, 12)}; fetching the bundle (${msg.bundle.size} bytes)`);
       const bundle = await downloadBundle(this.deps.portalUrl(), this.deps.token, msg.bundle, f.dir, this.deps.fetch, { log: (l) => this.deps.log(l) });
-      await checkoutFromBundle(f.src, bundle, msg.commit);
+      await checkoutFromBundle(f.src, bundle, msg.commit, (src) => checkPublished(src, msg.commit, this.deps.published?.() ?? FF_PUBLISHED));
       removeOldBundles(this.deps.appDir, bundle);
       const how = await this.start(this.job(msg.form, msg.id, inst.service, { commit: msg.commit, ...(msg.flags ? { flags: msg.flags } : {}) }), inst.service);
       this.deps.log(`update over the link: the bundle checked (SHA-256 and commit), job ${msg.id} started as ${how}`);

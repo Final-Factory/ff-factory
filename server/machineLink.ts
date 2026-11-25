@@ -3,7 +3,7 @@
 // it runs from (deploy/vm/guest/fff-update makes each release a worktree of one clone), at its HEAD. The bundle's SHA-256
 // and size go in the `self_update` message on the machine's own authenticated link; the machine downloads it with its own
 // credential (GET /machine/update/<sha256>, only a machine it was offered to) and checks both, and git checks the commit.
-import { spawn } from 'node:child_process';
+import { gitSpawn } from './safeGit.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -17,7 +17,7 @@ export interface UpdateBundle {
 
 const git = (cwd: string, args: string[]) =>
   new Promise<string>((resolve, reject) => {
-    const p = spawn('git', ['-C', cwd, ...args], { windowsHide: true });
+    const p = gitSpawn(['-C', cwd, ...args], { windowsHide: true });
     let out = '';
     let err = '';
     p.stdout.on('data', (d) => (out += d));

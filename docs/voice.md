@@ -155,8 +155,11 @@ portal's `PyWorker` and `setupVoice`, so it is one code path, not a second engin
 **Where it runs.** Inside the daemon (`machine/voice.ts`), as a child Python process, not a service of its own: it
 starts and stops with the daemon, needs no install step of its own beyond the folder, and is reached through the link
 the daemon already has. It is not an agent and not a Unity editor, so no agent or editor limit counts it. Its files
-live in the worker root: `<root>/voice` (`F:\ffw\voice` on BEAST): uv's Python, the venv with faster-whisper and the
-CUDA 12 wheels, the model, `setup.log`. The daemon installs or updates them in the background when they are missing or
+live in the daemon's folder: `<root>/daemon/voice` (`F:\ffw\daemon\voice` on BEAST): uv's Python, the venv with
+faster-whisper and the CUDA 12 wheels, the model, `setup.log`. Not in the worker root: the venv's python runs at the
+daemon's level, and workers can write the root (w5574, from w5542's audit). A `toolsDir` or `uvPath` set elsewhere in the
+root is refused (`voiceToolsProblem`; the status says why), and the old `<root>/voice` is removed once the new copy is
+installed. The daemon installs or updates them in the background when they are missing or
 stale (the same stamps as the portal's), and the uninstall deletes them with the root. The daemon's process ends the
 worker when it ends (the worker exits when its stdin closes), so a daemon restart leaves nothing behind.
 
@@ -168,7 +171,7 @@ worker when it ends (the worker exits when its stdin closes), so a daemon restar
 | `model` | `large-v3-turbo` | a faster-whisper model name |
 | `device` | `cuda` | GPU only: a worker's CPU belongs to its agents and builds, and the VM is the CPU fallback |
 | `computeType` | `int8_float16` on the GPU | |
-| `toolsDir` | `<root>/voice` | |
+| `toolsDir` | `<root>/daemon/voice` | never elsewhere in the worker root (w5574) |
 | `minFreeVramMiB` | 3072 | it loads the model only with this much VRAM free (more than `yieldBelowMiB` plus the model, so an unload is not followed by a reload) |
 | `yieldBelowMiB` | 1024 | an idle loaded model is unloaded when free VRAM falls under this |
 | `idleMinutes` | 0 | 0: kept loaded; otherwise unloaded after this long unused |
@@ -325,7 +328,7 @@ Server side, `config.json` → `voice` (`server/config.ts`):
 
 ## Install
 
-On a worker machine (w615) the daemon installs its own copy, speech-to-text only, under `<root>/voice` (above). On the
+On a worker machine (w615) the daemon installs its own copy, speech-to-text only, under `<root>/daemon/voice` (above). On the
 portal: `npm run voice-setup` is idempotent; `-- --force` reinstalls. It puts everything under
 `voice.toolsDir` (default `data/tools/whisper`, ~5.6 GB). No admin, nothing system-wide; uv comes
 from PATH or is downloaded into the folder.
