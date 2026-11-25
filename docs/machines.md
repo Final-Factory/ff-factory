@@ -77,7 +77,9 @@ before redeploying by hand.
   then m3 and LothLaptop; FFBox's connector uses `/provider`, which the check leaves out). Enforce also needs
   `trustProxy` on (its default): with it off, a daemon that comes in through Tailscale Serve is a loopback
   connection carrying a header the portal may not believe (`untrustedProxied`, `server/clientAddress.ts`), and is
-  refused (the w5595 review measured this).
+  refused (the w5595 review measured this). A portal that daemons reach by a LAN or public address (a
+  `fffctl migrate --cut-over` to such a host, or a test world: `scripts/fff-migrate.world.ts` sets `"off"`) refuses
+  them under enforce: set `machineLinkTailnet` to `"warn"` before such a move.
 
   **Recovery, with no person at any machine:** if enforce cuts a daemon off (its link drops and `machine link: refused`
   lines carry its address), Ben's or Lothsahn's orchestrator calls `set_app_config` with `machineLinkTailnet` `"off"`
