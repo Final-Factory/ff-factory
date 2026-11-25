@@ -65,7 +65,11 @@ test('fencedArgv runs the command under sandbox-exec with the profile inline; fe
   const a = fencedArgv(F, '/bin/claude', ['--x']);
   assert.deepEqual([a[0], a[1], a[3], a[4]], [SANDBOX_EXEC, '-p', '/bin/claude', '--x']);
   assert.equal(a[2], seatbeltProfile(F));
-  assert.deepEqual(fenceEnv(F), { CLAUDE_CODE_TMPDIR: '/Users/p/ffw/tmp/claude-code', DISABLE_AUTOUPDATER: '1', TMPPREFIX: '/Users/p/ffw/tmp/zsh' });
+  assert.deepEqual(fenceEnv(F), { CLAUDE_CODE_TMPDIR: '/Users/p/ffw/tmp/claude-code', DISABLE_AUTOUPDATER: '1', TMPPREFIX: '/Users/p/ffw/tmp/zsh', UV_TOOL_DIR: '/Users/p/ffw/cache/uv-tools' });
+  // w5693: uvx's tool folder is inside the workers' cache (a folder the profile opens), never the Medium agents' one
+  const p = seatbeltProfile(F);
+  assert.ok(p.includes('(subpath "/Users/p/ffw/cache")'), 'the workers\' cache is open');
+  assert.ok(!fenceEnv(F).UV_TOOL_DIR.includes('cache-medium'));
 });
 
 test('buildOptions sets spawnClaudeCodeProcess only for a fenced spec', () => {

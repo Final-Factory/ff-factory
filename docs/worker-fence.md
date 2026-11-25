@@ -116,7 +116,8 @@ project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
 in `server/workerFence.test.ts` now commits in a worktree). The harness's own text guard keeps a careless agent's tools off it, which a script file gets past. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
-and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`).
+and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`), and `UV_TOOL_DIR=<root>/cache/uv-tools` (w5693: uvx
+writes a temp file in `~/.local/share/uv/tools`, so the Unity MCP server died at start; docs/worker-root.md 2.8).
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
 
