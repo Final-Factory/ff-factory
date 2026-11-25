@@ -1871,7 +1871,11 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
     noteOutside(m, { kind: 'firewall-group', name: FFU_SERVER_GROUP + sfx, note: ffuNote(l.root) });
     if (!o.firewallSuffix) noteOutside(m, { kind: 'file', name: path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'FinalFactory', 'player-slots.json'), note: 'the slot root for scripts outside the daemon' });
     writeManifest(l.root, m);
-    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix) });
+    // w5581, warn stage (review of #1265): an update re-makes every group, the node's too; while the node's rule lets it
+    // in from any address, the update keeps it so (or when the rule cannot be read), so nothing narrows before the enforce stage.
+    const node = agentNodeExe(l.root);
+    const nodeWide = o.update && fs.existsSync(node) ? await agentNodeRuleWide(l, node) : false;
+    steps.unshift({ kind: 'firewall', args: firewallArgs('add', l, o.maxSandboxes, editors, o.firewallSuffix, nodeWide) });
   } else if (isWin) say('Skipped the firewall rules (--no-firewall): players will prompt on first start.');
   if (steps.length && o.update && !elevated() && !process.stdin.isTTY) {
     // Nobody can answer an administrator prompt here (an ssh session that is not elevated): what the install put there stays.
@@ -2395,6 +2399,12 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
  * tools run comes over the portal's ssh, elevated on an administrator's computer (administrators_authorized_keys,
  * w568), so it can run the step itself; otherwise it says what is missing, never a prompt nobody answers.
  */
+/** w5581: true when the agent node's rule lets it in from outside the tailnet, or cannot be read (an update then keeps it as it is). */
+async function agentNodeRuleWide(l: Layout, node: string): Promise<boolean> {
+  const seen = parseFirewallCheck(await ps("reading the agent node's firewall rule", firewallCheckScript([node], l.tmp, [node]), 2 * 60_000).catch((e) => `${(e as Error).message}`));
+  return !seen || seen.wide.includes(node);
+}
+
 export async function firewallRepair(l: Layout, m: Manifest) {
   const slots = Array.from({ length: m.slots }, (_, i) => [0, 1].map((p) => path.join(l.players, `slot${i + 1}-${p}`, 'player', 'finalfactory.exe'))).flat();
   const node = agentNodeExe(l.root);
@@ -2406,7 +2416,7 @@ export async function firewallRepair(l: Layout, m: Manifest) {
   // and its warning leaves out "Windows Firewall" so the rollout's elevated rerun (machineRollout.publishTools) does not
   // narrow it either. "peer" names each connection from outside the tailnet that narrowing would cut off; the enforce
   // stage, a later PR, waits for those to be zero on every machine.
-  if (seen.wide.length) say(`WARNING: tailnet-only rule (w5581, warn only): ${seen.wide.join(', ')} can be reached from outside the tailnet (allowed from: ${seen.from.join('; ') || 'none read'}); connections from outside the tailnet now: ${[...seen.peers, ...seen.peersUnknown.map((p) => `could not see (${p})`)].join(', ') || 'none'}${seen.read ? ` (${seen.read})` : ''}.`);
+  if (seen.wide.length) say(`WARNING: tailnet-only rule (w5581, warn only): ${seen.wide.join(', ')} can be reached from outside the tailnet (allowed from: ${seen.from.join('; ') || 'none read'}); connections from outside the tailnet now: ${[...seen.peers, ...seen.peersUnknown.filter((p) => seen.wide.some((w) => p.endsWith(` ${w}`))).map((p) => `could not see (${p})`)].join(', ') || 'none'}${seen.read ? ` (${seen.read})` : ''}.`);
   if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? (seen.wide.includes(node) ? ', the agent node (from any address, see above)' : ', the agent node (tailnet only)') : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
   const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
   if (!elevated()) return say(`WARNING: Windows Firewall: ${what}. This session is not elevated; an elevated tools run or update (the portal's ssh, ops_worker machine_update) makes them.`);

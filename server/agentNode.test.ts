@@ -170,4 +170,9 @@ test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, an
   // wide that repair keeps it wide (firewall.ps1 -AgentNodeAnyAddress), so nothing narrows before the enforce stage.
   assert.match(worker, /firewallArgs\('add', l, m\.slots, unityEditors\(\), m\.firewallSuffix, seen\.wide\.includes\(node\)\)/);
   assert.match(worker, /nodeAnyAddress \? \['-AgentNodeAnyAddress'\] : \[\]/);
+  // Second review of #1265: an elevated update re-makes the groups too, so it reads the node's rule first and keeps a wide one.
+  assert.match(worker, /const nodeWide = o\.update && fs\.existsSync\(node\) \? await agentNodeRuleWide\(l, node\) : false;/);
+  assert.match(worker, /firewallArgs\('add', l, o\.maxSandboxes, editors, o\.firewallSuffix, nodeWide\)/);
+  assert.match(worker, /return !seen \|\| seen\.wide\.includes\(node\);/, 'an unread rule is kept as it is, never narrowed');
+  assert.match(worker, /seen\.peersUnknown\.filter\(\(p\) => seen\.wide\.some/, 'only the wide paths\' unseen peers are listed, not every idle ffu-server');
 });
