@@ -14,7 +14,7 @@ import { agentNodeExe, agentNodePathDir } from './agentNode.ts';
  * `tools` was Low and its FILE_DELETE_CHILD let a Low process rename `tools\node` aside and plant its own node.exe,
  * which Medium agents, BEAST's instance portals and the elevated `worker.ts tools` then ran (measured on LothDesktop
  * from a Low worker: DELETE granted on V:\ffw\tools\node). Here real icacls labels an old-layout tree the way the
- * daemon's labelLow did, a Low-labelled copy of this node (Windows starts a Low-labelled exe at Low, whoever starts it)
+ * daemon's labelLow did, this node started with a worker's token (Low, no privileges, Administrators deny-only: LOWRUN)
  * shows the hole, labelLow with the tools children closes it, the same Low process still writes cargo and git, the
  * planted binary never runs, and a revert (labelLow without the children) gives back the old layout.
  *
@@ -53,28 +53,63 @@ for (const a of acts) {
   const cp = require('node:child_process');
   const out = (f, args) => { try { return cp.execFileSync(f, args, { encoding: 'utf8', windowsHide: true }); } catch (e) { return String(e.stdout || '') + String(e.message); } };
   if (a === 'whoami') did.diag = (did.diag || '') + out(path.join(process.env.SystemRoot || process.env.windir, 'System32', 'whoami.exe'), ['/groups', '/priv']).split(/\\r?\\n/).filter((l) => /Mandatory Label|S-1-5-32-544|Se\\w+Privilege/.test(l)).map((l) => l.replace(/\\s+/g, ' ').trim()).join('\\n') + '\\n';
-  if (a === 'access') for (const p of [t, path.join(t, 'node'), path.join(t, 'node', 'node.exe')]) did.diag = (did.diag || '') + out('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(root, 'bin', 'acc.ps1'), p]);
 }
 process.stdout.write(JSON.stringify(did));
 `;
 
-/** Opens one path for one right at a time and closes it again (nothing renamed or written): what the token is granted. */
-export const ACC = `param([string]$P)
+/**
+ * Starts a command with a worker's token: this process's own with every privilege but SeChangeNotify removed,
+ * Administrators deny-only (as in a signed-in person's filtered token) and the Low label. A GitHub runner's elevated
+ * token keeps SeBackupPrivilege and SeRestorePrivilege at Low, and those pass any integrity label and access list
+ * (run 45641049172: the runner's Low copy of node renamed tools\node under a Medium tools); no worker holds them
+ * (LothDesktop, measured: Administrators deny-only, SeChangeNotify the only privilege). Stdout and stderr go to one file.
+ */
+export const LOWRUN = `param([string]$CmdFile, [string]$OutFile)
 Add-Type -TypeDefinition @"
-using System; using System.Runtime.InteropServices;
-public static class Acc {
-  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
-  public static extern IntPtr CreateFileW(string n, uint a, uint s, IntPtr sa, uint c, uint f, IntPtr t);
-  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
-  public static string Try(string p, uint a) {
-    IntPtr h = CreateFileW(p, a, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
-    if (h == new IntPtr(-1)) return "refused(" + Marshal.GetLastWin32Error() + ")";
-    CloseHandle(h); return "granted";
+using System; using System.IO; using System.Text; using System.Runtime.InteropServices;
+public static class LowRun {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  struct SI { public int cb; public string r, d, t; public int x, y, xs, ys, xc, yc, fill, flags; public short show, r2; public IntPtr r3, hin, hout, herr; }
+  [StructLayout(LayoutKind.Sequential)] struct PI { public IntPtr hp, ht; public int pid, tid; }
+  [StructLayout(LayoutKind.Sequential)] public struct SA { public IntPtr sid; public int attr; }
+  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool OpenProcessToken(IntPtr p, int a, out IntPtr t);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool CreateRestrictedToken(IntPtr t, int flags, int nd, SA[] dis, int np, IntPtr pr, int nr, IntPtr rs, out IntPtr nt);
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool ConvertStringSidToSidW(string s, out IntPtr sid);
+  [DllImport("advapi32.dll")] static extern int GetLengthSid(IntPtr sid);
+  [DllImport("advapi32.dll", SetLastError=true)] static extern bool SetTokenInformation(IntPtr t, int cls, ref SA i, int len);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr h, int m, int f);
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUserW(IntPtr t, string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inh, int flags, IntPtr env, string dir, ref SI si, out PI pi);
+  [DllImport("kernel32.dll")] static extern int WaitForSingleObject(IntPtr h, int ms);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr h, out int c);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+  static void Ok(bool b, string what) { if (!b) throw new Exception(what + " failed: " + Marshal.GetLastWin32Error()); }
+  // A worker's token: this one's with every privilege but SeChangeNotify removed, Administrators deny-only (as in a
+  // signed-in person's filtered token) and the Low label. Its stdout and stderr go to one file opened here.
+  public static int Run(string cmdline, string outFile) {
+    IntPtr tok, rtok, admins, low;
+    Ok(OpenProcessToken(GetCurrentProcess(), 0x2 | 0x8 | 0x1 | 0x80, out tok), "OpenProcessToken");
+    Ok(ConvertStringSidToSidW("S-1-5-32-544", out admins), "ConvertStringSidToSid");
+    SA[] dis = new SA[] { new SA { sid = admins, attr = 0 } };
+    Ok(CreateRestrictedToken(tok, 0x1 | 0x4, 1, dis, 0, IntPtr.Zero, 0, IntPtr.Zero, out rtok), "CreateRestrictedToken");
+    Ok(ConvertStringSidToSidW("S-1-16-4096", out low), "ConvertStringSidToSid");
+    SA tml = new SA { sid = low, attr = 0x20 };
+    Ok(SetTokenInformation(rtok, 25, ref tml, Marshal.SizeOf(typeof(SA)) + GetLengthSid(low)), "SetTokenInformation");
+    using (FileStream f = new FileStream(outFile, FileMode.Create, FileAccess.Write, FileShare.ReadWrite)) {
+      IntPtr h = f.SafeFileHandle.DangerousGetHandle();
+      Ok(SetHandleInformation(h, 1, 1), "SetHandleInformation");
+      SI si = new SI(); si.cb = Marshal.SizeOf(typeof(SI)); si.flags = 0x100; si.hout = h; si.herr = h;
+      PI pi;
+      Ok(CreateProcessAsUserW(rtok, null, new StringBuilder(cmdline), IntPtr.Zero, IntPtr.Zero, true, 0x08000000, IntPtr.Zero, null, ref si, out pi), "CreateProcessAsUser");
+      WaitForSingleObject(pi.hp, 120000);
+      int code; GetExitCodeProcess(pi.hp, out code);
+      CloseHandle(pi.hp); CloseHandle(pi.ht);
+      return code;
+    }
   }
 }
 "@
-$r = [ordered]@{ DELETE = 0x10000; FILE_DELETE_CHILD = 0x40; FILE_ADD_SUBDIRECTORY = 0x4 }
-"$P : " + (($r.Keys | ForEach-Object { "$_=" + [Acc]::Try($P, [uint32]$r[$_]) }) -join ' ')
+exit [LowRun]::Run([IO.File]::ReadAllText($CmdFile), $OutFile)
 `;
 
 test('w5717: a Low worker can no longer rename or replace tools\\node, still writes the rest of tools, and a revert restores the old layout', { skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
@@ -93,16 +128,19 @@ test('w5717: a Low worker can no longer rename or replace tools\\node, still wri
     fs.copyFileSync(process.execPath, agentNodeExe(root));
     const realNode = sha(agentNodeExe(root));
     fs.mkdirSync(path.join(root, 'bin'));
-    const low = path.join(root, 'bin', 'low-node.exe');
-    fs.copyFileSync(process.execPath, low);
     const probe = path.join(root, 'bin', 'probe.cjs');
     fs.writeFileSync(probe, PROBE);
-    fs.writeFileSync(path.join(root, 'bin', 'acc.ps1'), ACC);
-    assert.equal((await run('icacls', [low, '/setintegritylevel', 'low'])).code, 0);
+    const launcher = path.join(root, 'bin', 'lowrun.ps1');
+    fs.writeFileSync(launcher, LOWRUN);
+    let n = 0;
     const lowTry = (...acts: string[]): Record<string, string> => {
-      const r = spawnSync(low, [probe, root, ...acts], { encoding: 'utf8', windowsHide: true, timeout: 120_000 });
-      assert.equal(r.status, 0, `the Low node ran: ${r.stderr}`);
-      return JSON.parse(r.stdout);
+      const cmd = path.join(root, 'bin', `cmd${++n}.txt`);
+      const out = path.join(root, 'bin', `out${n}.txt`);
+      fs.writeFileSync(cmd, [process.execPath, probe, root, ...acts].map((a) => `"${a}"`).join(' '));
+      const r = spawnSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', launcher, cmd, out], { encoding: 'utf8', windowsHide: true, timeout: 180_000 });
+      const text = fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : '';
+      assert.equal(r.status, 0, `the probe ran with a worker's token: ${r.stderr}${r.stdout}${text}`);
+      return JSON.parse(text);
     };
 
     // The old layout, as the daemon's labelLow left it before w5717: tools Low on its own, node Medium on its own.
@@ -129,7 +167,7 @@ test('w5717: a Low worker can no longer rename or replace tools\\node, still wri
     const after = lowTry('rename-node', 'plant-node', 'add-to-node', 'new-tools-child', 'cargo', 'cargo-new', 'git');
     // w5717 review: on the runner the rename went through (run 45635881985) though on LothDesktop a Low process is
     // refused DELETE on a Medium folder under a Medium parent (measured). Say what the Low token and each right were.
-    const diag = lowTry('whoami', 'access').diag ?? '';
+    const diag = lowTry('whoami').diag ?? '';
     t.diagnostic(diag);
     t.diagnostic(`labels: ${(await run('icacls', [tools])).stdout}\n${(await run('icacls', [path.join(tools, 'node')])).stdout}`);
     assert.notEqual(after['rename-node'], 'ok', `tools\\node cannot be renamed away\n${diag}`);
