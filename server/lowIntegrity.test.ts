@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
+import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -418,4 +419,51 @@ test('w5557: labelLow keeps an inherited-Low owner game folder Medium when it is
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('w5731: a <root>/steam made after the start is labelled at the next labelling, and its secret files get NR of their own', async () => {
+  // N1 of the #1237 review: the daemon labels only paths that exist. ensureDaemonOnlyDirs makes steam first (start and the
+  // read-fence switch), so No-Read-Up is set on it before steamcmd's first install writes inside.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5731-'));
+  try {
+    const root = path.join(dir, 'ffw');
+    const app = path.join(root, 'daemon');
+    fs.mkdirSync(path.join(app, 'logs'), { recursive: true });
+    const steam = path.join(root, 'steam');
+    assert.ok(!noReadUpTargets({ root, appDir: app, allowBack: [] }).some((t) => t.path === steam), 'no folder yet: no target');
+    ensureDaemonOnlyDirs(root);
+    assert.ok(fs.statSync(steam).isDirectory());
+    assert.ok(!fs.existsSync(path.join(root, 'steam-lobby-gate')), 'only the daemon-only children are made');
+    const t = noReadUpTargets({ root, appDir: app, allowBack: [] });
+    assert.deepEqual(t.find((x) => x.path === steam), { path: steam, sddl: NO_READ_UP.dir });
+    // The label is then set: labelNoReadUp's script names steam with the folder's NR label.
+    const scripts: string[] = [];
+    const exec: Exec = async (cmd, args) => {
+      if (cmd === 'icacls') return { code: 0, stdout: '', stderr: '' };
+      const s = Buffer.from(args[args.length - 1], 'base64').toString('utf16le');
+      scripts.push(s);
+      const n = (s.match(/\[FfLabel\]::Set\(/g) ?? []).length;
+      return { code: 0, stdout: Array.from({ length: n }, (_, i) => `ok ${i}`).join('\r\n'), stderr: '' };
+    };
+    assert.equal(await labelNoReadUp(t, exec, () => {}, { systemDrive: () => false }), true);
+    assert.ok(scripts.some((s) => s.includes(`'${steam}', '${NO_READ_UP.dir}'`)), scripts.join('\n'));
+    ensureDaemonOnlyDirs(root); // again at every start: no error on an existing folder
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // N2: steam's secret files by name, with a file's NR label, when they are there; nothing else inside steam.
+  const W = 'F:\\ffw';
+  const files = new Set([W + '\\steam\\config.json', W + '\\steam\\steamcmd\\config\\config.vdf']);
+  const bs = (x: string) => x.replace(/\//g, '\\');
+  const stat = (x: string) => {
+    const p = bs(x);
+    return files.has(p) ? ('file' as const) : p === W + '\\steam' || p === W + '\\daemon' ? ('dir' as const) : undefined;
+  };
+  const t2 = noReadUpTargets({ root: W, appDir: W + '\\daemon', allowBack: [], stat });
+  const inSteam = t2.filter((x) => bs(x.path).startsWith(W + '\\steam\\'));
+  assert.deepEqual(inSteam.map((x) => [bs(x.path), x.sddl]).sort(), [...files].map((f) => [f, NO_READ_UP.file]).sort());
+  // A file that kept an explicit Low label is not "already so", so it is labelled; one already NR is left alone.
+  const vdf = t2.find((x) => bs(x.path).endsWith('config.vdf'))!;
+  assert.equal(hasLabel(`${vdf.path} Mandatory Label\\Low Mandatory Level:(NW)`, vdf.sddl), false);
+  assert.equal(hasLabel(`${vdf.path} Mandatory Label\\Medium Mandatory Level:(NW,NR)`, vdf.sddl), true);
 });

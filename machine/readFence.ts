@@ -68,6 +68,17 @@ export function daemonOnlyDirs(root: string): string[] {
 }
 
 /**
+ * Makes each daemon-only root child (w5731): on Windows the daemon labels only paths that exist, and steamcmd's first
+ * install made <root>/steam after the start's labelling, leaving it readable to Low workers until the next start (N1 of the
+ * #1237 review). Made before the root's children are listed and labelled, an empty one is kept Medium and closed like the
+ * rest, and what steamcmd later writes inside inherits its label. An empty folder changes nothing for the upload: it looks
+ * for steamcmd's program, not the folder (steamUpload.ts installSteamcmd).
+ */
+export function ensureDaemonOnlyDirs(root: string): void {
+  for (const d of daemonOnlyDirs(root)) fs.mkdirSync(d, { recursive: true });
+}
+
+/**
  * Up to three regular files directly inside `dir`, by name (w5639): what the Linux probe opens for a closed folder. Landlock
  * rights are inherited down the tree, so the READ_DIR every parent of a closed path keeps (to list names) reaches the closed
  * folder too: opening or listing the folder itself succeeds there, and only its files' contents are refused. Names only: the

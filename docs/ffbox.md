@@ -167,8 +167,12 @@ queries do it (wire: [the contract](ffbox-connector-contract.md#read-only-querie
 - **Final Factory Universe's (FFU's) reports** (w5678): ffintake files a report sent with `X-FF-Game: ffu` under
   `<root>/ffu/<kind>/` (ffbox #88, w5671), apart from FF1's. `list_ffbox_files {what: "reports", game: "ffu"}` lists
   them and `fetch_ffbox_report {id, game: "ffu"}` fetches one; without `game` (or `ff`) both read FF1's alone, so FF1's
-  readers never see an FFU report. FFBox does not diagnose FFU reports yet: read one against `Final-Factory/ffu` at the
-  build its `details.json` names, never FF1's code.
+  readers never see an FFU report. FFBox diagnoses FFU reports too (w5713, ffbox #89): its intake.auto reads each one
+  against `Final-Factory/ffu` at the commit its build names (FFU's `main` while `details.json`'s `build_id` is `unknown`,
+  as every FFU build's is today), never FF1's code, and the diagnosis's `summary.md` names the ffu commit it read. Read
+  that first: `list_ffbox_files {what: "diagnosis", id}` (the id alone finds it; `game` is not needed there) and
+  `fetch_ffbox_report {id, game: "ffu", diagnosis: "summary.md"}`. The first: 20261125T115838Z-crash-27bbdbc360,
+  diagnosed in FFBox conversation 1926.
   A worker's tool schema comes from its machine's daemon (machine/agentHost.ts reads server/launch.ts), not the portal:
   until that daemon has updated, `game` is dropped without an error and the call answers FF1's reports. w5678's first
   check after the portal deploy got FF1's 20 reports for `game: "ffu"` while `machine_rollout` showed beast still

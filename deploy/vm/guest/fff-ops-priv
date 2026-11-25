@@ -29,6 +29,10 @@
 #                                      never a value, then "remaining: N". The scrub itself (no --dry-run) is a person's
 #   fffctl fence-check                 what the portal's own account can open (w5506): refused or OPENED, and credential names
 #                                      counted in its processes' environments, never a value (fffctl fence-check)
+#   fffctl agents [status]             the portal's agents' own account (w5651): the switch, fff-agent.socket, the views, the
+#                                      portal's recent "agent account" lines (read only)
+#   fffctl agents off | warn           start every agent as the portal's account again (off also stops fff-agent.socket;
+#                                      warn keeps checking it): the recovery route that needs no orchestrator. on is a person's
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
 #   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
 #                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
@@ -252,6 +256,15 @@ case "${1:-help}" in
       "") [ $# -eq 1 ] || refuse "config takes nothing more"; exec "$FFFCTL" config ;;
       --check) [ $# -eq 2 ] || refuse "config --check takes nothing more"; exec "$FFFCTL" config --check ;;
       *) refuse "config | config --check (changing a setting is set_app_config's, through the dispatcher or an owner's orchestrator)" ;;
+    esac
+    ;;
+  agents)
+    # The agents' own account (w5651): status reads; off and warn start every agent as the portal's account (the recovery
+    # route that needs no orchestrator). on and default are a person's.
+    case "${2:-}" in
+      "" | status) [ $# -le 2 ] || refuse "agents status takes nothing more"; exec "$FFFCTL" agents status ;;
+      off | warn) [ $# -eq 2 ] || refuse "agents $2 takes nothing more"; exec "$FFFCTL" agents "$2" ;;
+      *) refuse "agents [status] | off | warn (turning the agents' account on is a person's: fffctl agents on)" ;;
     esac
     ;;
   fence-check)

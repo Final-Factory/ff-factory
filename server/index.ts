@@ -118,6 +118,7 @@ import { SpendStore, buildReport } from './spend.ts';
 import { backfillSpend, repairSpend } from './spendJobs.ts';
 import type { SpendSummaryReply } from '../shared/spend.ts';
 import { warmSearchIndex } from './search.ts';
+import { configureAgentAccount } from './agentAccount.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
@@ -751,6 +752,10 @@ function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
   if (identity.get(me.userId)?.role !== 'owner') throw new HttpError(403, "only the owner answers the dispatcher's permission requests or changes its mode; ask your own orchestrator, which files work with it");
 }
 const notifier = new Notifier(cfg.dataDir, store, sessions);
+// The portal VM's agents as their own OS account (w5598, server/agentAccount.ts): the owner's setting ("warn" while unset;
+// the VM's fffctl agents switch wins), read at each start, and the owners told when one started as the portal's account
+// instead or warn's check failed.
+configureAgentAccount({ setting: () => cfg.agentAccount, alert: (title, body) => notifier.host(title, body) });
 notifier.orchestratorId = () => store.orchestratorId;
 // Device approval (docs/identity.md): a member's login from a new browser waits; the owners are told.
 auth.onDevicePending = (d) => notifier.device(auth.userInfo(d.username)?.displayName ?? d.username, d.label, identity.list().filter((u) => u.role === 'owner').map((u) => u.userId));

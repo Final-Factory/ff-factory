@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -715,6 +715,33 @@ test('w5554: --worker-caps takes off, warn or enforce and refuses anything else,
   const none = path.join(os.tmpdir(), `ffw-caps-none-${process.pid}`);
   await assert.rejects(main(['update', '--root', none, '--worker-caps', 'maybe']), /--worker-caps is off, warn or enforce, not "maybe"/);
   await assert.rejects(main(['update', '--root', none, '--worker-caps']), /--worker-caps is off, warn or enforce/);
+  assert.equal(fs.existsSync(none), false);
+});
+
+test('w5702: worker update --transcript-lock writes on or off to daemon.json as transcriptLock on Linux; unset carries it', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-tlock-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { transcriptLock?: 'on' | 'off' }) => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, 'linux'), l, 'beast', undefined);
+  assert.equal('transcriptLock' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const m of ['on', 'off'] as const) assert.equal(written(BEAST_CONFIG, { transcriptLock: m }).transcriptLock, m);
+  const had = { ...BEAST_CONFIG, transcriptLock: 'on' };
+  assert.equal(written(had, {}).transcriptLock, 'on', 'unset carries it');
+  assert.equal(written(had, { transcriptLock: 'off' }).transcriptLock, 'off', 'the switch replaces it');
+  assert.deepEqual(written(had, { transcriptLock: 'off' }).protectedPaths, BEAST_CONFIG.protectedPaths, 'the other settings are carried');
+  const cfg = { a: 1 };
+  assert.equal(applyTranscriptLock(cfg, undefined, 'darwin'), cfg, 'unset: the very config, on any platform');
+  assert.throws(() => applyTranscriptLock(cfg, 'on', 'darwin'), /Linux only/);
+  assert.throws(() => applyTranscriptLock(cfg, 'off', 'win32'), /Linux only/);
+});
+
+test('w5702: --transcript-lock takes on or off and refuses anything else, before the update touches anything', async () => {
+  assert.deepEqual(parseArgs(['update', '--root', '/r', '--transcript-lock', 'on']).opts, { root: '/r', 'transcript-lock': 'on' });
+  assert.equal(transcriptLockFlag(undefined), undefined);
+  for (const m of ['on', 'off'] as const) assert.equal(transcriptLockFlag(m), m);
+  for (const bad of ['ON', 'true', 'warn', '']) assert.throws(() => transcriptLockFlag(bad), /--transcript-lock is on or off/);
+  const none = path.join(os.tmpdir(), `ffw-tlock-none-${process.pid}`);
+  await assert.rejects(main(['update', '--root', none, '--transcript-lock', 'maybe']), /--transcript-lock is on or off, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--transcript-lock']), /--transcript-lock is on or off/);
   assert.equal(fs.existsSync(none), false);
 });
 
