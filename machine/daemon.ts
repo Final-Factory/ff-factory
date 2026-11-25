@@ -78,6 +78,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
+import { hasOwnGithub, machineGhEnv, machineGhToken } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, installGhAppShims, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -2829,10 +2830,30 @@ export class Daemon {
     const fence = spec.sandbox ? this.workerFence : undefined;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
-    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
+    // w5548: a fenced run gets the machine's gh login only when it has no vault token, and then as GH_TOKEN read by the
+    // daemon (machineGh), never as the login's folder: GH_CONFIG_DIR is only the fallback when the daemon read no token.
+    const ghMachine = spec.sandbox && !hasOwnGithub(spec.env) ? this.machineGh() : {};
+    const ghDir = spec.sandbox && !hasOwnGithub(spec.env) && !ghMachine.GH_TOKEN ? low?.gh : undefined;
+    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, ghDir), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slots.dir, { ...process.env, ...spec.env }) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...ghMachine, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+  }
+
+  private ghMemo?: { at: number; token?: string };
+  /**
+   * w5548: the machine's gh login's token for fenced runs with no vault token (ownerSecrets.ts machineGhEnv), read with
+   * `gh auth token` outside every fence and kept 30 minutes. Its value is never logged; only whether there was one.
+   */
+  private machineGh(): Record<string, string> {
+    const now = Date.now();
+    if (!this.ghMemo || now - this.ghMemo.at > 30 * 60_000) {
+      const had = this.ghMemo ? Boolean(this.ghMemo.token) : undefined;
+      const token = machineGhToken();
+      this.ghMemo = { at: now, token };
+      if (had !== Boolean(token)) log(token ? 'owner secrets: runs with no vault GitHub token get the machine gh login as GH_TOKEN (w5548)' : "owner secrets: gh auth token gave no machine login token; runs with no vault GitHub token fall back to the login's folder (w5548)");
+    }
+    return machineGhEnv({}, this.ghMemo.token);
   }
 
   private fenceMemo?: { fence?: WorkerFence };

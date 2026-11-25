@@ -129,7 +129,7 @@ const realTokenRun: TokenRun = (cmd, args, o) => {
  * never logged: only whether there was one.
  */
 export function machineGhToken(run: TokenRun = realTokenRun): string | undefined {
-  const env = { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
+  const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   try {
