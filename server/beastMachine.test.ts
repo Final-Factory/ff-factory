@@ -574,7 +574,7 @@ test('w5545: the daemon arbitrates slots in its own folder, not the workers\' ma
     await inside.slots.tick();
     assert.deepEqual((await inside.slots.holds()).reqs, []);
     const env = d.rpcEnv('w5545-worker', 'slot3');
-    assert.equal(env.FF_DAEMON_RPC, path.join(appDir, 'rpc.json'));
+    assert.equal(env.FF_DAEMON_RPC, path.join(appDir, 'rpc', 'rpc.json'));
     const { readToken } = await import('../machine/daemonRpc.ts');
     assert.deepEqual(readToken(inside.rpcKey!, env.FF_DAEMON_TOKEN), { session: 'w5545-worker', sandbox: 'slot3' });
     inside.slots.close();
