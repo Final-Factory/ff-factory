@@ -26,7 +26,7 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * field of a switch or unity message and act on the main clone, so the portal never sends one to it.
  * 6: the portal's own host as a machine (docs/beast-machine.md): the `adopt` and `release` sandbox ops (a worktree
  * that already exists is taken into the pool, or dropped from it, without touching the folder), and the pool
- * settings' `maxAgents`, `librarySeed`, `librarySeedCopy`, `librarySeedGB`, `belowNormal` and `protectedPaths`.
+ * settings' `maxAgents`, `librarySeed`, `librarySeedCopy`, `librarySeedGB`, `belowNormal` and `protectedPaths` (and, w5614, `slotRepos`, which an older daemon ignores: it makes worktrees).
  * 7: attachments (docs/attachments.md): `attachments` on `send`, which the daemon fetches into the place's Inbox
  * (GET /machine/attachments/<id> with its token) before the message goes to the agent, and the `fetch_attachment` tool.
  * A protocol-6 daemon would drop them, so the portal never sends it any.

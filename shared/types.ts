@@ -1229,6 +1229,12 @@ export interface Machine {
   /** Its sandbox editors run at below-normal priority, so a game the user plays there wins every contest for the CPU. */
   unityBelowNormal?: boolean;
   /**
+   * New sandboxes are their own git repos that borrow the main clone's objects (objects/info/alternates), not worktrees of
+   * it (w5614, docs/machines.md "Slot repos"): a commit there writes nothing into the clone. 'new': new sandboxes only;
+   * 'all': also each free, idle worktree sandbox, one at a time. Unset or 'off': worktrees.
+   */
+  slotRepos?: 'new' | 'all' | 'off';
+  /**
    * Why it takes no timed runs (w1861, add_machine no_timed_runs; server/machines.ts noTimedRunsOf): its bench queue refuses
    * a timing ticket and placement sends timed work elsewhere. Unset: the default (NO_TIMED_RUNS: m5); "" clears it.
    */
@@ -1349,6 +1355,8 @@ export interface SandboxPoolSettings {
   librarySeedGB?: number;
   /** Protocol 6: start sandbox editors at below-normal priority. */
   belowNormal?: boolean;
+  /** w5614: sandboxes are slot repos (Machine.slotRepos). An older daemon ignores it and makes worktrees. */
+  slotRepos?: 'new' | 'all';
   /** Protocol 6: folders clean-up never deletes (a live game), besides the clone, the sandboxes and the daemon's folder. */
   protectedPaths?: string[];
 }
