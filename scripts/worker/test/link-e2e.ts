@@ -8,6 +8,8 @@
  *
  * LINK_E2E_INSTALL_FROM=<commit> installs from that older commit instead of this checkout (w5715): the update to B then
  * proves a daemon of that commit updates over its link to this checkout's code (B is this checkout plus one commit).
+ * On GitHub Actions a run without it then runs itself again once per OLDER_DAEMONS commit, so the worker-update job
+ * proves it on Windows and macOS with no change to the workflow.
  *
  * The portal runs from a clone of this checkout with a commit of its own on top (B), so the install (from this checkout,
  * A) has something to update to; then a commit whose daemon exits at start (C), so the update has to be put back.
@@ -69,6 +71,11 @@ if (FROM) {
   fs.symlinkSync(path.join(SRC, 'node_modules'), path.join(INSTALL_SRC, 'node_modules'), isWin ? 'junction' : 'dir');
 }
 const INSTALLED = git(INSTALL_SRC, 'rev-parse', 'HEAD');
+/**
+ * Older daemons a machine may still run that must update to this code (w5715). 5790dce0: main just before w5576's pin
+ * (#1206), the last daemon with no pin at all. Drop one once no machine can run it (list_machines, machine_rollout).
+ */
+const OLDER_DAEMONS = ['5790dce081a54cf88c2c0e69d79c3abae7085c6c'];
 const P = path.join(scratch, 'portal-code');
 git(scratch, 'clone', '-q', '--no-hardlinks', SRC, P);
 git(P, 'checkout', '-q', '--detach', A);
@@ -207,6 +214,13 @@ try {
   const un = spawnSync(node[0], [...node.slice(1), path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'uninstall', '--root', root, '--yes', '--force'], { encoding: 'utf8' });
   console.log(`(uninstall of the test root: exit ${un.status})`);
   portal.kill();
+}
+if (!FROM && process.env.GITHUB_ACTIONS === 'true') {
+  for (const [i, older] of OLDER_DAEMONS.entries()) {
+    console.log(`\n=== w5715: the same, installed from the older ${short(older)}, updating to this checkout's code ===`);
+    const r = spawnSync(node[0], [...node.slice(1), fileURLToPath(import.meta.url), `${scratch}-older${i}`, String(port + 10 + 2 * i)], { stdio: 'inherit', env: { ...process.env, LINK_E2E_INSTALL_FROM: older }, timeout: 20 * 60_000 });
+    check(r.status === 0, `a daemon installed from the older ${short(older)} updates over its link to this code, then restarts and unloads`, `exit ${r.status}`);
+  }
 }
 console.log(failed ? `\n${failed} check(s) FAILED` : '\nAll checks passed.');
 process.exitCode = failed ? 1 : 0;
