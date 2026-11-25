@@ -14,6 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { trustedGh } from './evidenceGate.ts';
 
 export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain';
 
@@ -161,7 +162,7 @@ export function machineGhToken(run: TokenRun = realTokenRun): string | undefined
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   try {
-    const r = run('gh', ['auth', 'token', '--hostname', 'github.com'], { env, timeoutMs: 30_000 });
+    const r = run(trustedGh(), ['auth', 'token', '--hostname', 'github.com'], { env, timeoutMs: 30_000 });
     const t = r.status === 0 ? r.stdout.trim() : '';
     return /^[A-Za-z0-9_]{20,255}$/.test(t) ? t : undefined;
   } catch {
