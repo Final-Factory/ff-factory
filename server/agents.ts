@@ -7080,8 +7080,9 @@ ${w.repo ?? ''}
             dev_drive_max_gb: z.number().int().min(50).max(65536).optional().describe("action machine_update (Windows): the Dev Drive's maximum in GB, 50 to 65536. A new drive is made at it (default: what the pool needs, capped by the root volume's free space). An existing drive is grown to a larger one by its daemon once no agent or editor is in a sandbox (the first time, one administrator prompt on the PC installs the grow task); a smaller one is refused, since ReFS cannot shrink (w1918)."),
             words: OWN_WORDS,
             worker_fence: z.enum(['on', 'off']).optional().describe("action machine_update: turn this machine's worker write fence on or off (w5377): Landlock on Linux, Seatbelt on macOS, Low integrity on Windows; unset leaves it as it is. Off is the emergency switch when a fence breaks work."),
+            worker_caps: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: set this machine's per-worker memory, process and temp-disk caps (w5554, docs/worker-caps.md): warn (the default: measures and reports, never limits or kills), enforce (the kernel limit and the tool kill) or off (nothing). Unset leaves it as it is. Off is the recovery switch when a cap breaks work; it holds for each worker started after the update."),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7089,7 +7090,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
