@@ -272,8 +272,9 @@ github.start();
 startGhCallLog(ghRunner(undefined, 'the rate limit read'));
 // Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
 // per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
-setTimeout(() => {
-  const held = store.scrubSecrets();
+setTimeout(async () => {
+  // w5613: both halves yield to the event loop (the records in slices, the files on their own thread).
+  const held = await store.scrubSecrets().catch((e: NodeJS.ErrnoException) => (console.warn(`secrets: the held records' scrub failed (${e?.code ?? e?.name ?? 'error'})`), 0));
   if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
   void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
   // The orchestrators' own Claude Code transcripts on this host (w1688), masked in place as they are written; the first pass

@@ -59,7 +59,7 @@ test('scrub: a token after an escape or a colour code is masked (the shapes had 
   assert.equal(redactValue({ text: 'nothing here' }).text, 'nothing here');
 });
 
-test('scrub: a session record, a work item and every event the dashboard hears are masked before state.json, work.json or a page', (t) => {
+test('scrub: a session record, a work item and every event the dashboard hears are masked before state.json, work.json or a page', async (t) => {
   withVault(t);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrub-store-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -86,9 +86,34 @@ test('scrub: a session record, a work item and every event the dashboard hears a
   // Records written before this (an older release): masked by scrubSecrets at start.
   const old = { ...s, id: 's2', lastResult: `old ${GHU}` };
   (store.sessions as Map<string, SessionInfo>).set('s2', old);
-  assert.ok(store.scrubSecrets() >= 1);
+  assert.ok((await store.scrubSecrets()) >= 1);
   assert.equal(old.lastResult, 'old ghu_[redacted …yVC9]');
   store.flush();
+});
+
+test('scrub: the held records are masked in slices that yield to the event loop (w5613)', async (t) => {
+  withVault(t);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scrub-slices-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = new Store(dir);
+  const now = new Date().toISOString();
+  const N = 2000;
+  const held: SessionInfo[] = [];
+  for (let i = 0; i < N; i++) {
+    const s = { id: `s${i}`, kind: 'worker', title: `w${i}`, status: 'idle', createdAt: now, lastActivityAt: now, pendingPermissions: [], lastResult: `held ${GHU}`, log: Array.from({ length: 50 }, (_, j) => `line ${j} of a long record`) } as unknown as SessionInfo;
+    (store.sessions as Map<string, SessionInfo>).set(s.id, s);
+    held.push(s);
+  }
+  // A timer that should fire while the scrub runs: it does only if the scrub hands the thread back.
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 1);
+  const n = await store.scrubSecrets(1);
+  clearInterval(timer);
+  assert.equal(n, N);
+  assert.ok(held.every((s) => s.lastResult === 'held ghu_[redacted …yVC9]'));
+  assert.ok(ticks > 0, 'the event loop ran timers during the scrub');
+  store.flush();
+  assert.deepEqual(leaks(fs.readFileSync(path.join(dir, 'state.json'), 'utf8')), []);
 });
 
 test('scrub: emit masks a streamed delta and a notice', (t) => {
