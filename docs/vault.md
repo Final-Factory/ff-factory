@@ -13,7 +13,7 @@ a box and make it faster and easier to install new workers."
   fffctl runs), `server/machineTokens.ts` (machine credentials), `machineRunEnv` and redaction in `server/secrets.ts`,
   `githubCredentialEnv` in `server/launch.ts`, the `/api/vault` routes in `server/index.ts`, the vault section of the
   settings dialog (`web/src/components/Vault.tsx`), `fffctl vault` and `fffctl machine-credential`
-  (`deploy/vm/guest/fffctl`), and `LoadCredential=` in `deploy/vm/guest/units/fff-portal.service`.
+  (`deploy/vm/guest/fffctl`), and `OpenFile=` in `deploy/vm/guest/units/fff-portal.service` (w5506; `LoadCredential=` before).
 - **Every Claude process runs on a vault token (w1078).** There is no host token, token file, stored login or machine
   login to fall back to: lothsahn, 2026-10-12, "Delete claudeTokenFile and its associated config. Also delete claudeEnv, get
   rid of the fallback mode, everything runs off the vault". The other secrets are given only where an entry is granted.
@@ -53,27 +53,43 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
 **The key lives outside the data folder.** It is 32 random bytes, base64, in one file:
 
 - **In the VM:** `/etc/fff/vault.key`, `root:root 0600`, made by the guest installer (or `fffctl vault init`).
-  `fff-portal.service` hands it to the portal with `LoadCredential=fff-vault-key:/etc/fff/vault.key`, so the `fff` user
-  reads it only through `$CREDENTIALS_DIRECTORY` while the service runs. The guest installer makes the key before it
-  installs the unit, so it is there when the portal first starts; without it the portal does not start (systemd fails
-  the unit with 243/CREDENTIALS). There is no empty `SetCredential=fff-vault-key:` default: systemd rejects an empty
-  value ("Invalid syntax, ignoring", in the portal journal on every reload until w4500), so it never applied. *(Sourced: systemd.exec(5), "Credentials": the
-  data sits "at a read-only location that (if possible and permitted) is backed by non-swappable memory".)*
-  The portal reads the variable once at start and removes it from the environment its agents inherit.
-  **The credential's mode (w736).** The portal's `fff` account is not root, so systemd writes the credential 0400,
-  root-owned, and gives `fff` read access with a POSIX ACL entry (`user:fff:r--`) on the file and on its folder
-  `/run/credentials/fff-portal.service`; where the file system has no ACLs it chowns the file to `fff` instead
-  *(sourced: systemd's `src/core/exec-credential.c`, `write_credential`: `fchmod(fd, 0400)`, then
-  `fd_add_uid_acl_permission(fd, uid, ACL_READ)`, else `fchown`)*. `stat` shows an ACL's mask in the group bits, so the
-  file read `mode 440` although no group can read it *(measured, Ubuntu 24.04, systemd 255: `setfacl -m u:nobody:r` on a
-  0400 root file gives `stat` mode 440, owner 0:0, and `getfacl` `group::---`, `mask::r--`, `other::---`)*. The old check
-  (any group or other bit refuses the key) read that as "readable by other users" and the vault could not be used
-  (`system_status`: "Token vault: 0 entries; key unreadable"). A mode set by a unit is not an option: `LoadCredential` has none.
-  So `readKey` knows the credential: when the key comes from `$CREDENTIALS_DIRECTORY` (`keySource` marks it), the file must
-  be directly in that folder (no link out), a regular file, with no *other* bits and no group or other *write* bit, owned by
-  root or the portal's own account, in a folder with no other bits and the same owners. The group bits are not read as a
-  grant there. Any other key file (config `vault.keyFile`, `/etc/fff/vault.key`) keeps the strict rule: no group or other
-  bit at all.
+  `fff-portal.service` opens it as root and hands the server a read-only descriptor,
+  `OpenFile=/etc/fff/vault.key:fff-vault-key:read-only` (w5506; systemd 253 and later). The server takes it before it
+  starts anything (`server/index.ts`, `takeOpenedKey` in `server/vault.ts`): the descriptor named `fff-vault-key` in
+  `LISTEN_FDNAMES`, numbered from 3. It reads the key, closes the descriptor and deletes `LISTEN_FDS`, `LISTEN_PID`,
+  `LISTEN_FDNAMES` and `LISTEN_PIDFDID` from its environment. Its journal says `vault key: from the descriptor systemd
+  opened (fff-vault-key)`, or why the key did not load. The man page puts it this way: OpenFile= is "useful to allow
+  services to access files/sockets that they cannot access themselves" *(sourced: systemd.service(5), "OpenFile=")*.
+  Without the key file the unit does not start, as before. There is no empty `SetCredential=fff-vault-key:` default: systemd rejects an
+  empty value ("Invalid syntax, ignoring", w4500).
+  **Why not LoadCredential= (w736 to w5506).** `LoadCredential=fff-vault-key:/etc/fff/vault.key` put a copy at
+  `/run/credentials/fff-portal.service/fff-vault-key`, which systemd gives the service's account (an ACL `user:fff:r--`;
+  sourced: systemd's `src/core/exec-credential.c`, `write_credential`). Every process the portal starts runs as `fff`
+  (the orchestrators', the dispatcher's, and their git and gh), so all of them could open the key, and only the read
+  guard (`server/secretGuard.ts`) stood between an orchestrator's Read tool and it. With OpenFile= no file the `fff`
+  account may open holds the key. `readKey` still knows a credential folder (`keySource` marks it) for a unit from
+  before w5506. A rollback past w5506 puts the older release's own `fff-portal.service` back with it (`portal_unit_back` in
+  `deploy/vm/guest/fff-update`), since its code would find no key under the new unit; until the next update the key is
+  then again a credential file the `fff` account may read (deploy/vm/RUNBOOK.md, "Rollback").
+  **The portal's memory (w5506).** The key, and every value the vault opens, sit in the server's memory, and any process
+  of its own account may read another's `/proc/<pid>/environ`, and `mem` with ptrace rights. So the unit runs an
+  execute-only copy of node, `/usr/local/lib/fff/node-portal` (`root:root 0111`). Its ExecStartPre makes that copy from
+  `/usr/bin/node` at every start, so it follows apt's node. A process that runs a binary it may not read is not dumpable:
+  `/proc/<pid>/environ`, `mem` and `fd` become root's, 0400, and are refused to `fff` *(sourced: proc(5), "/proc/pid";
+  measured on biscuit, systemd 259: a sibling of the same account got "Permission denied" on all three, and the process
+  still ran, spawned children and read its own `/proc/self/mountinfo`)*. That holds where `fs.suid_dumpable` is 0 or 2,
+  not 1; `ci-vm-e2e.sh` checks it. `--disable-sigusr1` keeps a SIGUSR1, which any `fff` process may send, from
+  opening the inspector. Yama's `ptrace_scope` 1 already kept a descendant from tracing it.
+  **The agents' Claude tokens (w5506).** Orchestrators, the dispatcher and the bug-thread judge get their vault token on a
+  pipe at descriptor 3 (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`; `server/tokenPipe.ts`), the way the ops worker's
+  launcher does. It is never in their environment, where another orchestrator's tools could read it in `/proc`.
+  **What is left.** The portal's own git and gh carry a GitHub token in their environment while they run. The read guard's
+  `/proc` rule (`portalSecretRules`) keeps every orchestrator's Read, Grep and Glob out of `/proc`, and orchestrators have
+  no shell. A separate account for the agents would fence that at the OS level too.
+  **Check it:** `fffctl fence-check` (the ops worker may run it) probes as `fff`, outside the portal's tree. For the key,
+  the credentials folder and the portal's `environ`, `mem` and `fd`, it prints `refused` with the kernel's reason or
+  `OPENED`. For each other `fff` process it prints which credential names its environment holds, by name and never by
+  value. It exits 1 if the key, the portal's memory or a Claude token is open.
 - **Elsewhere** (a portal still on Windows, the e2e tests): config `vault.keyFile`. `loadConfig` refuses one inside
   `data/`; `readKey` refuses one that any group or other user can read (Linux, macOS).
 - **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. A Claude process then does not

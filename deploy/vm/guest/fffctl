@@ -65,6 +65,9 @@
 #                                       release with its node_modules, the portal account's .claude, files of 200 MB or more,
 #                                       /var/log and the journal, and auth.log's and syslog's lines counted per day by the program
 #                                       that wrote them. Sizes, counts, dates and paths only; read only
+#   fffctl fence-check                  what the portal's own account can open (w5506): the vault key, the portal's environ,
+#                                       mem and fd, and which credential names its other processes' environments hold; it opens
+#                                       and counts, never prints a value. Exits 1 if the key or a Claude credential is open
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
 #   fffctl vault list | add | rotate | grant | remove ...
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
@@ -571,7 +574,7 @@ cmd_vault() {
         mv -f "$FFF_VAULT_KEY.tmp" "$FFF_VAULT_KEY"
         echo "a new vault key in $FFF_VAULT_KEY (0600, root; its content is not shown)"
       fi
-      # systemd hands the key over at start (LoadCredential=): a restart loads a new one.
+      # systemd opens the key for the server at start (OpenFile=, w5506): a restart loads a new one.
       cmd_restart --drain-minutes 2
       vault_cli list | head -n 1
       ;;
@@ -1043,6 +1046,58 @@ cmd_backup_config() {
   fi
 }
 
+# fence-check (w5506; lothsahn: no process the portal starts can read the vault key or the decrypted vault): what a
+# process of the portal's own account (every orchestrator's, the dispatcher's and their tools') can open, probed as that
+# account and outside the portal's process tree, which may open more than a descendant. Read only, and it prints no content:
+# each probe only opens a path (into nothing) and says "refused" with the kernel's reason or "OPENED"; an agent process's
+# environment is read through a pipe that only counts the credential variables' names. Exits 1 if the key, the portal's
+# memory or a Claude credential is open to the account. The FENCE_* variables are deploy/vm/test/fff-fence-check.test.sh's
+# (FENCE_USER: run the probes as the caller, unprivileged).
+fence_as() { if [ -n "${FENCE_USER:-}" ]; then "$@"; return; fi; setpriv --reuid="${FENCE_USER:-$FFF_USER}" --regid="${FENCE_USER:-$FFF_USER}" --init-groups --inh-caps=-all -- "$@"; }
+# fence_open WHAT PATH: opens PATH (a folder: lists it) as the account, reads nothing.
+fence_open() {
+  local err
+  # shellcheck disable=SC2016 # $1 is the inner shell's: the path, opened and never read
+  if [ -d "$2" ]; then err=$(fence_as ls -- "$2" 2>&1 >/dev/null); else err=$(fence_as sh -c 'exec 3<"$1"' fence "$2" 2>&1); fi && { echo "OPENED: $1 ($2)"; return 1; }
+  echo "refused: $1 ($2): ${err##*: }"
+}
+cmd_fence_check() {
+  [ $# -eq 0 ] || die "fffctl fence-check takes nothing more"
+  local rc=0 pid p comm n name names line
+  echo "== as ${FENCE_USER:-$FFF_USER}, outside the portal's process tree"
+  fence_open "the vault key" "${FENCE_KEY:-/etc/fff/vault.key}" || rc=1
+  local cred=${FENCE_CREDENTIALS:-/run/credentials/fff-portal.service}
+  if [ -e "$cred" ]; then fence_open "systemd's credentials folder (LoadCredential, before w5506)" "$cred" || rc=1; else echo "absent: systemd's credentials folder ($cred)"; fi
+  pid=${FENCE_PORTAL_PID:-$(systemctl show -p MainPID --value fff-portal.service 2>/dev/null || echo 0)}
+  if [ "${pid:-0}" = 0 ]; then
+    echo "the portal is not running: its process not probed"; rc=1
+  else
+    echo "the portal: pid $pid, $(readlink "/proc/$pid/exe" 2>/dev/null || echo '?'), environ $(stat -c '%U %a' "/proc/$pid/environ" 2>/dev/null)"
+    for p in environ mem fd; do fence_open "the portal's $p" "/proc/$pid/$p" || rc=1; done
+  fi
+  # The account's other processes (orchestrators' and the dispatcher's claude, git, gh): which credential names each one's
+  # environment holds. Counts of names only; the values pass through the pipe to grep -c and go nowhere.
+  names='CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN GH_TOKEN GITHUB_TOKEN'
+  for p in ${FENCE_PIDS-$(pgrep -u "$FFF_USER" 2>/dev/null)}; do
+    [ "$p" = "$pid" ] && continue
+    comm=$(cat "/proc/$p/comm" 2>/dev/null) || continue
+    # shellcheck disable=SC2016 # $1 is the inner shell's
+    if ! fence_as sh -c 'exec 3<"$1"' fence "/proc/$p/environ" 2>/dev/null; then echo "process $p ($comm): environ refused"; continue; fi
+    line=""
+    for name in $names; do
+      n=$(fence_as cat "/proc/$p/environ" 2>/dev/null | tr '\0' '\n' | grep -c "^$name=" || true)
+      [ "${n:-0}" = 0 ] || line+=" $name"
+    done
+    case "$comm:$line" in
+      *:) ;;
+      *:*CLAUDE_CODE_OAUTH_TOKEN* | *:*ANTHROPIC_*) echo "process $p ($comm): CREDENTIAL IN ITS ENVIRONMENT:$line"; rc=1 ;;
+      *) echo "process $p ($comm): holds$line in its environment (the read guard's /proc rule fences it; docs/vault.md, w5506)" ;;
+    esac
+  done
+  [ "$rc" = 0 ] && echo "fence: holds" || echo "fence: OPEN"
+  return "$rc"
+}
+
 case "${1:-status}" in
   status) cmd_status ;;
   units) shift; cmd_units "$@" ;;
@@ -1063,6 +1118,7 @@ case "${1:-status}" in
   conf) shift; cmd_conf "$@" ;;
   approvals) shift; cmd_approvals "$@" ;;
   disk-usage) shift; cmd_disk_usage "$@" ;;
+  fence-check) shift; cmd_fence_check "$@" ;;
   state) cmd_state ;;
   migrate) shift; exec "$FFF_LIB/fff-migrate" "$@" ;;
   vault) shift; cmd_vault "$@" ;;

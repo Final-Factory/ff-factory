@@ -180,4 +180,20 @@ ok "every other service is triggered by a timer, a path or a socket"
 bad=$(grep -HnE '^[[:space:]]*SetCredential(Encrypted)?=[^:]*:[[:space:]]*$' "$out"/* "$U"/*.conf 2>/dev/null || true)
 [ -z "$bad" ] || fail "an empty SetCredential= value, which systemd ignores as invalid syntax: $bad"
 ok "no unit sets a credential to an empty value"
+
+# ---------------------------------------------------------------- the vault key and the portal's memory (w5506)
+# No process of the fff account (an orchestrator's tools, git, gh) reads the vault key: systemd opens the key file and
+# hands the server a descriptor (OpenFile=), not a credential file fff may read (LoadCredential=); the server runs an
+# execute-only copy of node, so its /proc/<pid>/environ, mem and fd are root's; SIGUSR1 opens no inspector.
+p=$out/fff-portal.service
+[ "$(value "$p" Service OpenFile)" = /etc/fff/vault.key:fff-vault-key:read-only ] || fail "fff-portal.service does not open the vault key for the server (OpenFile=/etc/fff/vault.key:fff-vault-key:read-only)"
+! grep -qE '^LoadCredential(Encrypted)?=' "$p" || fail "fff-portal.service still hands the vault key over as a credential file the fff account may read"
+[ "$(value "$p" Service ExecStart)" = '/usr/local/lib/fff/node-portal --disable-sigusr1 server/index.ts' ] || fail "fff-portal.service does not run the execute-only node with --disable-sigusr1: $(value "$p" Service ExecStart)"
+grep -qF "install -o root -g root -m 0111 /usr/bin/node /usr/local/lib/fff/node-portal.new" "$p" || fail "fff-portal.service does not make the execute-only node (root's, 0111) before it starts"
+grep -q "VAULT_CREDENTIAL = 'fff-vault-key'" server/vault.ts || fail "server/vault.ts no longer names the descriptor fff-vault-key, which OpenFile= gives it"
+ok "fff-portal.service opens the vault key as a descriptor and runs an execute-only node without SIGUSR1's inspector"
+# A rollback puts the older release's portal unit back: code from before w5506 reads its key from LoadCredential=.
+grep -q '^portal_unit_back()' deploy/vm/guest/fff-update || fail "fff-update has no portal_unit_back (w5506)"
+sed -n '/^cmd_rollback()/,/^}/p' deploy/vm/guest/fff-update | grep -q '^  portal_unit_back "\$prev"$' || fail "fff-update's rollback does not put back the older release's fff-portal.service (w5506)"
+ok "a rollback puts back the older release's fff-portal.service"
 echo "all unit checks pass"
