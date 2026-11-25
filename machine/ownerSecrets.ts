@@ -408,7 +408,9 @@ export function ownerLabelTargets(o: { platform: NodeJS.Platform; home: string; 
  * does not reach it), 'file' (the folder's hosts.yml, which the label closes), or undefined (no login, or not said).
  */
 export function ghLoginStorage(statusOut: string): 'keyring' | 'file' | undefined {
-  const line = statusOut.split(/\r?\n/).find((l) => /Logged in to github\.com/i.test(l));
+  // gh prints "X Failed to log in to github.com account <user> (<where>)" when it cannot check the token (an invalid token,
+  // measured with gh 2.102.0 by w5849; a network outage is likely the same): the login is still stored there, so read it too.
+  const line = statusOut.split(/\r?\n/).find((l) => /(Logged|Failed to log) in to github\.com/i.test(l));
   if (!line) return undefined;
   return /\(keyring\)/i.test(line) ? 'keyring' : 'file';
 }

@@ -3641,8 +3641,11 @@ export class Daemon {
       const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
       // w5749: on Windows the owner's secrets are closed by labels on this machine's system drive, where lothsahn allowed it.
       if (process.platform === 'win32') {
-        const st = await run(trustedGh(), ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 30_000, env: machineGhStatusEnv() }).catch(() => undefined);
-        log(sayOwnerLabels(mode, ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id }), st ? ghLoginStorage(`${st.stdout}\n${st.stderr}`) : undefined));
+        // The plan first: gh is asked where its login is only on a machine with a plan (w5849's review of #1278), so on every
+        // other Windows machine nothing on the system drive is looked at.
+        const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+        const st = plan.label.length || plan.left.length ? await run(trustedGh(), ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 30_000, env: machineGhStatusEnv() }).catch(() => undefined) : undefined;
+        log(sayOwnerLabels(mode, plan, st ? ghLoginStorage(`${st.stdout}\n${st.stderr}`) : undefined));
       } else log(sayOwnerRules(mode, process.platform, owner));
       const fence = this.workerFence;
       const lock = this.writeLock;
