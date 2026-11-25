@@ -779,6 +779,18 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   longer make a new folder in `tools`; a tool that needs one makes it from the daemon or `worker.ts tools`. A daemon
   from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
   `server/toolsLabelsWin.test.ts` on the Windows runner.
+  - **A test of what a Low worker can do on Windows must drop privileges, not only lower the label.** A GitHub runner's
+    token is elevated, and a Low copy of it keeps SeBackupPrivilege and SeRestorePrivilege, which pass any integrity
+    label and access list. In run 45641049172 the runner's Low node renamed `tools\node` under a Medium `tools`, and the
+    fix looked broken when it was not. No worker holds those privileges (LothDesktop, measured: Administrators
+    deny-only, SeChangeNotify the only privilege). Start the probe with the worker's token: `LOWRUN` in
+    `server/toolsLabelsWin.test.ts` removes every privilege but SeChangeNotify, makes Administrators deny-only and sets
+    the Low label. Reuse it (w5717).
+  - **The daemon relabels at start, which takes a minute or two.** A probe right after a deploy reads the old labels. On
+    LothDesktop on 2026-11-25, `worker integrity: kept V:\ffw\tools Medium` came about a minute after the new daemon
+    started, at 17:36:17Z. A probe just before it still saw `tools` Low and `tools\node` deletable. Probe after that
+    line in `daemon.log`. `tools\git.json`, the agent Git's stamp, appears only after the rollout's agent tools publish
+    (`worker.ts tools`), not at daemon start.
 - **The sandbox editors the daemon starts are Low too** (w5540, lothsahn: "run sandbox editors fenced, staged per
   OS"). Before, they stayed Medium, and an editor compiles and runs whatever C# a worker writes (and `execute_code`), so
   it was a one-step way out of the fence. `MacUnity.start` (`machine/unity.ts`) now starts a Windows sandbox editor
