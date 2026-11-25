@@ -54,8 +54,14 @@ export const MEDIUM_CACHE_CHILD = 'cache-medium';
  * (w5551, machine/steamUpload.ts): the daemon's alone; a worker uploads a release only through steam_upload.
  */
 export const STEAM_CHILD = 'steam';
+/**
+ * The root child that holds FF Factory's own checkout of final-factory-agents and the agent tools publish's run folders (w5597,
+ * server/agentTools.ts toolsCheckout): the publish runs git and registerAgents.sh there at the daemon's level, so no worker
+ * may plant a hook or a script in it. Workers read it (the FF_SKILLS fallback, server/pluginPaths.ts).
+ */
+export const TOOLS_MEDIUM_CHILD = 'tools-medium';
 /** The root's children only Medium writes: kept Medium on Windows, read-only under the Landlock and Seatbelt fences. */
-export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD] as const;
+export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD, TOOLS_MEDIUM_CHILD] as const;
 /**
  * Root children only the daemon writes, read-only under the Landlock and Seatbelt fences (writeLock.ts LOCKED_CHILDREN,
  * workerFence.ts READ_ONLY_IN_ROOT). On Windows they are no worker child (lowIntegrity.ts WORKER_CHILDREN), so a rollout
