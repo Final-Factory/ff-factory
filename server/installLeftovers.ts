@@ -227,6 +227,18 @@ export function runnerJobWhy(runner: string, procs: ProcLite[] | undefined, now:
   return undefined;
 }
 
+/**
+ * The re-check for runCleanup (w5502): for an ffu-runner-work item, runnerJobWhy again with a fresh process list right before the
+ * rename, since a job may have been handed out after the plan. Any other item passes. An unreadable list keeps the item.
+ */
+export function runnerBusyNow(procs: () => Promise<ProcLite[] | undefined>, now: () => number = Date.now, readLog?: (runner: string) => string | undefined): (it: { rule: string; runner?: string }) => Promise<string | undefined> {
+  return async (it) => {
+    if (it.rule !== 'ffu-runner-work' || !it.runner) return undefined;
+    const why = runnerJobWhy(it.runner, await procs(), now(), readLog);
+    return why ? `a job may have started on the FFU runner since the plan: ${why}` : undefined;
+  };
+}
+
 /** An Actions runner's tool cache and action downloads: kept, as the actions-work rule keeps them (server/cleanup.ts). */
 export const RUNNER_KEPT = /^_(tool|actions)$/i;
 
@@ -844,7 +856,7 @@ export async function planInstallLeftovers(o: {
   const take = async (p: string, base: string, rule: string, why: string, untouchedMs: number | undefined, anyRepo = false) => {
     if (items.has(p)) return;
     const b = await blocked(p, base, untouchedMs, anyRepo);
-    if (!b) items.set(p, { path: p, rule, why, base });
+    if (!b) items.set(p, { path: p, rule, why, base, ...(rule === 'ffu-runner-work' ? { runner: base } : {}) });
     else if (b.list) listed.set(p, b.why);
   };
   /**
@@ -1353,6 +1365,13 @@ export async function planInstallLeftovers(o: {
     } else if (o.low) {
       if (!kept) whole(`the disk is low, no running or resumable worker holds the slot, and nothing in it was written for ${settleMs / 60_000} min`);
       else trim(`the disk is low and nothing in it was written for ${settleMs / 60_000} min (${kept})`);
+    }
+    // w5499: ffu slots build with incremental off (machine/ffuSlots.ts writeSlotCargoConfig), so a slot's incremental cache is
+    // what builds before that left, or a worker's own CARGO_INCREMENTAL=1 loop: it goes, held slot or not, once no build has
+    // written it for the settle time (BEAST slot2: 38 of 55 GB, measured 2026-11-24).
+    const wholeTaken = items.has(target) && !items.get(target)!.members;
+    if (incLeft > 0 && !wholeTaken && !items.has(incremental) && (await newestTopWrite(incremental)) <= now - settleMs) {
+      trim(`no build has written it for ${settleMs / 60_000} min and ffu slots now build with incremental off, as ffu CI does (w5499)${kept ? ` (${kept})` : ''}`);
     }
   }
 

@@ -52,7 +52,7 @@ shared by every slot and every worker's cargo:
 ## Use (a worker)
 
 ```sh
-eval "$(ffu-slot take --branch my-branch)"   # sets FFU_SLOT, FFU_DIR, CARGO_TARGET_DIR, CARGO_HOME and cds into the checkout
+eval "$(ffu-slot take --branch my-branch)"   # sets FFU_SLOT, FFU_DIR, CARGO_TARGET_DIR, CARGO_INCREMENTAL=0, CARGO_HOME and cds into the checkout
 cargo test --workspace --all-features --no-run
 ffu-slot release                             # once the work is pushed (a stopped worker's pushed slot frees itself)
 ffu-slot list                                # every slot, its branch, and why it is or is not free
@@ -134,6 +134,15 @@ debug profile 4 to 11.5 GB on m5, so 16 GB keeps about two configurations warm a
 the incremental cache or the whole target is touched. The sweep of an 11.5 GB profile read 2193 fingerprints in about
 1 s. The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders.
 
+### A runner's job is looked for again before its `_work` goes (w5502)
+
+`ffu-runner-work` checks `runnerJobWhy` when it plans, but `runCleanup` renames the folder aside later, after `endStrays` and
+other awaits. A rename fails on a file a job holds open; a job handed out in that gap before it opens one could still lose
+its checkout. So `cleanupPass` passes `runCleanup` a `busyNow` check (`runnerBusyNow`, `server/installLeftovers.ts`): for an
+item of that rule (it carries its `runner`), `runnerJobWhy` runs again on a fresh process list right before the rename, and a
+job found keeps the item (`kept: a job may have started ...` in `failed`; an unreadable list keeps it too). Ben, w5499:
+"Don't break a CI run that is in progress". Test: `w3502TimingRunnerCleanup.test.ts`.
+
 ### What `ff-leftovers check` and `folders` say (`server/cleanupFolders.ts` `judgeFfuSlotPath`, w4422)
 
 A clean-up worker's `ff-leftovers check <path>`, `folders` and `remove` judge a slot's build output as the rule above
@@ -144,9 +153,58 @@ nothing, as the daemon's `holderUp` judges it), with cargo's `CACHEDIR.TAG`, no 
 rustc, a test binary from the target, a shell in the checkout) and nothing in its top three levels written within the
 settle time (15 min). The same goes for a stray `slot<N>/ffu/target` inside the checkout, where builds landed before the
 w4258 `.cargo/config.toml` routing (25 GB in biscuit's slot1), which the daemon's sweep never looks at: only with cargo's
-`CACHEDIR.TAG`. Everything else is KEEP with the reason: a held or busy slot, the checkout and anything else in it, the
+`CACHEDIR.TAG`, or (w5499) with the checkout's `.gitignore` ignoring `/target` and cargo's tag in a folder right
+inside it: ffu's own scripts point `CARGO_TARGET_DIR` at `target/compat-base`, `target/deploy-base` or
+`target/sim-switch-b`, and cargo tags only those (LothDesktop's four slots held 0.8 to 1.9 GB each there, kept as "not
+provably build output"). Everything else is KEEP with the reason: a held or busy slot, the checkout and anything else in it, the
 slot folder, the shared clone. A clean-up worker takes a target sooner than the daemon's 7 idle days; the next build in the
 slot rebuilds it cold (minutes, not seconds). Tests: `ffuSlotCheck.test.ts`.
+
+## Incremental off (w5499)
+
+Since w5499 a slot builds with cargo's incremental compilation off, as ffu CI does (`ci.yml`, `CARGO_INCREMENTAL: 0`): the
+slot's `.cargo/config.toml` says `incremental = false` and `ffu-slot take` exports `CARGO_INCREMENTAL=0`. A worker that
+wants it back for a tight edit loop runs `export CARGO_INCREMENTAL=1` in its shell. The clean-up drops a slot's
+`debug/incremental` once no build wrote it for the settle time, held slot or not.
+
+Why (all measured on BEAST, 2026-11-24, ffu 7d89d72a, 32 threads, exclusive bench ticket t00008552; `cargo test
+--workspace --all-features --locked --no-run` into a fresh target, then two rounds of a one-line edit in
+`crates/ffu-sim/src/sector.rs`):
+
+| | incremental on | incremental off |
+|---|---|---|
+| Clean build | 447.6 s (a `du` of mine ran beside it: high) | 366.3 s |
+| Target after the clean build | 14,220 MB (5,144 of it `debug/incremental`) | 9,126 MB |
+| Edit rebuild 1 / 2 | 99.0 s / 90.5 s | 179.3 s / 150.3 s |
+| Target after the two edits | 16,474 MB (7,374 incremental) | 9,150 MB |
+
+The slots in use grew far past that: BEAST slot1 24.1 GB (8.7 GB incremental), slot2 55.0 GB (38.1 GB incremental, 2004
+unit folders: each feature set and flag change makes new ones); LothDesktop's four 20.4 to 24.5 GB, 88 GB in all. The price is
+an edit rebuild about 60 to 80 s slower. Release builds were never incremental, so `ffu-headless hashcheck` is unchanged: its
+release build with `CARGO_INCREMENTAL=0` matched `golden/hashcheck.txt` at 1, 4 and 16 threads (hash b5f686367612b320).
+
+Rejected: one shared `CARGO_TARGET_DIR` for all slots. Cargo 1.94 locks the build folder ("Blocking waiting for file lock on
+build directory", measured: a second `cargo check` waited for the first), branches overwrite each other's units, and the
+Windows Firewall rules name each slot's own `target/.../ffu-server.exe` (w5442). sccache: each target still keeps its own
+copy of every artifact, so it frees no disk; it does not cache incremental crates; and its server is one more process to
+leave behind.
+
+## FFU runners' job folders and the integrity label (w5499)
+
+`ffu-runners` carries Windows' Medium integrity label with no-write-up (`icacls F:\ffw\ffu-runners`: `Mandatory
+Label\Medium Mandatory Level:(OI)(CI)(NW)`, inherited by `_work`), so a fenced worker at Low integrity gets EPERM on every
+file there, job or no job. `ff-leftovers remove` of a runner job folder therefore says the daemon takes it: the daemon runs
+at Medium, and its rule `ffu-runner-work` (`server/installLeftovers.ts`) removes a job folder while no job runs, after 15
+min untouched on a low pass, else after `runnerWorkDays` (14). It renames the folder aside before deleting
+(`server/renameAway.ts`), and the rename fails on a file a job holds open, so a running job keeps its folder. It took
+LothDesktop's 9.9 GB `_work\ffu` at 2026-11-24 19:34 and 2026-11-25 03:24 UTC (portal clean-up log); a CI job builds it
+again.
+
+## Cargo's home on the worker fence
+
+A fenced worker on Windows cannot write the user's `~/.cargo` (on C:): a `cargo fetch` of a crate not yet downloaded
+there failed with "Access is denied (os error 5)" (BEAST, 2026-11-24). Building with the crates already fetched works.
+The runners use `<install>/ffu-runners/cargo`.
 
 ## Measurements behind it (BEAST, 2026-11-09, ffu 9e10964, 32 cores, a shared bench ticket)
 

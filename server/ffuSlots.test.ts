@@ -74,6 +74,7 @@ test('w3764: a worker takes a slot on its branch, keeps it, and the next worker 
   // w4258: a cargo run in the checkout without CARGO_TARGET_DIR still builds in the slot's target.
   const cfg = fs.readFileSync(path.join(root, 'ffu-sandboxes', 'slot1', '.cargo', 'config.toml'), 'utf8');
   assert.match(cfg, /^\[build\]$/m);
+  assert.match(cfg, /^incremental = false$/m, 'w5499: a slot builds with incremental off, as ffu CI does');
   assert.ok(cfg.includes(`target-dir = ${JSON.stringify(slotTarget(root, id).split(path.sep).join('/'))}`), cfg);
   fs.mkdirSync(path.join(slotTarget(root, id), 'debug'), { recursive: true });
   fs.writeFileSync(path.join(slotTarget(root, id), 'debug', 'warm.rlib'), 'x');
@@ -117,6 +118,7 @@ test('w3764: no new slot below the free-disk floor, and take prints the lines ev
   const lines = ok.out.join('');
   assert.match(lines, /^export FFU_SLOT='slot1'$/m);
   assert.match(lines, /^export CARGO_TARGET_DIR='.*ffu-sandboxes\/slot1\/target'$/m);
+  assert.match(lines, /^export CARGO_INCREMENTAL=0$/m);
   // w5501: the machine's cargo home inside the root, where a fenced worker can fetch a new crate.
   assert.match(lines, /^export CARGO_HOME='.*\/cache\/cargo'$/m);
   assert.match(lines, /^cd '.*ffu-sandboxes\/slot1\/ffu'$/m);
@@ -177,7 +179,8 @@ test("w3764: a slot's warm target stays on a normal pass; one idle a week with n
   target(root, 'slot3', 8 * 24);
   fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot3', holder: 'live0001' }] }));
   const p = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0001')] });
-  assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot2/target'], 'slot1 is recent and slot3 held by a running worker: both stay warm');
+  // w5499: slots build with incremental off, so an incremental cache no build wrote for the settle time goes, held or not.
+  assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target/debug/incremental', 'ffu-sandboxes/slot2/target', 'ffu-sandboxes/slot3/target/debug/incremental'], 'slot1 is recent and slot3 held by a running worker: both stay warm but for their idle incremental cache');
   assert.ok(!p.items.some((i) => /slot\d\/ffu$/.test(rel(root, i.path))), 'a checkout is never an item');
 });
 
@@ -305,4 +308,16 @@ test('w5442: ffu-server has a firewall path in every slot an ffu machine can mak
   const worker = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'worker.ts'), 'utf8');
   assert.match(worker, /'-FfuServer', ffuServerExes\(l\.root\)\.join\(';'\)/, 'the install and firewallRepair pass the paths');
   assert.match(worker, /\.\.\.\(fs\.existsSync\(node\) \? \[node\] : \[\]\), \.\.\.ffu\]/, 'firewallRepair checks them on every tools rollout');
+});
+
+test('w5499: an incremental cache a build wrote within the settle time stays; an idle one of a held slot goes', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5499i-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  target(root, 'slot1', 2);
+  const fresh = (NOW - 5 * 60_000) / 1000;
+  fs.utimesSync(path.join(target(root, 'slot2', 2), 'debug', 'incremental'), fresh, fresh);
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0001' }, { id: 'slot2', holder: 'live0001' }] }));
+  const p = await plan(root, { inUse: [path.join(root, 'tmp', 'ffa-live0001')] });
+  assert.deepEqual(ffuItems(root, p), ['ffu-sandboxes/slot1/target/debug/incremental'], "slot2's incremental cache was written 5 min ago (a worker's CARGO_INCREMENTAL=1 loop): kept");
+  assert.match(p.items.find((i) => i.rule === 'ffu-slot-target')!.why, /incremental off, as ffu CI does \(w5499\)/);
 });
