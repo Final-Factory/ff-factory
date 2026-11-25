@@ -240,7 +240,7 @@ export type ToDaemon =
   | { type: 'cleanup_context'; context: StaleContext }
   /**
    * Each worker's request priority on this machine (w1628), for its bench queue: the daemon writes it to
-   * <root>/tmp/bench.queue/priorities.json, which the game repo's scripts/bench/bench_queue.py reads at every decision.
+   * <root>/daemon/bench.queue/priorities.json (w5545), which the game repo's scripts/bench/bench_queue.py reads at every decision.
    */
   | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns; timedAsk?: TimedAskMark; personPlay?: { enabled: boolean; graceMinutes: number; who?: string } }
   /**

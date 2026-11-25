@@ -95,6 +95,7 @@ import { beltFor, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
 import { DEFAULT_WAIT_SECONDS, MAX_SEND_CHARS, MAX_TOOL_FILE_BYTES, MAX_WAIT_SECONDS, RemoteChat, type Progress, type RemoteCaller } from './remoteChat.ts';
+import { tokenPipeOptions } from './tokenPipe.ts';
 import { OPS_ID, OPS_LIMITS, OPS_PATHS, OPS_PEOPLE, OPS_REFUSED, OpsWorker, opsAllowedOrchestrator, opsBrief, opsGuard, opsSpawner } from './opsWorker.ts';
 import { deleteMemoryFile, MEMORY_TRASH_DAYS, memoryDirFor, memoryGuard, memoryKey, memoryRootOf, memoryTrashDir, restoreMemoryFile } from './orchestratorMemory.ts';
 import { ownerDataReads, portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
@@ -2196,11 +2197,14 @@ export class Agents {
     const warnings: string[] = [];
     // w4498: merge on green armed: a draft or a failing Evidence check is refused now, not found after green CI.
     const arming = typeof a.merge_on_green === 'string' && a.merge_on_green.trim() !== '';
+    // w5549: each ci: pull request's head as GitHub reads it, for merge on green's check that it is the worker's own.
+    const prHeads = new Map<string, PrHealth | undefined>();
     for (const raw of prs) {
       const m = /^\s*ci:\s*/i.exec(raw);
       const ref = m ? prRefOf(raw.slice(m[0].length)) : undefined;
       if (!ref) continue;
       const problem = await this.ciWaitProblem(ref, head, arming);
+      prHeads.set(ref, problem?.pr);
       if (problem?.refuse) throw new Error(problem.refuse);
       if (problem?.warn) warnings.push(problem.warn);
       // w3021: a short head the pull request's own head starts with is recorded whole, as merge on green passes it to GitHub.
@@ -2220,6 +2224,7 @@ export class Agents {
       what: String(a.what ?? ''),
       ...(head ? { head } : {}),
       ...(typeof a.merge_on_green === 'string' && a.merge_on_green.trim() ? { mergeOnGreen: a.merge_on_green } : {}),
+      prHeads,
     });
     this.blockerWatch?.kick();
     return warnings.length ? `${out} WARNING: ${warnings.join(' ')}` : out;
@@ -2287,14 +2292,23 @@ export class Agents {
   }
 
   /** Why a ci: wait on `ref` should not be set: its pull request conflicts, or its head is not the pushed `head`; or a warning. */
-  private async ciWaitProblem(ref: string, head: string, arming = false): Promise<{ refuse?: string; warn?: string; head?: string } | undefined> {
+  private async ciWaitProblem(ref: string, head: string, arming = false): Promise<{ refuse?: string; warn?: string; head?: string; pr?: PrHealth } | undefined> {
+    const h = await this.readPrHealth(ref);
+    const problem = this.ciWaitProblemOf(ref, head, arming, h);
+    return h ? { ...problem, pr: h } : problem;
+  }
+
+  private async readPrHealth(ref: string): Promise<PrHealth | undefined> {
     if (!this.prHealth) return undefined;
-    let h: PrHealth | undefined;
     try {
-      h = await this.prHealth(ref);
+      return await this.prHealth(ref);
     } catch {
-      h = undefined;
+      return undefined;
     }
+  }
+
+  private ciWaitProblemOf(ref: string, head: string, arming: boolean, h: PrHealth | undefined): { refuse?: string; warn?: string; head?: string } | undefined {
+    if (!this.prHealth) return undefined;
     if (!h) return { warn: `FF Factory could not read ${prLabel(ref)}, so it did not check that your push landed or that it can merge: check yourself (gh pr view ${ref.split('#')[1]} --json headRefOid,mergeable).` };
     if (h.state !== 'open') return undefined;
     if (h.conflict) return { refuse: `${conflictText(ref, h.conflict.base).replace(/, and wait again$/, '')}; then call blocked_on again. Nothing was recorded.` };
@@ -9106,6 +9120,8 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
       // Who pays (docs/orchestrators.md, docs/accounts.md): a person's own orchestrator runs on their own vault pool; the
       // dispatcher on the vault token config claudeAccounts.dispatcher pins (w996), else on the system payer's pool (w1078).
       env: this.orchestratorEnv(owner, info.id),
+      // Its vault token on a pipe, not in its environment, where another orchestrator's tools could read it (w5506).
+      ...tokenPipeOptions(),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: branded(`${owner ? this.personalBrief(owner) : this.dispatcherBrief()}${orchestratorDeployment(this.cfg)}\n\n${memoryBrief(memory, owner?.displayName)}${opsAllowedOrchestrator(info) ? `\n\n${dataBrief(this.cfg.dataDir)}` : ''}${mayReadConfig(info) ? `\n\n${configBrief(configPath(), owner?.displayName)}` : ''}`, this.cfg) },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };

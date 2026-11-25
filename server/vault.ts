@@ -234,6 +234,46 @@ export interface KeySource {
   why?: string;
   /** Set when `file` is the systemd credential: the credentials folder it is in (readKey's credential rule applies to it alone). */
   credentialsDir?: string;
+  /** The key itself, already read and checked (takeOpenedKey: the descriptor systemd's OpenFile= hands over, w5506). */
+  key?: Buffer;
+}
+
+/**
+ * The vault key from the descriptor systemd opened for the portal (fff-portal.service `OpenFile=/etc/fff/vault.key:
+ * fff-vault-key:read-only`, w5506), read once, checked like a key file (readKey) and closed, with LISTEN_FDS, LISTEN_PID and
+ * LISTEN_FDNAMES taken out of the environment its agents inherit. systemd opens the root-only file as root, so the portal's
+ * account never has a key file it could read, and nor does any process it starts: before w5506 the LoadCredential copy in
+ * /run/credentials/fff-portal.service was readable by the fff account, so by every agent the portal started. undefined when
+ * systemd handed no such descriptor (sd_listen_fds(3): the first one is fd 3, the names are LISTEN_FDNAMES in order).
+ */
+export function takeOpenedKey(env: NodeJS.ProcessEnv = process.env, o: { pid?: number; platform?: NodeJS.Platform; fsx?: Pick<typeof fs, 'fstatSync' | 'readFileSync' | 'closeSync'> } = {}): KeySource | undefined {
+  const fsx = o.fsx ?? fs;
+  const count = Number(env.LISTEN_FDS);
+  const mine = env.LISTEN_PID === String(o.pid ?? process.pid);
+  const names = (env.LISTEN_FDNAMES ?? '').split(':');
+  delete env.LISTEN_FDS;
+  delete env.LISTEN_PID;
+  delete env.LISTEN_FDNAMES;
+  delete env.LISTEN_PIDFDID;
+  const at = names.indexOf(VAULT_CREDENTIAL);
+  if (!mine || !Number.isInteger(count) || at < 0 || at >= count) return undefined;
+  const fd = 3 + at;
+  const label = `the descriptor systemd opened (${VAULT_CREDENTIAL})`;
+  try {
+    const st = fsx.fstatSync(fd);
+    if ((o.platform ?? process.platform) !== 'win32' && st.mode & 0o077) return { why: `the vault key behind ${label} is readable by other users (mode ${(st.mode & 0o777).toString(8)}); chmod 600 it` };
+    const key = Buffer.from(String(fsx.readFileSync(fd, 'utf8')).trim(), 'base64');
+    if (key.length !== 32) return { why: `the vault key behind ${label} is not 32 bytes of base64 (fffctl vault init makes one); its content is not shown` };
+    return { file: label, key };
+  } catch (e) {
+    return { why: `cannot read the vault key from ${label}: ${(e as NodeJS.ErrnoException).code ?? 'unreadable'}` };
+  } finally {
+    try {
+      fsx.closeSync(fd);
+    } catch {
+      // already closed
+    }
+  }
 }
 
 /**
@@ -500,7 +540,7 @@ export class Vault {
     if (!src.file) return { status: { key: 'missing', why: src.why } };
     let key: Buffer;
     try {
-      key = readKey(src.file, { credentialsDir: src.credentialsDir });
+      key = src.key ?? readKey(src.file, { credentialsDir: src.credentialsDir });
     } catch (e) {
       return { status: { key: 'unreadable', why: (e as Error).message, keyFile: src.file } };
     }
