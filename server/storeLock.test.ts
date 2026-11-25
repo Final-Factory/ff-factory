@@ -112,10 +112,12 @@ test('"on" stays off for a main clone outside <root>/repo, no root, no git folde
 test('the fences: with lockStore, repo leaves the Seatbelt and Landlock write sets, and its git folder is Medium on Windows', () => {
   const root = path.resolve('/Users/p/ffw');
   const mac = (lockStore: boolean) => fenceFor({ setting: 'seatbelt', root, platform: 'darwin', home: '/Users/p', lockStore, exists: () => true, getconf: (n) => `/t/${n}` })!;
-  const repoRule = `(subpath "${path.join(root, 'repo')}")`;
+  // The profile quotes each path, doubling a backslash (workerFence.ts lit): on Windows path.join gives D:\...
+  const subpath = (p: string) => `(subpath ${JSON.stringify(p)})`;
+  const repoRule = subpath(path.join(root, 'repo'));
   assert.ok(seatbeltProfile(mac(false)).includes(repoRule));
   assert.ok(!seatbeltProfile(mac(true)).includes(repoRule), 'locked: repo is not writable');
-  assert.ok(seatbeltProfile(mac(true)).includes(`(subpath "${path.join(root, 'sandboxes')}")`), 'the slots still are');
+  assert.ok(seatbeltProfile(mac(true)).includes(subpath(path.join(root, 'sandboxes'))), 'the slots still are');
   // path.join throughout (w5764's review): the file runs on Windows too.
   const L = path.resolve('/home/u/ffw');
   const lin = (lockStore: boolean) => writeLockArgs({ root: L, lockStore });
@@ -215,7 +217,10 @@ const realExec: Exec = async (cmd, args) => {
  */
 const lowShell = (cmd: string) => (line: string) => spawnSync(cmd, ['/d', '/s', '/c', `"${line}"`], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true });
 
-test('live (Windows): a Low process writes its slot repo and is refused in the Medium store; store_lock off labels it Low again and a Low git commit in a worktree of it goes through', { skip: process.platform !== 'win32' && 'needs Windows' }, async () => {
+/** A Low process (a sandbox worker running this file) cannot raise a folder to Medium, so the leg needs a Medium one (CI, the daemon's user). */
+const runsLow = process.platform === 'win32' && /S-1-16-4096/.test(spawnSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8', windowsHide: true }).stdout ?? '');
+
+test('live (Windows): a Low process writes its slot repo and is refused in the Medium store; store_lock off labels it Low again and a Low git commit in a worktree of it goes through', { skip: process.platform !== 'win32' ? 'needs Windows' : runsLow && 'needs a Medium process: this one runs Low' }, async () => {
   const r0 = makeRoot({ slots: ['slotA'] });
   try {
     const g = path.join(r0.repo, '.git');
