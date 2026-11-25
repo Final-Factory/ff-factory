@@ -2073,7 +2073,7 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
-      ...(this.cfg.root ? { steamUpload: true } : {}),
+      ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.

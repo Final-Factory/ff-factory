@@ -52,6 +52,8 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * Also (w4922, no bump): `test_history`, a sandbox's local test run for the portal's per-test history, which an older portal
  * drops (the daemon sends it again later), answered by `test_history_ack`, which an older daemon drops.
  * Also (w5576, no bump): `portalPin` in the hello (machine/portalPin.ts), which an older portal ignores.
+ * Also (w5640, no bump): `steamInstall` in the hello, and action `install` and `account` (the build account to set up) in
+ * `steam_upload`, sent only to a daemon that offered it.
  * Also (w5551, no bump): `steamUpload` in the hello and `steam_upload`, sent only to a daemon that offered it, answered by
  * `steam_upload_state`, which an older portal drops.
  */
@@ -309,7 +311,7 @@ export type ToDaemon =
    * FFSTEAM_GUARD_SECRET from the vault, which no agent's environment holds) and `guardCode` in that process only. Answered
    * by steam_upload_state. Sent only to a daemon whose hello offered `steamUpload`.
    */
-  | { type: 'steam_upload'; id: string; action: 'check' | 'upload'; session: string; sandbox?: string; version?: string; app?: 'main' | 'demo'; runs?: Partial<Record<'windows' | 'mac' | 'linux', string>>; live?: string; preview?: boolean; secrets: Record<string, string>; guardCode?: string; githubToken?: string }
+  | { type: 'steam_upload'; id: string; action: 'check' | 'upload' | 'install'; session: string; sandbox?: string; version?: string; app?: 'main' | 'demo'; runs?: Partial<Record<'windows' | 'mac' | 'linux', string>>; live?: string; preview?: boolean; secrets: Record<string, string>; guardCode?: string; githubToken?: string; account?: string }
   /** GitHub App installation tokens for this machine's runs (w1519, docs/github-apps.md): the whole set, each time it changes. */
   | { type: 'gh_app_tokens'; tokens: GhAppToken[] }
   /**
@@ -401,6 +403,8 @@ export type FromDaemon =
       timedActive?: string[];
       /** It runs the urgent lane's Steam check and upload itself (w5551, `steam_upload`). An older portal ignores it. */
       steamUpload?: boolean;
+      /** It runs steam_upload's `install` (w5640). */
+      steamInstall?: boolean;
       /** It holds the nightly lab's fixtures (w3939, `<root>/nightly-history/fixtures`, never on C:) and serves `lab_fixture` and `lab_fixture_upload`. An older portal ignores it. */
       labFixtures?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
