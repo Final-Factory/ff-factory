@@ -118,11 +118,16 @@ const run = async (prompt: string, o: { resume?: string; interruptAfterMs?: numb
     for await (const m of q) out.push(m);
   } catch (e) {
     threw = String((e as Error)?.message ?? e).split('\n')[0].slice(0, 300);
-    for (const l of said.split('\n').filter(Boolean).slice(-15)) console.log(`FAIL: its stdout: ${l.slice(0, 400)}`);
   }
   clearTimeout(guard);
   const result = out.find((m) => m.type === 'result') as (SDKMessage & { subtype: string; result?: string; session_id: string }) | undefined;
-  return { result, threw, ms: Date.now() - t0 };
+  return { result, threw, said, ms: Date.now() - t0 };
+};
+// A failed turn's last lines from Claude Code, then the FAIL: its own error may be on stdout, not in the journal. Not for
+// the interrupt, whose throw is expected.
+const failWith = (r: { said: string }, why: string): never => {
+  for (const l of r.said.split('\n').filter(Boolean).slice(-15)) console.log(`FAIL: its stdout: ${l.slice(0, 400)}`);
+  return fail(why);
 };
 
 if (step === 'hang') {
@@ -133,7 +138,7 @@ if (step === 'hang') {
 }
 
 const one = await run('ci-step-one: call the ping tool, then write the note');
-if (one.threw) fail(`the turn threw: ${one.threw}`);
+if (one.threw) failWith(one, `the turn threw: ${one.threw}`);
 if (one.result?.subtype !== 'success' || !one.result.result?.includes('ci-turn-done')) fail(`the turn did not end well: ${JSON.stringify(one.result)?.slice(0, 400)}`);
 if (pinged.join() !== 'ci') fail(`the in-process MCP tool was not called through the agent: ${pinged.join()}`);
 if (!asked.includes('Write')) fail(`the permission callback was not asked for Write: ${asked.join()}`);
@@ -141,7 +146,7 @@ if (!fs.existsSync(note)) fail(`the turn's Write did not reach ${note}`);
 console.log(`ok: a turn (${one.ms} ms): the MCP tool called back to the portal's process, the permission callback asked for Write, the note written to ${note}`);
 const sid = one.result.session_id;
 const two = await run('ci-step-resume', { resume: sid });
-if (two.threw) fail(`the resume threw: ${two.threw}`);
+if (two.threw) failWith(two, `the resume threw: ${two.threw}`);
 if (two.result?.subtype !== 'success' || !two.result.result?.includes('ci-resumed')) fail(`the resume did not end well: ${JSON.stringify(two.result)?.slice(0, 400)}`);
 if (!seen.at(-1)?.text.includes('ci-step-one')) fail('the resumed turn reached the model without the first turn in its history');
 console.log(`ok: the resume (${two.ms} ms) of session ${sid} reached the model with the first turn in its history`);
