@@ -15,6 +15,8 @@
  * write. It stops accidental writes outside the root, which is lothsahn's rule ("under no circumstances should workers
  * write outside of ffw").
  */
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES } from '../server/claudeHome.ts';
@@ -149,19 +151,29 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // labels `dirs` before `medium`, and asks a child of a Medium folder for its own Low label, not an inherited one).
   // The path of node stays, so the firewall rule "Final Factory agent node" still names it. Files right in tools stay
   // Medium: only the daemon and `worker.ts tools` write there (the agent Git's stamp, server/agentGit.ts).
+  //
+  // w5838: `low` (the Low copies of claude, node and gh the daemon runs, lowCopy), `unity-low` (the junctions Low editors
+  // start Unity through) and `shims` (unity-slot, ff-pr, ff-leftovers and ffu-slot, first on every agent's PATH, Medium
+  // ones included) are the daemon's alone too: Low, a worker could plant a DLL beside a copy, swap a junction for its own
+  // Unity.exe, or rewrite a shim a Medium agent then runs. Kept Medium, a Low worker reads and runs them and writes none.
   const tools = path.join(i.root, 'tools');
   const medium: string[] = [];
   const at = dirs.findIndex((d) => same(d, tools));
   if (at >= 0) {
     if (i.toolsChildren) {
-      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && c.name.toLowerCase() !== 'node').map((c) => path.join(tools, c.name)));
-      medium.push(tools);
-    }
-    medium.push(path.join(tools, 'node'));
+      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !MEDIUM_TOOLS.includes(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
+      medium.push(tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)));
+    } else medium.push(path.join(tools, 'node'));
   }
   medium.push(...fenced, ...lockedStore);
   return { dirs, files, medium };
 }
+
+/** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
+export const MEDIUM_TOOLS = ['node', 'low', 'unity-low', 'shims'];
+
+/** Where the daemon writes the workers' shims on Windows with a root (w5838): a Medium folder, not the Low slots mailbox. */
+export const toolsShimsDir = (root: string) => path.join(root, 'tools', 'shims');
 
 type Ran = { code: number | null; stdout: string; stderr: string };
 export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<Ran>;
@@ -268,42 +280,159 @@ export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | u
 
 export const lowToolsDir = (root: string) => path.join(root, 'tools', 'low');
 
-/**
- * A Low-labelled copy of `exe` in `<root>\tools\low`, named by its size and mtime so a new claude gets a new copy; copies
- * of older builds are removed when nothing runs them. Returns the copy's path, or undefined (and says why) when it
- * cannot be made: the caller then runs that agent unfenced.
- */
-export async function lowCopy(root: string, exe: string, exec: Exec, say: (line: string) => void): Promise<string | undefined> {
+/** A run that waits for its answer: the Low copies' checks happen in runSpec, which is synchronous (w5838). */
+export type ExecSync = (cmd: string, args: string[]) => Ran;
+
+export const execSync: ExecSync = (cmd, args) => {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr || (r.error ? r.error.message : '') };
+};
+
+/** A file's SHA-256, read in 1 MB pieces: about 250 ms for claude.exe's 300 MB (measured on BEAST, w5838). */
+export function fileHash(p: string): string {
+  const h = createHash('sha256');
+  const fd = fs.openSync(p, 'r');
   try {
-    const st = fs.statSync(exe);
-    const dir = lowToolsDir(root);
-    fs.mkdirSync(dir, { recursive: true });
-    const base = path.basename(exe, path.extname(exe));
-    const name = `${base}-${st.size}-${Math.floor(st.mtimeMs)}${path.extname(exe)}`;
-    const copy = path.join(dir, name);
-    if (!fs.existsSync(copy) || fs.statSync(copy).size !== st.size) {
-      const part = `${copy}.part`;
-      fs.copyFileSync(exe, part);
-      fs.renameSync(part, copy);
-    }
-    const now = await exec('icacls', [copy], { timeoutMs: 60_000 });
-    if (!(now.code === 0 && isLabelledLow(now.stdout))) {
-      const r = await exec('icacls', [copy, '/setintegritylevel', 'low'], { timeoutMs: 60_000 });
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
-    }
-    for (const old of fs.readdirSync(dir)) {
-      if (old !== name && old.startsWith(`${base}-`)) {
-        try {
-          fs.rmSync(path.join(dir, old), { force: true });
-        } catch {
-          /* still running: the next start removes it */
+    const buf = Buffer.allocUnsafe(1 << 20);
+    for (let n = fs.readSync(fd, buf, 0, buf.length, null); n > 0; n = fs.readSync(fd, buf, 0, buf.length, null)) h.update(buf.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return h.digest('hex');
+}
+
+/**
+ * What a file's stat shows of a change: any write moves its change time, and setting that back needs
+ * FILE_WRITE_ATTRIBUTES, which a read-only copy refuses a Low process; a new file has a new file id (ino).
+ */
+const statKey = (st: fs.Stats) => `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`;
+
+/**
+ * icacls' arguments that leave a copy read-only to the account (w5838): no inherited entries, read and run for the account
+ * and for OWNER RIGHTS (which takes away the owner's implicit WRITE_DAC), Full for SYSTEM and Administrators. Measured on
+ * BEAST from a Low process: the copy still runs; a write, an append, a new grant and a new label are refused. The daemon
+ * still removes or replaces it through the folder's delete-child right (measured: Node's rmSync and renameSync).
+ */
+export const readOnlyGrants = (account: string) => ['/inheritance:r', '/grant:r', '*S-1-3-4:(RX)', `${account}:(RX)`, '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'];
+
+/** Whether icacls shows the read-only entries readOnlyGrants sets, and none inherited. Exported for tests. */
+export const isReadOnlyCopy = (icaclsOut: string) => /OWNER RIGHTS:\(RX\)/i.test(icaclsOut) && !/\(I\)/.test(icaclsOut);
+
+/**
+ * The Low-labelled copies of claude, node and gh in `<root>\tools\low` the daemon runs (w5333, w5540, w5430): a process
+ * started from a Low-labelled file runs at Low. Each is named by its source's size and mtime, so a new claude gets a new
+ * copy; copies of older builds are removed when nothing runs them.
+ *
+ * w5838: a Low worker can write a Low-labelled file, so before this one could replace a copy and have the next agent, editor
+ * or probe run its program with what the daemon passes in (another person's vault tokens, for an agent). Now:
+ * - the folder is Medium (lowTargets, MEDIUM_TOOLS): a worker cannot add, rename or delete a file there, nor plant a DLL;
+ * - each copy is read-only (readOnlyGrants), so a worker cannot rewrite it either; where icacls cannot do that, it says
+ *   so and the copy is hashed in full before every run instead;
+ * - `check` before every run: the copy still has its source's bytes (a full hash, or the stat seen at the last hash for a
+ *   read-only copy), else it is made again from the source, with a WARNING in the log.
+ */
+export class LowCopies {
+  private copies = new Map<string, { source: string; key: string; readOnly: boolean }>();
+  private sources = new Map<string, { key: string; hash: string }>();
+
+  private root: string;
+  private say: (line: string) => void;
+  private exec: ExecSync;
+  private account: string | undefined;
+  private hash: (p: string) => string;
+
+  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash) {
+    this.root = root;
+    this.say = say;
+    this.exec = exec;
+    this.account = account;
+    this.hash = hash;
+  }
+
+  private sourceHash(exe: string): string {
+    const key = statKey(fs.statSync(exe));
+    const had = this.sources.get(exe);
+    if (had?.key === key) return had.hash;
+    const hash = this.hash(exe);
+    this.sources.set(exe, { key, hash });
+    return hash;
+  }
+
+  /** The Low copy of `exe`, made or checked now; undefined (and says why) when it cannot be made: the caller decides. */
+  make(exe: string): string | undefined {
+    try {
+      const st = fs.statSync(exe);
+      const dir = lowToolsDir(this.root);
+      fs.mkdirSync(dir, { recursive: true });
+      const base = path.basename(exe, path.extname(exe));
+      const name = `${base}-${st.size}-${Math.floor(st.mtimeMs)}${path.extname(exe)}`;
+      const copy = path.join(dir, name);
+      const want = this.sourceHash(exe);
+      if (fs.existsSync(copy) && this.hash(copy) !== want) {
+        this.say(`worker integrity: WARNING: the Low copy ${copy} is not ${exe} (its bytes differ); made again (w5838)`);
+        fs.rmSync(copy, { force: true });
+      }
+      if (fs.existsSync(copy)) {
+        // An earlier copy inherited Low from a Low folder; with the folder Medium (w5838) it needs a label of its own. A
+        // read-only copy cannot be labelled again (no WRITE_OWNER): it is made again instead.
+        const now = this.exec('icacls', [copy]);
+        if (!(now.code === 0 && isLabelledLow(now.stdout)) && this.exec('icacls', [copy, '/setintegritylevel', 'low']).code !== 0) fs.rmSync(copy, { force: true });
+      }
+      if (!fs.existsSync(copy)) {
+        const part = `${copy}.part`;
+        fs.rmSync(part, { force: true });
+        fs.copyFileSync(exe, part);
+        fs.renameSync(part, copy);
+        const r = this.exec('icacls', [copy, '/setintegritylevel', 'low']);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+      }
+      let readOnly = isReadOnlyCopy(this.exec('icacls', [copy]).stdout);
+      if (!readOnly) {
+        const r = this.account ? this.exec('icacls', [copy, ...readOnlyGrants(this.account)]) : undefined;
+        readOnly = r?.code === 0;
+        if (!readOnly) this.say(`worker integrity: WARNING: could not make the Low copy ${copy} read-only (${r ? (r.stderr || r.stdout).trim().slice(-200) : 'no account name'}); it is hashed in full before every run instead (w5838)`);
+      }
+      // Checked once it is labelled and read-only, so nothing written before that is run.
+      if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
+      this.copies.set(copy, { source: exe, key: statKey(fs.statSync(copy)), readOnly });
+      for (const old of fs.readdirSync(dir)) {
+        if (old !== name && old.startsWith(`${base}-`)) {
+          try {
+            fs.rmSync(path.join(dir, old), { force: true });
+            this.copies.delete(path.join(dir, old));
+          } catch {
+            /* still running: the next start removes it */
+          }
         }
       }
+      return copy;
+    } catch (e) {
+      this.say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
+      return undefined;
     }
-    return copy;
-  } catch (e) {
-    say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
-    return undefined;
+  }
+
+  /**
+   * Before each run of `copy` (w5838): the path to run, which is `copy` while it still has its source's bytes, else a copy
+   * made again from the source (a new path when the source changed). Undefined when `copy` is not one of this daemon's or
+   * cannot be made again: the caller does not run it.
+   */
+  check(copy: string): string | undefined {
+    const c = this.copies.get(copy);
+    if (!c) return undefined;
+    try {
+      const st = fs.statSync(copy);
+      const sourceSame = this.sources.get(c.source)?.key === statKey(fs.statSync(c.source));
+      if (c.readOnly && sourceSame && c.key === statKey(st)) return copy;
+      if (sourceSame && this.hash(copy) === this.sourceHash(c.source)) {
+        c.key = statKey(st);
+        return copy;
+      }
+      if (sourceSame) this.say(`worker integrity: WARNING: the Low copy ${copy} was changed since it was made from ${c.source}; made again before this run (w5838)`);
+    } catch (e) {
+      this.say(`worker integrity: WARNING: the Low copy ${copy} could not be checked (${(e as Error).message}); made again before this run (w5838)`);
+    }
+    return this.make(c.source);
   }
 }
 
@@ -371,7 +500,8 @@ export async function lowUnityJunctions(root: string, editors: { version: string
     const target = path.dirname(e.bin); // <install>\<version>\Editor
     const link = path.join(dir, e.version);
     try {
-      if (fs.existsSync(path.join(link, 'Unity.exe'))) {
+      // w5838: and only when it still leads to the install's Editor folder: the daemon's editors start Unity through it.
+      if (fs.existsSync(path.join(link, 'Unity.exe')) && junctionLeadsTo(link, target)) {
         have.push(e.version);
         continue;
       }
@@ -384,6 +514,16 @@ export async function lowUnityJunctions(root: string, editors: { version: string
     }
   }
   return have;
+}
+
+/** Whether the junction (or link) `link` leads to `target`. Exported for tests. */
+export function junctionLeadsTo(link: string, target: string, readlink: (p: string) => string = fs.readlinkSync): boolean {
+  try {
+    const plain = (p: string) => path.resolve(p.replace(/^\\\\\?\\/, '')).replace(/[\\/]+$/, '').toLowerCase();
+    return plain(readlink(link)) === plain(target);
+  } catch {
+    return false;
+  }
 }
 
 /**

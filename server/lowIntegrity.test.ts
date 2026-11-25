@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, MEDIUM_TOOLS, isReadOnlyCopy, junctionLeadsTo, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -62,9 +62,12 @@ test('w5717: given its children, tools turns Medium, each child folder but node 
   const toolsChildren = [...kids('cargo', 'git', 'node', 'NODE-old', 'low', 'unity-low', 'final-factory-agents'), { name: 'git.json', dir: false }];
   const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools', 'tmp'), toolsChildren, exists: () => true });
   assert.ok(!t.dirs.includes(tools), 'tools is not labelled Low');
-  for (const c of ['cargo', 'git', 'NODE-old', 'low', 'unity-low', 'final-factory-agents']) assert.ok(t.dirs.includes(path.join(tools, c)), `${c} is labelled Low`);
+  for (const c of ['cargo', 'git', 'NODE-old', 'final-factory-agents']) assert.ok(t.dirs.includes(path.join(tools, c)), `${c} is labelled Low`);
   assert.ok(!t.dirs.includes(path.join(tools, 'node')) && !t.files.includes(path.join(tools, 'git.json')), 'node and the stamp are not');
-  assert.deepEqual(t.medium, [tools, path.join(tools, 'node')]);
+  // w5838: the folders of programs the daemon runs (the Low copies, the Unity junctions, the shims) stay Medium too.
+  for (const c of ['low', 'unity-low']) assert.ok(!t.dirs.includes(path.join(tools, c)), `${c} is not labelled Low`);
+  assert.deepEqual(t.medium, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c))]);
+  assert.deepEqual(MEDIUM_TOOLS, ['node', 'low', 'unity-low', 'shims']);
   // Without the list (a daemon from before w5717 never passes one): the old layout.
   const old = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools'), exists: () => true });
   assert.ok(old.dirs.includes(tools));
@@ -267,18 +270,110 @@ test('currentAccount names DOMAIN\\user as icacls takes it', () => {
   assert.equal(currentAccount({}), undefined);
 });
 
-test('lowCopy names the copy by size and mtime, labels it, and removes older copies', async () => {
+/**
+ * A fake icacls for LowCopies (w5838): remembers which files carry a Low label and which the read-only grants; a file
+ * written after them (fs.writeFileSync) keeps its marks, as an NTFS write keeps its ACL, which is the case the hash catches.
+ */
+const icaclsSync = (o: { readOnlyFails?: boolean } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string> } => {
+  const calls: string[][] = [];
+  const low = new Set<string>();
+  const ro = new Set<string>();
+  return {
+    calls,
+    low,
+    ro,
+    exec: (_cmd, args) => {
+      calls.push(args);
+      const [path0, ...rest] = args;
+      // The marks belong to the file, not its name: a copy removed and made again starts with none.
+      const f = `${path0}#${fs.statSync(path0).ino}`;
+      if (!rest.length) return { code: 0, stdout: `${path0} ${ro.has(f) ? 'OWNER RIGHTS:(RX)' : 'BUILTIN\\Users:(I)(RX)'}\n${low.has(f) ? 'Mandatory Label\\Low Mandatory Level:(NW)' : ''}`, stderr: '' };
+      if (rest[0] === '/setintegritylevel') {
+        if (ro.has(f)) return { code: 5, stdout: '', stderr: 'Access is denied.' };
+        low.add(f);
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (o.readOnlyFails) return { code: 5, stdout: '', stderr: 'Access is denied.' };
+      ro.add(f);
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  };
+};
+
+test('LowCopies names the copy by size and mtime, labels it Low and read-only, and removes older copies', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'v1');
-  const { exec } = icacls(new Set());
-  const first = await lowCopy(root, exe, exec, () => {});
+  const f = icaclsSync();
+  const copies = new LowCopies(root, () => {}, f.exec, 'BEAST\\rydin');
+  const first = copies.make(exe);
   assert.ok(first && fs.existsSync(first) && path.basename(first).startsWith('claude-2-'));
+  const id = `${first}#${fs.statSync(first!).ino}`;
+  assert.ok(f.low.has(id) && f.ro.has(id), 'labelled Low, then read-only');
+  assert.deepEqual(
+    f.calls.find((c) => c[0] === first && c[1] === '/inheritance:r'),
+    [first, ...readOnlyGrants('BEAST\\rydin')],
+  );
+  assert.equal(copies.check(first), first, 'an unchanged copy runs as it is');
   fs.writeFileSync(exe, 'v2 longer');
-  const second = await lowCopy(root, exe, exec, () => {});
+  const second = copies.make(exe)!;
   assert.notEqual(second, first);
-  assert.deepEqual(fs.readdirSync(path.dirname(second!)), [path.basename(second!)]);
-  assert.equal(await lowCopy(root, path.join(root, 'missing.exe'), exec, () => {}), undefined);
+  assert.deepEqual(fs.readdirSync(path.dirname(second)), [path.basename(second)]);
+  assert.equal(copies.make(path.join(root, 'missing.exe')), undefined);
+  assert.equal(copies.check(path.join(root, 'tools', 'low', 'not-ours.exe')), undefined, 'a path it did not make is never passed');
+});
+
+test('w5838: a replaced Low copy is not run: check makes it again from its source, with a WARNING', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'claude.exe');
+  fs.writeFileSync(exe, 'the real claude');
+  // Read-only applied (the stat key changes with the write) and refused (hashed in full every time): both catch it.
+  for (const readOnlyFails of [false, true]) {
+    const said: string[] = [];
+    const copies = new LowCopies(root, (l) => void said.push(l), icaclsSync({ readOnlyFails }).exec, 'BEAST\\rydin');
+    const copy = copies.make(exe)!;
+    // A Low worker's program in its place (same size, so only the bytes tell).
+    fs.writeFileSync(copy, 'the evil claude');
+    const ran = copies.check(copy);
+    assert.ok(ran, `readOnlyFails ${readOnlyFails}: still a copy to run`);
+    assert.equal(fs.readFileSync(ran, 'utf8'), 'the real claude', 'the copy run has the source bytes again');
+    assert.ok(said.some((l) => /WARNING/.test(l) && /made again/.test(l)), said.join('\n'));
+    if (readOnlyFails) assert.ok(said.some((l) => /hashed in full before every run/.test(l)), said.join('\n'));
+    // A copy replaced while the daemon was down is caught at make, too.
+    fs.writeFileSync(copy, 'the evil claude');
+    said.length = 0;
+    assert.equal(fs.readFileSync(copies.make(exe)!, 'utf8'), 'the real claude');
+    assert.ok(said.some((l) => /WARNING/.test(l) && /bytes differ/.test(l)), said.join('\n'));
+  }
+});
+
+test('w5838: a replaced copy whose source is gone is not run', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'node.exe');
+  fs.writeFileSync(exe, 'node');
+  const copies = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin');
+  const copy = copies.make(exe)!;
+  fs.writeFileSync(copy, 'evil');
+  fs.rmSync(exe);
+  assert.equal(copies.check(copy), undefined);
+});
+
+test('w5838: isReadOnlyCopy wants the OWNER RIGHTS entry and nothing inherited', () => {
+  assert.ok(isReadOnlyCopy('x OWNER RIGHTS:(RX)\n   BEAST\\rydin:(RX)\n   Mandatory Label\\Low Mandatory Level:(NW)'));
+  assert.ok(!isReadOnlyCopy('x OWNER RIGHTS:(RX)\n   BUILTIN\\Users:(I)(RX)'));
+  assert.ok(!isReadOnlyCopy('x BEAST\\rydin:(I)(F)'));
+});
+
+test('w5838: junctionLeadsTo compares where a junction leads, whatever its prefix or case', () => {
+  const target = 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor';
+  assert.ok(junctionLeadsTo('L', target, () => '\\\\?\\c:\\program files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor\\'));
+  assert.ok(junctionLeadsTo('L', target, () => target));
+  assert.ok(!junctionLeadsTo('L', target, () => 'F:\\ffw\\tmp\\evil\\Editor'));
+  assert.ok(
+    !junctionLeadsTo('L', target, () => {
+      throw new Error('not a link');
+    }),
+  );
 });
 
 test('lowEnv moves APPDATA into the root and puts the agent Git first', () => {

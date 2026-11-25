@@ -1929,7 +1929,11 @@ export function shimScripts(node: string, nodeArgs: string[], script: string): {
 
 /** Write the shims into <dir>/bin; returns that folder. */
 export function installShims(dir: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename): string {
-  const bin = path.join(dir, 'bin');
+  return writeShims(path.join(dir, 'bin'), node, nodeArgs, script);
+}
+
+/** Write the shims into `bin` itself (w5838: `<root>/tools/shims` on Windows, a folder Low workers cannot write); returns it. */
+export function writeShims(bin: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename): string {
   fs.mkdirSync(bin, { recursive: true });
   const s = shimScripts(node, nodeArgs, script);
   writeAtomic(path.join(bin, 'unity-slot'), s.sh);

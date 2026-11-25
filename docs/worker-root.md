@@ -745,6 +745,27 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     once with `--version` (`probeFence`, 60 s). That copy, not a Low node, is what a sandbox agent runs: the SDK takes
     it as `pathToClaudeCodeExecutable`, and the agent host stays Medium.
   - It junctions each installed Unity's `Editor` folder into `<root>\tools\unity-low\<version>`.
+  - **The programs the daemon runs from the root stay out of workers' reach** (w5838). Before, `tools\low` and
+    `tools\unity-low` were labelled Low, so a Low worker could replace a copy or turn a junction, and the next sandbox agent
+    ran its program with that agent's vault tokens, a probe with the daemon's whole environment, an editor through it.
+    - `tools\low`, `tools\unity-low` and `tools\shims` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`): a worker
+      cannot add, rename or delete a file in them, so neither a copy nor a DLL beside it can be planted.
+    - Each copy is labelled Low and then made read-only (`readOnlyGrants`: read and run for the account and OWNER RIGHTS,
+      Full for SYSTEM and Administrators). Measured on BEAST from a Low process: the copy runs; a write, an append, a new
+      grant and a new label are refused. Where icacls cannot set that, the log says so and the copy is hashed in full
+      before every run instead.
+    - `LowCopies.check` runs before every sandbox agent (`runSpec`) and every fenced editor start (`editorFence`): the copy
+      still has its source's bytes (SHA-256, about 250 ms for claude.exe; a read-only copy whose stat is unchanged is
+      trusted, since changing a file's change time needs a right it lacks), else it is made again from the source and the
+      log says `WARNING`. A copy that cannot be checked or made again holds the agent (as the fence does) or starts that
+      editor Medium (warn-only, as before the fence).
+    - The probes of a copy (`claude --version`, the editor launcher, the transcript lock, `gh auth status`) run with
+      `bareEnv` (`machine/maxEventsFence.ts`), none of the daemon's tokens; gh gets only its login folder. A probe that
+      fails bare is tried once with the daemon's environment and logged as a `WARNING`, so no machine loses its fence to
+      this change.
+    - A junction is made again unless it leads to its Unity (`junctionLeadsTo`).
+    - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to `<root>\tools\shims`,
+      not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included.
 - A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).
