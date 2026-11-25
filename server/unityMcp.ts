@@ -1,7 +1,6 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
-import { normProject } from './unityHang.ts';
+import { mcpStatusDirs, normProject } from './unityHang.ts';
 
 // ---------------------------------------------------------------- one editor per sandbox
 
@@ -23,7 +22,8 @@ export interface StatusFile {
 }
 
 /** The editors' status files in `dir` (~/.unity-mcp): read once per poll for every sandbox. */
-export function readStatusFiles(dir = path.join(os.homedir(), '.unity-mcp')): StatusFile[] {
+export function readStatusFiles(dir: string | string[] = mcpStatusDirs()): StatusFile[] {
+  if (Array.isArray(dir)) return dir.flatMap((d) => readStatusFiles(d));
   let names: string[] = [];
   try {
     names = fs.readdirSync(dir).filter((n) => /^unity-mcp-status-[\w-]+\.json$/.test(n));

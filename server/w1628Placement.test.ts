@@ -111,7 +111,7 @@ test('w1628: the daemon reports the timed legs in its queue, running or waiting,
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1628-q-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   assert.equal(readBenchQueue(root), undefined, 'no queue');
-  const q = path.join(root, 'tmp', 'bench.queue');
+  const q = path.join(root, 'daemon', 'bench.queue');
   const put = (name: string, mode: string, what: string, pid: number, extra: Record<string, string> = {}) => {
     fs.mkdirSync(path.join(q, name), { recursive: true });
     fs.writeFileSync(path.join(q, name, 'info.json'), JSON.stringify({ mode, what, pid }));

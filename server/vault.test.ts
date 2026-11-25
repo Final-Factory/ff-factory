@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NIGHTLY_SENTRY, PoolHeldError, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
+import { NIGHTLY_SENTRY, PoolHeldError, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, takeOpenedKey, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
 import { SECRET_ENV, addSecretValues, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
 import { GH_LOGIN_HELPER, GITHUB_HELPER, ghLoginCredentialEnv, githubCredentialEnv } from './launch.ts';
 import { buildAccounts, tokenKey } from './usage.ts';
@@ -656,4 +656,35 @@ test('w5430: ghLoginCredentialEnv clears github.com helpers and asks gh, after t
   });
   assert.equal(GH_LOGIN_HELPER, '!gh auth git-credential');
   assert.equal(ghLoginCredentialEnv({}).GIT_CONFIG_COUNT, '2');
+});
+
+test("w5506: the key systemd opened (OpenFile=) is read from its descriptor, closed, and its variables leave the environment", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-fd-'));
+  const file = path.join(dir, 'vault.key');
+  fs.writeFileSync(file, newKeyText(), { mode: 0o600 });
+  const real = fs.openSync(file, 'r');
+  const closed: number[] = [];
+  // fd 4 (the second name) stands for the real descriptor.
+  const fsx = {
+    fstatSync: (fd: number) => fs.fstatSync(fd === 4 ? real : -1),
+    readFileSync: (fd: number, enc: 'utf8') => fs.readFileSync(fd === 4 ? real : -1, enc),
+    closeSync: (fd: number) => closed.push(fd),
+  } as unknown as Parameters<typeof takeOpenedKey>[1] extends infer O ? NonNullable<O extends { fsx?: infer F } ? F : never> : never;
+  const env: NodeJS.ProcessEnv = { LISTEN_FDS: '2', LISTEN_PID: '77', LISTEN_FDNAMES: 'other:fff-vault-key', LISTEN_PIDFDID: '9', KEEP: '1' };
+  const got = takeOpenedKey(env, { pid: 77, platform: 'linux', fsx });
+  assert.equal(got?.key?.length, 32);
+  assert.doesNotMatch(got?.file ?? '', /\//, 'names the descriptor, not a path');
+  assert.deepEqual(closed, [4]);
+  assert.deepEqual(env, { KEEP: '1' });
+  // Another process's descriptors, or none named for the key: nothing read, the variables still gone.
+  const other: NodeJS.ProcessEnv = { LISTEN_FDS: '1', LISTEN_PID: '78', LISTEN_FDNAMES: 'fff-vault-key' };
+  assert.equal(takeOpenedKey(other, { pid: 77, platform: 'linux', fsx }), undefined);
+  assert.deepEqual(other, {});
+  assert.equal(takeOpenedKey({}, { pid: 77, platform: 'linux', fsx }), undefined);
+  if (process.platform !== 'win32') {
+    fs.chmodSync(file, 0o644);
+    assert.match(takeOpenedKey({ LISTEN_FDS: '2', LISTEN_PID: '77', LISTEN_FDNAMES: 'x:fff-vault-key' }, { pid: 77, platform: 'linux', fsx })?.why ?? '', /readable by other users/);
+  }
+  fs.closeSync(real);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

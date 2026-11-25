@@ -9,6 +9,7 @@ import type { VoiceEnginePref } from '../../../shared/voice';
 import { Modal } from './ui';
 import { versionLabel } from '../util';
 import { VaultSettings } from './Vault';
+import { DeviceSettings } from './Devices';
 import { useProduct } from '../brand';
 
 /** This device's settings: notifications and voice input. */
@@ -91,6 +92,7 @@ export function SettingsModal({ app, onClose }: { app?: AppVersion; onClose: () 
         <VoiceSettings />
         <PoolSettings />
         <VaultSettings />
+        <DeviceSettings />
         {app && (
           <div className="field about" data-testid="about-version">
             <span>About</span>

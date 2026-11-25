@@ -23,7 +23,13 @@ ExecCondition=/bin/sh -c '! test -e /run/fff/portal.hold'
 ExecStartPre=+/usr/local/lib/fff/fff-update activate
 # As root, never failing the start: the orchestration worker's Claude Code is this release's Agent SDK's (w597).
 ExecStartPre=-+/usr/local/lib/fff/fff-ops-sync
-ExecStart=/usr/bin/node server/index.ts
+# As root, never failing the start (w5506): node, copied execute-only (0111, root's) for this service alone. A process that
+# runs a binary it may not read is not dumpable, so its /proc/<pid>/environ, mem and fd are root's: no other process of
+# the fff account, an agent's tool included, reads the portal's memory or the vault key in it. The copy follows apt's node
+# at every start; without one the start fails below, never runs a readable node.
+ExecStartPre=-+/bin/sh -c 'cmp -s /usr/bin/node /usr/local/lib/fff/node-portal || { install -o root -g root -m 0111 /usr/bin/node /usr/local/lib/fff/node-portal.new && mv -f /usr/local/lib/fff/node-portal.new /usr/local/lib/fff/node-portal; }'
+# --disable-sigusr1: a SIGUSR1, which any fff process may send, would open the inspector to the portal's memory.
+ExecStart=/usr/local/lib/fff/node-portal --disable-sigusr1 server/index.ts
 Restart=always
 RestartSec=3
 # Covers an update built at start (one a crash cut off) and the server's own startup.
@@ -33,11 +39,11 @@ TimeoutStartSec=20min
 KillMode=mixed
 TimeoutStopSec=75
 LimitNOFILE=65536
-# The token vault's key (docs/vault.md, w512): root's file, handed to this service alone while it runs
-# ($CREDENTIALS_DIRECTORY/fff-vault-key). install.sh makes the key before it installs this unit. No empty
-# SetCredential=fff-vault-key: default: systemd (255) rejects an empty value ("Invalid syntax, ignoring", w4500), so it
-# never applied; without the key the portal does not start (243/CREDENTIALS), as it always did.
-LoadCredential=fff-vault-key:/etc/fff/vault.key
+# The token vault's key (docs/vault.md, w512): root's file, opened by systemd and handed to the server as a descriptor
+# (OpenFile=, systemd 253+), which it reads and closes before it starts anything (server/vault.ts takeOpenedKey). Unlike
+# LoadCredential= (before w5506), nothing on disk holds the key for the fff account to read. install.sh makes the key
+# before it installs this unit; without it the portal does not start, as it never did.
+OpenFile=/etc/fff/vault.key:fff-vault-key:read-only
 NoNewPrivileges=yes
 ProtectSystem=full
 ProtectKernelTunables=yes
