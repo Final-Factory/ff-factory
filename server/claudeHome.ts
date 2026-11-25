@@ -97,6 +97,33 @@ export function loginClaudeEnv<E extends Env>(env: E): E {
   return env[LEGACY_VAR] && env.CLAUDE_CONFIG_DIR === env[WORKER_VAR] ? legacyEnv(env) : env;
 }
 
+/**
+ * w5559 (lothsahn: "workers can't read BEAST's old Claude login folder"): what never reaches an agent's environment. The
+ * legacy folder holds the machine's own claude.ai login (.credentials.json on Windows and Linux), and a worker runs on its
+ * vault token, never on that login (server/secrets.ts machineRunEnv), so only the daemon and its readers keep the path.
+ */
+export const LOGIN_PATH_VARS = [LEGACY_VAR] as const;
+
+/** `env` without a path to the machine's own Claude login (LOGIN_PATH_VARS), for an agent's process. */
+export function withoutLoginPaths<E extends Env>(env: E): E {
+  const out = { ...env };
+  for (const k of LOGIN_PATH_VARS) delete out[k];
+  return out;
+}
+
+/**
+ * The files that hold a claude.ai login a worker could read (w5559): `.credentials.json` in the person's ~/.claude, in the
+ * legacy folder the daemon left and in the environment's own Claude Code folder, whether or not it exists now (Claude Code
+ * writes it at the next login or refresh). The read fences deny each (server/workerFence.ts, machine/writeLock.ts,
+ * machine/lowIntegrity.ts); the folders themselves stay readable, since skills read other files there by fixed path
+ * (`~/.claude/final-factory-agents-checkout`, `~/.claude/plugins/cache/...`). macOS keeps its login in the Keychain instead.
+ */
+export function claudeLoginFiles(env: Env, home: string): string[] {
+  const dirs = [path.join(home, '.claude'), env[LEGACY_VAR], env.CLAUDE_CONFIG_DIR].filter((x): x is string => !!x);
+  const files = dirs.map((d) => path.join(d, '.credentials.json'));
+  return files.filter((f, i) => files.findIndex((x) => path.resolve(x) === path.resolve(f)) === i);
+}
+
 /** The folder whose plugins a reader on the daemon uses (FF_SKILLS, the evidence gate): the agents' one while the worker folder has none. */
 export function pluginClaudeEnv<E extends Env>(env: E, ready: (dir: string | undefined) => boolean = pluginsReady): E {
   return env[LEGACY_VAR] && env.CLAUDE_CONFIG_DIR === env[WORKER_VAR] && !ready(env.CLAUDE_CONFIG_DIR) ? legacyEnv(env) : env;
