@@ -128,7 +128,7 @@ test('w5563: sessionIdOf reads the conversation a claude argv runs', () => {
   assert.equal(sessionIdOf(['--verbose']), undefined);
 });
 
-test("w5563: the profile takes the Claude home's transcripts back after the root, but this conversation's own, and before the read-only folders", () => {
+test("w5563: the profile takes the Claude home's transcripts back after the root's open folders (w5569), but this conversation's own, and before the read-only folders", () => {
   const sid = '4476260e-3192-4e62-b3ac-23e3de4f85e4';
   const p = seatbeltProfile(F, { projects: '/Users/p/ffw/claude/projects', sid });
   const at = (s: string) => {
@@ -136,7 +136,7 @@ test("w5563: the profile takes the Claude home's transcripts back after the root
     assert.ok(i >= 0, `missing: ${s}`);
     return i;
   };
-  const root = at('(allow file-write* (subpath "/Users/p/ffw"))');
+  const root = at('  (subpath "/Users/p/ffw/claude")');
   const deny = at('(deny file-write* (subpath "/Users/p/ffw/claude/projects"))');
   const own = at(`(allow file-write* (regex #"^/Users/p/ffw/claude/projects/[^/]+/${sid}\\.jsonl$") (regex #"^/Users/p/ffw/claude/projects/[^/]+/${sid}(/|$)"))`);
   assert.ok(root < deny && deny < own && own < at('(subpath "/Users/p/ffw/daemon")'), 'later rules win');
