@@ -616,3 +616,35 @@ test('w1641: the portal logs each update bundle it serves, finished or cut', () 
     'machine beast: the update bundle was cut from byte 6962988 after 7962988 of 18595141 bytes in 312.0 s (3 KB/s)',
   );
 });
+
+test('w5546: the read fence goes to warn, on and off again over the link with nobody at the machine; an older daemon is never sent it; an unknown action is refused, never taken as an unload', async (t) => {
+  const s = await setup(t);
+  await until('online', () => s.mm.canLink('mx'));
+  const marker = path.join(s.appDir, 'read-fence');
+  assert.equal(fs.existsSync(marker), false, 'off by default: no mode file');
+  await s.mm.controlDaemon('mx', 'read-fence-warn');
+  assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'warn');
+  assert.equal(s.exits.length, 0, 'no restart');
+  if (process.platform === 'linux') {
+    // Lockout re-review B4 of #1193: on is refused on Linux, with the reason, and the mode stays as it was.
+    await assert.rejects(s.mm.controlDaemon('mx', 'read-fence-on'), /refused on Linux/);
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'warn');
+  } else {
+    await s.mm.controlDaemon('mx', 'read-fence-on');
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'on');
+  }
+  await s.mm.controlDaemon('mx', 'read-fence-off');
+  assert.equal(fs.existsSync(marker), false, 'off: the file is gone, so runs start with no read rules');
+  // A daemon from before the switch said no readFenceSwitch in its hello: its onControl took any other action as an unload.
+  (s.mm as unknown as { hellos: Map<string, { readFenceSwitch?: boolean }> }).hellos.get('mx')!.readFenceSwitch = undefined;
+  await assert.rejects(s.mm.linkControl('mx', 'read-fence-off'), /no read fence switch|before the read fence switch/);
+  assert.equal(s.launched.length, 0, 'nothing was unloaded');
+  // This daemon's own answer to an action it does not know.
+  const sent: { ok: boolean; error?: string }[] = [];
+  const u = new SelfUpdater({ appDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ffrf-')), portalUrl: () => 'http://127.0.0.1:1', token: 'tok', send: (m) => (sent.push(m as { ok: boolean }), true), exit: () => assert.fail('no exit'), log: () => undefined });
+  await u.onControl({ type: 'daemon_control', id: 'c1', action: 'something-new' as 'restart' });
+  await u.onControl({ type: 'daemon_control', id: 'c2', action: 'read-fence-off' });
+  assert.deepEqual(sent.map((m) => m.ok), [false, false]);
+  assert.match(sent[0].error ?? '', /unknown action something-new/);
+  assert.match(sent[1].error ?? '', /no read fence switch/);
+});

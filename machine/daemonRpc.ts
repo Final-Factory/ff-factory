@@ -32,7 +32,14 @@ export interface RpcInfo {
   benchLock?: string;
 }
 
-export const rpcInfoFile = (appDir: string) => path.join(appDir, 'rpc.json');
+/**
+ * Where rpc.json goes: `<appDir>/rpc/rpc.json`, a folder workers are given back to read under the read fence (w5546). A
+ * folder, not the file, so the daemon's write by rename stays readable to runs that outlive a daemon restart (a Landlock
+ * grant is by inode; on Windows a new file takes its folder's label).
+ */
+export const rpcInfoFile = (appDir: string) => path.join(appDir, 'rpc', 'rpc.json');
+/** w5545's first place for it, still written for agents started by a daemon from before w5546 (their FF_DAEMON_RPC names it). */
+export const legacyRpcInfoFile = (appDir: string) => path.join(appDir, 'rpc.json');
 export const rpcKeyFile = (root: string) => path.join(root, 'secrets', 'daemon-rpc.key');
 
 /** The env names a client reads. */
@@ -95,6 +102,8 @@ export interface DaemonRpcOptions {
   key: Buffer;
   /** Where rpc.json goes (the daemon's folder). */
   infoFile: string;
+  /** The same written here too (w5546: legacyRpcInfoFile), for agents that still name it. */
+  alsoInfoFile?: string;
   handlers: Record<string, RpcHandler>;
   benchLock?: string;
   log?: (line: string) => void;
@@ -124,10 +133,12 @@ export class DaemonRpc {
         const a = server.address();
         this.port = typeof a === 'object' && a ? a.port : 0;
         const info: RpcInfo = { v: 1, port: this.port, pid: process.pid, at: new Date().toISOString(), ...(this.o.benchLock ? { benchLock: this.o.benchLock } : {}) };
-        fs.mkdirSync(path.dirname(this.o.infoFile), { recursive: true });
-        const tmp = `${this.o.infoFile}.${process.pid}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(info, null, 1));
-        fs.renameSync(tmp, this.o.infoFile);
+        for (const f of [this.o.infoFile, ...(this.o.alsoInfoFile ? [this.o.alsoInfoFile] : [])]) {
+          fs.mkdirSync(path.dirname(f), { recursive: true });
+          const tmp = `${f}.${process.pid}.tmp`;
+          fs.writeFileSync(tmp, JSON.stringify(info, null, 1));
+          fs.renameSync(tmp, f);
+        }
         this.o.log?.(`daemon rpc: listening on 127.0.0.1:${this.port} (${this.o.infoFile}), ops ${Object.keys(this.o.handlers).sort().join(', ')}`);
         resolve(this.port);
       });
