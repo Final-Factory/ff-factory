@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import type { FromDaemon, ToDaemon } from '../server/machineProtocol.ts';
 import { addSecretValues, redactSecrets } from '../server/secrets.ts';
 import { STEAM_CHILD } from '../server/claudeHome.ts';
+import { gitFence, isGit } from '../server/safeGit.ts';
 
 export type SteamUploadMsg = Extract<ToDaemon, { type: 'steam_upload' }>;
 type StateMsg = Extract<FromDaemon, { type: 'steam_upload_state' }>;
@@ -49,9 +50,11 @@ export const steamDir = (root: string) => path.join(root, STEAM_CHILD);
 
 let busy = false;
 
-const defaultRun: Runner = (cmd, args, o) =>
-  new Promise((resolve) => {
-    const p = spawn(cmd, args, { env: o.env, cwd: o.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+// The ffbox clone's git goes through server/safeGit.ts (w5541): a worker could have written a config it would read.
+const defaultRun: Runner = async (cmd, args, o) => {
+  const g = isGit(cmd) ? await gitFence(args, { cwd: o.cwd, env: o.env }) : { args, env: o.env };
+  return new Promise((resolve) => {
+    const p = spawn(cmd, g.args, { env: g.env, cwd: o.cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     const take = (b: Buffer) => {
       out += b.toString('utf8');
@@ -69,6 +72,7 @@ const defaultRun: Runner = (cmd, args, o) =>
       resolve({ code: code ?? -1, out });
     });
   });
+};
 
 /** The last lines of a program's output, redacted, for the portal. */
 export const lastLines = (out: string, n = 12) => redactSecrets(out.trim().split(/\r?\n/).slice(-n).join('\n')).slice(-1500);

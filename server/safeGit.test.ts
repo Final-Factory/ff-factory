@@ -44,6 +44,8 @@ const NOT_GIT: Record<string, string> = {
   'machine/timedRunner.ts|e': 'the game player',
   'machine/agentHost.ts|cmd.bin': 'the agent CLI',
   'machine/osJob.ts|cmd': 'launchctl, systemd-run or schtasks',
+  'machine/maxEventsFence.ts|cmd': 'a fence launcher around a shell that appends nothing to the Max events file (maxProbeArgv)',
+  'machine/workerCaps.ts|exe': 'the Windows job-object helper (jobHelper)',
   'machine/osJob.ts|s.node': 'node',
   'machine/fenceProbe.ts|cmd': 'the fence probe (sandbox-exec, landlock)',
   'machine/unity.ts|bin': 'the Unity editor',
