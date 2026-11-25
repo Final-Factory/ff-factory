@@ -4,6 +4,7 @@ import type http from 'node:http';
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import type { UserInfo, UserRole } from '../shared/types.ts';
 import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
+import { clientAddress } from './clientAddress.ts';
 import { FailureTable, LoginTimer, SWEEP_MS, addressKey, addressRefused, quoteForLog, userWaitMs } from './loginThrottle.ts';
 import { Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type DeviceRecord, type DeviceView } from './devices.ts';
 
@@ -311,15 +312,9 @@ export class Auth {
     return typeof this.trustProxyOpt === 'function' ? this.trustProxyOpt() : this.trustProxyOpt;
   }
 
-  /** The client address, taking X-Forwarded-For only from a local reverse proxy (Tailscale serve/funnel). */
+  /** The client address, by the portal's one rule (server/clientAddress.ts, w5535) with this Auth's trustProxy. */
   clientIp(req: http.IncomingMessage) {
-    const direct = req.socket.remoteAddress ?? '?';
-    const local = direct === '127.0.0.1' || direct === '::1' || direct === '::ffff:127.0.0.1';
-    if (this.trustProxy && local) {
-      const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-      if (fwd) return fwd;
-    }
-    return direct;
+    return clientAddress(req, { trustProxy: this.trustProxy }) || '?';
   }
 
   /** Whether the browser reached us over HTTPS (directly or via a local TLS-terminating proxy). */
