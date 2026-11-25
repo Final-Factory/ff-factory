@@ -828,7 +828,7 @@ then "Closing Firefox should be off by default"). Code: `machine/firefox.ts` and
 ## Machine sandboxes
 
 A machine with a `sandbox_root` holds a pool of sandboxes (the portal's own computer included, through its own daemon): each a **git worktree of the
-machine's main clone** (`repo_path`) at `<sandbox_root>/<name>`, on its own branch, with its own `Library` and at
+machine's main clone** (`repo_path`), or with `slot_repos` its own repo borrowing the clone's objects ([Slot repos](#slot-repos-w5614)), at `<sandbox_root>/<name>`, on its own branch, with its own `Library` and at
 most one Unity editor. The folder name is also the Unity project name, so the editor's MCP instance is
 `<name>@<hash>`, which the guard pins its agents to. They are addressed as `<machine>/<name>`, e.g.
 `lothdesktop/sb1`. The daemon does the work (`machine/sandboxes.ts`, `SandboxPool`); the portal keeps the labels
@@ -846,6 +846,7 @@ change applies on the next reconnect; omitted on a redeploy: kept):
 | `max_unity` | Unity editors that may run at once on the machine: every top-level Unity process there counts, sandbox editors, the main clone's or its owner's own, `-batchmode` builds and test runs, peer-run editors, editors scripts start (w469, [unity-lifecycle.md](unity-lifecycle.md#unity-slots-every-editor-counts)); launches other than `unity start` wait in a queue for their slot (`unity-slot run`) | 2 |
 | `disk_warn_gb` | Below this many GB free on the sandbox volume: no new sandboxes, no new sandbox editors, and on a machine whose daemon runs the host guard (a Dev Drive install: lothdesktop's V:, BEAST) no new agent processes either (w1581) | 15 |
 | `disk_critical_gb` | Below this: idle sandbox editors stop, and agents mid-turn in sandboxes are asked to commit, push and end their turn | 10 |
+| `slot_repos` | `new`: new sandboxes are slot repos; `all`: also each free, idle worktree sandbox becomes one in place; `off`: worktrees again for new ones ([Slot repos](#slot-repos-w5614)) | off |
 
 **10 / 15 / 20 GB since w1951** (lothsahn, 2026-10-23: "Let's set 10,15,20 as defaults in code for all new installs.
 For existing machines let them adopt the default but set BEAST to 40GB cleanup"): critical 10, warn 15 and the clean-up
@@ -1093,6 +1094,50 @@ running at the daemon's first look, any age). The daemon logs the command it fou
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
 portal never sends it one: it says the daemon is being redeployed.
+
+### Slot repos (w5614)
+
+Stage 1 of the per-slot isolation design w5544 (report r384, lothsahn). With `slot_repos` set, a sandbox is **its own
+git repository** whose `.git` is a folder, not a worktree pointer. Its `.git/objects/info/alternates` names the main
+clone's `objects` folder, so it borrows every object the clone has and copies none (`git count-objects` reads 0 in a
+new one). A commit, a branch, a stash, a `git config` or a hook in a sandbox writes only into that sandbox's `.git`:
+nothing in the clone (`machine/slotRepo.ts`; the w5614 tests in `server/machineSandboxes.test.ts` check that the
+clone's object count and branches are unchanged after a commit). Setting it: `add_machine` with `slot_repos`; an
+older daemon ignores it and keeps making worktrees.
+
+- **How one is made** (`makeSlotRepo`): `git init --bare` into `.git.new`, one config file written from the clone's
+  (`COPIED_KEYS`: line endings, long paths, the LFS filter, origin's URL, the committer; the branch's upstream),
+  alternates, origin's refs and the branch fetched from the clone, `HEAD` written, then renamed to `.git`. The checkout
+  and Library seed after it are the same as a worktree's. A commit took 0.7 to 1.8 s in a slot repo against 9 to
+  11.5 s in a worktree of the same clone (measured on lothdesktop/slot4, w5614 step 4).
+- **Git LFS reads objects through the alternates** (measured, w5614 step 1): the sandbox's own `.git/lfs` stays empty
+  and the files check out from the clone's LFS store, as the LFS share (A3 in docs/sandbox-disk.md) does for worktrees.
+- **`all` converts a worktree in place** (`convertToSlotRepo`, from `SandboxPool.convertIdle`, at most one every 2
+  minutes): only a `ready` sandbox with no live agent, no editor or batch run, no open project and no activity. Its
+  `HEAD`, `index`, `config.worktree`, the branch and its upstream and `info/exclude` come along, so no file changes
+  and the next editor start imports nothing (measured on slot4, w5614 step 2). The swap is two renames in the
+  sandbox's own folder (`.git` to `.git.worktree`, `.git.new` to `.git`); a restart cut between them is finished by
+  `finishConversion` when the daemon loads its sandboxes. Then the clone's `worktrees/<name>` record is removed, so
+  the branch is free there. The old pointer stays as `.git/worktree-pointer`.
+- **One branch, one sandbox**: git no longer refuses a branch another sandbox holds, since they share no refs, so the
+  pool does (`slotBranchHolder`): `switch_branch` and `create_sandbox` to a branch a slot-repo sandbox holds are
+  refused with "branch X is checked out in sandbox Y". Between two worktrees git still refuses in its own words.
+- **Its branches go into the clone** (`keepSlotBranches`): after a save or a switch away, and before a delete, every
+  branch of the sandbox is fetched into the clone under `refs/sandbox-kept/<sandbox>/*` (forced) and its own branch as
+  `refs/heads/<branch>` (not forced: a clone branch that moved on stays as it is). A delete that cannot keep them is
+  refused ("delete refused: …; nothing was deleted"). A worker placed again in another sandbox finds its branch
+  there: a slot repo's switch to a branch it does not have takes the clone's copy first (`takeStoreBranch`), as every
+  worktree saw one repository's branches before. Its stash stays in its own `.git`, gone with the sandbox.
+- **The clone keeps what slots borrow**: before the first slot repo the daemon sets `gc.pruneExpire=never` on the
+  clone unless someone set a value (`guardStorePrune`), so `git gc` never prunes an object a sandbox's commit points
+  at; unreachable objects go into a cruft pack instead. This touches neither the clone's fetch nor the daemon's own
+  update, the two parts lothsahn's lockout rule covers.
+- **Fetches**: a sandbox's `git fetch` goes to origin itself (its own `remote.origin.url`); `switch_branch` fetches
+  there as before. Objects it fetches land in its own `.git`, and the clone's next fetch makes them shared again.
+- **Going back**: `slot_repos off` stops making them; a slot-repo sandbox is turned back into a worktree by deleting
+  it (its branches are kept in the clone, above) and creating it again.
+- **Not in stage 1**: a sandbox can still write the clone's files and another sandbox's `.git` (no ACL or integrity
+  label yet); stage 2 (w5615) locks the clone down and stage 3 (w5616) the other slots.
 
 ### Git in a worker's checkout runs no program the worker named (w5541)
 
@@ -2231,7 +2276,8 @@ LothDesktop and Beast, not just when BEAST is full").
     sandboxes, since an editor stops only after 2 hours idle. Work lives in files and commits; a worker whose open
     editor state matters keeps its check-in within 30 minutes, as the `wake_me` reply says. Committed work needs no
     push to survive: a machine's sandboxes are worktrees of one repository, so the worker's branch and its commits are
-    in every sandbox there.
+    in every sandbox there; a slot repo keeps its branches in the main clone on a save or a switch away, and another
+    slot repo takes them from there ([Slot repos](#slot-repos-w5614)).
   - **Uncommitted work is saved first** (w656, `server/saveWork.ts`, run by the daemon on `save_work`). A dirty
     worktree whose release is due is committed on the worker's own branch (`git add -A`: changed, deleted and new
     files; ignored ones such as `Library/` stay as they are) with a commit "FF Factory: saved <id>'s uncommitted work

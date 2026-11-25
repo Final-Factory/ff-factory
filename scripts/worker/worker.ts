@@ -2438,9 +2438,15 @@ export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]>
   for (const name of fs.readdirSync(sandboxesDir)) {
     const dir = path.join(sandboxesDir, name);
     if (!fs.existsSync(path.join(dir, '.git'))) continue;
-    const log = await exec('git', ['-C', dir, 'log', '--oneline', '--no-decorate', 'HEAD', '--not', '--remotes', '--']);
+    // A slot repo (w5614, its .git a folder) holds its other branches and its stash itself, not in the kept clone.
+    const slot = fs.statSync(path.join(dir, '.git')).isDirectory();
+    const log = await exec('git', ['-C', dir, 'log', '--oneline', '--no-decorate', ...(slot ? ['HEAD', '--branches'] : ['HEAD']), '--not', '--remotes', '--']);
     const status = await exec('git', ['-C', dir, 'status', '--porcelain=v1', '--untracked-files=normal']);
     const unpushed = log.code === 0 ? log.stdout.split('\n').filter(Boolean) : [`(git log failed: ${log.stderr.trim().slice(0, 200)})`];
+    if (slot) {
+      const stash = await exec('git', ['-C', dir, 'stash', 'list']);
+      if (stash.code === 0) unpushed.push(...stash.stdout.split('\n').filter(Boolean).map((l) => `(stash, in this sandbox only) ${l}`));
+    }
     const dirty = status.code === 0 ? status.stdout.split('\n').filter(Boolean).filter((l) => !/\s(Library|Logs|Temp|obj|Builds|UserSettings)\/?$/.test(l)) : [];
     if (unpushed.length || dirty.length) out.push({ sandbox: name, unpushed, dirty });
   }
