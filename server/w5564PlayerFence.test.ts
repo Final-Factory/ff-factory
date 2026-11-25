@@ -10,8 +10,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fencedPlayer, playerFenceFor, playerLandlockArgs, playerSeatbeltProfile, playerWritable, type PlayerFence } from '../machine/playerFence.ts';
-import { TimedRunner, type RunTicket } from '../machine/timedRunner.ts';
-import { hashVariant, scanBuild } from '../machine/timedRunPack.ts';
+import { buildProblem, layOut, TimedRunner, type RunTicket } from '../machine/timedRunner.ts';
+import { hashVariant, scanBuild, writePiece } from '../machine/timedRunPack.ts';
 import { FF_LANDLOCK } from '../machine/writeLock.ts';
 import { SANDBOX_EXEC } from './workerFence.ts';
 import type { TicketState } from '../machine/benchQueue.ts';
@@ -197,4 +197,27 @@ test('w5564: a fence that cannot run refuses the leg and starts no player', asyn
   assert.equal(r.end.ok, false);
   assert.match(r.end.legs[0].note ?? '', /player fence cannot run here \(Landlock unavailable \(errno 38\)\)/);
   assert.ok(r.logs.some((l) => /never runs unfenced/.test(l)));
+});
+
+test('w5564: the status file the player leaves beside its exe does not fail the next leg\'s build check; any other file does', async (t) => {
+  const d = tmp(t, 'w5564b-');
+  const src = path.join(d, 'src');
+  fs.mkdirSync(path.join(src, 'finalfactory_Data'), { recursive: true });
+  fs.writeFileSync(path.join(src, 'finalfactory.exe'), 'player');
+  fs.writeFileSync(path.join(src, 'finalfactory_Data', 'level0'), 'x'.repeat(100));
+  const files = scanBuild(src);
+  const v = { files, pieces: await hashVariant(src, files) };
+  const cache = path.join(d, 'cache');
+  fs.mkdirSync(cache);
+  for (const p of v.pieces) await writePiece(src, p, path.join(cache, p.sha256));
+  const dir = path.join(d, 'b0');
+  assert.equal(await layOut(v, dir, cache), 'written');
+  // what a leg leaves (LocalMultiplayerAutomationSessionConfig.cs WriteStatusFileResilient): the file and a stray temp copy
+  fs.writeFileSync(path.join(dir, '.ff-local-automation-status.json'), '{"phase":"report-written"}');
+  fs.writeFileSync(path.join(dir, `.ff-local-automation-status.json.tmp${'a'.repeat(32)}`), '{');
+  assert.equal(await buildProblem(v, dir), undefined);
+  assert.equal(await layOut(v, dir, cache), 'kept', 'kept, not laid out again');
+  assert.ok(!fs.existsSync(path.join(dir, '.ff-local-automation-status.json')));
+  fs.writeFileSync(path.join(dir, '.ff-local-automation-status.json.evil'), 'x');
+  assert.match((await buildProblem(v, dir))?.problem ?? '', /is not one of the build's files/);
 });

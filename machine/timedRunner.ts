@@ -322,7 +322,25 @@ const BUILD_MARK = '.timed-build';
  * never from the disk), and nothing else may be in the folder (a planted DLL beside the exe is loaded by it).
  * `bad` is the hash of the first piece that differs, for the caller to drop from the cache.
  */
+/**
+ * w5564: the status file the game's automation writes beside its own exe on every leg (and its temp copies,
+ * LocalMultiplayerAutomationSessionConfig.cs `StatusFileName`, `WriteStatusFileResilient`). It is the player's output, not
+ * the build, and nothing reads it in a timed run; dropped before each check, or every leg after the first is refused.
+ */
+const PLAYER_STATUS = /^\.ff-local-automation-status\.json(\.tmp[0-9a-f]{32})?$/;
+
+export function dropPlayerStatus(dir: string) {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const n of names) if (PLAYER_STATUS.test(n)) fs.rmSync(path.join(dir, n), { force: true });
+}
+
 export async function buildProblem(v: Pick<TimedVariant, 'files' | 'pieces'>, dir: string): Promise<{ problem: string; bad?: string } | undefined> {
+  dropPlayerStatus(dir);
   const want = new Map(v.files.map((f) => [f.path.replace(/\\/g, '/'), f.size]));
   const seen = new Set<string>();
   const walk = (rel: string): string | undefined => {

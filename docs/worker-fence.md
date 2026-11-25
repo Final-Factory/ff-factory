@@ -73,6 +73,9 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   113.1 and 117.1 fps; frame average 8.54/9.13 ms against 8.83/8.53 ms. The spread between rounds of one side (7.6 fps)
   is wider than the gap between the sides (1.9 fps): no cost seen. The save loaded in every leg. A write to `/tmp` (which the
   worker shell itself could write), the home folder, `ffw/tmp`, `ffw/sandboxes/slot1` and another player slot was refused.
+- The player writes `.ff-local-automation-status.json` (and `.tmp<guid>` copies) beside its own exe on every leg. w5574's
+  per-leg check (`buildProblem`) refused any file that is not the build's, so every leg after the first was refused; the
+  runner now drops those status files before the check (`dropPlayerStatus`), and any other extra file is still refused.
 - Pair runs' players are started by workers (`player_slots.py launch`), so they already run inside the worker's fence;
   the daemon starts no pair player (`server/pairRuns.ts` spawns nothing).
 
