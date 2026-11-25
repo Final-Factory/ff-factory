@@ -224,6 +224,16 @@ Limits:
   `GH_TOKEN`, instead of running the shim again without end.
 - **Windows, BEAST**: its `daemon` and `secrets` are junctions into `C:\ffw-anchor`, which the fence does not touch, so they
   stay readable there until a person decides otherwise.
+- **The machine's own Claude login** (w5559, lothsahn: "fenced workers can't read the machine's own Claude login anywhere,
+  and keep LothDesktop's C: off limits"): its `.credentials.json` files (`~/.claude`, the legacy folder, the Medium agents'
+  folder; `server/claudeHome.ts` `fencedLoginFiles`) are closed with the secrets, through the daemon's `secretsDirs`, so all
+  three fences and the read probe take them. Only the files, never the folder: skills in fenced workers read other files in
+  `~/.claude` by fixed path (publish-skills' `final-factory-agents-checkout`, `plugins/cache/...`), and on BEAST a Low
+  worker's `~/.claude` is the legacy folder itself. The workers' own Claude folder is left out: runs start on their vault
+  token and hold no machine login there. On Windows a login on the system drive is labelled only on the machines in
+  `machine/readFence.ts` `LOGIN_LABEL_ON_SYSTEM_DRIVE` (BEAST, whose request allows that one label); elsewhere it is left out
+  of the labels and the probe and logged at start. In `on` mode the daemon checks the login files' labels every minute and
+  sets a missing one again, since a token refresh by a Medium reader (the usage probe) may write the file anew.
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
   is what holds for every process the worker starts.
 
