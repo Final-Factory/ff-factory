@@ -14,6 +14,8 @@
 #   own fff cannot write, only --x on $FFF_ROOT by an ACL, a clean environment without NODE_ENV), whose leftover processes
 #   are ended before harden; with an unfit build account the release is built as fff, as before, and the journal and the
 #   dispatcher are told, and fff's leftover writer is refused.
+#   root's clone and the release stay readable by fff (its update bundles) when activate runs under umask 077, and init
+#   mends objects an earlier run under it left unreadable (w5593).
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
 here=$(pwd)
@@ -219,11 +221,37 @@ upd prepare origin/main >/dev/null 2>"$T/s3.log" || { cat "$T/s3.log"; fail "a b
 [ -z "$(problem "$(r "$S3")" "$S3")" ] || fail "the rebuilt release is not fit: $(problem "$(r "$S3")" "$S3")"
 ok "the build account's leftover writer is ended, and the release builds"
 
-# ---- 7. An unfit build account (w5523): the release is built as fff, as before, the update goes on, and the journal
-# and the dispatcher are told; fff's leftover writer is then refused by harden_release, as before.
+# ---- 7. Root's clone stays readable by fff whatever umask root runs under (w5593). activate runs inside fff-portal.service
+# (UMask=0077, kept by its "+" ExecStartPre); its own build of origin/main fetched objects only root could read, and every
+# machine's update bundle (server/machineLink.ts: fff's git bundle create) failed with "Permission denied".
+unreadable() { find "$REPO" ! -perm -o=r -print -quit; }
+bundles() { as_u git -C "$1" bundle create --quiet "$R/home/u.bundle" HEAD 2>"$T/bundle.log"; }
 gs commit -q --allow-empty -m s4
 S4=$(gs rev-parse HEAD)
-git -C "$T/src" push -q "$T/src.git" main
+git -C "$T/src" push -q "$T/src.git" "$S4:refs/heads/main"
+as_u touch "$R/data/update.request"
+(umask 077 && upd activate) 2>"$T/act-umask.log" || { cat "$T/act-umask.log"; fail "activate under umask 077 failed"; }
+[ "$(readlink -e "$CURRENT")" = "$(r "$S4")" ] || { cat "$T/act-umask.log"; fail "activate under umask 077 did not build and switch to S4"; }
+[ -z "$(unreadable)" ] || fail "activate under umask 077 left $(unreadable) unreadable by fff"
+bundles "$(r "$S4")" || { cat "$T/bundle.log"; fail "fff's git could not bundle the release activate built under umask 077"; }
+[ -z "$(find "$(r "$S4")" ! -perm -o=r -print -quit)" ] || fail "the release built under umask 077 is not readable by fff"
+ok "activate under the portal unit's umask 077 leaves root's clone and the release readable: fff's git bundles it"
+# What a run under umask 077 wrote before this fix (objects 0400 in folders 0700) is mended by the next update's init.
+o=$(git -C "$REPO" rev-parse "$S4^{tree}")
+f=$(find "$REPO/objects" -type f -name "${o:2}" -print -quit)
+[ -n "$f" ] || f=$(find "$REPO/objects/pack" -type f -name '*.pack' -print -quit)
+chmod 0400 "$f"
+chmod 0700 "$(dirname "$f")"
+bundles "$(r "$S4")" && fail "the test's broken object did not break fff's bundle"
+upd init origin/main 2>"$T/init-mend.log" || { cat "$T/init-mend.log"; fail "init failed"; }
+[ -z "$(unreadable)" ] || fail "init left $(unreadable) unreadable by fff"
+bundles "$(r "$S4")" || { cat "$T/bundle.log"; fail "after init, fff's git still cannot bundle the release"; }
+ok "init (each update's system setup runs it) mends objects and folders root wrote under umask 077"
+# ---- 8. An unfit build account (w5523): the release is built as fff, as before, the update goes on, and the journal
+# and the dispatcher are told; fff's leftover writer is then refused by harden_release, as before.
+gs commit -q --allow-empty -m s5
+S5=$(gs rev-parse HEAD)
+git -C "$T/src" push -q "$T/src.git" "$S5:refs/heads/main"
 sed -i "s|^FFF_BUILD_USER=.*|FFF_BUILD_USER=root|" "$T/fff.conf"
 echo holdfd >"$T/evil"
 if upd prepare origin/main >/dev/null 2>"$T/fb1.log"; then fail "fff's build with a leftover writer was marked ready"; fi
@@ -232,8 +260,8 @@ pkill -u "$U" sleep 2>/dev/null || true
 : >"$T/evil"
 upd prepare origin/main >/dev/null 2>"$T/fb.log" || { cat "$T/fb.log"; fail "the build as fff, with an unfit build account, failed"; }
 matches -F 'SECURITY: the build account root is not fit' "$T/fb.log" || { cat "$T/fb.log"; fail "the fall back to fff was not said"; }
-matches -F "web build as $U" "$T/fb.log" || { cat "$T/fb.log"; fail "with an unfit build account, S4 was not built as $U"; }
+matches -F "web build as $U" "$T/fb.log" || { cat "$T/fb.log"; fail "with an unfit build account, S5 was not built as $U"; }
 grep -lF 'SECURITY (w5523)' "$R"/data/orchestrator-inbox/*.txt >/dev/null 2>&1 || fail "the dispatcher was not told of the fall back to fff"
-[ -z "$(problem "$(r "$S4")" "$S4")" ] || fail "the release built as fff is not fit: $(problem "$(r "$S4")" "$S4")"
+[ -z "$(problem "$(r "$S5")" "$S5")" ] || fail "the release built as fff is not fit: $(problem "$(r "$S5")" "$S5")"
 ok "an unfit build account: the release is built as fff, made root's, and the fall back is said to the journal and the dispatcher"
 echo "fff-update.test.sh: all passed"

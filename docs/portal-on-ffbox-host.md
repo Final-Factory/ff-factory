@@ -547,6 +547,12 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
   read-only release folders"). `activate` runs as root, so it trusts nothing `fff` can write:
   - `/srv/fff` is `root:fff 1770` (sticky: `fff` cannot rename `app/`), `app/`, `app/releases/` and `app/repo.git` are
     `root:root 0755`. `fff` reads them through `safe.directory` entries in its git config.
+  - **Readable by `fff`, whatever umask root runs under** (w5593): `fff`'s git reads `repo.git`'s objects to make the
+    bundle every machine updates from (`server/machineLink.ts`). `activate` runs in `fff-portal.service`, whose
+    `UMask=0077` its `+` `ExecStartPre` keeps, so `fff-update` sets `umask 022` itself, and `ensure_repo` runs
+    `chmod -R go-w,a+rX` on the clone at every `prepare` and `init`, which mends objects an earlier run left `0400` in
+    `0700` folders. Without it (2026-11-25, 06:03Z) one `activate` build wrote such objects and every daemon's rollout
+    failed with `git bundle failed (128): error: unable to open loose object ...: Permission denied`.
   - After `npm` (as `fffbuild`) the release is handed to root: `chown -R root:root`, `chmod -R go-w`, setuid bits cleared,
     tracked files rewritten (`git checkout-index -af`) and no process may still hold a writable file or shared map in it
     (`writers_in`, from `/proc`). A `.ready` file names the commit.
