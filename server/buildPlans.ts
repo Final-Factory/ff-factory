@@ -182,6 +182,12 @@ export class BuildPlans {
     return [...this.plans.values()];
   }
 
+  /** Whether this worker builds on that computer now: its plan has started (w5551: steam_upload uploads only then). */
+  building(machineId: string, sessionId: string): boolean {
+    const p = this.plan(machineId);
+    return !!p?.startedAt && this.isBuilder(p, sessionId);
+  }
+
   private isBuilder(p: BuildPlan, sessionId: string): boolean {
     if (p.builder === sessionId) return true;
     return p.requests.length > 0 && this.d.openRequestsOf(sessionId).some((w) => p.requests.includes(w.id));

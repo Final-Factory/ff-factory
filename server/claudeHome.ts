@@ -49,8 +49,19 @@ export const MEDIUM_CLAUDE_CHILD = 'claude-medium';
 export const mediumClaudeDir = (root: string) => path.join(root, MEDIUM_CLAUDE_CHILD);
 /** The root child that holds the daemon's and Medium agents' tool caches (w5565: their uv cache, machine/sharedCaches.ts). */
 export const MEDIUM_CACHE_CHILD = 'cache-medium';
+/**
+ * The root child that holds steamcmd, its config and its cached login, and FFBox's release scripts the daemon runs
+ * (w5551, machine/steamUpload.ts): the daemon's alone; a worker uploads a release only through steam_upload.
+ */
+export const STEAM_CHILD = 'steam';
 /** The root's children only Medium writes: kept Medium on Windows, read-only under the Landlock and Seatbelt fences. */
 export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD] as const;
+/**
+ * Root children only the daemon writes, read-only under the Landlock and Seatbelt fences (writeLock.ts LOCKED_CHILDREN,
+ * workerFence.ts READ_ONLY_IN_ROOT). On Windows they are no worker child (lowIntegrity.ts WORKER_CHILDREN), so a rollout
+ * that labelled one Low relabels it Medium.
+ */
+export const DAEMON_ONLY_CHILDREN = [STEAM_CHILD] as const;
 
 /** Whether a worker root's agents move to <root>/claude: CLAUDE_CONFIG_DIR not set already (an instance's own) and no off switch. */
 export function movesClaudeHome(env: Env): boolean {

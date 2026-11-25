@@ -300,3 +300,9 @@ jobs:
             range="$AFTER"
           fi
           node scripts/check-identity.ts "$range"
+      - name: npm audit, production dependencies of the server and web (high and critical fail)
+        # w5519 (finding 13 of the w5452 security audit). Runs `npm audit --omit=dev --audit-level=high` in . and web from
+        # the lockfiles (no install). An advisory with no fix yet is allowed only by one entry in .github/npm-audit-allow.json,
+        # with a reason and an end date (docs/ci.md, "npm audit"). On a push to main too, so a new advisory shows on main.
+        if: ${{ !cancelled() }}
+        run: node scripts/audit-gate.ts
