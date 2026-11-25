@@ -112,8 +112,10 @@ run_cmd passwd -l "$FFF_USER" >/dev/null
 run_cmd install -d -m 1770 -o root -g "$FFF_USER" "$FFF_ROOT"
 run_cmd chown "root:$FFF_USER" "$FFF_ROOT"
 run_cmd chmod 1770 "$FFF_ROOT"
+# fff's own folders: fff can swap any of them for a symbolic link, so fff_dir (lib.sh, w5531) refuses one and never
+# follows it, where install -d -o would have given the link's target to fff.
 for d in /home /config /data /agents /review /sandboxes /secrets; do
-  run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT$d"
+  fff_dir "$FFF_ROOT$d"
 done
 run_cmd install -d -m 0755 -o root -g root "$FFF_ROOT/app"
 run_cmd install -d -m 0700 -o root -g root "$FFF_ROOT/backup"
@@ -140,11 +142,11 @@ if [ ! -f "$BACKUP_SSH_KEY" ]; then
 fi
 if [ ! -f "$FFF_ROOT/home/.ssh/id_ed25519" ]; then
   # The portal's own key for deploying machine daemons (docs, 4.3): authorize its .pub with from= on each machine.
-  run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/home/.ssh"
+  fff_dir "$FFF_ROOT/home/.ssh"
   [ "$DRY_RUN" = 1 ] || as_fff ssh-keygen -q -t ed25519 -N '' -C "fff-portal@$(hostname -s)" -f "$FFF_ROOT/home/.ssh/id_ed25519"
 fi
 # The server reads Max's Discord token from here (server/discordConfig.ts): the portal's own copy, never FFBox's.
-run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT/home/.config" "$FFF_ROOT/home/.config/ffbox"
+fff_dir "$FFF_ROOT/home/.config" "$FFF_ROOT/home/.config/ffbox"
 
 log "5/10 the VM's own firewall (table inet fff_guest)"
 host_rule=""
@@ -222,7 +224,8 @@ log "8/10 config.json"
 if [ -f "$FFF_ROOT/config/config.json" ]; then
   log "kept: $FFF_ROOT/config/config.json"
 else
-  write_file "$FFF_ROOT/config/config.json" 0600 "$FFF_USER:$FFF_USER" <"$here/config.vm.example.json" >/dev/null
+  # Written by fff (fff_write, w5531): a link fff left at the name would have led root's write elsewhere.
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would write $FFF_ROOT/config/config.json"; else fff_write "$FFF_ROOT/config/config.json" <"$here/config.vm.example.json"; fi
   log "written from config.vm.example.json; set ownerName (docs, 'Installing')"
 fi
 url_changed=0
