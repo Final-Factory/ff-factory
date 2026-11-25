@@ -1490,7 +1490,7 @@ export class Daemon {
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
     // Agents run it against the worker install's uv cache, which nothing else fills (w5377).
-    if (mcp.server && this.cfg.root) void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(this.cfg.root), runQuietEnv).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache failed: ${(e as Error).message}`));
+    if (mcp.server && this.cfg.root) void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(this.cfg.root), runQuietEnv, {}, 'agents', { root: this.cfg.root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache failed: ${(e as Error).message}`));
     this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
     this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
@@ -2948,7 +2948,7 @@ export class Daemon {
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
       if (mcp.server) {
         const { APPDATA, LOCALAPPDATA } = lowEnv(root, undefined, 'PATH', undefined);
-        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents').then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
+        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
       this.timers.push(setInterval(() => {

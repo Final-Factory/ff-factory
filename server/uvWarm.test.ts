@@ -45,3 +45,18 @@ test('the warm for Low agents runs under its own APPDATA and LOCALAPPDATA and sa
   const fail = async () => ({ error: 'no network' });
   assert.match(await warmUvCache(UVX.command, uvWarmRuns(UVX), 'F:/ffw/cache/uv', fail, low, 'Low agents') ?? '', /with its package for Low agents, so Low agents here get no Unity MCP bridge: no network/);
 });
+
+test('w5542: the daemon never warms a uvx or a package a worker planted in the root, and a Low run reads no uv config', async () => {
+  const ran: { bin: string; env: NodeJS.ProcessEnv }[] = [];
+  const fake = async (bin: string, _args: string[], env: NodeJS.ProcessEnv) => { ran.push({ bin, env }); return {}; };
+  const trust = { root: 'V:/ffw', appDir: 'V:/ffw/daemon' };
+  const planted = { command: 'V:/ffw/claude/uvx.exe', args: UVX.args };
+  assert.match(await warmUvCache(planted.command, uvWarmRuns(planted), 'V:/ffw/cache/uv', fake, {}, 'agents', trust) ?? '', /V:\/ffw\/claude\/uvx.exe is in a folder workers can write/);
+  const pkg = { command: UVX.command, args: ['--offline', '--from', 'file:///V:/ffw/sandboxes/slot1/evil', 'mcp-for-unity'] };
+  assert.match(await warmUvCache(pkg.command, uvWarmRuns(pkg), 'V:/ffw/cache/uv', fake, {}, 'agents', trust) ?? '', /workers can write/);
+  assert.equal(ran.length, 0);
+  // The daemon's own folder and a uvx outside the root are fine; the Low run's APPDATA is in the root, so no uv.toml is read.
+  await warmUvCache('V:/ffw/daemon/tools/uvx.exe', uvWarmRuns(UVX), 'V:/ffw/cache/uv', fake, {}, 'agents', trust);
+  await warmUvCache(UVX.command, uvWarmRuns(UVX), 'V:/ffw/cache/uv', fake, { APPDATA: 'V:/ffw/low/AppData/Roaming' }, 'Low agents', trust);
+  assert.deepEqual(ran.map((r) => [r.bin, r.env.UV_NO_CONFIG]), [['V:/ffw/daemon/tools/uvx.exe', undefined], [UVX.command, '1']]);
+});
