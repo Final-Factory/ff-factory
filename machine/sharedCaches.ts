@@ -70,16 +70,34 @@ export function applyMediumUvToolDir(env: Record<string, string | undefined>, ro
 }
 
 /**
- * What a sandbox agent's environment adds (w5565): the workers' uv cache in place of the daemon's Medium one; w5693: and
- * the workers' uv tool folder in place of the Medium one, or of uv's default in the person's home (unset), which the
- * fence refuses. One daemon.json names (any other folder) stays.
+ * uv's tool bin folder (UV_TOOL_BIN_DIR, default ~/.local/bin), where `uv tool install` puts a tool's command (w5745).
+ * `uvx` never writes it; a sandbox agent's `uv tool install` did, and every fence refuses the person's home, so workers
+ * get <root>/cache/uv-bin. The daemon and Medium agents keep ~/.local/bin: it is on their PATH, which a folder of their
+ * own would not be, and no worker can write it.
+ */
+export const workerUvToolBinDir = (root: string) => path.join(sharedCacheDir(root), 'uv-bin');
+
+/**
+ * What a sandbox agent's environment adds, and its editor's (w5745: machine/sandboxes.ts realPoolDeps): w5565 the workers'
+ * uv cache in place of the daemon's Medium one; w5693 the workers' uv tool folder; w5745 the workers' uv tool bin folder.
+ * The cache: one daemon.json names (any other folder) stays. The tool and bin folders: only one inside the workers' cache
+ * stays; uv's default in the person's home (unset), the Medium one or any other folder becomes the workers' one, since
+ * workers write only inside the root and every fence refuses the rest. This is the one rule (w5745 (a)): the Seatbelt
+ * fence's env (server/workerFence.ts fenceEnv) no longer sets its own. uv's managed Pythons (UV_PYTHON_INSTALL_DIR) stay
+ * where they are, read-only to workers: docs/worker-root.md 2.8.
  */
 export function sandboxUvEnv(env: Record<string, string | undefined>, root: string | undefined): Record<string, string> {
   if (!root) return {};
   const same = (a: string, b: string) => path.resolve(a) === path.resolve(b);
+  const inCache = (p: string | undefined) => {
+    if (!p) return false;
+    const rel = path.relative(path.resolve(sharedCacheDir(root)), path.resolve(p));
+    return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
   const out: Record<string, string> = {};
   if (env.UV_CACHE_DIR && same(env.UV_CACHE_DIR, mediumUvCacheDir(root))) out.UV_CACHE_DIR = workerUvCacheDir(root);
-  if (!env.UV_TOOL_DIR || same(env.UV_TOOL_DIR, mediumUvToolDir(root))) out.UV_TOOL_DIR = workerUvToolDir(root);
+  if (!inCache(env.UV_TOOL_DIR)) out.UV_TOOL_DIR = workerUvToolDir(root);
+  if (!inCache(env.UV_TOOL_BIN_DIR)) out.UV_TOOL_BIN_DIR = workerUvToolBinDir(root);
   return out;
 }
 /**

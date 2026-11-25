@@ -90,6 +90,10 @@ GUEST_BACKUP_SSH_TARGET=
 VM_DISK_GB=16
 $(if [ "$TIMING" = fast ]; then printf 'WATCH_INTERVAL_SEC=10\nWATCH_FAILS_BEFORE_RESET=2\nWATCH_BOOT_GRACE_SEC=90\n'; fi)
 NIGHTLY_MODE=always
+# The nightly timer half a day from now: the steps run fff-vm nightly --now themselves, and the default 12:00 UTC fired a real
+# nightly in the hang-detection step of a run that crossed noon, a reboot the watch did not make (w5538, run 45605794807).
+NIGHTLY_TIME=$(date -u -d '+12 hours' +%H:%M)
+NIGHTLY_TZ=UTC
 SNAPSHOTS_KEEP=2
 EOF
 if [ "$MODE" = zvol ]; then

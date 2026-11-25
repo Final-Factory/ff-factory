@@ -59,6 +59,24 @@ export function secretsDirs(root: string, tokenFile?: string): string[] {
 }
 
 /**
+ * w5559 (lothsahn: "fenced workers can't read the machine's own Claude login anywhere, and keep LothDesktop's C: off
+ * limits"): the Windows machines whose Claude login on the system drive the read fence labels. BEAST only, whose request
+ * allows the one label on its legacy folder's login (C:\Users\rydin\.claude); every other Windows machine keeps its system
+ * drive untouched (lowIntegrity.ts labelNoReadUp) and its login there is left out and said, for its person to decide.
+ */
+export const LOGIN_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['beast']);
+
+/**
+ * The Claude login files (claudeHome.ts fencedLoginFiles) this machine's read fences close, and those left out: on Windows
+ * a file on the system drive unless the machine is in LOGIN_LABEL_ON_SYSTEM_DRIVE. A left-out file is not probed either,
+ * so the read probe does not count it as a hole the fence was never meant to close.
+ */
+export function loginFenceFiles(files: readonly string[], o: { platform: string; machineId?: string; onSystemDrive: (p: string) => boolean }): { closed: string[]; left: string[] } {
+  if (o.platform !== 'win32' || (o.machineId && LOGIN_LABEL_ON_SYSTEM_DRIVE.has(o.machineId.toLowerCase()))) return { closed: [...files], left: [] };
+  return { closed: files.filter((f) => !o.onSystemDrive(f)), left: files.filter((f) => o.onSystemDrive(f)) };
+}
+
+/**
  * The root children only the daemon reads, closed to workers' reads like the secrets (w5639): `<root>/steam` (w5551), which
  * holds steamcmd and its cached Steam login, the upload config, the daemon's ffbox clone and uploads.json. The daemon runs
  * steamcmd and the uploads itself, unfenced (machine/steamUpload.ts), so the fence never stands in their way.
@@ -104,8 +122,9 @@ function filesIn(dir: string): string[] {
  * What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only.
  * `linux` (default: this machine is Linux) swaps each closed folder for the files inside it (filesIn), since Landlock cannot
  * refuse a closed folder's own open; a closed folder with no files is then not probed.
+ * `owner`: the owner-secret paths closed with them (w5747).
  */
-export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean }): { closed: string[]; open: string[] } {
+export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean; owner?: readonly string[] }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
   const linux = o.linux ?? process.platform === 'linux';
   const closed = [
@@ -115,6 +134,8 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
     path.join(o.root, 'root.json'),
     path.join(o.appDir, 'daemon.json'),
     path.join(o.appDir, 'gh-app', 'tokens.json'),
+    // w5747: the owner's secrets (ownerSecrets.ts ownerReadDenied), so a probe that passes has run the rules on mode adds.
+    ...(o.owner ?? []),
   ];
   const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
   const uniq = (l: string[]) => [...new Set(l)].filter(exists);
@@ -128,6 +149,27 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
  */
 export const READ_PROBE_SCRIPT =
   "const fs=require('fs');process.argv.slice(1).forEach((p,i)=>{try{fs.closeSync(fs.openSync(p,'r'));console.log(i+' ok')}catch(e){console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))}})";
+
+/**
+ * The owner-socket probe's program (w5748): connects to each UNIX socket and closes at once, sending nothing and reading
+ * nothing, and prints `abi <n>` (ff-landlock.py's FF_LANDLOCK_ABI) then `<i> ok|refused|<code>` per socket. A connect
+ * still pending after 5 s prints `timeout`.
+ */
+export const SOCKET_PROBE_SCRIPT =
+  "const net=require('net');console.log('abi '+(process.env.FF_LANDLOCK_ABI||'?'));process.argv.slice(1).forEach((p,i)=>{const s=net.createConnection({path:p});const t=setTimeout(()=>{console.log(i+' timeout');s.destroy()},5000);s.on('connect',()=>{clearTimeout(t);console.log(i+' ok');s.destroy()});s.on('error',(e)=>{clearTimeout(t);console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))})})";
+
+/**
+ * One log line for the owner-socket probe (w5748), and the sockets it found reachable: on Linux `on` waits for none
+ * (docs/worker-fence.md, "The Secret Service and the agents").
+ */
+export function sayOwnerSocketProbe(mode: ReadFenceMode, socks: readonly string[], stdout: string): { line: string; open: string[] } {
+  const abi = /^abi (\S+)$/m.exec(stdout)?.[1] ?? '?';
+  const v = judgeReadProbe({ closed: socks, open: [] }, stdout);
+  const open = [...v.leftOpen, ...v.unknown];
+  if (!socks.length) return { line: `read fence (${mode}, linux) owner sockets: none found to probe (Landlock ABI ${abi})`, open };
+  const why = open.length ? `; reachable from a fenced run: ${open.join(', ')}${Number(abi) < 9 ? ` (Landlock ABI ${abi}: refusing a socket's connect needs ABI 9, Linux 7.1), so the Secret Service and the agents stay open to workers here` : ''}` : '';
+  return { line: `read fence (${mode}, linux) owner sockets: ${socks.length - open.length}/${socks.length} refused (Landlock ABI ${abi})${why}`, open };
+}
 
 export interface ReadProbeVerdict {
   /** Paths workers need that the fence refused: a lockout if enforced. */

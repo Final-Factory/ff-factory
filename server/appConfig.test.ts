@@ -11,6 +11,7 @@ import { autoCompactSettings } from './autoCompact.ts';
 import { attachmentSettings } from './attachments.ts';
 import { machineActivityPause, privacyGuardsOn, type Config } from './config.ts';
 import { FILINGS_PER_MESSAGE, timerFilings } from './orchestrators.ts';
+import { checkMachineLink, machineLinkMode, resetMachineLinkWarnings } from './machineLinkGate.ts';
 
 const setup = (t: { after: (fn: () => void) => void }) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'appcfg-'));
@@ -591,4 +592,24 @@ test('set_app_config (w17): privacyGuards is an owner-only switch, applied live,
   assert.equal(cfg.privacyGuards, undefined);
   assert.equal(privacyGuardsOn(finalFactory), false);
   assert.throws(() => setAppConfig(file, cfg, 'privacyGuards', 'yes'), /privacyGuards is true/);
+});
+
+test('w5575: the recovery switch: set_app_config machineLinkTailnet "off" lets a refused daemon in at once, is written down, and a typo is refused', (t) => {
+  const { file, cfg } = setup(t);
+  // What index.ts reads on every /machine request: machineLinkMode(cfg.machineLinkTailnet).
+  const outside = { socket: { remoteAddress: '10.1.0.154' }, headers: {} } as never;
+  const gate = () => checkMachineLink(outside, machineLinkMode(cfg.machineLinkTailnet), 'link /machine', () => {}).refuse;
+  resetMachineLinkWarnings();
+  assert.equal(gate(), true, 'unset is enforce: a LAN address is refused');
+  setAppConfig(file, cfg, 'machineLinkTailnet', 'off');
+  assert.equal(cfg.machineLinkTailnet, 'off');
+  assert.equal(gate(), false, 'off applies live: the next redial gets in');
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, '')).machineLinkTailnet, 'off', 'and survives a restart');
+  setAppConfig(file, cfg, 'machineLinkTailnet', 'warn');
+  assert.equal(gate(), false, 'warn lets it in too');
+  assert.throws(() => setAppConfig(file, cfg, 'machineLinkTailnet', 'Off'), /machineLinkTailnet is/);
+  assert.equal(cfg.machineLinkTailnet, 'warn', 'a refused value changes nothing');
+  setAppConfig(file, cfg, 'machineLinkTailnet', null);
+  assert.equal(gate(), true, 'null puts back the default, enforce');
+  assert.ok(OWNER_ONLY_KEYS.has('machineLinkTailnet'));
 });
