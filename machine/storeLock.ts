@@ -163,20 +163,31 @@ export function watchStore(gitDir: string, log: (l: string) => void, o: { busy?:
   const busy = o.busy ?? (() => daemonGitBusy());
   const now = o.now ?? Date.now;
   const said = new Map<string, number>();
-  let w: fs.FSWatcher | undefined;
-  try {
-    w = fs.watch(gitDir, { recursive: true, persistent: false }, (_ev, name) => {
-      const rel = typeof name === 'string' ? name : '';
-      if (ignoredStorePath(rel) || busy()) return;
-      const top = rel.replace(/\\/g, '/').split('/').slice(0, 2).join('/');
-      const t = now();
-      if ((said.get(top) ?? -Infinity) > t - 3600_000) return;
-      said.set(top, t);
-      log(`store lock (warn): ${path.join(gitDir, rel)} changed while the daemon ran no git; a worker's write there is refused once the store lock is on (a person's own git in the clone is not)`);
-    });
-    w.on('error', (e) => log(`store lock (warn): the watch on ${gitDir} stopped (${(e as Error).message})`));
-  } catch (e) {
-    log(`store lock (warn): cannot watch ${gitDir} (${(e as Error).message}); writes there are not logged`);
+  const ws: fs.FSWatcher[] = [];
+  // Not one recursive watch of the whole folder (w5764's review): on Linux that is an inotify watch per folder, and the
+  // LFS store (lfs/objects/xx/yy) alone can hold tens of thousands. The folder's own files (config, HEAD, packed-refs),
+  // refs whole, and the top of objects, its pack and info folders, hooks and info: a new loose object shows as its folder.
+  const spots: [string, boolean][] = [['', false], ['refs', true], ['objects', false], ['objects/pack', false], ['objects/info', false], ['hooks', false], ['info', false]];
+  for (const [sub, recursive] of spots) {
+    const dir = sub ? path.join(gitDir, sub) : gitDir;
+    if (sub && !fs.existsSync(dir)) continue;
+    try {
+      const w = fs.watch(dir, { recursive, persistent: false }, (_ev, name) => {
+        const rel = [sub, typeof name === 'string' ? name : ''].filter(Boolean).join('/');
+        if (ignoredStorePath(rel) || busy()) return;
+        const top = rel.replace(/\\/g, '/').split('/').slice(0, 2).join('/');
+        const t = now();
+        if ((said.get(top) ?? -Infinity) > t - 3600_000) return;
+        said.set(top, t);
+        log(`store lock (warn): ${path.join(gitDir, rel)} changed while the daemon ran no git; a worker's write there is refused once the store lock is on (a person's own git in the clone is not)`);
+      });
+      w.on('error', (e) => log(`store lock (warn): the watch on ${dir} stopped (${(e as Error).message})`));
+      ws.push(w);
+    } catch (e) {
+      log(`store lock (warn): cannot watch ${dir} (${(e as Error).message}); writes there are not logged`);
+    }
   }
-  return () => w?.close();
+  return () => {
+    for (const w of ws) w.close();
+  };
 }

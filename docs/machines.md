@@ -1183,6 +1183,8 @@ older daemon ignores it and keeps making worktrees.
   - `warn`: nothing is refused. The daemon watches the clone's git folder and logs each write it did not make itself,
     once per path an hour: "store lock (warn): … changed while the daemon ran no git". At start it also logs whether
     `on` would apply now, or what holds it off.
+    It watches the git folder's own files, `refs` whole and the top of `objects`, `hooks` and `info`, not the whole tree:
+    on Linux a recursive watch costs an inotify watch per folder, and the LFS store alone can hold tens of thousands.
   - `on`: the lock applies only when nothing needs the clone writable: every sandbox a slot repo, no worktree of the
     clone left, and the clone at `<root>/repo`. Otherwise it stays off, says why, and warns as `warn` does.
   - While it holds:
@@ -1190,6 +1192,8 @@ older daemon ignores it and keeps making worktrees.
     - On Windows, the clone's git folder is labelled Medium instead of Low (`lowTargets` `medium`; integrity labels
       only, no ACEs, the w5599 lesson), so a Low worker reads the objects and LFS files and cannot write them.
     - New sandboxes are slot repos whatever `slot_repos` says.
+    - On Windows the daemon reads the label back after labelling and logs "store lock: NOT in force on Windows" when the
+      store does not read Medium.
   - The daemon writes the clone as before, unfenced: the fetch before a new sandbox, kept branches and stash, the
     prune guard.
   - Like the fences, it is decided once per daemon process.

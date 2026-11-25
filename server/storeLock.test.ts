@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { GRACE_MS, STORE_CHILD, daemonGit, daemonGitBusy, decideStoreLock, ignoredStorePath, storeGitFolder, storeLockLine, storeLockSetting, watchStore } from '../machine/storeLock.ts';
 import { isSlotRepo } from '../machine/slotRepo.ts';
-import { lowTargets, labelLow, lowCopy, type Exec } from '../machine/lowIntegrity.ts';
+import { isLabelledLow, isLabelledMedium, lowTargets, labelLow, lowCopy, type Exec } from '../machine/lowIntegrity.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { fenceFor, seatbeltProfile } from './workerFence.ts';
 
@@ -116,10 +116,12 @@ test('the fences: with lockStore, repo leaves the Seatbelt and Landlock write se
   assert.ok(seatbeltProfile(mac(false)).includes(repoRule));
   assert.ok(!seatbeltProfile(mac(true)).includes(repoRule), 'locked: repo is not writable');
   assert.ok(seatbeltProfile(mac(true)).includes(`(subpath "${path.join(root, 'sandboxes')}")`), 'the slots still are');
-  const lin = (lockStore: boolean) => writeLockArgs({ root: '/home/u/ffw', lockStore });
-  assert.ok(lin(false).includes('/home/u/ffw/repo'));
-  assert.ok(!lin(true).includes('/home/u/ffw/repo'));
-  assert.ok(lin(true).includes('/home/u/ffw/sandboxes'));
+  // path.join throughout (w5764's review): the file runs on Windows too.
+  const L = path.resolve('/home/u/ffw');
+  const lin = (lockStore: boolean) => writeLockArgs({ root: L, lockStore });
+  assert.ok(lin(false).includes(path.join(L, 'repo')));
+  assert.ok(!lin(true).includes(path.join(L, 'repo')));
+  assert.ok(lin(true).includes(path.join(L, 'sandboxes')));
   const W = path.resolve('/ffw');
   const kids = ['repo', 'sandboxes', 'tmp'].map((name) => ({ name, dir: true }));
   const open = lowTargets({ root: W, appDir: path.join(W, 'daemon'), children: kids, exists: () => true });
@@ -143,6 +145,7 @@ test('the watch logs a write the daemon did not make, once per path an hour, and
   assert.equal(daemonGitBusy(Date.now() + GRACE_MS + 1), false);
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'w5614w-')));
   fs.mkdirSync(path.join(dir, 'refs', 'heads'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'config'), '');
   const said: string[] = [];
   let busy = true;
   const stop = watchStore(dir, (l) => void said.push(l), { busy: () => busy });
@@ -161,6 +164,10 @@ test('the watch logs a write the daemon did not make, once per path an hour, and
     fs.writeFileSync(path.join(dir, 'refs', 'heads', 'worker2'), 'y');
     await new Promise((r) => setTimeout(r, 300));
     assert.equal(said.length, 1, 'once per path an hour');
+    fs.writeFileSync(path.join(dir, 'config'), '[ff]');
+    await waitFor(2);
+    assert.equal(said.length, 2, said.join('\n'));
+    assert.match(said[1], /config changed/);
   } finally {
     stop();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -201,26 +208,56 @@ const realExec: Exec = async (cmd, args) => {
   return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' } as never;
 };
 
-test('live (Windows): a Low process commits in a Low slot repo, and its writes into the Medium store are refused', { skip: process.platform !== 'win32' && 'needs Windows' }, async () => {
+/**
+ * A Low process: a Low-labelled copy of cmd.exe running one line. windowsVerbatimArguments (w5764's review, measured on
+ * lothdesktop): without it node quotes the line and cmd.exe rejects every one, exit 1 with nothing written, so a
+ * "refused" check passed with no lock at all. Every leg below therefore also proves the same shell writes where it may.
+ */
+const lowShell = (cmd: string) => (line: string) => spawnSync(cmd, ['/d', '/s', '/c', `"${line}"`], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true });
+
+test('live (Windows): a Low process writes its slot repo and is refused in the Medium store; store_lock off labels it Low again and a Low git commit in a worktree of it goes through', { skip: process.platform !== 'win32' && 'needs Windows' }, async () => {
   const r0 = makeRoot({ slots: ['slotA'] });
   try {
-    const t = lowTargets({ root: r0.root, appDir: path.join(r0.root, 'daemon'), children: [STORE_CHILD, 'sandboxes'].map((name) => ({ name, dir: true })), lockStore: true });
-    assert.ok(t.medium.includes(path.join(r0.repo, '.git')));
-    // Label as the daemon does: first the old Low label (the store before the lock), then the lock's, so the relabel is proven.
-    assert.equal(await labelLow({ dirs: [path.join(r0.repo, '.git'), ...t.dirs], files: [] }, realExec, () => {}), true);
-    const said: string[] = [];
-    assert.equal(await labelLow(t, realExec, (l) => void said.push(l)), true, said.join('\n'));
-    const cmd = await lowCopy(r0.base, path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'), realExec, (l) => void said.push(l));
-    assert.ok(cmd, said.join('\n'));
     const g = path.join(r0.repo, '.git');
     const a = r0.sandboxes[0].path;
-    const low = (line: string) => spawnSync(cmd!, ['/d', '/c', line], { encoding: 'utf8', windowsHide: true }).status;
-    assert.equal(low(`echo x> "${path.join(a, 'low.txt')}"`), 0, 'the slot repo is writable at Low');
-    assert.notEqual(low(`echo x> "${path.join(g, 'refs', 'heads', 'evil')}"`), 0);
-    assert.notEqual(low(`echo x>> "${path.join(g, 'config')}"`), 0);
-    assert.notEqual(low(`echo x> "${path.join(g, 'objects', 'evil')}"`), 0);
+    const children = [STORE_CHILD, 'sandboxes'].map((name) => ({ name, dir: true }));
+    const targets = (lockStore: boolean) => lowTargets({ root: r0.root, appDir: path.join(r0.root, 'daemon'), children, lockStore });
+    const label = async (p: string) => (await realExec('icacls', [p])).stdout;
+    const said: string[] = [];
+    // Before the lock: labelled as the daemon did (the store's git folder Low), then the lock's labelling, so the relabel is proven.
+    assert.equal(await labelLow(targets(false), realExec, (l) => void said.push(l)), true, said.join('\n'));
+    assert.ok(isLabelledLow(await label(g)), 'unlocked: the store is Low');
+    const locked = targets(true);
+    assert.ok(locked.medium.includes(g));
+    assert.equal(await labelLow(locked, realExec, (l) => void said.push(l)), true, said.join('\n'));
+    assert.ok(isLabelledMedium(await label(g)), `locked: the store reads Medium\n${await label(g)}`);
+    const cmd = await lowCopy(r0.base, path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'), realExec, (l) => void said.push(l));
+    assert.ok(cmd, said.join('\n'));
+    const low = lowShell(cmd!);
+    const ok = low(`echo x> "${path.join(a, 'low.txt')}"`);
+    assert.equal(ok.status, 0, `the Low shell writes its slot repo: ${ok.stderr}`);
+    assert.ok(fs.existsSync(path.join(a, 'low.txt')), 'and the file is there: the shell really ran the line');
+    const cfgBefore = fs.readFileSync(path.join(g, 'config'), 'utf8');
+    for (const line of [`echo x> "${path.join(g, 'refs', 'heads', 'evil')}"`, `echo x>> "${path.join(g, 'config')}"`, `echo x> "${path.join(g, 'objects', 'evil')}"`]) {
+      assert.notEqual(low(line).status, 0, line);
+    }
     assert.ok(!fs.existsSync(path.join(g, 'refs', 'heads', 'evil')));
     assert.ok(!fs.existsSync(path.join(g, 'objects', 'evil')));
+    assert.equal(fs.readFileSync(path.join(g, 'config'), 'utf8'), cfgBefore);
+
+    // The way back: store_lock off, and the daemon's next labelling turns the store's git folder Low again.
+    assert.equal(await labelLow(targets(false), realExec, (l) => void said.push(l)), true, said.join('\n'));
+    assert.ok(isLabelledLow(await label(g)), `unlocked again: the store is Low\n${await label(g)}`);
+    const back = low(`echo x> "${path.join(g, 'refs', 'heads', 'back')}"`);
+    assert.equal(back.status, 0, `the Low write into the store goes through again: ${back.stderr}`);
+    // A worktree of the store (a sandbox before slot repos) commits at Low: its index, HEAD and refs live in the store.
+    const wt = path.join(r0.root, 'sandboxes', 'wt');
+    git(r0.repo, 'worktree', 'add', '-q', '-b', 'b-wt', wt);
+    fs.writeFileSync(path.join(wt, 'c.txt'), 'c\n');
+    const gitc = `git -c user.name=t -c user.email=t@t -c commit.gpgsign=false -c safe.directory=* -C "${wt}"`;
+    const commit = low(`${gitc} add c.txt && ${gitc} commit -qm low-commit`);
+    assert.equal(commit.status, 0, `a Low git commit in a worktree: ${commit.stdout}${commit.stderr}`);
+    assert.equal(git(wt, 'log', '-1', '--format=%s'), 'low-commit');
   } finally {
     r0.done();
   }

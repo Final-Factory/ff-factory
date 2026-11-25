@@ -18,7 +18,7 @@ import { probeFence } from './fenceProbe.ts';
 import { maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, openNoReadUp, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, openNoReadUp, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -3283,6 +3283,13 @@ export class Daemon {
       if (ownerGameData) targets.medium.push(ownerGameData);
       if (!(await labelLow(targets, exec, say))) {
         return this.lowFail('not every folder could be labelled Low');
+      }
+      // w5614 (w5764's review): "store lock: on" was logged before the labels; say so when the Medium label did not take.
+      const sl = this.storeLock;
+      if (sl.locked && sl.gitDir) {
+        const r = await exec('icacls', [sl.gitDir]);
+        if (r.code !== 0 || !isLabelledMedium(r.stdout)) log(`store lock: NOT in force on Windows: ${sl.gitDir} does not read Medium after labelling (${r.code !== 0 ? `icacls exit ${r.code}` : 'no Medium label'}), so Low workers can still write it; store_lock off, or a daemon restart to label it again`);
+        else log(`store lock: ${sl.gitDir} reads Medium; Low workers' writes there are refused`);
       }
       // w5546: the read half: No-Read-Up on the daemon's folder, secrets and root.json, with what workers read there given
       // back (and the runs' own GitHub App token files, w5547). Again at every start: a self-update's new folders inherit NR.
