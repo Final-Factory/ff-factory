@@ -15,6 +15,7 @@ import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFac
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
+import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { ghConfigDirFor, labelLow, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
@@ -633,11 +634,17 @@ export class Daemon {
   /** The host guard (cfg.hostGuard, Windows; tests give effects). */
   guard?: MachineGuard;
   private readonly guardEffects?: MachineGuardEffects;
+  /**
+   * The worker fence's gate (w5555, machine/fenceGate.ts): sandbox workers wait while it is set up, start inside it once
+   * it is on, and are refused when it failed; unfenced only when this OS's fence key is absent (worker_fence off).
+   */
+  fence: FenceGate;
 
   constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => LiveDeps) {
     this.cfg = cfg;
     this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
+    this.fence = new FenceGate({ wanted: fenceWanted(cfg, process.platform), kind: fenceKindFor(process.platform), machine: cfg.id, changed: (r) => this.send({ type: 'worker_fence', fence: r }) });
     this.probes = probes;
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
@@ -830,7 +837,7 @@ export class Daemon {
         log(`leftovers: could not write the worker shells' zsh files: ${(e as Error).message}`);
       }
     }
-    this.procsBroker = real && platform === 'darwin' ? new ProcsBroker({ dir: procsMailbox(this.slotMailbox), answer: answerProcsAsk(platform), log: (line) => log(line) }) : undefined;
+    this.procsBroker = real && platform === 'darwin' ? new ProcsBroker({ dir: procsMailbox(this.slotMailbox), answer: answerProcsAsk(platform, undefined, { root: this.cfg.root, groups: (session) => readShellGroups(shellGroupsDir(this.slotMailbox), { session }) }), log: (line) => log(line) }) : undefined;
     this.benchTurn = new BenchTurn({
       // w1894: a timed run's turn first (it ends within its 30 minutes; no new one is granted while a person plays), then a
       // person's game
@@ -1496,8 +1503,9 @@ export class Daemon {
     // w4672: a hello that offered no update over the link (root.json unreadable then: its Dev Drive not yet attached) is
     // offered again once the install record is back, without waiting for the next reconnect.
     this.timers.push(setInterval(() => this.offerSelfUpdate(), REOFFER_MS.value));
-    // w5377: the Windows worker fence, set up in the background; agents start unfenced until it is ready.
-    void this.lowSetup();
+    // w5377: the worker fence, set up in the background (Windows labels folders); w5555: sandbox workers wait until it is
+    // decided, and are held if it failed, never started unfenced.
+    void this.fenceSetup();
     this.startRpc();
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
@@ -2931,6 +2939,12 @@ export class Daemon {
    * the agent did as Max: this machine's file, tailed above) and the Unity slots commands.
    */
   private runSpec(info: Pick<SessionInfo, 'id'>, spec: LaunchSpec): LaunchSpec {
+    // w5555: a sandbox agent never gets a spec without its fence while the fence is wanted but not on (setting up or
+    // failed). The send gate waits or refuses first; this also covers a hosted session restarted by its own host.
+    if (spec.sandbox && !this.fence.allowsSandboxRun()) {
+      const g = this.fence.startGate(true);
+      throw new Error('refuse' in g ? g.refuse : `the worker fence on ${this.cfg.id} is still being set up; try again shortly (w5555)`);
+    }
     const maxFile = this.maxEventsFile;
     const slot = this.slotEnv(spec);
     // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
@@ -2949,30 +2963,33 @@ export class Daemon {
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
   }
 
-  private fenceMemo?: { fence?: WorkerFence };
+  private fenceMemo?: { fence?: WorkerFence; why?: string };
   /**
    * The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). Probed once
-   * (machine/fenceProbe.ts, w5377): a fence that cannot run a no-op is logged and left off, so agents run unfenced.
+   * (machine/fenceProbe.ts, w5377): a fence that cannot run a no-op is logged with why (fenceMemo.why), and since w5555
+   * the fence gate then holds sandbox workers instead of starting them unfenced.
    */
   private get workerFence(): WorkerFence | undefined {
     if (!this.fenceMemo) {
       let fence: WorkerFence | undefined;
+      let why: string | undefined;
       try {
         fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
-        if (this.cfg.workerFence && !fence) log(`worker fence: "${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only); agents run unfenced`);
+        if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
           if (probe.ok) log('worker fence: seatbelt is on for sandbox agents');
           else {
-            log(`worker fence: seatbelt could not run a no-op (${probe.why}); agents run unfenced`);
+            why = `seatbelt could not run a no-op (${probe.why})`;
             fence = undefined;
           }
         }
       } catch (e) {
-        log(`worker fence: ${(e as Error).message}; agents run unfenced`);
+        why = (e as Error).message;
         fence = undefined;
       }
-      this.fenceMemo = { fence };
+      if (why) log(`worker fence: ${why}; sandbox workers are held (w5555)`);
+      this.fenceMemo = { fence, ...(why ? { why } : {}) };
     }
     return this.fenceMemo.fence;
   }
@@ -2980,6 +2997,41 @@ export class Daemon {
   /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
   private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: EditorFence };
   private lowStarted = false;
+  /** Why lowSetup left the Low fence off (w5555): the fence gate's failure and the portal's alert say it. */
+  private lowWhy?: string;
+
+  /** A Low setup step failed (w5555): logged, kept for the fence gate, and the fence stays off. */
+  private lowFail(why: string): void {
+    this.lowWhy = why;
+    this.low = undefined;
+    log(`worker integrity: ${why}; sandbox workers are held (w5555)`);
+  }
+
+  /**
+   * Decides the worker fence once at start (w5555): Windows sets up the Low fence (lowSetup), macOS and Linux probe theirs.
+   * The gate (this.fence) then lets sandbox workers start inside it, or holds them with the reason, which the portal shows.
+   * With this OS's fence key absent (worker_fence off) the gate is off from the start and nothing waits. Never throws.
+   */
+  private async fenceSetup(): Promise<void> {
+    try {
+      if (process.platform === 'win32') await this.lowSetup();
+      if (this.fence.state.state !== 'setting_up') return;
+      if (process.platform === 'win32') {
+        if (this.low) this.fence.on();
+        else this.fence.failed(this.lowWhy ?? 'the Low setup ended without a Low claude');
+      } else if (process.platform === 'darwin') {
+        if (this.workerFence) this.fence.on();
+        else this.fence.failed(this.fenceMemo?.why ?? 'seatbelt could not apply');
+      } else if (process.platform === 'linux') {
+        if (this.writeLock) this.fence.on();
+        else this.fence.failed(this.lockMemo?.why ?? 'landlock could not apply');
+      } else this.fence.failed(`no worker fence on ${process.platform}`);
+    } catch (e) {
+      this.fence.failed(`the fence setup failed: ${(e as Error).message}`);
+    }
+    const f = this.fence.state;
+    if (f.state === 'failed') log(`worker fence: FAILED on ${this.cfg.id} (${f.why}): sandbox workers are held until it is fixed (a daemon restart probes again) or switched off with worker_fence off (w5555)`);
+  }
 
   /** w5540: the fence sandbox editors start in (Windows Low), while the agents' fence is on and editors may join it. */
   private editorFence(): EditorFence | undefined {
@@ -2988,8 +3040,8 @@ export class Daemon {
 
   /**
    * Sets up the Windows worker fence when daemon.json says `workerIntegrity: "low"` (w5377): labels the root's folders
-   * Low, makes the Low claude copy and the Unity junctions, and runs the copy once (`--version`). Agents run unfenced
-   * until it is done, and stay unfenced, with the reason in the log, if any step fails. Never throws.
+   * Low, makes the Low claude copy and the Unity junctions, and runs the copy once (`--version`). Sandbox workers wait
+   * until it is done and are held, with the reason in the log and the portal, if any step fails (w5555). Never throws.
    */
   private async lowSetup(): Promise<void> {
     if (this.lowStarted) return;
@@ -2997,8 +3049,7 @@ export class Daemon {
     const root = this.cfg.root;
     if (this.cfg.workerIntegrity !== 'low') return;
     if (process.platform !== 'win32' || !root) {
-      log('worker integrity: workerIntegrity is set but applies on Windows with a worker root only; agents run unfenced');
-      return;
+      return this.lowFail('workerIntegrity is set but applies on Windows with a worker root only');
     }
     try {
       const say = (l: string) => log(l);
@@ -3026,8 +3077,7 @@ export class Daemon {
       const ownerGameData = this.cfg.workerIntegrityLockGameData ? legacyGameDataRoot('win32') : undefined;
       if (ownerGameData) targets.medium.push(ownerGameData);
       if (!(await labelLow(targets, exec, say))) {
-        log('worker integrity: not every folder could be labelled Low; agents run unfenced');
-        return;
+        return this.lowFail('not every folder could be labelled Low');
       }
       // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
       if (ownerGameData) log(await ownerGameDataLock(ownerGameData, exec));
@@ -3037,13 +3087,11 @@ export class Daemon {
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
       const claude = await lowCopy(root, sdkClaude, exec, say);
       if (!claude) {
-        log('worker integrity: no Low claude copy; agents run unfenced');
-        return;
+        return this.lowFail('no Low claude copy');
       }
       const probe = probeFence([claude, '--version'], { timeoutMs: 60_000 });
       if (!probe.ok) {
-        log(`worker integrity: the Low claude could not run (${probe.why}); agents run unfenced`);
-        return;
+        return this.lowFail(`the Low claude could not run (${probe.why})`);
       }
       const git = agentGitPathDir(root);
       if (!git) log('worker integrity: no Git for Low workers at <root>\\tools\\git yet (worker.ts tools puts it there); Claude Code falls back to the machine\'s Git, which crashes at Low');
@@ -3090,8 +3138,7 @@ export class Daemon {
         }
       }, 15_000));
     } catch (e) {
-      log(`worker integrity: ${(e as Error).message}; agents run unfenced`);
-      this.low = undefined;
+      this.lowFail((e as Error).message);
     }
   }
 
@@ -3141,29 +3188,32 @@ export class Daemon {
     }
   }
 
-  private lockMemo?: { args?: string[] };
+  private lockMemo?: { args?: string[]; why?: string };
   /**
    * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
-   * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 leaves agents unlocked.
+   * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 fails it, with why in
+   * lockMemo.why, and sandbox workers are held (w5555).
    */
   private get writeLock(): string[] | undefined {
     if (!this.lockMemo) {
       let args: string[] | undefined;
+      let why: string | undefined;
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
           args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: this.maxEventsFile, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra });
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
           if (probe.ok) log('write lock: landlock is on for sandbox agents');
           else {
-            log(`write lock: landlock could not run a no-op (${probe.why}); agents run unlocked`);
+            why = `landlock could not run a no-op (${probe.why})`;
             args = undefined;
           }
-        } else if (this.cfg.writeLock) log('write lock: writeLock is set but applies on Linux with a worker root only; agents run unlocked');
+        } else if (this.cfg.writeLock) why = 'writeLock is set but applies on Linux with a worker root only';
       } catch (e) {
-        log(`write lock: ${(e as Error).message}; agents run unlocked`);
+        why = (e as Error).message;
         args = undefined;
       }
-      this.lockMemo = { args };
+      if (why) log(`write lock: ${why}; sandbox workers are held (w5555)`);
+      this.lockMemo = { args, ...(why ? { why } : {}) };
     }
     return this.lockMemo.args;
   }
@@ -3380,6 +3430,9 @@ export class Daemon {
    * maxAgentsPerSandbox, and a sandbox agent needs its sandbox ready at the folder the spec names.
    */
   private startRefusal(spec: LaunchSpec, sessionId: string): string | undefined {
+    // The worker fence failed its setup or probe (w5555): no sandbox agent starts unfenced on this machine.
+    const fenced = spec.sandbox ? this.fence.startGate(true) : undefined;
+    if (fenced && 'refuse' in fenced) return fenced.refuse;
     // The sandbox drive gone or disk space low on this machine (its host guard, w466): nothing new starts in a sandbox, except a
     // disk clean-up request's worker down to DISK_CLEANUP_FLOOR_GB (w3328: the worker sent to free the space was refused by it).
     const gate = spec.sandbox ? this.guard?.blockReason('agent', { diskCleanup: spec.diskCleanup === true }) : undefined;
@@ -3567,6 +3620,8 @@ export class Daemon {
         this.portalSessions = new Set(msg.sessions.map((s) => s.id));
         this.welcomed = true;
         void this.reportBenchHours();
+        // The worker fence's state (w5555): the portal alerts on a failed one and places no worker here.
+        this.send({ type: 'worker_fence', fence: this.fence.state });
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {
@@ -3616,7 +3671,11 @@ export class Daemon {
           this.awake();
         };
         const files = msg.attachments ?? [];
-        const before = this.sending.get(id);
+        // w5555: while the worker fence is still being set up, a sandbox agent's message waits for it (then starts
+        // fenced, or is refused if the fence failed) instead of starting unfenced or failing.
+        const fenceGate = this.fence.startGate(!!msg.spec.sandbox);
+        const queued = this.sending.get(id);
+        const before = 'wait' in fenceGate ? (queued ?? Promise.resolve()).then(() => fenceGate.wait) : queued;
         if (!files.length && !before) return deliver();
         // Files first (docs/attachments.md): fetched into the place's Inbox, then the message names where each is. A
         // message sent meanwhile waits its turn behind this one.
