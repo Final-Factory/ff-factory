@@ -217,7 +217,7 @@ See `config.example.json` and `server/config.ts` (every field is documented ther
 ones: `host`, `repo` (the base clone the orchestrators read; the only required key), `sandboxRoot` (optional: the
 sandbox root of this host's own daemon when `add_machine local` is used, and the default parent of `review.root` and
 `standingRoot`; keep it short: Windows path lengths), `protectedPaths` (checkouts agents must never touch),
-`limits.minFreeRamGB` (editors are ~8-12 GB RAM each), `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user").
+`limits.minFreeRamGB` (editors are ~8-12 GB RAM each), `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user"). `steamBuildAccount` (optional: the Steam build account `steam_upload` action `install` sets up on an urgent-lane computer, docs/steam-upload.md).
 `publicGitIdentity` (optional `name`/`email`/`repos`): repos whose history is public, by default this
 app's own origin. Any other GitHub repo that GitHub reports as public counts too (`gh api`, cached;
 `server/publicGit.ts`). The guard refuses an agent's push to a public repo when a commit carries an email
