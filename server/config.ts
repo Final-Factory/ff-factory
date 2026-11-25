@@ -1179,6 +1179,9 @@ export function loadConfig(): Config {
   const cfg = withDefaults(raw);
   cfg.retiredKeys = retiredConfigKeys(raw);
   cfg.retiredBase = retiredBaseLine(raw);
+  // w5538: a config with no "host" listens on loopback since the default moved from 0.0.0.0. Say so at every start, so a
+  // portal reached on its own address (the VM host's health check) is told why, not only on an install.sh rerun.
+  if (raw.host === undefined) console.warn(`[config] ${file} has no "host": the portal listens on 127.0.0.1 only (the default since w5538). Set "host": "0.0.0.0" where something reaches it on its own address, as the portal VM's host check does (docs/portal-bind-address.md).`);
   // The portal keeps no sandboxes (w510): only the base clone the orchestrators read is required.
   if (!cfg.repo) throw new Error('config.json is missing "repo"');
   const windowsOnly = windowsPathsOffWindows(cfg);

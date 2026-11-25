@@ -13,12 +13,19 @@ portal run on a PC.
 | The portal host's own machine daemon (`local`) | `http://127.0.0.1:8790` (server/machines.ts) | loopback |
 | The VM host's health check and `fff-vm status` | `http://<VM bridge IP>:8790/api/health` (deploy/vm/host/fff-vm); the VM's firewall admits only that one source address to 22 and 8790 (deploy/vm/guest/install.sh, `host_rule`) | **not loopback** |
 
+A machine joined from a browser on the LAN gets that page's origin as its portal URL (server/index.ts, `originOf`), so on a PC
+whose config has no `host`, such a machine reaches the portal only through the tailnet name: join it from that name.
+
+The portal warns at every start when its config has no `host` (`loadConfig`, server/config.ts).
+
 So a portal on a PC (README "Setup") needs nothing set: `127.0.0.1`, published by `tailscale funnel --bg 8790`.
 
 ## The portal VM
 
 The VM's `config.json` carries `"host": "0.0.0.0"` explicitly: the host's health check connects to the VM's own address, which
-a loopback listener would refuse (`fff-vm watch` would report the portal down).
+a loopback listener would refuse: `portal_healthy` (deploy/vm/host/lib.sh) would fail, and after `PORTAL_DOWN_RESET_MIN` (60 min)
+`fff-vm` resets the VM, at most 3 times in 6 h. People would still reach it (Funnel proxies to 127.0.0.1), and a person can
+recover over the tailnet with ssh (port 22): set `host`, or `fff-update rollback`.
 The VM's own firewall (table `inet fff_guest`) is what keeps the port off everything but that host; the tailnet reaches only 443
 and 22. `install.sh` writes the VM's config from `deploy/vm/guest/config.vm.example.json`, which sets `host` explicitly, and on a
 rerun, where it keeps an existing config, it warns when that config has no `host` (such a config silently moved from
