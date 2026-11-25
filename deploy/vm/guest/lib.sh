@@ -118,7 +118,7 @@ load_conf() {
 # stat ("fatal: failed to stat '/home/fffadmin/ff-factory': Permission denied" from fffctl gh-login).
 as_fff() { as_fff_in / "$@"; }
 # as_fff_in DIR CMD...: the same, started in DIR.
-as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@"); }
+as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@"); }
 
 # data_write NAME: stdin to $DATA/NAME, whole (a temp file and a rename) and owned by fff, which the server needs to
 # read and remove it.

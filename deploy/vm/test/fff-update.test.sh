@@ -44,7 +44,7 @@ EOF
 # $T/evil says: holdfd (keeps the built file open for writing), outlink (a link out of the tree), untracked (a file).
 cat >"$T/bin/npm" <<'EOF'
 #!/usr/bin/env bash
-evil=$(cat "$FAKE_NPM_EVIL" 2>/dev/null || true)
+evil=$(cat "${FAKE_NPM_EVIL:-@EVIL@}" 2>/dev/null || true)
 case "$1" in
   ci) mkdir -p node_modules/dep/bin node_modules/.bin; echo 'module.exports = 1' >node_modules/dep/index.js
     echo x >node_modules/dep/bin/x; ln -sfn ../dep/bin/x node_modules/.bin/x ;;
@@ -57,6 +57,7 @@ case "$1" in
     esac ;;
 esac
 EOF
+sed -i "s|@EVIL@|$T/evil|" "$T/bin/npm"
 printf '#!/bin/sh\nexit 0\n' >"$T/bin/systemctl"
 chmod 0755 "$T/bin/npm" "$T/bin/systemctl"
 : >"$T/evil"
