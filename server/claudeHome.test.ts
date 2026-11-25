@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, LEGACY_VAR, legacyProjectsDirs, loginClaudeEnv, MEDIUM_VAR, mediumPluginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR } from './claudeHome.ts';
+import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, claudeLoginFiles, LEGACY_VAR, legacyProjectsDirs, loginClaudeEnv, MEDIUM_VAR, mediumPluginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR, withoutLoginPaths } from './claudeHome.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 import { resolveUnityMcpServer } from '../machine/unityMcp.ts';
@@ -239,4 +239,16 @@ test('live: a hook planted in the workers\' folder does not run in a Medium agen
   } finally {
     fs.rmSync(w.base, { recursive: true, force: true });
   }
+});
+
+test('w5559: withoutLoginPaths drops the legacy folder; claudeLoginFiles names every .credentials.json a worker could reach', () => {
+  const w = world();
+  const env: Record<string, string | undefined> = {};
+  moveClaudeHome(env, w.root, w.home);
+  const agent = withoutLoginPaths(env);
+  assert.equal(agent[LEGACY_VAR], undefined);
+  assert.equal(agent.CLAUDE_CONFIG_DIR, w.dir, 'the worker folder stays');
+  assert.equal(env[LEGACY_VAR], w.legacy, 'the input is not changed');
+  assert.deepEqual(claudeLoginFiles(env, w.home), [path.join(w.legacy, '.credentials.json'), path.join(w.dir, '.credentials.json'), path.join(env[MEDIUM_VAR]!, '.credentials.json')]);
+  assert.deepEqual(claudeLoginFiles({}, w.home), [path.join(w.legacy, '.credentials.json')], 'no repeats when the legacy folder is ~/.claude');
 });

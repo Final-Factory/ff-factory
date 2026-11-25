@@ -181,6 +181,7 @@ export class Notifier {
   subscribe(user: string, sub: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }, prefs: Partial<NotifyPrefs> | undefined, device: string) {
     if (!sub?.endpoint || !/^https:\/\//.test(sub.endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) throw new Error('not a push subscription');
     const prev = this.subs.find((s) => s.endpoint === sub.endpoint);
+    if (prev && prev.user !== user) throw new Error('no such subscription'); // another person's device (w5534)
     const rec: PushSub = {
       endpoint: sub.endpoint,
       keys: { p256dh: sub.keys.p256dh, auth: sub.keys.auth },
@@ -194,15 +195,23 @@ export class Notifier {
     return rec.prefs;
   }
 
-  setPrefs(endpoint: string, prefs: Partial<NotifyPrefs>) {
-    const s = this.subs.find((x) => x.endpoint === endpoint);
+  /** A subscription is looked up under its owner only: another person's endpoint is "not found" (w5534). */
+  setPrefs(user: string, endpoint: string, prefs: Partial<NotifyPrefs>) {
+    const s = this.subs.find((x) => x.endpoint === endpoint && x.user === user);
     if (!s) throw new Error('no such subscription');
     s.prefs = { ...s.prefs, ...prefs };
     this.save();
     return s.prefs;
   }
 
-  unsubscribe(endpoint: string) {
+  /** Remove the caller's own subscription; another person's endpoint is "not found" and nothing changes (w5534). */
+  unsubscribe(user: string, endpoint: string) {
+    if (!this.subs.some((s) => s.endpoint === endpoint && s.user === user)) throw new Error('no such subscription');
+    this.drop(endpoint);
+  }
+
+  /** Remove an endpoint whoever it belongs to: the push service dropped it, or its owner was deleted. */
+  drop(endpoint: string) {
     this.subs = this.subs.filter((s) => s.endpoint !== endpoint);
     this.save();
   }
@@ -243,7 +252,7 @@ export class Notifier {
       return true;
     } catch (e) {
       const code = (e as { statusCode?: number }).statusCode;
-      if (code === 404 || code === 410) this.unsubscribe(s.endpoint); // the browser dropped it
+      if (code === 404 || code === 410) this.drop(s.endpoint); // the browser dropped it
       else console.warn(`push to ${s.device}: ${code ?? ''} ${(e as Error).message}`);
       return false;
     }

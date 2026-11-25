@@ -63,6 +63,25 @@ test('CI runner folders are never labelled Low and are kept Medium where an earl
   assert.deepEqual(both.medium, [path.join(R, 'tools', 'node'), path.join(R, 'FFU-Runners')]);
 });
 
+test("only the folders workers write are labelled Low; BEAST's instances, demos, portals and any new folder stay Medium (w5539)", () => {
+  // BEAST's root on 2026-11-24 (ls F:\ffw), the folders the w5451 audit found labelled Low.
+  const beast = kids('archives', 'ben-factory', 'cache', 'claude', 'daemon', 'demos', 'ffu-runners', 'ffu-sandboxes', 'gamedata', 'home', 'instances',
+    'lens-factory', 'logs', 'max', 'migration', 'nightly-history', 'nightly', 'player-cache', 'players', 'release-records', 'repo', 'sandboxes',
+    'scratch-slot3', 'scratch', 'secrets', 'seed', 'steam-lobby-gate', 'steam', 'test-history', 'tmp', 'tools', 'unity-slots', 'voice', 'some-new-portal');
+  const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: beast, exists: (p) => p === path.join(R, 'repo', 'HEAD') });
+  const fenced = ['archives', 'ben-factory', 'demos', 'ffu-runners', 'instances', 'lens-factory', 'migration', 'scratch-slot3', 'some-new-portal'];
+  for (const n of fenced) {
+    assert.ok(!t.dirs.includes(path.join(R, n)), `${n} is not labelled Low`);
+    assert.ok(t.medium.includes(path.join(R, n)), `${n} is kept Medium`);
+  }
+  for (const n of ['daemon', 'secrets']) assert.ok(!t.dirs.includes(path.join(R, n)) && !t.medium.includes(path.join(R, n)), `${n} is left alone`);
+  for (const n of ['sandboxes', 'tmp', 'tools', 'claude', 'home', 'cache', 'players', 'nightly', 'logs', 'unity-slots', 'repo']) assert.ok(t.dirs.includes(path.join(R, n)), `${n} is labelled Low`);
+  // A temp or sandboxes folder the config puts in another root child makes that child a worker one.
+  const moved = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('sb', 'instances'), extra: [path.join(R, 'sb', 'sandboxes')], exists: () => true });
+  assert.ok(moved.dirs.includes(path.join(R, 'sb')));
+  assert.deepEqual(moved.medium, [path.join(R, 'instances')]);
+});
+
 test("lowRunners names each runner whose Runner.Worker.exe is labelled Low (BEAST's ffu runners, w5440)", async () => {
   const worker = (r: string) => path.join(R, 'ffu-runners', r, 'bin', 'Runner.Worker.exe');
   const exec: Exec = async (_c, args) => ({

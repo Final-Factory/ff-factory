@@ -1,4 +1,4 @@
-import { agentClaudeEnv } from './claudeHome.ts';
+import { agentClaudeEnv, withoutLoginPaths } from './claudeHome.ts';
 import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { POST_TARGETS } from '../shared/ffboxPost.ts';
 import { z } from 'zod';
@@ -623,7 +623,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
   const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env, undefined, !spec.sandbox);
   const g = spec.guard;
   // Git fails fast instead of waiting on a credential prompt nobody will answer.
-  const agentEnv = (() => {
+  // w5559: no path to the machine's own Claude login (FF_CLAUDE_LEGACY_DIR) reaches the agent (claudeHome.ts withoutLoginPaths).
+  const agentEnv = withoutLoginPaths((() => {
     // w2012: a sandbox worker learns where the ff-agents scripts are (FF_SKILLS), read on this machine at launch, so it never
     // searches the disk for ui_look.py or pr_evidence.py (server/pluginPaths.ts).
     const plugins = localPluginEnv(baseEnv, g.workerRoot);
@@ -633,7 +634,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     const cred = spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : spec.env?.GH_CONFIG_DIR && !env.FF_GH_APP_HELPER ? { ...env, ...ghLoginCredentialEnv(env) } : env;
     // w5514: a standing agent's git ignores what a repository's own config says about programs to run (standingGitEnv).
     return g.standing ? { ...cred, ...standingGitEnv(cred) } : cred;
-  })();
+  })());
   // w3758: a worker with a vault GitHub token keeps the token's last calls for the portal's CI waits and merges, and hears
   // when one command of its own spent hundreds of them (server/ghSpendHook.ts).
   const spend = spec.env?.GH_TOKEN ? ghSpendHooks(rateLimitReader(spec.env.GH_TOKEN)) : undefined;

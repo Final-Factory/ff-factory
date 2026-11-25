@@ -284,13 +284,31 @@ export function runQuiet(bin: string, args: string[], timeoutMs: number): Promis
  * (lowIntegrity.ts lowEnv), so uv finds no managed Python there, picks another one from PATH and needs other packages, and
  * a cache warmed under the daemon's own APPDATA still had no Unity MCP bridge for them (BEAST, w5402).
  */
-export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>, agentEnv: Record<string, string> = {}, forWhom = 'agents'): Promise<string | undefined> {
+export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>, agentEnv: Record<string, string> = {}, forWhom = 'agents', trust?: { root: string; appDir: string }): Promise<string | undefined> {
   if (!runs) return undefined;
-  const env = { ...process.env, ...agentEnv, UV_CACHE_DIR: cacheDir };
+  // w5542: the entry may come from <root>/claude/.claude.json, which workers can write, and this runs at the daemon's level:
+  // never a uvx or a --from package inside the worker root (outside the daemon's folder).
+  const planted = trust && [command, ...runs.online].find((a) => workerWritable(a.replace(/^(git\+)?file:\/\//, ''), trust.root, trust.appDir));
+  if (planted) return `unity mcp: did not warm the uv cache${forWhom === 'agents' ? '' : ` for ${forWhom}`}: ${planted} is in a folder workers can write (w5542)`;
+  const env: NodeJS.ProcessEnv = { ...process.env, ...agentEnv, UV_CACHE_DIR: cacheDir };
+  // A Low agent's APPDATA is inside the root: its uv.toml is a worker's file, so the daemon's run reads no uv config.
+  if (trust && Object.values(agentEnv).some((v) => workerWritable(v, trust.root, trust.appDir))) env.UV_NO_CONFIG = '1';
   const tag = forWhom === 'agents' ? '' : ` for ${forWhom}`;
   if (!(await run(command, runs.offline, env)).error) return `unity mcp: its package is in ${cacheDir}${tag}`;
   const online = await run(command, runs.online, env);
   return online.error ? `unity mcp: could not fill ${cacheDir} with its package${tag}, so ${forWhom} here get no Unity MCP bridge: ${online.error.slice(0, 300)}` : `unity mcp: filled ${cacheDir} with its package${tag}`;
+}
+
+/** w5542: whether `p` is an absolute path inside the worker root and outside the daemon's folder (where workers can write). */
+export function workerWritable(p: string, root: string, appDir: string): boolean {
+  const P = /^[A-Za-z]:[\\/]|^\\\\/.test(root) ? path.win32 : path.posix;
+  if (!P.isAbsolute(p)) return false;
+  const inside = (dir: string) => {
+    const fold = (x: string) => (P === path.win32 ? x.toLowerCase() : x);
+    const rel = P.relative(fold(P.resolve(dir)), fold(P.resolve(p)));
+    return rel === '' || (!!rel && !rel.startsWith('..') && !P.isAbsolute(rel));
+  };
+  return inside(root) && !inside(appDir);
 }
 
 /** runQuiet with an environment. */
