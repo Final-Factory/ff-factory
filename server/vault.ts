@@ -21,7 +21,9 @@ export const VAULT_ROLES: readonly VaultRole[] = ['workers', 'standing', 'releas
  * entries belong to the `releases` role; one still granted to `workers` (w1639's) is read for the job too, and never given
  * to a run.
  */
-export const DAEMON_ONLY_ENV: readonly string[] = ['FFSTEAM_PASSWORD', 'FFSTEAM_GUARD_SECRET', 'FFSTEAM_GUARD_CODE'];
+// FFSTEAM_ACCOUNT (w5640): the build account's name, which steam_upload's install writes into config.json; a setting, never
+// a name in code (lothsahn, w1639), and kept from runs like the password.
+export const DAEMON_ONLY_ENV: readonly string[] = ['FFSTEAM_PASSWORD', 'FFSTEAM_GUARD_SECRET', 'FFSTEAM_GUARD_CODE', 'FFSTEAM_ACCOUNT'];
 export const daemonOnly = (name: string | undefined) => !!name && DAEMON_ONLY_ENV.includes(name.toUpperCase());
 
 interface Sealed {

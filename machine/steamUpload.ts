@@ -31,6 +31,8 @@ export interface SteamRunDeps {
   log: (line: string) => void;
   /** Tests: the program runner (default spawn). */
   run?: Runner;
+  /** Tests: steamcmd's download (default fetch). */
+  download?: Download;
 }
 
 export type Runner = (cmd: string, args: string[], o: { env: NodeJS.ProcessEnv; cwd?: string; timeoutMs: number }) => Promise<{ code: number; out: string }>;
@@ -47,6 +49,85 @@ const STALE_LOCK_MS = 3 * 60 * 60_000;
 const DROP_ENV = /^(GH_TOKEN|GITHUB_TOKEN|GH_ENTERPRISE_TOKEN|ANTHROPIC_.*|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY|FFBOX_ROOT|FFBOX_TEST|FFSTEAM_.*)$/i;
 
 export const steamDir = (root: string) => path.join(root, STEAM_CHILD);
+
+/** Valve's steamcmd for each platform (w5640: the daemon installs it, since no worker may write `<root>/steam`). */
+export const STEAMCMD: Partial<Record<NodeJS.Platform, { url: string; exe: string }>> = {
+  win32: { url: 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip', exe: 'steamcmd.exe' },
+  darwin: { url: 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd_osx.tar.gz', exe: 'steamcmd.sh' },
+  linux: { url: 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz', exe: 'steamcmd.sh' },
+};
+/** A Steam account name as Steam takes them. */
+const ACCOUNT = /^[A-Za-z0-9_]{2,64}$/;
+const configFile = (root: string) => path.join(steamDir(root), 'config.json');
+type SteamConfig = { release?: { steam?: { account?: string; steamcmd?: string; home?: string } & Record<string, unknown> } & Record<string, unknown> } & Record<string, unknown>;
+function readConfig(root: string): SteamConfig {
+  try {
+    const v = JSON.parse(fs.readFileSync(configFile(root), 'utf8')) as unknown;
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as SteamConfig) : {};
+  } catch {
+    return {};
+  }
+}
+export const steamcmdExe = (root: string, platform: NodeJS.Platform = process.platform) => path.join(steamDir(root), 'steamcmd', STEAMCMD[platform]?.exe ?? 'steamcmd.sh');
+
+/** What this computer lacks before ffsteam can run (config.json's account and steamcmd, steamcmd itself), or undefined. */
+export function steamMissing(root: string, platform: NodeJS.Platform = process.platform): string | undefined {
+  const s = readConfig(root).release?.steam;
+  if (!s?.account) return `${configFile(root)} names no build account`;
+  if (!s.steamcmd || !fs.existsSync(s.steamcmd)) return `no steamcmd at ${s.steamcmd ?? steamcmdExe(root, platform)}`;
+  return undefined;
+}
+
+/** Fetch a URL into a file (the default download; tests pass their own). */
+export type Download = (url: string, file: string) => Promise<void>;
+const defaultDownload: Download = async (url, file) => {
+  const r = await fetch(url, { signal: AbortSignal.timeout(300_000) });
+  if (!r.ok) throw new Error(`${url} answered ${r.status}`);
+  fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+};
+
+/**
+ * Install steamcmd for ffsteam (w5640; what urgent_release.py steam-install did in a worker before w5551): Valve's steamcmd
+ * into `<root>/steam/steamcmd` when it is not there (unpacked with the system tar, which reads a zip on Windows, then run
+ * once with +quit, which updates it and logs nobody in), and config.json's release.steam: the build account, steamcmd and
+ * its home. The account is a setting, never a name in code (lothsahn, w1639): the vault entry FFSTEAM_ACCOUNT, else the
+ * account config.json names already. Other keys of config.json are kept.
+ */
+export async function installSteamcmd(root: string, account: string | undefined, run: Runner, o: { platform?: NodeJS.Platform; download?: Download; log?: (line: string) => void } = {}): Promise<{ steamcmd: string; downloaded: boolean }> {
+  const platform = o.platform ?? process.platform;
+  const cfg = readConfig(root);
+  const name = account || cfg.release?.steam?.account;
+  if (!name) throw new Error('no build account to set up: the vault entry FFSTEAM_ACCOUNT (kind env, role releases, granted to this computer) names it; nothing was installed');
+  if (!ACCOUNT.test(name)) throw new Error('FFSTEAM_ACCOUNT is not a Steam account name (letters, digits and _); nothing was installed');
+  const src = STEAMCMD[platform];
+  if (!src) throw new Error(`Valve has no steamcmd for ${platform}`);
+  const sdir = steamDir(root);
+  const exe = steamcmdExe(root, platform);
+  let downloaded = false;
+  if (!fs.existsSync(exe)) {
+    fs.mkdirSync(path.dirname(exe), { recursive: true });
+    const archive = path.join(sdir, `steamcmd-download${src.url.endsWith('.zip') ? '.zip' : '.tar.gz'}`);
+    try {
+      await (o.download ?? defaultDownload)(src.url, archive);
+      // Windows' own bsdtar (System32), not a Git for Windows tar on PATH, which cannot read a zip.
+      const tar = platform === 'win32' ? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
+      const x = await run(tar, ['-xf', archive, '-C', path.dirname(exe)], { env: process.env, timeoutMs: 120_000 });
+      if (x.code !== 0 || !fs.existsSync(exe)) throw new Error(`could not unpack ${src.url}: ${lastLines(x.out, 4)}`);
+    } finally {
+      fs.rmSync(archive, { force: true });
+    }
+    // Its first run updates steamcmd (a few minutes) and exits with a code of its own (7 after an update): only the
+    // program being there counts.
+    const q = await run(exe, ['+quit'], { env: steamEnv(root, {}), cwd: path.dirname(exe), timeoutMs: 900_000 });
+    o.log?.(`steamcmd installed in ${path.dirname(exe)}; its first run exited ${q.code}`);
+    downloaded = true;
+  }
+  const release = (cfg.release ??= {});
+  release.steam = { ...(release.steam ?? {}), account: name, steamcmd: exe, home: path.join(sdir, 'home') };
+  fs.writeFileSync(`${configFile(root)}.part`, `${JSON.stringify(cfg, null, 2)}\n`);
+  fs.renameSync(`${configFile(root)}.part`, configFile(root));
+  return { steamcmd: exe, downloaded };
+}
 
 let busy = false;
 
@@ -204,13 +285,21 @@ export async function runSteamJob(msg: SteamUploadMsg, d: SteamRunDeps): Promise
   let staging: string | undefined;
   busy = true;
   try {
-    if (!fs.existsSync(path.join(sdir, 'config.json'))) throw new Error(`${sdir} has no config.json: this computer was never set up for the urgent lane (urgent_release.py steam-install)`);
+    fs.mkdirSync(sdir, { recursive: true });
     try {
       fs.writeFileSync(lock, `${msg.id} ${new Date().toISOString()}\n`, { flag: 'wx' });
     } catch {
       const age = Date.now() - fs.statSync(lock).mtimeMs;
       if (age < STALE_LOCK_MS) throw new Error(`another Steam job holds ${lock} (${Math.round(age / 60_000)} min): ask again when it ends`);
       fs.writeFileSync(lock, `${msg.id} ${new Date().toISOString()}\n`);
+    }
+    // A new computer sets itself up (w5640): install asks for it, and a check or upload does it when anything is missing.
+    const missing = steamMissing(d.root);
+    if (msg.action === 'install' || missing) {
+      say({ state: 'running', phase: 'installing steamcmd' });
+      const got = await installSteamcmd(d.root, msg.secrets?.FFSTEAM_ACCOUNT, run, { download: d.download, log: d.log });
+      d.log(`steam install ${msg.id}: ${got.downloaded ? 'downloaded steamcmd' : 'steamcmd was there'}; config.json written`);
+      if (msg.action === 'install') return say({ state: 'done', phase: 'install', result: { steamcmd: got.steamcmd, downloaded: got.downloaded, ...(missing ? { was: missing } : {}) } });
     }
     say({ state: 'running', phase: 'ffbox' });
     const scripts = await ffboxCheckout(d, run);
