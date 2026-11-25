@@ -48,13 +48,19 @@ const realIcacls: IcaclsSync = (args) => {
  */
 export function setLabelSync(p: string, label: string, icacls: IcaclsSync = realIcacls, account = currentAccount(), tree = false): void {
   // Without /T icacls labels only `p`: what is already inside keeps its own label (an explicit Low from the root's labelLow
-  // stays Low; measured on the Windows CI runner, w5703). /T labels every file and folder beneath it as well.
-  const args = [p, '/setintegritylevel', label, ...(tree ? ['/T'] : [])];
-  let r = icacls(args);
-  if (r.code !== 0 && account && /access is denied/i.test(r.out)) {
-    if (icacls([p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`]).code === 0) r = icacls(args);
+  // stays Low; measured on the Windows CI runner, w5703). With /T an `(OI)(CI)` label reaches only the folders beneath: a
+  // file keeps its own explicit label (a transcript the lock made Medium stayed Medium after the way back's
+  // `(OI)(CI)low /T`, measured on the Windows CI runner, w5703). So a tree is labelled twice: the plain level on every file
+  // and folder, then the inheritable one on the folders (measured: files explicit, folders (OI)(CI)).
+  const passes = tree && label.startsWith('(OI)(CI)') ? [label.slice('(OI)(CI)'.length), label] : [label];
+  for (const l of passes) {
+    const args = [p, '/setintegritylevel', l, ...(tree ? ['/T'] : [])];
+    let r = icacls(args);
+    if (r.code !== 0 && account && /access is denied/i.test(r.out)) {
+      if (icacls([p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`]).code === 0) r = icacls(args);
+    }
+    if (r.code !== 0) throw new Error(`icacls ${l} on ${p}: ${r.out.trim().slice(-300)}`);
   }
-  if (r.code !== 0) throw new Error(`icacls ${label} on ${p}: ${r.out.trim().slice(-300)}`);
 }
 
 /**

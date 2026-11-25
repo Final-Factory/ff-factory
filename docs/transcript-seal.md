@@ -123,6 +123,11 @@ Two things the first CI run on the Windows runner showed (w5703):
   Windows runner's account is such a token (measured, w5703: every Low write went through, while `cmd`'s `>>` from the
   same Low process was refused); a worker's filtered user token holds neither, so the Windows test removes both from its
   own process first (`removePrivileges` in `server/transcriptLabels.test.ts`).
+- **A folder and everything in it** is labelled in two `icacls /T` passes (`setLabelSync` with `tree`): the plain level
+  (`medium` or `low`) on every file and folder, then `(OI)(CI)<level>` on the folders. A single `(OI)(CI)` pass with `/T`
+  reaches only folders: a file keeps its own explicit label, so the way back left the transcripts the lock had labelled
+  Medium still Medium, and an older explicit Low on a subagent's transcript inside a conversation folder would stay Low
+  under the lock (measured on the Windows CI runner and on LothDesktop, w5703).
 - **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
   claude starts, it makes the conversation's `<id>\` folder and labels it and what is in it `(OI)(CI)low` (`/T`). On a resume it also labels the
   existing `<id>.jsonl` (found in any project folder) `low`. When the last process of that conversation exits, both go back

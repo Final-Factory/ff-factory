@@ -74,7 +74,7 @@ test('a new conversation: control lines pass, the first message waits for the CL
   assert.equal((p as { pid?: number }).pid, 4242);
   assert.ok(fs.statSync(own.dir).isDirectory(), 'its folder is made before the CLI starts');
   const labels = () => r.calls.filter((c) => c[1] === '/setintegritylevel');
-  assert.deepEqual(labels(), [[own.dir, '/setintegritylevel', '(OI)(CI)low', '/T']]);
+  assert.deepEqual(labels(), [[own.dir, '/setintegritylevel', 'low', '/T'], [own.dir, '/setintegritylevel', '(OI)(CI)low', '/T']]);
   assert.deepEqual(r.calls.filter((c) => c[1] === '/deny').map((c) => c[0]), process.env.USERNAME ? [path.dirname(own.file)] : [], 'a project folder it makes gets delete-child taken back');
   p.stdin.write(INIT + USER.slice(0, 10));
   p.stdin.write(USER.slice(10));
@@ -91,7 +91,7 @@ test('a new conversation: control lines pass, the first message waits for the CL
   await tick();
   assert.equal(f.got(), INIT + USER + USER);
   f.child.emit('exit', 0, null);
-  assert.deepEqual(labels().slice(-2), [[own.file, '/setintegritylevel', 'medium'], [own.dir, '/setintegritylevel', '(OI)(CI)medium', '/T']]);
+  assert.deepEqual(labels().slice(-3), [[own.file, '/setintegritylevel', 'medium'], [own.dir, '/setintegritylevel', 'medium', '/T'], [own.dir, '/setintegritylevel', '(OI)(CI)medium', '/T']]);
 });
 
 test('a resume labels its file Low at once and passes stdin straight through; two processes of one conversation share the label', async () => {
@@ -165,13 +165,16 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
     ['..', '/deny', 'HOST\\me:(DC)'],
     ['', '/deny', 'HOST\\me:(DC)'],
     ['F--work', '/deny', 'HOST\\me:(DC)'],
-    ...[[w('new'), '/setintegritylevel', '(OI)(CI)low', '/T'], [w('new.jsonl'), '/setintegritylevel', 'low']].sort(byName),
+    ...[[w('new'), '/setintegritylevel', 'low', '/T'], [w('new'), '/setintegritylevel', '(OI)(CI)low', '/T'], [w('new.jsonl'), '/setintegritylevel', 'low']].sort(byName),
     ['', '/setintegritylevel', '(OI)(CI)medium'],
     ['F--work', '/setintegritylevel', '(OI)(CI)medium'],
     // then everything else, explicitly: an old explicit Low is not overridden by what it inherits
     ...[
+      // a folder twice: every file in it explicitly, then the folders inheritable (an (OI)(CI) label skips files)
+      [w('memory'), '/setintegritylevel', 'medium', '/T'],
       [w('memory'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
       [w('notes.txt'), '/setintegritylevel', 'medium'],
+      [w('old'), '/setintegritylevel', 'medium', '/T'],
       [w('old'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
       [w('old.jsonl'), '/setintegritylevel', 'medium'],
     ].sort(byName),
@@ -200,7 +203,7 @@ test('unlockTranscripts labels everything Low again only where a lock was set', 
   assert.deepEqual(none.calls, []);
   const r = recorder();
   await unlockTranscripts(projects, async () => ({ code: 0, stdout: 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', stderr: '' }), () => {}, r.icacls, 'HOST\\me');
-  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [['..', '/remove:d', 'HOST\\me'], ['', '/remove:d', 'HOST\\me'], ['F--work', '/remove:d', 'HOST\\me'], ['', '/setintegritylevel', '(OI)(CI)low', '/T']]);
+  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [['..', '/remove:d', 'HOST\\me'], ['', '/remove:d', 'HOST\\me'], ['F--work', '/remove:d', 'HOST\\me'], ['', '/setintegritylevel', 'low', '/T'], ['', '/setintegritylevel', '(OI)(CI)low', '/T']]);
 });
 
 /**
@@ -268,6 +271,11 @@ test('Windows: a Low process cannot touch another transcript under the lock, its
   const other = path.join(slug, 'bbbbbbbb-other.jsonl');
   fs.writeFileSync(other, '{"type":"user"}\n');
   fs.mkdirSync(path.join(slug, 'bbbbbbbb-other'));
+  // A subagent's transcript inside the other conversation's folder, with an explicit Low as an earlier label left it: an
+  // (OI)(CI) label on its folder alone would not reach it (w5703, measured on the Windows CI runner).
+  const sub = path.join(slug, 'bbbbbbbb-other', 'subagent.jsonl');
+  fs.writeFileSync(sub, '{}\n');
+  setLabelSync(sub, 'low');
   for (const n of ['bbbbbbbb-rename.jsonl', 'bbbbbbbb-delete.jsonl']) fs.writeFileSync(path.join(slug, n), '{}\n');
   setLabelSync(root, '(OI)(CI)low');
   setLabelSync(home, '(OI)(CI)low');
@@ -300,7 +308,7 @@ test('Windows: a Low process cannot touch another transcript under the lock, its
     `${TRY}const [o,own,slug,projects,home]=process.argv.slice(1);const path=require('path');
 t('append other',()=>fs.appendFileSync(o,'x'));t('truncate other',()=>fs.writeFileSync(o,''));
 t('plant',()=>fs.writeFileSync(path.join(slug,'cccccccc.jsonl'),''));t('mkdir',()=>fs.mkdirSync(path.join(slug,'cccccccc')));
-t('plant in other folder',()=>fs.writeFileSync(path.join(o.slice(0,-6),'x.txt'),''));
+t('plant in other folder',()=>fs.writeFileSync(path.join(o.slice(0,-6),'x.txt'),''));t('append in other folder',()=>fs.appendFileSync(path.join(o.slice(0,-6),'subagent.jsonl'),'x'));
 t('rename other',()=>fs.renameSync(path.join(slug,'bbbbbbbb-rename.jsonl'),path.join(slug,'bbbbbbbb-renamed.jsonl')));
 t('rename other to its folder',()=>fs.renameSync(o,path.join(o.slice(0,-6),'moved.jsonl')));t('delete other',()=>fs.unlinkSync(path.join(slug,'bbbbbbbb-delete.jsonl')));
 t('delete other folder',()=>fs.rmSync(o.slice(0,-6),{recursive:true}));
@@ -318,7 +326,7 @@ console.log(out.join('; '))`,
     home,
   );
   t.diagnostic(`at Low under the lock: ${res}`);
-  for (const w of ['append other', 'truncate other', 'plant', 'mkdir', 'plant in other folder', 'rename other', 'rename other to its folder', 'delete other', 'delete other folder', 'new project folder', 'undo deny on projects', 'label projects low']) assert.match(res, new RegExp(`${w} E(ACCES|PERM)`), w);
+  for (const w of ['append other', 'truncate other', 'plant', 'mkdir', 'plant in other folder', 'append in other folder', 'rename other', 'rename other to its folder', 'delete other', 'delete other folder', 'new project folder', 'undo deny on projects', 'label projects low']) assert.match(res, new RegExp(`${w} E(ACCES|PERM)`), w);
   assert.match(res, /append own WRITTEN/);
   assert.match(res, /own folder WRITTEN/);
   assert.match(res, /rename projects E(ACCES|PERM)/, 'a Low worker cannot move the locked folder aside, though its parent is Low');
@@ -348,7 +356,10 @@ console.log(out.join('; '))`,
 
   // The way back: everything Low again.
   await unlockTranscripts(projects, exec, (l) => t.diagnostic(l));
-  for (const p of [home, projects, slug, other]) t.diagnostic(`after unlock: ${execFileSync('icacls', [p], { encoding: 'utf8' }).replace(/\s+/g, ' ')}`);
-  t.diagnostic(`after unlock: ${other} attributes ${execFileSync('attrib', [other], { encoding: 'utf8' }).trim()}`);
-  assert.match(atLow(`${TRY}t('append',()=>fs.appendFileSync(process.argv[1],''));t('plant',()=>fs.writeFileSync(process.argv[2],''));console.log(out.join())`, other, path.join(slug, 'eeeeeeee.jsonl')), /append WRITTEN,plant WRITTEN/);
+  for (const p of [projects, other]) t.diagnostic(`after unlock: ${execFileSync('icacls', [p], { encoding: 'utf8' }).replace(/\s+/g, ' ')}`);
+  // A transcript the lock labelled Medium is Low again: an (OI)(CI) label on `projects` alone left it Medium (measured).
+  assert.match(
+    atLow(`${TRY}t('append',()=>fs.appendFileSync(process.argv[1],''));t('plant',()=>fs.writeFileSync(process.argv[2],''));t('append sub',()=>fs.appendFileSync(process.argv[3],''));console.log(out.join())`, other, path.join(slug, 'eeeeeeee.jsonl'), sub),
+    /append WRITTEN,plant WRITTEN,append sub WRITTEN/,
+  );
 });
