@@ -1462,7 +1462,7 @@ export class CleanupRunner {
         this.d.marker?.save({ startedAt, trigger });
       }
       // Each step said in the marker, with the steps done (w5795): a pass cut off mid-plan then names the step that held it.
-      const step = dryRun ? undefined : (name: string, done: Record<string, number>) => this.d.marker?.save({ startedAt, trigger, step: name, stepAt: this.now(), done });
+      const step = dryRun || !this.d.marker ? undefined : (name: string, done: Record<string, number>) => this.d.marker?.save({ startedAt, trigger, step: name, stepAt: this.now(), done });
       let quick: CleanupSummary['quick'];
       if (low && !dryRun && this.d.quick) {
         step?.('quick', {});
