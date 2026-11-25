@@ -27,7 +27,7 @@ import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
-import { SelfUpdater } from './selfUpdate.ts';
+import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
@@ -111,7 +111,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
-import { UvCachePruner, findUv, runQuiet, runQuietEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
+import { UvCachePruner, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -221,6 +221,12 @@ export interface DaemonConfig {
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
   configFile?: string;
   /**
+   * w5516: where a commit sent over the link must be published (machine/selfUpdate.ts checkPublished); GitHub's
+   * ff-factory main when absent. Only the link end-to-end test sets it (its own repository). Read from daemon.json at
+   * each update.
+   */
+  updateOrigin?: { url: string; branch: string };
+  /**
    * The Unity slots mailbox (machine/unitySlots.ts). The daemon's entry point defaults it to slotsDir(), the one place
    * scripts look for it; a Daemon built anywhere else (a test) gets `<app_dir>/unity-slots`, so it never answers the
    * machine's real mailbox (a hung relocate test's daemon granted BEAST's slots with no limit for hours, w469).
@@ -264,6 +270,12 @@ export function dialUrl(cfg: Pick<DaemonConfig, 'portalUrl' | 'previousPortalUrl
  * Keep these fields in the daemon.json at `file`, everything else as it is (undefined removes one): fsynced, renamed
  * into place, the last versions kept beside it (server/durable.ts). Exported for tests.
  */
+/** daemon.json's `updateOrigin` (w5516), read fresh: undefined (GitHub's main) when absent or malformed. */
+export function publishedOrigin(configFile: string | undefined): PublishedOrigin | undefined {
+  const o = configFile ? readJsonFile<DaemonConfig>(configFile)?.updateOrigin : undefined;
+  return o && typeof o.url === 'string' && typeof o.branch === 'string' ? { url: o.url, branch: o.branch } : undefined;
+}
+
 export function patchDaemonConfig(file: string, fields: Partial<Pick<DaemonConfig, 'portalUrl' | 'previousPortalUrl' | 'relocatedAt'>>) {
   const text = fs.readFileSync(file, 'utf8');
   const cfg = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
@@ -312,10 +324,12 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
  * from a commit with game PR #4237, and (w5344) the players' own home (FF_PLAYER_HOME=<root>/gamedata-home), which the game's
  * player_slots.py and the timed runs turn into a player's XDG_CONFIG_HOME or CFFIXED_USER_HOME, and (w5501) CARGO_HOME=<root>/cache/cargo,
  * the cargo registry a fenced worker can write (sharedCaches.ts workerCargoHome: one already inside the root stays, one
- * outside it moves here, seeded from the old). The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
+ * outside it moves here, seeded from the old). The daemon sets each only where its own environment lacks it (`??=`).
+ * w5565: UV_CACHE_DIR is the daemon's and Medium agents' own cache (sharedCaches.ts mediumUvCacheDir), which no worker
+ * can write; runSpec gives sandbox agents the workers' one (sandboxUvEnv). Exported for tests.
  */
 export function rootEnv(root: string, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), [PLAYER_HOME_VARIABLE]: workerPlayerHomeDir(root), CARGO_HOME: workerCargoHomeDir(root), ...workerToolCacheEnv(root, platform) };
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: mediumUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), [PLAYER_HOME_VARIABLE]: workerPlayerHomeDir(root), CARGO_HOME: workerCargoHomeDir(root), ...workerToolCacheEnv(root, platform) };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */
@@ -535,6 +549,7 @@ export class Daemon {
   readonly cleaner: CleanupRunner;
   /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
   private uvPruner?: UvCachePruner;
+  private mediumUvPruner?: UvCachePruner;
   /** Sweeps a stopped worker's temp folder (server/sessionSweep.ts, w913). */
   private readonly sweeper: SessionSweeper;
   /**
@@ -613,6 +628,7 @@ export class Daemon {
       exit: () => this.exitForRestart(),
       log: (...a) => log(...a),
       nodeArgs: hostNodeArgs(),
+      published: () => publishedOrigin(this.cfg.configFile) ?? this.cfg.updateOrigin,
     });
     this.pause = new PauseKeeper({
       file: pauseFile(appDirOfConfig(cfg)),
@@ -711,7 +727,7 @@ export class Daemon {
         worker: {
           sandboxIds: () => (this.pool ? this.pool.list().map((sb) => sb.id) : []),
           ticket: (o) =>
-            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
+            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
         },
       });
     }
@@ -910,7 +926,7 @@ export class Daemon {
         // own sandbox's timed leg (rides_along: "running editor <sandbox>", with the sandbox in the ticket)
         // w1962: under a session of its own (editor:<sandbox>, at its sandbox's worker's priority in priorities.json), which
         // FF_BENCH_SESSION gives it: FF_SESSION_ID would make it a worker's, whose leftovers FF Factory ends
-        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
       },
       pd,
     );
@@ -927,7 +943,9 @@ export class Daemon {
     this.makeSession = makeSession ?? ((info, sink, options, events) => new AgentSession(info, sink, options, events));
     this.hosted = cfg.agentHosts ?? !makeSession;
     if (cfg.voice?.enabled) {
-      this.voice = new DaemonVoice(cfg.voice, cfg.root ?? appDirOfConfig(cfg), {
+      // w5574: the tools live in the daemon's folder (<appDir>/voice), never in the worker root.
+      this.voice = new DaemonVoice(cfg.voice, appDirOfConfig(cfg), {
+        root: cfg.root,
         log: (s) => log(s),
         stats: () => this.lastStats?.stats,
         changed: () => this.voice && this.send({ type: 'voice', status: this.voice.status() }),
@@ -964,6 +982,8 @@ export class Daemon {
       log,
     });
     if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
+    // w5565: the daemon's and Medium agents' own cache, pruned on its own clock.
+    if (cfg.root) this.mediumUvPruner = new UvCachePruner({ dir: mediumUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
     this.cleaner = new CleanupRunner({
       // Below the pool's disk_critical_gb a pass may take a live Unity cache, the last resort (w2752).
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, criticalFreeGB: this.currentPool()?.diskCriticalGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
@@ -991,6 +1011,7 @@ export class Daemon {
         const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root)] : [] }, DEFAULT_CLEANUP), roots, HOME);
         // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
+        if (!opts.dryRun) void this.mediumUvPruner?.maybe(low);
         return cleanupPass({
           opts,
           guard,
@@ -1490,8 +1511,18 @@ export class Daemon {
     // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
-    // Agents run it against the worker install's uv cache, which nothing else fills (w5377).
-    if (mcp.server && this.cfg.root) void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(this.cfg.root), runQuietEnv).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache failed: ${(e as Error).message}`));
+    // Agents run it against the worker install's uv cache, which nothing else fills (w5377); w5565: Medium agents against
+    // their own (mediumUvCacheDir), sandbox agents against the workers' one. One after the other: the same uv downloads.
+    if (mcp.server && this.cfg.root) {
+      const { command, args } = mcp.server;
+      const root = this.cfg.root;
+      void (async () => {
+        for (const [dir, forWhom] of [[mediumUvCacheDir(root), 'Medium agents'], [workerUvCacheDir(root), 'sandbox agents']] as const) {
+          const m = await warmUvCache(command, uvWarmRuns({ command, args }), dir, runQuietEnv, {}, forWhom, { root, appDir: appDirOfConfig(this.cfg) }).catch((e) => `unity mcp: filling the uv cache for ${forWhom} failed: ${(e as Error).message}`);
+          if (m) log(m);
+        }
+      })();
+    }
     this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
     this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
@@ -2842,7 +2873,9 @@ export class Daemon {
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slots.dir, { ...process.env, ...spec.env }) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+    // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it.
+    const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
   }
 
   private fenceMemo?: { fence?: WorkerFence };
@@ -2971,7 +3004,7 @@ export class Daemon {
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
       if (mcp.server) {
         const { APPDATA, LOCALAPPDATA } = lowEnv(root, undefined, 'PATH', undefined);
-        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents').then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
+        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
       this.timers.push(setInterval(() => {
@@ -3778,6 +3811,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   const cargo = cfg.root ? workerCargoHome(cfg.root, process.env, HOME) : undefined;
   if (cargo) process.env.CARGO_HOME = cargo.home;
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
+  // w5565: the workers' uv cache carried over from an older daemon moves to the Medium one too.
+  const mediumUv = cfg.root ? mediumUvCacheFor(process.env, cfg.root) : undefined;
+  if (mediumUv) process.env.UV_CACHE_DIR = mediumUv;
   if (cargo) {
     try {
       fs.mkdirSync(cargo.home, { recursive: true });

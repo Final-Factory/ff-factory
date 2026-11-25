@@ -102,7 +102,7 @@ test('notify: a subscription the push service says is gone is dropped; bad subsc
   await flush();
   assert.equal(n.list('alice').length, 0);
   assert.throws(() => n.subscribe('alice', { endpoint: 'http://insecure' }, {}, 'x'), /not a push subscription/);
-  assert.throws(() => n.setPrefs('https://nope', {}), /no such subscription/);
+  assert.throws(() => n.setPrefs('alice', 'https://nope', {}), /no such subscription/);
 });
 
 test('notify: click targets', () => {
@@ -163,4 +163,24 @@ test('notify: a message from another person reaches only its recipient, and open
   await flush();
   assert.deepEqual(sent.map((x) => [x.endpoint.split('/').pop(), x.payload.kind, x.payload.title, (x.payload as { body?: string }).body, x.payload.url]), [['ben-phone', 'person', 'Message from Lothsahn', 'Deploy now or tonight?', '#/']]);
   assert.deepEqual(seen, [['ben']]);
+});
+
+test("notify (w5534): a person can't change, remove or take over another person's subscription, and manages their own", (t) => {
+  const { n } = setup(t);
+  n.subscribe('alice', sub('a-phone'), {}, 'Safari');
+  n.subscribe('bob', sub('b-desk'), {}, 'Edge');
+  const bobBefore = JSON.stringify(n.list('bob'));
+  const aliceBefore = JSON.stringify(n.list('alice'));
+
+  assert.throws(() => n.setPrefs('bob', sub('a-phone').endpoint, { turnEnd: false }), /no such subscription/);
+  assert.throws(() => n.unsubscribe('bob', sub('a-phone').endpoint), /no such subscription/);
+  assert.throws(() => n.subscribe('bob', sub('a-phone'), { turnEnd: false }, 'Edge'), /no such subscription/);
+  assert.equal(JSON.stringify(n.list('alice')), aliceBefore, "alice's device is unchanged");
+  assert.equal(JSON.stringify(n.list('bob')), bobBefore);
+
+  assert.equal(n.setPrefs('alice', sub('a-phone').endpoint, { turnEnd: false }).turnEnd, false);
+  n.subscribe('alice', sub('a-phone'), {}, 'Safari');
+  n.unsubscribe('alice', sub('a-phone').endpoint);
+  assert.equal(n.list('alice').length, 0);
+  assert.equal(n.list('bob').length, 1);
 });

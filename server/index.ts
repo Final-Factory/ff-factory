@@ -79,7 +79,7 @@ import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
 import { clock, firstFree, outOfPool, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
-import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
+import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, takeOpenedKey, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, githubTokens, setGithubTokens } from './githubTokens.ts';
 import { GithubApps } from './githubApps.ts';
 import { startGhCallLog } from './ghBudget.ts';
@@ -94,7 +94,7 @@ import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, stal
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, isBusy, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, systemdSupervised, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, writeUpdateWanted, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, sessionSource } from './usage.ts';
-import { appVersion, formatVersion } from './version.ts';
+import { appVersion, formatVersion, portalCommit } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
@@ -105,6 +105,8 @@ import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller }
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
+import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -115,9 +117,12 @@ import { warmSearchIndex } from './search.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
-import { PageSockets, fromThisMachine } from './pageSockets.ts';
+import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
+// The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
+// process starts anything that could inherit it.
+const openedKey = takeOpenedKey();
 const WEB = path.join(ROOT, 'web', 'dist');
 
 /** The server's version plus the web UI build it serves now (server/webStatic.ts): an open page reloads when that changes. */
@@ -244,12 +249,14 @@ guardMemory('backup');
 setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 // The token vault (docs/vault.md, w512): data/vault.json, sealed with a key outside data/. Loaded first, so redaction knows
 // its values (registerSecretValues) before any transcript is written or scrubbed.
-// systemd's credentials folder (the VM: the vault key) is kept here and taken out of the environment every agent inherits.
+// systemd's credentials folder (LoadCredential, before w5506) is kept here and taken out of the environment every agent inherits.
 const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
 // The portal's own secrets in its environment (w1688: a password, a bot token, a key), masked by value like the vault's.
 addSecretEnv(process.env);
-const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => openedKey ?? keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+// Where the key came from, never the key (deploy/vm/test/ci-vm-e2e.sh reads this line).
+if (openedKey) console.log(`vault key: ${openedKey.key ? `from ${openedKey.file}` : `not loaded: ${openedKey.why}`}`);
 // The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
 // The vault's GitHub Apps (w1519, docs/github-apps.md): installation tokens for the repositories an allowed account installed
 // them on (a modder's private repositories); started once the machines are there, which get the tokens.
@@ -379,6 +386,7 @@ const joinHttp = machineJoinHttp({
   // w2004: the clone of a new computer with no GitHub login of its own, where machines.githubFromVault is on for it.
   githubToken: (machineId, person) => githubTokens()?.forMachine(machineId, person, `${machineId}'s worker install (the game repo's clone)`),
   script: (kind) => joinHttpScript(kind),
+  commit: () => portalCommit(),
   refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
   report: (text) => machines.report?.(text),
 });
@@ -466,6 +474,8 @@ setInterval(() => {
 }, 30_000);
 // trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
 const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
+// Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
+configureClientAddress({ trustProxy: () => cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
@@ -2023,19 +2033,34 @@ route('POST', '/api/delegations/([\\w-]+)/(approve|reject|bump)', async (req, [i
 
 route('GET', '/api/push', async (req) => ({ publicKey: notifier.publicKey, subscriptions: notifier.list(auth.user(req)!) }));
 
+/** An endpoint that is not the caller's own, or does not exist, answers 404 and changes nothing (w5534). */
+const notFoundSubscription = (e: unknown) => (e instanceof Error && e.message === 'no such subscription' ? new HttpError(404, e.message) : e);
+
 route('POST', '/api/push/subscribe', async (req) => {
   const b = await readJson<{ subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; prefs?: Partial<NotifyPrefs> }>(req);
-  return { prefs: notifier.subscribe(auth.user(req)!, b.subscription ?? {}, b.prefs, deviceName(String(req.headers['user-agent'] ?? ''))) };
+  try {
+    return { prefs: notifier.subscribe(auth.user(req)!, b.subscription ?? {}, b.prefs, deviceName(String(req.headers['user-agent'] ?? ''))) };
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
 });
 
 route('POST', '/api/push/prefs', async (req) => {
   const b = await readJson<{ endpoint?: string; prefs?: Partial<NotifyPrefs> }>(req);
-  return { prefs: notifier.setPrefs(need(b.endpoint, 'endpoint'), b.prefs ?? {}) };
+  try {
+    return { prefs: notifier.setPrefs(auth.user(req)!, need(b.endpoint, 'endpoint'), b.prefs ?? {}) };
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
 });
 
 route('POST', '/api/push/unsubscribe', async (req) => {
   const b = await readJson<{ endpoint?: string }>(req);
-  notifier.unsubscribe(need(b.endpoint, 'endpoint'));
+  try {
+    notifier.unsubscribe(auth.user(req)!, need(b.endpoint, 'endpoint'));
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
   return {};
 });
 
@@ -2337,6 +2362,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
+    // The daemon link's HTTP routes from the tailnet only (w5575; machineLinkTailnet: warn logs, enforce refuses, off skips).
+    if (isMachineLinkPath(url.pathname) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), `HTTP ${url.pathname.split('/').slice(0, 3).join('/')}`).refuse) {
+      return send(res, 403, { error: 'the daemon link is tailnet-only' });
+    }
     if (url.pathname === '/mcp' || url.pathname === '/mcp/upload') {
       return await routeMcp({ agents, auth, identity, attachments, send, readJson }, req, res, url);
     }
@@ -2457,7 +2486,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway. loopLagMs: the event loop's worst lag of the last minute (w1377).
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), ...(portalCommit() ? { commit: portalCommit() } : {}), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
@@ -2507,7 +2536,7 @@ const server = http.createServer(async (req, res) => {
 
 // Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
 // the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
-const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
+const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 /** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
@@ -2529,24 +2558,25 @@ server.on('upgrade', (req, socket, head) => {
   // attacker-supplied Origin ("null", garbage) must never be able to throw.
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    providers.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    providers.upgrade(req, socket, head, clientAddress(req));
+    return;
+  }
+  const upgradePath = parseUrl(req.url)?.pathname ?? '';
+  if (isMachineLinkPath(upgradePath) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), upgradePath === '/machine' ? 'link /machine' : 'link /machine/live').refuse) {
+    // The daemon link from the tailnet only (w5575), before its token is even read.
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
   if (livePath) {
     // A daemon's live frame socket (w1398, docs/live-view.md): the machine token, as /machine.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgradeLive(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer, livePath[1]);
+    machines.upgradeLive(req, socket, head, clientAddress(req), livePath[1]);
     return;
   }
   if (parseUrl(req.url)?.pathname === '/machine') {
     // A machine daemon (docs/machines.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    machines.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const origin = req.headers.origin;
@@ -3245,7 +3275,7 @@ setInterval(() => {
           },
           removeSession: (id) => sessions.remove(id),
           pushEndpoints: (u) => notifier.list(u).map((x) => x.endpoint),
-          unsubscribe: (e) => notifier.unsubscribe(e),
+          unsubscribe: (e) => notifier.drop(e),
           memoryRoot,
           memoryDir: (u) => memoryDirFor(cfg, { orchestratorRole: 'personal', requestedBy: { userId: u, displayName: u } }, false),
         },
