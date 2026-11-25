@@ -29,8 +29,8 @@ import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
-import { TRANSCRIPTS, linkTranscripts } from './transcriptLock.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -3041,6 +3041,8 @@ export class Daemon {
     }
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey], own);
     // w5546: the fences close the daemon's folder, secrets and root.json to reads; the run's own tokens file is given back.
+    // w5702: a transcript move held back for running agents is tried again once they have ended.
+    if (spec.sandbox && this.lockMemo?.transcriptsWait && this.cfg.root && !this.transcriptMoveWaits(this.cfg.root).length) this.lockMemo = undefined;
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
     // w5676: ff-landlock.py skips an open root folder that does not exist yet, and the locked worker cannot make it.
     if (lockArgs && this.cfg.root) {
@@ -3440,7 +3442,7 @@ export class Daemon {
     await this.probeReadFence();
   }
 
-  private lockMemo?: { args?: string[]; why?: string; transcripts?: string };
+  private lockMemo?: { args?: string[]; why?: string; transcripts?: string; transcriptsWait?: boolean };
   /**
    * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
    * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 fails it, with why in
@@ -3451,9 +3453,12 @@ export class Daemon {
       let args: string[] | undefined;
       let why: string | undefined;
       let transcripts: string | undefined;
+      let waits: string[] = [];
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
-          transcripts = this.cfg.transcriptLock === 'on' ? this.lockTranscripts(this.cfg.root) : undefined;
+          waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
+          if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
+          transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
           args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg));
@@ -3474,7 +3479,7 @@ export class Daemon {
         args = undefined;
       }
       if (why) log(`write lock: ${why}; sandbox workers are held (w5555)`);
-      this.lockMemo = { args, ...(why ? { why } : {}), ...(args && transcripts ? { transcripts } : {}) };
+      this.lockMemo = { args, ...(why ? { why } : {}), ...(args && transcripts ? { transcripts } : {}), ...(args && waits.length ? { transcriptsWait: true } : {}) };
     }
     return this.lockMemo.args;
   }
@@ -3484,10 +3489,22 @@ export class Daemon {
    * the transcripts folder, or undefined (logged) when the Claude home is not the root's or the move fails: the lock then
    * opens the transcripts as before, never shuts a worker out of its own.
    */
+  /**
+   * w5702, w5718's review: the sandbox agents whose running claude would lose its own transcript if the transcripts moved
+   * now. Agent hosts outlive a daemon restart (machine/agentHost.ts) and each keeps the Landlock rules it started with: one
+   * locked without `<root>/transcripts` (older than w5702, or made before the folder was) is refused its transcript once
+   * it is there. Empty when the transcripts are already linked or no such host runs.
+   */
+  private transcriptMoveWaits(root: string): string[] {
+    const home = process.env.CLAUDE_CONFIG_DIR;
+    if (!this.hosted || !home || transcriptsLinked(root, home)) return [];
+    return hostsWithoutTranscripts(this.hostsRoot);
+  }
+
   private lockTranscripts(root: string): string | undefined {
     const home = process.env.CLAUDE_CONFIG_DIR;
     const r = path.resolve(root);
-    if (!home || path.resolve(path.dirname(home)) !== r) {
+    if (!home || path.resolve(home) !== path.join(r, 'claude')) {
       log(`transcript lock: the agents' Claude home (${home ?? 'unset'}) is not in the root ${r}; transcripts stay open to workers`);
       return undefined;
     }

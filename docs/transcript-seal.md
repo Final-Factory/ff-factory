@@ -23,8 +23,15 @@ close that:
 3. **Per-conversation write access, on Linux, behind a switch** (w5702, `machine/transcriptLock.ts`; daemon.json
    `transcriptLock: "on"`, set remotely with `ops_worker` `machine_update` `transcript_lock on|off`; off by default). Landlock
    grants a folder's rights to everything below it and the write lock opens the whole Claude home, so no rule can take
-   `projects` back. With the switch on, the daemon moves `<root>/claude/projects` to `<root>/transcripts` (a rename) and leaves
-   a link `projects -> ../transcripts`; `transcripts` is a root folder the lock does not open. The spawner
+   `projects` back. With the switch on, the daemon moves the project folders from `<root>/claude/projects` into
+   `<root>/transcripts` and leaves a link `projects -> ../transcripts`; `transcripts` is a root folder the lock does not
+   open. Switching on must not cut off a claude already running (w5718's review of #1231): agent hosts outlive the daemon
+   restart the switch causes, each keeps the Landlock rules it started with, and Landlock binds a rule to an inode, so one
+   locked on `<root>/claude` alone is refused its own transcript once it lives in `transcripts` (measured). So with the
+   switch off, `transcripts` is made ahead and opened whole to every locked worker, and the move goes into that same
+   folder (its inode kept) one project folder at a time; and the daemon holds the move back while any running sandbox
+   host's `place.json` does not say `transcriptsHeld` (`hostsWithoutTranscripts`: hosts older than w5702), trying again at
+   each later sandbox start. Both are in the live test `live w5718` of `server/transcriptLock.test.ts`. The spawner
    (`machine/writeLock.ts` `writeLockSpawner`) then adds `--rw` for this conversation's `<id>.jsonl` (in any project folder)
    and its `<id>/` folder. A new conversation's file cannot be made ahead (below), so the host leaves a dangling link
    `<id>.jsonl -> <id>/.new.jsonl` in the cwd's project folder: Claude Code's "already in use" check is a stat that follows

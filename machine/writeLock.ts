@@ -53,7 +53,7 @@ export interface WriteLockPaths {
   workFolders?: (string | undefined)[];
   /**
    * w5702: daemon.json `transcriptLock` is on: `<root>/transcripts` stays shut and each claude gets its own conversation's
-   * rules (machine/transcriptLock.ts). Off, a transcripts folder an earlier `on` made is opened whole, as `claude` is.
+   * rules (machine/transcriptLock.ts). Off, the transcripts folder is opened whole, as `claude` is.
    */
   transcriptLock?: boolean;
 }
@@ -83,7 +83,9 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only), so
   // the daemon makes the missing ones before each locked worker starts (makeOpenRootChildren, w5676).
   for (const c of openChildren(root, p.workFolders ?? [], except)) args.push('--rw', path.join(root, c));
-  if (!p.transcriptLock && fs.existsSync(path.join(root, TRANSCRIPTS))) args.push('--rw', path.join(root, TRANSCRIPTS));
+  // w5702: off, the transcripts folder is open whole, and made ahead (makeOpenRootChildren) even before any `on`, so a
+  // claude locked before the switch keeps its own transcript once the switch moves them there (w5718's review).
+  if (!p.transcriptLock) args.push('--rw', path.join(root, TRANSCRIPTS));
   for (const r of p.extraRoots ?? []) args.push('--rw', r);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
   if (p.runtimeDir) args.push('--sock', path.join(p.runtimeDir, 'cc-socks'));
@@ -153,7 +155,8 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
 function transcriptRules(t: string, s: SpawnOptions, log: (line: string) => void): { args: string[]; sid?: string } {
   const sid = sessionIdOf(s.args);
   const home = s.env.CLAUDE_CONFIG_DIR;
-  if (!sid || !home || !path.isAbsolute(home)) return { args: [] };
+  // Only the root's own Claude home (w5718's review): another home's `projects` would be hidden from its resumes.
+  if (!sid || !home || path.resolve(home) !== path.join(path.dirname(t), 'claude')) return { args: [] };
   try {
     const did = linkTranscripts(path.dirname(t), home);
     if (did) log(`transcript lock: ${did}`);

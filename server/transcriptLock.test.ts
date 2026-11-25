@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FF_LANDLOCK, writeLockArgs, writeLockSpawner } from '../machine/writeLock.ts';
+import { FF_LANDLOCK, makeOpenRootChildren, writeLockArgs, writeLockSpawner } from '../machine/writeLock.ts';
+import { holdsTranscripts, hostsWithoutTranscripts } from '../machine/agentHost.ts';
 import { NEW_TRANSCRIPT, TRANSCRIPTS, finishNewTranscripts, linkTranscripts, ownTranscriptArgs } from '../machine/transcriptLock.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
@@ -72,12 +73,43 @@ test("a new conversation gets its own folder and a link its claude's first write
   assert.equal(fs.existsSync(path.join(p, `${fresh}.jsonl`)) || !!fs.lstatSync(path.join(p, `${fresh}.jsonl`), { throwIfNoEntry: false }), false);
 });
 
-test('writeLockArgs opens a transcripts folder whole while transcriptLock is off, and never while it is on', (t) => {
+test('writeLockArgs opens the transcripts folder whole while transcriptLock is off, made ahead, and never while it is on', (t) => {
   const { root, tr } = home(t);
-  assert.ok(!writeLockArgs({ root }).includes(tr), 'no folder, no rule (makeOpenRootChildren must not make it)');
-  fs.mkdirSync(tr);
-  assert.ok(writeLockArgs({ root }).includes(tr));
+  const off = writeLockArgs({ root });
+  assert.ok(off.includes(tr), 'opened even before any on, so a claude locked before the switch keeps its own (w5718)');
+  assert.ok(makeOpenRootChildren(root, off).includes(tr), 'and made before a locked worker starts');
   assert.ok(!writeLockArgs({ root, transcriptLock: true }).includes(tr));
+});
+
+test('the first move goes into the transcripts folder made ahead, keeping its inode (a running lock is bound to it)', (t) => {
+  const { root, claude, tr } = home(t);
+  fs.mkdirSync(tr);
+  const ino = fs.statSync(tr).ino;
+  fs.writeFileSync(path.join(claude, 'projects', 'p1', `${SID}.jsonl`), 'a\n');
+  assert.match(linkTranscripts(root, claude) ?? '', /moved the transcripts in .* into /);
+  assert.equal(fs.statSync(tr).ino, ino);
+  assert.equal(fs.readFileSync(path.join(claude, 'projects', 'p1', `${SID}.jsonl`), 'utf8'), 'a\n');
+  assert.equal(fs.readlinkSync(path.join(claude, 'projects')), `../${TRANSCRIPTS}`);
+});
+
+test('hostsWithoutTranscripts names the running sandbox agents a move would cut off, and only those', (t) => {
+  const { base } = home(t);
+  const hosts = path.join(base, 'hosts');
+  const dead = spawnSync('true').pid!;
+  const host = (id: string, pid: number, place?: object) => {
+    fs.mkdirSync(path.join(hosts, id), { recursive: true });
+    fs.writeFileSync(path.join(hosts, id, 'host.json'), JSON.stringify({ pid }));
+    if (place) fs.writeFileSync(path.join(hosts, id, 'place.json'), JSON.stringify(place));
+  };
+  host('old', process.pid, { cwd: '/x', sandbox: 'slot1' }); // older than w5702: no mark
+  host('without', process.pid, { cwd: '/x', sandbox: 'slot2', transcriptsHeld: false });
+  host('held', process.pid, { cwd: '/x', sandbox: 'slot3', transcriptsHeld: true });
+  host('portal', process.pid, { cwd: '/x' }); // no sandbox: never locked
+  host('gone', dead, { cwd: '/x', sandbox: 'slot4' });
+  assert.deepEqual(hostsWithoutTranscripts(hosts).sort(), ['old', 'without']);
+  assert.equal(holdsTranscripts(writeLockArgs({ root: path.join(base, 'root') })), true, 'a lock with the switch off holds the folder');
+  assert.equal(holdsTranscripts(['--rw', path.join(base, 'root', 'claude')]), false, 'a lock older than w5702 does not');
+  assert.equal(holdsTranscripts([], path.join(base, 'root', TRANSCRIPTS)), true, 'its own conversation\'s rules do');
 });
 
 const landlock = process.platform === 'linux' && spawnSync('python3', [FF_LANDLOCK, '--', 'true']).status === 0;
@@ -152,4 +184,30 @@ test("the secret scrubbers walk a linked projects folder, and the read guard hol
   const { homeSecrets } = await import('./secretGuard.ts');
   assert.ok(homeSecrets({ CLAUDE_CONFIG_DIR: claude }, 'linux').includes(tr));
   assert.ok(!homeSecrets({ CLAUDE_CONFIG_DIR: path.join(root, 'nothing') }, 'linux').includes(tr));
+});
+
+test('live w5718: a claude locked before the switch keeps writing its own transcript after the move; one locked older than w5702 does not', { skip: !landlock && 'needs Linux with Landlock' }, async (t) => {
+  const { root, claude } = home(t);
+  const off = writeLockArgs({ root });
+  makeOpenRootChildren(root, off);
+  const tr = path.join(root, TRANSCRIPTS);
+  const older = off.filter((a, i) => a !== tr && off[i + 1] !== tr);
+  const file = path.join(claude, 'projects', 'p1', `${SID}.jsonl`);
+  fs.writeFileSync(file, '1\n');
+  // Each waits for a line on stdin, after the move, then appends to its transcript by path as Claude Code does.
+  const start = (args: string[]) => {
+    const child = spawn('python3', [FF_LANDLOCK, ...args, '--', 'bash', '-c', `read; if echo 2 >> ${file} 2>/dev/null; then echo ok; else echo refused; fi`], { cwd: root });
+    let out = '';
+    child!.stdout!.on('data', (c: Buffer) => (out += c.toString()));
+    return { child: child!, out: () => out.trim() };
+  };
+  const held = start(off);
+  const old = start(older);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.match(linkTranscripts(root, claude) ?? '', /moved the transcripts in/);
+  for (const c of [held, old]) c.child.stdin!.end('go\n');
+  await Promise.all([once(held.child, 'exit'), once(old.child, 'exit')]);
+  assert.equal(held.out(), 'ok');
+  assert.equal(old.out(), 'refused', 'the case the daemon holds the move back for (hostsWithoutTranscripts)');
+  assert.equal(fs.readFileSync(file, 'utf8'), '1\n2\n');
 });

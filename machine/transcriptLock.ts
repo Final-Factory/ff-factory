@@ -45,12 +45,24 @@ export function linkTranscripts(root: string, home: string, now = Date.now()): s
   const t = path.join(path.resolve(root), TRANSCRIPTS);
   const l = path.join(home, 'projects');
   const target = path.relative(home, t);
+  if (transcriptsLinked(root, home)) return undefined;
   const st = lstat(l);
-  if (st?.isSymbolicLink() && (fs.readlinkSync(l) === target || real(l) === real(t))) return undefined;
   let did: string;
   if (st?.isDirectory() && !lstat(t)) {
     fs.renameSync(l, t);
     did = `moved ${l} to ${t}`;
+  } else if (st?.isDirectory() && emptyDir(t)) {
+    // The usual first move (w5718's review): while the lock was off the daemon made `transcripts` and every locked claude
+    // got a rule on it (writeLockArgs). Landlock binds a rule to that folder's inode, so the transcripts move into it, one
+    // project folder at a time, and a claude locked before the switch keeps writing its own after the move.
+    for (const n of fs.readdirSync(l)) fs.renameSync(path.join(l, n), path.join(t, n));
+    try {
+      fs.rmdirSync(l);
+    } catch {
+      // A claude wrote in the moment between the moves and made its project folder again: keep it aside.
+      fs.renameSync(l, path.join(t, `.replaced-${now}`));
+    }
+    did = `moved the transcripts in ${l} into ${t}`;
   } else if (st) {
     fs.mkdirSync(t, { recursive: true });
     const aside = path.join(t, `.replaced-${now}`);
@@ -70,6 +82,21 @@ export function linkTranscripts(root: string, home: string, now = Date.now()): s
       fs.renameSync(l, path.join(t, `.replaced-${now}-${i}`));
     }
   }
+}
+
+const emptyDir = (p: string) => {
+  try {
+    return lstat(p)?.isDirectory() === true && fs.readdirSync(p).length === 0;
+  } catch {
+    return false;
+  }
+};
+
+/** Whether `<home>/projects` is already the link to `<root>/transcripts`: linkTranscripts then moves nothing. */
+export function transcriptsLinked(root: string, home: string): boolean {
+  const t = path.join(path.resolve(root), TRANSCRIPTS);
+  const l = path.join(home, 'projects');
+  return !!lstat(l)?.isSymbolicLink() && (fs.readlinkSync(l) === path.relative(home, t) || real(l) === real(t));
 }
 
 /** The project folders of the transcripts folder (not the `.replaced-*` ones). */
