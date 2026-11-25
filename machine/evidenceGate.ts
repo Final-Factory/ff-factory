@@ -75,7 +75,9 @@ export function findPrEvidence(d: FindDeps): string | undefined {
   const plugins = list(cache).map((v) => P.join(cache, v));
   if (d.env.FF_SKILLS) plugins.push(P.dirname(d.env.FF_SKILLS));
   const root = d.root ?? d.env.FF_WORKER_ROOT;
-  if (root) plugins.push(P.join(root, 'tools', 'final-factory-agents', 'plugins', 'ff-agents'));
+  // w5597: only FF Factory's checkout in <root>/tools-medium, which no worker writes. The old <root>/tools checkout is
+  // never read here (w5723): a Low worker could plant a newer pr_evidence.py there and the merge gate would run it.
+  if (root) plugins.push(P.join(root, 'tools-medium', 'final-factory-agents', 'plugins', 'ff-agents'));
   let best: { script: string; v: number[] } | undefined;
   for (const p of plugins) {
     const script = P.join(p, ...SCRIPT);
@@ -287,7 +289,7 @@ export function trustedEvidenceRun(o: {
 export type GitRun = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export interface PortalEvidenceDeps {
-  /** The portal's data folder: its checkout is `<dataDir>/tools/final-factory-agents`, where findPrEvidence's `root` looks. */
+  /** The portal's data folder: its own checkout is `<dataDir>/tools/final-factory-agents` (the portal's, not a worker root's; findPrEvidence no longer looks there, w5597). */
   dataDir: string;
   run: GitRun;
   env?: NodeJS.ProcessEnv;

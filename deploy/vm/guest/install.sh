@@ -248,9 +248,13 @@ if [ -f "$FFF_ROOT/config/config.json" ]; then
   log "kept: $FFF_ROOT/config/config.json"
   # A kept config with no "host" now listens on 127.0.0.1 (the code default, w5538: docs/portal-bind-address.md), and the VM
   # host's health check calls the VM's own address, so it would find the portal down. Say so; the config is never rewritten.
-  if ! jq -e 'has("host")' "$FFF_ROOT/config/config.json" >/dev/null 2>&1; then
-    warn "$FFF_ROOT/config/config.json has no \"host\": the portal now listens on 127.0.0.1 only and the host's health check will fail; set \"host\": \"0.0.0.0\" (the VM's firewall limits who reaches it; docs/portal-bind-address.md)"
-  fi
+  # A jq or read failure is its own warning, not a false "no host" (w5538 review note).
+  host_state=$(config_host_state "$FFF_ROOT/config/config.json")
+  case "$host_state" in
+    set) ;;
+    missing) warn "$FFF_ROOT/config/config.json has no \"host\": the portal now listens on 127.0.0.1 only and the host's health check will fail; set \"host\": \"0.0.0.0\" (the VM's firewall limits who reaches it; docs/portal-bind-address.md)" ;;
+    *) warn "could not check \"host\" in $FFF_ROOT/config/config.json ($host_state); without one the portal listens on 127.0.0.1 only (docs/portal-bind-address.md)" ;;
+  esac
 else
   # Written by fff (fff_write, w5531): a link fff left at the name would have led root's write elsewhere.
   if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would write $FFF_ROOT/config/config.json"; else fff_write "$FFF_ROOT/config/config.json" <"$here/config.vm.example.json"; fi

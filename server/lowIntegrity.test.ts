@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -55,6 +55,82 @@ test("the agents' node stays Medium inside a Low tools folder, and only then (w5
   assert.ok(t.dirs.includes(path.join(R, 'tools')));
   assert.deepEqual(t.medium, [path.join(R, 'tools', 'node')]);
   assert.deepEqual(lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tmp'), exists: () => true }).medium, []);
+});
+
+test('w5717: given its children, tools turns Medium, each child folder but node is labelled Low on its own, and node keeps its path', () => {
+  const tools = path.join(R, 'tools');
+  const toolsChildren = [...kids('cargo', 'git', 'node', 'NODE-old', 'low', 'unity-low', 'final-factory-agents'), { name: 'git.json', dir: false }];
+  const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools', 'tmp'), toolsChildren, exists: () => true });
+  assert.ok(!t.dirs.includes(tools), 'tools is not labelled Low');
+  for (const c of ['cargo', 'git', 'NODE-old', 'low', 'unity-low', 'final-factory-agents']) assert.ok(t.dirs.includes(path.join(tools, c)), `${c} is labelled Low`);
+  assert.ok(!t.dirs.includes(path.join(tools, 'node')) && !t.files.includes(path.join(tools, 'git.json')), 'node and the stamp are not');
+  assert.deepEqual(t.medium, [tools, path.join(tools, 'node')]);
+  // Without the list (a daemon from before w5717 never passes one): the old layout.
+  const old = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools'), exists: () => true });
+  assert.ok(old.dirs.includes(tools));
+  assert.deepEqual(old.medium, [path.join(tools, 'node')]);
+  // No tools folder: nothing about it.
+  assert.deepEqual(lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tmp'), toolsChildren: kids('cargo'), exists: () => true }).medium, []);
+});
+
+test('w5717: the Mac and Linux fences are unchanged: tools stays one open child, and neither agent tool exists there', async () => {
+  const { openChildren } = await import('../machine/lowIntegrity.ts');
+  const { agentNodePathDir } = await import('./agentNode.ts');
+  const { agentGitPathDir } = await import('./agentGit.ts');
+  assert.ok(openChildren('/w').includes('tools'));
+  for (const plat of ['darwin', 'linux'] as const) {
+    assert.equal(agentNodePathDir('/w', plat, () => true), undefined, plat);
+    assert.equal(agentGitPathDir('/w', plat, () => true), undefined, plat);
+  }
+});
+
+test('w5717: labelLow gives a child of a Medium folder its own Low label, raises the folder after, and reads the child again', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const tools = path.join(dir, 'tools');
+  const cargo = path.join(tools, 'cargo');
+  const git = path.join(tools, 'git');
+  const node = path.join(tools, 'node');
+  for (const d of [cargo, git, node]) fs.mkdirSync(d, { recursive: true });
+  // The old layout: tools Low on its own, cargo inheriting it, git already Low on its own, node Medium on its own.
+  const label = new Map<string, string>([
+    [tools, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'],
+    [cargo, 'Mandatory Label\\Low Mandatory Level:(I)(OI)(CI)(NW)'],
+    [git, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'],
+    [node, 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)'],
+  ]);
+  const calls: string[][] = [];
+  const exec: Exec = async (_c, args) => {
+    calls.push(args);
+    if (args.length === 1) return { code: 0, stdout: `${args[0]} ${label.get(args[0]) ?? ''}`, stderr: '' };
+    label.set(args[0], args[2].endsWith('low') ? 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)' : 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)');
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const said: string[] = [];
+  assert.equal(await labelLow({ dirs: [cargo, git], files: [], medium: [tools, node] }, exec, (l) => void said.push(l)), true);
+  const sets = calls.filter((c) => c.length > 1).map((c) => `${path.basename(c[0])} ${c[2]}`);
+  assert.deepEqual(sets, ['cargo (OI)(CI)low', 'tools (OI)(CI)medium'], 'cargo first, then tools; git and node untouched');
+  assert.ok(calls.filter((c) => c.length === 1 && c[0] === cargo).length >= 2, 'cargo read again after tools rose');
+  // A child that cannot be labelled holds its parent Low, so workers keep writing it.
+  const stuck = new Map(label);
+  stuck.set(tools, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)');
+  stuck.set(cargo, 'Mandatory Label\\Low Mandatory Level:(I)(OI)(CI)(NW)');
+  const bad: Exec = async (_c, args) => {
+    if (args.length === 1) return { code: 0, stdout: `${args[0]} ${stuck.get(args[0]) ?? ''}`, stderr: '' };
+    if (args[0] === cargo) return { code: 1, stdout: '', stderr: 'The media is write protected.' };
+    stuck.set(args[0], 'set');
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const said2: string[] = [];
+  assert.equal(await labelLow({ dirs: [cargo], files: [], medium: [tools, node] }, bad, (l) => void said2.push(l)), false);
+  assert.match(stuck.get(tools)!, /Low/, 'tools left Low');
+  assert.ok(said2.some((l) => l.includes(`left ${tools} Low`)), said2.join('\n'));
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('w5717: isExplicitLow tells a Low label of its own from an inherited one', () => {
+  assert.ok(isExplicitLow('V:\\ffw\\tools\\cargo Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'));
+  assert.ok(!isExplicitLow('V:\\ffw\\tools\\cargo Mandatory Label\\Low Mandatory Level:(I)(OI)(CI)(NW)'));
+  assert.ok(!isExplicitLow('V:\\ffw\\tools Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)'));
 });
 
 test('CI runner folders are never labelled Low and are kept Medium where an earlier rollout labelled them (w5440)', () => {

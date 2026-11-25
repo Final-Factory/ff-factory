@@ -841,10 +841,10 @@ plugin's version before and after, per machine.
   old daemon still online; a machine that comes online later gets it after its own daemon step, in the follow-up. One left
   offline by a failed update is listed "Agent tools skipped". The portal's own host and machines deployed over ssh are not
   worker roots and get none.
-- **A person's checkout is never touched.** The run uses FF Factory's own `<root>/tools/final-factory-agents`; a person's
+- **A person's checkout is never touched.** The run uses FF Factory's own `<root>/tools-medium/final-factory-agents` (w5597; `<root>/tools` before, which workers write); a person's
   (`~/final-factory-agents` on BEAST, [worker-root.md](worker-root.md)) stays as it is, and so does publish-skills' marker
-  that names it. If FF Factory's own checkout has changes of its own, the line says `Agent tools NOT PUBLISHED: <why>` and
-  nothing in it is overwritten.
+  that names it. If FF Factory's own checkout has changes of its own, or cannot be fetched or made, the run's lines carry
+  `WARNING: <why>; nothing in it was overwritten; this run publishes from a fresh clone` and the publish goes on (w5597).
 - **A failure on one machine** (`Agent tools FAILED: <why>`, with the run's own lines under it as `tools: ...`) changes
   nothing about its daemon, rolls nothing back, and the next machine carries on. The report's last line asks for a line to
   the user when any machine says FAILED, NOT PUBLISHED or OFFLINE.

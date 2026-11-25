@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { ghConfigFolder, hasOwnGithub, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadWarn, ownerSecretPaths, ownerSecretPathsWarn, sayOwnerWarnStage, type TokenRun } from '../machine/ownerSecrets.ts';
+import { ghConfigFolder, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadWarn, ownerRunWiring, ownerSecretPaths, ownerSecretPathsWarn, ownerToolLegs, sayOwnerRules, sayOwnerWarnStage, type TokenRun } from '../machine/ownerSecrets.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
 
@@ -143,4 +143,125 @@ test('sayOwnerWarnStage (w5749): names only the paths that exist, and nothing wh
   assert.match(line ?? '', /\/Users\/p\/\.netrc exist here/);
   assert.doesNotMatch(line ?? '', /git-credentials/);
   assert.equal(sayOwnerWarnStage({ platform: 'darwin', home: '/Users/p', env: {}, mode: 'warn', exists: () => false }), undefined);
+});
+
+// w5747 (w5733's review of #1232): the daemon's per-run wiring (machine/daemon.ts launchSpecFor uses ownerRunWiring).
+const wire = (o: { sandbox?: boolean; enforced: boolean; platform?: NodeJS.Platform; vault?: boolean; machineToken?: string }) => {
+  let asked = 0;
+  const w = ownerRunWiring({
+    sandbox: o.sandbox ?? true,
+    enforced: o.enforced,
+    platform: o.platform ?? 'darwin',
+    home: '/Users/p',
+    env: {},
+    specEnv: o.vault ? { GH_TOKEN: 'vault-token-value-xxxxxxxx' } : {},
+    root: '/Users/p/ffw',
+    machineGh: (): Record<string, string> => (asked++, o.machineToken ? { GH_TOKEN: o.machineToken } : {}),
+    ghConfigDir: (root) => `${root}/gh-worker`,
+  });
+  return { ...w, asked };
+};
+
+test('ownerRunWiring: the owner read denies and the Keychain mach denies come only with the read fence enforced (w5747)', () => {
+  for (const vault of [true, false]) {
+    const off = wire({ enforced: false, vault, machineToken: 'machine-token-value-xxxxx' });
+    assert.deepEqual(off.owner, [], 'warn or off: no owner path denied');
+    assert.equal(off.ownerSecrets, undefined, 'warn or off: no mach or preference deny');
+    const on = wire({ enforced: true, vault, machineToken: 'machine-token-value-xxxxx' });
+    assert.ok(on.owner.includes('/Users/p/.ssh') && on.owner.includes('/Users/p/Library/Keychains') && on.owner.includes('/Users/p/.config/gh'));
+    assert.deepEqual(on.ownerSecrets, { mach: KEYCHAIN_MACH_SERVICES });
+  }
+  // A run with no token at all keeps the login's folder readable, even enforced; the rest stays closed.
+  const bare = wire({ enforced: true });
+  assert.ok(!bare.owner.includes('/Users/p/.config/gh') && bare.owner.includes('/Users/p/.ssh'));
+  // Not a fenced run, or Windows: nothing.
+  assert.deepEqual(wire({ enforced: true, sandbox: false, machineToken: 'm'.repeat(30) }).owner, []);
+  const win = wire({ enforced: true, platform: 'win32', machineToken: 'm'.repeat(30) });
+  assert.deepEqual(win.owner, []);
+  assert.equal(win.ownerSecrets, undefined);
+});
+
+test('ownerRunWiring: GH_CONFIG_DIR=<root>/gh-worker only for a fenced macOS or Linux run that holds a token (w5747)', () => {
+  for (const enforced of [true, false]) {
+    assert.deepEqual(wire({ enforced, vault: true }).ghOwn, { GH_CONFIG_DIR: '/Users/p/ffw/gh-worker' });
+    assert.deepEqual(wire({ enforced, machineToken: 'machine-token-value-xxxxx' }).ghOwn, { GH_CONFIG_DIR: '/Users/p/ffw/gh-worker' });
+    assert.deepEqual(wire({ enforced, platform: 'linux', vault: true }).ghOwn, { GH_CONFIG_DIR: '/Users/p/ffw/gh-worker' });
+    assert.deepEqual(wire({ enforced }).ghOwn, {}, 'no token: gh keeps its own config');
+    assert.deepEqual(wire({ enforced, platform: 'win32', vault: true }).ghOwn, {}, 'Windows: lowEnv moves APPDATA instead');
+    assert.deepEqual(wire({ enforced, sandbox: false, vault: true }).ghOwn, {});
+  }
+});
+
+test('ownerRunWiring: the machine GH_TOKEN only for a fenced run without a vault token; the login folder only with no token (w5747)', () => {
+  const vault = wire({ enforced: false, vault: true, machineToken: 'machine-token-value-xxxxx' });
+  assert.deepEqual(vault.ghMachine, {});
+  assert.equal(vault.asked, 0, 'a run with a vault token never reads the machine login');
+  assert.equal(vault.ghLoginFolder, false);
+  const none = wire({ enforced: false, machineToken: 'machine-token-value-xxxxx' });
+  assert.deepEqual(none.ghMachine, { GH_TOKEN: 'machine-token-value-xxxxx' });
+  assert.equal(none.ghLoginFolder, false, 'given the token, not the folder');
+  const unread = wire({ enforced: false });
+  assert.deepEqual(unread.ghMachine, {});
+  assert.equal(unread.ghLoginFolder, true, 'the daemon read no token: the old folder fallback');
+  const unfenced = wire({ enforced: false, sandbox: false, machineToken: 'machine-token-value-xxxxx' });
+  assert.deepEqual(unfenced.ghMachine, {});
+  assert.equal(unfenced.asked, 0);
+  assert.equal(unfenced.ghLoginFolder, false);
+});
+
+test('ownerToolLegs: gh and git ls-remote with the token and an empty gh folder; a Keychain write on a Mac (w5747)', () => {
+  const mac = ownerToolLegs({ platform: 'darwin', gh: '/opt/gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: { GIT_CONFIG_COUNT: '2' } });
+  assert.deepEqual(mac.legs.map((l) => [l.name, l.expect]), [['gh', 'ok'], ['git ls-remote', 'ok'], ['security', 'refused']]);
+  assert.deepEqual(mac.skipped, []);
+  for (const l of mac.legs.slice(0, 2)) assert.equal(l.env.GH_CONFIG_DIR, '/r/gh-worker');
+  assert.equal(mac.legs[1].env.GIT_CONFIG_COUNT, '2', 'git goes through the credential helper');
+  assert.ok(mac.legs.every((l) => !l.args.includes('machine-token-value-xxxxx')), 'the token is never on a command line');
+  const linux = ownerToolLegs({ platform: 'linux', gh: 'gh', ghConfigDir: '/r/gh-worker', credentialEnv: {} });
+  assert.deepEqual(linux.legs, []);
+  assert.equal(linux.skipped.length, 1, 'no token: gh and git are not run, and say so');
+});
+
+test('judgeToolLeg: ok legs must exit 0; the Keychain write must fail, at once; no token-looking line is quoted (w5747)', () => {
+  assert.deepEqual(judgeToolLeg({ name: 'gh', expect: 'ok' }, { code: 0 }), { name: 'gh', ok: true, said: 'ok' });
+  const bad = judgeToolLeg({ name: 'gh', expect: 'ok' }, { code: 1, stderr: 'failed to load config: operation not permitted\nGH_TOKEN ghp_abc' });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.said, 'exit 1: failed to load config: operation not permitted');
+  assert.equal(judgeToolLeg({ name: 'gh', expect: 'ok' }, { code: -1, timedOut: true }).ok, false);
+  assert.deepEqual(judgeToolLeg({ name: 'security', expect: 'refused' }, { code: 152 }), { name: 'security', ok: true, said: 'refused at once (exit 152)' });
+  assert.equal(judgeToolLeg({ name: 'security', expect: 'refused' }, { code: 0 }).ok, false, 'the write got through');
+  assert.equal(judgeToolLeg({ name: 'security', expect: 'refused' }, { code: -1, timedOut: true }).ok, false, 'hung on a dialog');
+});
+
+test('sayOwnerRules: warn names what on would close (w5747)', () => {
+  const l = sayOwnerRules('warn', 'darwin', ['/Users/p/.ssh']);
+  assert.match(l, /would close \(warn only/);
+  assert.match(l, /\/Users\/p\/\.ssh/);
+  assert.match(l, /com\.apple\.authd and com\.apple\.SecurityServer/);
+  assert.match(l, /preference writes/);
+  assert.match(sayOwnerRules('on', 'linux', ['/home/p/.ssh']), /owner-secret rules close: reads of \/home\/p\/\.ssh$/);
+  assert.match(sayOwnerRules('warn', 'win32', []), /none on Windows/);
+});
+
+test('the Keychain write leg is held after it hung or got through, until the code version changes, and still blocks on (w5752)', () => {
+  const files = new Map<string, string>();
+  const write = (f: string, d: string) => void files.set(f, d);
+  const read = (f: string) => {
+    const d = files.get(f);
+    if (d === undefined) throw new Error('ENOENT');
+    return d;
+  };
+  const file = keychainHoldFile('/d');
+  assert.equal(keychainHeld(file, 'v1', read), undefined, 'no hold: the leg runs');
+  holdKeychainLeg(file, 'v1', 'hung, a dialog may have been on the screen', write);
+  assert.equal(keychainHeld(file, 'v1', read), 'hung, a dialog may have been on the screen');
+  assert.equal(keychainHeld(file, 'v2', read), undefined, 'new code: the leg runs again');
+  files.set(file, '{not json');
+  assert.equal(keychainHeld(file, 'v1', read), undefined, 'a broken hold file is no hold');
+
+  const held = ownerToolLegs({ platform: 'darwin', gh: 'gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: {}, keychainHeld: 'let through' });
+  assert.deepEqual(held.legs.map((l) => l.name), ['gh', 'git ls-remote'], 'the held leg does not run');
+  assert.equal(held.skipped.length, 1, 'a skipped leg, which blocks on mode in probeOwnerTools');
+  assert.match(held.skipped[0], /^security \(held: .*let through/);
+  const linux = ownerToolLegs({ platform: 'linux', gh: 'gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: {}, keychainHeld: 'let through' });
+  assert.deepEqual(linux.skipped, [], 'the hold means nothing off a Mac');
 });

@@ -165,12 +165,15 @@ const CARGO_HOME_NOT_UNDER = ['daemon', 'secrets', 'ffu-runners'];
  * writable for a worker stays (LothDesktop's `V:/ffw/tools/cargo`, set in its environment); anything else (unset, so
  * cargo's `~/.cargo`, or a folder outside the root) moves to `<root>/cache/cargo`, seeded from the old one. Exported for tests.
  */
-export function workerCargoHome(root: string, env: NodeJS.ProcessEnv, home: string, p: typeof path = path): { home: string; seedFrom?: string } {
+export function workerCargoHome(root: string, env: NodeJS.ProcessEnv, home: string, p: typeof path = path, exists: (f: string) => boolean = fs.existsSync): { home: string; seedFrom?: string } {
   const now = env.CARGO_HOME?.trim();
   if (now) {
     const rel = p.relative(p.resolve(root), p.resolve(now));
     const first = rel.split(/[\\/]/)[0]?.toLowerCase() ?? '';
-    if (rel && !rel.startsWith('..') && !p.isAbsolute(rel) && !CARGO_HOME_NOT_UNDER.includes(first)) return { home: p.resolve(now) };
+    // w5717: `tools` is Medium on Windows and a Low worker cannot make a new folder in it, so a cargo home there stays
+    // only while it is there; once gone it moves to `<root>/cache/cargo` like any other.
+    const gone = first === 'tools' && !exists(p.resolve(now));
+    if (rel && !rel.startsWith('..') && !p.isAbsolute(rel) && !CARGO_HOME_NOT_UNDER.includes(first) && !gone) return { home: p.resolve(now) };
   }
   const to = p.join(root, 'cache', 'cargo');
   const from = now ? p.resolve(now) : p.join(home, '.cargo');

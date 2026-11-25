@@ -261,6 +261,125 @@ export function workerGhConfigDir(root: string): string {
   return dir;
 }
 
+/** What one run gets from the owner-secret work (w5548, w5553, w5560), as daemon.ts wires it (w5747's wiring test). */
+export interface OwnerRunWiring {
+  /** The machine login's token as GH_TOKEN: only a fenced run with no vault token, and only when the daemon read one. */
+  ghMachine: Record<string, string>;
+  /** The owner paths closed to the run's reads: only while the read fence is enforced. */
+  owner: string[];
+  /** The Keychain mach denies (and with them, in Seatbelt, the preference-write deny): only with owner paths. */
+  ownerSecrets?: { mach: string[] };
+  /** Windows fallback: the login's own folder as GH_CONFIG_DIR (lowEnv), only for a fenced run with no token at all. */
+  ghLoginFolder: boolean;
+  /** GH_CONFIG_DIR=<root>/gh-worker: a fenced macOS or Linux run that holds a token (its own or the machine's). */
+  ghOwn: Record<string, string>;
+}
+
+/**
+ * The owner-secret part of a run's launch (daemon.ts launchSpecFor), in one place so it is tested: the read denies follow
+ * the read fence's switch (`enforced`), while the gh routing (ghMachine, ghLoginFolder, ghOwn) follows only whether the
+ * run holds a token. `machineGh` is called only for a fenced run with no vault token.
+ */
+export function ownerRunWiring(o: {
+  sandbox: boolean;
+  enforced: boolean;
+  platform: NodeJS.Platform;
+  home: string;
+  env: NodeJS.ProcessEnv;
+  specEnv: Record<string, string | undefined> | undefined;
+  root?: string;
+  machineGh: () => Record<string, string>;
+  ghConfigDir?: (root: string) => string;
+}): OwnerRunWiring {
+  const own = hasOwnGithub(o.specEnv);
+  const ghMachine = o.sandbox && !own ? o.machineGh() : {};
+  const hasToken = own || Boolean(ghMachine.GH_TOKEN);
+  const owner = o.sandbox && o.enforced ? ownerReadDenied({ platform: o.platform, home: o.home, env: o.env, hasToken }) : [];
+  return {
+    ghMachine,
+    owner,
+    ...(owner.length ? { ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : {}),
+    ghLoginFolder: o.sandbox && !hasToken,
+    ghOwn: o.sandbox && o.root && o.platform !== 'win32' && hasToken ? { GH_CONFIG_DIR: (o.ghConfigDir ?? workerGhConfigDir)(o.root) } : {},
+  };
+}
+
+/** The Keychain item the probe's `security` leg tries to write (and deletes, outside the fence, if the write got through). */
+export const PROBE_KEYCHAIN_ITEM = 'ff-read-fence-probe';
+
+/** One tool the read fence's probe runs under the owner rules: `ok` must exit 0; `refused` must fail, and fail at once. */
+export interface OwnerToolLeg {
+  name: string;
+  cmd: string;
+  args: string[];
+  env: Record<string, string>;
+  expect: 'ok' | 'refused';
+  timeoutMs: number;
+}
+
+/**
+ * The probe's tool legs (w5747, from w5733's review of #1232): what a fenced run does with the owner's secrets closed.
+ * - gh with an empty GH_CONFIG_DIR and a token (the w5548 route: gh refused to start when it read the owner's folder);
+ * - git ls-remote of a private repository through the credential helper that reads GH_TOKEN (`credentialEnv`);
+ * - macOS: `security add-generic-password` refused at once, with no SecurityAgent dialog (w5560 probe 4: without both mach
+ *   denies it hung on a dialog on the person's screen).
+ * gh and git need a token (the machine login's, read by the daemon); without one they are `skipped`, which blocks enforcing.
+ */
+export function ownerToolLegs(o: { platform: NodeJS.Platform; gh: string; git?: string; token?: string; ghConfigDir: string; credentialEnv: Record<string, string>; repo?: string; keychainHeld?: string }): { legs: OwnerToolLeg[]; skipped: string[] } {
+  const legs: OwnerToolLeg[] = [];
+  const skipped: string[] = [];
+  const quiet = { GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  if (o.token) {
+    legs.push({ name: 'gh', cmd: o.gh, args: ['api', 'user', '--silent'], env: { ...quiet, GH_TOKEN: o.token, GH_CONFIG_DIR: o.ghConfigDir }, expect: 'ok', timeoutMs: 60_000 });
+    legs.push({
+      name: 'git ls-remote',
+      cmd: o.git ?? 'git',
+      args: ['-c', 'credential.interactive=never', 'ls-remote', o.repo ?? 'https://github.com/Final-Factory/FinalFactory.git', 'HEAD'],
+      env: { ...quiet, ...o.credentialEnv, GH_TOKEN: o.token, GH_CONFIG_DIR: o.ghConfigDir },
+      expect: 'ok',
+      timeoutMs: 60_000,
+    });
+  } else skipped.push('gh and git ls-remote (the daemon read no machine gh token to test with)');
+  if (o.platform === 'darwin' && o.keychainHeld) {
+    skipped.push(`security (held: an earlier probe on this code found the Keychain write ${o.keychainHeld}; it runs again once the daemon's code changes)`);
+  } else if (o.platform === 'darwin') {
+    legs.push({ name: 'security', cmd: '/usr/bin/security', args: ['add-generic-password', '-a', PROBE_KEYCHAIN_ITEM, '-s', PROBE_KEYCHAIN_ITEM, '-w', 'probe'], env: {}, expect: 'refused', timeoutMs: 20_000 });
+  }
+  return { legs, skipped };
+}
+
+export interface ToolLegVerdict {
+  name: string;
+  ok: boolean;
+  said: string;
+}
+
+/** Judges one tool leg's exit; never quotes a line that could carry a token. Exported for tests. */
+export function judgeToolLeg(leg: Pick<OwnerToolLeg, 'name' | 'expect'>, r: { code: number; stderr?: string; timedOut?: boolean }): ToolLegVerdict {
+  const tail = (r.stderr ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l && !/token|gh[opsur]_|github_pat_|password/i.test(l))
+    .slice(-1)[0]
+    ?.slice(0, 200);
+  const why = `exit ${r.code}${tail ? `: ${tail}` : ''}`;
+  if (leg.expect === 'ok') return { name: leg.name, ok: r.code === 0 && !r.timedOut, said: r.code === 0 && !r.timedOut ? 'ok' : r.timedOut ? 'hung' : why };
+  if (r.timedOut) return { name: leg.name, ok: false, said: 'hung, not refused (a dialog may be on the screen)' };
+  if (r.code === 0) return { name: leg.name, ok: false, said: 'the write got through: not refused' };
+  return { name: leg.name, ok: true, said: `refused at once (exit ${r.code})` };
+}
+
+/**
+ * One log line for what the owner-secret rules close (w5747): in warn mode what on mode would close, so warn shows them
+ * before any machine enforces them.
+ */
+export function sayOwnerRules(mode: string, platform: NodeJS.Platform, owner: readonly string[]): string {
+  if (platform === 'win32') return `read fence (${mode}): owner-secret rules: none on Windows (every owner path is on the system drive, where the fence sets no label)`;
+  const verb = mode === 'on' ? 'close' : 'would close (warn only: runs start without them)';
+  const mac = platform === 'darwin' ? `, deny mach-lookup of ${KEYCHAIN_MACH_SERVICES.join(' and ')}, and deny preference writes` : '';
+  return `read fence (${mode}): owner-secret rules ${verb}: reads of ${owner.length ? owner.join(', ') : 'no owner path'}${mac}`;
+}
+
 /**
  * The owner's UNIX sockets that hand out a secret with no file read (w5748, from w5733's review of #1232): the session
  * bus (the Secret Service, org.freedesktop.secrets, where a desktop Linux gh login is kept "(keyring)", and the browsers'
@@ -315,4 +434,28 @@ function statOr(p: string): fs.Stats | undefined {
  */
 export function ownerSocketDenyArgs(runtimeDir: string | undefined): string[] {
   return ownerSocketPaths({ runtimeDir, env: {} }).flatMap((p) => ['--deny-unix', p]);
+}
+
+/**
+ * The Keychain write leg's hold (w5752's review of #1245): a probe that finds the leg hung (a dialog may be on the person's
+ * screen, and its "Reset To Defaults" would replace their login keychain) or the write let through records it here, in the
+ * daemon's own folder, with the daemon's code version, and later probes skip the leg until that version changes, so the
+ * dialog comes back at most once per code version, not at every daemon start. A skipped leg still blocks `on`
+ * (probeOwnerTools: any skipped leg blocks).
+ */
+export const keychainHoldFile = (appDir: string) => path.join(appDir, 'read-fence-keychain-held.json');
+
+/** What the hold says for this code version (`hung, ...` or `let through`), or undefined: no hold, or another version's. */
+export function keychainHeld(file: string, version: string, read: (f: string) => string = (f) => fs.readFileSync(f, 'utf8')): string | undefined {
+  try {
+    const h = JSON.parse(read(file)) as { version?: unknown; why?: unknown };
+    return h.version === version && typeof h.why === 'string' && h.why ? h.why : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Records the hold for this code version. A hold that cannot be written is said in the log by the caller. */
+export function holdKeychainLeg(file: string, version: string, why: string, write: (f: string, d: string) => void = (f, d) => fs.writeFileSync(f, d)): void {
+  write(file, JSON.stringify({ version, why, at: new Date().toISOString() }) + '\n');
 }

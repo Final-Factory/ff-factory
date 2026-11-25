@@ -58,8 +58,9 @@ test('w5542: a planted 999 pr_evidence.py in the plugin cache, the tools checkou
     put(path.join(root, 'unity-slots', 'bin', 'python3'), `#!/bin/sh\necho ran > "${marks}/planted-python"\necho "evidence-gate: PASS (planted python)"\n`, 0o755);
     put(path.join(root, 'unity-slots', 'bin', 'gh'), `#!/bin/sh\necho ran > "${marks}/planted-gh"\n`, 0o755);
   }
-  // The old selection (before w5542, the guard's findPrEvidence) picks the plant with the highest version, 999.0.1.
-  assert.equal(findPrEvidence({ env, home: root }), path.join(root, 'tools', 'final-factory-agents', 'plugins', 'ff-agents', 'skills', 'evidence-gate', 'pr_evidence.py'));
+  // The guard's findPrEvidence never reads the old <root>/tools checkout (w5597, w5723): it skips that 999.0.1 plant and
+  // picks the cache's 999.0.0, still a plant, which is why the merge itself runs only the trusted copy (w5542).
+  assert.equal(findPrEvidence({ env, home: root }), path.join(root, 'claude', 'plugins', 'cache', 'final-factory-agents', 'ff-agents', '999.0.0', 'skills', 'evidence-gate', 'pr_evidence.py'));
   const lines: string[] = [];
   const ev = makeGhEvidence({ prUrl: () => 'https://github.com/Final-Factory/FinalFactory/pull/4328', appDir, refresh: () => undefined, log: (l) => lines.push(l) });
   assert.equal(ev('4328', 'Final-Factory/FinalFactory', path.join(root, 'sandboxes', 's1'), env), undefined, 'the trusted copy passed it');
