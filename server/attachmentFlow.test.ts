@@ -308,5 +308,11 @@ test('w3558: 25 attachments go to a worker, 26 are refused; a request\'s own fil
   const second = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Read them too.', title: 'Logs 2', work_id: w.id, extra_agent: true, override_duplicate: 'w3558 test: a second worker on purpose' });
   assert.equal(second.isError, false, `a request's own 25 files pass a cap of 3: ${second.text}`);
   assert.match(second.text, /It gets 25 attachments/);
+  // w5619: its 25 files are fetched before its brief goes on. Ending the test meanwhile stopped the portal under the
+  // daemon's download, whose retries (4 tries of a 60 s idle timer) kept this file's process up for 280 s on CI.
+  const worker2 = /Started agent (\w+)/.exec(second.text)![1];
+  await until('the second worker got its brief', () => users(worker2).length > 0);
+  assert.equal(users(worker2)[0].attachments?.length, 25);
+  await until('its brief turn ends', () => !isMidTurn(store.sessions.get(worker2)!));
   assert.match((await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'x', title: 'Logs 3', work_id: w.id, extra_agent: true, override_duplicate: 'w3558 test', attachments: ids.slice(0, 4) })).text, /^ERROR: attachments: at most 3 at once/, 'the ids a call adds are still capped');
 });
