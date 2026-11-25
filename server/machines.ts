@@ -29,7 +29,7 @@ import { hostStartFailed, offlineDetail } from '../shared/agentState.ts';
 import { ghLoginLabel, sanitizeGhLogin } from '../shared/ghLogin.ts';
 import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
 import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
-import { HOST_LOGIN, machineLogin, type AccountIdentity } from './usage.ts';
+import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
@@ -72,6 +72,37 @@ export const VOICE_RETRY_MS = { value: 2 * 60_000 };
 const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
 /** Run-state fields the daemon clears (absent from its JSON report once cleared). */
 const CLEARABLE = ['turnOpenSince', 'backgroundTasks', 'backgroundJobs', 'statusDetail'] as const;
+/**
+ * The fields of a session a machine's report may set (w5515, finding 10 of the w5452 security audit): the run state its
+ * agent's process produces (server/sessions.ts AgentSession.update and its hosted copy, machine/agentHost.ts). Everything
+ * else in its report is dropped: identity, authorization and attribution (requestedBy, lastRequestedBy, orchestratorRole,
+ * permissionMode, ranAs, ranFor, followUpOn, effort, openAsks, personMessages, forYou, peopleMessaged), naming and
+ * placement are the portal's own records, so a compromised machine cannot make its sessions pass as another person's or
+ * an orchestrator's in mayAct (shared/actAccess.ts) or in the cost ledger (server/spend.ts reads requestedBy and
+ * orchestratorRole from the portal's record). The agent's own spend (costUsd, sdkCostUsd, lastTurnCostUsd) is its usage
+ * and stays the daemon's; the ledger attributes it by those portal-owned fields. `account` is taken only when it is the
+ * one the portal handed that session (sessionAccount). A field a newer daemon adds is dropped until it is listed here.
+ * Exported for tests.
+ */
+export const DAEMON_RUN_FIELDS = [
+  'status', 'statusDetail', 'lastActivityAt', 'turns', 'costUsd', 'sdkCostUsd', 'lastTurnCostUsd', 'pendingPermissions',
+  'lastResult', 'lastResultAt', 'sdkSessionId', 'model', 'activeModel', 'contextTokens', 'lastCompaction', 'turnOpenSince',
+  'backgroundTasks', 'backgroundJobs', 'editorRefused',
+] as const satisfies readonly (keyof SessionInfo)[];
+const DAEMON_RUN_SET: ReadonlySet<string> = new Set(DAEMON_RUN_FIELDS);
+
+/** Only the fields of a daemon's session report it may set (DAEMON_RUN_FIELDS). Exported for tests. */
+export function daemonRunState(info: SessionInfo): Partial<SessionInfo> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(info ?? {})) if (DAEMON_RUN_SET.has(k)) out[k] = v;
+  return out as Partial<SessionInfo>;
+}
+
+/** The account key a process started with this spec's env records on its machine (usage.ts accountKeyOf), as the portal reads it. */
+export function sessionAccount(env: Record<string, string | undefined> | undefined, machineId: string, local: boolean): string {
+  const key = accountKeyOf(env ?? {});
+  return key === HOST_LOGIN && !local ? machineLogin(machineId) : key;
+}
 
 /**
  * Whether a machine worker counts as cut off mid-turn when its link drops: its daemon reported its process live on
@@ -1390,6 +1421,8 @@ export class MachineManager {
    * kept so a refusal at an agent cap goes back in the queue (requeueRefused). Counted as mid-turn meanwhile, so resumes sent
    * in one pass (one merge clearing several requests' gates) do not each see the same free slot.
    */
+  /** w5515: per session, the account keys (sessionAccount) the portal handed it in a send's spec since this portal started. */
+  private handedAccounts = new Map<string, Set<string>>();
   private starting = new Map<string, { at: number; text: string; from: 'human' | 'orchestrator' | 'system'; uuid: string; images: ImageInput[]; requestedBy?: Requester; attachments: DeliveredAttachment[] }>();
 
   /** Whether a turn this portal just sent `s` counts as mid-turn before its daemon says so (w3597). */
@@ -1998,6 +2031,10 @@ export class MachineManager {
     // Its Live view ended with its sandbox's release (w1582): it stages the view again before it answers.
     const lost = !s.live && s.info.liveLost ? liveLostNote(s.info.liveLost) : undefined;
     const said = [updated, moved ? movedNote(m, s.info.movedFrom!, moved) : undefined, saved, lost, text].filter(Boolean).join('\n\n');
+    // w5515: the account this send hands it; its daemon's report of the account its process started on is taken only if it is one of these.
+    const handed = this.handedAccounts.get(s.info.id) ?? new Set<string>();
+    handed.add(sessionAccount(spec.env, m.id, !!m.local));
+    this.handedAccounts.set(s.info.id, handed);
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
     // w3597: it takes a slot from now, and its message is kept in case the daemon refuses it at an agent cap.
     if (!isMidTurn(s.info)) this.starting.set(s.info.id, { at: Date.now(), text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), attachments });
@@ -2459,12 +2496,17 @@ export class MachineManager {
         // a "here" answered mid-turn went back to the older "elsewhere" on the next report, and BEAST parked worker 66b1c43c's
         // exclusive tickets "placed elsewhere (timed_run on lothdesktop)" from 12:46Z to 15:26Z on 2026-11-07, re-asked 8 times.
         const wasLive = s.liveFlag;
-        const { id: _i, kind: _k, machineId: _m, standingId: _s, sandboxId: _b, title: _t, createdAt: _c, label: _l, labelAt: _la, activeTool: _at, stoppedOnPurpose: _sp, waitingOn: _wo, hostFailure: _hf, machineSandbox: _ms, placeReleased: _pr, movedFrom: _mf, liveLost: _ll, releaseDue: _rd, savedWork: _sw, ranAs: _ra, ranFor: _rf, ranOn: _ro, wakeAt: _wa, wakeNote: _wn, queuedSend: _qs, queuedOn: _qo, timedVerdict: _tv, ...run } = msg.info;
+        // w5515: an allowlist, not a strip list (DAEMON_RUN_FIELDS): what the agent's process produces, nothing about who
+        // it is, who it works for or what it may do. The fields above were each dropped for a reason of their own (the portal
+        // owns identity, naming and placement; ranAs/ranFor w1076; the check-in w2255; timedVerdict w3663); none is listed.
+        const run = daemonRunState(msg.info);
         // The portal sees the daemon's events as they come (Store.noteActivity): never step activity back.
         if (run.lastActivityAt && s.info.lastActivityAt && run.lastActivityAt < s.info.lastActivityAt) run.lastActivityAt = s.info.lastActivityAt;
-        // "The login of the computer it runs on", there: this Mac's login, not this host's. On the portal's own host
-        // it is this host's login, which the usage tracker already polls.
-        if (run.account === HOST_LOGIN && !m.local) run.account = machineLogin(id);
+        // The account its process started on: "the login of the computer it runs on" is this Mac's login, not this host's
+        // (on the portal's own host it is this host's login, which the usage tracker already polls). Taken only when it is the
+        // one already recorded or one the portal handed it (w5515): a machine cannot put its spend on another account.
+        const reported = typeof msg.info?.account === 'string' ? (msg.info.account === HOST_LOGIN && !m.local ? machineLogin(id) : msg.info.account) : undefined;
+        if (reported !== undefined && reported !== s.info.account && this.handedAccounts.get(s.info.id)?.has(reported)) s.info.account = reported;
         Object.assign(s.info, run);
         // It ended before its host came up (w691): the same dead host as a start that threw.
         if (run.status === 'stopped' && hostStartFailed(run.statusDetail)) s.info.hostFailure ??= { at: new Date().toISOString(), error: run.statusDetail! };

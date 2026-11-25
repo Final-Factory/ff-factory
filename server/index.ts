@@ -94,7 +94,7 @@ import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, stal
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, isBusy, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, systemdSupervised, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, writeUpdateWanted, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, sessionSource } from './usage.ts';
-import { appVersion, formatVersion } from './version.ts';
+import { appVersion, formatVersion, portalCommit } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
@@ -104,7 +104,7 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress, tailnetOnly } from './remoteChat.ts';
 import { OWNER_DEVICE_APPROVAL_DEFAULT } from './devices.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -116,7 +116,7 @@ import { warmSearchIndex } from './search.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
-import { PageSockets, fromThisMachine } from './pageSockets.ts';
+import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
@@ -380,6 +380,7 @@ const joinHttp = machineJoinHttp({
   // w2004: the clone of a new computer with no GitHub login of its own, where machines.githubFromVault is on for it.
   githubToken: (machineId, person) => githubTokens()?.forMachine(machineId, person, `${machineId}'s worker install (the game repo's clone)`),
   script: (kind) => joinHttpScript(kind),
+  commit: () => portalCommit(),
   refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
   report: (text) => machines.report?.(text),
 });
@@ -2032,19 +2033,34 @@ route('POST', '/api/delegations/([\\w-]+)/(approve|reject|bump)', async (req, [i
 
 route('GET', '/api/push', async (req) => ({ publicKey: notifier.publicKey, subscriptions: notifier.list(auth.user(req)!) }));
 
+/** An endpoint that is not the caller's own, or does not exist, answers 404 and changes nothing (w5534). */
+const notFoundSubscription = (e: unknown) => (e instanceof Error && e.message === 'no such subscription' ? new HttpError(404, e.message) : e);
+
 route('POST', '/api/push/subscribe', async (req) => {
   const b = await readJson<{ subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; prefs?: Partial<NotifyPrefs> }>(req);
-  return { prefs: notifier.subscribe(auth.user(req)!, b.subscription ?? {}, b.prefs, deviceName(String(req.headers['user-agent'] ?? ''))) };
+  try {
+    return { prefs: notifier.subscribe(auth.user(req)!, b.subscription ?? {}, b.prefs, deviceName(String(req.headers['user-agent'] ?? ''))) };
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
 });
 
 route('POST', '/api/push/prefs', async (req) => {
   const b = await readJson<{ endpoint?: string; prefs?: Partial<NotifyPrefs> }>(req);
-  return { prefs: notifier.setPrefs(need(b.endpoint, 'endpoint'), b.prefs ?? {}) };
+  try {
+    return { prefs: notifier.setPrefs(auth.user(req)!, need(b.endpoint, 'endpoint'), b.prefs ?? {}) };
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
 });
 
 route('POST', '/api/push/unsubscribe', async (req) => {
   const b = await readJson<{ endpoint?: string }>(req);
-  notifier.unsubscribe(need(b.endpoint, 'endpoint'));
+  try {
+    notifier.unsubscribe(auth.user(req)!, need(b.endpoint, 'endpoint'));
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
   return {};
 });
 
@@ -2159,7 +2175,8 @@ const requireJoinOwner = (req: http.IncomingMessage) => {
 // The tailnet device this browser is on, to name the PC when the owner adds it from its own browser (undefined off the tailnet).
 route('GET', '/api/machines/join/device', async (req) => {
   requireJoinOwner(req);
-  const device = tailnetOnly(req) ? await joinWhois(clientAddress(req)) : undefined;
+  const addr = tailnetDeviceAddress(req);
+  const device = addr ? await joinWhois(addr) : undefined;
   const name = device?.name;
   const machine = name ? machines.list().find((m) => m.host.toLowerCase() === name || m.id === name)?.id : undefined;
   return { name, machine };
@@ -2465,7 +2482,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway. loopLagMs: the event loop's worst lag of the last minute (w1377).
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), ...(portalCommit() ? { commit: portalCommit() } : {}), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
@@ -2515,7 +2532,7 @@ const server = http.createServer(async (req, res) => {
 
 // Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
 // the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
-const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
+const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 /** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
@@ -3253,7 +3270,7 @@ setInterval(() => {
           },
           removeSession: (id) => sessions.remove(id),
           pushEndpoints: (u) => notifier.list(u).map((x) => x.endpoint),
-          unsubscribe: (e) => notifier.unsubscribe(e),
+          unsubscribe: (e) => notifier.drop(e),
           memoryRoot,
           memoryDir: (u) => memoryDirFor(cfg, { orchestratorRole: 'personal', requestedBy: { userId: u, displayName: u } }, false),
         },

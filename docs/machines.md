@@ -60,7 +60,14 @@ before redeploying by hand.
 - **Sessions.** The portal creates the session record and tells the daemon what to launch (a
   serialisable launch spec: cwd, model, brief, tools, guard settings, budget). Transcript sequence
   numbers are assigned by the daemon, starting from the portal's last one, so a session resumes
-  across daemon restarts. An agent whose machine is offline shows `stopped`; messaging it fails with
+  across daemon restarts. **A daemon reports only run state** (w5515, finding 10 of the w5452 security audit): of each
+  session update it sends, the portal takes only the fields its agent's process produces (`DAEMON_RUN_FIELDS` in
+  `server/machines.ts`: status, turns, its own spend, the result, context size and the like) and drops the rest. Who the
+  session works for (`requestedBy`, `lastRequestedBy`), its orchestrator role, permission mode, effort and the account
+  its spend goes on stay the portal's own records, so a compromised machine cannot pass its sessions off as another
+  person's or an orchestrator's in `mayAct` or the cost ledger. Its reported `account` is taken only when it is one the
+  portal handed that session in a launch spec. A field a newer daemon adds is dropped until it is listed there.
+  An agent whose machine is offline shows `stopped`; messaging it fails with
   "machine m5 is offline". **Cut off mid-turn:** when a machine's link drops, the portal notes the workers that
   were mid-turn; when the daemon is back without them (it was redeployed with `add_machine` `force`, restarted
   with `machine_daemon restart`, or crashed), each gets a resume message (check git status, re-pin Unity,

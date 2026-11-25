@@ -27,13 +27,19 @@ export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
  */
 export const DEFAULT_SCREENSHOT_DIRS = ['Assets/Screenshots', 'Screenshots', 'specs/*/proofs', 'Logs', 'Temp/Screenshots', 'screenshots'];
 
-const norm = (p: string) => path.resolve(p).replace(/\\/g, '/').toLowerCase();
+/** Windows and macOS file systems ignore case, Linux's do not: an allowed folder "Logs" must not admit "logs" there. */
+export const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin';
+
+const norm = (p: string, insensitive = CASE_INSENSITIVE_FS) => {
+  const n = path.resolve(p).replace(/\\/g, '/');
+  return insensitive ? n.toLowerCase() : n;
+};
 
 /** Whether `file` is inside one of `roots` (after resolving `..`). */
-export function inRoots(file: string, roots: string[]): boolean {
-  const f = norm(file);
+export function inRoots(file: string, roots: string[], insensitive = CASE_INSENSITIVE_FS): boolean {
+  const f = norm(file, insensitive);
   return roots.some((r) => {
-    const n = norm(r);
+    const n = norm(r, insensitive);
     return f === n || f.startsWith(n + '/');
   });
 }
