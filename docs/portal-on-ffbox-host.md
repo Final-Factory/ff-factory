@@ -629,7 +629,12 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
    - **Neither answers 3 times in a row:** `virsh reset`, logged and alerted.
    - **Never during the first boot**, before the agent has answered once (cloud-init installs it, then upgrades and may
      reboot): an alert after 30 minutes, never a reset.
-   - **Never within 5 minutes of QEMU's start, nor during the nightly cycle.**
+   - **Never within 5 minutes of QEMU's start or of the guest's last reboot, nor during the nightly cycle.** A reboot
+     inside a running QEMU (cloud-init's after its first upgrade, a reset) restarts the grace: `fff-vm events` notes
+     libvirt's `reboot` event (w5608: the watch reset a guest 11 s into the reboot cloud-init asked for, and its ssh
+     then hung for the e2e's whole 900 s wait).
+   - **Checks are spaced from the end of the last one** (`OnUnitInactiveSec`): a check that waits out its 10 s timeouts
+     no longer starts the next one at once, so "N in a row" spans at least N intervals.
    - **At most 3 resets in 6 hours;** after that only alerts, since a VM that keeps dying needs a person.
 4. **The watchdog is the second layer.** If the guest's kernel or PID 1 hangs, nobody pets `i6300esb` and QEMU resets
    the VM *(measured in CI: a guest that stops petting it is reset; `fff-vm-events` reports the watchdog event)*. A
