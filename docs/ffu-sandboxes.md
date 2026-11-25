@@ -110,6 +110,15 @@ debug profile 4 to 11.5 GB on m5, so 16 GB keeps about two configurations warm a
 the incremental cache or the whole target is touched. The sweep of an 11.5 GB profile read 2193 fingerprints in about
 1 s. The per-worker `cargoTargetCapGB` (8 GB, w3426) still applies to targets in temp folders.
 
+### A runner's job is looked for again before its `_work` goes (w5502)
+
+`ffu-runner-work` checks `runnerJobWhy` when it plans, but `runCleanup` renames the folder aside later, after `endStrays` and
+other awaits. A rename fails on a file a job holds open; a job handed out in that gap before it opens one could still lose
+its checkout. So `cleanupPass` passes `runCleanup` a `busyNow` check (`runnerBusyNow`, `server/installLeftovers.ts`): for an
+item of that rule (it carries its `runner`), `runnerJobWhy` runs again on a fresh process list right before the rename, and a
+job found keeps the item (`kept: a job may have started ...` in `failed`; an unreadable list keeps it too). Ben, w5499:
+"Don't break a CI run that is in progress". Test: `w3502TimingRunnerCleanup.test.ts`.
+
 ### What `ff-leftovers check` and `folders` say (`server/cleanupFolders.ts` `judgeFfuSlotPath`, w4422)
 
 A clean-up worker's `ff-leftovers check <path>`, `folders` and `remove` judge a slot's build output as the rule above

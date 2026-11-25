@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { CleanupGuard } from './cleanup.ts';
 import { fenceToRoot } from './cleanup.ts';
 import { cleanupPass } from './staleOutput.ts';
-import { installLeftoverSettings, mergePlans, planInstallLeftovers, runnerJobWhy, timingHeld, type ProcLite } from './installLeftovers.ts';
+import { installLeftoverSettings, mergePlans, planInstallLeftovers, runnerBusyNow, runnerJobWhy, timingHeld, type ProcLite } from './installLeftovers.ts';
 import { judgeTiming } from './cleanupFolders.ts';
 
 /**
@@ -218,4 +218,22 @@ test('w3502: a low pass removes them by itself, with no person\'s go, fenced to 
     assert.ok(!fs.existsSync(path.join(root, ...x.split('/'))), `${x} is gone from disk`);
   }
   for (const x of ['timing/runs/t1/result.json', 'ffu-runners/r1/_work/_tool/rust/x', 'ffu-runners/r1/.runner']) assert.ok(fs.existsSync(path.join(root, ...x.split('/'))), `${x} stays`);
+});
+
+test('w5502: a job handed out between the plan and the rename keeps its job folder; a runner still idle loses it', async (t) => {
+  const root = install(t);
+  runnersTree(root);
+  const guard: CleanupGuard = { keep: [path.join(root, 'repo')], inUse: [], home: path.join(root, 'home') };
+  const p = await plan(root, { low: true, procs: [listener(root, 'r1', 100), listener(root, 'r2', 200)], runnerLog: () => idleLog(NOW - HOUR) });
+  assert.ok(p.items.some((i) => i.rule === 'ffu-runner-work' && i.runner), 'the plan names the runner of each runner-work item');
+  // r1's listener is handed a job after the plan (its _diag log says so), r2 stays idle.
+  const fresh = (r: string) => (path.basename(r) === 'r1' ? jobLog(NOW) : idleLog(NOW - HOUR));
+  const busyNow = runnerBusyNow(async () => [listener(root, 'r1', 100), listener(root, 'r2', 200)], () => NOW, fresh);
+  const r = await cleanupPass({ opts: { stale: true, dryRun: false }, guard, mode: 'on', regular: async () => [], stale: async () => mergePlans({ items: [], listed: [] }, p), root, busyNow });
+  assert.ok(fs.existsSync(path.join(root, 'ffu-runners', 'r1', '_work', 'ffu')), 'r1 kept its checkout');
+  assert.ok(!fs.existsSync(path.join(root, 'ffu-runners', 'r2', '_work', 'ffu')), 'r2 went');
+  assert.ok(r.failed.some((f) => /r1/.test(f.path) && /^kept: a job may have started/.test(f.why)), JSON.stringify(r.failed));
+  // An unreadable process list keeps the item too, and other rules are never asked.
+  assert.match((await runnerBusyNow(async () => undefined)({ rule: 'ffu-runner-work', runner: path.join(root, 'ffu-runners', 'r1') })) ?? '', /could not be read/);
+  assert.equal(await runnerBusyNow(async () => undefined)({ rule: 'timing-cache' }), undefined);
 });
