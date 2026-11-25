@@ -3,11 +3,12 @@ import type { Ask } from '../../../shared/ask';
 import { answerMessage, answersText, cardMedia, ownerAnswerMessage, cardQuestions, legacySteps, namesForPaths, plainQuestion } from '../../../shared/questionCard';
 import { FLAG_LABEL, type AppState, type WorkDigest, type WorkItem } from '../../../shared/types';
 import { holdsWorker, intakeRecommendation, ownerAnswersFor, waitAge, waitOrder, type AskItem, type WaitingItem } from '../../../shared/waiting';
-import { APPROVE_LABEL, DECLINE_LABEL, approveAsk, waitSummary, waitedFor, whatOf, type WaitSummary } from '../../../shared/waitSummary';
+import { APPROVE_LABEL, DECLINE_LABEL, FILE_HANDUPS_LABEL, approveAsk, handUpAsk, waitSummary, waitedFor, whatOf, type WaitSummary } from '../../../shared/waitSummary';
 import { digestCaption, digestHeading, digestMissing, digestRows } from '../../../shared/intakeDigest';
 import { namesReporter, sourceLabel, untrustedLabel } from '../../../shared/workLabels';
 import { api } from '../api';
 import { sessionRoute } from '../attention';
+import { handUpCardOf } from '../../../shared/workState';
 import { attempt, focusWait, sessionsByIds, toast, useStore } from '../store';
 import { fmtClock, fmtRelative, href, navigate } from '../util';
 import { LocalImages, Markdown } from './Markdown';
@@ -328,6 +329,42 @@ export function ApproveCard({ app, w, mine, reviewers, details, testId, summary 
   );
 }
 
+/**
+ * w5577: follow-ups a worker handed up, left unfiled 12 h, as a card for the person they were handed up to: File them
+ * (through their own orchestrator's file_follow_ups, every request_work limit included) or Drop them; the free box drops
+ * them with a reason. Nothing files a hand-up by itself.
+ */
+function HandUpCard({ w, mine, details, testId, summary }: { w: WorkItem; mine: boolean; details: ReactNode; testId: string; summary?: CardSummary }) {
+  const onAnswer = async (text: string) => {
+    if (text === FILE_HANDUPS_LABEL) {
+      const r = await attempt(api.fileHandUps(w.id));
+      if (r === undefined) return false;
+      toast(r.left ? `${w.id}: not all filed (${r.left} left): ${r.text.slice(0, 200)}` : `${w.id}'s follow-ups are filed.`);
+      return true;
+    }
+    const ok = await attempt(api.dropHandUps(w.id, text.startsWith('Drop them') ? undefined : text.slice(0, 300)));
+    if (ok !== undefined) toast(`${w.id}'s follow-ups dropped.`);
+    return ok !== undefined;
+  };
+  return (
+    <QuestionCard
+      id={`handup.${w.id}`}
+      testId={testId}
+      title={w.title}
+      asks={[handUpAsk(w)]}
+      question=""
+      previews={[]}
+      mine={mine}
+      answeredBy={w.requestedBy.displayName}
+      onAnswer={onAnswer}
+      freeLabel="Or drop them with a reason"
+      details={details}
+      {...(summary ? { summary } : {})}
+      subject
+    />
+  );
+}
+
 function WaitCard({ app, item, now, holds, forOwner }: { app: AppState; item: WaitingItem; now: number; holds?: boolean; forOwner?: string[] }) {
   const { w, ask, mine } = item;
   const [sent, setSent] = useState(false);
@@ -341,6 +378,7 @@ function WaitCard({ app, item, now, holds, forOwner }: { app: AppState; item: Wa
   // Its number, not its title again: the line above says what it is in plain words (w2856).
   const summary = cardSummary(sum, now, undefined, w.id);
   if (ask === 'approve') return <ApproveCard app={app} w={w} mine={mine} reviewers={reviewers} details={details} testId={`wait-${w.id}`} summary={summary} />;
+  if (handUpCardOf(w)) return <HandUpCard w={w} mine={mine} details={details} testId={`wait-${w.id}`} summary={summary} />;
   const r = w.needsYou;
   const cq = cardQuestions(w);
   // A wait with no question of its own (a worker's permission, a report that ends asking): the summary's question.

@@ -2827,11 +2827,18 @@ export interface WorkHandedUp {
   /** When the requester's orchestrator was sent them again (once, 2 h after the hand-up: Orchestrators.handUpStep, w4352). */
   remindedAt?: string;
   /**
-   * w4352: still unfiled 12 h after the hand-up, FF Factory filed them itself as the requester's low-priority requests
-   * (`filed`, also in `filed` above), each de-duplicated against open and recently done work like an FFBox dev request
-   * (`dropped`: what covers it). Nothing is pending after it (handUpsPending).
+   * w4352, until w5577: still unfiled 12 h after the hand-up, FF Factory filed them itself. No longer set (w5577: a hand-up
+   * never files itself); kept so a record written before reads as settled (handUpsPending).
    */
   autoFiled?: { at: string; filed: string[]; dropped: { title: string; by: string; why: string }[] };
+  /**
+   * w5577: when, still unfiled 12 h after the hand-up, they became a Waiting-on-input card for the person they were handed
+   * up to (Orchestrators.handUpStep, once): File them (filed through that person's orchestrator's file_follow_ups, every
+   * request_work limit included) or Drop them. Nothing files them by itself.
+   */
+  card?: string;
+  /** w5577: the person dropped them (the card's Drop, Orchestrators.dropHandUps): nothing is pending after it. */
+  dropped?: { at: string; by: string; note?: string };
 }
 
 /** One pull request linked to a request: where it is, and what it did. */
@@ -3008,7 +3015,13 @@ export interface WorkBlocker {
    * itself when every check passed, at this head (--match-head-commit), and files `report` as the worker's report, with no model
    * turn. On red, or a merge that fails, the worker is resumed as without it. `session`: the worker that set it.
    */
-  mergeOnGreen?: { head: string; report: string; session: string };
+  mergeOnGreen?: {
+    head: string;
+    report: string;
+    session: string;
+    /** w5549: the pull request's head branch as GitHub said when it was armed (the worker's own, server/mergeOwner.ts); the merge checks it again. */
+    headRef?: string;
+  };
   /**
    * deploy (w2140): the portal's automatic deploy is held because CI failed on the head of its main, so this gate cannot
    * clear until that is fixed. `text` is what the request's live state says ("deploy held: master CI failed on 5a1909756

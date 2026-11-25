@@ -2364,10 +2364,11 @@ export async function firewallRepair(l: Layout, m: Manifest) {
   const node = agentNodeExe(l.root);
   const ffu = ffuServerExes(l.root);
   const exes = [...slots, ...(fs.existsSync(node) ? [node] : []), ...ffu];
-  const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp), 2 * 60_000).catch((e) => `${(e as Error).message}`));
+  const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp, [...(fs.existsSync(node) ? [node] : []), ...ffu]), 2 * 60_000).catch((e) => `${(e as Error).message}`));
   if (!seen) return say('WARNING: Windows Firewall: could not read the rules, so they were not checked.');
-  if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ', the agent node' : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
-  const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
+  // w5581: a rule that lets the agent node or ffu-server in from any address (the node's, before w5581) is made again, tailnet only.
+  if (!seen.missing.length && !seen.wide.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ', the agent node (tailnet only)' : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
+  const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.wide.length ? [`a rule lets ${seen.wide.join(', ')} in from any address, not the tailnet only`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
   if (!elevated()) return say(`WARNING: Windows Firewall: ${what}. This session is not elevated; an elevated tools run or update (the portal's ssh, ops_worker machine_update) makes them.`);
   const sfx = m.firewallSuffix ? ` ${m.firewallSuffix}` : '';
   try {

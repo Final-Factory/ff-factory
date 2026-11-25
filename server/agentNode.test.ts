@@ -99,7 +99,29 @@ test('w1742: the firewall read names each path, quoted, and the temp folder in l
 
 test('w1742: the firewall answer (as lothdesktop gave it after #517: node and a tenth slot missing, six temp-node rules)', () => {
   const out = 'ok V:\\ffw\\players\\slot1-0\\player\\finalfactory.exe\r\nmissing V:\\ffw\\tools\\node\\node.exe\r\nmissing V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe\r\nstale=6\r\n';
-  assert.deepEqual(parseFirewallCheck(out), { missing: ['V:\\ffw\\tools\\node\\node.exe', 'V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe'], stale: 6 });
-  assert.deepEqual(parseFirewallCheck('ok A\nstale=0'), { missing: [], stale: 0 });
+  assert.deepEqual(parseFirewallCheck(out), { wide: [], missing: ['V:\\ffw\\tools\\node\\node.exe', 'V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe'], stale: 6 });
+  assert.deepEqual(parseFirewallCheck('ok A\nstale=0'), { missing: [], wide: [], stale: 0 });
   assert.equal(parseFirewallCheck('reading the firewall rules failed: Access is denied'), undefined, 'an unreadable answer is not "all there"');
+});
+
+test('w5581: the firewall read lists the tailnet-only paths an allow rule opens to any address', () => {
+  const node = 'F:\\ffw\\tools\\node\\node.exe';
+  const s = firewallCheckScript([node], 'F:\\ffw\\tmp', [node]);
+  assert.ok(s.includes('Get-NetFirewallAddressFilter'), 'reads every address filter in one bulk read');
+  assert.ok(s.includes("-contains 'Any'"), 'a rule from any address is wide');
+  assert.ok(s.includes("foreach ($e in @('F:\\ffw\\tools\\node\\node.exe')) { if ($wide"), s);
+  assert.ok(firewallCheckScript([node], 'F:\\ffw\\tmp').includes('foreach ($e in @()) {'), 'no tailnet-only paths: nothing is wide');
+  // BEAST before w5581 (the ops worker's read, 2026-11-25): the node's rule allowed every address.
+  const out = `ok ${node}\r\nwide ${node}\r\nstale=0\r\n`;
+  assert.deepEqual(parseFirewallCheck(out), { missing: [], wide: [node], stale: 0 });
+  assert.deepEqual(parseFirewallCheck(`ok ${node}\nstale=0`), { missing: [], wide: [], stale: 0 });
+});
+
+test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, any protocol, and firewallRepair repairs a wide one', () => {
+  const ps = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'firewall.ps1'), 'utf8');
+  assert.match(ps, /Add-Allow \$AgentNode 'Final Factory agent node' \$NodeGroup "[^"]*" -Tailnet -Protocol Any/, 'the node: tailnet only, any protocol');
+  assert.match(ps, /-Program \$exe -Protocol \$Protocol `\s*-RemoteAddress \$script:Tailnet/, 'the tailnet branch passes the protocol');
+  assert.match(ps, /Set-NetFirewallRule -RemoteAddress Any/, 'the header documents the revert');
+  const worker = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'worker.ts'), 'utf8');
+  assert.match(worker, /!seen\.wide\.length/, 'a wide rule is not "all there"');
 });
