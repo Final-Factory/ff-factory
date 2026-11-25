@@ -1158,9 +1158,18 @@ agent `FF_UNITY_MCP_EDITOR_STATUS_DIR`, and `unity-slot run` passes it to what i
 reads from its start (`workerEditorStatusDir`, `machine/unityMcp.ts`): `~/.unity-mcp` on macOS (a Seatbelt named
 exception, and where the server's preflight looks), `<root>/home/.unity-mcp` on Linux and Windows (the root child
 `home` is open to the Landlock lock and to Low workers). With no daemon editor running in the sandbox, its synced folder
-follows the editor whose pid the project's `Library/EditorInstance.json` holds (`mcpPlaces`), under the same
-written-since-first-seen rule, so a dead editor's file is never copied. No fence changed. A second editor of a peer run
-in another project (a ParrelSync clone) is still not in any sandbox's folder.
+follows the editor whose pid the project's `Library/EditorInstance.json` holds (`mcpPlaces`), only while that pid is a
+live Unity process whose `-projectPath` is this sandbox (`unityProcesses`, read every 5 s; a pid that is merely alive
+may be reused by any process, w5779), and only status written strictly after the look that first saw it (no mtime
+allowance), so a dead editor's file is never copied. No fence changed.
+
+**A peer run's second editor** (w5799): a ParrelSync clone of the sandbox (`<sandbox>_clone_<n>`, beside it) is no place
+of the daemon's, so nothing followed it. Now every Unity process whose `-projectPath` is exactly such a clone of a
+sandbox (`cloneEditors`, `machine/unityMcp.ts`) has its newest status file copied into that sandbox's own folder,
+beside the sandbox editor's, under the same strict written-since-first-seen rule, keyed by project and pid; it goes when
+the process does. The legacy `unity-mcp-port.json` stays the sandbox editor's. The worker's server lists it as
+`<sandbox>_clone_<n>@<hash>`, and the guard lets a worker pin its own sandbox's clones (`server/guard.ts`) and no
+other. No fence changed.
 
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,

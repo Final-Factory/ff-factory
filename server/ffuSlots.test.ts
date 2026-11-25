@@ -393,3 +393,36 @@ test('w5503: the hourly pass (scope cargo-cap) caps the ffu slots too, not only 
   const tight = await plan(root, { inUse, scope: 'cargo-cap', settings: { ffuSlotTargetCapGB: 5_000 / 1024 ** 3 } });
   assert.deepEqual(ffuItems(root, tight), ['ffu-sandboxes/slot1/target'], 'and the sweep, with the cache in its members');
 });
+
+test('w5796: a stray ffu/target in a slot checkout goes once idle past ffuSlotKeepHours (held) or the settle time (released); a busy or recent one stays', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5796s-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  // LothDesktop, 2026-11-25: ffu/target/compat-base (828-920 MB) in held slots 1-3, untouched for 5-9 days, which no rule took.
+  const stray = (slot: string, ageH: number) => {
+    target(root, slot, 1);
+    const st = path.join(root, 'ffu-sandboxes', slot, 'ffu', 'target');
+    fs.mkdirSync(path.join(st, 'compat-base', 'release'), { recursive: true });
+    fs.writeFileSync(path.join(st, 'compat-base', 'CACHEDIR.TAG'), TAG);
+    fs.writeFileSync(path.join(st, 'compat-base', 'release', 'ffu-headless.exe'), Buffer.alloc(100));
+    fs.writeFileSync(path.join(root, 'ffu-sandboxes', slot, 'ffu', '.gitignore'), '/target\n');
+    fs.writeFileSync(path.join(root, 'ffu-sandboxes', slot, 'ffu', 'keep.rs'), 'work');
+    const at = (NOW - ageH * HOUR) / 1000;
+    const walk = (p: string) => {
+      if (fs.statSync(p).isDirectory()) for (const e of fs.readdirSync(p)) walk(path.join(p, e));
+      fs.utimesSync(p, at, at);
+    };
+    walk(st);
+    return st;
+  };
+  stray('slot1', 9 * 24); // held, idle 9 days: goes
+  stray('slot2', 20); // held, idle 20 h: stays (inside 48 h)
+  stray('slot3', 1); // released, idle 1 h: goes (past the settle time)
+  const s4 = stray('slot4', 9 * 24); // held, idle, but a build runs in it: stays
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: ['slot1', 'slot2', 'slot4'].map((id, i) => ({ id, holder: `live000${i}` })) }));
+  const inUse = [0, 1, 2].map((i) => path.join(root, 'tmp', `ffa-live000${i}`));
+  const procs: ProcLite[] = [{ pid: 42, ppid: 1, cmd: `cargo build --release --target-dir ${s4}/compat-base` } as ProcLite];
+  const p = await plan(root, { inUse, procs });
+  const strays = ffuItems(root, p).filter((x) => x.includes('/ffu/'));
+  assert.deepEqual(strays, ['ffu-sandboxes/slot1/ffu/target', 'ffu-sandboxes/slot3/ffu/target']);
+  assert.ok(!p.items.some((i) => /slot\d\/ffu$/.test(rel(root, i.path))), 'the checkout itself is never an item');
+});
