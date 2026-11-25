@@ -194,6 +194,7 @@ grep -q "VAULT_CREDENTIAL = 'fff-vault-key'" server/vault.ts || fail "server/vau
 ok "fff-portal.service opens the vault key as a descriptor and runs an execute-only node without SIGUSR1's inspector"
 # A rollback puts the older release's portal unit back: code from before w5506 reads its key from LoadCredential=.
 grep -q '^portal_unit_back()' deploy/vm/guest/fff-update || fail "fff-update has no portal_unit_back (w5506)"
-sed -n '/^cmd_rollback()/,/^}/p' deploy/vm/guest/fff-update | grep -q '^  portal_unit_back "\$prev"$' || fail "fff-update's rollback does not put back the older release's fff-portal.service (w5506)"
+# shellcheck disable=SC2016 # the literal $prev of fff-update's source
+sed -n '/^cmd_rollback()/,/^}/p' deploy/vm/guest/fff-update | grep -qF '  portal_unit_back "$prev"' || fail "fff-update's rollback does not put back the older release's fff-portal.service (w5506)"
 ok "a rollback puts back the older release's fff-portal.service"
 echo "all unit checks pass"
