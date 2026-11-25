@@ -259,8 +259,8 @@ export class LedgerSweep {
         // A Waiting worker (w475: a running job, a queued message or a check-in ahead) will come back, and so will a stopped
         // one its check-in or a queued message resumes (w509): as good as busy here.
         const busy = workers.filter((s) => BUSY.has(s.status) || holdsItsPlace(s, this.now()));
-        // w4352: follow-ups its worker handed up and nobody filed are sent again at 2 h and filed by FF Factory at 12 h, which
-        // closes the request on its kept DONE; a stalled one too (followUpStep never reaches a stalled request).
+        // w4352: follow-ups its worker handed up and nobody filed are sent again at 2 h, and at 12 h become a card for their
+        // person to file or drop (w5577: never filed by FF Factory); a stalled one too (followUpStep never reaches it).
         if (full && !busy.length && handUpsPending(live)) {
           this.d.orchestrators.handUpStep(live);
           const after = this.d.store.work.get(live.id);
@@ -991,7 +991,7 @@ export class LedgerSweep {
     // A blocked request waits on its blocker (w643): the blocker watch unblocks, stalls or asks, not "Is it done?".
     if (!isOpen(w) || w.question || w.flag || w.status === 'blocked') return false;
     // w2969: what is left is filing the follow-ups its worker handed up, which no worker can do: handUpStep (w4352) sends them
-    // again and then files them, instead of asking the worker "Is it done?" (w2194 closed on that answer with five stages unfiled).
+    // again and then makes them its person's card (w5577), instead of asking the worker "Is it done?" (w2194 closed on that answer with five stages unfiled).
     if (handUpsPending(w)) return false;
     const prs = w.prs ?? [];
     if (!prs.some((p) => p.state === 'merged') || prs.some((p) => p.state === 'open')) return false;

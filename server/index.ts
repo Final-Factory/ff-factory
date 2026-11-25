@@ -1328,6 +1328,24 @@ route('POST', '/api/work/(w[0-9]+)/priority', async (req, [id]) => {
     throw new HttpError(400, (e as Error).message);
   }
 });
+// w5577: the hand-up card (12 h unfiled): its person files the follow-ups (through their own orchestrator's file_follow_ups,
+// every request_work limit included) or drops them. Nothing files a hand-up by itself.
+route('POST', '/api/work/(w[0-9]+)/handups/file', async (req, [id]) => {
+  try {
+    return { id, ...agents.orchestrators.fileHandUps(id, requesterOf(req)) };
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+});
+route('POST', '/api/work/(w[0-9]+)/handups/drop', async (req, [id]) => {
+  const b = await readJson<{ note?: string }>(req);
+  try {
+    const w = agents.orchestrators.dropHandUps(id, requesterOf(req), typeof b.note === 'string' ? b.note : undefined);
+    return { id: w.id, status: w.status };
+  } catch (e) {
+    throw new HttpError(400, (e as Error).message);
+  }
+});
 route('POST', '/api/work/(w[0-9]+)/decline', async (req, [id]) => {
   const b = await readJson<{ note?: string }>(req);
   const w = agents.orchestrators.declineIntake(id, requesterOf(req), typeof b.note === 'string' ? b.note.slice(0, 300) : undefined);
