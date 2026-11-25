@@ -19,7 +19,8 @@ import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
  *   `~/final-factory-agents`, docs/worker-root.md) is never touched: the plugins Claude Code loads come from its managed
  *   marketplace clone, which `registerAgents.sh` refreshes from GitHub. The old checkout is never run, fetched or written
  *   again (it stays, readable, as the readers' fallback). Its own checkout missing, dirty, on another branch or diverged:
- *   nothing is overwritten, a WARNING says why and the publish goes on, since nothing below runs from it.
+ *   nothing is overwritten, a WARNING says why and the publish goes on, since nothing below runs from it. The same fault
+ *   REPAIR_AFTER publishes in a row (files but no .git: at once) moves it to `<checkout>.broken` and clones it again (w5776).
  * - Runs every git with `core.hooksPath` on an empty folder of the run's own, no global config, no system config (but on
  *   Windows, whose TLS backend lives there) and server/safeGit.ts's fence (w5541).
  * - Runs `sh registerAgents.sh --claude`, not from that checkout (w5573) but from a fresh shallow clone of origin/master in
@@ -71,6 +72,12 @@ export const legacyToolsCheckout = (root: string) => path.join(root, 'tools', MA
 export function readableToolsCheckout(root: string, rel: string, exists: (p: string) => boolean = fs.existsSync): string | undefined {
   return [toolsCheckout(root), legacyToolsCheckout(root)].find((c) => exists(path.join(c, rel)));
 }
+/** w5776: how many publishes in a row may find the same fault in FF Factory's checkout before it is moved aside and cloned again. */
+export const REPAIR_AFTER = 3;
+/** w5776: where a broken checkout is moved before it is cloned again; one backup, the newest. */
+export const checkoutBackup = (root: string) => `${toolsCheckout(root)}.broken`;
+/** w5776: the fault the last publishes found and how many in a row, beside the checkout (Medium only, like it). */
+export const repairStateFile = (root: string) => `${toolsCheckout(root)}.repair.json`;
 const samePath = (a: string, b: string) => {
   const r = (p: string) => path.resolve(p).replace(/[\\/]+$/, '');
   return process.platform === 'win32' || /^[a-z]:/i.test(a) ? r(a).toLowerCase() === r(b).toLowerCase() : r(a) === r(b);
@@ -227,22 +234,56 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
     const git = (args: string[], cwd?: string, timeoutMs = 5 * 60_000) => d.exec('git', [...anon, '-c', `core.hooksPath=${noHooks}`, ...args], { env: cleanEnv, timeoutMs, ...(cwd ? { cwd } : {}) });
 
     const fresh = '; this run publishes from a fresh clone';
+    const clone = async (again: string) => {
+      const r = await git(['clone', '--quiet', '--branch', BRANCH, AGENTS_REPO_URL, co]);
+      if (r.code !== 0) d.say(`WARNING: could not clone ${AGENTS_REPO_URL} into ${co} (${tail(r)})${fresh}.`);
+      else d.say(again || `Cloned ${MARKETPLACE} into ${co} (FF Factory's own checkout, which no worker can write${fs.existsSync(legacy) ? `; the old ${legacy} is no longer used and is left as it is` : ''}).`);
+    };
+    // What is wrong with the lasting checkout this run: `kind` names the fault the same from one run to the next (w5776).
+    let fault: { kind: string; why: string; kept: string } | undefined;
+    const kept = `; nothing in it was overwritten${fresh}`;
     if (!fs.existsSync(path.join(co, '.git'))) {
-      if (fs.existsSync(co) && fs.readdirSync(co).length) {
-        d.say(`WARNING: ${co} holds files but no git checkout; it is left as it is${fresh}.`);
-      } else {
-        const r = await git(['clone', '--quiet', '--branch', BRANCH, AGENTS_REPO_URL, co]);
-        if (r.code !== 0) d.say(`WARNING: could not clone ${AGENTS_REPO_URL} into ${co} (${tail(r)})${fresh}.`);
-        else d.say(`Cloned ${MARKETPLACE} into ${co} (FF Factory's own checkout, which no worker can write${fs.existsSync(legacy) ? `; the old ${legacy} is no longer used and is left as it is` : ''}).`);
-      }
+      if (fs.existsSync(co) && fs.readdirSync(co).length) fault = { kind: 'no-git', why: 'holds files but no git checkout', kept: `; it is left as it is${fresh}` };
+      else await clone('');
     } else {
       const [st, br, url] = await Promise.all([git(['status', '--porcelain'], co), git(['rev-parse', '--abbrev-ref', 'HEAD'], co), git(['config', '--get', 'remote.origin.url'], co)]);
       const problem = st.code !== 0 ? `could not be read (git status: ${tail(st)})` : checkoutProblem({ porcelain: st.stdout, branch: br.stdout.trim().replace(/^HEAD$/, ''), origin: url.stdout });
-      if (problem) d.say(`WARNING: ${co} ${problem}; nothing in it was overwritten${fresh}.`);
+      if (problem) fault = { kind: st.code !== 0 ? 'unreadable' : problem.replace(/\d+/g, '#'), why: problem, kept };
       else {
         const f = await git(['fetch', '--quiet', 'origin', BRANCH], co);
-        if (f.code !== 0) d.say(`WARNING: could not fetch ${MARKETPLACE} into ${co} (${tail(f)})${fresh}.`);
-        else if ((await git(['merge', '--ff-only', '--quiet', `origin/${BRANCH}`], co)).code !== 0) d.say(`WARNING: ${co} has commits origin/${BRANCH} does not (it cannot fast-forward); nothing in it was overwritten${fresh}.`);
+        if (f.code !== 0) fault = { kind: 'fetch', why: `could not be fetched from ${MARKETPLACE} (${tail(f)})`, kept: fresh };
+        else if ((await git(['merge', '--ff-only', '--quiet', `origin/${BRANCH}`], co)).code !== 0) fault = { kind: 'diverged', why: `has commits origin/${BRANCH} does not (it cannot fast-forward)`, kept };
+      }
+    }
+    // w5776: a fault seen REPAIR_AFTER publishes in a row (a checkout with files but no .git at once) is repaired with no
+    // person at the machine: the checkout is moved to `<co>.broken` (the one backup kept, an older one removed) and cloned
+    // again, by this Medium run with the same fenced, hook-free git. Workers cannot write <root>/tools-medium, so only a
+    // daemon fault, a person or a failed clone breaks it; readers fall back to the old checkout while it is away.
+    const state = repairStateFile(root);
+    if (!fault) fs.rmSync(state, { force: true });
+    else {
+      const was = readJson(state) as { kind?: unknown; count?: unknown } | undefined;
+      const count = fault.kind === 'no-git' ? REPAIR_AFTER : (was?.kind === fault.kind && typeof was.count === 'number' ? was.count : 0) + 1;
+      if (count < REPAIR_AFTER) {
+        d.say(`WARNING: ${co} ${fault.why}${fault.kept} (${count} of ${REPAIR_AFTER} publishes in a row before it is moved aside and cloned again).`);
+        fs.writeFileSync(state, JSON.stringify({ kind: fault.kind, count }));
+      } else {
+        const bak = checkoutBackup(root);
+        const times = fault.kind === 'no-git' ? '' : ` for ${count} publishes in a row`;
+        let moved = false;
+        try {
+          fs.rmSync(bak, { recursive: true, force: true, maxRetries: 3 });
+          fs.renameSync(co, bak);
+          moved = true;
+        } catch (e) {
+          d.say(`WARNING: ${co} ${fault.why}${times}, and it could not be moved aside (${(e as Error).message}); it is left as it is${fresh}.`);
+          fs.writeFileSync(state, JSON.stringify({ kind: fault.kind, count }));
+        }
+        if (moved) {
+          d.say(`WARNING: ${co} ${fault.why}${times}; it was moved to ${bak} (the one backup kept) and is cloned again.`);
+          fs.rmSync(state, { force: true });
+          await clone(`Repaired FF Factory's checkout: cloned ${MARKETPLACE} into ${co} again.`);
+        }
       }
     }
     const coHead = fs.existsSync(path.join(co, '.git')) ? (await git(['rev-parse', 'HEAD'], co, 60_000)).stdout.trim() : '';
