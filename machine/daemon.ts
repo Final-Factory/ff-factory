@@ -238,7 +238,7 @@ export interface DaemonConfig {
   relocatedAt?: string;
   /**
    * w5576 (machine/portalPin.ts, docs/portal-pin.md): portal hosts this machine follows beside the built-in list
-   * (PINNED_PORTAL_HOSTS). Edited by hand over ssh (no installer flag writes it; an installer rerun keeps it), never by a message over the link.
+   * (PINNED_PORTAL_HOSTS). Edited by hand over ssh (no installer flag writes it; an installer update, a reinstall or a migration keeps it; a full install rerun drops it), never by a message over the link.
    */
   pinnedPortalHosts?: string[];
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */

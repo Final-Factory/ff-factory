@@ -2,7 +2,7 @@
 // address it chose. The hosts a daemon trusts ship in this file, so they change only with an update of the daemon's own
 // code, and an update installs only a commit published on GitHub's ff-factory main (w5516, machine/selfUpdate.ts
 // checkPublished). A daemon.json `pinnedPortalHosts` adds hosts on one machine: a person or the ops worker edits it by hand
-// over ssh (no installer flag writes it; an installer rerun keeps it), and nothing sent over the link can (patchDaemonConfig takes only the relocate fields).
+// over ssh (no installer flag writes it; an installer update, a reinstall or a migration keeps it; a full install rerun drops it), and nothing sent over the link can (patchDaemonConfig takes only the relocate fields).
 //
 // Stage 1, warn (this file's PORTAL_PIN_MODE): what pinning would refuse is logged, kept in portal-pin.json beside
 // daemon.json and reported in the hello (`portalPin`, list_machines shows it), and goes ahead as before. Enforcement is a
