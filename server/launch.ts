@@ -415,6 +415,21 @@ export const CATALOG = {
       .optional()
       .describe('One per build to file, as urgent_release.py lists them. Leave it out to see how an upload of this version stands.'),
   },
+  /** docs/steam-upload.md (w5551): the daemon runs ffbox ffsteam.py with the build account's credential, which no worker holds. */
+  steam_upload: {
+    action: z.enum(['check', 'upload', 'status']).describe('check: can this computer log in to Steam (once every 10 min, or now with guard_code); upload: upload your release build; status: how the job stands.'),
+    version: z.string().max(32).optional().describe('upload: the release, e.g. "1.0.0.12".'),
+    app: z.enum(['main', 'demo']).optional().describe('upload: which Steam app (default main).'),
+    sha: z.string().max(40).optional().describe('upload: the full commit built (the bump carrying cicd/release-lane.json).'),
+    runs: z
+      .object({ windows: z.string().max(400).optional(), mac: z.string().max(400).optional(), linux: z.string().max(400).optional() })
+      .optional()
+      .describe("upload: each platform's run folder (build-release.sh's: release.json, build.log, release/player), in your sandbox or temp folder."),
+    live: z.string().max(40).optional().describe('upload: the Steam branch to set live, only the one the release names (development for a master main release); leave out for none.'),
+    preview: z.boolean().optional().describe('upload: steamcmd --preview, a dry run that uploads nothing and sets nothing live.'),
+    guard_code: z.string().max(8).optional().describe("check: the code from Steam Guard's email, when a check stopped for one."),
+    job: z.string().max(40).optional().describe('status: a job id (default: the job running on this computer).'),
+  },
   /** docs/ffbox.md, "Bug threads' files". On a machine the portal fetches the files from FFBox and the daemon puts them in the Inbox. */
   fetch_discord_thread_files: {
     thread: z.string().max(200).describe('The Discord thread: its URL, e.g. "https://discord.com/channels/530867164866150410/1558176042089447425" (a message link in it works), or its id.'),
