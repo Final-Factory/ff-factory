@@ -46,8 +46,9 @@ current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 # deps_from OLD NEW SUB: NEW/SUB/node_modules as hard links of OLD's when SUB's package.json and package-lock.json are
 # the same in both, which is what npm ci would install anyway (seconds instead of half a minute). The caches tools write
 # into node_modules are left out, so nothing writes through a link into the running release's files.
-# The old release must be a checked root's one; the links are root's, and only the folders are the build account's for
-# the build, so it can add files but change none of them.
+# The old release must be a checked root's one; the links are root's (the kernel's protected_hardlinks refuses the
+# build account a link to root's file), and only the folders become the build account's for the build (prepare), so
+# it can add files but change none of them. Run while NEW is still root's (w5531).
 deps_from() {
   local old=$1 new=$2 sub=$3 f
   [ -n "$old" ] && release_ok "$old" && [ -d "$old/$sub/node_modules" ] && [ ! -L "$old/$sub/node_modules" ] || return 1
@@ -55,7 +56,6 @@ deps_from() {
   rm -rf "$new/$sub/node_modules"
   cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
   rm -rf "$new/$sub/node_modules/.cache" "$new/$sub/node_modules/.vite" "$new/$sub/node_modules/.tmp"
-  find "$new/$sub/node_modules" -type d -exec chown "$BUILD_AS:$BUILD_AS" {} +
 }
 
 # pick_builder: BUILD_AS and BUILD_HOME for this build: the build account when ensure_build_user (lib.sh) finds it fit.
@@ -122,7 +122,7 @@ ensure_repo() {
 # prepare [REF]: build REF beside the running release and print its folder. Every step is checked here: this runs in
 # $(...) and under "if", where bash ignores errexit, so a failed npm ci would otherwise still mark the release ready.
 prepare() {
-  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t
+  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t reused
   log "fetching $ref"
   t=$(date +%s)
   own_app
@@ -150,18 +150,24 @@ prepare() {
   fi
   git_root -C "$REPO" worktree prune >&2 || true
   git_root -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
-  # The build account builds it (npm ci, the web build), in a folder fff cannot write; harden_release makes it root's
-  # afterwards.
-  pick_builder
-  chown -R -h "$BUILD_AS:$BUILD_AS" "$dir"
   cur=$(current_dir)
+  reused=" "
   for sub in . web; do
     if [ "$cur" != "$dir" ] && deps_from "$cur" "$dir" "$sub"; then
       log "building ${sha:0:12}: $sub dependencies unchanged, node_modules reused from $(basename "$cur")"
-    else
-      log "building ${sha:0:12}: npm ci ($sub) as $BUILD_AS"
-      as_build_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || { end_build_processes; die "npm ci in $sub failed"; }
+      reused+="$sub "
     fi
+  done
+  # The build account builds it (npm ci, the web build), in a folder fff cannot write (w5523); harden_release makes it
+  # root's afterwards. Given to it from the bottom up (-depth, chown -h), so each folder above the one root changes is
+  # still root's and it cannot have swapped it for a link (w5531); the files of the reused node_modules stay root's links.
+  pick_builder
+  find "$dir" -depth \( -type d -o \( ! -path "$dir/node_modules/*" ! -path "$dir/web/node_modules/*" \) \) \
+    -exec chown -h "$BUILD_AS:$BUILD_AS" {} +
+  for sub in . web; do
+    case $reused in *" $sub "*) continue ;; esac
+    log "building ${sha:0:12}: npm ci ($sub) as $BUILD_AS"
+    as_build_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || { end_build_processes; die "npm ci in $sub failed"; }
   done
   log "building ${sha:0:12}: web build as $BUILD_AS"
   as_build_in "$dir" npm --prefix web run build --silent >&2 || { end_build_processes; die "the web build failed"; }
@@ -345,17 +351,19 @@ cmd_activate() {
 # back there from its file in the secrets folder (the start of a newer release moves it out again). Nothing else needs
 # undoing: config keeps claudeAccounts.orchestrator "vault", which those releases read too.
 restore_inline_hash() {
-  local cfg=$FFF_ROOT/config/config.json f h tmp
+  local cfg=$FFF_ROOT/config/config.json f h
   [ -f "$1/server/configMigration.ts" ] && return 0
   f=$(jq -r '.providers.ffbox.tokenSha256File // ""' "$cfg" 2>/dev/null) || return 0
   [ -n "$f" ] && [ -s "$f" ] || return 0
-  h=$(tr -d '[:space:]' <"$f")
+  # fff reads the file config.json names and edits its own config (w5531: root would follow a link fff put there).
+  h=$(as_fff cat -- "$f" | tr -d '[:space:]') || h=""
   [[ $h =~ ^[0-9a-f]{64}$ ]] || { warn "$f does not hold one SHA-256: FFBox's connector hash not put back into config.json"; return 0; }
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  if ! jq --arg h "$h" '.providers.ffbox.tokenSha256 = $h' "$cfg" >"$tmp"; then rm -f "$tmp"; warn "could not put FFBox's connector hash back into config.json"; return 0; fi
-  chown --reference="$cfg" "$tmp"
-  chmod --reference="$cfg" "$tmp"
-  mv -f "$tmp" "$cfg"
+  no_link "$cfg" "putting FFBox's connector hash back into config.json" || return 0
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  if ! as_fff sh -c 't=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg h "$2" ".providers.ffbox.tokenSha256 = \$h" "$1" >"$t" &&
+    chmod --reference="$1" "$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$h"; then
+    warn "could not put FFBox's connector hash back into config.json"; return 0
+  fi
   log "FFBox's connector hash put back into config.json for $(basename "$1"), a release from before w1078"
 }
 
