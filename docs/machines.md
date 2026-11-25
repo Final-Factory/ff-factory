@@ -1158,9 +1158,18 @@ agent `FF_UNITY_MCP_EDITOR_STATUS_DIR`, and `unity-slot run` passes it to what i
 reads from its start (`workerEditorStatusDir`, `machine/unityMcp.ts`): `~/.unity-mcp` on macOS (a Seatbelt named
 exception, and where the server's preflight looks), `<root>/home/.unity-mcp` on Linux and Windows (the root child
 `home` is open to the Landlock lock and to Low workers). With no daemon editor running in the sandbox, its synced folder
-follows the editor whose pid the project's `Library/EditorInstance.json` holds (`mcpPlaces`), under the same
-written-since-first-seen rule, so a dead editor's file is never copied. No fence changed. A second editor of a peer run
-in another project (a ParrelSync clone) is still not in any sandbox's folder.
+follows the editor whose pid the project's `Library/EditorInstance.json` holds (`mcpPlaces`), only while that pid is a
+live Unity process whose `-projectPath` is this sandbox (`unityProcesses`, read every 5 s; a pid that is merely alive
+may be reused by any process, w5779), and only status written strictly after the look that first saw it (no mtime
+allowance), so a dead editor's file is never copied. No fence changed.
+
+**A peer run's second editor** (w5799): a ParrelSync clone of the sandbox (`<sandbox>_clone_<n>`, beside it) is no place
+of the daemon's, so nothing followed it. Now every Unity process whose `-projectPath` is exactly such a clone of a
+sandbox (`cloneEditors`, `machine/unityMcp.ts`) has its newest status file copied into that sandbox's own folder,
+beside the sandbox editor's, under the same strict written-since-first-seen rule, keyed by project and pid; it goes when
+the process does. The legacy `unity-mcp-port.json` stays the sandbox editor's. The worker's server lists it as
+`<sandbox>_clone_<n>@<hash>`, and the guard lets a worker pin its own sandbox's clones (`server/guard.ts`) and no
+other. No fence changed.
 
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
@@ -1213,8 +1222,34 @@ older daemon ignores it and keeps making worktrees.
   it (its branches and stash are kept in the clone, above) and creating it again (the w5614 test "the way back").
   Do that before a daemon older than w5614 runs on the machine: its delete removes a slot repo's folder without
   keeping its branches, and its dev-drive move and rehome would leave the alternates naming the old path.
-- **Not in stage 1**: a sandbox can still write the clone's files and another sandbox's `.git` (no ACL or integrity
-  label yet); stage 2 (w5615) locks the clone down and stage 3 (w5616) the other slots.
+- **The store lock** (`machine/storeLock.ts`): once every sandbox is a slot repo, no worker needs to write the clone,
+  so the worker fences stop letting them. `ops_worker` `machine_update` `store_lock` (daemon.json `storeLock`, every OS):
+  - `off` (the default): nothing changes.
+  - `warn`: nothing is refused. The daemon watches the clone's git folder and logs each write it did not make itself,
+    once per path an hour: "store lock (warn): … changed while the daemon ran no git". At start it also logs whether
+    `on` would apply now, or what holds it off.
+    It watches the git folder's own files, `refs` whole and the top of `objects`, `hooks` and `info`, not the whole tree:
+    on Linux a recursive watch costs an inotify watch per folder, and the LFS store alone can hold tens of thousands.
+  - `on`: the lock applies only when nothing needs the clone writable: every sandbox a slot repo, no worktree of the
+    clone left, and the clone at `<root>/repo`. Otherwise it stays off, says why, and warns as `warn` does.
+  - While it holds:
+    - macOS Seatbelt (`fenceFor`) and Linux Landlock (`writeLockArgs`) leave `repo` out of the write set.
+    - On Windows, the clone's git folder is labelled Medium instead of Low (`lowTargets` `medium`; integrity labels
+      only, no ACEs, the w5599 lesson), so a Low worker reads the objects and LFS files and cannot write them.
+    - New sandboxes are slot repos whatever `slot_repos` says.
+    - On Windows the daemon reads the label back after labelling and logs "store lock: NOT in force on Windows" when the
+      store does not read Medium.
+  - The daemon writes the clone as before, unfenced: the fetch before a new sandbox, kept branches and stash, the
+    prune guard.
+  - Like the fences, it is decided once per daemon process.
+  - Way back: `store_lock off` (or `worker_fence off`) and the daemon restart that the update makes. The next workers'
+    fences open `repo` again, and on Windows `lowSetup` labels its git folder Low again.
+  - It touches neither the daemon's self-update nor the bundles the portal sends. Its switch rides `machine_update`, so
+    it ships `warn` first (lothsahn's lockout rule).
+  - Tests: `server/storeLock.test.ts`. Its live legs run in CI: Landlock on Linux; on Windows a Low `cmd.exe` writing
+    into the Medium clone. Both commit in a slot repo, and both see the clone's config, refs and objects refused.
+- **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
+  per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 
 ### Git in a worker's checkout runs no program the worker named (w5541)
 

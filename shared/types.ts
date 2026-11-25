@@ -2079,6 +2079,18 @@ export interface CleanupSummary {
   staleLibraries?: { path: string; days: number }[];
   /** The portal host's media retention (w2268): what it removed and kept, and what was there. */
   media?: MediaSummary;
+  /**
+   * How long each step of the pass took, in ms (w5795: LothDesktop's low passes finished 67-78 min after a daemon start, and a
+   * restart in between lost every one, since nothing goes until the whole plan is made).
+   */
+  phasesMs?: Record<string, number>;
+  /** The whole pass, in ms. */
+  passMs?: number;
+  /**
+   * A low pass's quick plan, made first (w5795, report-only): what the cargo-target cap with the low-space rules alone would
+   * remove at once, and how long planning it took. Nothing of it is removed apart from the full pass yet.
+   */
+  quick?: { items: number; bytes: number; ms: number; top?: { path: string; bytes: number; rule: string }[] };
 }
 
 export interface DrainStatus {

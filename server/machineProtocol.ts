@@ -130,6 +130,8 @@ export interface LinkUpdateFlags {
   workerCaps?: 'off' | 'warn' | 'enforce';
   /** The transcript lock on or off (w5702, docs/transcript-seal.md), Linux only: daemon.json `transcriptLock`; unset: carried. A daemon that predates it ignores it. */
   transcriptLock?: 'on' | 'off';
+  /** The store lock's mode (w5614, docs/machines.md "Slot repos"), any OS: daemon.json `storeLock`; unset: carried. A daemon that predates it ignores it. */
+  storeLock?: 'off' | 'warn' | 'on';
 }
 
 /**
