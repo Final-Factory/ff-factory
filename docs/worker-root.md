@@ -171,6 +171,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
   claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
   cache-medium/uv/               the daemon's and Medium agents' UV_CACHE_DIR (the Unity MCP server's uvx, w5565): read-only to workers
+  steam/                         steamcmd, its config and cached login, FFBox's release scripts: the daemon's alone (w5551, steam-upload.md)
   tools/final-factory-agents/    FF Factory's own checkout the agent tools publish runs registerAgents.sh from (w1476)
   home/                          GIT_CONFIG_GLOBAL (.gitconfig), GH_CONFIG_DIR (.config/gh), .ssh/config
   cache/                         UPM_CACHE_ROOT, npm and pip caches

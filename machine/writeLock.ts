@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { openChildren } from './lowIntegrity.ts';
 
@@ -21,9 +21,9 @@ export const DOTNET_DIR = '.dotnet';
 
 /**
  * Folders of the install root a worker never writes: the daemon's own (its code, config, hosts), the secrets, and the Medium
- * agents' Claude Code folder (w5543: its settings, plugins and hooks run in agents outside the lock).
+ * agents' Claude Code folder (w5543: its settings, plugins and hooks run in agents outside the lock), and steamcmd's (w5551).
  */
-export const LOCKED_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN] as const;
+export const LOCKED_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN, ...DAEMON_ONLY_CHILDREN] as const;
 
 export interface WriteLockPaths {
   /** The worker root (`~/ffw`). Only the folders workers write are writable (lowIntegrity.ts openChildren, w5569). */

@@ -149,6 +149,61 @@ as_fff_in() {
   (cd "$dir" && "${run[@]}" env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
 }
 
+# The release build's account (w5523): FFF_BUILD_USER with its own home, or fff when that account cannot be made fit
+# (pick_builder, fff-update). as_build_in DIR CMD... runs CMD in DIR as it, with a clean environment: its PATH
+# (lib.sh's fixed one), its home (its TMPDIR too, not a /tmp fff shares) and nothing of the caller's (NODE_ENV=production from fff-portal.service's ExecStartPre
+# would leave out the web build's tools).
+BUILD_AS='' BUILD_HOME=''
+as_build_in() {
+  local dir=$1; shift
+  (cd "$dir" && runuser -u "${BUILD_AS:-$FFF_USER}" -- env -i PATH="$PATH" HOME="${BUILD_HOME:-$FFF_ROOT/home}" TMPDIR="${BUILD_HOME:-$FFF_ROOT/home}" LANG=C.UTF-8 \
+    npm_config_update_notifier=false GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
+
+# ensure_build_user: FFF_BUILD_USER is there and fit to build a release, made when missing: an account of its own (not
+# root, not fff, not in fff's group, no password, no login shell), its home (FFF_BUILD_HOME: its npm cache) its own and
+# closed (0700) in a folder root's and closed to fff's writes, so fff cannot plant an .npmrc or a cached package there;
+# and an ACL entry on $FFF_ROOT (root:fff 1770) that lets it pass through to $RELEASES and read nothing there. Prints why
+# it is not fit, and fails.
+ensure_build_user() {
+  local b=${FFF_BUILD_USER:-} h=${FFF_BUILD_HOME:-} uid
+  case $b in '' | root | "$FFF_USER") echo "FFF_BUILD_USER is '$b': it must be an account of its own"; return 1 ;; esac
+  [[ $h == /?* ]] && [[ $h != */ ]] || { echo "FFF_BUILD_HOME '$h' is not an absolute folder"; return 1; }
+  case "$h/" in "$FFF_ROOT"/*) echo "FFF_BUILD_HOME $h is inside $FFF_ROOT, where fff makes folders"; return 1 ;; esac
+  root_owned "$(dirname "$h")" || { echo "$(dirname "$h") is not root's, or is writable by others"; return 1; }
+  if ! id "$b" >/dev/null 2>&1; then
+    # A group of its name may be left from an earlier account (userdel keeps a group with other members): use it.
+    local grp=(--user-group)
+    if getent group "$b" >/dev/null 2>&1; then grp=(-g "$b"); fi
+    useradd --system "${grp[@]}" --home-dir "$h" --no-create-home --shell /usr/sbin/nologin --comment 'FF Factory release builds (w5523)' "$b" >&2 ||
+      { echo "useradd $b failed"; return 1; }
+    log "made the build account $b"
+  fi
+  uid=$(id -u "$b") || { echo "no account $b"; return 1; }
+  [ "$uid" != 0 ] || { echo "$b has uid 0"; return 1; }
+  [ "$uid" != "$(id -u "$FFF_USER")" ] || { echo "$b has $FFF_USER's uid"; return 1; }
+  if id -nG "$b" | tr ' ' '\n' | matches -xF "$FFF_USER"; then echo "$b is in $FFF_USER's group"; return 1; fi
+  passwd -l "$b" >/dev/null 2>&1 || true
+  [ ! -L "$h" ] || { echo "$h is a symbolic link"; return 1; }
+  install -d -m 0700 -o "$b" -g "$b" "$h" || { echo "could not make $h"; return 1; }
+  { chown "$b:$b" "$h" && chmod 0700 "$h"; } || { echo "could not make $h $b's alone"; return 1; }
+  command -v setfacl >/dev/null || { echo "setfacl is missing (the acl package: the guest install.sh installs it)"; return 1; }
+  setfacl -m "u:$b:--x" "$FFF_ROOT" || { echo "setfacl on $FFF_ROOT failed"; return 1; }
+  # shellcheck disable=SC2016 # $1 is expanded by the inner sh
+  runuser -u "$b" -- sh -c 'cd "$1"' _ "$RELEASES" 2>/dev/null || { echo "$b cannot reach $RELEASES"; return 1; }
+  # shellcheck disable=SC2016
+  if runuser -u "$b" -- sh -c 'ls "$1" || test -w "$1"' _ "$FFF_ROOT" >/dev/null 2>&1; then echo "$b can read or write $FFF_ROOT"; return 1; fi
+}
+
+# end_build_processes: whatever the build account still runs after a build (a watcher npm left behind) is ended, so
+# nothing of it writes into the release once it is root's. Only for the build account, never fff, whose portal runs.
+end_build_processes() {
+  [ -n "$BUILD_AS" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 0
+  pkill -KILL -u "$BUILD_AS" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$BUILD_AS" >/dev/null 2>&1 || return 0; sleep 0.5; done
+  warn "the build account $BUILD_AS still runs: $(pgrep -u "$BUILD_AS" -l | head -n 3 | paste -sd' ' -)"
+}
+
 # ---------------------------------------------------------------- root in fff's folders (w5531)
 # fff owns $DATA, config, home and its other folders, and can rename anything in them (and them, in the sticky $FFF_ROOT)
 # and put a symbolic link in its place, at any moment. Root that wrote, chowned or chmodded there by name would follow
@@ -354,7 +409,7 @@ release_ok() {
 # its .git link is rewritten, and DIR.ready names SHA. Fails, saying why, unless release_problem then finds nothing.
 harden_release() {
   local dir=$1 sha=$2 admin p
-  rm -f "$dir.ready"
+  rm -f "$dir.ready" "$dir.builder"
   chown -R -h -P root:root "$dir"
   chmod -R go-w,ug-s "$dir"
   admin=$(release_admin "$dir")

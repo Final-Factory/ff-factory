@@ -332,6 +332,12 @@ export interface Config {
    */
   ownerName?: string;
   /**
+   * The Steam build account the urgent release lane uploads as (w5640): steam_upload's install writes it into a computer's
+   * `<root>/steam/config.json` (release.steam.account). A setting, never a name in code (lothsahn, w1639: "It should not be
+   * hardcoded in the code"); its password stays in the vault (FFSTEAM_PASSWORD, docs/steam-upload.md).
+   */
+  steamBuildAccount?: string;
+  /**
    * How often the Claude plan usage of every account is polled, in minutes (docs/accounts.md): this host's token,
    * login and people's own tokens, and each machine daemon's login. Default 15. The usage endpoint rate-limits.
    */
