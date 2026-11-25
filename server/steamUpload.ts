@@ -128,7 +128,7 @@ export interface SteamJob {
   id: string;
   machine: string;
   key: string;
-  action: 'check' | 'upload';
+  action: 'check' | 'upload' | 'install';
   version?: string;
   app?: SteamApp;
   preview?: boolean;
@@ -160,8 +160,8 @@ export class SteamJobs {
     this.now = now;
   }
 
-  static keyOf(machine: string, action: 'check' | 'upload', version?: string, app?: string, preview?: boolean) {
-    return action === 'check' ? `${machine}:check` : `${machine}:${version}:${app}:${preview ? 'preview' : 'upload'}`;
+  static keyOf(machine: string, action: 'check' | 'upload' | 'install', version?: string, app?: string, preview?: boolean) {
+    return action === 'check' || action === 'install' ? `${machine}:${action}` : `${machine}:${version}:${app}:${preview ? 'preview' : 'upload'}`;
   }
 
   get(key: string): SteamJob | undefined {
