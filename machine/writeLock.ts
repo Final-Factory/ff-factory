@@ -13,6 +13,7 @@ import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { openChildren } from './lowIntegrity.ts';
+import { STORE_CHILD } from './storeLock.ts';
 import { sessionIdOf } from '../server/workerFence.ts';
 import { TRANSCRIPTS, finishNewTranscripts, linkTranscripts, ownTranscriptArgs } from './transcriptLock.ts';
 
@@ -56,6 +57,8 @@ export interface WriteLockPaths {
    * rules (machine/transcriptLock.ts). Off, the transcripts folder is opened whole, as `claude` is.
    */
   transcriptLock?: boolean;
+  /** w5614: the store lock holds (machine/storeLock.ts): the main clone (`repo`) stays read-only. */
+  lockStore?: boolean;
 }
 
 /**
@@ -77,6 +80,7 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   const app = p.appDir ? path.resolve(p.appDir) : path.join(root, 'daemon');
   const except = new Set<string>(LOCKED_CHILDREN);
   if (path.dirname(app) === root) except.add(path.basename(app));
+  if (p.lockStore) except.add(STORE_CHILD);
   // /dev: null, tty, shm, the GPU. /proc: a process's own oom_score_adj (Unity sets it); file modes still decide the rest.
   const args = ['--rw', '/dev', '--rw', '/proc'];
   // Only the root's folders workers write (w5569, as Windows since w5539): a portal, an instances folder or any new root
