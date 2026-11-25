@@ -401,6 +401,11 @@ machines.offlineAlert = (machineId, title, text) => {
   notifier.host(title, text);
   machines.report?.(text);
 };
+// w5555: a machine's worker fence failed (its sandbox workers are held) or is back, to the orchestrator and the host's devices.
+machines.fenceAlert = (_machineId, title, text) => {
+  notifier.host(title, text);
+  machines.report?.(text);
+};
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
 machines.activityFor = (id) => machineActivityPause(cfg, id);
