@@ -59,7 +59,18 @@ export interface UnityDeps {
   move?(from: string, to: string): void;
   /** w5270: turn Unity's user-wide Burst EditorPref back on when it is off; a note when it was (machine/burstPref.ts). */
   burstPrefOn?(): Promise<string | undefined>;
+  /**
+   * w5630: start Unity's licensing client for the editor at `bin` outside the fence, with the daemon's own (real) home,
+   * when none runs; a note when it could not. A fenced editor whose home is moved and that has to start the client itself
+   * starts it under that home, where no entitlement is, and quits "No valid Unity Editor license found" (measured on m5);
+   * with a client already up it joins its channel and licenses.
+   */
+  licensingClient?(bin: string): Promise<string | undefined>;
 }
+
+/** w5630: Unity's licensing client inside the macOS editor app at `bin` (…/Unity.app/Contents/MacOS/Unity). */
+export const macLicensingClientBin = (bin: string) =>
+  path.join(path.dirname(path.dirname(bin)), 'Helpers', 'UnityLicensingClient.app', 'Contents', 'MacOS', 'Unity.Licensing.Client');
 
 const norm = (p: string) => p.replace(/[\\/]+$/, '');
 
@@ -90,9 +101,10 @@ export interface LowEditorFence {
  * seatbeltProfile) with `<root>/home` writable too. sandbox-exec execs the editor, so the pid is Unity's own and every
  * child (the compiler server, Burst, the shader compiler, a licensing client it starts) inherits the profile.
  * - `profile`: the SBPL text, passed inline, so no file a worker could edit decides it.
- * - `warn`: true while the fence only reports (every deny of the profile turned into an allow `(with report)`: the writes it
- *   would refuse go to the unified log as "Sandbox: Unity(<pid>) allow file-write..." and none is refused). The first
- *   rollout is warn-only (lothsahn's rule for fence changes); daemon.json `editorFence: true` enforces it.
+ * - `warn`: true while the fence refuses nothing (every deny of the profile turned into an allow `(with report)`). On
+ *   macOS 26.4 that report reaches no log: no "Sandbox:" line for an allow with report, nor for a deny, and `(trace ...)`
+ *   writes no file (measured on m5, w5659), so warn mode proves the launch path only, not which writes it would refuse.
+ *   daemon.json `editorFence: true` enforces it.
  * - `env`: HOME and CFFIXED_USER_HOME at `<root>/home`: Unity saves its window layouts in
  *   ~/Library/Preferences/Unity/Editor-5.x, and a fenced editor refused there stops on a modal "Moving file failed" with
  *   its bridge never up (measured on m5, w5630); Foundation's home follows CFFIXED_USER_HOME, Mono's HOME. Its EditorPrefs
@@ -490,6 +502,8 @@ export class MacUnity {
     if (seatbelt) {
       // w5630: the macOS editor under the workers' Seatbelt profile; a Mac without a fenced launcher starts it as before.
       if (this.d.launchFenced) {
+        const lc = await this.d.licensingClient?.(bin).catch((e: Error) => `could not start Unity's licensing client: ${e.message}`);
+        if (lc) this.burstNote = this.burstNote ? `${this.burstNote}. ${lc}` : lc;
         pid = await this.d.launchFenced(seatbelt, bin, args, this.repo, this.env);
         this.fenced = { on: true, ...(seatbelt.warn ? { warn: true } : {}) };
       } else {
@@ -512,7 +526,7 @@ export class MacUnity {
     }
     const onNote = seatbelt
       ? this.fenced?.warn
-        ? " under the workers' Seatbelt profile, warn-only (writes it would refuse are logged, not refused)"
+        ? " under the workers' Seatbelt profile, warn-only (it refuses nothing)"
         : " inside the workers' Seatbelt profile (the worker fence)"
       : ' at Low integrity (the worker fence)';
     const fenceNote = this.fenced ? (this.fenced.on ? onNote : ` unfenced (${this.fenced.why})`) : '';
@@ -673,6 +687,16 @@ function realDepsMac(): UnityDeps {
       child.unref();
       if (!child.pid) throw new Error(`could not start ${bin} under sandbox-exec`);
       return child.pid;
+    },
+    licensingClient: async (bin) => {
+      const lc = macLicensingClientBin(bin);
+      if (!fs.existsSync(lc)) return `no licensing client at ${lc}; the fenced editor starts its own`;
+      const r = await run('ps', ['-axo', 'command='], { timeoutMs: 15_000 });
+      if (r.stdout.split('\n').some((l) => l.includes('/Unity.Licensing.Client'))) return undefined;
+      const child = spawn(lc, [], { detached: true, stdio: 'ignore', env: process.env });
+      child.unref();
+      await new Promise((res) => setTimeout(res, 3000)); // its channel is up within a few seconds (measured: up at 5 s)
+      return undefined;
     },
     exists: (p) => fs.existsSync(p),
     remove: (p) => fs.rmSync(p, { force: true }),

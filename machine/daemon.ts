@@ -174,7 +174,7 @@ export interface DaemonConfig {
    * the daemon starts each sandbox editor at Low integrity too (machine/unity.ts EditorFence), so C# a worker writes, and
    * its execute_code, run inside the fence.
    * macOS (w5630, stage 2): with the Seatbelt worker fence on, sandbox editors start under the workers' profile; unset is
-   * warn-only for now (writes it would refuse are logged, none refused; lothsahn's rule for fence changes), true enforces
+   * warn-only for now (refuses nothing, and macOS logs no report of what it would refuse; lothsahn's rule), true enforces
    * it, false starts them unfenced as before. The switch takes effect at each editor's next start.
    */
   editorFence?: boolean;

@@ -778,14 +778,26 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
     `defaults write` of a new domain from inside the fence created its plist in the real `~/Library/Preferences`.
   - **Warn-only first** (lothsahn's lockout rule). With `editorFence` unset, the profile's every `(deny ...)` becomes
-    `(allow ... (with report))` (`warnOnlyProfile`). Nothing is refused, and each write the fence would refuse is
-    logged in the unified log (`log show --predicate 'sender == "Sandbox"'`). `"editorFence": true` enforces it.
+    `(allow ... (with report))` (`warnOnlyProfile`). Nothing is refused. **On macOS that report is logged nowhere**
+    (measured on m5, macOS 26.4, w5659): no `Sandbox:` unified-log line for an allow with report, none for a deny
+    either (not one kernel `deny(1) file-write` line in 3 h of fenced workers being refused), `(trace "<file>")` writes
+    no file, and `(with report)` on a deny is a syntax error. So warn mode proves the launch path (licensing, the bridge,
+    the home move) and nothing about which writes enforcement would refuse; that rests on the enforced pretest below.
+    `"editorFence": true` enforces it.
     `"editorFence": false` starts Mac editors unfenced, as before. Each applies at an editor's next start (the
     daemon reads daemon.json when it starts).
   - **Probe and fallback.** The daemon runs `sandbox-exec -p <profile> /usr/bin/true` once before the first fenced start.
     If that fails, or the workers' fence is off, editors start unfenced, and the daemon log says `editor fence: ...`.
     A launcher-less start says "unfenced (no fenced launcher here)" in the start message. A fenced start says "inside the
-    workers' Seatbelt profile (the worker fence)", or "... warn-only (writes it would refuse are logged, not refused)".
+    workers' Seatbelt profile (the worker fence)", or "... warn-only (it refuses nothing)".
+  - **Licensing.** A fenced editor whose home is moved and that has to start Unity's licensing client itself starts it
+    under `<root>/home`, where no entitlement is (the user's is `~/Library/Unity/licenses`), and quits "No valid Unity
+    Editor license found" (measured on m5: a batch Unity under the profile with the moved home, no client running).
+    With a client already up, it joins the `LicenseClient-<user>` channel and licenses (measured: the same run passed
+    31 of 31). So before each fenced start the daemon starts `Unity.app/Contents/Helpers/UnityLicensingClient.app/...
+    /Unity.Licensing.Client` itself, unfenced with its own home, when none runs (`licensingClient` in
+    `machine/unity.ts`). A client a fenced editor started under the moved home (if the daemon's ever failed) would be
+    reused as it is; `mcp__machine__unity restart` after it exits fixes that.
   - **Recovery, nobody at the machine:** `ops_worker machine_update worker_fence off` (4.3) turns off the agents' fence
     and the editors' with it. Alternatively, the ops worker sets `"editorFence": false` in daemon.json over ssh and
     restarts the daemon. Then `mcp__machine__unity restart` starts the editor unfenced.

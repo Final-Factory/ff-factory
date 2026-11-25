@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { MacUnity, macEditorFenceFor, warnOnlyProfile, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
+import { MacUnity, macEditorFenceFor, macLicensingClientBin, warnOnlyProfile, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
 import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from './workerFence.ts';
 
 const ROOT = '/Users/u/ffw';
@@ -98,4 +98,29 @@ test('w5630: no fenced launcher, no fence (editorFence false or the workers\' fe
   const win = fakeMac(enforce, true, 'win32');
   await win.u.start();
   assert.equal(win.world.fenced.length, 0, 'a Seatbelt fence is never used off a Mac');
+});
+
+test('w5630: the licensing client starts outside the fence before a fenced editor, and only then; its failure is said, not fatal', async () => {
+  assert.equal(macLicensingClientBin(BIN), '/Applications/Unity/Hub/Editor/6000.3.19f1/Unity.app/Contents/Helpers/UnityLicensingClient.app/Contents/MacOS/Unity.Licensing.Client');
+  const order: string[] = [];
+  const a = fakeMac(macEditorFenceFor(WORKER, 'enforce')!, true);
+  const fencedLaunch = a.u['d'].launchFenced!;
+  a.u['d'].licensingClient = async (bin) => void order.push(`client ${bin}`);
+  a.u['d'].launchFenced = async (...xs) => (order.push('editor'), fencedLaunch(...xs));
+  await a.u.start();
+  assert.deepEqual(order, [`client ${BIN}`, 'editor'], 'the client is up before the fenced editor looks for its channel');
+
+  const b = fakeMac(macEditorFenceFor(WORKER, 'enforce')!, true);
+  b.u['d'].licensingClient = async () => {
+    throw new Error('spawn EACCES');
+  };
+  const said = await b.u.start();
+  assert.equal(b.world.fenced.length, 1, 'the editor still starts');
+  assert.match(said, /could not start Unity's licensing client: spawn EACCES/);
+
+  let asked = 0;
+  const off = fakeMac(undefined, true);
+  off.u['d'].licensingClient = async () => void asked++;
+  await off.u.start();
+  assert.equal(asked, 0, 'an unfenced editor starts its own client, as before');
 });
