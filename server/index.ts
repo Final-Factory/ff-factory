@@ -104,7 +104,7 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { clientAddress, originOf, tailnetOnly } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -2155,7 +2155,8 @@ const requireJoinOwner = (req: http.IncomingMessage) => {
 // The tailnet device this browser is on, to name the PC when the owner adds it from its own browser (undefined off the tailnet).
 route('GET', '/api/machines/join/device', async (req) => {
   requireJoinOwner(req);
-  const device = tailnetOnly(req) ? await joinWhois(clientAddress(req)) : undefined;
+  const addr = tailnetDeviceAddress(req);
+  const device = addr ? await joinWhois(addr) : undefined;
   const name = device?.name;
   const machine = name ? machines.list().find((m) => m.host.toLowerCase() === name || m.id === name)?.id : undefined;
   return { name, machine };
