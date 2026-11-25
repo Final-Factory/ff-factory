@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { atlasWarning, ciVerdict, ghAuthProblem, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
+import { atlasWarning, ciVerdict, ghAuthProblem, ghAvailableFields, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpFont } from './tmpFontFixture.ts';
 
@@ -294,4 +294,32 @@ test('w5430: ff-pr refuses loudly before any push when gh cannot authenticate, a
   const app = fake({ 'gh auth status': { code: 1, out: '', err: 'x' } });
   assert.equal(ghAuthProblem(app, { FF_GH_APP_NAMES: 'a' }), undefined, 'a GitHub App run is left out');
   assert.deepEqual(app.ran, []);
+});
+
+test('w5836: a gh without baseRefOid (2.46.0 on biscuit) still finds the PR; any other gh failure is said in gh\'s words', () => {
+  // gh 2.46.0's own answer to a field it lacks (w5140 saw it on biscuit), which ff-pr used to hide as "no PR".
+  const old = fail('Unknown JSON field: "baseRefOid"\nAvailable fields:\n  additions\n  baseRefName\n  headRefName\n  headRefOid\n  isCrossRepository\n  mergeable\n  number\n  state\n  statusCheckRollup\n  url\n');
+  const green = ok(JSON.stringify([{ databaseId: 1, workflowName: 'ci', status: 'completed', conclusion: 'success' }]));
+  const d = fake({ 'gh pr view 7 --json number,url,headRefOid,mergeable,state,baseRefName,baseRefOid,': old, 'gh pr view 7 --json': ok(pr()), 'gh api repos/Final-Factory/ff-factory/pulls/7 --jq .base.sha': ok(`${OLD}\n`), 'gh run list': green });
+  assert.equal(prMain(['status', '7'], d), 0, d.said);
+  assert.ok(d.ran.includes('gh pr view 7 --json number,url,headRefOid,mergeable,state,baseRefName,headRefName,isCrossRepository'), d.ran.join('\n'));
+  assert.ok(!d.said.includes('no PR'), d.said);
+  // Never the checks rollup, which a fine-grained token is refused (w2015).
+  assert.ok(!d.ran.some((l) => l.includes('statusCheckRollup')), d.ran.join('\n'));
+
+  const auth = fake({ 'gh pr view': fail('HTTP 401: Requires authentication (https://api.github.com/graphql)\nTry authenticating with:  gh auth login') });
+  assert.equal(prMain(['status', '7'], auth), 1);
+  assert.match(auth.said, /^ff-pr: no PR 7: gh pr view failed: HTTP 401: Requires authentication/);
+  assert.equal(auth.ran.filter((l) => l.startsWith('gh pr view')).length, 1);
+
+  // push: a gh failure is not "no PR", so nothing is pushed and gh's words are shown.
+  const push = fake({ ...base, 'gh pr view': fail('HTTP 401: Requires authentication') });
+  assert.equal(prMain(['push', '--title', 't', '--body-file', 'b.md'], push), 1);
+  assert.match(push.said, /gh pr view failed, so nothing is pushed: HTTP 401/);
+  assert.ok(!push.ran.some((l) => l.startsWith('git push') || l.startsWith('gh pr create')), push.ran.join('\n'));
+});
+
+test('w5836: ghAvailableFields reads gh\'s field list only from an Unknown JSON field answer', () => {
+  assert.deepEqual([...(ghAvailableFields('Unknown JSON field: "x"\nAvailable fields:\n  number\n  url\n') ?? [])], ['number', 'url']);
+  assert.equal(ghAvailableFields('no pull requests found for branch "w1"'), undefined);
 });
