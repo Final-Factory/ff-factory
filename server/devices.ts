@@ -14,13 +14,13 @@ export type DeviceApproval = 'off' | 'members';
 export const DEVICE_APPROVALS: readonly DeviceApproval[] = ['off', 'members'];
 /**
  * New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"), config `ownerDeviceApproval`:
- * "off", nothing asked; "advisory" (the default), an owner's login from a browser no owner approved for them outside the
- * tailnet is let in, but a request is made for the owners and the login is written to the device log as one enforce would
- * have held; "enforce", that login waits for another owner's approval as a member's does. Over the tailnet an owner's login
- * is never held and approves its browser, so there is always a way in.
+ * "off", nothing recorded; "advisory" (the default), an owner's login from a browser no owner approved for them outside
+ * the tailnet is let in, but a request is shown to the owners and the login is written to the device log as one that would
+ * need approval. Over the tailnet an owner's login approves its browser. Nothing here holds or refuses an owner's login:
+ * enforcement is a later change (lothsahn, w5524: advisory only while the owners travel).
  */
-export type OwnerDeviceApproval = 'off' | 'advisory' | 'enforce';
-export const OWNER_DEVICE_APPROVALS: readonly OwnerDeviceApproval[] = ['off', 'advisory', 'enforce'];
+export type OwnerDeviceApproval = 'off' | 'advisory';
+export const OWNER_DEVICE_APPROVALS: readonly OwnerDeviceApproval[] = ['off', 'advisory'];
 export const OWNER_DEVICE_APPROVAL_DEFAULT: OwnerDeviceApproval = 'advisory';
 export const DEVICE_COOKIE = 'ffsb_device';
 /** Browsers cap a cookie's life at 400 days. */
@@ -48,7 +48,7 @@ export interface DeviceRecord {
   /** The owner who decided, "set-password link", or "tailnet login" (an owner's login over the tailnet approves its browser). */
   decidedBy?: string;
   lastSeenAt?: string;
-  /** A pending request whose login was let in anyway (ownerDeviceApproval "advisory"): enforce would have held it. */
+  /** A pending request whose login was let in anyway (ownerDeviceApproval "advisory"): it would need approval. */
   advisory?: boolean;
 }
 
@@ -139,11 +139,11 @@ export class Devices {
 }
 
 /**
- * What owner device approval held, refused, or (in advisory mode) would have (w5524): one line per such login, kept 180
- * days and at most 2000 lines in data/device-log.json, so the owners can see over time who enforce would lock out before
- * they turn it on (the dashboard's This device > Devices list, GET /api/devices `log`). Never a cookie or its hash.
+ * The owner logins advisory device approval let in that would need approval (w5524): one line per such login, kept 180
+ * days and at most 2000 lines in data/device-log.json, so the owners can see over time who enforcement would lock out
+ * before it exists (the dashboard's Settings > Devices list, GET /api/devices `log`). Never a cookie or its hash.
  */
-export type DeviceLogOutcome = 'would-need-approval' | 'would-be-refused' | 'held' | 'refused';
+export type DeviceLogOutcome = 'would-need-approval' | 'would-be-refused';
 
 export interface DeviceLogEntry {
   at: string;

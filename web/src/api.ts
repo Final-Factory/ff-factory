@@ -123,11 +123,11 @@ export interface DeviceInfo {
   decidedAt?: string;
   decidedBy?: string;
   lastSeenAt?: string;
-  /** An owner's login let in by ownerDeviceApproval "advisory" that enforce would have held. */
+  /** An owner's login let in by ownerDeviceApproval "advisory" that would need approval. */
   advisory?: boolean;
 }
 
-/** A login owner device approval held, refused or (advisory) would have (w5524). */
+/** An owner's login advisory device approval let in that would need approval (w5524). */
 export interface DeviceLogInfo {
   at: string;
   username: string;
@@ -136,13 +136,13 @@ export interface DeviceLogInfo {
   label: string;
   ip: string;
   userAgent: string;
-  mode: 'off' | 'advisory' | 'enforce';
-  outcome: 'would-need-approval' | 'would-be-refused' | 'held' | 'refused';
+  mode: 'off' | 'advisory';
+  outcome: 'would-need-approval' | 'would-be-refused';
 }
 
 export interface DevicesView {
   deviceApproval: 'off' | 'members';
-  ownerDeviceApproval: 'off' | 'advisory' | 'enforce';
+  ownerDeviceApproval: 'off' | 'advisory';
   devices: DeviceInfo[];
   /** This browser's own device record, if it has one. */
   current?: string;

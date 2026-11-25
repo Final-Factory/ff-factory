@@ -24,8 +24,8 @@ export function DeviceRequests({ app }: { app: AppState }) {
         const r = await api.devices();
         if (stop) return 5 * 60_000;
         setDevices(r.devices);
-        // w5524: owners' logins are held only under ownerDeviceApproval "enforce"; advisory requests show within 5 minutes.
-        const held = r.deviceApproval === 'members' || r.ownerDeviceApproval === 'enforce';
+        // w5524: owners' logins are never held (advisory only); their requests show within 5 minutes.
+        const held = r.deviceApproval === 'members';
         setOn(held);
         return held || r.devices.some((d) => d.status === 'pending') ? 20_000 : 5 * 60_000;
       },
@@ -56,8 +56,8 @@ export function DeviceRequests({ app }: { app: AppState }) {
   return (
     <>
       {pending.map((d) => {
-        // w5524: an owner's login let in by advisory mode; enforce would have held it until an owner approves.
-        const head = d.advisory ? `${d.displayName} signed in from a new device (advisory: enforce would have held it):` : `${d.displayName} asks to sign in from a new device:`;
+        // w5524: an owner's login let in by advisory mode; it would need approval once enforcement exists.
+        const head = d.advisory ? `${d.displayName} signed in from a new device (advisory, let in):` : `${d.displayName} asks to sign in from a new device:`;
         const text = `${head} ${d.label}, from ${d.ip}, ${fmtRelative(d.lastSeenAt ?? d.createdAt, Date.now())}.${on || d.advisory ? '' : ' (Device approval is off now.)'}`;
         return (
           <div key={d.id} className="gbar gbar-warn" role="status" data-device={d.id}>

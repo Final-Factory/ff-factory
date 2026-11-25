@@ -6,21 +6,18 @@ import { fmtRelative } from '../util';
 const OUTCOME: Record<DevicesView['log'][number]['outcome'], string> = {
   'would-need-approval': 'would need approval',
   'would-be-refused': 'would be refused',
-  held: 'held for approval',
-  refused: 'refused',
 };
 
 const MODE: Record<DevicesView['ownerDeviceApproval'], string> = {
   off: 'Off: an owner signs in with the password alone, from anywhere.',
   advisory:
-    'Advisory: an owner who signs in from a new browser outside the tailnet is let in, and the login is listed below as one enforce would have held. Approve the browsers you know, so the list shows only the ones that would really be locked out.',
-  enforce: 'Enforce: an owner who signs in from a new browser outside the tailnet waits until another owner approves it here. Logins over the tailnet are never held.',
+    'Advisory: an owner who signs in from a new browser outside the tailnet is let in, and the login is listed below as one that would need approval. Nothing holds an owner yet. Approve the browsers you know, so the list shows only the ones that would really be locked out.',
 };
 
 /**
  * The owners' Devices list (w5524, docs/identity.md "Owner device approval"): every browser approved, waiting or refused
- * for a login, with Revoke, Approve and Deny, and the logins owner device approval held or would have held, so the owners
- * can see over time who enforce would lock out before they turn it on. Members never see it (the route answers 403).
+ * for a login, with Revoke, Approve and Deny, and the owner logins advisory mode let in that would need approval, so the
+ * owners can see over time who enforcement would lock out before it is built. Members never see it (the route answers 403).
  */
 export function DeviceSettings() {
   const [view, setView] = useState<DevicesView | null | undefined>(undefined);
@@ -91,7 +88,7 @@ export function DeviceSettings() {
       )}
       <details data-testid="device-log">
         <summary className="small">
-          Held or would have been held: {view.log.length} login{view.log.length === 1 ? '' : 's'} in the last 180 days
+          Would have needed approval: {view.log.length} login{view.log.length === 1 ? '' : 's'} in the last 180 days
         </summary>
         {view.log.length ? (
           <ul className="vault-list">

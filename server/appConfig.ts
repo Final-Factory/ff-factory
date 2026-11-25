@@ -56,7 +56,7 @@ export const SETTABLE_KEYS = [
   'trustProxy',
   'deviceApproval',
   // New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"), the owner's only: "off",
-  // "advisory" (the default: let in, but logged as enforce would hold it) or "enforce"; null puts back the default.
+  // "advisory" (the default: let in, but logged as one that would need approval); null puts back the default.
   'ownerDeviceApproval',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
@@ -578,8 +578,9 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'ownerDeviceApproval': {
       if (value === undefined || value === null) return undefined;
-      if (value === 'off' || value === 'advisory' || value === 'enforce') return value;
-      throw new Error(`ownerDeviceApproval is "advisory" (the default: an owner's login from a new browser outside the tailnet is let in and logged as one enforce would hold), "enforce" (it waits for another owner's approval in the portal; tailnet logins never wait), "off", or null for the default`);
+      if (value === 'off' || value === 'advisory') return value;
+      if (value === 'enforce') throw new Error(`ownerDeviceApproval "enforce" does not exist yet: owner logins are only recorded for now (advisory), and holding them comes in a later change`);
+      throw new Error(`ownerDeviceApproval is "advisory" (the default: an owner's login from a new browser outside the tailnet is let in and logged as one that would need approval), "off", or null for the default`);
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1046,7 +1047,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'deviceApproval') cfg.deviceApproval = v as 'off' | 'members' | undefined;
   else if (key === 'ownerDeviceApproval') {
     if (v === undefined) delete cfg.ownerDeviceApproval;
-    else cfg.ownerDeviceApproval = v as 'off' | 'advisory' | 'enforce';
+    else cfg.ownerDeviceApproval = v as 'off' | 'advisory';
   }
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
