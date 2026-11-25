@@ -41,7 +41,7 @@ interface FakeMachine extends RolloutMachine {
 const toolsOut = (before = 'ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed', after = 'ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed', extra = '') =>
   `Agent tools before: ${before}\nAgent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7\n` +
   `  == Claude Code ==\n${extra}Agent tools after: ${after}\nAgent tools published: every installed plugin is on master.`;
-const isTools = (remote: string) => / -Tools -Root | -- --tools --root /.test(remote);
+const isTools = (remote: string) => / -Tools -Ref \S+ -Root | -- --tools --ref \S+ --root /.test(remote);
 
 const mac = (id: string, over: Partial<FakeMachine> = {}): FakeMachine => ({
   id,
@@ -120,10 +120,10 @@ test('a verified deploy updates every online machine with the installer, naming 
   await r.tick();
   assert.equal(w.calls.length, 2);
   const beast = w.calls.find((c) => c.target === 'rydin@beast')!;
-  assert.equal(beast.remote, workerUpdateRemote({ root: 'C:\\ffw', platform: 'win32' }));
-  assert.match(beast.remote, /-Update -Root C:\\ffw"$/);
+  assert.equal(beast.remote, workerUpdateRemote({ root: 'C:\\ffw', platform: 'win32' }, NEW));
+  assert.match(beast.remote, /-Update -Ref [0-9a-f]{40} -Root C:\\ffw"$/);
   const m5 = w.calls.find((c) => c.target === 'ben@m5')!;
-  assert.match(m5.remote, /-- --update --root \/Users\/Shared\/ffw-m5$/);
+  assert.match(m5.remote, /-- --update --ref [0-9a-f]{40} --root \/Users\/Shared\/ffw-m5$/);
   for (const c of w.calls) assert.doesNotMatch(c.remote, /max-sandboxes|max-agents|max-unity|MaxSandboxes|MaxAgents|MaxUnity/i, 'the limits are not touched');
   assert.equal(w.told.length, 1, 'one message');
   assert.equal(w.told[0].to?.userId, 'lothsahn');
@@ -383,9 +383,9 @@ test('w1476: after its daemon step every worker root machine gets the latest age
   assert.deepEqual(w.calls.map((c) => c.target), ['rydin@beast'], 'm5 is current: no daemon update');
   assert.deepEqual(w.toolCalls.map((c) => c.target), ['rydin@beast', 'ben@m5'], 'both get the tools');
   assert.equal(w.toolCalls[0].at, 1, "beast's tools ran after its daemon update");
-  assert.equal(w.toolCalls[0].remote, workerToolsRemote({ root: 'C:\\ffw', platform: 'win32' }));
-  assert.match(w.toolCalls[0].remote, / -Tools -Root C:\\ffw"$/);
-  assert.match(w.toolCalls[1].remote, /-- --tools --root \/Users\/Shared\/ffw-m5$/);
+  assert.equal(w.toolCalls[0].remote, workerToolsRemote({ root: 'C:\\ffw', platform: 'win32' }, NEW));
+  assert.match(w.toolCalls[0].remote, / -Tools -Ref [0-9a-f]{40} -Root C:\\ffw"$/);
+  assert.match(w.toolCalls[1].remote, /-- --tools --ref [0-9a-f]{40} --root \/Users\/Shared\/ffw-m5$/);
   assert.equal(w.told.length, 1, 'still one report');
   const t = w.told[0].text;
   assert.match(t, /updated the machines' daemons and published the latest agent tools \(final-factory-agents\) on them by itself/);
@@ -523,7 +523,7 @@ test('w1742: a tools run over the link that finds a firewall rule missing runs a
   const w = world([lothdesktop], { requester: LOTH });
   w.verify();
   await w.make().tick();
-  assert.deepEqual(w.toolCalls.map((c) => [c.target, c.remote]), [['Lothsahn@loth2800', workerToolsRemote({ root: 'D:\\ffw', platform: 'win32' })]]);
+  assert.deepEqual(w.toolCalls.map((c) => [c.target, c.remote]), [['Lothsahn@loth2800', workerToolsRemote({ root: 'D:\\ffw', platform: 'win32' }, NEW)]]);
   assert.match(w.told[0].text, /Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
   assert.doesNotMatch(w.told[0].text, /WARNING/, 'made over ssh: nothing left to warn of');
 
@@ -746,4 +746,47 @@ test('w2044: a tick saves in the background: no synchronous write per machine, a
   assert.equal(saved.machines.m5.status, r.state.machines.m5.status);
   assert.equal(saved.machines.biscuit.status, 'pending');
   r.close();
+});
+
+test('w5516: every installer the rollout runs is fetched at the verified commit and told to install exactly it, the rollback too', async () => {
+  let n = 0;
+  const w = world([
+    mac('m5', { run: () => (++n === 1 ? { code: 1, out: 'FAILED', after: { online: false } } : { code: 0, out: 'After: daemon 1111111', after: { online: true, daemon: OLD.slice(0, 7) } }) }),
+    mac('beast', { platform: 'win32', root: 'C:\\ffw', target: 'rydin@beast' }),
+  ]);
+  w.verify();
+  await w.make().tick();
+  const remotes = [...w.calls, ...w.toolCalls].map((c) => c.remote);
+  assert.equal(remotes.length, 5, "m5's update and its rollback, beast's update, and the tools on both");
+  for (const r of remotes) {
+    assert.ok(r.includes(`https://raw.githubusercontent.com/Final-Factory/ff-factory/${NEW}/scripts/worker/install.`), r);
+    assert.match(r, new RegExp(`(--ref|-Ref) ${NEW} `), r);
+    assert.doesNotMatch(r, /ff-factory\/main\//, r);
+  }
+  assert.match(w.calls.find((c) => c.target === 'ben@m5' && /--daemon-ref/.test(c.remote))!.remote, new RegExp(`--ref ${NEW} --root .* --daemon-ref 1111111$`), "the rollback names the commit it goes back to, with the verified commit's installer");
+});
+
+test('w5516: a daemon that comes back on another commit than the verified one is a failure, named, with nothing put back', async () => {
+  const w = world([mac('m5', { run: () => ({ code: 0, out: 'After: ok', after: { online: true, daemon: 'deadbeef1234' } }) }), mac('m3')]);
+  w.verify();
+  await w.make().tick();
+  assert.equal(w.calls.filter((c) => c.target === 'ben@m5').length, 1, 'it is online: nothing is run again');
+  assert.match(w.told[0].text, /- m5: FAILED: its daemon came back on deadbeef1234, not on the verified commit c5a93e060aaa/);
+  assert.match(w.told[0].text, /- m3: updated\./);
+});
+
+test('w5516: over the link too, a daemon on another commit after the update is a failure', async () => {
+  const w = world([mac('pc', { linkRun: (form) => (form === 'tools' ? { report: { log: toolsOut() } } : { report: { log: 'After: ok' }, after: { online: true, daemon: 'deadbeef1234' } }) })]);
+  w.verify();
+  await w.make().tick();
+  assert.deepEqual(w.linkCalls.map((c) => [c.form, c.commit]).slice(0, 1), [['update', NEW]], 'the link is sent the verified commit');
+  assert.match(w.told[0].text, /- pc: FAILED: its daemon came back on deadbeef1234, not on the verified commit/);
+});
+
+test('w5516: a verified commit that is not a full sha updates nothing: no installer can be pinned to it', async () => {
+  const w = world([mac('m5')]);
+  w.verify(NEW.slice(0, 12));
+  await w.make().tick();
+  assert.equal(w.calls.length, 0, 'no installer ran');
+  assert.match(w.told[0].text, /- m5: FAILED: the verified commit "c5a93e060aaa" is not a full 40-character sha/);
 });

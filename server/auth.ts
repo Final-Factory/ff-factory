@@ -4,6 +4,8 @@ import type http from 'node:http';
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import type { UserInfo, UserRole } from '../shared/types.ts';
 import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
+import { clientAddress } from './clientAddress.ts';
+import { FailureTable, LoginTimer, SWEEP_MS, addressKey, addressRefused, quoteForLog, userWaitMs } from './loginThrottle.ts';
 import { Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type DeviceRecord, type DeviceView } from './devices.ts';
 
 /**
@@ -14,10 +16,11 @@ import { Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type
  *     (data/auth-sessions.json), so reading that file does not yield a usable cookie; 30-day expiry,
  *     revocable by deleting the file or logging out;
  *   - cookies are HttpOnly + SameSite=Strict (+ Secure behind HTTPS);
- *   - failed logins are rate limited per client IP and globally; an attempt is counted BEFORE the
- *     slow hash (so a burst of parallel guesses cannot all slip in), and at most two password hashes
- *     run at once. Bad API keys are throttled per IP separately, so they cannot lock out a login; a good key
- *     is never throttled;
+ *   - failed logins are rate limited per attempted username (a backoff that doubles, at most a minute) and per
+ *     client address (IPv4 per address, IPv6 per /64), never globally (w5521): server/loginThrottle.ts. An attempt is
+ *     counted BEFORE the slow hash (so a burst of parallel guesses cannot all slip in), at most two password hashes
+ *     run at once, the failure tables are capped and swept, and every login answer is held to one measured time.
+ *     Bad API keys are throttled per IP separately, so they cannot lock out a login; a good key is never throttled;
  *   - a one-time set-password link (w3714, `node server/user.ts <name> --link`) is a random 256-bit token whose
  *     SHA-256 alone is kept (data/password-links.json); it sets that login's password once, within its hours, and its
  *     wrong guesses count as failed logins;
@@ -110,13 +113,20 @@ type LinkRecord = { sha256: string; username: string; expires: number };
 
 type ApiKeyRecord = { name: string; sha256: string; createdAt: string; user?: string; scope?: ApiKeyScope };
 
+/** The one answer to a throttled login, whichever limit (the address's or the name's) it hit. */
+const THROTTLED = { ok: false, status: 429, error: 'Too many failed attempts. Try again later.' } as const;
+
 export class Auth {
   private readonly usersFile: string;
   private readonly sessionsFile: string;
   private readonly linksFile: string;
   private sessions = new Map<string, SessionRecord>();
-  private readonly failures = new Map<string, number[]>();
-  private globalFailures: number[] = [];
+  /** Failed logins per client address key (addressKey) and per attempted username (w5521). */
+  private readonly addressFailures: FailureTable;
+  private readonly userFailures: FailureTable;
+  /** The fixed login time. */
+  readonly loginTimer = new LoginTimer();
+  private readonly now: () => number;
   private readonly keyFailures = new Map<string, number[]>();
   private hashing = 0;
   /** A hash to verify against when the username does not exist, so timing does not reveal valid names. */
@@ -128,7 +138,7 @@ export class Auth {
   onDevicePending?: (d: DeviceView) => void;
 
   /** opts: trustProxy and deviceApproval as config has them now (a function reads it live). */
-  constructor(dataDir: string, opts: { trustProxy: boolean | (() => boolean); deviceApproval?: () => DeviceApproval }) {
+  constructor(dataDir: string, opts: { trustProxy: boolean | (() => boolean); deviceApproval?: () => DeviceApproval; now?: () => number }) {
     this.usersFile = path.join(dataDir, 'users.json');
     this.sessionsFile = path.join(dataDir, 'auth-sessions.json');
     this.linksFile = path.join(dataDir, 'password-links.json');
@@ -138,7 +148,32 @@ export class Auth {
     const raw = readJsonDurable<Record<string, SessionRecord>>(this.sessionsFile, { check: checkObject });
     const now = Date.now();
     for (const [id, s] of Object.entries(raw ?? {})) if (s.expires > now) this.sessions.set(id, s);
+    const t0 = performance.now();
     this.dummyHash = hashPassword(randomBytes(16).toString('hex'));
+    // The first floor of the fixed login time: what one hash at this cost took here.
+    this.dummyHash.then(() => this.loginTimer.observe(performance.now() - t0, false), () => {});
+    this.now = opts.now ?? Date.now;
+    this.addressFailures = new FailureTable({ now: this.now });
+    this.userFailures = new FailureTable({ now: this.now });
+    // Expired failures go, so the tables stay small; unref so the timer never holds the process (or a test) open.
+    setInterval(() => this.sweepFailures(), SWEEP_MS).unref();
+  }
+
+  /** Drop expired login and API-key failures; returns how many entries went (w5521). */
+  sweepFailures(): number {
+    const now = this.now();
+    let n = this.addressFailures.sweep() + this.userFailures.sweep();
+    for (const [ip, ts] of this.keyFailures) {
+      const live = ts.filter((t) => now - t < 15 * 60_000);
+      if (live.length) this.keyFailures.set(ip, live);
+      else if (this.keyFailures.delete(ip)) n++;
+    }
+    return n;
+  }
+
+  /** How many entries the failure tables hold now, for tests and the sweep. */
+  failureCounts() {
+    return { addresses: this.addressFailures.size, users: this.userFailures.size, keys: this.keyFailures.size };
   }
 
   users(): UserRecord[] {
@@ -222,7 +257,8 @@ export class Auth {
 
   /**
    * Mint a key (shown once; only its SHA-256 is stored). Re-minting a name replaces its old key. `user`: the login
-   * it acts for (work it starts is requested by them); a key without one acts for the owner. `scope`: a key for one
+   * it acts for (work it starts is requested by them; refused once that login is gone, w5533); a key without one is an
+   * unbound key, which /mcp takes as the owner's on purpose (server/mcp.ts). `scope`: a key for one
    * endpoint only ("nightly": POST /api/intake/nightly), refused on /mcp; a key without one is an MCP key.
    */
   createApiKey(name: string, user?: string, scope?: ApiKeyScope) {
@@ -240,6 +276,20 @@ export class Auth {
   /** Every key without its hash: name, the login it acts for, its scope and when it was made (fffctl apikey list, w1415). */
   apiKeyInfos(): { name: string; createdAt: string; user?: string; scope?: ApiKeyScope }[] {
     return this.keys().map(({ name, createdAt, user, scope }) => ({ name, createdAt, ...(user ? { user } : {}), ...(scope ? { scope } : {}) }));
+  }
+
+  /**
+   * How many bound keys and live sessions name a login that no longer exists, so are refused (w5533): counts only, for
+   * the boot log, so the portal's own log says what a deploy of the check cut off without anyone reading the files.
+   */
+  goneLogins(now = Date.now()): { keys: number; sessions: number; unboundKeys: number } {
+    const known = new Set(this.users().map((u) => u.username));
+    const mcp = this.keys().filter((k) => !k.scope);
+    return {
+      keys: this.keys().filter((k) => k.user !== undefined && !known.has(k.user)).length,
+      sessions: [...this.sessions.values()].filter((x) => x.expires > now && !known.has(x.username)).length,
+      unboundKeys: mcp.filter((k) => k.user === undefined).length,
+    };
   }
 
   revokeApiKey(name: string) {
@@ -263,6 +313,12 @@ export class Auth {
     const hit = digest && this.keys().find((k) => timingSafeEqual(Buffer.from(k.sha256, 'hex'), digest));
     if (hit) {
       this.keyFailures.delete(ip);
+      // w5533: a key bound to a login that no longer exists (users.json edited or restored) is refused, never read as
+      // the owner's. It is not counted as a bad key: it is a real one, and its holder learns why from the log.
+      if (hit.user !== undefined && !this.userInfo(hit.user)) {
+        console.warn(`API key "${hit.name}" from ${ip} refused: its login "${hit.user}" no longer exists`);
+        return { ok: false, status: 401 };
+      }
       return { ok: true, name: hit.name, ...(hit.user ? { user: hit.user } : {}), ...(hit.scope ? { scope: hit.scope } : {}) };
     }
     const locked = recent.length >= 10;
@@ -277,15 +333,9 @@ export class Auth {
     return typeof this.trustProxyOpt === 'function' ? this.trustProxyOpt() : this.trustProxyOpt;
   }
 
-  /** The client address, taking X-Forwarded-For only from a local reverse proxy (Tailscale serve/funnel). */
+  /** The client address, by the portal's one rule (server/clientAddress.ts, w5535) with this Auth's trustProxy. */
   clientIp(req: http.IncomingMessage) {
-    const direct = req.socket.remoteAddress ?? '?';
-    const local = direct === '127.0.0.1' || direct === '::1' || direct === '::ffff:127.0.0.1';
-    if (this.trustProxy && local) {
-      const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-      if (fwd) return fwd;
-    }
-    return direct;
+    return clientAddress(req, { trustProxy: this.trustProxy }) || '?';
   }
 
   /** Whether the browser reached us over HTTPS (directly or via a local TLS-terminating proxy). */
@@ -293,22 +343,35 @@ export class Auth {
     return String(req.headers['x-forwarded-proto'] ?? '').includes('https') || !!(req.socket as { encrypted?: boolean }).encrypted;
   }
 
-  private throttled(ip: string) {
-    const now = Date.now();
-    const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < 15 * 60_000);
-    this.failures.set(ip, recent);
-    this.globalFailures = this.globalFailures.filter((t) => now - t < 60_000);
-    return recent.length >= 5 || this.globalFailures.length >= 20;
+  /** Whether this address (its /64 for IPv6) has had ADDRESS_MAX_FAILURES failures within the last 15 minutes. */
+  private addressThrottled(ip: string) {
+    return addressRefused(this.addressFailures.state(addressKey(ip)));
   }
 
+  /**
+   * Every answer is held to the same time, the fixed login time (LoginTimer), whether the name is unknown, the password
+   * wrong or right, or the attempt throttled: an outsider cannot tell a valid name or password by how long it took.
+   */
   async login(req: http.IncomingMessage, username: string, password: string): Promise<LoginResult> {
+    const started = performance.now();
+    try {
+      const { result, hashed } = await this.loginUnpadded(req, username, password);
+      if (hashed) this.loginTimer.observe(performance.now() - started, result.ok || result.status === 202);
+      return result;
+    } finally {
+      await this.loginTimer.pad(started);
+    }
+  }
+
+  private async loginUnpadded(req: http.IncomingMessage, username: string, password: string): Promise<{ result: LoginResult; hashed: boolean }> {
     const ip = this.clientIp(req);
-    if (this.throttled(ip)) return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
-    if (this.hashing >= 2) return { ok: false, status: 429, error: 'Busy, try again in a moment.' };
-    // Count the attempt as a failure up front; a success takes it back.
-    const stamp = Date.now();
-    this.failures.get(ip)!.push(stamp);
-    this.globalFailures.push(stamp);
+    const addr = addressKey(ip);
+    // The address first: one address or /64 trying many names is stopped here, before any name's record is touched.
+    if (this.addressThrottled(ip) || userWaitMs(this.userFailures.state(username), this.now()) > 0) return { result: THROTTLED, hashed: false };
+    if (this.hashing >= 2) return { result: { ok: false, status: 429, error: 'Busy, try again in a moment.' }, hashed: false };
+    // Count the attempt as a failure up front, for the address and the name; a success takes it back.
+    this.addressFailures.fail(addr);
+    this.userFailures.fail(username);
     const user = this.users().find((u) => u.username === username);
     this.hashing++;
     let valid = false;
@@ -319,11 +382,16 @@ export class Auth {
       this.hashing--;
     }
     if (!user || !valid) {
-      console.warn(`login failed for "${username}" from ${ip}`);
-      return { ok: false, status: 401, error: 'Wrong username or password.' };
+      console.warn(`login failed for ${quoteForLog(username)} from ${quoteForLog(ip)}`);
+      return { result: { ok: false, status: 401, error: 'Wrong username or password.' }, hashed: true };
     }
-    this.failures.delete(ip);
-    this.globalFailures = this.globalFailures.filter((t) => t !== stamp);
+    this.addressFailures.clear(addr);
+    this.userFailures.clear(username);
+    return { result: this.loginOk(req, user, ip), hashed: true };
+  }
+
+  private loginOk(req: http.IncomingMessage, user: UserRecord, ip: string): LoginResult {
+    const username = user.username;
     if (this.needsApproval(user)) {
       const given = deviceId(req);
       const dev = given ?? newDeviceId();
@@ -331,19 +399,19 @@ export class Auth {
       const known = this.devices.find(username, sha(dev));
       if (known?.status !== 'approved') {
         if (known?.status === 'denied') {
-          console.warn(`login for "${username}" from ${ip}: device ${known.id} was refused`);
+          console.warn(`login for "${username}" from ${quoteForLog(ip)}: device ${known.id} was refused`);
           return { ok: false, status: 403, error: 'An owner refused this device. Ask them to approve it in FF Factory.' };
         }
         const d = this.devices.upsert(username, sha(dev), req, ip, 'pending');
-        console.log(`login for "${username}" from ${ip} waits for an owner to approve device ${d.id} (${d.label})`);
+        console.log(`login for "${username}" from ${quoteForLog(ip)} waits for an owner to approve device ${d.id} (${d.label})`);
         if (!known) this.onDevicePending?.(this.view(d));
         return { ok: false, status: 202, pending: true, error: 'This device is new: an owner must approve it in FF Factory. This page signs you in once they do.', ...(setDevice ? { deviceCookie: setDevice } : {}) };
       }
       this.devices.upsert(username, sha(dev), req, ip, 'approved');
-      console.log(`login ok for "${username}" from ${ip} on approved device ${known.id}`);
+      console.log(`login ok for "${username}" from ${quoteForLog(ip)} on approved device ${known.id}`);
       return { ok: true, cookie: this.newSession(req, username, sha(dev)) };
     }
-    console.log(`login ok for "${username}" from ${ip}`);
+    console.log(`login ok for "${username}" from ${quoteForLog(ip)}`);
     const dev = deviceId(req);
     return { ok: true, cookie: this.newSession(req, username, dev && sha(dev)) };
   }
@@ -401,14 +469,12 @@ export class Auth {
   /** Set the password a link names, once, and log that browser in (every other session of the login ends). */
   async usePasswordLink(req: http.IncomingMessage, token: string, password: string): Promise<{ ok: true; username: string; cookie: string; deviceCookie?: string } | { ok: false; status: number; error: string }> {
     const ip = this.clientIp(req);
-    if (this.throttled(ip)) return { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' };
+    if (this.addressThrottled(ip)) return THROTTLED;
     const all = this.links();
     const hit = all.find((l) => l.sha256 === sha(token));
     if (!hit) {
-      const stamp = Date.now();
-      this.failures.get(ip)!.push(stamp);
-      this.globalFailures.push(stamp);
-      console.warn(`set-password link refused from ${ip}`);
+      this.addressFailures.fail(addressKey(ip));
+      console.warn(`set-password link refused from ${quoteForLog(ip)}`);
       return { ok: false, status: 401, error: 'This link is used, expired or mistyped. Ask for a new one.' };
     }
     if (password.length < 12) return { ok: false, status: 400, error: 'The password must be at least 12 characters.' };
@@ -432,7 +498,7 @@ export class Auth {
     return new RegExp(`(?:^|;\\s*)${COOKIE}=([a-f0-9]{64})`).exec(req.headers.cookie ?? '')?.[1];
   }
 
-  /** The logged-in username, or undefined. */
+  /** The logged-in username, or undefined; a session whose login no longer exists ends here (w5533). */
   user(req: http.IncomingMessage): string | undefined {
     const id = this.sessionId(req);
     if (!id) return undefined;
@@ -440,6 +506,12 @@ export class Auth {
     const s = this.sessions.get(key);
     if (!s) return undefined;
     if (s.expires < Date.now()) {
+      this.sessions.delete(key);
+      this.persistSessions();
+      return undefined;
+    }
+    if (!this.userInfo(s.username)) {
+      console.warn(`session of "${s.username}" ended: that login no longer exists`);
       this.sessions.delete(key);
       this.persistSessions();
       return undefined;

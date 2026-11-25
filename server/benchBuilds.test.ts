@@ -120,7 +120,7 @@ test('w1860: unity-slot run ends its command and exits 75 when its bench ticket 
     FF_SANDBOX_PATH: checkout,
     FF_WORKER_ROOT: root,
     FF_UNITY_SLOTS: path.join(root, 'slots'),
-    BENCH_LOCK: path.join(root, 'tmp', 'bench.lock'),
+    BENCH_LOCK: path.join(root, 'daemon', 'bench.lock'),
     FF_BENCH_TICKET: '',
     FF_UNITY_SLOT_HELD: '',
     FF_BENCH_TICKETS: '',
@@ -137,7 +137,7 @@ function fakeQueue(t: { after: (f: () => void) => void }, helper?: string) {
   fs.mkdirSync(path.join(checkout, 'scripts', 'bench'), { recursive: true });
   if (helper !== undefined) fs.writeFileSync(path.join(checkout, 'scripts', 'bench', 'bench_queue.py'), helper);
   const ran = path.join(root, 'ran.txt');
-  const env = { ...process.env, FF_PYTHON: process.execPath, FF_SANDBOX_PATH: checkout, FF_WORKER_ROOT: root, FF_UNITY_SLOTS: path.join(root, 'slots'), BENCH_LOCK: path.join(root, 'tmp', 'bench.lock'), FF_BENCH_TICKET: '', FF_UNITY_SLOT_HELD: '', FF_BENCH_TICKETS: '', FF_UNITY_SLOT_BENCH: '' };
+  const env = { ...process.env, FF_PYTHON: process.execPath, FF_SANDBOX_PATH: checkout, FF_WORKER_ROOT: root, FF_UNITY_SLOTS: path.join(root, 'slots'), BENCH_LOCK: path.join(root, 'daemon', 'bench.lock'), FF_BENCH_TICKET: '', FF_UNITY_SLOT_HELD: '', FF_BENCH_TICKETS: '', FF_UNITY_SLOT_BENCH: '' };
   // The command writes a file when it runs: it must not, without a ticket.
   const cmd = [process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(ran)}, 'ran')`];
   return { root, env, cmd, ran, cwd: checkout };
