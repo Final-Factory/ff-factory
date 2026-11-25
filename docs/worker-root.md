@@ -485,7 +485,7 @@ each step idempotent:
 `authorized_keys`. The gh token, the ffdiscord, ffbox and ffnightly configs and the ntfy topic are copied in from
 the person's existing files, by path, once, never printed, and only where that machine needs them (LothDesktop: the
 Max bot). The Claude OAuth token is never written on a machine: it arrives in each launch spec over the
-authenticated link (docs/machines.md "Claude account"). The guards protect `secrets/` and `claude/` as they protect
+authenticated link (docs/machines.md "Claude account"). The text guards (a seatbelt for mistakes: a script file gets past them, so they do not stop a determined or hijacked worker) refuse tools on `secrets/` and `claude/` as they do for
 `~/.ssh` and `~/.claude` today (`server/secretGuard.ts:167-177`, `server/guard.ts`).
 
 **Uninstall** leaves nothing outside `root.json.outside`, and removes that list:
@@ -515,7 +515,7 @@ the env block and the secrets.
 
 | | A. The person's account, everything in the root (recommended now) | B. A dedicated local user per machine | C. A VM or container |
 |---|---|---|---|
-| Files | agents can still read the person's home; the guard protects named paths (today's model) | real separation: the OS stops agents reading the person's files | strongest |
+| Files | agents can still read the person's home; the text guard refuses named paths to a careless worker and a script file gets past it (today's model; the write fences are the protection, docs/worker-fence.md) | real separation: the OS stops agents reading the person's files | strongest |
 | Unity and GPU | works today: the daemon runs in the interactive session for the Claude login, the GPU and the desktop (`server/machineDeployWin.ts:389-441`, "What runs it" in docs/machines.md) | the worker user must be logged on in its own session. Windows 11 Pro keeps several sessions with fast user switching, but only one owns the console; whether Unity renders and play mode runs in a background session is untested *(guess: risky)*. After a reboot only one account can sign in automatically (BEAST signs Ben in, beast-machine.md) | no GPU on Windows client without passthrough; Metal does not reach a macOS VM's guests usefully *(guess)* |
 | Licences and logins | the person's | its own Unity licence activation, Claude login or the portal's token, gh token, Steam if ever needed | the same as B |
 | Install cost | the installer above | plus creating the user, its auto-logon or session, and ACLs | far more |
@@ -632,8 +632,11 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 
 - `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; agents start unfenced until
   it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
-  - It labels the root's folders Low (`machine/lowIntegrity.ts` `lowTargets`, `labelLow`): every child except `daemon`,
-    `secrets`, the daemon's own folder and the CI runners' `ffu-runners` (`CI_CHILDREN`, kept Medium: w5440). `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
+  - It labels Low only the root's folders workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, `lowTargets`,
+    `labelLow`; w5539), plus the root child that holds a configured temp or sandboxes folder. Every other child stays
+    Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets` and the daemon's own
+    folder are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
+    portals, and any folder added later are kept Medium. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
     is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
     roots, the temp and sandbox folders where they are elsewhere, and only what `daemon.json` `workerIntegrityAllow`
@@ -706,6 +709,14 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   checks every `<runner>\bin\Runner.Worker.exe` (`lowRunners`) and logs `CI runner job exe ... is still labelled Low`
   if one is. A new runner folder inside the root goes in `CI_CHILDREN`. The game repo's Windows runners are not inside
   any worker root.
+- **Only the folders workers write are Low; a new root folder is Medium until listed** (w5539, from the w5451 audit).
+  Until then every root child but `daemon` and `secrets` was labelled Low, and on BEAST that reached
+  `F:fw\instances` (its `update-all.ts` runs every 5 minutes at Medium from the scheduled task
+  `ff-instances-update`), `demos` and the instance portals `ben-factory` and `lens-factory`, whose config holds vault,
+  ledger and Claude keys: one edit from a Low worker ran at Medium there. lothsahn: "File it: make the BEAST instances
+  folder unwritable by workers". `lowTargets` now labels only `WORKER_CHILDREN` and keeps the rest Medium; a folder a
+  worker tool needs to write is added to that list in the same change that makes the tool write there, never by
+  labelling it by hand. The Landlock and Seatbelt fences (4.2) still open every child but `daemon` and `secrets`.
 - **A Low process sees only Low processes.** tasklist, Get-Process and CIM list about 24 rows: no daemon, and no Medium
   editor or node. Never judge from inside a worker whether a Medium process is running.
 - **The firewall cmdlets are denied** (`Get-NetFirewallApplicationFilter`: "Access is denied", PermissionDenied). The
@@ -793,6 +804,10 @@ outside it: the daemon, the agent host, the in-process FF Factory tools, the mac
 ssh session. A fenced worker breaking cannot stop any of them.
 
 **The one setting per OS** (daemon.json in the daemon's folder; the daemon reads it when it starts):
+
+The fences, not the text guard (`server/guard.ts`, which matches only command text and which a script file gets past), are the
+protection; they are write-only today, and what each covers and what is still open is in docs/worker-fence.md, "What protects a
+machine, and what does not".
 
 | OS | Fence | On | Off |
 |---|---|---|---|

@@ -94,7 +94,7 @@ import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, stal
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, isBusy, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, systemdSupervised, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, writeUpdateWanted, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, sessionSource } from './usage.ts';
-import { appVersion, formatVersion } from './version.ts';
+import { appVersion, formatVersion, portalCommit } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
@@ -379,6 +379,7 @@ const joinHttp = machineJoinHttp({
   // w2004: the clone of a new computer with no GitHub login of its own, where machines.githubFromVault is on for it.
   githubToken: (machineId, person) => githubTokens()?.forMachine(machineId, person, `${machineId}'s worker install (the game repo's clone)`),
   script: (kind) => joinHttpScript(kind),
+  commit: () => portalCommit(),
   refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
   report: (text) => machines.report?.(text),
 });
@@ -2472,7 +2473,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway. loopLagMs: the event loop's worst lag of the last minute (w1377).
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), ...(portalCommit() ? { commit: portalCommit() } : {}), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
