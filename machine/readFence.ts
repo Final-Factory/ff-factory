@@ -104,8 +104,9 @@ function filesIn(dir: string): string[] {
  * What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only.
  * `linux` (default: this machine is Linux) swaps each closed folder for the files inside it (filesIn), since Landlock cannot
  * refuse a closed folder's own open; a closed folder with no files is then not probed.
+ * `owner`: the owner-secret paths closed with them (w5747).
  */
-export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean }): { closed: string[]; open: string[] } {
+export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean; owner?: readonly string[] }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
   const linux = o.linux ?? process.platform === 'linux';
   const closed = [
@@ -115,6 +116,8 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
     path.join(o.root, 'root.json'),
     path.join(o.appDir, 'daemon.json'),
     path.join(o.appDir, 'gh-app', 'tokens.json'),
+    // w5747: the owner's secrets (ownerSecrets.ts ownerReadDenied), so a probe that passes has run the rules on mode adds.
+    ...(o.owner ?? []),
   ];
   const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
   const uniq = (l: string[]) => [...new Set(l)].filter(exists);

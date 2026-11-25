@@ -188,7 +188,20 @@ under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read ru
 secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
 `app/machine/ghApp.ts`) read-only and closes it at once, reading no byte, and the daemon logs one line, `read fence (<mode>,
 <os>) probe: a/b closed paths refused, c/d given-back paths open; ...` with what it would wrongly refuse or leave open. On
-Windows the labels are what refuses, so `warn` sets none and logs what `on` would close. Only a daemon whose hello offers
+Windows the labels are what refuses, so `warn` sets none and logs what `on` would close.
+
+Since w5747 (from w5733's review of #1232) the probe also runs the owner-secret rules ("Owner secrets" below) as `on` adds
+them for a run that holds a token: the owner paths join the closed targets and the fence (Seatbelt `readDenied` plus
+`ownerSecrets`, so the Keychain mach denies and the preference-write deny; Landlock `--no-read`). A line `read fence
+(<mode>): owner-secret rules would close ...` says what they close (in `warn`: what `on` would). Then tool legs run under
+that same fence (`ownerToolLegs`, machine/ownerSecrets.ts): `gh api user` and `git ls-remote` of a private repository
+through the GH_TOKEN credential helper, both with the machine login's token and the empty `<root>/gh-worker` gh folder,
+must exit 0; on a Mac `security add-generic-password` must fail at once (a hang means a SecurityAgent dialog; a success is
+deleted again outside the fence). Their line is `read fence probe, tools under the owner rules (w5747): ...`. A failed
+leg, or legs not run because the daemon read no machine gh token, keeps `on` from enforcing, like a wrongly refused path.
+The per-run wiring is `ownerRunWiring` (machine/ownerSecrets.ts), tested in server/ownerSecrets.test.ts.
+
+Only a daemon whose hello offers
 `readFenceSwitch` is sent a mode: a daemon from before w5546 took any action but `restart` as an unload, and a daemon now
 refuses an action it does not know.
 
