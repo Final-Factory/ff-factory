@@ -39,6 +39,7 @@ function sources(): string[] {
  * either fences git (calls gitFence or gitFenceSync in its file, as proc.ts, worker.ts and prFlow.ts do) or joins this list.
  */
 const NOT_GIT: Record<string, string> = {
+  'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/timedRunner.ts|process.execPath': 'a node watchdog',
   'machine/timedRunner.ts|e': 'the game player',
   'machine/agentHost.ts|cmd.bin': 'the agent CLI',

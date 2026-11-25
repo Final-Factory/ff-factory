@@ -54,7 +54,7 @@ that variable, and `FF_SESSION_ID`, in the environment of every agent it starts:
 
 Why a file: it needs no new secret and no network path. The line says what was posted where; it never
 holds the bot token. An endpoint the CLI posts to would have needed a token for the CLI and a way to
-reach the portal from every machine. The file is outside the folders the guard protects on purpose, since
+reach the portal from every machine. The file is outside the folders the text guard refuses to agents (a seatbelt, not a protection) on purpose, since
 agents write it. A session outside FF Factory has no `FF_MAX_EVENTS`, so the CLI writes nothing.
 
 One line, version 1 (unknown fields are ignored; a line that fails this is dropped):

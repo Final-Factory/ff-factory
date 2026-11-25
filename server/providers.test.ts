@@ -109,8 +109,18 @@ test('the upgrade is refused without the right token (401), while switched off (
   assert.equal(pm.online, false);
   cfg.providers!.ffbox!.enabled = true;
   for (let i = 0; i < 7; i++) await connect(mintProviderToken()).closed;
-  // Ten failures from this address in 15 minutes: even the right token waits.
-  assert.equal((await connect(token).closed).status, 429);
+  // Ten failures from this address in 15 minutes: bad tokens are throttled (429), and the throttle grows with them.
+  assert.equal((await connect(mintProviderToken()).closed).status, 429, 'a bad token from the locked address: 429');
+  assert.equal((await connect('').closed).status, 429, 'no token: 429');
+  // w5528 (w5452 finding 20): the right token gets in whatever the lockout, or bad requests from FFBox's address would
+  // keep the real connector out. A good token while off is still 403, not 429.
+  cfg.providers!.ffbox!.enabled = false;
+  assert.equal((await connect(token).closed).status, 403, 'locked out, switched off: 403 for a valid token');
+  cfg.providers!.ffbox!.enabled = true;
+  const c = connect(token);
+  await c.hello();
+  assert.equal(pm.online, true, 'a locked-out address with the valid token is accepted');
+  assert.equal((await connect(mintProviderToken()).closed).status, 429, 'bad tokens are still refused while the real one is connected');
 });
 
 test('hello → welcome; capacity, conversations and intake are recorded, newest first, deduplicated', async (t) => {

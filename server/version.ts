@@ -31,6 +31,31 @@ export function readSha(root = ROOT): string | undefined {
   }
 }
 
+/**
+ * The checkout's HEAD as a full 40-character commit id (w5516): what machine updates install, pinned (server/opsWorker.ts
+ * installerRemote, the join scripts). FFSB_GIT_SHA wins when it is a full id; undefined when no full id is known.
+ */
+export function readCommit(root = ROOT): string | undefined {
+  const env = process.env.FFSB_GIT_SHA?.trim().toLowerCase();
+  if (env && FULL_COMMIT.test(env)) return env;
+  try {
+    const out = gitExecFileSync(['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim().toLowerCase();
+    return FULL_COMMIT.test(out) ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A full git commit id (40 hex characters). */
+export const FULL_COMMIT = /^[0-9a-f]{40}$/;
+
+let commitCached: { v: string | undefined } | undefined;
+/** The portal's own full commit, read once per process (a release's checkout does not change under it). */
+export function portalCommit(): string | undefined {
+  commitCached ??= { v: readCommit() };
+  return commitCached.v;
+}
+
 let cached: AppVersion | undefined;
 
 /** Read once per process. */
