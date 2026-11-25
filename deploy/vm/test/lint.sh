@@ -13,7 +13,7 @@ units=0
 scripts=(deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/host/lib.sh deploy/vm/host/pathwatch.sh
   deploy/vm/host/answers.sh deploy/vm/host/guest.sh deploy/vm/host/vault.sh deploy/vm/host/machine-ssh.sh deploy/vm/guest/fff-machine-ssh
   deploy/vm/host/fff-vm.conf.example deploy/vm/guest/install.sh deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health
-  deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh deploy/vm/guest/fff-migrate deploy/vm/guest/lib.sh deploy/vm/guest/fff.conf.example
+  deploy/vm/guest/fff-backup deploy/vm/guest/fff-backup-drill deploy/vm/guest/fff-base-refresh deploy/vm/guest/fff-migrate deploy/vm/guest/lib.sh deploy/vm/guest/fff.conf.example
   deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh
   deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync
   deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh
@@ -27,7 +27,7 @@ echo "shellcheck: clean"
 [ "${1:-}" != --shellcheck-only ] || exit 0
 # Every executable script really is executable in git (the installers copy modes from the checkout).
 for f in deploy/vm/host/install.sh deploy/vm/host/uninstall.sh deploy/vm/host/vm-rollback.sh deploy/vm/host/fff-vm deploy/vm/guest/install.sh \
-  deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-base-refresh \
+  deploy/vm/guest/fffctl deploy/vm/guest/fff-update deploy/vm/guest/fff-health deploy/vm/guest/fff-backup deploy/vm/guest/fff-backup-drill deploy/vm/guest/fff-base-refresh \
   deploy/vm/guest/fff-migrate deploy/vm/host/machine-ssh.sh deploy/vm/guest/fff-machine-ssh deploy/vm/test/lint.sh deploy/vm/test/ci-vm-e2e.sh \
   deploy/vm/test/fff-vm-nightly.test.sh deploy/vm/test/fff-vm-path.test.sh deploy/vm/test/fff-machine-ssh.test.sh deploy/vm/guest/fff-ops-launch deploy/vm/guest/fff-ops-priv   deploy/vm/guest/fff-ops-ssh deploy/vm/guest/fff-ops-scp-ssh deploy/vm/guest/fff-ops-sync deploy/vm/guest/ops-bin/ssh deploy/vm/guest/ops-bin/fffctl deploy/vm/guest/ops-bin/scp deploy/vm/guest/ops-bin/sftp deploy/vm/guest/ops-bin/fff-machine-ssh deploy/vm/test/fff-ops.test.sh deploy/vm/test/fff-ops-socket.test.sh deploy/vm/guest/fff-watchdog deploy/vm/test/fff-watchdog.test.sh deploy/vm/test/fff-health.test.sh deploy/vm/test/fff-units.test.sh deploy/vm/test/fff-vault-sync.test.sh deploy/vm/test/fff-vault-add.test.sh deploy/vm/test/fff-conf.test.sh deploy/vm/test/fff-disk-usage.test.sh deploy/vm/test/fff-update.test.sh deploy/vm/test/fff-fence-check.test.sh deploy/vm/test/fff-root-links.test.sh deploy/vm/test/fff-apt-keys.test.sh; do
   [ "$(git ls-files -s "$f" | cut -c1-6)" = 100755 ] || { echo "$f is not executable in git (git update-index --chmod=+x)"; exit 1; }
@@ -77,7 +77,7 @@ if [ "$units" = 1 ]; then
   # systemd-analyze verify checks each unit's executables and user exist, so put them where the units point.
   id fff >/dev/null 2>&1 || useradd --system --user-group fff
   install -d /usr/local/lib/fff /usr/local/lib/fff-vm /srv/fff/app/current
-  for f in fff-update fff-health fff-backup fff-base-refresh fff-ops-launch fff-ops-sync; do install -m 0755 "deploy/vm/guest/$f" /usr/local/lib/fff/; done
+  for f in fff-update fff-health fff-backup fff-backup-drill fff-base-refresh fff-ops-launch fff-ops-sync; do install -m 0755 "deploy/vm/guest/$f" /usr/local/lib/fff/; done
   install -m 0755 deploy/vm/host/fff-vm /usr/local/sbin/fff-vm
   install -m 0755 deploy/vm/guest/fffctl /usr/local/sbin/fffctl
   # fff-portal.service runs the execute-only node its ExecStartPre installs (w5506); verify wants it there now.

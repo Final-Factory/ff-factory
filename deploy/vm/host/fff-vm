@@ -13,6 +13,11 @@
 #                            start it (fff-vm-nightly.timer); back to the previous definition if it does not come up
 #   fff-vm events            alerts on libvirt's watchdog, crash and stop events (fff-vm-events.service)
 #   fff-vm snapshots         the disk's snapshots
+#   fff-vm backup-drill --identity FILE [NAME]
+#                            the monthly restore drill (w5529): the newest backup on the backup target (or NAME), fetched
+#                            through the VM still encrypted, decrypted HERE with the age private key FILE (a key holder's,
+#                            brought for the drill and taken away again: never kept on this host), and piped into the VM's
+#                            fffctl backup-drill, which unpacks it in a scratch folder, checks it and deletes it
 #   fff-vm notify-test       send a test alert to the ntfy topic
 #   fff-vm vault-sync        each person's tokens in /etc/fff-vm/secrets/people/<user id>/ into the VM's vault, and the
 #                            vault key's spare copy back here (docs/vault.md, "Whose tokens"); values never printed. It copies
@@ -390,6 +395,29 @@ dom_status() {
   fi
 }
 
+cmd_backup_drill() {
+  local id="" name="" codes
+  while [ $# -gt 0 ]; do
+    case "$1" in --identity) id=$2; shift ;; -*) die "unknown option $1" ;; *) name=$1 ;; esac
+    shift
+  done
+  [ -n "$id" ] || die "fff-vm backup-drill --identity FILE [NAME]: FILE is an age private key of one of the backup's recipients"
+  [ -r "$id" ] || die "--identity $id: not readable"
+  command -v age >/dev/null || die "age is not installed here (apt-get install age; install.sh installs it)"
+  case "$name" in *[!A-Za-z0-9._-]*) die "not a backup's name: $name" ;; esac
+  log "restore drill of ${name:-the newest backup}: fetch (encrypted) | age -d here | the VM's checks"
+  set +o errexit
+  # shellcheck disable=SC2086 # an empty NAME is no argument: the newest
+  ssh_guest sudo fffctl backup-fetch $name | age -d -i "$id" | ssh_guest sudo fffctl backup-drill --name "${name:-newest}"
+  codes=("${PIPESTATUS[@]}")
+  set -o errexit
+  ssh_guest sudo fffctl status 2>/dev/null | grep -A1 'restore drill:' | head -n 2 || true
+  [ "${codes[0]}" = 0 ] || die "fetching the backup through the VM failed (exit ${codes[0]})"
+  [ "${codes[1]}" = 0 ] || die "age could not decrypt it with $id (exit ${codes[1]}): is that key one of the recipients?"
+  [ "${codes[2]}" = 0 ] || die "the drill's checks failed (exit ${codes[2]}): fff-vm ssh sudo fffctl status"
+  log "restore drill passed"
+}
+
 # What a stuck first boot or a dead ssh needs, through the guest agent's virtio channel (no network, no sshd, no login).
 # CI's e2e prints it on a failure (w5608: ssh hung for 15 min after a reset and the logs step, over ssh, got nothing).
 cmd_guest_logs() {
@@ -442,6 +470,7 @@ case "${1:-status}" in
   nightly) shift; cmd_nightly "${1:-}" ;;
   events) cmd_events ;;
   snapshots) snapshot_list ;;
+  backup-drill) shift; cmd_backup_drill "$@" ;;
   notify-test) notify "fff-vm: test" "A test alert from $(hostname -s) (fff-vm notify-test)." ;;
   vault-sync)
     # shellcheck source=vault.sh
