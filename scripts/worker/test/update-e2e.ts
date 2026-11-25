@@ -11,7 +11,7 @@
  *   (install.sh --update / install.ps1 -Update); on Windows it also runs elevated when this process is (CI's runner is);
  * - it fetches nothing of the game repo: the root clone's origin points nowhere and no credential helper answers;
  * - every setting tuned in daemon.json by hand is carried, and the credential file is the same bytes, never printed;
- * - a Mac's LaunchAgent PATH keeps its order;
+ * - a Mac's LaunchAgent PATH, or a Linux systemd user unit's (w5727), keeps its order;
  * - the daemon restarted (a new connection in its log) and the portal sees it online with the new code;
  * - (w629) it runs with an ssh session's minimal PATH, with no Homebrew or Git folder on it: the installer finds git,
  *   git-lfs and node in their standard places itself (m5's ssh PATH had no /opt/homebrew/bin);
@@ -26,6 +26,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { layoutOf } from '../worker.ts';
 import { plistPathOf, withPlistPath } from '../worker.ts';
+import { unitFile, unitPathOf, withUnitPath } from '../../../server/machineDeployLinux.ts';
 
 const [scratchArg, portArg = '8797'] = process.argv.slice(2);
 if (!scratchArg) throw new Error('usage: node scripts/worker/test/update-e2e.ts <scratch folder> [port]');
@@ -33,6 +34,7 @@ const scratch = path.resolve(scratchArg);
 const port = Number(portArg);
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const isWin = process.platform === 'win32';
+const isLinux = process.platform === 'linux';
 const service = isWin ? 'FFWorkerUpdateTest' : 'com.fffactory.updatetest';
 const node = [process.execPath, ...process.execArgv];
 const elevated = isWin ? spawnSync('net', ['session'], { windowsHide: true, stdio: 'ignore' }).status === 0 : false;
@@ -129,11 +131,12 @@ try {
   let oldPath = '';
   if (!isWin) {
     // m5's PATH had ~/.unity/bin early, where the ssh session's probe does not see it.
-    plistFile = path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
+    // A Linux computer's unit (FFBox, biscuit; w5727) carries its PATH the same way, in Environment=PATH=.
+    plistFile = isLinux ? unitFile(os.homedir(), service) : path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`);
     const text = fs.readFileSync(plistFile, 'utf8');
-    const dirs = plistPathOf(text)!.split(':');
+    const dirs = (isLinux ? unitPathOf(text) : plistPathOf(text))!.split(':');
     oldPath = [dirs[0], path.join(os.homedir(), '.unity', 'bin'), ...dirs.slice(1)].join(':');
-    fs.writeFileSync(plistFile, withPlistPath(text, oldPath));
+    fs.writeFileSync(plistFile, isLinux ? withUnitPath(text, oldPath) : withPlistPath(text, oldPath));
   }
   // No game-repo fetch: its origin points nowhere and nothing could answer for a credential.
   git(l.repo, 'remote', 'set-url', 'origin', 'https://127.0.0.1:9/private/FinalFactory.git');
@@ -177,7 +180,10 @@ try {
   check(after.sandboxes?.librarySeed === cfg.sandboxes.librarySeed, 'the Library seed carried');
   check([after.sandboxes?.maxSandboxes, after.sandboxes?.maxAgentsPerSandbox, after.sandboxes?.maxUnity].join() === '2,1,1', 'the one-root limits kept');
   check(crypto.createHash('sha256').update(fs.readFileSync(l.token)).digest('hex') === tokenHash, 'the credential file is the same bytes');
-  if (!isWin) check((plistPathOf(fs.readFileSync(plistFile, 'utf8')) ?? '').startsWith(oldPath), "the LaunchAgent's PATH keeps its order", plistPathOf(fs.readFileSync(plistFile, 'utf8')));
+  if (!isWin) {
+    const now = (isLinux ? unitPathOf : plistPathOf)(fs.readFileSync(plistFile, 'utf8'));
+    check((now ?? '').startsWith(oldPath), `the ${isLinux ? 'systemd unit' : 'LaunchAgent'}'s PATH keeps its order`, now);
+  }
 
   // 5. Restarted and seen.
   check(connects() > before, 'the daemon restarted (a new connection in its log)', `${before} -> ${connects()}`);
