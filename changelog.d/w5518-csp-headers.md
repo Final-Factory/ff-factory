@@ -8,4 +8,4 @@
   is now a file of its own (`web/public/voice-tap.js`) instead of a `blob:` script. Mermaid is 12.3.0, which brings
   DOMPurify 3.5.0 (npm audit flagged DOMPurify ≤ 3.4.16 as high); `web` has no npm audit findings left. Every e2e test on the
   signed-in page now fails on a CSP refusal in the browser console (`e2e/fixtures.ts`), and `e2e/csp.spec.ts` checks the
-  headers and the remote-image refusal on a login of its own.
+  headers and the remote-image refusal on the app page.

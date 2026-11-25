@@ -1,4 +1,4 @@
-import { appState, asLogin, expect, sendMessage, test, uniq } from './fixtures.ts';
+import { expect, test } from './fixtures.ts';
 
 // The app page's Content-Security-Policy (w5518, server/webStatic.ts appCsp). Every `authed` test already fails on a CSP
 // refusal (e2e/fixtures.ts); these check the headers themselves, and the one refusal that is meant: a remote image.
@@ -18,20 +18,28 @@ test('the app page and /login carry the CSP, nosniff and no framing', async ({ r
   expect((await request.get('/api/health')).headers()['x-content-type-options']).toBe('nosniff');
 });
 
-// Its own login (e2e/server.ts, cspcheck): the owner's chat is on every other test's page, which fails on this refusal.
-const asCspCheck = asLogin('cspcheck', 'e2e-password-357');
-
-asCspCheck('a remote image in agent text no longer loads; the page and its socket go on working', async ({ solo: page }) => {
-  const refused: string[] = [];
-  page.on('console', (m) => {
-    if (/Content[ -]Security[ -]Policy/i.test(m.text())) refused.push(m.text());
+// A remote image in agent text is an <img> with a remote src (Markdown.tsx): the page's CSP refuses it. Checked on /login, the
+// same page and policy, with the plain `page` fixture: on a signed-in page this refusal would fail the fixture, and a chat
+// message carrying it would reach every other test's page through the shared orchestrator. No new login either: a login of
+// its own needs a vault token, which changes the account list meters.spec and provider.spec's screenshot count on.
+test('a remote image no longer loads on the app page; its own stills and data: images do', async ({ page }) => {
+  await page.goto('/login');
+  const got = await page.evaluate(async () => {
+    const refused: string[] = [];
+    document.addEventListener('securitypolicyviolation', (e) => refused.push(`${e.violatedDirective} ${e.blockedURI}`));
+    const load = (src: string) => new Promise<string>((done) => {
+      const img = new Image();
+      img.onload = () => done('loaded');
+      img.onerror = () => done('refused');
+      img.src = src;
+      document.body.append(img);
+    });
+    const remote = await load('https://example.com/far.png');
+    const data = await load('data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+    await new Promise((r) => setTimeout(r, 200));
+    return { remote, data, refused };
   });
-  const tag = uniq('remoteimg');
-  const app = await appState(page.request);
-  await sendMessage(page.request, app.orchestratorId!, `remote ![far](https://example.com/far.png) ${tag}`);
-  // The reply arrives over the page's socket: the socket works under connect-src.
-  await expect(page.locator('.orch .msg-assistant', { hasText: tag })).toBeVisible({ timeout: 15_000 });
-  await expect.poll(() => refused.some((t) => t.includes('example.com')), { message: 'the browser refused the remote image', timeout: 10_000 }).toBe(true);
-  // That refusal is the expected one; nothing else may be.
-  expect(refused.filter((t) => !t.includes('example.com'))).toEqual([]);
+  expect(got.remote).toBe('refused');
+  expect(got.data).toBe('loaded');
+  expect(got.refused.some((r) => r.startsWith('img-src') && r.includes('example.com')), got.refused.join(' | ')).toBe(true);
 });

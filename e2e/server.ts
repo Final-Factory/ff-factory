@@ -33,8 +33,6 @@
  *   eighth login       attacher / e2e-password-814, "Attach Tester", a member whose own orchestrator only
  *                      e2e/waitingAttach.spec.ts asks: other files' cards on the owner's Waiting on input tab come and go above
  *                      its card, moved the paperclip under a click, and no file chooser opened (w3945)
- *   ninth login        cspcheck / e2e-password-357, "CSP Tester", a member whose own orchestrator only e2e/csp.spec.ts
- *                      writes to: its remote image is refused by the page's CSP, which every other page treats as a failure
  *   dispatcher turns   POST <port + 200> (e2e/fixtures.ts, sendToChat): the only way a test makes the dispatcher take a turn
  *   Max                a mock Discord on <port + 100> (e2e/mockDiscord.ts) with a bot token in a scratch ffbox config, and
  *                      five seeded events from the gallery worker (e2e/max.spec.ts)
@@ -73,8 +71,6 @@ export const RELOADER = 'reloader';
 export const RELOADER_PASSWORD = 'e2e-password-680';
 export const ATTACHER = 'attacher';
 export const ATTACHER_PASSWORD = 'e2e-password-814';
-export const CSPCHECK = 'cspcheck';
-export const CSPCHECK_PASSWORD = 'e2e-password-357';
 const withProvider = process.env.E2E_PROVIDER === '1';
 const withIntake = process.env.E2E_INTAKE === '1';
 /** The Discord user id the intake projects trust, mapped to tester (e2e/intake.spec.ts). */
@@ -307,7 +303,7 @@ fs.mkdirSync(process.env.CLAUDE_CONFIG_DIR, { recursive: true });
 // dispatcher and the machine's workers start. The portal's vault reads this file and key at its start.
 const { Vault, VAULT_FILE } = await import('../server/vault.ts');
 const vault = new Vault({ file: path.join(dataDir, VAULT_FILE), key: () => ({ file: path.join(base, 'vault.key') }) });
-for (const login of [USER, MATE, COMPACTOR, ASKER, SCROLLER, REPLIER, RELOADER, ATTACHER, CSPCHECK]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
+for (const login of [USER, MATE, COMPACTOR, ASKER, SCROLLER, REPLIER, RELOADER, ATTACHER]) vault.add({ name: `vault-${login}-1`, kind: 'claude', value: fakeToken(login), owner: login, share: 'owner' });
 
 const { Auth } = await import('../server/auth.ts');
 const auth = new Auth(dataDir, { trustProxy: false });
@@ -319,7 +315,6 @@ await auth.setUser(SCROLLER, SCROLLER_PASSWORD, { displayName: 'Scroll Tester', 
 await auth.setUser(REPLIER, REPLIER_PASSWORD, { displayName: 'Reply Tester', role: 'member' });
 await auth.setUser(RELOADER, RELOADER_PASSWORD, { displayName: 'Reload Tester', role: 'member' });
 await auth.setUser(ATTACHER, ATTACHER_PASSWORD, { displayName: 'Attach Tester', role: 'member' });
-await auth.setUser(CSPCHECK, CSPCHECK_PASSWORD, { displayName: 'CSP Tester', role: 'member' });
 fs.writeFileSync(path.join(base, 'teammate-key.txt'), auth.createApiKey('teammate-laptop', MATE));
 // FFBox's key for Max's escalations (docs/intake.md), scoped to POST /api/intake/ffbox (e2e/provider.spec.ts).
 if (withProvider) fs.writeFileSync(path.join(base, 'ffbox-key.txt'), auth.createApiKey('ffbox', undefined, 'ffbox'));
