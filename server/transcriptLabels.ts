@@ -130,7 +130,7 @@ export const setLabel = (p: string, label: string, icacls: Icacls, account = cur
 
 /** Whether icacls shows a Low label on `p` (its own or inherited). No label at all is Medium. */
 function* labelledLow(p: string): Steps<boolean> {
-  return /Mandatory Label\Low Mandatory Level/i.test((yield [p]).out);
+  return /Mandatory Label\\Low Mandatory Level/i.test((yield [p]).out);
 }
 
 /**
