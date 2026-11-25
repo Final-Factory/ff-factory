@@ -305,6 +305,18 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
     (handed up by w5749): No-Read-Up labels (or a deny ACE for Low) on `~\.ssh`, the gh folder and the browser profile
     folders, with the gh login moved out of Credential Manager; or workers as their own Windows account. Until then a Low
     worker can read them.
+  - **LothDesktop's go** (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential
+    Manager"; "Do only that on C:. Keep a tested way back"). `OWNER_LABEL_ON_SYSTEM_DRIVE` (ownerSecrets.ts) holds
+    `lothdesktop` only; on every other Windows machine nothing on the system drive is looked at. `ownerLabelTargets`
+    plans No-Read-Up on the gh folder and `~\.ssh`. Warn stage first (this change): the probe's line `read fence (warn):
+    owner-secret rules would label ... No-Read-Up on ...` names them, says where the gh login is (`gh auth status`: in
+    Credential Manager, `(keyring)`, or in `hosts.yml`) and what stays open. The enforce stage (a separate PR, own review)
+    labels them and moves the login in `on`, and takes both back in `off` and `warn`.
+  - **Browser profiles stay open, even on LothDesktop**: Chrome and Edge grant their network service's AppContainer
+    Modify on each profile's `Network` folder (measured on LothDesktop 2026-11-25: icacls shows an `S-1-15-3-1024-...`
+    capability with `(M)` on `User Data\Default\Network`). An AppContainer runs at Low, so a No-Read-Up label on the
+    profile would refuse the owner's own browser its cookies. Handed back to lothsahn as its own decision, with git's
+    Credential Manager entries (`git:https://github.com`, bitbucket), which the go did not name either.
 - **Known limits**: the person's own unfenced processes (the sandbox's Unity editor) are not fenced. `spctl -a -t exec`
   rejects Unity.app with or without the fence ("Unnotarized Developer ID"), so it is no fence check. Linux: a closed path
   in `$HOME` makes `$HOME` a parent the read lock walks, so a file rewritten there by rename after a run started is

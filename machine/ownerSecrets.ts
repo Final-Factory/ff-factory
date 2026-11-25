@@ -15,6 +15,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { trustedGh } from './evidenceGate.ts';
+import { NO_READ_UP, type LabelTarget } from './lowIntegrity.ts';
 
 export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain' | 'credentials';
 
@@ -360,6 +361,73 @@ export function sayOwnerRules(mode: string, platform: NodeJS.Platform, owner: re
   const verb = mode === 'on' ? 'close' : 'would close (warn only: runs start without them)';
   const mac = platform === 'darwin' ? `, deny mach-lookup of ${KEYCHAIN_MACH_SERVICES.join(' and ')}, and deny preference writes` : '';
   return `read fence (${mode}): owner-secret rules ${verb}: reads of ${owner.length ? owner.join(', ') : 'no owner path'}${mac}`;
+}
+
+/**
+ * w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"): the Windows
+ * machines where the read fence may label the owner's own secret folders on the system drive. LothDesktop only: the go was
+ * for LothDesktop, and "Do only that on C:". Every other Windows machine keeps its system drive untouched (lowIntegrity.ts
+ * labelNoReadUp) and its owner secrets open to Low workers, as before. Measured on LothDesktop (2026-11-25, a Low worker):
+ * `GH_CONFIG_DIR="%APPDATA%\GitHub CLI" gh auth status` said "Logged in to github.com account Lothsahn (keyring)", and
+ * ~/.ssh listed its keys.
+ */
+export const OWNER_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['lothdesktop']);
+
+/** One owner path the Windows read fence labels, or leaves open and says why. */
+export interface OwnerLabelPlan {
+  /** Labelled No-Read-Up in on mode (a folder: inherited by everything in it, files made later included). */
+  label: LabelTarget[];
+  /** Left open, each with its reason, said in the warn and on lines. */
+  left: { path: string; why: string }[];
+}
+
+/**
+ * The Windows owner-secret labels for this machine (w5749). On a machine in OWNER_LABEL_ON_SYSTEM_DRIVE: the gh login's
+ * folder and ~/.ssh, when they exist. Browser profiles stay open: Chrome and Edge grant their network service's
+ * AppContainer (which runs at Low) Modify on each profile's Network folder (measured on LothDesktop, 2026-11-25: icacls
+ * shows an S-1-15-3-1024-... capability with (M) on `User Data\Default\Network`), so a No-Read-Up label on the profile
+ * would refuse the owner's own browser its cookies; handed back to lothsahn as its own decision. Nothing outside the go
+ * (~/.netrc, ~/.git-credentials, the Claude login) is labelled here. Other platforms and machines: nothing; `exists` is
+ * then never called, so nothing on their system drive is even looked at.
+ */
+export function ownerLabelTargets(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; machineId?: string; exists?: (p: string) => boolean }): OwnerLabelPlan {
+  if (o.platform !== 'win32' || !o.machineId || !OWNER_LABEL_ON_SYSTEM_DRIVE.has(o.machineId.toLowerCase())) return { label: [], left: [] };
+  const exists = o.exists ?? fs.existsSync;
+  const out: OwnerLabelPlan = { label: [], left: [] };
+  for (const s of ownerSecretPaths(o)) {
+    if (!exists(s.path)) continue;
+    if (s.kind === 'browser') out.left.push({ path: s.path, why: "its browser's own AppContainer (Low) reads the profile's Network folder; a No-Read-Up label would refuse it the owner's cookies" });
+    else out.label.push({ path: s.path, sddl: NO_READ_UP.dir });
+  }
+  return out;
+}
+
+/**
+ * Where gh keeps this machine's login, from `gh auth status` (run by the daemon, outside the fence; the token is never in
+ * what it prints): 'keyring' (Windows Credential Manager, which a Low process reads as the owner does: the folder's label
+ * does not reach it), 'file' (the folder's hosts.yml, which the label closes), or undefined (no login, or not said).
+ */
+export function ghLoginStorage(statusOut: string): 'keyring' | 'file' | undefined {
+  const line = statusOut.split(/\r?\n/).find((l) => /Logged in to github\.com/i.test(l));
+  if (!line) return undefined;
+  return /\(keyring\)/i.test(line) ? 'keyring' : 'file';
+}
+
+/** The daemon's environment for its own `gh auth status` (ghLoginStorage): no token, so gh reports its stored login. */
+export function machineGhStatusEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
+  delete out.GH_TOKEN;
+  delete out.GITHUB_TOKEN;
+  return out;
+}
+
+/** The warn and on line for the Windows owner-secret labels (w5749): what on labels, the gh login's move, and what stays open. */
+export function sayOwnerLabels(mode: string, plan: OwnerLabelPlan, gh: 'keyring' | 'file' | undefined): string {
+  if (!plan.label.length && !plan.left.length) return `read fence (${mode}): owner-secret rules: none on this Windows machine (the fence labels the owner's folders on the system drive only on ${[...OWNER_LABEL_ON_SYSTEM_DRIVE].join(', ')})`;
+  const verb = mode === 'on' ? 'label' : 'would label (warn only: no label set)';
+  const move = gh === 'keyring' ? "; the gh login is in Credential Manager (keyring), which the label does not close: on moves it into the gh folder's hosts.yml" : gh === 'file' ? '; the gh login is in its folder (hosts.yml)' : '; no gh login found';
+  const left = plan.left.length ? `; left open: ${plan.left.map((l) => `${l.path} (${l.why})`).join(', ')}` : '';
+  return `read fence (${mode}): owner-secret rules ${verb} No-Read-Up on ${plan.label.length ? plan.label.map((t) => t.path).join(', ') : 'nothing'}${move}${left}`;
 }
 
 /**
