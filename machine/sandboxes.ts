@@ -12,7 +12,7 @@ import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeUpSince } from '../server/unityHang.ts';
 import { sandboxGameDataEnv } from './gameData.ts';
-import { sandboxUvEnv } from './sharedCaches.ts';
+import { editorTmpdirEnv, sandboxUvEnv } from './sharedCaches.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
 import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
@@ -306,14 +306,16 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
 /**
  * A sandbox editor's own environment: its game data folder, and (w5745) the workers' uv folders its agent has
  * (sharedCaches.ts sandboxUvEnv), not the daemon's Medium ones, which a Low or fenced editor cannot write. An editor
- * already runs its sandbox's code, which workers write, so a worker's uv folder adds no new reach. No root: none.
+ * already runs its sandbox's code, which workers write, so a worker's uv folder adds no new reach. w5833: and with `tmpdir`
+ * (daemon.json `editorTmpdir` "on"), its own TMPDIR inside the root on macOS and Linux (sharedCaches.ts editorTmpdirEnv).
+ * No root: none.
  */
-export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined): Record<string, string> {
-  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root) };
+export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...editorTmpdirEnv(root, sandbox, tmpdir, platform) };
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
@@ -338,7 +340,9 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     },
     procs,
     editor: (sb, logFile, report) => {
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: sandboxEditorEnv(process.env, sb.id, root) });
+      const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform);
+      if (env.TMPDIR) fs.mkdirSync(env.TMPDIR, { recursive: true });
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),

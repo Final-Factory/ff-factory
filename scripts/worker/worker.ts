@@ -1955,6 +1955,8 @@ export interface UpdateFlags {
   transcriptLock?: 'on' | 'off';
   /** The store lock (w5614, docs/machines.md "Slot repos"), every OS: written as daemon.json's `storeLock`; unset carries daemon.json's. */
   storeLock?: 'off' | 'warn' | 'on';
+  /** The editor temp folder (w5833), macOS and Linux only: written as daemon.json's `editorTmpdir`; unset carries daemon.json's (absent: off). */
+  editorTmpdir?: 'on' | 'off';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2034,6 +2036,20 @@ export function applyStoreLock(config: Record<string, unknown>, setting: 'off' |
   return setting ? { ...config, storeLock: setting } : config;
 }
 
+/** `--editor-tmpdir on|off` (w5833): anything else is refused, never guessed at. Exported for tests. */
+export function editorTmpdirFlag(v: string | undefined): 'on' | 'off' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'on' && v !== 'off') throw new Error(`--editor-tmpdir is on or off, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the editor temp folder set, "off" written as "off" (w5833); macOS and Linux only: Unity on Windows has no TMPDIR to move. Exported for tests. */
+export function applyEditorTmpdir(config: Record<string, unknown>, setting: 'on' | 'off' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  if (platform === 'win32') throw new Error(`--editor-tmpdir: macOS and Linux only, not ${platform}`);
+  return { ...config, editorTmpdir: setting };
+}
+
 /**
  * The install options an update runs with (w613): the root's own root.json and daemon.json, every setting carried
  * (beast's agent total, protected paths, the Library seed, the editors' priority, the disk guard, cleanup, the Unity
@@ -2070,7 +2086,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2307,6 +2323,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.workerCaps) say(`worker caps: ${f.workerCaps}`);
   if (f.transcriptLock) say(`transcript lock: ${f.transcriptLock}`);
   if (f.storeLock) say(`store lock: ${f.storeLock}`);
+  if (f.editorTmpdir) say(`editor tmpdir: ${f.editorTmpdir}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2891,6 +2908,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              transcriptLock; default: as daemon.json has it; docs/transcript-seal.md)
             [--store-lock off|warn|on] (w5614, every OS: the main clone read-only to fenced workers once every sandbox is a slot
              repo, daemon.json storeLock; default: as daemon.json has it; docs/machines.md "Slot repos")
+            [--editor-tmpdir on|off] (w5833, macOS and Linux: each sandbox's Unity editor gets its own TMPDIR under <root>/tmp, daemon.json
+             editorTmpdir; default: as daemon.json has it, off if it has none)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -2990,6 +3009,7 @@ export async function main(argv = process.argv.slice(2)) {
     const workerCaps = flags.has('worker-caps') ? workerCapsFlag('') : workerCapsFlag(opts['worker-caps']);
     const transcriptLock = flags.has('transcript-lock') ? transcriptLockFlag('') : transcriptLockFlag(opts['transcript-lock']);
     const storeLock = flags.has('store-lock') ? storeLockFlag('') : storeLockFlag(opts['store-lock']);
+    const editorTmpdir = flags.has('editor-tmpdir') ? editorTmpdirFlag('') : editorTmpdirFlag(opts['editor-tmpdir']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3004,6 +3024,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(workerCaps ? { workerCaps } : {}),
       ...(transcriptLock ? { transcriptLock } : {}),
       ...(storeLock ? { storeLock } : {}),
+      ...(editorTmpdir ? { editorTmpdir } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

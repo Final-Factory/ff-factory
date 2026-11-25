@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { rootEnv } from '../machine/daemon.ts';
-import { batchUnityLogFile, editorTempEnv, workerToolCacheEnv } from '../machine/sharedCaches.ts';
+import { sandboxEditorEnv } from '../machine/sandboxes.ts';
+import { EDITOR_TMPDIR_MAX, batchUnityLogFile, editorTempEnv, editorTmpdirEnv, workerToolCacheEnv } from '../machine/sharedCaches.ts';
 
 // w5297 (lothsahn: "under no circumstances should workers write outside of ffw"): every folder the daemon hands its
 // children is inside the install folder, and a new place in the daemon's code that names the home folder, the user's
@@ -32,7 +33,25 @@ test('outside writes: every folder in the daemon\'s environment is inside the ro
 test('outside writes: a daemon-started editor on Windows keeps its temp files in the root', () => {
   assert.deepEqual(editorTempEnv({ FF_WORKER_ROOT: ROOT }, 'win32'), { TMP: path.join(ROOT, 'tmp', 'unity'), TEMP: path.join(ROOT, 'tmp', 'unity') });
   assert.deepEqual(editorTempEnv({}, 'win32'), {}, 'no root: unchanged');
-  assert.deepEqual(editorTempEnv({ FF_WORKER_ROOT: ROOT }, 'darwin'), {}, 'macOS and Linux: not checked, unchanged');
+  assert.deepEqual(editorTempEnv({ FF_WORKER_ROOT: ROOT }, 'darwin'), {}, 'macOS and Linux: editorTmpdirEnv');
+});
+
+test('w5833: a sandbox editor on macOS and Linux gets TMPDIR in the root only with editorTmpdir on, short enough for its sockets', () => {
+  const root = path.resolve('/home/ben-ryding/ffw');
+  for (const p of ['linux', 'darwin'] as const) {
+    assert.deepEqual(editorTmpdirEnv(root, 'slot1', true, p), { TMPDIR: path.join(root, 'tmp', 'editor-slot1') });
+    assert.deepEqual(editorTmpdirEnv(root, 'slot1', false, p), {}, 'off (the default): the system temp, as before');
+    assert.deepEqual(editorTmpdirEnv(undefined, 'slot1', true, p), {}, 'no root: unchanged');
+  }
+  assert.deepEqual(editorTmpdirEnv(root, 'slot1', true, 'win32'), {}, 'Windows: editorTempEnv');
+  // a root too deep for `<TMPDIR>/dotnet-diagnostic-<pid>-<start>-socket` under the 104-byte socket limit keeps the system temp
+  const deep = path.resolve('/' + 'd'.repeat(EDITOR_TMPDIR_MAX));
+  assert.deepEqual(editorTmpdirEnv(deep, 'slot1', true, 'linux'), {});
+  assert.ok(path.join(root, 'tmp', 'editor-slot12').length + 'dotnet-diagnostic-4194304-4294967295-socket'.length + 2 <= 104);
+  // the sandbox editor's whole env carries it, and only when asked
+  assert.equal(sandboxEditorEnv({}, 'slot1', root, true, 'linux').TMPDIR, path.join(root, 'tmp', 'editor-slot1'));
+  assert.equal('TMPDIR' in sandboxEditorEnv({}, 'slot1', root, false, 'linux'), false);
+  assert.equal('TMPDIR' in sandboxEditorEnv({}, 'slot1', root), false, 'default off');
 });
 
 test('outside writes: a batch Unity run without -logFile gets one in the worker\'s temp folder', () => {

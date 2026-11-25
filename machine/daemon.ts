@@ -254,6 +254,12 @@ export interface DaemonConfig {
    */
   transcriptLock?: 'on' | 'off';
   /**
+   * w5833: "on" gives each sandbox Unity editor on macOS and Linux its own TMPDIR, `<root>/tmp/editor-<sandbox>`, in place of
+   * the system temp (machine/sharedCaches.ts editorTmpdirEnv). Off when unset; set remotely by `ops_worker machine_update
+   * editor_tmpdir`, read at the daemon's start, and off is the recovery. Windows editors have `<root>/tmp/unity` always.
+   */
+  editorTmpdir?: 'on' | 'off';
+  /**
    * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
    * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
    * unset; decided once per daemon process; set remotely by `ops_worker machine_update store_lock`.
@@ -727,7 +733,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root);
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on');
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
