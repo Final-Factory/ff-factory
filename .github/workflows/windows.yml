@@ -64,6 +64,9 @@ on:
       - 'server/updateSteps.test.ts'
       - 'server/watchdog.ts'
       - 'server/workerCaps.test.ts'
+      - 'server/workerFence.test.ts'
+      - 'server/workerFence.ts'
+      - 'machine/readFence.ts'
       - '.github/windows-tests.txt'
       - '.github/workflows/windows.yml'
   # The safety net: the whole suite on Windows once a day, for what no list names. In the 30 days to 2026-10-10 the
