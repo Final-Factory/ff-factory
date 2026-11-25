@@ -348,5 +348,7 @@ console.log(out.join('; '))`,
 
   // The way back: everything Low again.
   await unlockTranscripts(projects, exec, (l) => t.diagnostic(l));
+  for (const p of [home, projects, slug, other]) t.diagnostic(`after unlock: ${execFileSync('icacls', [p], { encoding: 'utf8' }).replace(/\s+/g, ' ')}`);
+  t.diagnostic(`after unlock: ${other} attributes ${execFileSync('attrib', [other], { encoding: 'utf8' }).trim()}`);
   assert.match(atLow(`${TRY}t('append',()=>fs.appendFileSync(process.argv[1],''));t('plant',()=>fs.writeFileSync(process.argv[2],''));console.log(out.join())`, other, path.join(slug, 'eeeeeeee.jsonl')), /append WRITTEN,plant WRITTEN/);
 });
