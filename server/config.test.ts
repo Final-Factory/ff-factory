@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { ROOT, SENDER_RULE, VOICE_DEFAULTS, checkConnectorConfig, claudeAiConnectorsFor, connectorEnv, loadConfig, ownerLine, pruneRetiredConfig, retiredBaseLine, retiredConfigKeys, retiredKeysLine, trunkBase, windowsPathsOffWindows, withoutRetiredKeys } from './config.ts';
@@ -245,4 +246,35 @@ test('w516: claude.ai connectors are off for the orchestrators and the dispatche
   assert.throws(() => checkConnectorConfig({ claudeAiConnectors: { worker: false } as never }), /claudeAiConnectors\.worker: no such role/);
   assert.throws(() => checkConnectorConfig({ claudeAiConnectors: { dispatcher: 'off' } as never }), /claudeAiConnectors\.dispatcher is true or false/);
   assert.throws(() => checkConnectorConfig({ claudeAiConnectors: false as never }), /is an object/);
+});
+
+test('loadConfig (w5538): with no host set the portal listens on loopback only; an explicit host is honoured', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-config-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  withConfig(t, minimal(dir));
+  const cfg = loadConfig();
+  assert.ok(cfg.hostWarning?.includes('has no "host"') && cfg.hostWarning.includes('127.0.0.1'), 'a config with no host carries the startup warning index.ts logs');
+  assert.equal(cfg.host, '127.0.0.1', 'the default is loopback: a portal run on a PC does not serve its LAN');
+  // The address index.ts passes to server.listen is cfg.host: bind with it and see where the socket really is.
+  const bound = await new Promise<string>((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, cfg.host, () => {
+      const a = s.address() as net.AddressInfo;
+      s.close(() => resolve(a.address));
+    });
+  });
+  assert.equal(bound, '127.0.0.1');
+  withConfig(t, { ...minimal(dir), host: '0.0.0.0' });
+  const explicit = loadConfig();
+  assert.equal(explicit.host, '0.0.0.0', 'an explicit host wins (the portal VM sets it)');
+  assert.equal(explicit.hostWarning, undefined, 'an explicit host is not warned about');
+  withConfig(t, { ...minimal(dir), host: '10.1.2.3' });
+  assert.equal(loadConfig().host, '10.1.2.3');
+});
+
+test('the shipped config templates name their host (w5538): the PC example is loopback, the VM template is explicit', () => {
+  const read = (f: string) => JSON.parse(fs.readFileSync(path.join(ROOT, f), 'utf8')) as { host?: string };
+  assert.equal(read('config.example.json').host, '127.0.0.1');
+  assert.equal(read('deploy/vm/guest/config.vm.example.json').host, '0.0.0.0', 'the VM host\'s health check calls the VM\'s own address (docs/portal-bind-address.md)');
 });

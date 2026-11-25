@@ -208,7 +208,7 @@ test('w3088: a raw gh pr merge (or the API merge) of a game repo PR is refused w
 test('w3088: findPrEvidence picks the newest copy by plugin.json version (sort -V, not by name)', () => {
   const home = '/h';
   const cache = path.join(home, '.claude', 'plugins', 'cache', 'final-factory-agents', 'ff-agents');
-  const versions: Record<string, string> = { [path.join(cache, '1.34.9')]: '1.34.9', [path.join(cache, '1.34.12')]: '1.34.12', '/ffw/tools/final-factory-agents/plugins/ff-agents': '1.34.10' };
+  const versions: Record<string, string> = { [path.join(cache, '1.34.9')]: '1.34.9', [path.join(cache, '1.34.12')]: '1.34.12', '/ffw/tools-medium/final-factory-agents/plugins/ff-agents': '1.34.10', '/ffw/tools/final-factory-agents/plugins/ff-agents': '9.9.9' };
   const script = (p: string) => path.join(p, 'skills', 'evidence-gate', 'pr_evidence.py');
   const deps = {
     env: { FF_WORKER_ROOT: '/ffw' },
@@ -218,7 +218,7 @@ test('w3088: findPrEvidence picks the newest copy by plugin.json version (sort -
     read: (p: string) => JSON.stringify({ version: versions[path.dirname(path.dirname(p))] }),
   };
   assert.equal(findPrEvidence(deps), script(path.join(cache, '1.34.12')));
-  assert.equal(findPrEvidence({ ...deps, list: () => [] }), script('/ffw/tools/final-factory-agents/plugins/ff-agents'));
+  assert.equal(findPrEvidence({ ...deps, list: () => [] }), script('/ffw/tools-medium/final-factory-agents/plugins/ff-agents'));
   assert.equal(findPrEvidence({ ...deps, list: () => [], env: {} }), undefined);
   assert.equal(findPrEvidence({ ...deps, env: { FF_PR_EVIDENCE: '/x/pe.py' }, exists: (p) => p === '/x/pe.py' }), '/x/pe.py');
 });

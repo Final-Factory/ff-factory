@@ -18,7 +18,7 @@ import { probeFence } from './fenceProbe.ts';
 import { maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, openNoReadUp, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -27,7 +27,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayOwnerSocketProbe, sayReadProbe, secretsDirs, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
@@ -51,7 +51,7 @@ import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scope
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
-import { legacyProjectsDirs, loginClaudeEnv, moveClaudeHome } from '../server/claudeHome.ts';
+import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome } from '../server/claudeHome.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -87,7 +87,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerSocketPaths, ownerSocketProbeTargets, workerGhConfigDir } from './ownerSecrets.ts';
+import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, workerGhConfigDir } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -3076,7 +3076,7 @@ export class Daemon {
     // w5553/w5560: the owner's secrets (gh login, ~/.ssh, browser profiles, the Keychain) are closed with the read fence,
     // on its own off switch; the gh folder stays open only to a run with no GitHub token at all (ownerReadDenied).
     const owner = spec.sandbox && !readOff ? ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: hasOwnGithub(spec.env) || !!ghMachine.GH_TOKEN }) : [];
-    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
+    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
     const readFence = baseFence && owner.length ? { ...baseFence, readDenied: [...(baseFence.readDenied ?? []), ...owner], ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : baseFence;
     const fence = readFence && readOff ? { ...readFence, readOff: true } : readFence && ownDir ? { ...readFence, readAllowed: [...(readFence.readAllowed ?? []), ownDir] } : readFence;
@@ -3301,6 +3301,8 @@ export class Daemon {
         // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
         ensureReadBackDirs(appDir);
         await this.applyReadLabels(readFenceMode(appDir), exec, say);
+        this.watchLoginLabels(exec, say);
+        for (const f of this.loginFiles.left) say(`worker integrity: left the Claude login ${f} without a read label: it is on the system drive, which the fence touches only on ${[...LOGIN_LABEL_ON_SYSTEM_DRIVE].join(', ')} (w5559)`);
       } catch (e) {
         log(`worker integrity: read labels: ${(e as Error).message}`);
       }
@@ -3416,7 +3418,38 @@ export class Daemon {
 
   /** w5546: every secrets folder the fences close (`<root>/secrets`, and the Dev Drive host folder's: lockout review B3). */
   private get secretsDirs(): string[] {
-    return this.cfg.root ? secretsDirs(this.cfg.root, this.cfg.tokenFile) : [];
+    return this.cfg.root ? [...secretsDirs(this.cfg.root, this.cfg.tokenFile), ...this.loginFiles.closed] : [];
+  }
+
+  /**
+   * w5559: the machine's own Claude login files the fences close with the secrets (claudeHome.ts fencedLoginFiles), and the
+   * ones left out (on a Windows system drive outside LOGIN_LABEL_ON_SYSTEM_DRIVE). Only the files: skills read other files in
+   * ~/.claude by fixed path (the checkout marker, plugins/cache).
+   */
+  private get loginFiles(): { closed: string[]; left: string[] } {
+    return loginFenceFiles(fencedLoginFiles(process.env, HOME), { platform: process.platform, machineId: this.cfg.id, onSystemDrive: (p) => onSystemDrive(p) });
+  }
+
+  /** The Windows labeller's system-drive test: the closed login files are labelled there (BEAST's, w5559), nothing else. */
+  private get labelSystemDrive(): (p: string) => boolean {
+    const login = new Set(this.loginFiles.closed.map((f) => f.toLowerCase()));
+    return (p) => !login.has(p.toLowerCase()) && onSystemDrive(p);
+  }
+
+  private loginRelabel?: NodeJS.Timeout;
+  /**
+   * w5559: Claude Code may write the login file anew when a Medium reader (the usage probe) refreshes its token, and a file
+   * made anew has no label of its own. So in on mode the login files' labels are checked every minute and set again where
+   * missing (labelNoReadUp sets only what icacls shows unlabelled, and logs when it does).
+   */
+  private watchLoginLabels(exec: Exec, say: (line: string) => void): void {
+    if (this.loginRelabel || !this.loginFiles.closed.length) return;
+    this.loginRelabel = setInterval(() => {
+      if (!this.cfg.root || readFenceMode(appDirOfConfig(this.cfg)) !== 'on') return;
+      const t = this.loginFiles.closed.filter((f) => fs.existsSync(f)).map((f) => ({ path: f, sddl: NO_READ_UP.file }));
+      if (t.length) void labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }).catch((e) => say(`worker integrity: login read labels: ${(e as Error).message}`));
+    }, 60_000);
+    this.loginRelabel.unref();
   }
 
   /** w5546: the Linux lock's read half (the daemon's folder, secrets, root.json closed; what workers read there given back). */
@@ -3432,7 +3465,9 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && !readFenceOnRefusal();
+    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
+    const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
+    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
   }
 
   /**
@@ -3471,6 +3506,7 @@ export class Daemon {
       log(sayReadProbe(mode, process.platform, v, t));
       if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock);
       if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused or could not judge one; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
@@ -3478,16 +3514,23 @@ export class Daemon {
     }
   }
 
+  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
+  private ownerSocketsOpen: string[] = ['(not probed)'];
+
   /**
    * w5748: whether a fenced run reaches the Secret Service (the gh keyring login) and the ssh and gpg agents: a child of the
-   * daemon's own, under the run's lock and read rules, connects to each owner socket and closes it, sending nothing. Logged
-   * in warn and on modes; a failure to run it is logged and changes nothing.
+   * daemon's own, under the lock, read rules and socket denies a run gets in on mode, connects to each owner socket and
+   * closes it, sending nothing. On Linux `on` takes effect only once it finds every one refused; a probe that fails to run
+   * keeps the read rules off (a warn, never a lockout).
    */
   private async probeOwnerSockets(mode: ReadFenceMode, lock: string[]): Promise<void> {
+    this.ownerSocketsOpen = ['(not probed)'];
     try {
       const socks = ownerSocketProbeTargets(ownerSocketPaths({ runtimeDir: process.env.XDG_RUNTIME_DIR, env: process.env }));
-      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
-      log(sayOwnerSocketProbe(mode, socks, r.stdout).line);
+      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, ...ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR), '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
+      const said = sayOwnerSocketProbe(mode, socks, r.stdout);
+      this.ownerSocketsOpen = r.code === 0 ? said.open : [`(the probe exited ${r.code})`];
+      log(said.line);
     } catch (e) {
       log(`read fence (${mode}, linux) owner sockets: the probe could not run (${(e as Error).message})`);
     }
@@ -3506,11 +3549,11 @@ export class Daemon {
     ensureDaemonOnlyDirs(this.cfg.root);
     const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions], secrets: this.secretsDirs });
     if (mode === 'on') {
-      if (!(await labelNoReadUp(t, exec, say))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      if (!(await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
       log('worker integrity: the read fence is on: No-Read-Up labels set');
       return;
     }
-    const opened = await openNoReadUp(t, exec, say);
+    const opened = await openNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive });
     if (!opened) throw new Error('not every No-Read-Up label could be taken off (the daemon log says which)');
     log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
   }

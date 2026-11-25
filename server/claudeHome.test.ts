@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, claudeLoginFiles, LEGACY_VAR, legacyProjectsDirs, loginClaudeEnv, MEDIUM_VAR, mediumPluginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR, withoutLoginPaths } from './claudeHome.ts';
+import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, claudeLoginFiles, fencedLoginFiles, LEGACY_VAR, legacyProjectsDirs, loginClaudeEnv, MEDIUM_VAR, mediumPluginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR, withoutLoginPaths } from './claudeHome.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 import { resolveUnityMcpServer } from '../machine/unityMcp.ts';
@@ -251,4 +251,13 @@ test('w5559: withoutLoginPaths drops the legacy folder; claudeLoginFiles names e
   assert.equal(env[LEGACY_VAR], w.legacy, 'the input is not changed');
   assert.deepEqual(claudeLoginFiles(env, w.home), [path.join(w.legacy, '.credentials.json'), path.join(w.dir, '.credentials.json'), path.join(env[MEDIUM_VAR]!, '.credentials.json')]);
   assert.deepEqual(claudeLoginFiles({}, w.home), [path.join(w.legacy, '.credentials.json')], 'no repeats when the legacy folder is ~/.claude');
+});
+
+test("w5559: the fences close the machine's login files but never the workers' own Claude folder", () => {
+  const w = world();
+  const env: Record<string, string | undefined> = {};
+  moveClaudeHome(env, w.root, w.home);
+  assert.equal(env[WORKER_VAR], w.dir);
+  assert.deepEqual(fencedLoginFiles(env, w.home), [path.join(w.legacy, '.credentials.json'), path.join(env[MEDIUM_VAR]!, '.credentials.json')]);
+  assert.deepEqual(fencedLoginFiles({}, w.home), [path.join(w.legacy, '.credentials.json')]);
 });

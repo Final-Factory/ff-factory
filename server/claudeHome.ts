@@ -54,8 +54,14 @@ export const MEDIUM_CACHE_CHILD = 'cache-medium';
  * (w5551, machine/steamUpload.ts): the daemon's alone; a worker uploads a release only through steam_upload.
  */
 export const STEAM_CHILD = 'steam';
+/**
+ * The root child that holds FF Factory's own checkout of final-factory-agents and the agent tools publish's run folders (w5597,
+ * server/agentTools.ts toolsCheckout): the publish runs git and registerAgents.sh there at the daemon's level, so no worker
+ * may plant a hook or a script in it. Workers read it (the FF_SKILLS fallback, server/pluginPaths.ts).
+ */
+export const TOOLS_MEDIUM_CHILD = 'tools-medium';
 /** The root's children only Medium writes: kept Medium on Windows, read-only under the Landlock and Seatbelt fences. */
-export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD] as const;
+export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD, TOOLS_MEDIUM_CHILD] as const;
 /**
  * Root children only the daemon writes, read-only under the Landlock and Seatbelt fences (writeLock.ts LOCKED_CHILDREN,
  * workerFence.ts READ_ONLY_IN_ROOT). On Windows they are no worker child (lowIntegrity.ts WORKER_CHILDREN), so a rollout
@@ -173,6 +179,17 @@ export function claudeLoginFiles(env: Env, home: string): string[] {
   const dirs = [path.join(home, '.claude'), env[LEGACY_VAR], env.CLAUDE_CONFIG_DIR, env[MEDIUM_VAR]].filter((x): x is string => !!x);
   const files = dirs.map((d) => path.join(d, '.credentials.json'));
   return files.filter((f, i) => files.findIndex((x) => path.resolve(x) === path.resolve(f)) === i);
+}
+
+/**
+ * The login files the read fences close (w5559): claudeLoginFiles without the workers' own folder (FF_CLAUDE_WORKER_DIR),
+ * where every run's Claude Code starts on its vault token (server/secrets.ts machineRunEnv) and holds no machine login, so a
+ * refused read there could only fail a worker's own Claude Code.
+ */
+export function fencedLoginFiles(env: Env, home: string): string[] {
+  const key = (p: string) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const own = env[WORKER_VAR] ? key(path.join(env[WORKER_VAR], '.credentials.json')) : undefined;
+  return claudeLoginFiles(env, home).filter((f) => key(f) !== own);
 }
 
 /** The folder whose plugins a reader on the daemon uses (FF_SKILLS, the evidence gate): the agents' one while the worker folder has none. */
