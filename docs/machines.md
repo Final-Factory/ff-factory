@@ -79,7 +79,21 @@ before redeploying by hand.
   connection carrying a header the portal may not believe (`untrustedProxied`, `server/clientAddress.ts`), and is
   refused (the w5595 review measured this). A portal that daemons reach by a LAN or public address (a
   `fffctl migrate --cut-over` to such a host, or a test world: `scripts/fff-migrate.world.ts` sets `"off"`) refuses
-  them under enforce: set `machineLinkTailnet` to `"warn"` before such a move.
+  them under enforce: set `machineLinkTailnet` to `"warn"` before such a move. `fffctl migrate --cut-over` checks this
+  itself (w5716, `machineLinkPreflight` in `server/vmMigration.ts`): on the config the new portal will start on, under
+  enforce, it goes on only when the daemons are sent to a tailnet URL: a `publicUrl` whose host is a Tailscale address
+  or a `*.ts.net` name (and, with Tailscale Serve in front, `trustProxy` on in the VM's config.json). Serve being on is
+  not enough by itself (w5771: a LAN `publicUrl` sends the daemons past it). Otherwise it stops with exit code 4 before
+  the typed confirmation, with BEAST and the VM's portal untouched, saying to set `"warn"` first or to use a tailnet URL;
+  the final copy is checked again after the drain, and a lockout there rolls back.
+
+  **Checking from outside the tailnet** (w5575, after the enforce deploy 0c7c0fd9a, 2026-11-25): a tailnet computer
+  resolves the portal's `*.ts.net` name to the VM's 100.x address, so a plain `curl` never leaves the tailnet. To go
+  through the public Funnel ingress as an outside client does, resolve the name with a public resolver
+  (`nslookup fff.<tailnet>.ts.net 1.1.1.1`) and pin it: `curl --resolve fff.<tailnet>.ts.net:443:<public IPv4>
+  https://fff.<tailnet>.ts.net/machine`. Measured: 403 `{"error":"the daemon link is tailnet-only"}` for HTTP and for
+  a websocket upgrade, each logged `machine link: refused ... came in through Tailscale Funnel`; the same URL from the
+  tailnet answered 200.
 
   **A refused machine is named and alerted** (w5575 review): when the check refuses a request whose bearer token is a
   machine's, the portal logs `machine <id>: link refused by machineLinkTailnet (enforce) from <address>: <why>` and,

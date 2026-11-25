@@ -72,6 +72,12 @@ export interface LowTargetsInput {
   children: { name: string; dir: boolean }[];
   /** Folders of the install outside the root, and the sandboxes' and temp folders where they are elsewhere. */
   extra?: (string | undefined)[];
+  /**
+   * The children of `<root>/tools` (w5717), as listed now. Given, `tools` itself turns Medium and each child folder but
+   * `node` is labelled Low on its own, so a Low worker keeps writing cargo, rustup, git and the rest but can no longer
+   * rename or delete `tools/node` (a Low parent's FILE_DELETE_CHILD let it). Left out: the old layout, `tools` Low.
+   */
+  toolsChildren?: { name: string; dir: boolean }[];
   /** Single files outside the Low folders a worker must write (the Max events file). */
   files?: (string | undefined)[];
   /** Extras the daemon owns that a worker must write although they sit in the daemon's folder (the Unity slots mailbox). */
@@ -135,7 +141,24 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // started from a Low-labelled exe runs at Low, so a Medium agent's node would be Low and the machine's Git it starts
   // would crash (0xC0000022 on msys' shared object directory; measured w5377). A Low agent's node is Low anyway (a Low
   // parent starts Low children), and a worker cannot rewrite the shared node.
-  const medium = dirs.some((d) => same(d, path.join(i.root, 'tools'))) ? [path.join(i.root, 'tools', 'node')] : [];
+  //
+  // w5717: inside a Low tools folder a Low worker could still rename `tools/node` away (the parent's
+  // FILE_DELETE_CHILD grants DELETE whatever the child's label; measured on LothDesktop) and put its own node.exe there, which every
+  // Medium agent, BEAST's instance portals and the elevated `worker.ts tools` run next. So, given the tools folder's
+  // children, `tools` itself is kept Medium and each child folder but node is labelled Low on its own first (labelLow
+  // labels `dirs` before `medium`, and asks a child of a Medium folder for its own Low label, not an inherited one).
+  // The path of node stays, so the firewall rule "Final Factory agent node" still names it. Files right in tools stay
+  // Medium: only the daemon and `worker.ts tools` write there (the agent Git's stamp, server/agentGit.ts).
+  const tools = path.join(i.root, 'tools');
+  const medium: string[] = [];
+  const at = dirs.findIndex((d) => same(d, tools));
+  if (at >= 0) {
+    if (i.toolsChildren) {
+      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && c.name.toLowerCase() !== 'node').map((c) => path.join(tools, c.name)));
+      medium.push(tools);
+    }
+    medium.push(path.join(tools, 'node'));
+  }
   medium.push(...fenced, ...lockedStore);
   return { dirs, files, medium };
 }
@@ -145,6 +168,8 @@ export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => 
 
 /** Whether icacls says this path carries an explicit or inherited Low mandatory label. Exported for tests. */
 export const isLabelledLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level/i.test(icaclsOut);
+/** Whether icacls says this path carries a Low label of its own, not an inherited one (`(I)`). Exported for tests. */
+export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level:(?!\(I\))/i.test(icaclsOut);
 
 /**
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
@@ -170,6 +195,10 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
     }
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
   };
+  // A target right inside a folder kept Medium (w5717: `tools`) needs a Low label of its own: an inherited one turns
+  // Medium with its parent.
+  const own = (p: string) => (t.medium ?? []).some((m) => same(path.dirname(p), m));
+  const failed: string[] = [];
   const one = async (p: string, label: string) => {
     try {
       if (!fs.existsSync(p)) {
@@ -177,11 +206,12 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
         else fs.writeFileSync(p, '', { flag: 'a' });
       }
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
-      if (now.code === 0 && isLabelledLow(now.stdout)) return;
+      if (now.code === 0 && (own(p) ? isExplicitLow(now.stdout) : isLabelledLow(now.stdout))) return;
       await setLabel(p, label);
       say(`worker integrity: labelled ${p} Low`);
     } catch (e) {
       ok = false;
+      failed.push(p);
       say(`worker integrity: could not label ${p} Low: ${(e as Error).message}`);
     }
   };
@@ -194,12 +224,21 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
       if (!fs.existsSync(p)) continue;
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       if (now.code !== 0 || !isLabelledLow(now.stdout)) continue;
+      // A child that could not get its own Low label would turn Medium with its parent, and workers could no longer write it.
+      const stuck = failed.filter((f) => same(path.dirname(f), p));
+      if (stuck.length) {
+        say(`worker integrity: left ${p} Low: ${stuck.join(', ')} could not be labelled Low on its own`);
+        continue;
+      }
       await setLabel(p, MEDIUM_LABEL);
       say(`worker integrity: kept ${p} Medium`);
     } catch (e) {
       say(`worker integrity: could not keep ${p} Medium: ${(e as Error).message}`);
     }
   }
+  // w5717: once their parent is Medium, the children it holds are read again; one that lost its Low label is labelled again.
+  for (const d of t.dirs.filter(own)) await one(d, LOW_LABEL);
+  for (const f of t.files.filter(own)) await one(f, 'low');
   return ok;
 }
 

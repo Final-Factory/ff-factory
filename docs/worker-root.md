@@ -765,6 +765,20 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - The root's Git is PortableGit 2.56.1 at `<root>\tools\git`, pinned by SHA-256 (`server/agentGit.ts`). `worker.ts tools`
   installs it on every Windows rollout and runs its first bash login at Medium: run first at Low, it could not make its
   links (measured).
+  Since w5717 nothing at Medium or elevated runs the installed Git: whether it is current comes from its stamp,
+  `<root>\tools\git.json` (the version and the SHA-256 of `cmd\git.exe` and `bin\bash.exe` when `tools` put it
+  there). A stamp that does not match is a Git put there again, from the pinned download unpacked into the run's own
+  folder and labelled Low before the swap. The daemon's Low fence probe runs the agent bash with only `SystemRoot`,
+  `windir` and `SystemDrive` (`bareEnv`, `machine/maxEventsFence.ts`), so a planted bash sees no token.
+- **`<root>\tools` is Medium; each folder in it but `node` is Low on its own** (w5717). Before, `tools` was Low, and a
+  Low folder's FILE_DELETE_CHILD let a Low worker rename the Medium `tools\node` aside and put its own `node.exe` there,
+  which Medium agents (their PATH), BEAST's instance portals, the updater task and the elevated `worker.ts tools` run.
+  The daemon lists `tools` at start (`toolsChildren` in `lowTargets`), labels each child `(OI)(CI)low` first, then
+  raises `tools` to Medium and reads the children again; a child it could not label keeps `tools` Low and says so.
+  `tools\node` keeps its path, so the firewall rule "Final Factory agent node" still names it. A Low worker can no
+  longer make a new folder in `tools`; a tool that needs one makes it from the daemon or `worker.ts tools`. A daemon
+  from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
+  `server/toolsLabelsWin.test.ts` on the Windows runner.
 - **The sandbox editors the daemon starts are Low too** (w5540, lothsahn: "run sandbox editors fenced, staged per
   OS"). Before, they stayed Medium, and an editor compiles and runs whatever C# a worker writes (and `execute_code`), so
   it was a one-step way out of the fence. `MacUnity.start` (`machine/unity.ts`) now starts a Windows sandbox editor
@@ -793,6 +807,74 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     reuses the port of the file left there and the daemon finds it by the status file, so nothing breaks.
 - Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
   a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
+- **macOS: sandbox editors start under the workers' Seatbelt profile** (w5630, stage 2 of w5540). When the workers'
+  fence is on (`"workerFence": "seatbelt"`), `MacUnity.start` (`machine/unity.ts`) starts a Mac sandbox editor through
+  `launchFenced` as `sandbox-exec -p <profile> <Unity> -projectPath <sandbox>`. The profile is the workers' own
+  (`seatbeltProfile`, `server/workerFence.ts`) with `<root>/home` writable too (`macEditorFenceFor`). The environment
+  adds `HOME=<root>/home`, `CFFIXED_USER_HOME=<root>/home` and `UNITY_MCP_STATUS_DIR=<root>/home/.unity-mcp`:
+  - **Why the home moves.** Unity writes its window layouts to `~/Library/Preferences/Unity/Editor-5.x/Layouts` at
+    every start. Refused there, the editor sat on a modal "Moving file failed" alert (a `sample` showed
+    `MoveReplaceFile` in `NSAlert runModal`), and the bridge never came up (measured, m5 pretest 1, 2026-11-25).
+    With the two variables set, the layouts, `Application Support/Unity` (CoreBusinessMetrics.db),
+    `Logs/Unity/upm.log`, `Caches/com.unity3d.UnityEditor` (bee, GiCache) and the game's `persistentDataPath` go under
+    `<root>/home/Library` instead. The licence still resolves through the user's running LicenseClient. The project's
+    Library is untouched, so the caches stay warm.
+  - **The bridge's files.** The bridge writes its port file (`unity-mcp-port-<hash>.json`) under the moved home, so its
+    status file goes there too. The daemon reads that folder from its own start on macOS, so an editor that runs through a
+    daemon restart or self-update keeps its bridge (`fenceSetup`, `macEditorStatusDir`; `addMcpStatusDir`,
+    `server/unityHang.ts`; w5712's review found it read only from the first fenced start), and copies the
+    status file into each sandbox's own folder for its agents (`syncStatusDir`, `server/unityMcp.ts`), as on Windows. With
+    the status left in the real `~/.unity-mcp`, a port file an unfenced start had left there (6403, a day old) beat the
+    fresh status file (6402) in `bridgeInfo`, so the daemon would have pinged the wrong port (measured on m5, found by
+    the PR's review).
+  - **EditorPrefs** go through cfprefsd, which writes outside the sandbox, so they still land in the real
+    `~/Library/Preferences/com.unity3d.UnityEditor5.x.plist`, unless daemon.json also says `workerPrefFence: true`
+    (w5659, PR #1220) and `editorFence: true`: then a fenced editor's EditorPrefs writes are refused, silently to Unity. The daemon's own EditorPrefs (App Nap off, Burst on)
+    therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
+    `defaults write` of a new domain from inside the fence created its plist in the real `~/Library/Preferences`.
+  - **Warn-only first** (lothsahn's lockout rule). With `editorFence` unset, the profile's every `(deny ...)` becomes
+    `(allow ... (with report))` (`warnOnlyProfile`). Nothing is refused. **On macOS that report is logged nowhere**
+    (measured on m5, macOS 26.4, w5659): no `Sandbox:` unified-log line for an allow with report, none for a deny
+    either (not one kernel `deny(1) file-write` line in 3 h of fenced workers being refused), `(trace "<file>")` writes
+    no file, and `(with report)` on a deny is a syntax error. So warn mode proves the launch path (licensing, the bridge,
+    the home move) and nothing about which writes enforcement would refuse; that rests on the enforced pretest below.
+    `"editorFence": true` enforces it.
+    `"editorFence": false` starts Mac editors unfenced, as before. Each applies at an editor's next start (the
+    daemon reads daemon.json when it starts).
+  - **Probe and fallback.** The daemon runs `sandbox-exec -p <profile> /usr/bin/true` once before the first fenced start.
+    If that fails, or the workers' fence is off, editors start unfenced, and the daemon log says `editor fence: ...`.
+    A launcher-less start says "unfenced (no fenced launcher here)" in the start message. A fenced start says "inside the
+    workers' Seatbelt profile (the worker fence)", or "... warn-only (it refuses nothing)".
+  - **Licensing.** A fenced editor whose home is moved and that has to start Unity's licensing client itself starts it
+    under `<root>/home`, where no entitlement is (the user's is `~/Library/Unity/licenses`), and quits "No valid Unity
+    Editor license found" (measured on m5: a batch Unity under the profile with the moved home, no client running).
+    With a client already up, it joins the `LicenseClient-<user>` channel and licenses (measured: the same run passed
+    31 of 31). So before each fenced start the daemon starts `Unity.app/Contents/Helpers/UnityLicensingClient.app/...
+    /Unity.Licensing.Client` itself, unfenced with its own home, when none runs (`licensingClient` in
+    `machine/unity.ts`). A client a fenced editor started under the moved home (if the daemon's ever failed) would be
+    reused as it is; `mcp__machine__unity restart` after it exits fixes that.
+  - **Recovery, nobody at the machine:** `ops_worker machine_update worker_fence off` (4.3) turns off the agents' fence
+    and the editors' with it. Alternatively, the ops worker sets `"editorFence": false` in daemon.json over ssh and
+    restarts the daemon. Then `mcp__machine__unity restart` starts the editor unfenced.
+  - **Batch runs and builds** are not started by the daemon. A worker starts them with `unity-slot run` from its own
+    shell, which is already inside the fence, so this change does not touch them.
+  - **Measured before the change** (m5 slot2, 2026-11-25): a GUI editor was started from inside the fence with the
+    workers' profile, HOME and CFFIXED_USER_HOME moved as the daemon now does (its status folder was still the real `~/.unity-mcp`).
+    - Licensing connected to the user's LicenseClient.
+    - The bridge was ready.
+    - `reload-and-wait` compiled in 9 s (warm), with 0 `error CS`.
+    - Play mode entered in 2 s and stopped in 1 s.
+    - `Tests.Core.SimulationRateConstantsTest` passed 31 of 31.
+    - `[Burst] self-check: jobs=burst option=on`.
+    - A write probe from `execute_code` was refused (`UnauthorizedAccessException`) for `~/`, `/`, `<root>/secrets`,
+      `<root>/daemon`, `~/Library/Preferences`, `~/Library/Application Support` and `/private/tmp`. It was written in
+      the sandbox's `Temp`.
+  - Not tested: an editor that must start its own licensing client (none running) with the home moved. That client
+    would run inside the fence and serve later editors, a person's too, on the shared socket (the "Known limits" of
+    docs/worker-fence.md); Windows gives fenced editors their own `-licensingIpc`.
+  - A `sandbox-exec` that fails at launch is not retried unfenced: the start reports the pid and the editor never comes
+    up (the hang watch then restarts it). The probe at the daemon's start runs the same profile, so it would fail there
+    first and the editors would start unfenced.
 
 **What a Low worker meets** (LothDesktop's trial, w5377, 2026-11-24; all measured from a Low agent):
 - **Works at Low:**
@@ -802,7 +884,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - a slot player, windowed, quitting by itself;
   - `ff-leftovers list` and `end`.
 - **Refused, as intended:** writes to `%USERPROFILE%`, `C:\ProgramData`, a drive's root, `<root>\secrets` and
-  `<root>\tools\node`.
+  `<root>\tools\node` (since w5717 also renaming `tools\node` or making a new folder in `tools`).
 - **The label of an exe sets the integrity of whoever starts it.** Windows starts a Low-labelled exe at Low from any
   parent. Labelling `<root>\tools` made the agents' `node` Low even in Medium agents, and Git's MSYS `sh.exe` started
   from it crashed (`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`). `labelLow` gives
