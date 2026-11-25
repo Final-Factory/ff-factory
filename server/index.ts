@@ -66,6 +66,7 @@ import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealt
 import { withDismissed } from '../shared/dismissals.ts';
 import { diskCriticalNotice } from '../shared/blockers.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
+import { backupStatusLines } from './backupStatus.ts';
 import { ActScope, NOT_YOURS, type ActPolicy } from '../shared/actAccess.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
@@ -3046,7 +3047,7 @@ agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, 
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   const idle = liveIdleStatusLine(cfg.live?.enabled === true, cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES, machines.list(), liveIdle.keptOpen());
-  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {

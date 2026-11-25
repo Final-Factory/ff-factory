@@ -143,7 +143,7 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },
-  vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'add-claude', 'put', 'rotate', 'grant', 'remove', 'rename', 'export', 'new-key'] },
+  vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'add-claude', 'put', 'rotate', 'grant', 'remove', 'rename', 'export', 'new-key', 'verify'] },
   'machine-credential': { allowed: ['list'], changes: ['issue', 'revoke'] },
   // API keys for member logins (w1415): issue writes the key straight into a file on a machine (fff-ops-priv), revoke ends one.
   apikey: {
@@ -173,6 +173,10 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   'base-clone': { allowed: [], changes: [''] },
   backup: { allowed: [], changes: [''] },
   'backup-config': { allowed: [], changes: [''] },
+  // The restore drill (w5529): fetch sends a whole encrypted backup to stdout, drill unpacks one as root and writes its result.
+  // vault verify (above) opens every entry of a vault file it is given with the live key: a person's, like the drill it serves.
+  'backup-fetch': { allowed: [], changes: [''] },
+  'backup-drill': { allowed: [], changes: [''] },
   configure: { allowed: [], changes: [''] },
 };
 
