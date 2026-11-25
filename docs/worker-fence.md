@@ -141,6 +141,9 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+- **Sandbox editors** the daemon starts on a Mac run under this profile, warn-only unless daemon.json says
+  `"editorFence": true` (w5630; docs/worker-root.md 4.1, "macOS: sandbox editors start under the workers' Seatbelt
+  profile"). Their HOME moves to `<root>/home`, so Unity's `~/Library` writes land in the root.
 
 ## Signals and launchd jobs (w5562)
 

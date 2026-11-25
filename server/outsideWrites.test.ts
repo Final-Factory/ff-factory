@@ -56,7 +56,7 @@ test('outside writes: a batch Unity run without -logFile gets one in the worker\
 const KNOWN: Record<string, [number, string]> = {
   'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given (docs 2.6)'],
   'machine/burstPref.ts': [1, 'exception: Unity\'s Burst EditorPref (registry, plist, ~/.local/share/unity3d)'],
-  'machine/daemon.ts': [6, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads)'],
+  'machine/daemon.ts': [7, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads); the Mac editor fence names the real ~/.unity-mcp for the bridge status (w5630, a named exception of the workers\' profile, writes nothing itself)'],
   'machine/lowIntegrity.ts': [2, "reads: where the daemon user's gh keeps its login, for a Low worker's GH_CONFIG_DIR (w5430)"],
   'machine/prFlow.ts': [1, 'names APPDATA in the gh refusal (w5430, reads)'],
   'machine/evidenceGate.ts': [3, 'reads plugin and skill paths'],

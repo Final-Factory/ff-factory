@@ -754,6 +754,48 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     reuses the port of the file left there and the daemon finds it by the status file, so nothing breaks.
 - Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
   a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
+- **macOS: sandbox editors start under the workers' Seatbelt profile** (w5630, stage 2 of w5540). When the workers'
+  fence is on (`"workerFence": "seatbelt"`), `MacUnity.start` (`machine/unity.ts`) starts a Mac sandbox editor through
+  `launchFenced` as `sandbox-exec -p <profile> <Unity> -projectPath <sandbox>`. The profile is the workers' own
+  (`seatbeltProfile`, `server/workerFence.ts`) with `<root>/home` writable too (`macEditorFenceFor`). The environment
+  adds `HOME=<root>/home`, `CFFIXED_USER_HOME=<root>/home` and `UNITY_MCP_STATUS_DIR=~/.unity-mcp`:
+  - **Why the home moves.** Unity writes its window layouts to `~/Library/Preferences/Unity/Editor-5.x/Layouts` at
+    every start. Refused there, the editor sat on a modal "Moving file failed" alert (a `sample` showed
+    `MoveReplaceFile` in `NSAlert runModal`), and the bridge never came up (measured, m5 pretest 1, 2026-11-25).
+    With the two variables set, the layouts, `Application Support/Unity` (CoreBusinessMetrics.db),
+    `Logs/Unity/upm.log`, `Caches/com.unity3d.UnityEditor` (bee, GiCache) and the game's `persistentDataPath` go under
+    `<root>/home/Library` instead. The licence still resolves through the user's running LicenseClient. The project's
+    Library is untouched, so the caches stay warm.
+  - **EditorPrefs** go through cfprefsd, which writes outside the sandbox, so they still land in the real
+    `~/Library/Preferences/com.unity3d.UnityEditor5.x.plist`. The daemon's own EditorPrefs (App Nap off, Burst on)
+    therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
+    `defaults write` of a new domain from inside the fence created its plist in the real `~/Library/Preferences`.
+  - **Warn-only first** (lothsahn's lockout rule). With `editorFence` unset, the profile's every `(deny ...)` becomes
+    `(allow ... (with report))` (`warnOnlyProfile`). Nothing is refused, and each write the fence would refuse is
+    logged in the unified log (`log show --predicate 'sender == "Sandbox"'`). `"editorFence": true` enforces it.
+    `"editorFence": false` starts Mac editors unfenced, as before. Each applies at an editor's next start (the
+    daemon reads daemon.json when it starts).
+  - **Probe and fallback.** The daemon runs `sandbox-exec -p <profile> /usr/bin/true` once before the first fenced start.
+    If that fails, or the workers' fence is off, editors start unfenced, and the daemon log says `editor fence: ...`.
+    A launcher-less start says "unfenced (no fenced launcher here)" in the start message. A fenced start says "inside the
+    workers' Seatbelt profile (the worker fence)", or "... warn-only (writes it would refuse are logged, not refused)".
+  - **Recovery, nobody at the machine:** `ops_worker machine_update worker_fence off` (4.3) turns off the agents' fence
+    and the editors' with it. Alternatively, the ops worker sets `"editorFence": false` in daemon.json over ssh and
+    restarts the daemon. Then `mcp__machine__unity restart` starts the editor unfenced.
+  - **Batch runs and builds** are not started by the daemon. A worker starts them with `unity-slot run` from its own
+    shell, which is already inside the fence, so this change does not touch them.
+  - **Measured before the change** (m5 slot2, 2026-11-25): a GUI editor was started from inside the fence with the
+    workers' profile and the three variables, the same as the daemon now does.
+    - Licensing connected to the user's LicenseClient.
+    - The bridge was ready.
+    - `reload-and-wait` compiled in 9 s (warm), with 0 `error CS`.
+    - Play mode entered in 2 s and stopped in 1 s.
+    - `Tests.Core.SimulationRateConstantsTest` passed 31 of 31.
+    - `[Burst] self-check: jobs=burst option=on`.
+    - A write probe from `execute_code` was refused (`UnauthorizedAccessException`) for `~/`, `/`, `<root>/secrets`,
+      `<root>/daemon`, `~/Library/Preferences`, `~/Library/Application Support` and `/private/tmp`. It was written in
+      the sandbox's `Temp`.
+  - Not tested: an editor that must start its own licensing client (none running) with the home moved.
 
 **What a Low worker meets** (LothDesktop's trial, w5377, 2026-11-24; all measured from a Low agent):
 - **Works at Low:**

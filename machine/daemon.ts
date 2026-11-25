@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
-import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
+import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
 import { maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
@@ -71,7 +71,7 @@ import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
-import { hubEditorDirs, hubListedEditors, listWinDialogs, realDeps as realUnityDeps, type EditorFence } from './unity.ts';
+import { hubEditorDirs, hubListedEditors, listWinDialogs, macEditorFenceFor, realDeps as realUnityDeps, type EditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
 import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
@@ -172,6 +172,9 @@ export interface DaemonConfig {
    * w5540: false keeps sandbox editors unfenced (Medium) while agents are fenced. Unset or true: with the Windows fence on,
    * the daemon starts each sandbox editor at Low integrity too (machine/unity.ts EditorFence), so C# a worker writes, and
    * its execute_code, run inside the fence.
+   * macOS (w5630, stage 2): with the Seatbelt worker fence on, sandbox editors start under the workers' profile; unset is
+   * warn-only for now (writes it would refuse are logged, none refused; lothsahn's rule for fence changes), true enforces
+   * it, false starts them unfenced as before. The switch takes effect at each editor's next start.
    */
   editorFence?: boolean;
   /** The machine's own `claude` (its login, settings and plugins). */
@@ -3078,7 +3081,7 @@ export class Daemon {
   }
 
   /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
-  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: EditorFence };
+  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: LowEditorFence };
   private lowStarted = false;
   /** Why lowSetup left the Low fence off (w5555): the fence gate's failure and the portal's alert say it. */
   private lowWhy?: string;
@@ -3116,9 +3119,40 @@ export class Daemon {
     if (f.state === 'failed') log(`worker fence: FAILED on ${this.cfg.id} (${f.why}): sandbox workers are held until it is fixed (a daemon restart probes again) or switched off with worker_fence off (w5555)`);
   }
 
-  /** w5540: the fence sandbox editors start in (Windows Low), while the agents' fence is on and editors may join it. */
+  /** w5540: the fence sandbox editors start in (Windows Low, macOS Seatbelt), while the agents' fence is on and editors may join it. */
   private editorFence(): EditorFence | undefined {
-    return this.cfg.editorFence === false ? undefined : this.low?.editor;
+    if (this.cfg.editorFence === false) return undefined;
+    if (process.platform === 'darwin') return this.macEditorFence();
+    return this.low?.editor;
+  }
+
+  private macEditorMemo?: { fence?: SeatbeltEditorFence };
+  /**
+   * w5630 (w5540 stage 2): the macOS editor fence, decided once: the workers' Seatbelt profile (only while the worker fence
+   * is on and probed) with `<root>/home` writable, the editor's HOME (machine/unity.ts SeatbeltEditorFence). Warn-only
+   * unless daemon.json says `editorFence: true`. Probed with a no-op first: a profile the kernel refuses leaves editors
+   * unfenced, as before, and says so in the log.
+   */
+  private macEditorFence(): SeatbeltEditorFence | undefined {
+    if (this.macEditorMemo) return this.macEditorMemo.fence;
+    let fence: SeatbeltEditorFence | undefined;
+    try {
+      fence = macEditorFenceFor(this.workerFence, this.cfg.editorFence === true ? 'enforce' : 'warn', HOME);
+      if (!fence) log('editor fence: sandbox editors start unfenced (the Seatbelt worker fence is off here)');
+      else {
+        const probe = probeFence([SANDBOX_EXEC, '-p', fence.profile, '/usr/bin/true']);
+        if (probe.ok) log(`editor fence: sandbox editors start under the workers' Seatbelt profile${fence.warn ? ', warn-only (refusals logged as "Sandbox: ... allow ... (with report)"; editorFence true enforces)' : ''}, home ${fence.env.HOME}, from their next start`);
+        else {
+          log(`editor fence: the editor profile could not run a no-op (${probe.why}); sandbox editors start unfenced`);
+          fence = undefined;
+        }
+      }
+    } catch (e) {
+      log(`editor fence: ${(e as Error).message}; sandbox editors start unfenced`);
+      fence = undefined;
+    }
+    this.macEditorMemo = { fence };
+    return fence;
   }
 
   /**
@@ -3231,7 +3265,7 @@ export class Daemon {
    * editor's environment (machine/unity.ts EditorFence). Undefined, and editors stay Medium, when the copy cannot be made or
    * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
    */
-  private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<EditorFence | undefined> {
+  private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<LowEditorFence | undefined> {
     const launcher = await lowCopy(root, process.execPath, exec, say);
     if (!launcher) return undefined;
     const probe = probeFence([launcher, '-e', '0'], { timeoutMs: 60_000 });

@@ -49,6 +49,7 @@ const NOT_GIT: Record<string, string> = {
   'machine/maxEventsFence.ts|cmd': 'the Max events probe (/bin/sh under sandbox-exec or landlock, w5552)',
   'machine/workerCaps.ts|exe': 'the Windows job-object helper (w5554)',
   'machine/unity.ts|bin': 'the Unity editor',
+  'machine/unity.ts|SANDBOX_EXEC': 'sandbox-exec running the Unity editor under the workers\' Seatbelt profile (w5630)',
   'machine/unity.ts|b': 'the Low launcher script (FENCED_LAUNCH_SCRIPT, a string the launcher node runs): the Unity editor',
   'machine/benchProxy.ts|python': 'python (bench_queue.py, detached)',
   'machine/benchQueue.ts|trustedGh(root': 'gh (resolved from a trusted PATH, w5542)',

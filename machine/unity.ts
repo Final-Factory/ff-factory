@@ -8,6 +8,7 @@ import { closeWindow, decide, decideClose, describeDialog, findClosable, findDia
 import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
 import { editorTempEnv } from './sharedCaches.ts';
+import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
 
 /**
@@ -42,7 +43,8 @@ export interface UnityDeps {
   launch(bin: string, args: string[], cwd: string, env?: Record<string, string>): number | Promise<number>;
   /**
    * w5540: start the editor detached through `fence.launcher`, a Low-labelled program that starts it at Low integrity
-   * (Windows only; machine/lowIntegrity.ts). Absent: fenced launches are not possible here and the editor starts unfenced.
+   * (Windows; machine/lowIntegrity.ts), or under `sandbox-exec -p <fence.profile>` (macOS, w5630). Absent: fenced launches
+   * are not possible here and the editor starts unfenced.
    */
   launchFenced?(fence: EditorFence, bin: string, args: string[], cwd: string, env?: Record<string, string>): Promise<number>;
   exists(p: string): boolean;
@@ -74,12 +76,59 @@ const norm = (p: string) => p.replace(/[\\/]+$/, '');
  *   modal "Moving file failed"), and UNITY_MCP_STATUS_DIR in the root: a Low editor cannot write `~/.unity-mcp`, so its
  *   bridge status goes there and the daemon reads both (server/unityHang.ts mcpStatusDirs).
  */
-export interface EditorFence {
+export interface LowEditorFence {
+  kind?: 'low';
   launcher: string;
   unityDir: string;
   licensingIpc: string;
   env: Record<string, string>;
 }
+
+/**
+ * w5630 (w5540 stage 2): how a sandbox editor starts inside the macOS worker fence, from the daemon (machine/daemon.ts
+ * macEditorFence): `sandbox-exec -p <profile> <Unity> ...`, the workers' own Seatbelt profile (server/workerFence.ts
+ * seatbeltProfile) with `<root>/home` writable too. sandbox-exec execs the editor, so the pid is Unity's own and every
+ * child (the compiler server, Burst, the shader compiler, a licensing client it starts) inherits the profile.
+ * - `profile`: the SBPL text, passed inline, so no file a worker could edit decides it.
+ * - `warn`: true while the fence only reports (every deny of the profile turned into an allow `(with report)`: the writes it
+ *   would refuse go to the unified log as "Sandbox: Unity(<pid>) allow file-write..." and none is refused). The first
+ *   rollout is warn-only (lothsahn's rule for fence changes); daemon.json `editorFence: true` enforces it.
+ * - `env`: HOME and CFFIXED_USER_HOME at `<root>/home`: Unity saves its window layouts in
+ *   ~/Library/Preferences/Unity/Editor-5.x, and a fenced editor refused there stops on a modal "Moving file failed" with
+ *   its bridge never up (measured on m5, w5630); Foundation's home follows CFFIXED_USER_HOME, Mono's HOME. Its EditorPrefs
+ *   still go through cfprefsd to the real ~/Library/Preferences plist, so the daemon's App Nap and Burst prefs still apply.
+ *   UNITY_MCP_STATUS_DIR stays the real ~/.unity-mcp (the profile's named exception), where agents' MCP servers look.
+ */
+export interface SeatbeltEditorFence {
+  kind: 'seatbelt';
+  profile: string;
+  warn: boolean;
+  env: Record<string, string>;
+}
+
+export type EditorFence = LowEditorFence | SeatbeltEditorFence;
+
+export const isSeatbeltFence = (f: EditorFence | undefined): f is SeatbeltEditorFence => f?.kind === 'seatbelt';
+
+/**
+ * w5630: the macOS editor fence from the workers' (server/workerFence.ts fenceFor), or undefined when theirs is off: their
+ * profile with `<root>/home` writable as the editor's home, warn-only unless `mode` is enforce. `realHome` is the user's
+ * home, where the bridge's status folder stays (~/.unity-mcp, a named exception of the workers' profile).
+ */
+export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' | 'enforce', realHome: string): SeatbeltEditorFence | undefined {
+  if (!worker) return undefined;
+  const home = path.join(worker.root, 'home');
+  const enforced = seatbeltProfile({ ...worker, extraWritable: [...(worker.extraWritable ?? []), home] });
+  return {
+    kind: 'seatbelt',
+    profile: mode === 'warn' ? warnOnlyProfile(enforced) : enforced,
+    warn: mode === 'warn',
+    env: { HOME: home, CFFIXED_USER_HOME: home, UNITY_MCP_STATUS_DIR: path.join(realHome, '.unity-mcp') },
+  };
+}
+
+/** A Seatbelt profile that refuses nothing and reports what `profile` would refuse: each `(deny <op>` becomes `(allow <op> (with report)` (w5630, warn-only). */
+export const warnOnlyProfile = (profile: string) => profile.replace(/\(deny ([a-z*-]+)/g, '(allow $1 (with report)');
 
 /** The fenced editor binary: `<unityDir>\<version>\Unity.exe` for an install's `<base>\<version>\Editor\Unity.exe`; undefined when `bin` is not shaped so or the junction lacks it. */
 export function fencedEditorBin(bin: string, unityDir: string, exists: (p: string) => boolean): string | undefined {
@@ -328,7 +377,7 @@ export class MacUnity {
   /** w5540: the worker fence editors start in, while the daemon has one (Windows Low integrity); undefined: unfenced. */
   private readonly fence?: () => EditorFence | undefined;
   /** w5540: whether the last start() was fenced, and why not when it was not. */
-  fenced?: { on: boolean; why?: string };
+  fenced?: { on: boolean; why?: string; warn?: boolean };
 
   constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> } = {}) {
     this.repo = norm(repo);
@@ -430,10 +479,21 @@ export class MacUnity {
     let bin = this.bin();
     await this.noAppNap(bin);
     const args = ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])];
-    const fence = this.platform === 'win32' ? this.fence?.() : undefined;
+    const wanted = this.fence?.();
+    const seatbelt = this.platform === 'darwin' && isSeatbeltFence(wanted) ? wanted : undefined;
+    const fence = this.platform === 'win32' && wanted && !isSeatbeltFence(wanted) ? wanted : undefined;
     const fencedBin = fence ? fencedEditorBin(bin, fence.unityDir, (p) => this.d.exists(p)) : undefined;
     let pid: number;
-    if (fence && fencedBin && this.d.launchFenced) {
+    if (seatbelt) {
+      // w5630: the macOS editor under the workers' Seatbelt profile; a Mac without a fenced launcher starts it as before.
+      if (this.d.launchFenced) {
+        pid = await this.d.launchFenced(seatbelt, bin, args, this.repo, this.env);
+        this.fenced = { on: true, ...(seatbelt.warn ? { warn: true } : {}) };
+      } else {
+        this.fenced = { on: false, why: 'no fenced launcher here' };
+        pid = await this.d.launch(bin, args, this.repo, this.env);
+      }
+    } else if (fence && fencedBin && this.d.launchFenced) {
       bin = fencedBin;
       pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, this.env);
       this.fenced = { on: true };
@@ -447,7 +507,12 @@ export class MacUnity {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
     }
-    const fenceNote = this.fenced ? (this.fenced.on ? ' at Low integrity (the worker fence)' : ` unfenced (${this.fenced.why})`) : '';
+    const onNote = seatbelt
+      ? this.fenced?.warn
+        ? " under the workers' Seatbelt profile, warn-only (writes it would refuse are logged, not refused)"
+        : " inside the workers' Seatbelt profile (the worker fence)"
+      : ' at Low integrity (the worker fence)';
+    const fenceNote = this.fenced ? (this.fenced.on ? onNote : ` unfenced (${this.fenced.why})`) : '';
     return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}Started ${bin}${fenceNote} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
   }
 
@@ -519,7 +584,7 @@ export function winLaunchScript(bin: string, args: string[], cwd: string): strin
 export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
   const base: UnityDeps = { ...realDepsMac(), burstPrefOn: () => ensureBurstPrefOn(realBurstPrefDeps(platform)) };
   if (platform === 'linux') {
-    const { noAppNap: _n, ...linux } = base;
+    const { noAppNap: _n, launchFenced: _f, ...linux } = base;
     // Each editor in a systemd scope of its own, out of the daemon's cgroup (machine/linuxScope.ts, w2474).
     return { ...linux, launch: (bin, args, cwd, env) => {
       const cmd = scoped('unity', path.basename(cwd), bin, args, { platform: 'linux' });
@@ -553,6 +618,7 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       return pid;
     },
     launchFenced: async (fence, bin, args, cwd, env) => {
+      if (isSeatbeltFence(fence)) throw new Error('a Seatbelt fence is macOS only');
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
       for (const k of ['APPDATA', 'LOCALAPPDATA', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
@@ -593,6 +659,16 @@ function realDepsMac(): UnityDeps {
       const child = spawn(bin, args, { cwd, detached: true, stdio: 'ignore', env: { ...process.env, ...env } });
       child.unref();
       if (!child.pid) throw new Error(`could not start ${bin}`);
+      return child.pid;
+    },
+    // w5630: the editor under `sandbox-exec -p <profile>`, which execs it (the pid is Unity's own). Its home is made here,
+    // outside the fence, before it starts.
+    launchFenced: async (fence, bin, args, cwd, env) => {
+      if (!isSeatbeltFence(fence)) throw new Error('a Low fence is Windows only');
+      for (const k of ['HOME', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
+      const child = spawn(SANDBOX_EXEC, ['-p', fence.profile, bin, ...args], { cwd, detached: true, stdio: 'ignore', env: { ...process.env, ...fence.env, ...env } });
+      child.unref();
+      if (!child.pid) throw new Error(`could not start ${bin} under sandbox-exec`);
       return child.pid;
     },
     exists: (p) => fs.existsSync(p),
