@@ -43,6 +43,32 @@ const fetchBytes = async (url: string): Promise<Buffer> => {
   return Buffer.from(await r.arrayBuffer());
 };
 
+/**
+ * w5717: `<root>\tools\git` is a folder Low workers write (each child of tools but node is Low, machine/lowIntegrity.ts
+ * lowTargets), and `worker.ts tools` runs at Medium, elevated in an administrator's ssh. So nothing here runs a program
+ * from the installed Git: whether it is current is read from this stamp, which `tools` (Medium since w5717) keeps beside
+ * it: the version, and the SHA-256 of its git.exe and bash.exe when it was put there. A stamp that does not match is a
+ * Git to put there again, from a pinned download unpacked into a folder of this run's own.
+ */
+export const agentGitStamp = (root: string) => path.join(root, 'tools', 'git.json');
+type Stamp = { version: string; git: string; bash: string };
+const sha = (file: string) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const hashes = (dir: string) => ({ git: sha(gitExe(dir)), bash: sha(path.join(dir, 'bin', 'bash.exe')) });
+
+/** The stamped version of the Git at `dir`, when its stamp matches what is there; else undefined and why. */
+function stampedVersion(stampFile: string, dir: string): { version?: string; why: string } {
+  if (!fs.existsSync(gitExe(dir))) return { why: 'none there' };
+  try {
+    const s = JSON.parse(fs.readFileSync(stampFile, 'utf8')) as Stamp;
+    const now = hashes(dir);
+    if (now.git === s.git && now.bash === s.bash && typeof s.version === 'string') return { version: s.version, why: 'stamped' };
+    return { why: `its git.exe or bash.exe is not the one stamped in ${stampFile}` };
+  } catch {
+    return { why: `no stamp of its install (${stampFile})` };
+  }
+}
+
+/** Runs only the git.exe this run unpacked, in its own folder: never the installed one (w5717). */
 async function versionOf(d: AgentGitDeps, dir: string): Promise<string | undefined> {
   if (!fs.existsSync(gitExe(dir))) return undefined;
   const r = await d.exec(gitExe(dir), ['--version'], { timeoutMs: 30_000 });
@@ -58,11 +84,14 @@ async function versionOf(d: AgentGitDeps, dir: string): Promise<string | undefin
 export async function ensureAgentGit(root: string, d: AgentGitDeps): Promise<AgentGitResult> {
   if (d.platform !== 'win32') return 'skipped';
   const dir = agentGitDir(root);
-  const had = await versionOf(d, dir);
+  const stampFile = agentGitStamp(root);
+  const st = stampedVersion(stampFile, dir);
+  const had = st.version;
   if (had === AGENT_GIT.version) {
     d.say(`Agent Git: ${had} at ${dir} (current).`);
     return 'current';
   }
+  if (!had && st.why !== 'none there') d.say(`Agent Git: the Git at ${dir} has ${st.why}; it is checked against a fresh download.`);
   const tools = path.dirname(dir);
   const stage = path.join(tools, `git-${AGENT_GIT.version}.part`);
   try {
@@ -82,6 +111,22 @@ export async function ensureAgentGit(root: string, d: AgentGitDeps): Promise<Age
     const got = await versionOf(d, unpacked);
     if (got !== AGENT_GIT.version) throw new Error(`the unpacked git says ${got ?? 'nothing'}, not ${AGENT_GIT.version}`);
     await d.exec(path.join(unpacked, 'bin', 'bash.exe'), ['-lc', 'exit 0'], { timeoutMs: 5 * 60_000 });
+    const fresh = hashes(unpacked);
+    const stamp = (): void => fs.writeFileSync(stampFile, `${JSON.stringify({ version: AGENT_GIT.version, ...fresh } satisfies Stamp)}\n`);
+    // An install from before the stamp (w5717) whose programs are the pinned ones: stamped, not swapped.
+    if (fs.existsSync(gitExe(dir)) && fs.existsSync(path.join(dir, 'bin', 'bash.exe'))) {
+      const now = hashes(dir);
+      if (now.git === fresh.git && now.bash === fresh.bash) {
+        stamp();
+        fs.rmSync(stage, { recursive: true, force: true });
+        d.say(`Agent Git: ${AGENT_GIT.version} at ${dir} (current; its git.exe and bash.exe match the pinned download, stamped).`);
+        return 'current';
+      }
+    }
+    // Low workers run it and its bash writes beside itself, so it is Low on its own label, as it was when tools was Low
+    // (w5377). A Windows that cannot label it leaves it Medium until the daemon's next start labels it (lowTargets).
+    const lab = await d.exec('icacls', [unpacked, '/setintegritylevel', '(OI)(CI)low'], { timeoutMs: 30 * 60_000 });
+    if (lab.code !== 0) d.say(`WARNING: Agent Git: could not label ${unpacked} Low (${(lab.stderr || lab.stdout).trim().slice(-200)}); the daemon labels it at its next start.`);
     let old: string | undefined;
     if (fs.existsSync(dir)) {
       old = path.join(tools, `git.old-${(d.now ?? Date.now)()}`);
@@ -94,6 +139,7 @@ export async function ensureAgentGit(root: string, d: AgentGitDeps): Promise<Age
       }
     }
     fs.renameSync(unpacked, dir);
+    stamp();
     fs.rmSync(stage, { recursive: true, force: true });
     if (old) fs.rmSync(old, { recursive: true, force: true });
     d.say(`Agent Git: ${AGENT_GIT.version} installed at ${dir}${had ? ` (was ${had})` : ''}; Low-integrity workers use it.`);

@@ -269,6 +269,20 @@ tell_dispatcher() {
   printf '%s\n' "$1" | fff_write "$dir/$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
 }
 
+# config_host_state FILE: "set" when the portal config names "host", "missing" when it is valid JSON without one, and
+# "unreadable: <why>" otherwise (no jq, no file, not JSON). install.sh warns on the last two with different words (w5538,
+# docs/portal-bind-address.md): only "missing" means the portal falls back to 127.0.0.1.
+config_host_state() {
+  command -v jq >/dev/null 2>&1 || { echo "unreadable: jq is not installed"; return 0; }
+  [ -r "$1" ] || { echo "unreadable: no readable file"; return 0; }
+  local out
+  out=$(jq -r 'if type != "object" then "not an object" elif has("host") then "set" else "missing" end' "$1" 2>/dev/null) || {
+    echo "unreadable: not valid JSON"
+    return 0
+  }
+  case "$out" in set | missing) echo "$out" ;; *) echo "unreadable: $out" ;; esac
+}
+
 health_json() { curl -fsS -m 10 "http://127.0.0.1:$FFF_PORT/api/health"; }
 # As fff: root running git in fff's repository trips git's safe.directory check.
 # Empty (and status 0) when there is no such release, so an assignment from it never stops a set -e script.

@@ -32,7 +32,7 @@ LothDesktop):
 
 | | Covers | Does not cover |
 |---|---|---|
-| Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
+| Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node`, `tools` itself (w5717; its other folders stay Low) | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
 | macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md); with the read fence `on`: reads of `~/.ssh`, browsers, `~/.config/gh` and the Keychain, Keychain services and preference writes (w5553, w5560, "Owner secrets" below); preference writes also with `workerPrefFence` (w5659) | with the read fence off: those reads; preference writes through cfprefsd unless `workerPrefFence`; signals to other processes of the user; other sandboxes inside the root; the network |
 | Linux Landlock | file writes outside the root; with `transcriptLock` on, other conversations' transcripts (w5702, docs/transcript-seal.md) | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
@@ -189,7 +189,24 @@ under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read ru
 secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
 `app/machine/ghApp.ts`) read-only and closes it at once, reading no byte, and the daemon logs one line, `read fence (<mode>,
 <os>) probe: a/b closed paths refused, c/d given-back paths open; ...` with what it would wrongly refuse or leave open. On
-Windows the labels are what refuses, so `warn` sets none and logs what `on` would close. Only a daemon whose hello offers
+Windows the labels are what refuses, so `warn` sets none and logs what `on` would close.
+
+Since w5747 (from w5733's review of #1232) the probe also runs the owner-secret rules ("Owner secrets" below) as `on` adds
+them for a run that holds a token: the owner paths join the closed targets and the fence (Seatbelt `readDenied` plus
+`ownerSecrets`, so the Keychain mach denies and the preference-write deny; Landlock `--no-read`). A line `read fence
+(<mode>): owner-secret rules would close ...` says what they close (in `warn`: what `on` would). Then tool legs run under
+that same fence (`ownerToolLegs`, machine/ownerSecrets.ts): `gh api user` and `git ls-remote` of a private repository
+through the GH_TOKEN credential helper, both with the machine login's token and the empty `<root>/gh-worker` gh folder,
+must exit 0; on a Mac `security add-generic-password` must fail at once (a hang means a SecurityAgent dialog; a success is
+deleted again outside the fence). Their line is `read fence probe, tools under the owner rules (w5747): ...`. A failed
+leg, or legs not run because the daemon read no machine gh token, keeps `on` from enforcing, like a wrongly refused path.
+A Keychain leg that hung or got through is held (w5752's review of #1245): the daemon records it with its code version in
+`read-fence-keychain-held.json` in its own folder, and later probes skip that leg, so a dialog comes back at most once per
+code version rather than at every daemon start. The skipped leg still keeps `on` from enforcing; deleting the file or a
+daemon update runs it again.
+The per-run wiring is `ownerRunWiring` (machine/ownerSecrets.ts), tested in server/ownerSecrets.test.ts.
+
+Only a daemon whose hello offers
 `readFenceSwitch` is sent a mode: a daemon from before w5546 took any action but `restart` as an unload, and a daemon now
 refuses an action it does not know.
 
