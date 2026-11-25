@@ -13,6 +13,7 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -33,11 +34,25 @@ export interface WorkerFence {
 const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 /**
- * Inside the root, still read-only for workers: the daemon's folder, the secrets, the root's record. Not `repo`, the
+ * Inside the root, still read-only for workers: the daemon's folder, the secrets, the root's record, and the Medium agents'
+ * Claude Code folder (w5543: settings, plugins and hooks that agents outside the fence load). Not `repo`, the
  * main clone: a sandbox is a git worktree whose git data (index, objects, refs) lives in it, so a fenced commit there
  * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
  */
-export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN], files: ['root.json'] };
+
+/**
+ * Signals (w5562): a worker may signal only processes of its own fence, itself and everything it started (they inherit
+ * its sandbox), so a careless `pkill -f` or `kill` cannot end the daemon, the agent host, a Unity editor the daemon
+ * started, another worker or the owner's apps. Signal 0 (a liveness check) is a signal too: to a process outside the
+ * fence it answers EPERM, which every liveness check of ours reads as alive (unitySlots.ts isAlive, bench_queue.py,
+ * player_slots.py). Signals sent TO the worker (the daemon's stop, the SDK's abort) are not the sandbox's to refuse.
+ * `children` as well as `same-sandbox`: a direct child is ours even if it could change its sandbox.
+ * No launchd rule: launchd itself refuses job submission from a sandboxed caller (measured on m5, w5562, from inside
+ * the fence: `launchctl submit` exit 1 "Operation not permitted", `launchctl bootstrap gui/<uid>` "5: Input/output
+ * error", and the job never ran), and that goes through the bootstrap port, not a mach-lookup name a profile could deny.
+ */
+export const SIGNAL_RULES = [';; signals: only to this fence\'s own processes (w5562)', '(deny signal)', '(allow signal (target self) (target children) (target same-sandbox))'];
 
 export function seatbeltProfile(f: WorkerFence): string {
   const home = (p: string) => path.join(f.home, p);
@@ -75,6 +90,7 @@ export function seatbeltProfile(f: WorkerFence): string {
     ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
     ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
     ')',
+    ...SIGNAL_RULES,
   ].join('\n');
 }
 

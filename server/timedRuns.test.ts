@@ -228,7 +228,7 @@ test('end to end: two builds made on one computer are timed on a play-only one u
     personBusy: () => undefined,
     savesDir: path.join(d, 'saves'),
     pollMs: 5,
-    spawnPlayer: (_exe, args, cwd) => spawn(process.execPath, [fake, ...args], { cwd, stdio: 'ignore', env: { ...process.env, FAKE_LOCK: path.join(deskRoot, 'tmp', 'bench.lock') } }),
+    spawnPlayer: (_exe, args, cwd) => spawn(process.execPath, [fake, ...args], { cwd, stdio: 'ignore', env: { ...process.env, FAKE_LOCK: path.join(deskRoot, 'daemon', 'bench.lock') } }),
   };
   runs.runner = new TimedRunner(deskDeps);
 

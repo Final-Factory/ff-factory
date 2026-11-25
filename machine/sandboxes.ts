@@ -16,7 +16,7 @@ import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable.ts';
 import { armScriptReimport } from './scriptReimport.ts';
-import { MacUnity, MacUnityWatch, realDeps, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
+import { MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
@@ -295,7 +295,7 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
 }
 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
-export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined): PoolDeps {
+export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
   const base = realDeps(platform);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
@@ -319,7 +319,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     },
     procs,
     editor: (sb, logFile, report) => {
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile });
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),
