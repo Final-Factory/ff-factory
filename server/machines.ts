@@ -1198,12 +1198,12 @@ export class MachineManager {
     return this.isOnline(id) && this.hellos.has(id);
   }
 
-  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   /** The portal hosts its daemon follows and what pinning would have refused (w5576), from its hello; undefined from an older daemon. */
   portalPinOf(id: string): PortalPinStatus | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.portalPin : undefined;
   }
 
+  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
   }

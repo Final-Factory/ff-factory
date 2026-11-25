@@ -13,8 +13,8 @@ network audit.
   installs only a commit published on GitHub's ff-factory `main`; `checkPublished` in `machine/selfUpdate.ts` checks
   that on the machine itself (w5516). No signing key is involved. Signed updates were put off by lothsahn on
   2026-11-25 ("Drop build signing for now, remind me in 1 week").
-- **One machine's extra hosts.** daemon.json's `pinnedPortalHosts` (a list of names) adds hosts on one machine. The
-  installer writes it. Nothing sent over the link can: `patchDaemonConfig` takes only `portalUrl`,
+- **One machine's extra hosts.** daemon.json's `pinnedPortalHosts` (a list of names) adds hosts on one machine. A
+  person or the ops worker edits it by hand over ssh: no installer flag writes it, and an installer rerun keeps it. Nothing sent over the link can: `patchDaemonConfig` takes only `portalUrl`,
   `previousPortalUrl` and `relocatedAt`, and a link update's `LinkUpdateFlags` carry no portal field.
 - **Why a host name, not an IP or a certificate pin.** The tailnet name is what every daemon.json already holds. Node
   checks its HTTPS certificate as it does for any site. A Tailscale certificate is a Let's Encrypt one that renews
@@ -70,7 +70,7 @@ then stays on the old portal while that portal still runs.
   1. **The old host still runs.** Merge the new host into `PINNED_PORTAL_HOSTS`, update the machine over its link from
      the old portal, then relocate it.
   2. **An ssh machine.** The ops worker reruns the installer over ssh with `--portal-url <new URL>` (or adds
-     `pinnedPortalHosts`), as in [ops-worker.md](ops-worker.md), "Updating and re-running a machine's installer". The
+     `pinnedPortalHosts` to daemon.json by hand, then reruns the installer, which keeps it and restarts the daemon), as in [ops-worker.md](ops-worker.md), "Updating and re-running a machine's installer". The
      installer writes daemon.json directly, and the daemon dials the `portalUrl` it finds there.
   3. **A `-NoSsh` machine.** Route 2 does not exist for it, so route 1 must stay open: keep the old portal running until
      every machine has moved.

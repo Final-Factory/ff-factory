@@ -1,8 +1,8 @@
 // The portal hosts a daemon follows (w5576, docs/portal-pin.md): a taken-over portal must not move a worker machine to an
 // address it chose. The hosts a daemon trusts ship in this file, so they change only with an update of the daemon's own
 // code, and an update installs only a commit published on GitHub's ff-factory main (w5516, machine/selfUpdate.ts
-// checkPublished). A daemon.json `pinnedPortalHosts` adds hosts on one machine: the installer writes it (the ops worker's
-// ssh route), and nothing sent over the link can (patchDaemonConfig takes only the relocate fields).
+// checkPublished). A daemon.json `pinnedPortalHosts` adds hosts on one machine: a person or the ops worker edits it by hand
+// over ssh (no installer flag writes it; an installer rerun keeps it), and nothing sent over the link can (patchDaemonConfig takes only the relocate fields).
 //
 // Stage 1, warn (this file's PORTAL_PIN_MODE): what pinning would refuse is logged, kept in portal-pin.json beside
 // daemon.json and reported in the hello (`portalPin`, list_machines shows it), and goes ahead as before. Enforcement is a
@@ -133,8 +133,10 @@ export class PortalPin {
  */
 export function describePortalPin(p: PortalPinStatus | undefined): string {
   if (!p) return 'portal pin: not reported (a daemon from before w5576)';
-  const w = Array.isArray(p.warnings) ? p.warnings : [];
-  const hosts = Array.isArray(p.hosts) && p.hosts.length ? `; follows ${p.hosts.join(', ')}` : '';
+  // A hello is another machine's data: an odd entry is skipped, never thrown on, so one daemon cannot break list_machines.
+  const w = (Array.isArray(p.warnings) ? p.warnings : []).filter((x) => !!x && typeof x === 'object');
+  const h = (Array.isArray(p.hosts) ? p.hosts : []).filter((x) => typeof x === 'string');
+  const hosts = h.length ? `; follows ${h.join(', ')}` : '';
   const head = `portal pin (w5576): ${p.mode} mode; dials ${p.host}${p.pinned ? ' (pinned)' : ' (NOT pinned)'}${hosts}`;
   if (!w.length) return `${head}; no warnings`;
   const last = w.slice(-3).reverse().map((x) => `${x.at} ${x.kind}: ${x.what}`).join(' | ');
