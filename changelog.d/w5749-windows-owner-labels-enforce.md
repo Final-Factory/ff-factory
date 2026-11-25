@@ -3,3 +3,5 @@
   deleted) and labels the gh folder and `~\.ssh` No-Read-Up, so a Low worker can read neither. `warn` or `off` takes the
   labels off and moves the login back. Workers with no vault token keep the machine's gh login as GH_TOKEN. Browser
   profiles stay open (their own AppContainer reads them). Other machines: unchanged.
+  If gh's status can't be read, the way back keeps its note and tries again at the next start, and the note is written
+  before the login moves (w5849's review).
