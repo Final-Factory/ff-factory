@@ -8,6 +8,8 @@ import { spawn } from 'node:child_process';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { AGENT_BREAKER, AGENT_PROBE_EVERY_MS, AGENT_PROBE_TOKEN, AGENT_SOCKET_VAR, AGENT_SWITCH_VAR, agentAccountFellBack, agentAccountMode, agentProbe, agentAccountTripped, agentRunEnded, resultWatcher, agentHeader, agentProcessOptions, agentSpawner, configureAgentAccount } from './agentAccount.ts';
 import { tokenPipeSpawner } from './tokenPipe.ts';
+/** The launcher's socket and its /bin/sh fakes are POSIX only: agentProcessOptions gives Windows no socket (agentAccount.ts). */
+const POSIX_ONLY = process.platform === 'win32' && 'the agent account launcher is POSIX only';
 
 /**
  * w5598: the portal VM's agents start as their own account through fff-agent.socket, and never fail to start because of
@@ -84,7 +86,7 @@ test('w5598: the header carries the folder, Claude Code\'s folder and the token 
   assert.deepEqual(Object.keys(h.env), ['CLAUDE_CODE_OAUTH_TOKEN']);
 });
 
-test('w5598: through the socket on OK: the agent\'s input and output flow over it, a stop interrupts and ends it', async () => {
+test('w5598: through the socket on OK: the agent\'s input and output flow over it, a stop interrupts and ends it', { skip: POSIX_ONLY }, async () => {
   const { dir, file } = sockPath();
   const seen: { header?: Record<string, unknown> } = {};
   const srv = await launcher(file, 'OK', seen);
@@ -113,7 +115,7 @@ for (const [name, answer, want] of [
   ['the launcher\'s ERR', 'ERR cannot enter /srv/fff/base', /refused: cannot enter \/srv\/fff\/base/],
   ['a connection closed without a word', undefined, /closed the connection without an answer/],
 ] as const) {
-  test(`w5598: the fallback: ${name} starts the agent as the portal's account, with its token on a pipe, and alerts`, async () => {
+  test(`w5598: the fallback: ${name} starts the agent as the portal's account, with its token on a pipe, and alerts`, { skip: POSIX_ONLY }, async () => {
     const { dir, file } = sockPath();
     const srv = answer === null ? undefined : await launcher(file, answer, {});
     const fell: string[] = [];
@@ -137,7 +139,7 @@ for (const [name, answer, want] of [
   });
 }
 
-test('w5598: the fallback: a launcher that never answers is given up after answerMs', async () => {
+test('w5598: the fallback: a launcher that never answers is given up after answerMs', { skip: POSIX_ONLY }, async () => {
   const { dir, file } = sockPath();
   const srv = net.createServer(() => {});
   await new Promise<void>((r) => srv.listen({ path: file }, () => r()));
@@ -170,7 +172,7 @@ test('w5598: agentProcessOptions: the socket only where the unit names it and th
   configureAgentAccount({ setting: () => undefined, alert: () => {} });
 });
 
-test('w5598: the setting "off" starts no connection: the agent runs as before', async () => {
+test('w5598: the setting "off" starts no connection: the agent runs as before', { skip: POSIX_ONLY }, async () => {
   configureAgentAccount({ setting: () => 'off', alert: () => {} });
   try {
     const { spawnClaudeCodeProcess } = agentProcessOptions({ [AGENT_SOCKET_VAR]: '/nonexistent/claude.sock' }, 'linux');
@@ -251,7 +253,7 @@ test('w5598: the breaker: two failed agents through the socket within the window
   }
 });
 
-test('w5598: an agent through the socket that ends before any result is a failure for the breaker; a stop is not', async () => {
+test('w5598: an agent through the socket that ends before any result is a failure for the breaker; a stop is not', { skip: POSIX_ONLY }, async () => {
   const { dir, file } = sockPath();
   const srv = net.createServer({ allowHalfOpen: true }, (c) => {
     c.once('data', () => {
@@ -328,7 +330,7 @@ test('w5651: "warn" starts every agent as the portal\'s account and probes the s
   assert.ok(AGENT_PROBE_EVERY_MS >= 60_000);
 });
 
-test('w5651: agentProbe asks the launcher for claude --version on a dummy credential, never the portal\'s, and reads its answer', async () => {
+test('w5651: agentProbe asks the launcher for claude --version on a dummy credential, never the portal\'s, and reads its answer', { skip: POSIX_ONLY }, async () => {
   const { dir, file } = sockPath();
   let header: Record<string, unknown> | undefined;
   let reply = 'OK\n2.1.0 (Claude Code)\n';
@@ -358,7 +360,7 @@ test('w5651: agentProbe asks the launcher for claude --version on a dummy creden
   }
 });
 
-test('w5651: a Claude Code that answers OK and then writes nothing is a stall: the breaker counts it and the agent starts as the portal\'s account with its input replayed', async () => {
+test('w5651: a Claude Code that answers OK and then writes nothing is a stall: the breaker counts it and the agent starts as the portal\'s account with its input replayed', { skip: POSIX_ONLY }, async () => {
   const { dir, file } = sockPath();
   const conns: net.Socket[] = [];
   const srv = net.createServer({ allowHalfOpen: true }, (c) => {
@@ -392,7 +394,7 @@ test('w5651: a Claude Code that answers OK and then writes nothing is a stall: t
   }
 });
 
-test('w5651: output after OK disarms the stall watchdog', async () => {
+test('w5651: output after OK disarms the stall watchdog', { skip: POSIX_ONLY }, async () => {
   const { dir, file } = sockPath();
   const seen: { header?: Record<string, unknown> } = {};
   const srv = await launcher(file, 'OK', seen);

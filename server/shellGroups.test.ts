@@ -138,9 +138,10 @@ test('macProcs reads pid, ppid, pgid and the command', () => {
 });
 
 test('shellGroupEnv sets ZDOTDIR and keeps the one it replaces', () => {
-  assert.deepEqual(shellGroupEnv('/s', {}), { ZDOTDIR: '/s/zsh' });
-  assert.deepEqual(shellGroupEnv('/s', { ZDOTDIR: '/Users/x/.config/zsh' }), { ZDOTDIR: '/s/zsh', FF_ZDOTDIR_WAS: '/Users/x/.config/zsh' });
-  assert.deepEqual(shellGroupEnv('/s', { ZDOTDIR: '/s/zsh' }), { ZDOTDIR: '/s/zsh' });
+  const ZD = path.join('/s', 'zsh'); // shellZdotdir joins natively; a Windows run spells it with backslashes (w5810)
+  assert.deepEqual(shellGroupEnv('/s', {}), { ZDOTDIR: ZD });
+  assert.deepEqual(shellGroupEnv('/s', { ZDOTDIR: '/Users/x/.config/zsh' }), { ZDOTDIR: ZD, FF_ZDOTDIR_WAS: '/Users/x/.config/zsh' });
+  assert.deepEqual(shellGroupEnv('/s', { ZDOTDIR: ZD }), { ZDOTDIR: ZD });
 });
 
 test('readShellGroups reads one session\'s file, ignores lines naming another, and prunes old files', () => {
