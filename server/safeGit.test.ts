@@ -46,6 +46,8 @@ const NOT_GIT: Record<string, string> = {
   'machine/osJob.ts|cmd': 'launchctl, systemd-run or schtasks',
   'machine/osJob.ts|s.node': 'node',
   'machine/fenceProbe.ts|cmd': 'the fence probe (sandbox-exec, landlock)',
+  'machine/maxEventsFence.ts|cmd': 'the max-events fence probe (sandbox-exec, landlock, the Low launcher)',
+  'machine/workerCaps.ts|exe': 'the Windows job-object helper (jobHelper)',
   'machine/unity.ts|bin': 'the Unity editor',
   'machine/unity.ts|b': 'the Low launcher script (FENCED_LAUNCH_SCRIPT, a string the launcher node runs): the Unity editor',
   'machine/benchProxy.ts|python': 'python (bench_queue.py, detached)',

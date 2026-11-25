@@ -508,8 +508,14 @@ test('w5546: the read fence goes to warn, on and off again over the link with no
   await s.mm.controlDaemon('mx', 'read-fence-warn');
   assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'warn');
   assert.equal(s.exits.length, 0, 'no restart');
-  await s.mm.controlDaemon('mx', 'read-fence-on');
-  assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'on');
+  if (process.platform === 'linux') {
+    // Lockout re-review B4 of #1193: on is refused on Linux, with the reason, and the mode stays as it was.
+    await assert.rejects(s.mm.controlDaemon('mx', 'read-fence-on'), /refused on Linux/);
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'warn');
+  } else {
+    await s.mm.controlDaemon('mx', 'read-fence-on');
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'on');
+  }
   await s.mm.controlDaemon('mx', 'read-fence-off');
   assert.equal(fs.existsSync(marker), false, 'off: the file is gone, so runs start with no read rules');
   // A daemon from before the switch said no readFenceSwitch in its hello: its onControl took any other action as an unload.
