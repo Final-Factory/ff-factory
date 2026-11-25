@@ -11,6 +11,14 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 - Each person has a login in `data/users.json`: a username, a scrypt hash, a display name and a role
   (`server/auth.ts`). The username is the **user id**. It never changes, and it is what FFBox maps to an
   account. The display name is what people and prompts see ("Lothsahn").
+- Failed logins are throttled per attempted username and per client address, never globally (w5521,
+  `server/loginThrottle.ts`): an address (an IPv6 /64) is refused for 15 minutes after 5 failures; a username, from
+  any address, after 10, with a backoff of 1 s that doubles on each further failure and stops at 60 s, so its owner
+  waits at most a minute. Both tables hold at most 10,000 entries (keys cut to 64 characters, about 3 MB each when
+  full, measured) and are swept every minute; an evicted entry's count stays in a fixed table of 65,536 salted
+  hash buckets, so flooding the table with made-up names cannot reset a targeted name's backoff. Every login answer
+  (unknown name, wrong or right password, throttled) is held to one time, measured on the machine: the slowest of
+  its recent logins plus a tenth and 3 ms (`LoginTimer`), waited on a timer.
 - Roles: `owner` (Ben, who runs the portal) and `member` (a teammate). The first login is the owner and
   later ones are members. A `users.json` written before roles existed reads every login as the owner.
   **Roles are recorded, and enforced in a few places so far:** an owner may close or reopen another person's request
