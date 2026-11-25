@@ -656,6 +656,8 @@ export interface WorkInput {
   repo?: string;
   /** w1098: what it needs of a computer when `repo` does not say: `game` (a game sandbox with an editor) or `agent` (only an agent slot). */
   needs?: 'game' | 'agent';
+  /** w5507: in a turn a relayed message joined, the person's own words that ask for it, quoted from their message. */
+  words?: string;
 }
 
 /** An operator's ffdev turn FFBox handed over (server/devRequests.ts), its files already in the attachment store. */
@@ -1051,7 +1053,8 @@ export class Orchestrators {
     const now = this.now().getTime();
     const owners = ownersPair(owner.userId, to.userId);
     // Between owners only turns no person started count, and only within the hour (w627).
-    const loop = owners && !own && chat.turnFrom !== 'human' ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
+    // w5507: a turn a relayed message joined counts too: its text may be what asks for the message.
+    const loop = owners && !own && !this.turnOwnWords(chat).own ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
     if (loop && loop.length >= OWNER_LOOP_MESSAGES_PER_HOUR) {
       throw new Error(
         `${OWNER_LOOP_MESSAGES_PER_HOUR} messages to ${to.displayName} in the last hour in turns no person started (a [person message], a report, a timer): the loop guard between ${owner.displayName}'s and ${to.displayName}'s orchestrators (w627). ` +
@@ -1950,10 +1953,14 @@ It is for your part of the work, not an answer to another worker's question.`;
     throw new Error('say whom this is for: pass work_id (the request it serves), or for_user (someone the conversation shows asking, or the system payer for work nobody asked for)');
   }
 
-  /** Whether the dispatcher's current turn was started by a person writing to it (the owner, in its chat). */
+  /**
+   * Whether the dispatcher's current turn was started by a person writing to it (the owner, in its chat), and no relayed
+   * message (a [worker update], a [dispatch]) joined it since (w5507): the dispatcher's tools take no quoted words, so
+   * such a turn acts for a request its person asked for (humanAsked) instead.
+   */
   dispatcherHeardPerson(): boolean {
     const h = this.dispatcherId ? this.sessions.sessions.get(this.dispatcherId) : undefined;
-    return !!h && (h.turnFrom ?? h.lastFrom) === 'human';
+    return !!h && this.turnOwnWords(h).own;
   }
 
   // ---------------------------------------------------------------- the ledger
@@ -2386,8 +2393,10 @@ It is for your part of the work, not an answer to another worker's question.`;
     const title = input.title.replace(/\s+/g, ' ').trim();
     const brief = input.brief.trim();
     if (!title || !brief) throw new Error('give a title and a brief');
-    const human = (chat.turnFrom ?? chat.lastFrom) === 'human';
-    const cloneMachine = input.main_clone ? this.mainCloneMachine(owner, input.main_clone, human) : undefined;
+    // w5507: theirs only as their own words: a turn they started that nothing relayed joined, or their words quoted.
+    const mine = this.turnOwnWords(chat, input.words);
+    const human = mine.own;
+    const cloneMachine = input.main_clone ? this.mainCloneMachine(owner, input.main_clone, human, mine.hint) : undefined;
     const cleanupMachine = input.disk_cleanup?.trim() ? this.machineIdOf('disk_cleanup', input.disk_cleanup) : undefined;
     const repeat = repeatOf(this.store.work.values(), owner, title);
     if (repeat) {
@@ -2470,7 +2479,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.gatherForDispatcher(owner, requestNotice(w));
     const overlap = w.overlaps.length ? ` Possible overlap: ${w.overlaps.slice(0, 3).map(overlapLine).join('; ')}. Tell ${owner.displayName}; the dispatcher decides.` : '';
     const urgent = failure && priority !== (input.priority ?? 'normal') ? ` Filed urgent: it is a ${failure.kind} (${failure.why}); desyncs, crashes and hangs are urgent (w4810). Lower it with update_work only if it is not one.` : '';
-    return `Filed ${id} with the dispatcher${w.report ? (w.report.asked === false ? `; marked ${w.report.kind}, but not asked by a person: a worker note, no report for people and no DONE gate (w5223; mark it from a turn of their own words)` : `; its result is a report (${w.report.kind}), which its worker files with file_report`) : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
+    const relayed = !human && (chat.turnFrom ?? chat.lastFrom) === 'human' ? ` Filed as not ${owner.displayName}'s own ask${mine.hint} (w5507): the tools that need their ask refuse it until update_work with their words.` : '';
+    return `${relayed ? relayed.trim() + ' ' : ''}Filed ${id} with the dispatcher${w.report ? (w.report.asked === false ? `; marked ${w.report.kind}, but not asked by a person: a worker note, no report for people and no DONE gate (w5223; mark it from a turn of their own words)` : `; its result is a report (${w.report.kind}), which its worker files with file_report`) : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
   }
 
   /**
@@ -2720,7 +2730,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * `alreadyAsked`: they have it already). Their note answers it; a note by anyone else keeps it with them, and the
    * undecided re-offer (w2217) passes it by, as it does every question. Handed back to the requester, a note of theirs answers it.
    */
-  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean, forOwner = false, before: Requester[] = questionFor(w)): string {
+  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean, forOwner = false, before: Requester[] = questionFor(w), words?: string): string {
     const to = this.personNamed(toName, `to hand ${w.id}'s question to`);
     if (!forOwner && !isFor(w, from.userId) && !questionFor(w).some((r) => same(r.userId, from.userId)) && !this.reviewers().some((r) => same(r.userId, from.userId))) throw new Error(`${w.id} is not ${from.displayName}'s request, nor is its question theirs to hand on`);
     if (!['new', 'question', 'stalled'].includes(w.status)) throw new Error(`${w.id} is ${w.status}: question_for hands on a question it waits on (new, question or stalled). A worker's own wait goes to a person through that worker (message_agent).`);
@@ -2730,7 +2740,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const asks = w.question?.asks ?? open?.asks;
     const at = this.now().toISOString();
     if (note) w.notes = [...(w.notes ?? []), { at, by: from.displayName, text: note.slice(0, 2000) }].slice(-20);
-    w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    w.humanAsked = this.turnOwnWords(chat, words).own;
     w.status = 'question';
     w.stalled = undefined;
     w.flag = undefined;
@@ -2790,7 +2800,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // MAIN-CLONE WORK (w936): grant or take back; with nothing else asked, that is the whole update.
     if (input.main_clone !== undefined) {
-      const cloneLine = this.setMainCloneAccess(chat, owner, w, input.main_clone);
+      const cloneLine = this.setMainCloneAccess(chat, owner, w, input.main_clone, input.words);
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return cloneLine;
     }
     // SUBJECTS ADDED LATER (w502): the threads and reports a request turned out to be the work for, open or closed.
@@ -2811,7 +2821,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // message (a relayed report, a worker's words) cannot approve anything.
     if (input.approve || input.decline) {
       if (input.approve && input.decline) throw new Error('approve or decline, not both');
-      const turn = this.reactionTurn(chat, { verb: input.approve ? 'approve' : 'decline', refs: [w.id] });
+      const turn = this.reactionTurn(chat, { verb: input.approve ? 'approve' : 'decline', refs: [w.id] }, input.words);
       if (!turn.own) throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}. A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
       const done = input.approve ? this.approveIntake(w.id, owner) : this.declineIntake(w.id, owner, input.note);
       if (turn.words) {
@@ -2851,12 +2861,13 @@ It is for your part of the work, not an answer to another worker's question.`;
         if (!this.isOwnerRole(to.userId)) throw new Error(`${w.id} is ${names(w.requesters)}'s request: another owner moves its question only to an owner, and ${to.displayName} is not one (w3606)`);
         this.stamp(w, `${owner.displayName} (an owner, on ${names(w.requesters)}'s request) moved its question from ${names(asked)} to ${to.displayName}, in their own words: ${this.ownWords(chat, note)}`);
       }
-      const moved = this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked, forOwner, asked);
+      const moved = this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked, forOwner, asked, input.words);
       if (forOwner) this.tellOwnersOfAct(w, owner, `moved the question on it from ${names(asked)} to ${names(w.question?.for ?? [])}`, this.ownWords(chat, note));
       return moved;
     }
-    // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
-    w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn, and
+    // in a turn a relayed message joined only with their words quoted (w5507).
+    w.humanAsked = this.turnOwnWords(chat, input.words).own;
     const what: string[] = [];
     let settledFor: { asked: Requester[]; line: string } | undefined;
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
@@ -3345,16 +3356,47 @@ It is for your part of the work, not an answer to another worker's question.`;
    * #22038: "...close w983 as handled..."`; `use` marks it spent once the action went through, so one click does each
    * thing once. A click that covers nothing here leaves `hint` for the refusal.
    */
-  private reactionTurn(chat: SessionHandle, need: GateNeed): { own: boolean; words?: string; use: () => void; hint: string } {
-    if ((chat.turnFrom ?? chat.lastFrom) === 'human') return { own: true, use: () => {}, hint: '' };
+  private reactionTurn(chat: SessionHandle, need: GateNeed, quoted?: string): { own: boolean; words?: string; use: () => void; hint: string } {
+    const mine = this.turnOwnWords(chat, quoted);
+    if (mine.own) return { own: true, ...(mine.words ? { words: mine.words } : {}), use: () => {}, hint: '' };
     const now = this.now().getTime();
     const live = (this.grants.get(chat.info.id) ?? []).filter((g) => now - g.at < GRANT_MS);
     for (const g of live) {
       const sentence = grantCovers(g, need);
       if (sentence) return { own: true, words: grantWords(g, sentence), use: () => void g.used.push(grantKey(need)), hint: '' };
     }
-    const hint = live.length ? ` (${live.map((g) => `${g.emoji} on #${g.seq}`).join(', ')} covers only the action and the requests one sentence of that message proposes together; none of them proposes this)` : '';
+    const hint = mine.hint + (live.length ? ` (${live.map((g) => `${g.emoji} on #${g.seq}`).join(', ')} covers only the action and the requests one sentence of that message proposes together; none of them proposes this)` : '');
     return { own: false, hint, use: () => {} };
+  }
+
+  /**
+   * Whether this turn is its person's own by their words (w5507): a turn they started that nothing else joined, or one
+   * that a message not theirs joined (SessionHandle.turnRelayed: a [worker update], a [dispatch], an FFBox relay) when
+   * `quoted` is found verbatim in a message of theirs in this turn. A turn the harness started is never theirs here
+   * (reactionTurn adds a click). `words` is the record to keep for a quote; `hint` says why a relayed turn fell short.
+   */
+  turnOwnWords(chat: SessionHandle, quoted?: string): { own: boolean; words?: string; hint: string } {
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') return { own: false, hint: '' };
+    if (!chat.turnRelayed) return { own: true, hint: '' };
+    const n = this.ownerOf(chat.info)?.displayName ?? 'your person';
+    if (quoted?.trim() && inPersonWords(quoted, this.turnPersonMessages(chat))) return { own: true, words: `"${clip(quoted.trim(), 300)}"`, hint: '' };
+    return {
+      own: false,
+      hint: quoted?.trim()
+        ? `; words "${clip(quoted, 120)}" is not in ${n}'s own message in this turn: quote them verbatim (at least a few words), never your summary or a relayed message's`
+        : `; a message that is not ${n}'s own (a worker update, a dispatch notice or a relayed text) joined this turn, so this needs ${n}'s own words from this turn quoted in \`words\` (verbatim, at least a few words), or their click on a card (w5507)`,
+    };
+  }
+
+  /** The person's own messages in the current turn (w5507): from the one that opened it on, `from` 'human' only. */
+  private turnPersonMessages(chat: SessionHandle): string[] {
+    const events = this.store.readTranscript(chat.info.id, 400);
+    const start = chat.turnId ? events.findIndex((e) => e.kind === 'user' && e.uuid === chat.turnId) : -1;
+    return events
+      .slice(Math.max(start, 0))
+      .filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human')
+      .slice(start >= 0 ? 0 : -1)
+      .map((e) => e.text);
   }
 
   /** Whether a click of the person's covers `need` now, spending it: the ops worker's gates (server/opsWorker.ts) ask this. */
@@ -3858,7 +3900,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * a request that explicitly asks for work in that clone, and never on one from the intake (its text is not a person's).
    * Taking it back needs no turn: it narrows. A running worker's guard changes with its next message.
    */
-  private setMainCloneAccess(chat: SessionHandle, owner: Requester, w: WorkItem, machine: string | false): string {
+  private setMainCloneAccess(chat: SessionHandle, owner: Requester, w: WorkItem, machine: string | false, words?: string): string {
     if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request: only its own people grant its workers a machine's main clone`);
     if (machine === false || machine === '') {
       if (!w.mainCloneAccess) return `${w.id} grants no main-clone work.`;
@@ -3869,7 +3911,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       return `${w.id}: main-clone work on ${was} taken back (a running worker's guard changes with its next message).`;
     }
     if (w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its text is not a person's own, so it never grants work in a main clone`);
-    const turn = this.reactionTurn(chat, { verb: 'main_clone', refs: [w.id], also: [machine] });
+    const turn = this.reactionTurn(chat, { verb: 'main_clone', refs: [w.id], also: [machine] }, words);
     const id = this.mainCloneMachine(owner, machine, turn.own, turn.hint);
     if (w.mainCloneAccess?.machine === id) return `${w.id} already grants work in ${id}'s main clone.`;
     w.mainCloneAccess = { machine: id, by: owner.displayName, at: this.now().toISOString() };
@@ -3888,7 +3930,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * alone is noteForOther's (w677: another owner's request only). The request's people hear who did it and why; the
    * dispatcher hears a cancel or a reopen, as for their own.
    */
-  private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; question_for?: string }): string {
+  private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; question_for?: string; words?: string }): string {
     const whose = `${names(w.requesters)}'s`;
     const refused = `${w.id} is ${whose} request, not ${by.displayName}'s`;
     if (!this.isOwnerRole(by.userId)) throw new Error(`${refused}; only an owner closes or reopens another person's request, or adds a note to another owner's`);
@@ -3900,7 +3942,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // reopens as one's own does, on the orchestrator's judgment in any turn (a timer, a [ledger cleanup] follow-up). A
     // member's request still needs the owner's own words in this turn.
     // w1039: a click of theirs on the orchestrator's proposal to close it is their own words for the close (not for a reopen).
-    const turn = this.reactionTurn(chat, input.close ? { verb: input.close === 'done' ? 'close_done' : 'close_cancelled', refs: [w.id] } : { verb: 'job' });
+    const turn = this.reactionTurn(chat, input.close ? { verb: input.close === 'done' ? 'close_done' : 'close_cancelled', refs: [w.id] } : { verb: 'job' }, input.words);
     const own = turn.own;
     const betweenOwners = this.isOwnerRole(w.requestedBy.userId);
     if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}`);
@@ -3951,10 +3993,12 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (!answer && !input.priority && !input.question_for) return false;
     const whose = `${names(w.requesters)}'s`;
     const act = input.question_for ? 'moves its question' : input.priority ? 'changes its priority' : 'answers its question';
-    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') {
-      // A note alone outside their turn stays a note (w677); a priority or a move waits for their own words.
+    const mine = this.turnOwnWords(chat, input.words);
+    if (!mine.own) {
+      // A note alone outside their turn stays a note (w677); a priority or a move waits for their own words. A turn a
+      // relayed message joined takes their words quoted (w5507).
       if (answer) return false;
-      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only in a turn ${by.displayName} started with their own words, and this turn is not theirs (a check-in, a timer, a worker's report or a relayed message) (w3606)`);
+      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only in a turn ${by.displayName} started with their own words, and this turn is not theirs (a check-in, a timer, a worker's report or a relayed message) (w3606)${mine.hint}`);
     }
     if (input.priority && input.question_for) throw new Error('question_for stands alone (a note giving the reason is fine): it hands the open question on and keeps the request open');
     const asked = questionFor(w);
