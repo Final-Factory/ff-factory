@@ -107,9 +107,15 @@ if ! id "$FFF_USER" >/dev/null 2>&1; then
   run_cmd useradd --system --user-group --home-dir "$FFF_ROOT/home" --no-create-home --shell /bin/bash --comment 'FF Factory portal' "$FFF_USER"
 fi
 run_cmd passwd -l "$FFF_USER" >/dev/null
-for d in "" /home /config /data /app /agents /review /sandboxes /secrets; do
+# $FFF_ROOT is root's with fff's group and the sticky bit, and the release folders are root's (w5505): fff makes and
+# owns its folders here, but cannot rename or replace /app, whose release trees, record and links root trusts.
+run_cmd install -d -m 1770 -o root -g "$FFF_USER" "$FFF_ROOT"
+run_cmd chown "root:$FFF_USER" "$FFF_ROOT"
+run_cmd chmod 1770 "$FFF_ROOT"
+for d in /home /config /data /agents /review /sandboxes /secrets; do
   run_cmd install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$FFF_ROOT$d"
 done
+run_cmd install -d -m 0755 -o root -g root "$FFF_ROOT/app"
 run_cmd install -d -m 0700 -o root -g root "$FFF_ROOT/backup"
 run_cmd install -d -m 0755 /etc/fff
 [ -f "$FFF_CONF" ] || write_file "$FFF_CONF" 0644 >/dev/null <<EOF
