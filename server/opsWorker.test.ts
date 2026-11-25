@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, sdkVersion, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -1174,4 +1174,15 @@ test('w5516: the installer commands pin a full commit, fetched at it and named t
   assert.equal(installerUrl(c), `https://raw.githubusercontent.com/Final-Factory/ff-factory/${c}/scripts/worker/install.sh`);
   for (const bad of ['main', c.slice(0, 12), c.toUpperCase(), `${c} --ref main`, ''])
     assert.throws(() => workerUpdateRemote({ root: '/x', platform: 'linux' }, bad), /pinned to a full 40-character commit id/, bad);
+});
+
+test("sdkVersion finds the SDK from the portal's own folder, whatever the process's working folder (w5598)", () => {
+  const want = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).version;
+  const was = process.cwd();
+  process.chdir(os.tmpdir());
+  try {
+    assert.equal(sdkVersion(), want);
+  } finally {
+    process.chdir(was);
+  }
 });

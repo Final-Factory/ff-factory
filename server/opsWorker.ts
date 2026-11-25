@@ -466,8 +466,12 @@ const PASS_ENV = /^(CLAUDE_CODE_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE_AGENT_SDK
 /** The portal's own settings that must not reach it, though they match the pattern. */
 const NEVER_ENV = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_GIT_BASH_PATH']);
 
-/** The SDK's own version (its package.json): the launcher refuses a claude binary of another version. */
-export function sdkVersion(root = process.cwd()): string {
+/**
+ * The SDK's own version (its package.json): the launcher refuses a claude binary of another version. Found from this
+ * file's own folder, not the process's: from any other folder it read as unknown, and every agent fell back to fff
+ * (w5598's real-turn check ran its driver outside the app folder).
+ */
+export function sdkVersion(root = path.resolve(import.meta.dirname, '..')): string {
   try {
     return String(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).version ?? '');
   } catch {
