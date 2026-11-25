@@ -827,7 +827,8 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 | `maxEventsFile` and the Unity slots mailbox, only where `daemon.json` puts them outside the root | ffdiscord appends Max's events (`FF_MAX_EVENTS`); the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps both inside it (`<root>/max`, `<root>/unity-slots`, w5377), so they need no rule |
 | `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |
 | `~/.config/unity3d`, `~/.local/share/unity3d` | Unity's editor and player prefs, `upm.log` and CoreBusinessMetrics. Moving them with XDG_CONFIG_HOME would also hide the licence from Unity |
-| `/tmp` | Unity ignores TMPDIR for its Package Manager socket (`/tmp/Unity-Upm-<pid>.sock`: without it the editor exits 1), its shader compiler's lock (`/tmp/Unity-ShaderCompilerIPC-*.lock`) and `/tmp/.dotnet/shm` (without them it aborts at shader compiler start). |
+| `/tmp`, create-only (w5561) | Unity ignores TMPDIR for its Package Manager socket (`/tmp/Unity-Upm-<pid>.sock`: without it the editor exits 1), its shader compiler's socket and lock (`/tmp/Unity-ShaderCompilerIPC-*`), the IL post-processor's socket (`/tmp/ilpp.sock-<hash>`) and the .NET runtime's socket. `--create` grants only new regular files and sockets and removing files: no write, truncate, folder or link, so a file already there cannot be changed. The shader compiler's lock is opened `O_RDONLY\|O_CREAT` and flock'd, so needs no write |
+| `/tmp/.dotnet` | the .NET runtime's IPC files (`.dotnet/shm/session<N>/`, written). The spawner makes `.dotnet/shm` first, mode 1777 as the runtime does |
 | `/dev`, `/proc` | null, tty, shm and the GPU; Unity writes its own `oom_score_adj`. Ordinary file modes still apply |
 | `writeLockExtra` | anything else a machine needs, each with its reason |
 
@@ -855,8 +856,14 @@ for systemd-executor, or turning the sysctl off for the whole machine.
 - A new top-level folder in the root is refused, because rules name the folders that exist when claude starts. A
   folder the daemon adds later is picked up at the next start.
 - The agent host and the sandbox editor the daemon starts stay outside the lock.
-- `/tmp` and `/dev/shm` are writable, and the worker runs as the person, so it can change or delete the person's own
-  files there (not other users'). A private `/tmp` needs a mount namespace, refused here like systemd's.
+- `/tmp` is create-only (w5561): a worker cannot write, truncate or link the person's files there, but can still delete
+  or rename them within `/tmp` (the sticky bit keeps other users' safe), and `/tmp/.dotnet` stays writable.
+- `/dev/shm` stays writable (w5561, measured on biscuit with it closed): Python's `multiprocessing` and
+  `shared_memory` fail with PermissionError (POSIX semaphores and shm live only there), and headless Chromium crashes
+  ("Creating shared memory in /dev/shm/.org.chromium.Chromium.* failed"). git, npm, uv, cargo (ffu build and tests),
+  the slot player and a batch editor passed without it.
+- A private `/tmp` or `/dev/shm` per worker needs a mount namespace, refused here like systemd's (`unshare -Urm`:
+  "write failed /proc/self/uid_map: Operation not permitted"; bwrap: "Failed to make / slave").
 - Refused writes leave no log on a machine without auditd. Find them with `strace -f -Z`.
 - Needs Landlock (on in Ubuntu since 22.04). Without it the launcher exits 125 and the agent does not start: leave the
   setting off there.
