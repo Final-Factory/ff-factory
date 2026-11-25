@@ -52,14 +52,14 @@ export interface WriteLockPaths {
 }
 
 /**
- * w5546: the read half. The daemon's folder, `secrets` and `root.json` are closed to reads; what workers read in the
- * daemon's folder (FENCE_READ_ALLOW: logs, code, the gh shim, Unity MCP status) is given back. Per run, `noRead` closes
+ * w5546: the read half. The daemon's folder, `secrets`, `root.json` and the daemon-only children (`steam`, w5639) are
+ * closed to reads; what workers read in the daemon's folder (FENCE_READ_ALLOW: logs, code, the gh shim, Unity MCP status) is given back. Per run, `noRead` closes
  * more (w5548's gh login) and `read` gives back one path inside a closed folder (the run's own GitHub App tokens, w5547).
  */
 export function readLockArgs(p: { root: string; appDir?: string; noRead?: string[]; read?: string[] }): string[] {
   const root = path.resolve(p.root);
   const app = p.appDir ? path.resolve(p.appDir) : path.join(root, 'daemon');
-  const closed = [...new Set([app, path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), ...(p.noRead ?? [])])];
+  const closed = [...new Set([app, path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), ...DAEMON_ONLY_CHILDREN.map((c) => path.join(root, c)), ...(p.noRead ?? [])])];
   const back = [...FENCE_READ_ALLOW.map((a) => path.join(app, a)), ...(p.read ?? [])];
   return [...closed.flatMap((c) => ['--no-read', c]), ...back.flatMap((b) => ['--read', b])];
 }

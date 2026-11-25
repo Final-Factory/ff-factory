@@ -78,6 +78,11 @@ process tree but not the job or the scope.
     reads the job's process count every 3 s. A Git Bash fork refused by the limit was seen posting no port message.
   - Nested jobs work: node's own and the Task Scheduler's. libuv does not break a detached child away, so detached tools stay
     in the job (measured).
+  - **No mode allows breakaway, warn included.** With `JOB_OBJECT_LIMIT_BREAKAWAY_OK` set, Git Bash (MSYS2/Cygwin) starts
+    every child with `CREATE_BREAKAWAY_FROM_JOB`, so whatever a worker runs through Bash leaves the job and warn's peaks miss
+    it. Measured on lothdesktop after #1223 (which set it in warn): the same job query found the worker's job from PowerShell
+    (flags 0x800) and another job from Bash (flags 0). `server/workerCaps.test.ts`, "what Git Bash starts stays in the job",
+    counts 5 processes with the flag and passes without it.
 - **Linux: the host's systemd scope.** The daemon starts each host in its own scope (`machine/linuxScope.ts`, w2474). A
   worker's scope gets `MemoryMax` and `TasksMax` where the user manager delegates the memory and pids controllers.
   - `probeLimits` checks this by having a test scope read its own `memory.max` and `pids.max` back, because systemd takes the

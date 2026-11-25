@@ -483,6 +483,32 @@ test('Windows warn: the job holds no memory limit, its peak commit is polled and
   });
 });
 
+// Git Bash, where a worker runs most of its tools: the one Claude Code uses (a worker's, its own Git), else Git for Windows';
+// absent on a runner without either.
+const GIT_BASH =
+  process.platform === 'win32'
+    ? [process.env.CLAUDE_CODE_GIT_BASH_PATH, path.join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe')].find((b): b is string => !!b && fs.existsSync(b))
+    : undefined;
+
+test("Windows warn: what Git Bash starts stays in the job and is counted (no breakaway)", { skip: !GIT_BASH, timeout: 120_000 }, async () => {
+  const app = appDir();
+  await withHost(async (h) => {
+    const logs: string[] = [];
+    const stop = await startWorkerCaps({ caps: { memoryBytes: 64 * GiB, processes: 1000, tasks: 0, tempBytes: 1e12 }, mode: 'warn', appDir: app, onCap: () => undefined, log: (s) => logs.push(s), hostPid: h.proc.pid, watch: { POLL_MS: 200 } });
+    try {
+      // the tool is Bash, which starts six sleeps: with JOB_OBJECT_LIMIT_BREAKAWAY_OK MSYS starts them outside the job
+      h.claude(`const { spawn } = require('child_process'); const p = spawn(${JSON.stringify(GIT_BASH)}, ['-c', 'for i in 1 2 3 4 5 6; do sleep 30 & done; echo started; wait'], { stdio: ['ignore', 'inherit', 'ignore'] }); console.log('tool ' + p.pid); setInterval(() => 0, 1000);`);
+      await h.until(/^started$/, 60_000);
+      await new Promise((r) => setTimeout(r, 1500));
+    } finally {
+      await stop();
+    }
+    // host, claude, bash and six sleeps: nine at least (only three when the sleeps broke away)
+    const peak = /peaks \(mode warn\): (\d+) processes at once/.exec(logs.join('\n'));
+    assert.ok(peak && Number(peak[1]) >= 9, JSON.stringify(logs));
+  });
+});
+
 test('Linux warn: the scope has no limits; its memory.peak and pids.peak are read and reported over the caps, once', { timeout: 60_000 }, async () => {
   const cg = fakeScope({ 'memory.peak': '1000000000\n', 'pids.peak': '5\n', 'memory.events.local': 'oom_kill 0\n', 'pids.events': 'max 0\n' });
   try {
