@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { probeFence, type ProbeRun } from '../machine/fenceProbe.ts';
 
-// w5377: a write fence that cannot run a no-op is left off, so agents run unfenced and the daemon keeps working.
+// w5377: a write fence that cannot run a no-op is reported, never thrown, so the daemon keeps working (w5555: and holds its sandbox workers).
 
 const fake = (r: ReturnType<ProbeRun>): ProbeRun => () => r;
 

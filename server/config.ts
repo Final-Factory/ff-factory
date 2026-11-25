@@ -304,6 +304,12 @@ export interface Config {
    */
   deviceApproval?: 'off' | 'members';
   /**
+   * New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"): "advisory" (the default, unset),
+   * an owner's login from outside the tailnet on a browser no owner approved is let in but logged as one that would need
+   * approval; "off", nothing is recorded. It never holds or refuses an owner; any other value reads as "advisory".
+   */
+  ownerDeviceApproval?: 'off' | 'advisory';
+  /**
    * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "warn" (unset) logs what would be
    * refused and lets it in, "enforce" refuses it, "off" skips the check (the recovery switch, docs/machines.md).
    */

@@ -110,7 +110,7 @@ export interface JoinAnswer {
   installer?: { name: string; text: string };
 }
 
-/** A browser that asked to sign in as a member, or was approved for one (device approval, docs/identity.md). */
+/** A browser that asked to sign in, or was approved for a login (device approval, docs/identity.md; owners too since w5524). */
 export interface DeviceInfo {
   id: string;
   username: string;
@@ -123,12 +123,36 @@ export interface DeviceInfo {
   decidedAt?: string;
   decidedBy?: string;
   lastSeenAt?: string;
+  /** An owner's login let in by ownerDeviceApproval "advisory" that would need approval. */
+  advisory?: boolean;
+}
+
+/** An owner's login advisory device approval let in that would need approval (w5524). */
+export interface DeviceLogInfo {
+  at: string;
+  username: string;
+  displayName: string;
+  device: string;
+  label: string;
+  ip: string;
+  userAgent: string;
+  mode: 'off' | 'advisory';
+  outcome: 'would-need-approval' | 'would-be-refused';
+}
+
+export interface DevicesView {
+  deviceApproval: 'off' | 'members';
+  ownerDeviceApproval: 'off' | 'advisory';
+  devices: DeviceInfo[];
+  /** This browser's own device record, if it has one. */
+  current?: string;
+  log: DeviceLogInfo[];
 }
 
 export const api = {
   /** pending: the password was right, but this browser waits for an owner's approval (HTTP 202, no session). */
   login: (username: string, password: string) => request<{ username?: string; pending?: boolean; error?: string }>('POST', '/api/login', { username, password }),
-  devices: () => request<{ deviceApproval: 'off' | 'members'; devices: DeviceInfo[] }>('GET', '/api/devices'),
+  devices: () => request<DevicesView>('GET', '/api/devices'),
   decideDevice: (id: string, action: 'approve' | 'deny' | 'revoke') => request<{ devices: DeviceInfo[] }>('POST', `/api/devices/${encodeURIComponent(id)}/${action}`),
   logout: () => request<unknown>('POST', '/api/logout'),
   /** `timeoutMs`: give up after it (the socket's failure check, w5318); absent, wait as long as the browser does. */

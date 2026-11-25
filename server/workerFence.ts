@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
+import { projectSlug } from './claudeHome.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -42,6 +43,34 @@ const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN], files: ['root.json'] };
 
 /**
+ * w5563: the one conversation a fenced process may write in its Claude home's transcripts. `projects` is
+ * `<CLAUDE_CONFIG_DIR>/projects`, resolved; `sid` its Claude Code session id (`--resume` or `--session-id`).
+ */
+export interface OwnTranscript {
+  projects: string;
+  sid: string;
+}
+
+/** An SBPL regex literal of a path (#"..."): its regex characters escaped. */
+const rx = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/"/g, '\\"');
+
+/**
+ * w5563: every transcript in the agent's Claude home is read-only to it, but its own conversation's: `<sid>.jsonl` in any
+ * project folder (a long cwd's folder is named by a hash, a moved sandbox keeps its old one) and its `<sid>/` folder
+ * (tool results, subagents' transcripts). Claude Code only appends there (docs/transcript-seal.md); it may not make
+ * `memory/` or a new project folder (measured on m5: a resume and a new conversation both ran with the folder read-only and
+ * `memory` unmakeable), and the host makes the cwd's project folder first (fenceSpawner).
+ */
+export function ownTranscriptRules(o: OwnTranscript): string[] {
+  const p = rx(o.projects);
+  return [
+    ";; other conversations' transcripts are read-only (w5563, docs/transcript-seal.md)",
+    `(deny file-write* (subpath ${lit(o.projects)}))`,
+    `(allow file-write* (regex #"^${p}/[^/]+/${o.sid}\\.jsonl$") (regex #"^${p}/[^/]+/${o.sid}(/|$)"))`,
+  ];
+}
+
+/**
  * Signals (w5562): a worker may signal only processes of its own fence, itself and everything it started (they inherit
  * its sandbox), so a careless `pkill -f` or `kill` cannot end the daemon, the agent host, a Unity editor the daemon
  * started, another worker or the owner's apps. Signal 0 (a liveness check) is a signal too: to a process outside the
@@ -54,7 +83,7 @@ export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONL
  */
 export const SIGNAL_RULES = [';; signals: only to this fence\'s own processes (w5562)', '(deny signal)', '(allow signal (target self) (target children) (target same-sandbox))'];
 
-export function seatbeltProfile(f: WorkerFence): string {
+export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
   const home = (p: string) => path.join(f.home, p);
   const extra = (f.extraWritable ?? []).filter((p) => path.isAbsolute(p));
   return [
@@ -85,6 +114,7 @@ export function seatbeltProfile(f: WorkerFence): string {
     `  (subpath ${lit(home('Library/Unity/licenses'))})`,
     ';; Unity per-user caches with no project setting: GI cache, Bee, CurlRequestCache.db (a player build logged "Failed to create GICache directory" 81,224 times without it)',
     `  (subpath ${lit(home('Library/Caches/com.unity3d.UnityEditor'))}))`,
+    ...(own ? ownTranscriptRules(own) : []),
     ';; inside the root, read-only for workers',
     '(deny file-write*',
     ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
@@ -131,7 +161,39 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
 export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh') });
 
 /** The argv that runs `command args` inside the fence. */
-export const fencedArgv = (f: WorkerFence, command: string, args: string[]) => [SANDBOX_EXEC, '-p', seatbeltProfile(f), command, ...args];
+export const fencedArgv = (f: WorkerFence, command: string, args: string[], own?: OwnTranscript) => [SANDBOX_EXEC, '-p', seatbeltProfile(f, own), command, ...args];
+
+/** The Claude Code session id a claude argv runs (`--resume <id>` or `--session-id <id>`, either form), when it is a safe one. */
+export function sessionIdOf(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    const v = a === '--resume' || a === '--session-id' ? args[i + 1] : /^--(?:resume|session-id)=(.*)$/.exec(a)?.[1];
+    if (v !== undefined) return /^[A-Za-z0-9_-]{8,80}$/.test(v) ? v : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * w5563: the transcripts this process may write (its own conversation's), when its Claude home is in the root: a home outside
+ * it is refused whole by the fence already. The cwd's project folder is made here, outside the fence, under both the cwd's
+ * name and its resolved one. A process whose session id the argv does not say gets no rule: it writes no transcript of
+ * another conversation's id either way it could find, but AgentSession always passes one (`sessionId` or `resume`).
+ */
+export function ownTranscriptOf(f: WorkerFence, o: { args: string[]; cwd?: string; env: Record<string, string | undefined> }): OwnTranscript | undefined {
+  const sid = sessionIdOf(o.args);
+  const home = o.env.CLAUDE_CONFIG_DIR;
+  if (!sid || !home || !path.isAbsolute(home)) return undefined;
+  const projects = path.join(real(home), 'projects');
+  if (!projects.startsWith(f.root + path.sep)) return undefined;
+  for (const cwd of new Set(o.cwd ? [o.cwd, real(o.cwd)] : [])) {
+    try {
+      fs.mkdirSync(path.join(projects, projectSlug(cwd)), { recursive: true });
+    } catch {
+      // the CLI's write is refused and says so; the conversation's other folders still take it
+    }
+  }
+  return { projects, sid };
+}
 
 /**
  * Options.spawnClaudeCodeProcess: the SDK's claude, inside the fence. sandbox-exec execs the command, so the child's pid
@@ -141,7 +203,7 @@ export const fencedArgv = (f: WorkerFence, command: string, args: string[]) => [
 export function fenceSpawner(f: WorkerFence, run: typeof spawn = spawn, log: (line: string) => void = (l) => console.warn(l)) {
   return (o: SpawnOptions): SpawnedProcess => {
     fs.mkdirSync(fenceEnv(f).CLAUDE_CODE_TMPDIR, { recursive: true });
-    const [cmd, ...args] = fencedArgv(f, o.command, o.args);
+    const [cmd, ...args] = fencedArgv(f, o.command, o.args, ownTranscriptOf(f, o));
     const child: ChildProcess = run(cmd, args, { cwd: o.cwd, env: o.env as NodeJS.ProcessEnv, signal: o.signal, stdio: ['pipe', 'pipe', 'pipe'] });
     let tail = '';
     child.stderr?.on('data', (c: Buffer) => (tail = (tail + c.toString()).slice(-2000)));
