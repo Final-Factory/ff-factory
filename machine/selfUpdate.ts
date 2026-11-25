@@ -15,7 +15,7 @@
 //
 // No module here may need an npm package: linkJob.ts imports these from a checkout that has none.
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { gitExecFile } from '../server/safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -207,7 +207,7 @@ export async function downloadBundle(
 
 const git = (args: string[], timeoutMs = 5 * 60_000) =>
   new Promise<string>((resolve, reject) =>
-    execFile('git', args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, stdout, stderr) =>
+    gitExecFile(args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, stdout, stderr) =>
       err ? reject(new Error(`git ${args[0] === '-C' ? args[2] : args[0]} failed: ${String(stderr || err.message).trim().split('\n').pop()}`)) : resolve(String(stdout)),
     ),
   );

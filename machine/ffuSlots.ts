@@ -19,7 +19,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 
@@ -398,7 +398,7 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     facts,
     now: () => Date.now(),
     git: (args, cwd) => {
-      const r = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
+      const r = gitSpawnSync(args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
       return { code: r.status ?? (r.error ? 127 : 1), out: r.stdout ?? '', err: r.stderr ?? (r.error ? r.error.message : '') };
     },
     freeGB: (dir) => {

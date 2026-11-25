@@ -1094,6 +1094,30 @@ on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
 portal never sends it one: it says the daemon is being redeployed.
 
+### Git in a worker's checkout runs no program the worker named (w5541)
+
+A worker writes its checkout's git config freely (`git config` in its worktree writes the clone's shared config, and a
+`.git` file can point at a git folder it made), so every git call the daemon, the agent host or another Medium process
+makes goes through `server/safeGit.ts`: `run()` (`server/proc.ts`), the worker's `exec()` and `machine/prFlow.ts` fence
+git by themselves, and a direct child_process call uses `gitExecFileSync`/`gitSpawnSync`/`gitSpawn`/`gitExecFile`.
+The fence is command-scope config (it outranks every config file): `core.fsmonitor=false`, `core.hooksPath` on
+`server/gitHooks` (git-lfs's four hooks and no other, so a push still uploads LFS objects; its lock hooks (post-checkout, post-commit, post-merge) run only where `.gitattributes` marks something `lockable`, since git-lfs on every commit made them over three times slower; `git lfs install`/`update`
+keep the repository's folder, since they write hooks there), the `cat` pager, `:` editors, no signing, remote transports only https, http, ssh and
+file; `--no-ext-diff --no-textconv` on `diff`/`log`/`show`; and keys a repository names freely (a filter's `clean`, a
+diff `textconv`, a merge driver, a credential helper, `core.sshCommand`, git-lfs transfer agents) read by one `git config`
+call and set back to the user's or system's value, else a neutral one (git-lfs's own filter for `filter.lfs.*`).
+That last part has a race: a key written between the scan and the call wins, so it narrows the gap without closing it.
+A repository-set `url.<base>.insteadOf` cannot be overridden by value (the longest prefix wins and the repository's entry
+wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). Not covered: `lfs.url`
+in a repository's config (git-lfs would send LFS objects there; the GitHub token's helper answers only github.com).
+
+`worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools/final-factory-agents` to origin/master, but
+runs `registerAgents.sh` from a fresh shallow clone in a new temp folder, made with no global config, no system config
+(but on Windows) and the fence, and removed after; the script, hooks and config in the root's checkout never run.
+`server/safeGit.test.ts` fails on a git spawn that skips the helper and shows with a marker file that the daemon's status,
+diff, commit and log calls run no planted fsmonitor, filter, textconv, `diff.external` or hook, in a `git worktree` and
+behind a `.git` file.
+
 ### Placing work
 
 A sandbox whose agent is **between turns** (w475, w509, w643; [orchestrators.md](orchestrators.md), "Agent states": alive
