@@ -224,6 +224,19 @@ test('the reinstall’s check of the sandboxes: a commit no remote has, or an un
   fs.writeFileSync(path.join(sandboxes, 'slot3', 'a.txt'), 'edited');
   const risks = await sandboxRisks(sandboxes);
   assert.deepEqual(risks.map((r) => [r.sandbox, r.unpushed.length, r.dirty.length]), [['slot2', 1, 0], ['slot3', 0, 1]]);
+  // w5614: a slot repo (its own .git folder) keeps its other branches and its stash itself; the reinstall deletes them.
+  const slot4 = path.join(sandboxes, 'slot4');
+  git(base, 'clone', '-q', origin, slot4);
+  git(slot4, 'switch', '-q', '-c', 'side');
+  fs.writeFileSync(path.join(slot4, 'c.txt'), 'c');
+  git(slot4, 'add', 'c.txt');
+  git(slot4, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'side work');
+  git(slot4, 'switch', '-q', 'main');
+  fs.writeFileSync(path.join(slot4, 'a.txt'), 'stashed');
+  git(slot4, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'stash', '-q');
+  const slotRisk = (await sandboxRisks(sandboxes)).find((r) => r.sandbox === 'slot4');
+  assert.equal(slotRisk?.unpushed.length, 2, 'the side branch commit and the stash');
+  assert.match(slotRisk!.unpushed.join('\n'), /\(stash, in this sandbox only\)/);
   fs.rmSync(base, { recursive: true, force: true });
 });
 

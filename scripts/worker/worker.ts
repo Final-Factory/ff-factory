@@ -1946,6 +1946,8 @@ export interface UpdateFlags {
   workerFence?: 'on' | 'off';
   /** The worker caps' mode (w5554, docs/worker-caps.md): written as daemon.json's `workerCaps`; unset carries daemon.json's (absent: warn). */
   workerCaps?: 'off' | 'warn' | 'enforce';
+  /** The transcript lock (w5702, docs/transcript-seal.md), Linux only: written as daemon.json's `transcriptLock`; unset carries daemon.json's. */
+  transcriptLock?: 'on' | 'off';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -1999,6 +2001,20 @@ export function applyWorkerCaps(config: Record<string, unknown>, mode: 'off' | '
   return mode ? { ...config, workerCaps: mode } : config;
 }
 
+/** `--transcript-lock on|off` (w5702): anything else is refused, never guessed at. Exported for tests. */
+export function transcriptLockFlag(v: string | undefined): 'on' | 'off' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'on' && v !== 'off') throw new Error(`--transcript-lock is on or off, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the transcript lock set, "off" written as "off" like the caps' modes (w5702); Linux only: macOS' fence seals transcripts itself. Exported for tests. */
+export function applyTranscriptLock(config: Record<string, unknown>, setting: 'on' | 'off' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  if (platform !== 'linux') throw new Error(`--transcript-lock: Linux only (the macOS fence already does this; docs/transcript-seal.md), not ${platform}`);
+  return { ...config, transcriptLock: setting };
+}
+
 /**
  * The install options an update runs with (w613): the root's own root.json and daemon.json, every setting carried
  * (beast's agent total, protected paths, the Library seed, the editors' priority, the disk guard, cleanup, the Unity
@@ -2035,7 +2051,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2270,6 +2286,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   const o = planUpdate(l.root, m, config, token, { ...f, absoluteWorktrees: rel === 'false', ...(owner ? { owner } : {}) });
   if (f.workerFence) say(workerFenceLine(f.workerFence));
   if (f.workerCaps) say(`worker caps: ${f.workerCaps}`);
+  if (f.transcriptLock) say(`transcript lock: ${f.transcriptLock}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2453,9 +2470,15 @@ export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]>
   for (const name of fs.readdirSync(sandboxesDir)) {
     const dir = path.join(sandboxesDir, name);
     if (!fs.existsSync(path.join(dir, '.git'))) continue;
-    const log = await exec('git', ['-C', dir, 'log', '--oneline', '--no-decorate', 'HEAD', '--not', '--remotes', '--']);
+    // A slot repo (w5614, its .git a folder) holds its other branches and its stash itself, not in the kept clone.
+    const slot = fs.statSync(path.join(dir, '.git')).isDirectory();
+    const log = await exec('git', ['-C', dir, 'log', '--oneline', '--no-decorate', ...(slot ? ['HEAD', '--branches'] : ['HEAD']), '--not', '--remotes', '--']);
     const status = await exec('git', ['-C', dir, 'status', '--porcelain=v1', '--untracked-files=normal']);
     const unpushed = log.code === 0 ? log.stdout.split('\n').filter(Boolean) : [`(git log failed: ${log.stderr.trim().slice(0, 200)})`];
+    if (slot) {
+      const stash = await exec('git', ['-C', dir, 'stash', 'list']);
+      if (stash.code === 0) unpushed.push(...stash.stdout.split('\n').filter(Boolean).map((l) => `(stash, in this sandbox only) ${l}`));
+    }
     const dirty = status.code === 0 ? status.stdout.split('\n').filter(Boolean).filter((l) => !/\s(Library|Logs|Temp|obj|Builds|UserSettings)\/?$/.test(l)) : [];
     if (unpushed.length || dirty.length) out.push({ sandbox: name, unpushed, dirty });
   }
@@ -2834,6 +2857,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              Seatbelt on macOS, Low integrity on Windows; default: as daemon.json has it)
             [--worker-caps off|warn|enforce] (w5554: the per-worker memory, process and temp caps' mode, daemon.json workerCaps;
              absent means warn; docs/worker-caps.md)
+            [--transcript-lock on|off] (w5702, Linux: each locked worker writes only its own conversation's transcript, daemon.json
+             transcriptLock; default: as daemon.json has it; docs/transcript-seal.md)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -2931,6 +2956,7 @@ export async function main(argv = process.argv.slice(2)) {
     // A bare `--worker-fence` parses as a flag with no value: refused like any other value that is not on or off.
     const workerFence = flags.has('worker-fence') ? workerFenceFlag('') : workerFenceFlag(opts['worker-fence']);
     const workerCaps = flags.has('worker-caps') ? workerCapsFlag('') : workerCapsFlag(opts['worker-caps']);
+    const transcriptLock = flags.has('transcript-lock') ? transcriptLockFlag('') : transcriptLockFlag(opts['transcript-lock']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -2943,6 +2969,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
       ...(workerFence ? { workerFence } : {}),
       ...(workerCaps ? { workerCaps } : {}),
+      ...(transcriptLock ? { transcriptLock } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

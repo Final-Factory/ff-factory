@@ -27,9 +27,10 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayOwnerSocketProbe, sayReadProbe, secretsDirs, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -84,7 +85,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, workerGhConfigDir } from './ownerSecrets.ts';
+import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, workerGhConfigDir } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -233,6 +234,12 @@ export interface DaemonConfig {
   writeLock?: boolean;
   /** More folders a locked worker may write, each one a measured need (docs/worker-root.md lists them). */
   writeLockExtra?: string[];
+  /**
+   * w5702, with writeLock: "on" lets each locked claude write only its own conversation's transcript (machine/transcriptLock.ts,
+   * docs/transcript-seal.md): `<root>/claude/projects` becomes a link to `<root>/transcripts`, which the lock keeps shut.
+   * Off when unset; set remotely by `ops_worker machine_update transcript_lock`, and `worker_fence off` lifts it with the lock.
+   */
+  transcriptLock?: 'on' | 'off';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -699,7 +706,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence());
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root);
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -3042,6 +3049,8 @@ export class Daemon {
     }
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey], own);
     // w5546: the fences close the daemon's folder, secrets and root.json to reads; the run's own tokens file is given back.
+    // w5702: a transcript move held back for running agents is tried again once they have ended.
+    if (spec.sandbox && this.lockMemo?.transcriptsWait && this.cfg.root && !this.transcriptMoveWaits(this.cfg.root).length) this.lockMemo = undefined;
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
     // w5676: ff-landlock.py skips an open root folder that does not exist yet, and the locked worker cannot make it.
     if (lockArgs && this.cfg.root) {
@@ -3057,7 +3066,7 @@ export class Daemon {
     // w5553/w5560: the owner's secrets (gh login, ~/.ssh, browser profiles, the Keychain) are closed with the read fence,
     // on its own off switch; the gh folder stays open only to a run with no GitHub token at all (ownerReadDenied).
     const owner = spec.sandbox && !readOff ? ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: hasOwnGithub(spec.env) || !!ghMachine.GH_TOKEN }) : [];
-    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(ownDir ? ['--read', ownDir] : [])] } : {};
+    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
     const readFence = baseFence && owner.length ? { ...baseFence, readDenied: [...(baseFence.readDenied ?? []), ...owner], ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : baseFence;
     const fence = readFence && readOff ? { ...readFence, readOff: true } : readFence && ownDir ? { ...readFence, readAllowed: [...(readFence.readAllowed ?? []), ownDir] } : readFence;
@@ -3228,6 +3237,8 @@ export class Daemon {
       };
       // w5377: the Unity slots mailbox workers write exists before the root's children are listed, so it is labelled.
       fs.mkdirSync(this.slotMailbox, { recursive: true });
+      // w5731: <root>/steam before the listing, so it is labelled (kept Medium, and NR with the read fence on) before steamcmd exists.
+      ensureDaemonOnlyDirs(root);
       const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
       const targets = lowTargets({
         root,
@@ -3384,7 +3395,9 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && !readFenceOnRefusal();
+    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
+    const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
+    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
   }
 
   /**
@@ -3421,11 +3434,35 @@ export class Daemon {
       const v = judgeReadProbe(t, r.stdout);
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0;
       log(sayReadProbe(mode, process.platform, v, t));
+      if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock);
       if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused or could not judge one; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
       log(`read fence (${mode}): the probe could not run (${(e as Error).message}); runs start without read rules`);
+    }
+  }
+
+  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
+  private ownerSocketsOpen: string[] = ['(not probed)'];
+
+  /**
+   * w5748: whether a fenced run reaches the Secret Service (the gh keyring login) and the ssh and gpg agents: a child of the
+   * daemon's own, under the lock, read rules and socket denies a run gets in on mode, connects to each owner socket and
+   * closes it, sending nothing. On Linux `on` takes effect only once it finds every one refused; a probe that fails to run
+   * keeps the read rules off (a warn, never a lockout).
+   */
+  private async probeOwnerSockets(mode: ReadFenceMode, lock: string[]): Promise<void> {
+    this.ownerSocketsOpen = ['(not probed)'];
+    try {
+      const socks = ownerSocketProbeTargets(ownerSocketPaths({ runtimeDir: process.env.XDG_RUNTIME_DIR, env: process.env }));
+      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, ...ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR), '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
+      const said = sayOwnerSocketProbe(mode, socks, r.stdout);
+      this.ownerSocketsOpen = r.code === 0 ? said.open : [`(the probe exited ${r.code})`];
+      log(said.line);
+    } catch (e) {
+      log(`read fence (${mode}, linux) owner sockets: the probe could not run (${(e as Error).message})`);
     }
   }
 
@@ -3438,6 +3475,8 @@ export class Daemon {
   private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     if (!this.cfg.root) return;
     const appDir = appDirOfConfig(this.cfg);
+    // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
+    ensureDaemonOnlyDirs(this.cfg.root);
     const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions], secrets: this.secretsDirs });
     if (mode === 'on') {
       if (!(await labelNoReadUp(t, exec, say))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
@@ -3469,7 +3508,7 @@ export class Daemon {
     await this.probeReadFence();
   }
 
-  private lockMemo?: { args?: string[]; why?: string };
+  private lockMemo?: { args?: string[]; why?: string; transcripts?: string; transcriptsWait?: boolean };
   /**
    * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
    * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 fails it, with why in
@@ -3479,9 +3518,14 @@ export class Daemon {
     if (!this.lockMemo) {
       let args: string[] | undefined;
       let why: string | undefined;
+      let transcripts: string | undefined;
+      let waits: string[] = [];
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()] });
+          waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
+          if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
+          transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg));
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
@@ -3501,9 +3545,43 @@ export class Daemon {
         args = undefined;
       }
       if (why) log(`write lock: ${why}; sandbox workers are held (w5555)`);
-      this.lockMemo = { args, ...(why ? { why } : {}) };
+      this.lockMemo = { args, ...(why ? { why } : {}), ...(args && transcripts ? { transcripts } : {}), ...(args && waits.length ? { transcriptsWait: true } : {}) };
     }
     return this.lockMemo.args;
+  }
+
+  /**
+   * w5702: moves the agents' transcripts out of their Claude home (machine/transcriptLock.ts linkTranscripts) and answers
+   * the transcripts folder, or undefined (logged) when the Claude home is not the root's or the move fails: the lock then
+   * opens the transcripts as before, never shuts a worker out of its own.
+   */
+  /**
+   * w5702, w5718's review: the sandbox agents whose running claude would lose its own transcript if the transcripts moved
+   * now. Agent hosts outlive a daemon restart (machine/agentHost.ts) and each keeps the Landlock rules it started with: one
+   * locked without `<root>/transcripts` (older than w5702, or made before the folder was) is refused its transcript once
+   * it is there. Empty when the transcripts are already linked or no such host runs.
+   */
+  private transcriptMoveWaits(root: string): string[] {
+    const home = process.env.CLAUDE_CONFIG_DIR;
+    if (!this.hosted || !home || transcriptsLinked(root, home)) return [];
+    return hostsWithoutTranscripts(this.hostsRoot);
+  }
+
+  private lockTranscripts(root: string): string | undefined {
+    const home = process.env.CLAUDE_CONFIG_DIR;
+    const r = path.resolve(root);
+    if (!home || path.resolve(home) !== path.join(r, 'claude')) {
+      log(`transcript lock: the agents' Claude home (${home ?? 'unset'}) is not in the root ${r}; transcripts stay open to workers`);
+      return undefined;
+    }
+    try {
+      const did = linkTranscripts(r, home);
+      log(`transcript lock: on, each locked claude writes only its own conversation's transcript${did ? `; ${did}` : ''}`);
+      return path.join(r, TRANSCRIPTS);
+    } catch (e) {
+      log(`transcript lock: could not move the transcripts out of ${home} (${(e as Error).message}); they stay open to workers`);
+      return undefined;
+    }
   }
 
   /**

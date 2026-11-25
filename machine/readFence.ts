@@ -68,6 +68,17 @@ export function daemonOnlyDirs(root: string): string[] {
 }
 
 /**
+ * Makes each daemon-only root child (w5731): on Windows the daemon labels only paths that exist, and steamcmd's first
+ * install made <root>/steam after the start's labelling, leaving it readable to Low workers until the next start (N1 of the
+ * #1237 review). Made before the root's children are listed and labelled, an empty one is kept Medium and closed like the
+ * rest, and what steamcmd later writes inside inherits its label. An empty folder changes nothing for the upload: it looks
+ * for steamcmd's program, not the folder (steamUpload.ts installSteamcmd).
+ */
+export function ensureDaemonOnlyDirs(root: string): void {
+  for (const d of daemonOnlyDirs(root)) fs.mkdirSync(d, { recursive: true });
+}
+
+/**
  * Up to three regular files directly inside `dir`, by name (w5639): what the Linux probe opens for a closed folder. Landlock
  * rights are inherited down the tree, so the READ_DIR every parent of a closed path keeps (to list names) reaches the closed
  * folder too: opening or listing the folder itself succeeds there, and only its files' contents are refused. Names only: the
@@ -117,6 +128,27 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
  */
 export const READ_PROBE_SCRIPT =
   "const fs=require('fs');process.argv.slice(1).forEach((p,i)=>{try{fs.closeSync(fs.openSync(p,'r'));console.log(i+' ok')}catch(e){console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))}})";
+
+/**
+ * The owner-socket probe's program (w5748): connects to each UNIX socket and closes at once, sending nothing and reading
+ * nothing, and prints `abi <n>` (ff-landlock.py's FF_LANDLOCK_ABI) then `<i> ok|refused|<code>` per socket. A connect
+ * still pending after 5 s prints `timeout`.
+ */
+export const SOCKET_PROBE_SCRIPT =
+  "const net=require('net');console.log('abi '+(process.env.FF_LANDLOCK_ABI||'?'));process.argv.slice(1).forEach((p,i)=>{const s=net.createConnection({path:p});const t=setTimeout(()=>{console.log(i+' timeout');s.destroy()},5000);s.on('connect',()=>{clearTimeout(t);console.log(i+' ok');s.destroy()});s.on('error',(e)=>{clearTimeout(t);console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))})})";
+
+/**
+ * One log line for the owner-socket probe (w5748), and the sockets it found reachable: on Linux `on` waits for none
+ * (docs/worker-fence.md, "The Secret Service and the agents").
+ */
+export function sayOwnerSocketProbe(mode: ReadFenceMode, socks: readonly string[], stdout: string): { line: string; open: string[] } {
+  const abi = /^abi (\S+)$/m.exec(stdout)?.[1] ?? '?';
+  const v = judgeReadProbe({ closed: socks, open: [] }, stdout);
+  const open = [...v.leftOpen, ...v.unknown];
+  if (!socks.length) return { line: `read fence (${mode}, linux) owner sockets: none found to probe (Landlock ABI ${abi})`, open };
+  const why = open.length ? `; reachable from a fenced run: ${open.join(', ')}${Number(abi) < 9 ? ` (Landlock ABI ${abi}: refusing a socket's connect needs ABI 9, Linux 7.1), so the Secret Service and the agents stay open to workers here` : ''}` : '';
+  return { line: `read fence (${mode}, linux) owner sockets: ${socks.length - open.length}/${socks.length} refused (Landlock ABI ${abi})${why}`, open };
+}
 
 export interface ReadProbeVerdict {
   /** Paths workers need that the fence refused: a lockout if enforced. */

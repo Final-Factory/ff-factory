@@ -77,3 +77,11 @@ OPS_ALLOW_NETS="160.79.104.0/23 2607:6bc0::/48 100.64.0.0/10 fd7a:115c:a1e0::/48
 OPS_MEMORY_MAX=1536M
 # A process older than this is ended by systemd (the portal stops an idle one after 1 h, cuts a turn after 2 h).
 OPS_RUNTIME_MAX=8h
+
+# ---------------------------------------------------------------- the portal's agents (w5598, docs/vault.md "In the VM")
+# The orchestrators, the dispatcher and the bug-thread judge run as this account (fff-agent.socket, fff-agent@.service),
+# which may read no fff process's /proc. The portal falls back to its own account, and alerts, when this is not set up;
+# config agentAccount "off" (set_app_config) switches it off live.
+AGENT_USER=fff-agent
+# Its home (Claude Code's own small files beside the portal's folder); the portal's folders it sees through fff-agent-views.
+AGENT_ROOT=/srv/fff-agent

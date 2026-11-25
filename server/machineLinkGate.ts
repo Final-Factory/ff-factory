@@ -11,9 +11,11 @@ import { tailnetOnly } from './remoteChat.ts';
  * this machine) must be loopback, 100.64.0.0/10 or fd7a:115c:a1e0::/48. A header from any other peer is ignored.
  *
  * config `machineLinkTailnet` (an owner's setting, set_app_config, read live, no restart):
- * - "warn" (the default while unset): every connection is let in as before; one that would be refused is logged
- *   "machine link: WOULD REFUSE ..." (once per address, path kind and reason per hour);
- * - "enforce": that connection is answered 403 and closed;
+ * - "enforce" (the default while unset, since the warn-only rollout showed every daemon on a tailnet address): that
+ *   connection is answered 403 and closed;
+ * - "warn": every connection is let in as before; one that would be refused is logged "machine link: WOULD REFUSE ..."
+ *   (once per address, path kind and reason per hour). An unknown value (a hand-edited typo) is also "warn", never a
+ *   refusal nobody asked for;
  * - "off": no check and no log, the recovery switch (docs/machines.md, "The daemon link is tailnet-only").
  * Each daemon link that opens is also logged with its address ("machine link from <address> ..."), so the portal's log
  * lists what each machine connects from before anyone turns enforce on.
@@ -22,8 +24,9 @@ export type MachineLinkMode = 'off' | 'warn' | 'enforce';
 
 export const MACHINE_LINK_MODES: readonly MachineLinkMode[] = ['off', 'warn', 'enforce'];
 
-/** The mode a config value means: unset or unknown is "warn". */
+/** The mode a config value means: unset is "enforce"; an unknown value is "warn" (it lets in, so a typo locks nobody out). */
 export function machineLinkMode(v: unknown): MachineLinkMode {
+  if (v === undefined || v === null) return 'enforce';
   return v === 'off' || v === 'enforce' ? v : 'warn';
 }
 

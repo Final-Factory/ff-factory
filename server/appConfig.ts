@@ -60,6 +60,9 @@ export const SETTABLE_KEYS = [
   'ownerDeviceApproval',
   // The daemon link from the tailnet only (w5575): "warn", "enforce" or "off" (the recovery switch); null puts back "warn".
   'machineLinkTailnet',
+  // The agents' own OS account on the portal VM (w5598, docs/vault.md "In the VM"): "on" (unset) or "off" (the recovery
+  // switch: agents start as the portal's account, as before); null puts back "on".
+  'agentAccount',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
@@ -198,7 +201,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -480,9 +483,17 @@ export function checkAgeRules(value: unknown, cfg?: Pick<Config, 'protectedPaths
   });
 }
 
+/** w5575 review: trustProxy false and machineLinkTailnet enforce together refuse every daemon that comes in through Serve. */
+const TRUST_PROXY_ENFORCE =
+  'trustProxy false with machineLinkTailnet "enforce" (the default) would refuse every daemon: they come in through Tailscale Serve, whose X-Forwarded-For is then not believed (docs/machines.md, "The daemon link is tailnet-only"). Set machineLinkTailnet to "warn" first';
+
 /** The value to store for `key`, or throws with what is wrong. `null` removes the key (back to the default). */
 export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config, users?: readonly string[]): unknown {
-  if (value === null || value === undefined) return undefined;
+  if (value === null || value === undefined) {
+    // w5721: a reset to the default is a reset to enforce, so it takes the same lockout-pair check as "enforce".
+    if (key === 'machineLinkTailnet' && cfg?.trustProxy === false) throw new Error(TRUST_PROXY_ENFORCE);
+    return undefined;
+  }
   switch (key) {
     case 'ownerName': {
       if (typeof value !== 'string') throw new Error('ownerName is a string');
@@ -570,7 +581,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'trustProxy': {
       if (value === true || value === 'true') return true;
-      if (value === false || value === 'false') return false;
+      if (value === false || value === 'false') {
+        // w5575: every daemon comes in through Tailscale Serve, a hop on this machine; with trustProxy off its X-Forwarded-For
+        // is not believed, so under enforce each one is judged by that hop and refused.
+        if (cfg && (cfg.machineLinkTailnet === undefined || cfg.machineLinkTailnet === 'enforce')) throw new Error(TRUST_PROXY_ENFORCE);
+        return false;
+      }
       throw new Error("trustProxy is true (believe X-Forwarded-For/-Proto from a proxy on this machine, such as Tailscale Funnel) or false");
     }
     case 'deviceApproval': {
@@ -586,8 +602,16 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'machineLinkTailnet': {
       if (value === undefined || value === null) return undefined;
-      if (value === 'off' || value === 'warn' || value === 'enforce') return value;
-      throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back "warn"');
+      if (value === 'off' || value === 'warn' || value === 'enforce') {
+        if (value === 'enforce' && cfg?.trustProxy === false) throw new Error(TRUST_PROXY_ENFORCE);
+        return value;
+      }
+      throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back the default, "enforce"');
+    }
+    case 'agentAccount': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'on' || value === 'warn' || value === 'off') return value;
+      throw new Error('agentAccount is "on" (the portal VM starts its agents as their own OS account, fff-agent), "warn" (as the portal\'s account, checking the agent account\'s socket and alerting when it fails) or "off" (as the portal\'s account, as before w5598: the recovery switch); null puts back "warn"; the VM\'s fffctl agents wins over it');
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1057,6 +1081,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else cfg.ownerDeviceApproval = v as 'off' | 'advisory';
   }
   else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
+  else if (key === 'agentAccount') cfg.agentAccount = v as 'off' | 'warn' | 'on' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;

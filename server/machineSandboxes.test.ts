@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import http from 'node:http';
 import type { EventEmitter } from 'node:events';
 import type { AddressInfo } from 'node:net';
@@ -21,6 +22,7 @@ import { EDITOR_TICKET_RETRY_MS, SandboxPool, type PoolOptions, deletable, idleS
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
 import { readGitStatus } from './gitStatus.ts';
+import { borrowsFrom, configText, finishConversion, gitPathForm, isSlotRepo, isWorktree, keptStashPrefix, worktreeRecordOf } from '../machine/slotRepo.ts';
 import { testRepos } from './testMachine.ts';
 import type { Config } from './config.ts';
 import type { GitStatus, ImageInput, PermissionMode, SandboxPoolSettings, SessionInfo, WorkItem } from '../shared/types.ts';
@@ -1901,4 +1903,174 @@ test('w4925: a repeat pair run for the same request carries the sandboxes its la
   assert.deepEqual(pairRoom({ pair: { ...p.pair!, warm: undefined } }, ['pc', 'biscuit'], fit).pick, ['pc'], 'without it, placement\'s own order');
   w.stop();
   await until('w stopped', () => !w.live);
+});
+
+// ---------------------------------------------------------------- w5614: slot repos (machine/slotRepo.ts)
+
+test('w5614: slot repos: a new sandbox is its own repo that borrows the clone\'s objects; its commits write nothing into the clone; a switch to a branch another sandbox holds is refused; a delete keeps its branches in the clone', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r, { settings: { slotRepos: 'new' } });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  assert.ok(isSlotRepo(dir), 'its .git is a folder with objects/info/alternates');
+  assert.ok(borrowsFrom(dir, path.join(r.main, '.git')), 'it borrows the main clone\'s objects');
+  assert.equal(fs.readFileSync(path.join(dir, 'README.md'), 'utf8').replace(/\r\n/g, '\n'), 'game\n', 'checked out');
+  assert.equal(r.git(dir, 'status', '--porcelain'), '');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+  assert.equal(r.git(dir, 'rev-parse', 'HEAD'), r.git(r.main, 'rev-parse', 'origin/master'), 'at its base');
+  assert.ok(r.git(dir, 'rev-parse', '--verify', 'origin/master'), "origin's refs came along");
+  assert.doesNotMatch(r.git(r.main, 'worktree', 'list'), /sb1/, 'no worktree of the clone');
+  assert.equal(r.git(r.main, 'config', '--get', 'gc.pruneExpire'), 'never', 'the clone keeps what slots borrow');
+  assert.equal(r.git(dir, 'count-objects'), '0 objects, 0 kilobytes', 'nothing copied');
+
+  // A commit: the clone gets no branch, no ref and no object.
+  const before = r.git(r.main, 'count-objects', '-v');
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'w');
+  r.git(dir, 'add', 'work.txt');
+  r.git(dir, 'commit', '-q', '-m', 'slot work');
+  const mine = r.git(dir, 'rev-parse', 'HEAD');
+  assert.equal(r.git(r.main, 'count-objects', '-v'), before, 'no object written into the clone');
+  assert.equal(r.git(r.main, 'branch', '--list', 'sandbox/sb1'), '', 'no branch in the clone');
+
+  // Git no longer refuses a branch another sandbox holds: the pool does.
+  await p.create({ id: 'sb2', branch: 'feature/x', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb2');
+  await assert.rejects(p.switch('sb2', 'sandbox/sb1'), /branch sandbox\/sb1 is checked out in sandbox sb1/);
+  await assert.rejects(p.create({ id: 'sb3', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false }), /checked out in sandbox sb1|max_sandboxes/);
+
+  // Its stash (w5692's review): two entries, the older with an untracked file, the newer a tracked edit.
+  fs.writeFileSync(path.join(dir, 'loose.txt'), 'untracked');
+  r.git(dir, 'stash', 'push', '-u', '-q', '-m', 'older');
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'edited');
+  r.git(dir, 'stash', 'push', '-q', '-m', 'newer');
+  const stashes = r.git(dir, 'stash', 'list', '--format=%H').split('\n').map((l) => l.trim());
+  assert.equal(stashes.length, 2);
+
+  // A delete keeps its unpushed commit: in the clone, under refs/sandbox-kept/sb1/ and as the branch (new there).
+  await p.remove('sb1');
+  // and its stash, newest first, with what each entry held (a worktree's refs/stash lived in the clone and outlived it).
+  assert.equal(r.git(r.main, 'rev-parse', `${keptStashPrefix('sb1')}0`), stashes[0]);
+  assert.equal(r.git(r.main, 'rev-parse', `${keptStashPrefix('sb1')}1`), stashes[1]);
+  assert.equal(r.git(r.main, 'show', `${keptStashPrefix('sb1')}0:work.txt`), 'edited');
+  assert.equal(r.git(r.main, 'show', `${keptStashPrefix('sb1')}1^3:loose.txt`), 'untracked', 'the untracked file came with it');
+  assert.equal(fs.existsSync(dir), false, 'the folder is gone');
+  assert.equal(r.git(r.main, 'rev-parse', 'refs/sandbox-kept/sb1/sandbox/sb1'), mine);
+  assert.equal(r.git(r.main, 'rev-parse', 'refs/heads/sandbox/sb1'), mine);
+  // A worker placed again in another sandbox finds its branch there, from the clone, as with worktrees.
+  const sw = await p.switch('sb2', 'sandbox/sb1');
+  assert.match(sw.notes.join('; '), /took sandbox\/sb1 from the main clone/);
+  assert.equal(r.git(path.join(r.sbRoot, 'sb2'), 'rev-parse', 'HEAD'), mine);
+  await p.remove('sb2');
+});
+
+test('w5614: slot repos "all": a free, idle worktree sandbox becomes a slot repo in place, its files, index and branch kept; one with an agent in it waits', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let live = 1;
+  const { p, events } = pool(r, { liveAgents: () => live });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  fs.writeFileSync(path.join(dir, 'README.md'), 'changed\n');
+  fs.writeFileSync(path.join(dir, 'staged.txt'), 's');
+  r.git(dir, 'add', 'staged.txt');
+  fs.writeFileSync(path.join(dir, 'loose.txt'), 'u');
+  const status = r.git(dir, 'status', '--porcelain');
+  const head = r.git(dir, 'rev-parse', 'HEAD');
+  assert.ok(isWorktree(dir));
+
+  p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
+  await p.tick();
+  assert.ok(isWorktree(dir), 'an agent is live there: left as it is');
+  live = 0;
+  // The tick that sees it free trims its Library caches first (trimReleased, 'cleanup'); the conversion waits for that.
+  await p.tick();
+  await ready(p, 'sb1');
+  (p as unknown as { lastConvertLookAt: number }).lastConvertLookAt = 0;
+  if (!isSlotRepo(dir)) await p.tick();
+  assert.ok(isSlotRepo(dir), `converted: ${JSON.stringify(events)} ${JSON.stringify(p.list())}`);
+  assert.equal(p.list()[0].status, 'ready');
+  assert.equal(r.git(dir, 'status', '--porcelain'), status, 'the same changes, staged and not');
+  assert.equal(r.git(dir, 'rev-parse', 'HEAD'), head);
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/sb1');
+  assert.doesNotMatch(r.git(r.main, 'worktree', 'list'), /sb1/, 'the clone forgot the worktree');
+  assert.equal(fs.readFileSync(path.join(dir, '.git', 'worktree-pointer'), 'utf8').startsWith('gitdir:'), true, 'the old pointer kept');
+  // The branch is free in the clone again: the main clone may check it out (git refused while it was a worktree).
+  r.git(r.main, 'switch', '-q', 'sandbox/sb1');
+  r.git(r.main, 'switch', '-q', 'master');
+});
+
+test('w5614: a conversion cut between its two renames is finished; a slot .git.new beside a whole .git is dropped', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slotfin-'));
+  try {
+    const a = path.join(root, 'a');
+    fs.mkdirSync(path.join(a, '.git.new'), { recursive: true });
+    fs.writeFileSync(path.join(a, '.git.new', 'HEAD'), 'ref: refs/heads/x\n');
+    fs.writeFileSync(path.join(a, '.git.worktree'), 'gitdir: ../repo/worktrees/a\n');
+    assert.equal(finishConversion(a), true);
+    assert.ok(fs.statSync(path.join(a, '.git')).isDirectory());
+    assert.equal(fs.existsSync(path.join(a, '.git.worktree')), false);
+    const b = path.join(root, 'b');
+    fs.mkdirSync(path.join(b, '.git.new'), { recursive: true });
+    fs.writeFileSync(path.join(b, '.git'), 'gitdir: ../repo/worktrees/b\n');
+    assert.equal(finishConversion(b), false);
+    assert.equal(fs.existsSync(path.join(b, '.git.new')), false);
+    assert.ok(fs.statSync(path.join(b, '.git')).isFile(), 'the worktree stays a worktree');
+    assert.equal(finishConversion(path.join(root, 'none')), false);
+    assert.equal(worktreeRecordOf('gitdir: ../../repo/worktrees/slot4\n', path.join(root, 'sb', 'slot4'), path.join(root, 'repo')), path.join(root, 'repo', 'worktrees', 'slot4'));
+    assert.equal(worktreeRecordOf('gitdir: /elsewhere/x\n', path.join(root, 'sb', 'slot4'), path.join(root, 'repo')), undefined, 'never outside the clone');
+    assert.equal(gitPathForm('C:\\a\\b').endsWith('a/b'), true);
+    // configText round-trips through git: quotes, backslashes, a dotted subsection, a tab.
+    const entries: [string, string][] = [['core.autocrlf', 'false'], ['filter.lfs.smudge', 'git-lfs smudge -- "%f"'], ['branch.sandbox/a.b.merge', 'refs/heads/sandbox/a.b'], ['user.name', 'A \\ B\tC']];
+    const cfg = path.join(root, 'cfg');
+    fs.writeFileSync(cfg, configText(entries));
+    const back = execFileSync('git', ['config', '--file', cfg, '--list', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean).map((e) => e.split('\n'));
+    assert.deepEqual(back, entries);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// w5692's review: lothsahn's lockout rule asks for a recovery route tested with nobody at the machine. The route
+// (docs/machines.md, Slot repos, "Going back"): slot_repos off, delete the slot repo, create it again.
+test('w5614: the way back: with slot_repos off a new sandbox is a worktree and nothing converts; a slot repo deleted keeps its branch and stash, and created again is a worktree on that commit', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p } = pool(r, { settings: { slotRepos: 'new' } });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  assert.ok(isSlotRepo(dir));
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'w');
+  r.git(dir, 'add', 'work.txt');
+  r.git(dir, 'commit', '-q', '-m', 'slot work');
+  const mine = r.git(dir, 'rev-parse', 'HEAD');
+
+  // A switch away keeps the stash; a stash dropped since is cleared from the clone on the next keep.
+  fs.writeFileSync(path.join(dir, 'work.txt'), 'stashed');
+  r.git(dir, 'stash', 'push', '-q', '-m', 'one');
+  await p.switch('sb1', 'side/y');
+  assert.equal(r.git(r.main, 'show', `${keptStashPrefix('sb1')}0:work.txt`), 'stashed');
+  r.git(dir, 'stash', 'drop', '-q');
+  await p.switch('sb1', 'sandbox/sb1');
+  assert.equal(r.git(r.main, 'for-each-ref', keptStashPrefix('sb1')), '', 'the dropped entry is gone from the clone too');
+
+  p.configure(SETTINGS(r.sbRoot, {}));
+  await p.create({ id: 'sb2', branch: 'sandbox/sb2', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb2');
+  assert.ok(isWorktree(path.join(r.sbRoot, 'sb2')), 'off: a new sandbox is a worktree');
+  (p as unknown as { lastConvertLookAt: number }).lastConvertLookAt = 0;
+  await p.tick();
+  assert.ok(isWorktree(path.join(r.sbRoot, 'sb2')), 'off: nothing converted');
+
+  await p.remove('sb1');
+  assert.equal(r.git(r.main, 'rev-parse', 'refs/heads/sandbox/sb1'), mine, 'the delete kept the commit in the clone');
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  assert.ok(isWorktree(dir), 'created again: a worktree');
+  assert.equal(r.git(dir, 'rev-parse', 'HEAD'), mine, 'on the kept commit');
+  await p.remove('sb1');
+  await p.remove('sb2');
 });
