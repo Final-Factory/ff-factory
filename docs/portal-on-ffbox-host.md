@@ -523,14 +523,14 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
 ### The update flow
 
 1. **Request.** `request_app_update`, or `fffctl update`, writes `data/update.wanted` (`{ drainMinutes, reason, at }`).
-   `fff-update.path` starts `fff-update request` as root; git and npm run as `fff`.
+   `fff-update.path` starts `fff-update request` as root; git runs as root, `npm` as `fff` (w5505).
 2. **Build while the old portal runs.** It fetches `origin/main` into `app/repo.git` and adds a worktree
    `app/releases/<sha12>` at that commit. There it runs `npm ci` and `npm --prefix web ci`, then the web build. Nobody
    edits these worktrees, so `update-steps.ps1`'s fast-forward, republish and rewrite checks reduce to "a fresh worktree
    at origin's commit". The unit tests for that commit already ran in CI. If the build fails, the dispatcher gets a
    message saying why and nothing restarts. If origin is at the running commit, it says "already up to date" and
    nothing restarts.
-3. **Hand-off.** It writes `data/update.prepared.json`, then `data/restart.request` with
+3. **Hand-off.** It writes the record `app/update.prepared.json` (root's; a copy in `data/` for `fffctl` to read), then `data/restart.request` with
    `{ drain: "auto", drainMinutes, update: true, reason: "update to <sha> (…)" }`. The server drains as it does today,
    writes `data/update.request` and `resume.json`, and exits 0.
 4. **Switch.** systemd starts it again. `ExecStartPre=+fff-update activate` sees `update.request`, swaps the `current`
@@ -542,6 +542,25 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
    `ok: false, "rolled back: …"`, the dispatcher is told, and the portal restarts *(measured in CI: a commit that throws
    at start rolls back by itself)*.
 
+- **Releases are root's, read-only to `fff`** (w5505, lothsahn: "root-owned release record, verified clean tree,
+  read-only release folders"). `activate` runs as root, so it trusts nothing `fff` can write:
+  - `/srv/fff` is `root:fff 1770` (sticky: `fff` cannot rename `app/`), `app/`, `app/releases/` and `app/repo.git` are
+    `root:root 0755`. `fff` reads them through `safe.directory` entries in its git config.
+  - After `npm` (as `fff`) the release is handed to root: `chown -R root:root`, `chmod -R go-w`, setuid bits cleared,
+    tracked files rewritten (`git checkout-index -af`) and no process may still hold a writable file or shared map in it
+    (`writers_in`, from `/proc`). A `.ready` file names the commit.
+  - Before `activate` switches, and before `rollback`, `release_problem` (`deploy/vm/guest/lib.sh`) checks: the folder is
+    `app/releases/<sha12>` and no symlink, git HEAD is the record's commit, the tree is clean (`git status --ignored`
+    allows only `node_modules/`, `web/dist/`, `web/node_modules/`), no symlink leads out, everything is root's and not
+    group- or world-writable. A record `fff` could have written (`data/update.prepared.json`) is never taken; with no
+    root record `activate` builds `origin/main` itself, as for a crash.
+  - **One-time migration**: the first update to this code runs the release's `install.sh`, which runs `fff-update init`:
+    it moves `fff`'s `repo.git` aside, clones it again as root, and rebuilds the new release as root's. Rolling back to a
+    release `fff` built before it is refused ("not fit to run"); a disk snapshot (`vm-rollback.sh`) is the way back.
+  - **Not yet covered**: `node_modules` is still built by `fff` (`npm ci`), and root runs node from `current/` in
+    `fffctl vault`, `scrub-secrets`, `app-config` and `fff-migrate`, so a package `fff` could plant there before the
+    hand-over runs as root. A file descriptor passed between processes (`SCM_RIGHTS`) during the hand-over is not seen
+    by `writers_in`. Tests: `deploy/vm/test/fff-update.test.sh` (root, in the lint job) and the e2e's ownership checks.
 - **An update cut off by a crash** (`server/index.ts:1690-1695`): after an unclean stop with an update pending, the
   server writes `update.request` and exits 0. With no prepared release, `activate` builds one then, while the portal
   is down, and switches. No code change needed.
