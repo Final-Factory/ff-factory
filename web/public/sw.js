@@ -46,8 +46,10 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const hash = (event.notification.data && event.notification.data.url) || '#/';
-  const target = new URL('/' + hash.replace(/^\/?/, ''), self.location.origin).href;
+  // Only an in-app link (starting with #) is followed, on the dashboard's own origin; anything else opens the root (w5537).
+  const url = event.notification.data && event.notification.data.url;
+  const hash = typeof url === 'string' && url.startsWith('#') ? url : '#/';
+  const target = new URL('/' + hash, self.location.origin).href;
   event.waitUntil(
     (async () => {
       const wins = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
