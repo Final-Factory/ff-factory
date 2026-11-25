@@ -80,7 +80,14 @@ Two things the first CI run on the Windows runner showed (w5703):
   account's Full grant. The lock adds a deny entry for delete-child (`/deny <account>:(DC)`, this folder only) on `claude`,
   on `projects` and on each project folder; the agent host adds it to a project folder it makes. Files still delete and
   rename through their own DELETE right, so Claude Code's own writes in `claude` (its settings file's replace) are not
-  affected.
+  affected. The deny entries go on before any label: a DACL change on a folder pushes its inheritable entries down again,
+  and with the deny on `claude` added last the second CI run found every transcript writable at Low.
+- **Limit, measured:** a Low worker owns the Low `claude` folder, so it can take that deny entry off again (icacls
+  `/remove:d` at Low succeeded on the runner) and then move `projects` aside and make its own. This takes two deliberate
+  steps. A transcript planted that way under a sealed conversation's id still fails its seal at resume, and before each
+  resume the agent host checks that `projects` still carries its own Medium label, logging `transcript labels: WARNING:
+  ... the transcript lock is undone` when it does not. Closing it outright would mean a Medium `claude`, where Claude Code
+  makes its own files.
 
 - **The daemon** (`lowTranscripts` in `machine/daemon.ts`, once per start): if `projects` has no explicit Medium label yet,
   it first labels Low every transcript and conversation folder written in the last 3 days. Agents outlive the daemon

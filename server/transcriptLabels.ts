@@ -140,6 +140,11 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
     const own = ownFiles(o);
     if (own) {
       const folder = path.dirname(own.file);
+      const projects = path.dirname(folder);
+      // The lock undone under us (`projects` moved aside and made again by a worker: it owns the Low `claude` and can take
+      // the deny entry off it, measured): say so loudly; the seal still refuses a planted transcript for a sealed id.
+      if (own.exists && fs.existsSync(projects) && !explicitMedium(icacls([projects]).out))
+        log(`transcript labels: WARNING: ${projects} has no Medium label of its own; the transcript lock is undone, a Low worker may have replaced it (w5703)`);
       if (!fs.existsSync(folder)) {
         fs.mkdirSync(folder, { recursive: true });
         try {
@@ -278,6 +283,11 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
     // on `projects` alone does not change (measured on the Windows CI runner). Recent conversations first, so none of
     // their files is Medium for a moment while its claude writes.
     const slugs = fs.readdirSync(projects, { withFileTypes: true }).filter((s) => s.isDirectory()).map((s) => path.join(projects, s.name));
+    // Delete-child first: from the Low `claude` a Low process could otherwise move `projects` aside (measured), and on the
+    // Medium folders a Low process may still hold it through the account's Full grant. First, because a DACL change on a
+    // folder pushes its inheritable entries down again, the label included: with the deny on `claude` added last, the
+    // Windows runner's second run found every transcript writable at Low again.
+    for (const p of [path.dirname(projects), projects, ...slugs]) denyDeleteChildSync(p, o.icacls, o.account ?? currentAccount());
     const rest: [string, boolean][] = [];
     for (const folder of slugs) {
       for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
@@ -295,9 +305,6 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
       setLabelSync(p, dir ? DIR_MEDIUM : 'medium', o.icacls, undefined, dir);
       locked++;
     }
-    // Delete-child: from the Low `claude` a Low process could otherwise move `projects` aside (measured), and on the Medium
-    // folders a Low process may still hold it through the account's Full grant.
-    for (const p of [path.dirname(projects), projects, ...slugs]) denyDeleteChildSync(p, o.icacls, o.account ?? currentAccount());
     say(`transcript labels: labelled ${projects} Medium (w5703), with ${slugs.length} project folder${slugs.length === 1 ? '' : 's'} and ${locked} transcript${locked === 1 ? '' : 's'} and folders in them; ${pinned} written in the last ${Math.round((o.recentMs ?? 3 * 24 * 3600_000) / 3600_000)} h kept Low until their conversation's next process ends`);
     return true;
   } catch (e) {

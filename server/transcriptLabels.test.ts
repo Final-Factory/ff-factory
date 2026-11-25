@@ -161,6 +161,10 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
   const byName = (a: string[], b: string[]) => a[0].localeCompare(b[0]);
   assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [
     // the recent conversations first, a folder with all inside it
+    // delete-child taken back first: a DACL change pushes the folder's inheritable label down again
+    ['..', '/deny', 'HOST\\me:(DC)'],
+    ['', '/deny', 'HOST\\me:(DC)'],
+    ['F--work', '/deny', 'HOST\\me:(DC)'],
     ...[[w('new'), '/setintegritylevel', '(OI)(CI)low', '/T'], [w('new.jsonl'), '/setintegritylevel', 'low']].sort(byName),
     ['', '/setintegritylevel', '(OI)(CI)medium'],
     ['F--work', '/setintegritylevel', '(OI)(CI)medium'],
@@ -171,9 +175,6 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
       [w('old'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
       [w('old.jsonl'), '/setintegritylevel', 'medium'],
     ].sort(byName),
-    ['..', '/deny', 'HOST\\me:(DC)'],
-    ['', '/deny', 'HOST\\me:(DC)'],
-    ['F--work', '/deny', 'HOST\\me:(DC)'],
   ]);
   assert.match(said[0], /1 project folder and 4 transcripts and folders in them; 2 written/);
   label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
@@ -251,6 +252,7 @@ test('Windows: a Low process cannot touch another transcript under the lock, its
   const week = (Date.now() - 7 * 24 * 3600_000) / 1000;
   for (const n of ['bbbbbbbb-other.jsonl', 'bbbbbbbb-other', 'bbbbbbbb-rename.jsonl', 'bbbbbbbb-delete.jsonl']) fs.utimesSync(path.join(slug, n), week, week);
   assert.equal(await lockTranscripts(projects, exec, (l) => t.diagnostic(l)), true);
+  for (const p of [home, projects, slug, other]) t.diagnostic(execFileSync('icacls', [p], { encoding: 'utf8' }).replace(/\s+/g, ' '));
   const own = path.join(slug, `${SID}.jsonl`);
   fs.writeFileSync(own, '');
   fs.mkdirSync(path.join(slug, SID));
