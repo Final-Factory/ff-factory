@@ -52,7 +52,7 @@ test('w5572: a planted higher-RULES_VERSION bench_queue.py in a sandbox is never
   await until(() => fs.existsSync(path.join(marks, 'trusted')));
   r.ticket!.release();
   assert.deepEqual(fs.readdirSync(marks).sort(), ['trusted']);
-  assert.equal(fs.readFileSync(path.join(marks, 'trusted'), 'utf8'), '1 --lock ' + path.join(root, 'tmp', 'bench.lock'));
+  assert.equal(fs.readFileSync(path.join(marks, 'trusted'), 'utf8'), '1 --lock ' + path.join(root, 'daemon', 'bench.lock'));
   assert.equal(fetched, 1);
   assert.equal(fs.readFileSync(trustedBenchScript(appDir), 'utf8'), marking(marks, 'trusted', 8));
   fs.rmSync(root, { recursive: true, force: true });

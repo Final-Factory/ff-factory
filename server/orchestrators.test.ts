@@ -22,7 +22,7 @@ import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { inheritedPayer, personForWork, sessionPerson, setVaultContext } from './vault.ts';
 import { fakeToken, useFakeVault } from './testVault.ts';
 import { parseNotice } from '../shared/notices.ts';
-import { diskWaitIn, holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { diskWaitIn, handUpLive, handUpsPending, holdsOf, portalWaitIn, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import { latestLine } from '../shared/latestLine.ts';
 import { CARDS_MARK, HELD_MARK, RELAYED_MARK, inPersonWords } from '../shared/conditional.ts';
 import { personMessageView } from '../shared/personMessage.ts';
@@ -11141,64 +11141,98 @@ test('w4306: a pair run or timed leg of other nobody\'s work keeps its kind (int
   assert.deepEqual(inheritedPayer({ requestedBy: BEN } as WorkItem), {}, "a person's own request: its children are theirs by requestedBy");
 });
 
-test('w4352: unfiled handed-up follow-ups are sent again at 2 h, then filed by FF Factory at 12 h at low priority, a duplicate dropped, and the request closes on its kept DONE', async (t) => {
-  const { store, machines, sessions, dispatcher, chat, call, heard, o } = await setupOnMachine(t);
+test('w5577: unfiled handed-up follow-ups are sent again at 2 h, become one card for their person at 12 h and are never filed by FF Factory; File files them once, Drop drops them', async (t) => {
+  const { store, machines, sessions, dispatcher, chat, call, heard, o } = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
   const ben = chat(BEN).info;
-  // Work that already covers one of the follow-ups: Ben filed it himself before the hand-up.
-  const cover = await call(ben, 'request_work', { title: 'Compose the boss music loop', brief: 'Compose the looping section of the boss music, the part that repeats through the fight.' });
-  const coverId = /Filed (w\d+)/.exec(cover.text)![1];
-  const f = await call(ben, 'request_work', { title: 'Boss music design', brief: 'Design the boss music.' });
-  const id = /Filed (w\d+)/.exec(f.text)![1];
-  const s = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'Design it', title: `${id}: Boss music`, work_id: id });
-  assert.equal(s.isError, false, s.text);
-  const wid = /Started agent (\w+)/.exec(s.text)![1];
-  const info = store.sessions.get(wid)!;
-  await until('its first turn', () => info.status === 'idle');
-  const m = store.machines.get('pc')!;
-  await machines.hooks!.handlersFor(info, m).hand_up_requests!({
-    items: [
-      { title: 'Compose the boss music loop', brief: 'Compose the looping section of the boss music, the part that repeats through the fight.' },
-      { title: 'Record the dragon roar sound set', brief: 'Record and mix twelve dragon roar variations for the Ancient Dragon attacks.' },
-    ],
-  });
-  await until('Ben’s orchestrator hears the briefs', () => heard(ben.id, '[follow-ups to file]').length === 1);
-  sessions.events.emit('turnEnd', sessions.get(wid), `Design done, PR merged.\n\nDONE: ${id}\nLearned: nothing new`);
-  await new Promise((r) => setTimeout(r, 200));
-  const w = () => store.work.get(id)!;
-  assert.notEqual(w().status, 'done');
   const clock = o as unknown as { now: () => Date };
+  const m = store.machines.get('pc')!;
+  /** A request of Ben's whose worker hands up two follow-ups and says DONE. */
+  const handedUp = async (name: string, sandbox: string) => {
+    const f = await call(ben, 'request_work', { title: `${name} design`, brief: `Design the ${name}.` });
+    const id = /Filed (w\d+)/.exec(f.text)![1];
+    const s = await call(dispatcher().info, 'start_agent', { sandbox, prompt: 'Design it', title: `${id}: ${name}`, work_id: id });
+    assert.equal(s.isError, false, s.text);
+    const wid = /Started agent (\w+)/.exec(s.text)![1];
+    const info = store.sessions.get(wid)!;
+    await until('its first turn', () => info.status === 'idle');
+    const told = heard(ben.id, '[follow-ups to file]').length;
+    await machines.hooks!.handlersFor(info, m).hand_up_requests!({
+      items: [
+        { title: `Compose the ${name} loop`, brief: `Compose the looping section of the ${name}, the part that repeats through the fight.` },
+        { title: `Record the ${name} roar set`, brief: `Record and mix twelve roar variations for the ${name}.` },
+      ],
+    });
+    await until('Ben’s orchestrator hears the briefs', () => heard(ben.id, '[follow-ups to file]').length === told + 1);
+    sessions.events.emit('turnEnd', sessions.get(wid), `Design done, PR merged.\n\nDONE: ${id}\nLearned: nothing new`);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.notEqual(store.work.get(id)!.status, 'done');
+    return id;
+  };
+  const id = await handedUp('boss music', 'pc/alpha');
+  const w = () => store.work.get(id)!;
   const at = Date.parse(w().handedUp!.at);
 
-  // 1 h: nothing yet. 3 h: sent again, once.
+  // 1 h: nothing yet. 3 h: sent again, once, saying it becomes a card, not that FF Factory files it.
   clock.now = () => new Date(at + 3_600_000);
   assert.equal(o.handUpStep(w()), undefined);
   clock.now = () => new Date(at + 3 * 3_600_000);
   assert.equal(o.handUpStep(w()), 'resent');
   await until('sent again', () => heard(ben.id, '[follow-ups to file]').length === 2);
-  assert.match(heard(ben.id, '[follow-ups to file]')[1].text, /Sent again: 2 of them are still not filed, 3 h after the hand-up\. .*FF Factory files them itself as Ben's low-priority requests/s);
+  const again = heard(ben.id, '[follow-ups to file]')[1].text;
+  assert.match(again, /Sent again: 2 of them are still not filed, 3 h after the hand-up\. .*become a card for Ben .*FF Factory never files them by itself/s);
   assert.equal(o.handUpStep(w()), undefined, 'sent again once');
-  assert.notEqual(w().status, 'done');
 
-  // 13 h: FF Factory files the one nothing covers and drops the duplicate, naming what covers it; the request closes.
+  // 13 h: one card for Ben, nothing filed; later sweeps change nothing.
   const before = new Set(store.work.keys());
   clock.now = () => new Date(at + 13 * 3_600_000);
-  assert.equal(o.handUpStep(w()), 'filed');
+  assert.equal(o.handUpStep(w()), 'card');
+  const cardAt = w().handedUp!.card;
+  assert.ok(cardAt);
+  const live = handUpLive(w(), clock.now().getTime())!;
+  assert.equal(live.handUpCard, true);
+  assert.deepEqual(live.waitsOn, ['Ben']);
+  assert.ok(!live.backlog && !live.orchestrator, 'a person’s card, not an orchestrator’s backlog');
+  for (const h of [14, 20, 48]) {
+    clock.now = () => new Date(at + h * 3_600_000);
+    assert.equal(o.handUpStep(w()), undefined, `no second card at ${h} h`);
+  }
+  assert.equal(w().handedUp!.card, cardAt);
+  assert.deepEqual([...store.work.keys()].filter((k) => !before.has(k)), [], 'FF Factory filed nothing');
+  assert.equal(w().log.filter((l) => l.includes('a card for Ben now')).length, 1);
+  assert.equal(handUpsPending(w()), 2);
+  assert.notEqual(w().status, 'done');
+
+  // Only the person it was handed up to clicks it.
+  assert.throws(() => o.fileHandUps(id, { userId: 'maya', displayName: 'Maya' }), /handed up to Ben, who files or drops them/);
+
+  // File: both follow-ups filed once, as Ben's requests related to the source; the request closes on its kept DONE.
+  const r = o.fileHandUps(id, BEN);
+  assert.equal(r.left, 0, r.text);
   const made = [...store.work.values()].filter((x) => !before.has(x.id));
-  assert.equal(made.length, 1, made.map((x) => x.title).join(', '));
-  const filed = made[0];
-  assert.equal(filed.title, 'Record the dragon roar sound set');
-  assert.equal(filed.priority, 'low');
-  assert.deepEqual(filed.relatedIds, [id]);
-  assert.equal(filed.requestedBy.userId, 'ben');
-  assert.match(filed.brief, /^Record and mix twelve dragon roar variations/);
-  const h = w().handedUp!;
-  assert.deepEqual(h.autoFiled?.filed, [filed.id]);
-  assert.deepEqual(h.autoFiled?.dropped.map((d) => [d.title, d.by]), [['Compose the boss music loop', coverId]]);
-  assert.ok(store.work.get(coverId)!.log.some((l) => l.includes(`covers follow-up "Compose the boss music loop" handed up on ${id}`)));
+  assert.deepEqual(made.map((x) => x.title).sort(), ['Compose the boss music loop', 'Record the boss music roar set']);
+  for (const x of made) {
+    assert.deepEqual(x.relatedIds, [id]);
+    assert.equal(x.requestedBy.userId, 'ben');
+  }
+  assert.equal(handUpsPending(w()), 0);
+  assert.equal(handUpLive(w(), clock.now().getTime()), undefined, 'the card is gone');
   await until('the request closes on its kept DONE', () => w().status === 'done');
-  await until('Ben’s orchestrator is told', () => heard(ben.id, '[follow-ups filed]').length === 1);
-  assert.ok(heard(ben.id, '[follow-ups filed]')[0].text.includes(`filed ${filed.id} at low priority; dropped "Compose the boss music loop" (covered by ${coverId}`));
-  assert.equal(o.handUpStep(w()), undefined, 'filed once');
+  assert.throws(() => o.fileHandUps(id, BEN), /no handed-up follow-ups waiting/, 'File again files nothing');
+  assert.equal([...store.work.values()].filter((x) => !before.has(x.id)).length, 2, 'filed once');
+
+  // Drop: a second request's card, dropped with a reason: nothing filed, nothing pending, it closes.
+  const id2 = await handedUp('dragon roar', 'pc/beta');
+  const w2 = () => store.work.get(id2)!;
+  const at2 = Date.parse(w2().handedUp!.at);
+  clock.now = () => new Date(at2 + 13 * 3_600_000);
+  assert.equal(o.handUpStep(w2()), 'card');
+  const before2 = new Set(store.work.keys());
+  o.dropHandUps(id2, BEN, 'not wanted after all');
+  assert.equal(handUpsPending(w2()), 0);
+  assert.deepEqual(w2().handedUp!.dropped && { by: w2().handedUp!.dropped!.by, note: w2().handedUp!.dropped!.note }, { by: 'Ben', note: 'not wanted after all' });
+  assert.deepEqual([...store.work.keys()].filter((k) => !before2.has(k)), [], 'Drop files nothing');
+  await until('the dropped request closes on its kept DONE', () => w2().status === 'done');
+  assert.equal(o.handUpStep(w2()), undefined);
 });
 
 test('w4468: request_pair split lets a Mac host with no w3697 sentence in the brief; decide_work pair_allow and pair_split widen a queued pair and re-place it; a pair\'s named needs never hide room; a person\'s game ending pings capacity', async (t) => {

@@ -16,7 +16,7 @@ export const readFenceOff = (appDir: string) => fs.existsSync(readFenceOffFile(a
  * set, so Landlock grants them (it skips a path that is not there) and on Windows they take their own read-back label
  * rather than inheriting the daemon folder's No-Read-Up when made later.
  */
-export const READ_BACK_DIRS = ['logs', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions'];
+export const READ_BACK_DIRS = ['logs', 'rpc', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions'];
 
 export function ensureReadBackDirs(appDir: string): void {
   for (const d of READ_BACK_DIRS) {

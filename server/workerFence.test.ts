@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -166,5 +166,43 @@ test('w5546: writeInPlace keeps the file (same inode), so a Landlock grant or a 
   fs.writeFileSync(readFenceOffFile(dir), '');
   assert.equal(readFenceOff(dir), true);
   ensureReadBackDirs(dir);
-  for (const d of ['logs', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions']) assert.ok(fs.statSync(path.join(dir, d)).isDirectory(), d);
+  for (const d of ['logs', 'rpc', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions']) assert.ok(fs.statSync(path.join(dir, d)).isDirectory(), d);
+});
+
+test('w5562: the profile refuses signals except to the fence\'s own processes, after the file rules', () => {
+  const p = seatbeltProfile(F);
+  const deny = p.indexOf('(deny signal)');
+  const allow = p.indexOf('(allow signal (target self) (target children) (target same-sandbox))');
+  assert.ok(deny > 0 && allow > deny, 'the own-process allow comes after the deny (later rules win)');
+  assert.ok(!/\(allow signal\)|target others/.test(p), 'no blanket signal allow');
+});
+
+// What a fenced shell may signal (w5562). `outside` is a process the test starts itself, outside the fence: it stands
+// for the daemon, Unity and the owner's apps, which a probe never signals.
+test('live w5562: a fenced shell signals and kills its own children (job control too) and is refused every other process and launchd jobs', { skip: (!mac && 'needs macOS sandbox-exec') || (nested && 'already inside a sandbox (a fenced worker): sandbox-exec cannot nest') }, () => {
+  const tmp = fs.realpathSync(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(tmp, 'fence-sig-'));
+  const outside = spawn('/bin/sleep', ['120'], { stdio: 'ignore' });
+  const twin = spawn(SANDBOX_EXEC, ['-p', seatbeltProfile({ kind: 'seatbelt', root, home: fs.realpathSync(os.homedir()), darwinTemp: root, darwinCache: root }), '/bin/sleep', '120'], { stdio: 'ignore' });
+  try {
+    const f: WorkerFence = { kind: 'seatbelt', root, home: fs.realpathSync(os.homedir()), darwinTemp: root, darwinCache: root };
+    const sh = (cmd: string) => {
+      const [c, ...a] = fencedArgv(f, '/bin/bash', ['-c', cmd]);
+      return spawnSync(c, a, { encoding: 'utf8', timeout: 30_000 });
+    };
+    const own = sh(['set -e', 'kill -0 $$', 'sleep 60 & c=$!', 'kill -0 $c; kill -TERM $c; r=0; wait $c || r=$?; [ "$r" = 143 ]', 'set -m; sleep 60 & kill %1; wait %1 || true', `"${process.execPath}" -e "const c=require('child_process').spawn('sleep',['60']);setTimeout(()=>c.kill('SIGKILL'),200);c.on('exit',(x,s)=>process.exit(s==='SIGKILL'?0:1))"`].join('\n'));
+    assert.equal(own.status, 0, `own children: ${own.stderr}`);
+    const other = sh(`kill -0 ${outside.pid} 2>&1; echo rc=$?; kill -TERM ${outside.pid} 2>&1; echo rc=$?`);
+    assert.match(other.stdout, /rc=1[\s\S]*rc=1/, `signals outside the fence: ${other.stdout}`);
+    assert.equal(outside.exitCode, null, 'the outside process still runs');
+    const tw = sh(`kill -0 ${twin.pid} 2>&1; echo rc=$?`);
+    assert.match(tw.stdout, /rc=1/, `another fence with the same profile (another worker) is not this one: ${tw.stdout}`);
+    const job = sh(`launchctl submit -l ff.w5562.test.$$ -- /usr/bin/touch "${root}/launchd-ran"; echo rc=$?; sleep 3`);
+    assert.ok(!fs.existsSync(path.join(root, 'launchd-ran')), `launchctl submit ran a job outside the fence: ${job.stdout}`);
+  } finally {
+    outside.kill('SIGKILL');
+    twin.kill('SIGKILL');
+    spawnSync('/bin/launchctl', ['list'], { encoding: 'utf8' }).stdout.split('\n').filter((l) => l.includes('ff.w5562.test.')).forEach((l) => spawnSync('/bin/launchctl', ['remove', l.split('\t')[2]]));
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

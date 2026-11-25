@@ -256,7 +256,7 @@ test('w1829: a holder with no worker session asks no player to quit (its own wer
 function queue(t: { after: (f: () => void) => void }) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1829-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const qdir = path.join(root, 'tmp', 'bench.queue');
+  const qdir = path.join(root, 'daemon', 'bench.queue');
   const add = (name: string, info: Record<string, unknown>, grantedTs?: number) => {
     fs.mkdirSync(path.join(qdir, name), { recursive: true });
     fs.writeFileSync(path.join(qdir, name, 'info.json'), JSON.stringify({ ticket: name, mode: 'exclusive', pid: 4242, max_min: 60, ...info }));

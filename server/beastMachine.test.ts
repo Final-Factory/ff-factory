@@ -443,10 +443,11 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
     const key = Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH')!;
     assert.deepEqual(Object.keys(env).filter((k) => k.toUpperCase() === 'PATH'), [key]);
     assert.equal(env[key].split(path.delimiter)[0], path.join(slots, 'bin'));
-    assert.equal(d.slots.dir, slots);
+    assert.equal(d.slots.dir, path.join(dir, 'slot-queue'), 'w5545: the arbiter reads its own folder; the mailbox is for jobs and shims');
     // Built without one (a test's daemon), its mailbox is its own, never the machine's real one.
     const plain = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: path.join(dir, 'mx'), maxEventsFile: null }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    assert.equal(plain.slots.dir, path.join(dir, 'mx', 'unity-slots'));
+    assert.equal((plain as unknown as { slotMailbox: string }).slotMailbox, path.join(dir, 'mx', 'unity-slots'));
+    assert.equal(plain.slots.dir, path.join(dir, 'mx', 'slot-queue'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -552,5 +553,28 @@ test('w3626: the daemon refuses a switch while a night runs in the sandbox or a 
     d.shutdown();
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('w5545: the daemon arbitrates slots in its own folder, not the workers\' mailbox, and gives each agent a token naming its session and sandbox', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-drpc-'));
+  try {
+    const appDir = path.join(dir, 'daemon');
+    const mailbox = path.join(dir, 'unity-slots');
+    const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'biscuit', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir, root: dir, maxEventsFile: null, unitySlotsDir: mailbox }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
+    const inside = d as unknown as { slots: { dir: string; tick(): Promise<unknown>; holds(): Promise<{ reqs: unknown[] }>; close(): void }; slotMailbox: string; rpcKey?: Buffer };
+    assert.equal(inside.slots.dir, path.join(appDir, 'slot-queue'));
+    assert.equal(inside.slotMailbox, mailbox);
+    fs.mkdirSync(mailbox, { recursive: true });
+    fs.writeFileSync(path.join(mailbox, 'req-forged-1.json'), JSON.stringify({ v: 1, id: 'forged-1', pid: process.pid, holder: 'sandbox:slot1', count: 1, label: 'forged', session: 'release-worker', createdAt: new Date().toISOString() }));
+    await inside.slots.tick();
+    assert.deepEqual((await inside.slots.holds()).reqs, []);
+    const env = d.rpcEnv('w5545-worker', 'slot3');
+    assert.equal(env.FF_DAEMON_RPC, path.join(appDir, 'rpc', 'rpc.json'));
+    const { readToken } = await import('../machine/daemonRpc.ts');
+    assert.deepEqual(readToken(inside.rpcKey!, env.FF_DAEMON_TOKEN), { session: 'w5545-worker', sandbox: 'slot3' });
+    inside.slots.close();
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
   }
 });

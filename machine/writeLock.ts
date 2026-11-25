@@ -70,6 +70,9 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   if (p.maxEventsFile) args.push('--rw', p.maxEventsFile);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
   if (p.runtimeDir) args.push('--sock', path.join(p.runtimeDir, 'cc-socks'));
+  // w5562: the user bus and the systemd user manager's own sockets, through which `systemd-run --user` starts a job
+  // outside the lock (measured escaping on biscuit, w5463). Needs Landlock ABI 9 (Linux 7.1); a no-op before it.
+  if (p.runtimeDir) args.push('--deny-unix', path.join(p.runtimeDir, 'bus'), '--deny-unix', path.join(p.runtimeDir, 'systemd'));
   if (p.home) args.push('--rw', path.join(p.home, '.config', 'unity3d'), '--rw', path.join(p.home, '.local', 'share', 'unity3d'));
   // Unity ignores TMPDIR for its Package Manager socket (/tmp/Unity-Upm-<pid>.sock), its shader compiler's lock
   // (/tmp/Unity-ShaderCompilerIPC-*.lock) and its runtime's /tmp/.dotnet/shm: without them the editor exits 1 or aborts

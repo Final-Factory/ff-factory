@@ -17,6 +17,16 @@ cannot open a closed folder. A file made directly in a chain folder after the st
 readable by this run; one made below a granted sibling is.
 
   ff-landlock.py ... --no-read <root>/secrets --no-read <root>/root.json --read <root>/<closed>/logs -- cmd
+
+Signals (w5562, ABI 6+): the command and its children may signal only processes of their own Landlock domain (or one
+nested in it), so a careless `pkill -f` cannot end the daemon, a Unity editor, another worker or the desktop. Signals
+sent to them from outside are not affected.
+
+--deny-unix PATH (w5562, ABI 9+): connect() to pathname UNIX sockets at or beneath PATH is refused (EACCES): the
+systemd user bus and manager sockets, through which `systemd-run --user` starts a job outside this lock. Connecting
+anywhere else stays free, granted per sibling as --except does, so a socket an outside server makes later directly in
+one of PATH's parent folders is refused too; sockets this command's own processes make stay reachable. On an older
+kernel the option is a no-op and says so on stderr.
 """
 import ctypes, os, struct, sys
 
@@ -25,7 +35,8 @@ PR_SET_NO_NEW_PRIVS = 38
 WRITE_FILE, REMOVE_DIR, REMOVE_FILE, MAKE_CHAR, MAKE_DIR, MAKE_REG, MAKE_SOCK, MAKE_FIFO, MAKE_BLOCK, MAKE_SYM = (
     1 << 1, 1 << 4, 1 << 5, 1 << 6, 1 << 7, 1 << 8, 1 << 9, 1 << 10, 1 << 11, 1 << 12)
 EXECUTE, READ_FILE, READ_DIR = 1 << 0, 1 << 2, 1 << 3
-REFER, TRUNCATE = 1 << 13, 1 << 14
+REFER, TRUNCATE, RESOLVE_UNIX = 1 << 13, 1 << 14, 1 << 16
+SCOPE_SIGNAL = 1 << 1
 FILE_ONLY = WRITE_FILE | TRUNCATE
 
 libc = ctypes.CDLL(None, use_errno=True)
@@ -34,6 +45,35 @@ libc.syscall.restype = ctypes.c_long
 
 class RulesetAttr(ctypes.Structure):
     _fields_ = [('handled_access_fs', ctypes.c_uint64)]
+
+
+class RulesetAttrV6(ctypes.Structure):  # ABI 6 added handled_access_net (ABI 4) and scoped to the attr the kernel reads
+    _fields_ = [('handled_access_fs', ctypes.c_uint64), ('handled_access_net', ctypes.c_uint64), ('scoped', ctypes.c_uint64)]
+
+
+def unix_grants(denied):
+    """Every path to grant RESOLVE_UNIX on so that all but the denied paths stay connectable: each sibling of a
+    denied path and of each of its parents, down from /. Landlock rules only add rights, as with --except."""
+    denied = [os.path.normpath(os.path.abspath(d)) for d in denied]
+    parents = set()
+    for d in denied:
+        p = os.path.dirname(d)
+        while True:
+            parents.add(p)
+            if p == '/':
+                break
+            p = os.path.dirname(p)
+    out = []
+    for p in sorted(parents):
+        try:
+            names = sorted(os.listdir(p))
+        except OSError:
+            continue
+        for n in names:
+            c = os.path.join(p, n)
+            if c not in parents and c not in denied:
+                out.append(c)
+    return out
 
 
 
@@ -88,7 +128,7 @@ def main(argv):
     opts, cmd = argv[:i], argv[i + 1:]
     if not cmd:
         die('no command')
-    rw, socks, children, cur, log, no_read, back = [], [], [], None, False, [], []
+    rw, socks, children, cur, log, deny_unix, no_read, back = [], [], [], None, False, [], [], []
     it = iter(opts)
     for a in it:
         if a == '--rw':
@@ -102,6 +142,8 @@ def main(argv):
             no_read.append(next(it))
         elif a == '--read':
             back.append(next(it))
+        elif a == '--deny-unix':
+            deny_unix.append(next(it))
         elif a == '--log':
             log = True  # audit-log refused writes of every program it starts (ABI 7+): journalctl -k | grep landlock
         elif a == '--except' and cur:
@@ -121,22 +163,33 @@ def main(argv):
         handled |= REFER
     if abi >= 3:
         handled |= TRUNCATE
+    unix = []
+    if deny_unix and abi >= 9:
+        handled |= RESOLVE_UNIX
+        unix = unix_grants(deny_unix)
+    elif deny_unix:
+        sys.stderr.write(f'ff-landlock: --deny-unix needs Landlock ABI 9 (Linux 7.1); this kernel has ABI {abi}, so UNIX sockets stay reachable\n')
     write_rights = handled
     grants = []
     if no_read:
         handled |= READ_FILE | READ_DIR | EXECUTE
         grants = read_grants(no_read, back)
-    attr = RulesetAttr(handled)
+    attr = RulesetAttrV6(handled, 0, SCOPE_SIGNAL) if abi >= 6 else RulesetAttr(handled)
     rfd = libc.syscall(SYS_CREATE, ctypes.byref(attr), ctypes.sizeof(attr), 0)
     if rfd < 0:
         die(f'create_ruleset failed (errno {ctypes.get_errno()})')
-    for p, sock in [(p, False) for p in rw] + [(p, True) for p in socks]:
+    for p, kind in [(p, 'rw') for p in rw] + [(p, 'sock') for p in socks] + [(p, 'unix') for p in unix]:
         try:
             fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             continue
-        allowed = (MAKE_SOCK | REMOVE_FILE) if sock else write_rights if os.path.isdir(p) else write_rights & FILE_ONLY
-        add_rule(rfd, fd, allowed, p)
+        if kind == 'unix':
+            allowed = RESOLVE_UNIX
+        elif kind == 'sock':
+            allowed = MAKE_SOCK | REMOVE_FILE
+        else:
+            allowed = write_rights if os.path.isdir(p) else write_rights & (FILE_ONLY | RESOLVE_UNIX)
+        add_rule(rfd, fd, allowed, f'{p} ({kind})')
     for p, rights in grants:
         try:
             fd = os.open(p, os.O_PATH | os.O_CLOEXEC | os.O_NOFOLLOW)

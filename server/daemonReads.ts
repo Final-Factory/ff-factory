@@ -60,7 +60,7 @@ export const HOST_READ_ALLOW = ['devdrive.json', 'moved.json'];
  * (gh-app/bin; never gh-app/tokens.json, w5547) and the Unity MCP server's status files (unity-mcp, machine/unityMcp.ts).
  * root.json and its spare (root-backup.json) are closed since w5546 (lothsahn: "...and root.json").
  */
-export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW, 'gh-app/bin', 'unity-mcp'];
+export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW, 'gh-app/bin', 'unity-mcp', 'rpc'];
 
 export interface DaemonReads {
   /** The daemon's folder (appDirOf). */

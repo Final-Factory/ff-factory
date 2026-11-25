@@ -56,7 +56,20 @@ export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONL
  * `file-read-data` only: a stat of a path, which node's module loader and git make up every parent, stays allowed; the
  * daemon's folder may be listed (names, never contents, as server/daemonReads.ts allows).
  */
-export const READ_DENIED_IN_ROOT = READ_ONLY_IN_ROOT;
+export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+
+/**
+ * Signals (w5562): a worker may signal only processes of its own fence, itself and everything it started (they inherit
+ * its sandbox), so a careless `pkill -f` or `kill` cannot end the daemon, the agent host, a Unity editor the daemon
+ * started, another worker or the owner's apps. Signal 0 (a liveness check) is a signal too: to a process outside the
+ * fence it answers EPERM, which every liveness check of ours reads as alive (unitySlots.ts isAlive, bench_queue.py,
+ * player_slots.py). Signals sent TO the worker (the daemon's stop, the SDK's abort) are not the sandbox's to refuse.
+ * `children` as well as `same-sandbox`: a direct child is ours even if it could change its sandbox.
+ * No launchd rule: launchd itself refuses job submission from a sandboxed caller (measured on m5, w5562, from inside
+ * the fence: `launchctl submit` exit 1 "Operation not permitted", `launchctl bootstrap gui/<uid>` "5: Input/output
+ * error", and the job never ran), and that goes through the bootstrap port, not a mach-lookup name a profile could deny.
+ */
+export const SIGNAL_RULES = [';; signals: only to this fence\'s own processes (w5562)', '(deny signal)', '(allow signal (target self) (target children) (target same-sandbox))'];
 
 export function seatbeltProfile(f: WorkerFence): string {
   const home = (p: string) => path.join(f.home, p);
@@ -96,6 +109,7 @@ export function seatbeltProfile(f: WorkerFence): string {
     ...(f.appDir && f.appDir !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
+    ...SIGNAL_RULES,
   ].join('\n');
 }
 
