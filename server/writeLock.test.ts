@@ -173,11 +173,13 @@ test('w5676: on a fresh root the daemon makes every open root folder before a lo
   const outside = path.join(base, 'outside');
   fs.mkdirSync(path.join(root, 'daemon'), { recursive: true });
   fs.mkdirSync(path.join(root, 'tmp'));
-  const args = writeLockArgs({ root, extra: [outside] });
-  const made = makeOpenRootChildren(root, args, path.join(root, 'daemon'));
+  // A daemon.json extra naming a locked folder must not make it either.
+  const args = writeLockArgs({ root, extra: [outside, path.join(root, 'secrets')] });
+  const made = makeOpenRootChildren(root, args, path.join(root, 'daemon'), [path.join(root, 'sandboxes')]);
   const open = openChildren(root, [], LOCKED_CHILDREN);
-  assert.deepEqual(made.map((m) => path.basename(m)).sort(), open.filter((c) => c !== 'tmp'), 'every missing open folder, and only those');
-  for (const c of open) assert.ok(fs.statSync(path.join(root, c)).isDirectory(), c);
+  assert.deepEqual(made.map((m) => path.basename(m)).sort(), open.filter((c) => c !== 'tmp' && c !== 'sandboxes'), 'every missing open folder, and only those');
+  for (const c of open.filter((c) => c !== 'sandboxes')) assert.ok(fs.statSync(path.join(root, c)).isDirectory(), c);
+  assert.ok(!fs.existsSync(path.join(root, 'sandboxes')), 'the sandboxes folder is never made: its absence means a drive gone');
   for (const c of LOCKED_CHILDREN) if (c !== 'daemon') assert.ok(!fs.existsSync(path.join(root, c)), `${c} is not made`);
   assert.ok(!fs.existsSync(outside), 'a rule outside the root makes nothing');
   assert.deepEqual(makeOpenRootChildren(root, args), [], 'a second start makes nothing');

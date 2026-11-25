@@ -3004,7 +3004,7 @@ export class Daemon {
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
     // w5676: ff-landlock.py skips an open root folder that does not exist yet, and the locked worker cannot make it.
     if (lockArgs && this.cfg.root) {
-      const made = makeOpenRootChildren(this.cfg.root, lockArgs, appDirOfConfig(this.cfg));
+      const made = makeOpenRootChildren(this.cfg.root, lockArgs, appDirOfConfig(this.cfg), [this.sandboxRoot()]);
       if (made.length) log(`write lock: made the open root folders ${made.map((m) => path.basename(m)).join(', ')} before a locked worker starts (w5676)`);
     }
     const lock = lockArgs ? { writeLock: lockArgs } : {};
