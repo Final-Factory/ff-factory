@@ -17,6 +17,8 @@ test('a locked worker writes only the root folders workers write, and the few me
   assert.deepEqual(a, [
     '--rw', '/dev', '--rw', '/proc',
     ...[...WORKER_CHILDREN].sort().flatMap((c) => ['--rw', path.join(root, c)]),
+    // w5702: the transcripts folder, open whole while transcriptLock is off (server/transcriptLock.test.ts).
+    '--rw', path.join(root, 'transcripts'),
     '--rw', '/home/u/.ff-factory/unity-slots',
     '--sock', path.join('/run/user/1000', 'cc-socks'),
     '--deny-unix', path.join('/run/user/1000', 'bus'), '--deny-unix', path.join('/run/user/1000', 'systemd'),
@@ -209,7 +211,7 @@ test('w5676: on a fresh root the daemon makes every open root folder before a lo
   const args = writeLockArgs({ root, extra: [outside, path.join(root, 'secrets')] });
   const made = makeOpenRootChildren(root, args, path.join(root, 'daemon'), [path.join(root, 'sandboxes')]);
   const open = openChildren(root, [], LOCKED_CHILDREN);
-  assert.deepEqual(made.map((m) => path.basename(m)).sort(), open.filter((c) => c !== 'tmp' && c !== 'sandboxes'), 'every missing open folder, and only those');
+  assert.deepEqual(made.map((m) => path.basename(m)).sort(), [...open.filter((c) => c !== 'tmp' && c !== 'sandboxes'), 'transcripts'].sort(), 'every missing open folder (w5702: transcripts too, while its lock is off), and only those');
   for (const c of open.filter((c) => c !== 'sandboxes')) assert.ok(fs.statSync(path.join(root, c)).isDirectory(), c);
   assert.ok(!fs.existsSync(path.join(root, 'sandboxes')), 'the sandboxes folder is never made: its absence means a drive gone');
   for (const c of LOCKED_CHILDREN) if (c !== 'daemon') assert.ok(!fs.existsSync(path.join(root, c)), `${c} is not made`);

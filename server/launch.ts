@@ -189,6 +189,8 @@ export interface LaunchSpec {
   fence?: WorkerFence;
   /** ff-landlock.py's arguments: claude starts under the Linux write lock (machine/writeLock.ts, w5333). */
   writeLock?: string[];
+  /** w5702: the transcripts folder, when the lock lets claude write only its own conversation's (machine/transcriptLock.ts). */
+  writeLockTranscripts?: string;
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
   init?: { files?: Record<string, string> };
 }
@@ -733,6 +735,6 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
     ...(spec.fence ? { spawnClaudeCodeProcess: fenceSpawner(spec.fence) } : {}),
-    ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock) } : {}),
+    ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock, { transcripts: spec.writeLockTranscripts }) } : {}),
   };
 }
