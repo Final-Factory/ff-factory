@@ -6,16 +6,17 @@ import os from 'node:os';
 import path from 'node:path';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { WORKER_CHILDREN } from '../machine/lowIntegrity.ts';
+import { maxProbeArgv, probeMaxEvents } from '../machine/maxEventsFence.ts';
 
 // w5333: the Linux write lock's rules (machine/writeLock.ts) and, where the kernel has Landlock, that the launcher refuses.
 
 test('a locked worker writes only the root folders workers write, and the few measured paths (w5569)', () => {
   const root = path.resolve('/home/u/ffw');
-  const a = writeLockArgs({ root, appDir: path.join(root, 'daemon'), maxEventsFile: path.join(root, 'daemon', 'max-events.jsonl'), unitySlots: '/home/u/.ff-factory/unity-slots', runtimeDir: '/run/user/1000', home: '/home/u' });
+  const a = writeLockArgs({ root, appDir: path.join(root, 'daemon'), unitySlots: '/home/u/.ff-factory/unity-slots', runtimeDir: '/run/user/1000', home: '/home/u' });
+  // w5552: no rule for the Max events file: it is the daemon's (<daemon>/max/max-events.jsonl), read-only like its folder.
   assert.deepEqual(a, [
     '--rw', '/dev', '--rw', '/proc',
     ...[...WORKER_CHILDREN].sort().flatMap((c) => ['--rw', path.join(root, c)]),
-    '--rw', path.join(root, 'daemon', 'max-events.jsonl'),
     '--rw', '/home/u/.ff-factory/unity-slots',
     '--sock', path.join('/run/user/1000', 'cc-socks'),
     '--deny-unix', path.join('/run/user/1000', 'bus'), '--deny-unix', path.join('/run/user/1000', 'systemd'),
@@ -46,7 +47,8 @@ test('ff-landlock.py refuses writes outside the granted folders, in the locked c
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w5333-'));
   try {
     for (const d of ['root/daemon', 'root/secrets', 'root/tmp', 'root/sandboxes', 'root/instances', 'root/ben-factory', 'root/claude', 'root/claude-medium', 'root/cache-medium/uv', 'root/cache/uv', 'outside']) fs.mkdirSync(path.join(base, d), { recursive: true });
-    fs.writeFileSync(path.join(base, 'root/daemon/max-events.jsonl'), '');
+    fs.mkdirSync(path.join(base, 'root/daemon/max'), { recursive: true });
+    fs.writeFileSync(path.join(base, 'root/daemon/max/max-events.jsonl'), '');
     const script = [
       'try() { if eval "$2" 2>/dev/null; then echo "$1 ok"; else echo "$1 refused"; fi; }',
       `try tmp "touch ${base}/root/tmp/x"`,
@@ -65,15 +67,21 @@ test('ff-landlock.py refuses writes outside the granted folders, in the locked c
       `try uv-workers "touch ${base}/root/cache/uv/x"`,
       `try newtop "mkdir ${base}/root/new"`,
       `try rename "mv ${base}/root/daemon ${base}/root/tmp/d"`,
-      `try events "echo '{}' >> ${base}/root/daemon/max-events.jsonl"`,
-      `try newfile-beside-events "touch ${base}/root/daemon/other.jsonl"`,
+      `try events "echo '{}' >> ${base}/root/daemon/max/max-events.jsonl"`,
+      `try newfile-beside-events "touch ${base}/root/daemon/max/other.jsonl"`,
     ].join('\n');
-    const args = writeLockArgs({ root: path.join(base, 'root'), maxEventsFile: path.join(base, 'root/daemon/max-events.jsonl') });
+    const args = writeLockArgs({ root: path.join(base, 'root') });
     const r = spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'bash', '-c', script], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
+    // w5552: the Max events file is refused like the rest of the daemon's folder.
     assert.deepEqual(r.stdout.trim().split('\n'), [
-      'tmp ok', 'outside refused', 'sandboxes ok', 'instances refused', 'portal refused', 'daemon refused', 'secrets refused', 'claude ok', 'claude-medium refused', 'claude-medium-rename refused', 'uv-medium refused', 'uv-workers ok', 'newtop refused', 'rename refused', 'events ok', 'newfile-beside-events refused',
+      'tmp ok', 'outside refused', 'sandboxes ok', 'instances refused', 'portal refused', 'daemon refused', 'secrets refused', 'claude ok', 'claude-medium refused', 'claude-medium-rename refused', 'uv-medium refused', 'uv-workers ok', 'newtop refused', 'rename refused', 'events refused', 'newfile-beside-events refused',
     ]);
+    // The daemon's own check (machine/maxEventsFence.ts) says the same, and an unfenced shell writes it.
+    const file = path.join(base, 'root/daemon/max/max-events.jsonl');
+    assert.equal(probeMaxEvents('landlock', ['python3', FF_LANDLOCK, ...args, '--', ...maxProbeArgv('/bin/sh', file)], file).refused, true);
+    assert.equal(probeMaxEvents('none', maxProbeArgv('/bin/sh', file), file).refused, false);
+    assert.equal(fs.readFileSync(file, 'utf8'), '', 'the check writes nothing');
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
