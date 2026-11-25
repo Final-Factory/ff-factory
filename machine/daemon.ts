@@ -28,7 +28,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
@@ -3615,6 +3615,8 @@ export class Daemon {
   async probeReadFence(): Promise<void> {
     const root = this.cfg.root;
     if (!root) return;
+    // w5773: a switch no longer waits for its probe, so two may overlap; only the newest one's verdict counts.
+    const gen = ++this.readProbeGen;
     const appDir = appDirOfConfig(this.cfg);
     const mode = readFenceMode(appDir);
     if (mode === 'off') {
@@ -3650,8 +3652,12 @@ export class Daemon {
       const v = judgeReadProbe(t, r.stdout);
       log(sayReadProbe(mode, process.platform, v, t));
       const tools = await this.probeOwnerTools(fenced, ownerFence ? fenceEnv(ownerFence) : {});
+      if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock, gen);
+      if (gen !== this.readProbeGen) {
+        log(`read fence (${mode}): a newer probe started while this one ran; its verdict is the one that counts`);
+        return;
+      }
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
-      if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock);
       if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
       else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
@@ -3663,6 +3669,8 @@ export class Daemon {
 
   /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
   private ownerSocketsOpen: string[] = ['(not probed)'];
+  /** w5773: counts read fence probes, so one that ends after a newer one started leaves its verdict unused. */
+  private readProbeGen = 0;
 
   /**
    * w5747: the probe's tool legs (ownerSecrets.ts ownerToolLegs), each run under the probe's fence with the owner rules: gh
@@ -3709,16 +3717,16 @@ export class Daemon {
    * w5748: whether a fenced run reaches the Secret Service (the gh keyring login) and the ssh and gpg agents: a child of the
    * daemon's own, under the lock, read rules and socket denies a run gets in on mode, connects to each owner socket and
    * closes it, sending nothing. On Linux `on` takes effect only once it finds every one refused; a probe that fails to run
-   * keeps the read rules off (a warn, never a lockout).
+   * keeps the read rules off (a warn, never a lockout), and so does one that hangs (w5773: ended after 15 s).
    */
-  private async probeOwnerSockets(mode: ReadFenceMode, lock: string[]): Promise<void> {
-    this.ownerSocketsOpen = ['(not probed)'];
+  private async probeOwnerSockets(mode: ReadFenceMode, lock: string[], gen: number): Promise<void> {
+    if (gen === this.readProbeGen) this.ownerSocketsOpen = ['(not probed)'];
     try {
       const socks = ownerSocketProbeTargets(ownerSocketPaths({ runtimeDir: process.env.XDG_RUNTIME_DIR, env: process.env }));
-      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, ...ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR), '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
+      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, ...ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR), '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: OWNER_SOCKET_PROBE_TIMEOUT_MS });
       const said = sayOwnerSocketProbe(mode, socks, r.stdout);
-      this.ownerSocketsOpen = r.code === 0 ? said.open : [`(the probe exited ${r.code})`];
-      log(said.line);
+      if (gen === this.readProbeGen) this.ownerSocketsOpen = ownerSocketsAfterProbe(r, said.open);
+      log(r.timedOut ? `read fence (${mode}, linux) owner sockets: the probe hung and was ended after ${OWNER_SOCKET_PROBE_TIMEOUT_MS / 1000} s; counted as reachable` : said.line);
     } catch (e) {
       log(`read fence (${mode}, linux) owner sockets: the probe could not run (${(e as Error).message})`);
     }
@@ -3750,7 +3758,9 @@ export class Daemon {
    * The live switch of the read fence (w5546 lockout review, lothsahn: "If we get that wrong we may be unable to update
    * workers and have to manually reinstall"): the portal's `daemon_control` `read-fence-off` / `-warn` / `-on`, with nobody
    * at the machine and no restart. The mode file keeps the choice across restarts and updates; runs started from now on
-   * follow it, after the probe.
+   * follow it, after the probe. w5773: the switch answers once the mode is written (and, on Windows, the labels set); the
+   * probe runs after, in the background, since the file probe and Linux's socket probe in a row outlasted the portal's
+   * 60 s wait. Until it passes, runs start without read rules (readProbeBlocks), as at start.
    */
   async setReadFence(mode: ReadFenceMode): Promise<void> {
     const refused = mode === 'on' ? readFenceOnRefusal() : undefined;
@@ -3763,7 +3773,7 @@ export class Daemon {
       const exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000 });
       await this.applyReadLabels(mode, exec, (l) => log(l));
     }
-    await this.probeReadFence();
+    void this.probeReadFence();
   }
 
   private lockMemo?: { args?: string[]; why?: string; transcripts?: string; transcriptsWait?: boolean };

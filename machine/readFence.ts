@@ -171,6 +171,21 @@ export function sayOwnerSocketProbe(mode: ReadFenceMode, socks: readonly string[
   return { line: `read fence (${mode}, linux) owner sockets: ${socks.length - open.length}/${socks.length} refused (Landlock ABI ${abi})${why}`, open };
 }
 
+/**
+ * w5773: how long the owner-socket probe may run. SOCKET_PROBE_SCRIPT gives each connect 5 s, all in parallel, so 15 s is
+ * ample; the file probe's 60 s and this one's old 60 s in a row outlasted the portal's 60 s wait for a switch.
+ */
+export const OWNER_SOCKET_PROBE_TIMEOUT_MS = 15_000;
+
+/**
+ * w5773: the owner sockets to count as reachable after the probe ran: what it said only when it exited 0 in time; a probe
+ * that hung or failed counts them reachable, so Linux `on` never enforces on a probe that did not answer.
+ */
+export function ownerSocketsAfterProbe(r: { code: number; timedOut?: boolean }, open: string[]): string[] {
+  if (r.timedOut) return [`(the probe hung and was ended after ${OWNER_SOCKET_PROBE_TIMEOUT_MS / 1000} s)`];
+  return r.code === 0 ? open : [`(the probe exited ${r.code})`];
+}
+
 export interface ReadProbeVerdict {
   /** Paths workers need that the fence refused: a lockout if enforced. */
   wronglyRefused: string[];
