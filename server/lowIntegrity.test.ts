@@ -17,7 +17,7 @@ test('labels the root children except daemon, secrets and the daemon folder; of 
   const t = lowTargets({
     root: R,
     appDir: path.join(R, 'app', 'current'),
-    children: [...kids('daemon', 'secrets', 'Sandboxes', 'repo', 'tmp', 'app', 'home'), { name: 'root.json', dir: false }],
+    children: [...kids('daemon', 'secrets', 'claude-medium', 'cache-medium', 'Sandboxes', 'repo', 'tmp', 'app', 'home'), { name: 'root.json', dir: false }],
     exists: () => true,
   });
   assert.deepEqual(t.dirs, [path.join(R, 'Sandboxes'), path.join(R, 'repo', '.git'), path.join(R, 'tmp'), path.join(R, 'home')]);
