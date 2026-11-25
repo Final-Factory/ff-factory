@@ -124,8 +124,10 @@ export interface LinkUpdateFlags {
   devDrive?: boolean;
   moveToDevDrive?: boolean;
   devDriveMaxGB?: number;
-  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it ignores it. */
+  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it passes it on to linkJob unchanged, and a linkJob that predates it does not write it. */
   workerFence?: 'on' | 'off';
+  /** The worker caps' mode (w5554, docs/worker-caps.md): daemon.json `workerCaps`; unset: carried. A daemon that predates it ignores it. */
+  workerCaps?: 'off' | 'warn' | 'enforce';
 }
 
 /**
@@ -162,8 +164,10 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
  * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
  * portal re-emits it with no listener, and an older daemon or host never sends it.
- * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended }
- * (machine/workerCaps.ts); an older portal ignores it.
+ * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended,
+ * warn?, kernel? } (machine/workerCaps.ts); `warn`: warn mode, the cap would have been hit and nothing was ended; `kernel`:
+ * Linux, the kernel acted and the host ended nothing. An older portal ignores it, and one that predates the two flags words a
+ * warn hit as an enforced one (its ledger line says "ended 0").
  */
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
 

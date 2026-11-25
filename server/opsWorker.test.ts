@@ -987,6 +987,21 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, 'on'), ['-WorkerFence on']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, 'off'), ['--worker-fence off']);
   assert.deepEqual(workerUpdateFlags('linux', {}), [], 'unset: no flag, the install keeps its fence');
+  // w5554: the worker caps' mode, the recovery switch (`worker_caps off`): off, warn or enforce and nothing else, one flag per platform.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerCaps: 'maybe' as never }), /worker_caps: off, warn or enforce/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerCaps: '' as never }), /worker_caps: off, warn or enforce/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerCaps: 'off' });
+  await new Promise((r) => setTimeout(r, 300));
+  const wcWin = store.readTranscript(OPS_ID, 120).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(wcWin.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw -WorkerCaps off"'`), wcWin.text);
+  assert.match(wcWin.text, /with these settings changed: -WorkerCaps off/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', workerCaps: 'enforce' });
+  await new Promise((r) => setTimeout(r, 300));
+  const wcLin = store.readTranscript(OPS_ID, 140).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(wcLin.text.includes(`--worker-fence on --worker-caps enforce'`), wcLin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, 'warn'), ['-WorkerCaps warn']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, 'enforce'), ['--worker-caps enforce']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined), [], 'unset: no flag, the install keeps its mode');
   ops.close();
 });
 
@@ -1050,6 +1065,13 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerFence: 'maybe' as never }), /worker_fence: on or off/);
   assert.equal(asked.length, before, 'a refused value asks nothing');
   assert.equal(recorded.length, 0, 'the fence switch is no limit: the record is left alone');
+  // w5554: the worker caps' mode alone is a valid update too, carried over the link as named; a value off the list never goes.
+  ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'off' });
+  assert.deepEqual(asked.at(-1), { id: 'coosego', flags: { workerCaps: 'off' } });
+  const beforeCaps = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'on' as never }), /worker_caps: off, warn or enforce/);
+  assert.equal(asked.length, beforeCaps, 'a refused value asks nothing');
+  assert.equal(recorded.length, 0, 'the caps switch is no limit: the record is left alone');
   await new Promise((r) => setTimeout(r, 50));
   ops.close();
 

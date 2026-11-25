@@ -179,6 +179,20 @@ export class SteamJobs {
     return undefined;
   }
 
+  /**
+   * What status with no job answers (w5694): the job running on this computer, else its latest of any action. A check that
+   * ended a second before the ask is still the one the caller means (BEAST, 2026-11-25: "No Steam job" right after it ended).
+   */
+  latestOn(machine: string): SteamJob | undefined {
+    let latest: SteamJob | undefined;
+    for (const j of this.jobs.values()) {
+      if (j.machine !== machine) continue;
+      if (j.state === 'running') return j;
+      if (!latest || j.startedAt >= latest.startedAt) latest = j;
+    }
+    return latest;
+  }
+
   /** Whether a login check may run now: at most one per computer every CHECK_EVERY_MS, so a loop never locks the account. */
   checkWait(machine: string, guardCode: boolean): number {
     if (guardCode) return 0;

@@ -105,6 +105,13 @@ test('w1596: a job a reboot cut off only checks: the new daemon seen is done; on
   assert.ok(lost.steps.includes('swapBack'));
 });
 
+test('w5554: the worker caps mode goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { workerCaps: m }), { source: '/src', workerCaps: m });
+  assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'off', workerFence: 'on' }), { source: '/src', workerFence: 'on', workerCaps: 'off' });
+  assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'on' as never }), { source: '/src' });
+});
+
 test('w5377: the worker fence switch goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'off' }), { source: '/src', workerFence: 'off' });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', maxUnity: 3 }), { source: '/src', maxUnity: 3, workerFence: 'on' });
