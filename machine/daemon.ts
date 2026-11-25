@@ -3412,9 +3412,14 @@ export class Daemon {
       this.readProbeBlocks = true;
       return;
     }
-    // w5749: the owner secrets still in their warn stage (not closed yet): which exist here, said once per probe.
-    const ownerWarn = sayOwnerWarnStage({ platform: process.platform, home: os.homedir(), env: process.env, mode });
-    if (ownerWarn) log(ownerWarn);
+    // w5749: the owner secrets still in their warn stage (not closed yet): which exist here, said once per probe. Never
+    // reads anything on Windows (the system drive is not touched without a person's decision).
+    try {
+      const ownerWarn = sayOwnerWarnStage({ platform: process.platform, home: HOME, env: process.env, mode });
+      if (ownerWarn) log(ownerWarn);
+    } catch {
+      // a log line only: never in the way of the probe
+    }
     try {
       ensureReadBackDirs(appDir);
       fs.mkdirSync(ghAppPaths(appDir).sessions, { recursive: true });

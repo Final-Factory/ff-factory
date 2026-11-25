@@ -157,7 +157,7 @@ export function ownerSecretPathsWarn(o: { platform: NodeJS.Platform; home: strin
     for (const id of ['org.mozilla.firefox', 'com.google.Chrome', 'org.chromium.Chromium', 'com.brave.Browser', 'com.microsoft.Edge', 'com.vivaldi.Vivaldi', 'com.opera.Opera', 'io.gitlab.librewolf-community'])
       add({ path: h('.var', 'app', id), kind: 'browser' });
     add({ path: h('snap', 'brave'), kind: 'browser' });
-    if (env.XDG_CONFIG_HOME && env.XDG_CONFIG_HOME !== h('.config'))
+    if (env.XDG_CONFIG_HOME && p.normalize(env.XDG_CONFIG_HOME + '/') !== p.normalize(h('.config') + '/'))
       for (const b of ['google-chrome', 'chromium', 'microsoft-edge', 'BraveSoftware']) add({ path: h('.config', b), kind: 'browser' });
   }
   const closed = new Set(ownerSecretPaths(o).map((s) => s.path));
@@ -169,6 +169,8 @@ export function ownerSecretPathsWarn(o: { platform: NodeJS.Platform; home: strin
  * with no GitHub token at all, as the gh folder does.
  */
 export function ownerReadWarn(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
+  // Windows first: nothing below may even resolve a path on the system drive (w5757's review).
+  if (o.platform === 'win32') return [];
   // A folder linked to the gh folder a run uses is that folder: never closed through its other name.
   const active = realOr(ghConfigFolder(o.env, o.platform, o.home));
   return ownerSecretPathsWarn(o)
@@ -182,6 +184,7 @@ export function ownerReadWarn(o: { platform: NodeJS.Platform; home: string; env:
  * here). Names only paths that exist, never their contents. `exists` is for tests.
  */
 export function sayOwnerWarnStage(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; mode: string; exists?: (p: string) => boolean }): string | undefined {
+  if (o.platform === 'win32') return undefined;
   const exists = o.exists ?? fs.existsSync;
   const all = ownerReadWarn({ ...o, hasToken: true });
   if (!all.length) return undefined;

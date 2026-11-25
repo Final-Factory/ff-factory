@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { ghConfigFolder, hasOwnGithub, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadWarn, ownerSecretPaths, ownerSecretPathsWarn, sayOwnerWarnStage, type TokenRun } from '../machine/ownerSecrets.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
@@ -106,8 +107,26 @@ test('ownerSecretPathsWarn (w5749): Linux flatpak and snap browsers, and ~/.conf
 });
 
 test('ownerSecretPathsWarn (w5749): Windows gets none (the system drive is never labelled without a person)', () => {
-  assert.deepEqual(ownerSecretPathsWarn({ platform: 'win32', home: 'C:\Users\p', env: { APPDATA: 'C:\Users\p\AppData\Roaming' } }), []);
-  assert.equal(sayOwnerWarnStage({ platform: 'win32', home: 'C:\Users\p', env: {}, mode: 'warn', exists: () => true }), undefined);
+  assert.deepEqual(ownerSecretPathsWarn({ platform: 'win32', home: String.raw`C:\Users\p`, env: { APPDATA: String.raw`C:\Users\p\AppData\Roaming` } }), []);
+  assert.equal(sayOwnerWarnStage({ platform: 'win32', home: String.raw`C:\Users\p`, env: {}, mode: 'warn', exists: () => true }), undefined);
+});
+
+test('owner secrets warn stage (w5749): on Windows it touches no file at all, not even to resolve a link', (t) => {
+  const real = t.mock.method(fs, 'realpathSync', (p: string) => p);
+  const ex = t.mock.method(fs, 'existsSync', () => true);
+  const env = { APPDATA: String.raw`C:\Users\p\AppData\Roaming`, GH_CONFIG_DIR: String.raw`C:\Users\p\AppData\Roaming\GitHub CLI` };
+  const home = String.raw`C:\Users\p`;
+  assert.deepEqual(ownerReadWarn({ platform: 'win32', home, env, hasToken: true }), []);
+  assert.equal(sayOwnerWarnStage({ platform: 'win32', home, env, mode: 'on' }), undefined);
+  assert.equal(real.mock.callCount(), 0);
+  assert.equal(ex.mock.callCount(), 0);
+});
+
+test('ownerSecretPathsWarn (w5749): XDG_CONFIG_HOME at ~/.config (with or without a slash) adds no ~/.config browsers', () => {
+  for (const x of ['/home/p/.config', '/home/p/.config/']) {
+    const l = ownerSecretPathsWarn({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: x } }).map((s) => s.path);
+    assert.ok(!l.includes('/home/p/.config/google-chrome'), x);
+  }
 });
 
 test('ownerReadWarn (w5749): the other gh folders stay open to a run with no GitHub token, as the gh folder does', () => {
