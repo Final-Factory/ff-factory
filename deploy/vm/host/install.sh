@@ -583,7 +583,7 @@ changed+=$(write_file /etc/systemd/system/fff-vm-watch.timer 0644 <<EOF
 Description=fff-vm: is the FF Factory portal VM alive (every ${WATCH_INTERVAL_SEC}s)
 [Timer]
 OnBootSec=3min
-OnUnitActiveSec=${WATCH_INTERVAL_SEC}s
+OnUnitInactiveSec=${WATCH_INTERVAL_SEC}s
 AccuracySec=5s
 [Install]
 WantedBy=timers.target
