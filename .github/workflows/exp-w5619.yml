@@ -10,7 +10,7 @@ permissions:
 env:
   NODE_VERSION: 24
   GITLEAKS_VERSION: 8.30.1
-  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
+  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --test-reporter=./.github/exp/file-times.ts --test-reporter-destination=filetimes.txt
   COV: --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**'
 
 jobs:
@@ -27,9 +27,6 @@ jobs:
             cov: 'yes'
           - v: conc4
             extra: '--test-concurrency=4'
-            cov: 'yes'
-          - v: conc8
-            extra: '--test-concurrency=8'
             cov: 'yes'
           - v: nocov
             extra: ''
@@ -67,4 +64,5 @@ jobs:
           start=$(date +%s)
           eval node scripts/test-watchdog.ts --minutes 20 -- node --test $TEST_FLAGS ${{ matrix.extra }} $cov server/*.test.ts scripts/*.test.ts 2>&1 | tee out.txt || true
           echo "EXP_WALL ${{ matrix.v }} $(( $(date +%s) - start )) s"
+          cat filetimes.txt | head -60
           grep -E '^ℹ (tests|pass|fail|duration_ms) ' out.txt || true
