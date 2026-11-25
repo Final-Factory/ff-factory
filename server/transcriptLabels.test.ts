@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { explicitMedium, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
+import { deniesDeleteChild, explicitMedium, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { Exec } from '../machine/lowIntegrity.ts';
 
@@ -74,7 +74,7 @@ test('a new conversation: control lines pass, the first message waits for the CL
   assert.equal((p as { pid?: number }).pid, 4242);
   assert.ok(fs.statSync(own.dir).isDirectory(), 'its folder is made before the CLI starts');
   const labels = () => r.calls.filter((c) => c[1] === '/setintegritylevel');
-  assert.deepEqual(labels(), [[own.dir, '/setintegritylevel', 'low', '/T'], [own.dir, '/setintegritylevel', '(OI)(CI)low', '/T']]);
+  assert.deepEqual(labels(), [[own.dir, '/setintegritylevel', '(OI)(CI)low']], 'its folder walked, never with /T');
   assert.deepEqual(r.calls.filter((c) => c[1] === '/deny').map((c) => c[0]), process.env.USERNAME ? [path.dirname(own.file)] : [], 'a project folder it makes gets delete-child taken back');
   p.stdin.write(INIT + USER.slice(0, 10));
   p.stdin.write(USER.slice(10));
@@ -91,7 +91,7 @@ test('a new conversation: control lines pass, the first message waits for the CL
   await tick();
   assert.equal(f.got(), INIT + USER + USER);
   f.child.emit('exit', 0, null);
-  assert.deepEqual(labels().slice(-3), [[own.file, '/setintegritylevel', 'medium'], [own.dir, '/setintegritylevel', 'medium', '/T'], [own.dir, '/setintegritylevel', '(OI)(CI)medium', '/T']]);
+  assert.deepEqual(labels().slice(-2), [[own.file, '/setintegritylevel', 'medium'], [own.dir, '/setintegritylevel', '(OI)(CI)medium']]);
 });
 
 test('a resume labels its file Low at once and passes stdin straight through; two processes of one conversation share the label', async () => {
@@ -160,30 +160,98 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
   const w = (n: string) => path.join('F--work', n);
   const byName = (a: string[], b: string[]) => a[0].localeCompare(b[0]);
   assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [
-    // the recent conversations first, a folder with all inside it
     // delete-child taken back first: a DACL change pushes the folder's inheritable label down again
     ['..', '/deny', 'HOST\\me:(DC)'],
     ['', '/deny', 'HOST\\me:(DC)'],
     ['F--work', '/deny', 'HOST\\me:(DC)'],
-    ...[[w('new'), '/setintegritylevel', 'low', '/T'], [w('new'), '/setintegritylevel', '(OI)(CI)low', '/T'], [w('new.jsonl'), '/setintegritylevel', 'low']].sort(byName),
+    // the folders Medium before anything in them is read: no Low process can put a junction in them after (w5774)
     ['', '/setintegritylevel', '(OI)(CI)medium'],
     ['F--work', '/setintegritylevel', '(OI)(CI)medium'],
-    // then everything else, explicitly: an old explicit Low is not overridden by what it inherits
+    // then each entry on its own, never /T: the recent conversations (no live list: written in 3 days) pinned Low, the rest
+    // Medium explicitly (an old explicit Low is not overridden by what it inherits)
     ...[
-      // a folder twice: every file in it explicitly, then the folders inheritable (an (OI)(CI) label skips files)
-      [w('memory'), '/setintegritylevel', 'medium', '/T'],
-      [w('memory'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
+      [w('memory'), '/setintegritylevel', '(OI)(CI)medium'],
+      [w('new'), '/setintegritylevel', '(OI)(CI)low'],
+      [w('new.jsonl'), '/setintegritylevel', 'low'],
       [w('notes.txt'), '/setintegritylevel', 'medium'],
-      [w('old'), '/setintegritylevel', 'medium', '/T'],
-      [w('old'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
+      [w('old'), '/setintegritylevel', '(OI)(CI)medium'],
       [w('old.jsonl'), '/setintegritylevel', 'medium'],
     ].sort(byName),
   ]);
-  assert.match(said[0], /1 project folder and 4 transcripts and folders in them; 2 written/);
+  assert.match(said[0], /1 project folder and 4 transcripts and folders in them; 2 running or written in the last 3 days/);
   label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
+  // Later starts: a project folder without the deny (made since by a Medium process) gets it; one with it is only read.
   const again = recorder();
-  assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: again.icacls }), true);
-  assert.deepEqual(again.calls, []);
+  assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: again.icacls, account: 'HOST\\me' }), true);
+  assert.deepEqual(again.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [['F--work'], ['F--work', '/deny', 'HOST\\me:(DC)']]);
+  const denied = recorder(() => ({ code: 0, out: 'F--work HOST\\me:(DENY)(DC)\r\n' }));
+  assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: denied.icacls, account: 'HOST\\me' }), true);
+  assert.deepEqual(denied.calls.length, 1);
+});
+
+test('lockTranscripts pins running and recent conversations, and a later start takes back to Medium the pins no longer running', async () => {
+  const root = tmp();
+  const projects = path.join(root, 'projects');
+  const slug = path.join(projects, 'F--work');
+  fs.mkdirSync(slug, { recursive: true });
+  const pins = path.join(root, 'transcript-pins.json');
+  const at = (n: string) => path.join(slug, n);
+  for (const n of [`${SID}.jsonl`, 'cccccccc-old.jsonl', 'dddddddd-recent.jsonl']) fs.writeFileSync(at(n), '');
+  const week = (Date.now() - 7 * 24 * 3600_000) / 1000;
+  for (const n of [`${SID}.jsonl`, 'cccccccc-old.jsonl']) fs.utimesSync(at(n), week, week);
+  let label = '';
+  const exec: Exec = async () => ({ code: 0, stdout: label, stderr: '' });
+  const r = recorder();
+  assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: r.icacls, account: 'HOST\\me', live: new Set([SID]), pins }), true);
+  const lows = r.calls.filter((c) => c[2] === 'low').map((c) => c[0]);
+  assert.deepEqual(lows.sort(), [at(`${SID}.jsonl`), at('dddddddd-recent.jsonl')], 'running (old but live) and written in the hour');
+  assert.ok(r.calls.some((c) => c[0] === at('cccccccc-old.jsonl') && c[2] === 'medium'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(pins, 'utf8')).sort(), lows);
+
+  label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
+  const deny = () => ({ code: 0, out: '(DENY)(DC)' });
+  // What runs unknown: every pin kept.
+  const unknown = recorder(deny);
+  await lockTranscripts(projects, exec, () => {}, { icacls: unknown.icacls, account: 'HOST\\me', pins });
+  assert.ok(!unknown.calls.some((c) => c[1] === '/setintegritylevel'));
+  // Two hours on, only SID still runs: the other pin goes back to Medium and leaves the list.
+  const later = recorder(deny);
+  const said: string[] = [];
+  await lockTranscripts(projects, exec, (l) => said.push(l), { icacls: later.icacls, account: 'HOST\\me', live: new Set([SID]), pins, now: Date.now() + 2 * 3600_000 });
+  assert.deepEqual(later.calls.filter((c) => c[1] === '/setintegritylevel'), [[at('dddddddd-recent.jsonl'), '/setintegritylevel', 'medium']]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(pins, 'utf8')), [at(`${SID}.jsonl`)]);
+  assert.match(said.join('\n'), /1 pinned conversation entry no longer running labelled Medium/);
+});
+
+test('labelTreeSync never follows a junction: it labels each real entry and skips the link, both ways', { skip: process.platform !== 'win32' ? 'junctions are a Windows thing' : false }, () => {
+  const root = tmp();
+  const tree = path.join(root, 'tree');
+  const target = path.join(root, 'target');
+  fs.mkdirSync(path.join(tree, 'sub'), { recursive: true });
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(tree, 'a.jsonl'), '');
+  fs.writeFileSync(path.join(tree, 'sub', 'b.txt'), '');
+  fs.symlinkSync(target, path.join(tree, 'link'), 'junction');
+  for (const level of ['medium', 'low'] as const) {
+    const r = recorder();
+    assert.equal(labelTreeSync(tree, level, r.icacls, 'HOST\\me'), 1, level);
+    const labelled = r.calls.filter((c) => c[1] === '/setintegritylevel');
+    assert.ok(!r.calls.some((c) => c[0].startsWith(target) || c[0] === path.join(tree, 'link') || c[0] === path.join(tree, '*')), `${level}: nothing names the link or a wildcard beside it: ${JSON.stringify(r.calls)}`);
+    assert.ok(!r.calls.some((c) => c.includes('/T')));
+    assert.deepEqual(labelled.map((c) => c[0]).sort(), [tree, path.join(tree, 'a.jsonl'), path.join(tree, 'sub'), path.join(tree, 'sub', '*')].sort(), level);
+    if (level === 'medium') assert.deepEqual(labelled[0], [tree, '/setintegritylevel', '(OI)(CI)medium'], 'the folder first, before it is read');
+    else assert.deepEqual(labelled.at(-1), [tree, '/setintegritylevel', '(OI)(CI)low'], 'the folder last, after what is in it');
+  }
+  assert.throws(() => labelTreeSync(path.join(tree, 'link'), 'medium', recorder().icacls, 'HOST\\me'), /junction or link/);
+  assert.throws(() => setLabelSync(path.join(tree, 'link'), 'low', recorder().icacls, 'HOST\\me'), /junction or link/);
+});
+
+test('liveSessionIds reads --resume and --session-id off the command lines, and is unknown when the call fails', async () => {
+  const out = `node cli.js --resume ${SID} --output-format stream-json\r\n"C:\\x\\claude.exe" --session-id="bbbbbbbb-2222" -p\r\nnode other.js --resume ..\\x\r\n`;
+  assert.deepEqual([...((await liveSessionIds(async () => ({ code: 0, stdout: out, stderr: '' }))) ?? [])], [SID, 'bbbbbbbb-2222']);
+  assert.equal(await liveSessionIds(async () => ({ code: 1, stdout: '', stderr: 'no' })), undefined);
+  assert.equal(deniesDeleteChild('X:\\p HOST\\me:(DENY)(DC)\r\n'), true);
+  assert.equal(deniesDeleteChild('X:\\p HOST\\me:(OI)(CI)(F)\r\n'), false);
 });
 
 test('lockTranscripts says so and answers false when the label cannot be set', async () => {
@@ -203,7 +271,21 @@ test('unlockTranscripts labels everything Low again only where a lock was set', 
   assert.deepEqual(none.calls, []);
   const r = recorder();
   await unlockTranscripts(projects, async () => ({ code: 0, stdout: 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', stderr: '' }), () => {}, r.icacls, 'HOST\\me');
-  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [['..', '/remove:d', 'HOST\\me'], ['', '/remove:d', 'HOST\\me'], ['F--work', '/remove:d', 'HOST\\me'], ['', '/setintegritylevel', 'low', '/T'], ['', '/setintegritylevel', '(OI)(CI)low', '/T']]);
+  // Walked, not /T: each folder's contents before the folder, `projects` itself last, so a way back cut off half way is
+  // tried again at the next start (it still carries its Medium label).
+  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [
+    ['..', '/remove:d', 'HOST\\me'],
+    ['', '/remove:d', 'HOST\\me'],
+    ['F--work', '/remove:d', 'HOST\\me'],
+    [''],
+    ['F--work'],
+    [path.join('F--work', SID)],
+    [path.join('F--work', '*'), '/setintegritylevel', 'low'],
+    [path.join('F--work', SID), '/setintegritylevel', '(OI)(CI)low'],
+    ['*', '/setintegritylevel', 'low'],
+    ['F--work', '/setintegritylevel', '(OI)(CI)low'],
+    ['', '/setintegritylevel', '(OI)(CI)low'],
+  ]);
 });
 
 /**
@@ -218,7 +300,8 @@ let buf='';process.stdin.on('data',c=>{buf+=c;let i;while((i=buf.indexOf('\\n'))
 if(l.type==='control_request')process.stdout.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:l.request_id}})+'\\n');
 else{fs.appendFileSync(file,JSON.stringify(l)+'\\n');fs.writeFileSync(path.join(path.dirname(file),sid,'tool.txt'),'x');
 let other='refused';try{fs.appendFileSync(process.env.OTHER,'x')}catch{other='refused ok'}
-process.stdout.write(JSON.stringify({type:'result',other})+'\\n')}}});
+let junction='none';if(process.env.JUNCTION)try{fs.symlinkSync(process.env.JUNCTION,path.join(path.dirname(file),sid,'link'),'junction');junction='made'}catch(e){junction=e.code}
+process.stdout.write(JSON.stringify({type:'result',other,junction})+'\\n')}}});
 process.stdin.on('end',()=>process.exit(0));`;
 
 /** A Low process cannot label anything Medium (a worker on a fenced machine): the Windows leg needs Medium or above (CI, the daemon). */
@@ -337,7 +420,21 @@ console.log(out.join('; '))`,
   // The spawner end to end, the stand-in CLI at Low: a pre-made file would stop it, the gate makes the file in time.
   const sid2 = 'dddddddd-2222';
   const cwd = path.join(root, 'work');
-  const env = { ...process.env, CLAUDE_CONFIG_DIR: home, SLUG: projectSlug(cwd), OTHER: other } as Record<string, string>;
+  // A Medium folder outside the transcripts that the stand-in CLI, at Low, points a junction at from its own Low folder: the
+  // relabels at its exit and at the way back must leave it Medium (w5774: icacls /T followed such a junction and relabelled
+  // the target Low, measured on BEAST).
+  const target = path.join(root, 'medium-target');
+  fs.mkdirSync(target);
+  fs.writeFileSync(path.join(target, 'keep.txt'), 'medium\n');
+  setLabelSync(target, '(OI)(CI)medium');
+  setLabelSync(path.join(target, 'keep.txt'), 'medium');
+  const targetStaysMedium = (when: string) => {
+    const shown = execFileSync('icacls', [target], { encoding: 'utf8' });
+    t.diagnostic(`junction target ${when}: ${shown.replace(/\s+/g, ' ')}`);
+    assert.doesNotMatch(shown, /Low Mandatory Level/, `the junction's target is not labelled Low ${when}`);
+    assert.match(atLow(`${TRY}t('append',()=>fs.appendFileSync(process.argv[1],'x'));t('plant',()=>fs.writeFileSync(process.argv[2],''));console.log(out.join())`, path.join(target, 'keep.txt'), path.join(target, 'planted.txt')), /append E(ACCES|PERM),plant E(ACCES|PERM)/, when);
+  };
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: home, SLUG: projectSlug(cwd), OTHER: other, JUNCTION: target } as Record<string, string>;
   fs.mkdirSync(cwd);
   const p = lowTranscriptSpawner({ log: (l) => t.diagnostic(l) })({ command: lowNode, args: ['-e', FAKE_CLI, '--', '--session-id', sid2], cwd, env, signal: new AbortController().signal });
   let out = '';
@@ -349,6 +446,9 @@ console.log(out.join('; '))`,
   p.stdin.end();
   assert.equal(await exited, 0, out);
   assert.match(out, /"other":"refused ok"/);
+  assert.match(out, /"junction":"made"/, 'a Low process can make a junction in its own Low folder');
+  assert.ok(fs.lstatSync(path.join(projects, projectSlug(cwd), sid2, 'link')).isSymbolicLink());
+  targetStaysMedium('after the spawner labelled the conversation Medium at its exit');
   const file2 = path.join(projects, projectSlug(cwd), `${sid2}.jsonl`);
   assert.equal(fs.readFileSync(file2, 'utf8'), USER);
   assert.equal(fs.readFileSync(path.join(projects, projectSlug(cwd), sid2, 'tool.txt'), 'utf8'), 'x');
@@ -357,6 +457,7 @@ console.log(out.join('; '))`,
   // The way back: everything Low again.
   await unlockTranscripts(projects, exec, (l) => t.diagnostic(l));
   for (const p of [projects, other]) t.diagnostic(`after unlock: ${execFileSync('icacls', [p], { encoding: 'utf8' }).replace(/\s+/g, ' ')}`);
+  targetStaysMedium('after the way back labelled everything Low');
   // A transcript the lock labelled Medium is Low again: an (OI)(CI) label on `projects` alone left it Medium (measured).
   assert.match(
     atLow(`${TRY}t('append',()=>fs.appendFileSync(process.argv[1],''));t('plant',()=>fs.writeFileSync(process.argv[2],''));t('append sub',()=>fs.appendFileSync(process.argv[3],''));console.log(out.join())`, other, path.join(slug, 'eeeeeeee.jsonl'), sub),

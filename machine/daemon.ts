@@ -18,7 +18,7 @@ import { probeFence } from './fenceProbe.ts';
 import { maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
+import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
 import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, openNoReadUp, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
@@ -3348,11 +3348,13 @@ export class Daemon {
   private async lowTranscripts(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<boolean> {
     const projects = path.join(process.env.CLAUDE_CONFIG_DIR || workerClaudeDir(root), 'projects');
 
+    // The pinned conversations, in the daemon's own folder: a Low worker can write anywhere in the Claude home (w5774).
+    const pins = path.join(appDirOfConfig(this.cfg), 'transcript-pins.json');
     if (!this.cfg.workerTranscriptLabels) {
-      await unlockTranscripts(projects, exec, say);
+      await unlockTranscripts(projects, exec, say, undefined, undefined, pins);
       return false;
     }
-    if (!(await lockTranscripts(projects, exec, say))) return false;
+    if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
     const node = await lowCopy(root, process.execPath, exec, say);
     const probe = node ? probeTranscriptLock(node, projects) : 'no Low node copy';
     log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
