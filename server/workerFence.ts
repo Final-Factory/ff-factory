@@ -37,6 +37,8 @@ export interface WorkerFence {
   readAllowed?: string[];
   /** The read fence is switched off on this machine (daemon_control read-fence-off, w5546): no read rules, writes as before. */
   readOff?: boolean;
+  /** Secrets folders outside `<root>/secrets` (a Dev Drive install's host folder, readFence.ts secretsDirs): read-denied too. */
+  secretsDirs?: string[];
 }
 
 /** An SBPL string literal. */
@@ -121,6 +123,7 @@ function readRules(f: WorkerFence): string[] {
     ...READ_DENIED_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
     ...READ_DENIED_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
     ...(daemon !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(daemon)})`] : []),
+    ...(f.secretsDirs ?? []).filter((p) => path.isAbsolute(p) && p !== path.join(f.root, 'secrets')).map((p) => `  (subpath ${lit(p)})`),
     ...(f.readDenied ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
   ];
   return [

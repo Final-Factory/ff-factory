@@ -86,7 +86,9 @@ and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1`
 ## Reads: the daemon's folder, secrets and root.json are closed (w5546, every OS)
 
 lothsahn (w5546): "workers can't read the secrets and daemon folders on any OS". The fences that refuse a worker's writes
-also refuse its reads of `<root>/secrets`, `<root>/root.json` and the daemon's folder (its own `appDir`, and
+also refuse its reads of `<root>/secrets` (and the folder that really holds the machine credential when it is elsewhere: a
+Dev Drive install keeps it in the host folder, `D:\work\ffw\secrets` for root `V:\ffw` on LothDesktop; `secretsDirs`,
+machine/readFence.ts, from `tokenFile`), `<root>/root.json` and the daemon's folder (its own `appDir`, and
 `<root>/daemon` where that differs). What workers read or run in the daemon's folder is given back, from one list,
 `FENCE_READ_ALLOW` (server/daemonReads.ts): the guard's diagnostic reads (`DAEMON_READ_ALLOW`: logs, the code in `src` and
 `app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
@@ -112,20 +114,42 @@ Kept working through the daemon's own writes (lockout review of #1193):
   `checkPublished`) and the update job (machine/osJob.ts) run unfenced with the daemon's own environment, and the installer
   clones and fetches anonymously. The gh-app helper is only ever in a run's environment (server/launch.ts, GIT_CONFIG_*).
 
-**Live off switch**, for a machine nobody is at: `machine_daemon` with action `read-fence-off` (or `POST
-/api/machines/<id>/daemon` `{"action":"read-fence-off"}`) writes `read-fence.off` in the daemon's folder: runs started after it
-get no read rules on any OS, and on Windows the closed paths' labels go back to No-Write-Up only. No restart, nothing else
-changes; the write fence stays. `read-fence-on` removes the marker and sets the labels again. Runs already going keep the
-fence they started with. Only a daemon whose hello offers `readFenceSwitch` is sent it: a daemon from before w5546 took any
-action but `restart` as an unload.
+**Modes, off by default** (lockout review of #1193, lothsahn's rule: "warn-only first, enforce only after measured zero
+failures, keep a recovery route that needs no person"). The read fence has its own mode per machine, separate from the
+write fence's keys, kept in `read-fence` in the daemon's folder (machine/readFence.ts `readFenceMode`; a missing or
+unreadable file is `off`). The portal sets it live, with nobody at the machine and no restart: `machine_daemon` with action
+`read-fence-off`, `read-fence-warn` or `read-fence-on` (or `POST /api/machines/<id>/daemon` `{"action":"read-fence-warn"}`).
+Runs already going keep the fence they started with; the write fence never changes.
+
+| Mode | Runs started from now on | Windows labels | Probe |
+|---|---|---|---|
+| `off` (default) | no read rules | any No-Read-Up label a closed path still carries (an earlier `on`, a reverted build) is replaced by plain No-Write-Up at each start and at the switch (`openNoReadUp`); a path without one is not touched | none |
+| `warn` | no read rules | as `off` | yes, logged |
+| `on` | the read rules, once a probe has passed | No-Read-Up set at each start and at the switch | yes; a probe that finds a path workers need refused, or cannot judge one, leaves runs without read rules until one passes |
+
+The probe (`probeReadFence`, machine/daemon.ts) runs at daemon start and at each switch, in a child of the daemon's own
+under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read rules): node opens each closed path (the
+secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
+`app/machine/ghApp.ts`) read-only and closes it at once, reading no byte, and the daemon logs one line, `read fence (<mode>,
+<os>) probe: a/b closed paths refused, c/d given-back paths open; ...` with what it would wrongly refuse or leave open. On
+Windows the labels are what refuses, so `warn` sets none and logs what `on` would close. Only a daemon whose hello offers
+`readFenceSwitch` is sent a mode: a daemon from before w5546 took any action but `restart` as an unload, and a daemon now
+refuses an action it does not know.
 
 Limits:
 
-- **Linux and Windows, diagnostic files**: a given-back file in the daemon's folder that the daemon rewrites by rename
-  (`sandboxes.json`, `pause.json`, `cleanup.json`, `update/job.json`, ...) is a new file afterwards, which a run started
-  before it cannot read until the next run (Linux) or the next daemon start (Windows). Only the guard's diagnostic reads
-  use them; the files a worker's tools need (`rpc/`, `unity-slots`, `unity-mcp`, `cleanup-facts.json`,
-  `person-play.json`, its own tokens folder) are folders or written in place.
+- **Linux and Windows, diagnostic files** (in `on` mode): a given-back file in the daemon's folder that the daemon rewrites
+  by rename (`sandboxes.json` and `pause.json` through server/durable.ts, `update/job.json` and `update/result.json` through
+  machine/selfUpdate.ts `writeJson`, `cleanup-log.jsonl` when it rotates) is a new file afterwards, which a run started
+  before it cannot read until the next run (Linux) or the next daemon start (Windows). Only an agent's own `cat` of them
+  for diagnosis reads them; no worker tool does (`leftovers.ts` reads `cleanup-facts.json` and `published.jsonl`, both
+  written in place). Their writers are left as they are on purpose: the pool's crash-safe writer and the update job are
+  what a rewrite could break. The files a worker's tools need (`rpc/`, `unity-slots`, `unity-mcp`, `cleanup-facts.json`,
+  `person-play.json`, `published.jsonl`, its own tokens folder) are folders or written in place.
+- **Linux, a self-update** (in `on` mode): the update puts the new code in a new `app` folder (scripts/worker/linkJob.ts),
+  which a run that outlives the update was never granted, so until that run ends its gh helper, git credential helper and
+  `unity-slot` (all `node <daemon>/app/machine/...`) are refused. New runs are fine. Windows has the same window until the
+  restarted daemon's start sets the labels again (about a minute on LothDesktop).
 
 - **Linux**: a file made directly in one of the closed paths' parent folders after the run started (a new file straight in
   `$HOME` or the root, or one rewritten there by rename) is not readable by that run; one made below a granted sibling is.

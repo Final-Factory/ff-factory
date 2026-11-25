@@ -2254,7 +2254,7 @@ route('POST', '/api/machines/([\\w-]+)/redeploy', async (req, [id]) => {
 
 route('POST', '/api/machines/([\\w-]+)/daemon', async (req, [id]) => {
   const b = await readJson<{ action?: string; force?: boolean }>(req);
-  if (b.action !== 'start' && b.action !== 'stop' && b.action !== 'restart' && b.action !== 'read-fence-off' && b.action !== 'read-fence-on') throw new HttpError(400, 'action must be start, stop, restart, read-fence-off or read-fence-on');
+  if (b.action !== 'start' && b.action !== 'stop' && b.action !== 'restart' && b.action !== 'read-fence-off' && b.action !== 'read-fence-warn' && b.action !== 'read-fence-on') throw new HttpError(400, 'action must be start, stop, restart, read-fence-off, read-fence-warn or read-fence-on');
   return { note: await machines.controlDaemon(id, b.action, !!b.force) };
 });
 

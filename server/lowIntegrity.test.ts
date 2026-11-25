@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isLabelledLow, labelLow, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isLabelledLow, labelLow, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 
 /**
@@ -295,4 +295,21 @@ test('w5546: hasLabel reads icacls for an explicit Medium label with or without 
   assert.equal(onSystemDrive('C:\\ffw', 'C:', (p) => p), true);
   assert.equal(onSystemDrive('F:\\ffw\\daemon', 'C:', () => 'C:\\ffw-anchor\\daemon'), true, 'a junction into C:');
   assert.equal(onSystemDrive('F:\\ffw\\daemon', 'C:', (p) => p), false);
+});
+
+test('w5546 lockout review B1, B3: off takes only the NR labels still there off again; a Dev Drive host secrets folder is closed', async () => {
+  const there = new Set(['F:\\ffw\\daemon', 'F:\\ffw\\secrets', 'D:\\work\\ffw\\secrets', 'F:\\ffw\\root.json', 'F:\\ffw\\daemon\\logs']);
+  const t = noReadUpTargets({ root: 'F:\\ffw', appDir: 'F:\\ffw\\daemon', allowBack: ['logs'], secrets: ['D:\\work\\ffw\\secrets'], stat: (p) => (there.has(p) ? (p.endsWith('.json') ? 'file' : 'dir') : undefined) });
+  assert.ok(t.some((x) => x.path === 'D:\\work\\ffw\\secrets' && x.sddl === NO_READ_UP.dir), 'the host folder\'s secrets closed');
+  const scripts: string[] = [];
+  const exec: Exec = async (cmd, args) => {
+    if (cmd === 'icacls') return { code: 0, stdout: args[0] === 'F:\\ffw\\daemon' ? `${args[0]} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW,NR)` : `${args[0]} Mandatory Label\\Medium Mandatory Level:(I)(OI)(CI)(NW,NR)`, stderr: '' };
+    scripts.push(Buffer.from(args[args.length - 1], 'base64').toString('utf16le'));
+    return { code: 0, stdout: 'ok 0\r\n', stderr: '' };
+  };
+  assert.deepEqual(await openNoReadUp(t, exec, () => {}, { systemDrive: () => false }), ['F:\\ffw\\daemon'], 'only the explicit NR label; inherited ones go with it');
+  assert.equal(scripts.length, 1);
+  assert.ok(scripts[0].includes("'F:\\ffw\\daemon', 'S:(ML;OICI;NW;;;ME)'") && !scripts[0].includes('NWNR'), scripts[0]);
+  const none: Exec = async (cmd) => (cmd === 'icacls' ? { code: 0, stdout: 'x Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', stderr: '' } : assert.fail('nothing to set'));
+  assert.deepEqual(await openNoReadUp(t, none, () => {}, { systemDrive: () => false }), [], 'never labelled: nothing walked');
 });

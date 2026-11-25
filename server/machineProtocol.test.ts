@@ -153,9 +153,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
 // w5546 (no bump): `daemon_control` actions `read-fence-off`/`read-fence-on`, the hello's `readFenceSwitch`, and
 // `LaunchSpec.fence.readAllowed`/`readOff`. The portal sends a read-fence action only to a daemon whose hello offers the
-// switch (an older one took any action but restart as an unload); an older portal ignores the hello field; an older agent
+// switch (an older one took any action but restart as an unload), `read-fence-warn` among them (lockout review); an older portal ignores the hello field; an older agent
 // host ignores the fence's read fields and runs the write fence alone.
-const DECIDED = { protocol: 9, fingerprint: 'aeae964bbab7840c' };
+const DECIDED = { protocol: 9, fingerprint: '3ca4cf0b05af281d' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

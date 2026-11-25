@@ -327,7 +327,7 @@ export type ToDaemon =
    * over ssh: its supervisor stopped and unregistered, its agents ended, its files kept. Answered by daemon_control_result
    * before it goes (w1596). Sent only to a daemon whose hello offered `selfUpdate`.
    */
-  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-on' };
+  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on' };
 
 /** A live view a daemon runs (w1509), as its hello reports it. */
 export interface DaemonLiveView {
@@ -392,7 +392,7 @@ export type FromDaemon =
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
       selfUpdate?: number;
       /**
-       * w5546: it takes daemon_control `read-fence-off` / `read-fence-on`, the live off switch of the worker read fence. Sent
+       * w5546: it takes daemon_control `read-fence-off` / `read-fence-warn` / `read-fence-on`, the worker read fence's live mode. Sent
        * only to a daemon that says so: an older one reads any action but restart as uninstall.
        */
       readFenceSwitch?: boolean;

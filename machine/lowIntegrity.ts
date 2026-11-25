@@ -360,7 +360,7 @@ export interface LabelTarget {
 }
 
 /** The NR labels, closed paths first, then the read-backs. Paths that do not exist are left out. Exported for tests. */
-export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined }): LabelTarget[] {
+export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; secrets?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined }): LabelTarget[] {
   const stat =
     o.stat ??
     ((p: string) => {
@@ -375,7 +375,8 @@ export function noReadUpTargets(o: { root: string; appDir: string; allowBack: re
     const k = stat(p);
     if (k && !out.some((t) => t.path.toLowerCase() === p.toLowerCase())) out.push({ path: p, sddl: k === 'dir' ? l.dir : l.file });
   };
-  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
+  // secrets: every secrets folder (readFence.ts secretsDirs), the Dev Drive host folder's too (B3 of the #1193 lockout review).
+  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
   for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(path.isAbsolute(a) ? a : path.join(o.appDir, a), READ_BACK);
   return out;
 }
@@ -479,4 +480,19 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
   for (const [i, c] of failed) say(`worker integrity: could not set ${todo[i].sddl} on ${todo[i].path}: ${c}`);
   say(`worker integrity: read labels set on ${todo.length - failed.size} of ${todo.length} paths (No-Read-Up on the daemon's folder, secrets and root.json; their worker reads given back)`);
   return failed.size === 0;
+}
+
+/**
+ * Takes the No-Read-Up labels off again (w5546 lockout review B1: the read fence off or warn, or a reverted build): each
+ * closed path that still carries an explicit NR label gets the plain No-Write-Up one. A path without one is not touched
+ * (setting a folder's label walks everything in it). Returns the paths it opened, or undefined when one could not be set.
+ */
+export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean } = {}): Promise<string[] | undefined> {
+  const open: LabelTarget[] = [];
+  for (const x of t.filter((x) => x.sddl.includes('NWNR'))) {
+    const now = await exec('icacls', [x.path], { timeoutMs: 60_000 });
+    if (now.code === 0 && hasLabel(now.stdout, x.sddl)) open.push({ path: x.path, sddl: x.sddl.replace('NWNR', 'NW') });
+  }
+  if (open.length && !(await labelNoReadUp(open, exec, say, o))) return undefined;
+  return open.map((x) => x.path);
 }

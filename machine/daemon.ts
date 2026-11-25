@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, openNoReadUp, type Exec, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -25,7 +25,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureReadBackDirs, readFenceOff, readFenceOffFile, writeInPlace } from './readFence.ts';
+import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -653,7 +653,7 @@ export class Daemon {
       log: (...a) => log(...a),
       nodeArgs: hostNodeArgs(),
       published: () => publishedOrigin(this.cfg.configFile) ?? this.cfg.updateOrigin,
-      readFence: (off) => this.setReadFence(off),
+      readFence: (mode) => this.setReadFence(mode),
     });
     this.pause = new PauseKeeper({
       file: pauseFile(appDirOfConfig(cfg)),
@@ -1494,6 +1494,8 @@ export class Daemon {
     this.timers.push(setInterval(() => this.offerSelfUpdate(), REOFFER_MS.value));
     // w5377: the Windows worker fence, set up in the background; agents start unfenced until it is ready.
     void this.lowSetup();
+    // w5546: the read fence's probe (warn and on modes), in the background; runs start without read rules until it passes.
+    void this.probeReadFence();
     this.startRpc();
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
@@ -2019,7 +2021,7 @@ export class Daemon {
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
       ...(selfUpdate ? { selfUpdate: SELF_UPDATE_VERSION } : {}),
-      // w5546: it takes daemon_control read-fence-off / read-fence-on (an older daemon would read any other action as uninstall).
+      // w5546: it takes daemon_control read-fence-off / -warn / -on (an older daemon would read any other action as uninstall).
       readFenceSwitch: true,
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
@@ -2945,7 +2947,7 @@ export class Daemon {
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
     // Its own folder, not the file: a rewrite of the file keeps the grant (lockout review of #1193).
     const ownDir = own ? path.dirname(own) : undefined;
-    const readOff = readFenceOff(appDirOfConfig(this.cfg));
+    const readOff = !this.readFenceEnforced();
     const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...(ownDir ? ['--read', ownDir] : [])] } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
     const fence = baseFence && readOff ? { ...baseFence, readOff: true } : baseFence && ownDir ? { ...baseFence, readAllowed: [...(baseFence.readAllowed ?? []), ownDir] } : baseFence;
@@ -2969,7 +2971,7 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       try {
         fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
-        if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg) };
+        if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg), secretsDirs: this.secretsDirs };
         if (this.cfg.workerFence && !fence) log(`worker fence: "${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only); agents run unfenced`);
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
@@ -3046,8 +3048,7 @@ export class Daemon {
         fs.mkdirSync(sessions, { recursive: true });
         // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
         ensureReadBackDirs(appDir);
-        if (readFenceOff(appDir)) log('worker integrity: the read fence is off (daemon_control read-fence-off); no No-Read-Up labels set');
-        else if (!(await labelNoReadUp(noReadUpTargets({ root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [sessions] }), exec, say))) log('worker integrity: not every read label could be set; Low workers may still read there');
+        await this.applyReadLabels(readFenceMode(appDir), exec, say);
       } catch (e) {
         log(`worker integrity: read labels: ${(e as Error).message}`);
       }
@@ -3162,28 +3163,104 @@ export class Daemon {
     }
   }
 
+  /** w5546: every secrets folder the fences close (`<root>/secrets`, and the Dev Drive host folder's: lockout review B3). */
+  private get secretsDirs(): string[] {
+    return this.cfg.root ? secretsDirs(this.cfg.root, this.cfg.tokenFile) : [];
+  }
+
   /** w5546: the Linux lock's read half (the daemon's folder, secrets, root.json closed; what workers read there given back). */
   private get readLock(): string[] {
-    return this.cfg.root ? readLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg) }) : [];
+    return this.cfg.root ? readLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), noRead: this.secretsDirs }) : [];
+  }
+
+  /** The last read fence probe's verdict: whether it found a path workers need refused (on mode then enforces nothing). */
+  private readProbeBlocks = true;
+
+  /**
+   * Whether runs started now get the read rules: only in `on` mode, and only once a probe found nothing workers need
+   * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
+   */
+  private readFenceEnforced(): boolean {
+    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks;
   }
 
   /**
-   * The live off switch of the read fence (w5546 lockout review, lothsahn: "If we get that wrong we may be unable to update
-   * workers and have to manually reinstall"): the portal's `daemon_control` `read-fence-off` / `read-fence-on`, with nobody
-   * at the machine and no restart. Off: runs started from now on get no read rules (macOS, Linux), and on Windows the No-Read-Up
-   * labels are replaced by plain No-Write-Up ones. The marker file keeps the choice across restarts and updates.
+   * The read fence's probe (warn and on modes): a child of the daemon's own, run under the same fence a run gets with the
+   * read rules (macOS Seatbelt, Linux Landlock), opens each closed path and each given-back one, reads no byte, and the
+   * verdict is logged. Windows: the labels are what refuses there, so warn mode sets none and logs what it would set.
    */
-  async setReadFence(off: boolean): Promise<void> {
+  async probeReadFence(): Promise<void> {
+    const root = this.cfg.root;
+    if (!root) return;
     const appDir = appDirOfConfig(this.cfg);
-    if (off) fs.writeFileSync(readFenceOffFile(appDir), `${new Date().toISOString()}\n`);
-    else fs.rmSync(readFenceOffFile(appDir), { force: true });
-    log(`read fence: ${off ? 'off' : 'on'} for runs started from now on (daemon_control)`);
+    const mode = readFenceMode(appDir);
+    if (mode === 'off') {
+      this.readProbeBlocks = true;
+      return;
+    }
+    try {
+      ensureReadBackDirs(appDir);
+      fs.mkdirSync(ghAppPaths(appDir).sessions, { recursive: true });
+      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW });
+      let argv: string[] | undefined;
+      const fence = this.workerFence;
+      const lock = this.writeLock;
+      if (process.platform === 'darwin' && fence) argv = fencedArgv({ ...fence, secretsDirs: this.secretsDirs, readOff: false }, process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open]);
+      else if (process.platform === 'linux' && lock) argv = ['python3', FF_LANDLOCK, ...lock, ...this.readLock, '--', process.execPath, '-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open];
+      if (!argv) {
+        // Windows (labels, set only in on mode by lowSetup), or no fence here: nothing a probe child could show.
+        this.readProbeBlocks = process.platform !== 'win32';
+        log(`read fence (${mode}): ${process.platform === 'win32' ? `${mode === 'warn' ? 'warn only: no No-Read-Up label set; on would close' : 'closes'} ${t.closed.join(', ')} and give back ${t.open.length} paths` : 'no worker fence runs here (workerFence on macOS, writeLock on Linux), so there is nothing to probe or enforce'}`);
+        return;
+      }
+      const [cmd, ...args] = argv;
+      const r = await run(cmd, args, { timeoutMs: 60_000 });
+      const v = judgeReadProbe(t, r.stdout);
+      this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0;
+      log(sayReadProbe(mode, process.platform, v, t));
+      if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused or could not judge one; runs start without read rules until a probe passes (warn, not a lockout)');
+    } catch (e) {
+      this.readProbeBlocks = true;
+      log(`read fence (${mode}): the probe could not run (${(e as Error).message}); runs start without read rules`);
+    }
+  }
+
+  /**
+   * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
+   * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
+   * one, so a switch or a revert leaves no read label behind (lockout review B1). A path without NR is not touched: setting
+   * a folder's label walks everything in it.
+   */
+  private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+    if (!this.cfg.root) return;
+    const appDir = appDirOfConfig(this.cfg);
+    const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions], secrets: this.secretsDirs });
+    if (mode === 'on') {
+      if (!(await labelNoReadUp(t, exec, say))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      log('worker integrity: the read fence is on: No-Read-Up labels set');
+      return;
+    }
+    const opened = await openNoReadUp(t, exec, say);
+    if (!opened) throw new Error('not every No-Read-Up label could be taken off (the daemon log says which)');
+    log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
+  }
+
+  /**
+   * The live switch of the read fence (w5546 lockout review, lothsahn: "If we get that wrong we may be unable to update
+   * workers and have to manually reinstall"): the portal's `daemon_control` `read-fence-off` / `-warn` / `-on`, with nobody
+   * at the machine and no restart. The mode file keeps the choice across restarts and updates; runs started from now on
+   * follow it, after the probe.
+   */
+  async setReadFence(mode: ReadFenceMode): Promise<void> {
+    const appDir = appDirOfConfig(this.cfg);
+    writeReadFenceMode(appDir, mode);
+    this.readProbeBlocks = true;
+    log(`read fence: ${mode} for runs started from now on (daemon_control)`);
     if (process.platform === 'win32' && this.cfg.workerIntegrity === 'low' && this.cfg.root) {
       const exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000 });
-      const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions] });
-      const ok = await labelNoReadUp(off ? t.map((x) => ({ ...x, sddl: x.sddl.replace('NWNR', 'NW') })) : t, exec, (l) => log(l));
-      if (!ok) throw new Error(`not every label could be ${off ? 'opened' : 'closed'}; the daemon log says which`);
+      await this.applyReadLabels(mode, exec, (l) => log(l));
     }
+    await this.probeReadFence();
   }
 
   private lockMemo?: { args?: string[] };

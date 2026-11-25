@@ -3,13 +3,109 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 /**
- * The marker of the live off switch (daemon_control `read-fence-off`): while it is there, runs start with no read rules and
- * Windows keeps no No-Read-Up labels. In the daemon's folder, which workers can neither read nor write.
+ * The read fence's mode on this machine (w5546 lockout review, lothsahn's rule: "warn-only first, enforce only after measured
+ * zero failures, keep a recovery route that needs no person"), set live by the portal's `daemon_control` `read-fence-off`,
+ * `read-fence-warn` or `read-fence-on` and kept across restarts and updates in a file in the daemon's folder, which workers can
+ * neither read nor write:
+ * - `off` (the default, and what a missing or unreadable file means): runs get no read rules and on Windows the closed paths'
+ *   No-Read-Up labels are taken off again, so a revert or a switch leaves no label behind;
+ * - `warn`: the same for runs, but the daemon probes the fence at start and at each switch, in a child of its own under the
+ *   read rules, and logs what it would refuse that workers need and what it would leave open that it must close;
+ * - `on`: runs get the read rules (Windows: the labels), with the same probe; a probe that finds a path workers need refused
+ *   leaves runs without read rules until the next probe passes, so a wrong rule degrades to warn, never to a lockout.
  */
-export const readFenceOffFile = (appDir: string) => path.join(appDir, 'read-fence.off');
+export type ReadFenceMode = 'off' | 'warn' | 'on';
+export const READ_FENCE_MODES: readonly ReadFenceMode[] = ['off', 'warn', 'on'];
+export const readFenceModeFile = (appDir: string) => path.join(appDir, 'read-fence');
 
-/** Whether the read fence is switched off on this machine. */
-export const readFenceOff = (appDir: string) => fs.existsSync(readFenceOffFile(appDir));
+export function readFenceMode(appDir: string): ReadFenceMode {
+  try {
+    const m = fs.readFileSync(readFenceModeFile(appDir), 'utf8').trim();
+    return m === 'warn' || m === 'on' ? m : 'off';
+  } catch {
+    return 'off';
+  }
+}
+
+export function writeReadFenceMode(appDir: string, mode: ReadFenceMode): void {
+  if (mode === 'off') fs.rmSync(readFenceModeFile(appDir), { force: true });
+  else fs.writeFileSync(readFenceModeFile(appDir), `${mode}\n`);
+}
+
+/**
+ * Every secrets folder the fence closes (B3 of the lockout review): `<root>/secrets`, and the folder that really holds the
+ * machine credential when that is elsewhere: a Dev Drive install keeps it in the host folder beside the daemon's
+ * (scripts/worker/worker.ts layoutOf `secrets: a('secrets')`; LothDesktop: D:\work\ffw\secrets for root V:\ffw). Only a
+ * folder named `secrets`, so an odd tokenFile never closes a person's folder.
+ */
+export function secretsDirs(root: string, tokenFile?: string): string[] {
+  const out = [path.join(path.resolve(root), 'secrets')];
+  const d = tokenFile ? path.dirname(path.resolve(tokenFile)) : undefined;
+  if (d && path.basename(d).toLowerCase() === 'secrets' && !out.some((o) => o.toLowerCase() === d.toLowerCase())) out.push(d);
+  return out;
+}
+
+/** What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only. */
+export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean }): { closed: string[]; open: string[] } {
+  const exists = o.exists ?? ((p: string) => fs.existsSync(p));
+  const closed = [
+    ...o.secrets,
+    ...(o.tokenFile ? [path.resolve(o.tokenFile)] : []),
+    path.join(o.root, 'root.json'),
+    path.join(o.appDir, 'daemon.json'),
+    path.join(o.appDir, 'gh-app', 'tokens.json'),
+  ];
+  const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
+  const uniq = (l: string[]) => [...new Set(l)].filter(exists);
+  return { closed: uniq(closed), open: uniq(open) };
+}
+
+/**
+ * The probe child's program (run by node under the fence): opens each path read-only and closes it at once, never reading a
+ * byte (lothsahn: "Probes only open the file and check whether access is refused"), and prints `<i> ok|refused|<code>`.
+ */
+export const READ_PROBE_SCRIPT =
+  "const fs=require('fs');process.argv.slice(1).forEach((p,i)=>{try{fs.closeSync(fs.openSync(p,'r'));console.log(i+' ok')}catch(e){console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))}})";
+
+export interface ReadProbeVerdict {
+  /** Paths workers need that the fence refused: a lockout if enforced. */
+  wronglyRefused: string[];
+  /** Paths the fence must close that it left open. */
+  leftOpen: string[];
+  /** Paths the probe could not judge (no answer, another error). */
+  unknown: string[];
+}
+
+/** Judges the probe child's output against the targets. Exported for tests. */
+export function judgeReadProbe(t: { closed: readonly string[]; open: readonly string[] }, stdout: string): ReadProbeVerdict {
+  const all = [...t.closed, ...t.open];
+  const ans = new Map<number, string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = /^(\d+) (\S+)$/.exec(line.trim());
+    if (m) ans.set(Number(m[1]), m[2]);
+  }
+  const v: ReadProbeVerdict = { wronglyRefused: [], leftOpen: [], unknown: [] };
+  all.forEach((p, i) => {
+    const a = ans.get(i);
+    const shouldOpen = i >= t.closed.length;
+    if (a === 'ok') {
+      if (!shouldOpen) v.leftOpen.push(p);
+    } else if (a === 'refused') {
+      if (shouldOpen) v.wronglyRefused.push(p);
+    } else v.unknown.push(`${p} (${a ?? 'no answer'})`);
+  });
+  return v;
+}
+
+/** One log line for a probe's verdict. */
+export function sayReadProbe(mode: ReadFenceMode, os: string, v: ReadProbeVerdict, t: { closed: readonly string[]; open: readonly string[] }): string {
+  const bad = [
+    ...(v.wronglyRefused.length ? [`would refuse what workers need: ${v.wronglyRefused.join(', ')}`] : []),
+    ...(v.leftOpen.length ? [`would leave open: ${v.leftOpen.join(', ')}`] : []),
+    ...(v.unknown.length ? [`could not judge: ${v.unknown.join(', ')}`] : []),
+  ];
+  return `read fence (${mode}, ${os}) probe: ${t.closed.length - v.leftOpen.length}/${t.closed.length} closed paths refused, ${t.open.length - v.wronglyRefused.length}/${t.open.length} given-back paths open${bad.length ? `; ${bad.join('; ')}` : '; no failures'}`;
+}
 
 /**
  * The given-back folders a daemon makes later than a run may start (lockout review of #1193): made before the fences are

@@ -1273,7 +1273,7 @@ export class MachineManager {
   }
 
   /** Restart a machine's daemon over its link (its agents run on), or unload it as removeMachine does over ssh (w1596). */
-  async linkControl(id: string, action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-on'): Promise<void> {
+  async linkControl(id: string, action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on'): Promise<void> {
     refuseInDryRun(`a daemon ${action} of ${id} over its link`);
     if (!this.canLink(id)) throw new Error(`${id}'s daemon does not take a ${action} over its link`);
     // w5546: an older daemon reads any action but restart as uninstall, so the switch goes only to one that offers it.
@@ -1911,13 +1911,14 @@ export class MachineManager {
    * while any run unless forced (as a redeploy is). A stopped daemon is left alone by the offline redeploy until
    * it is started (or redeployed) again.
    */
-  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart' | 'read-fence-off' | 'read-fence-on', force = false): Promise<string> {
+  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on', force = false): Promise<string> {
     const m = this.require(id);
     refuseInDryRun(`a daemon ${action} on ${m.id}`);
     // w5546: the worker read fence's live off switch, over the daemon's link only; no restart, its agents run on.
-    if (action === 'read-fence-off' || action === 'read-fence-on') {
+    if (action === 'read-fence-off' || action === 'read-fence-warn' || action === 'read-fence-on') {
       await this.linkControl(m.id, action);
-      return `${m.id}: the worker read fence is ${action === 'read-fence-off' ? 'off' : 'on'} for runs started from now on${action === 'read-fence-off' ? ' (Windows: its No-Read-Up labels replaced)' : ''}.`;
+      const mode = action.slice('read-fence-'.length);
+      return `${m.id}: the worker read fence is ${mode} for runs started from now on${mode === 'on' ? ' once its probe passes' : ' (Windows: any No-Read-Up label taken off)'}; its daemon log says what the probe found.`;
     }
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
