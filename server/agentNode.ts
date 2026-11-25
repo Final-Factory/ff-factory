@@ -166,6 +166,7 @@ if (${narrow}.Count) {
 }
 foreach ($e in ${narrow}) {
   $k = $e.ToLowerInvariant()
+  $wideSaid = $false
   try {
   $isWide = $false
   foreach ($n in @($rules[$k] | Where-Object { $_ })) {
@@ -174,7 +175,7 @@ foreach ($e in ${narrow}) {
     "from $e $(@($ra) -join ',')"
     if (-not @($ra).Count -or @($ra | Where-Object { $tailnet -notcontains $_ }).Count) { $isWide = $true }
   }
-  if ($isWide) { "wide $e" }
+  if ($isWide) { "wide $e"; $wideSaid = $true }
   try {
     if ($null -eq $procs) { throw 'no process list' }
     $ids = @($procs[$k] | Where-Object { $_ })
@@ -192,7 +193,7 @@ foreach ($e in ${narrow}) {
       }
     }
   } catch { "peers unread $e" }
-  } catch { if (-not $isWide) { "wide $e" }; "from $e unread: $($_.Exception.Message -replace '\\s+', ' ')" }
+  } catch { if (-not $wideSaid) { "wide $e" }; "from $e unread: $($_.Exception.Message -replace '\\s+', ' ')" }
 }
 "stale=$stale"
 `;
