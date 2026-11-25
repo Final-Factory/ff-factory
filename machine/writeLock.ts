@@ -9,7 +9,7 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 
 /** The launcher beside this file. */
@@ -17,9 +17,9 @@ export const FF_LANDLOCK = path.join(import.meta.dirname, 'ff-landlock.py');
 
 /**
  * Folders of the install root a worker never writes: the daemon's own (its code, config, hosts), the secrets, and the Medium
- * agents' Claude Code folder (w5543: its settings, plugins and hooks run in agents outside the lock).
+ * agents' Claude Code folder (w5543: its settings, plugins and hooks run in agents outside the lock), and steamcmd's (w5551).
  */
-export const LOCKED_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN] as const;
+export const LOCKED_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN, ...DAEMON_ONLY_CHILDREN] as const;
 
 export interface WriteLockPaths {
   /** The worker root (`~/ffw`). Every folder in it is writable except the daemon's and `secrets`. */

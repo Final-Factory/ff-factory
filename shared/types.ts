@@ -3726,8 +3726,12 @@ export interface PermissionDecisionRequest {
 // ---------------------------------------------------------------- the token vault (docs/vault.md, w512)
 
 export type VaultKind = 'claude' | 'github' | 'env' | 'github-app';
-/** The roles a machine run has (config claudeAccounts' names): sandbox workers, standing agents. */
-export type VaultRole = 'workers' | 'standing';
+/**
+ * The roles a machine run has (config claudeAccounts' names): sandbox workers, standing agents. `releases` (w5551) is no
+ * run's: an entry granted to it reaches no agent and is read by the portal only for the daemon's own release jobs
+ * (steam_upload, server/steamUpload.ts).
+ */
+export type VaultRole = 'workers' | 'standing' | 'releases';
 /** owner: only work the entry's owner asked for. anyone: any run it is granted to. */
 export type VaultShare = 'owner' | 'anyone';
 

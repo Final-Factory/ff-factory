@@ -13,7 +13,7 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -39,7 +39,7 @@ const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
  * main clone: a sandbox is a git worktree whose git data (index, objects, refs) lives in it, so a fenced commit there
  * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
  */
-export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN], files: ['root.json'] };
+export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN, ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
 
 export function seatbeltProfile(f: WorkerFence): string {
   const home = (p: string) => path.join(f.home, p);
