@@ -643,7 +643,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     lists, which is the person's decision.
   - Setting a label needs WRITE_OWNER, which an owner lacks by right (it has READ_CONTROL and WRITE_DAC). Where the
     account writes the root only through a group ACE, `icacls /setintegritylevel` answers "Access is denied" (BEAST,
-    w5402: `F:fw` inherits `Authenticated Users:(M)` from the drive, and the daemon's token is not elevated, so
+    w5402: `F:\ffw` inherits `Authenticated Users:(M)` from the drive, and the daemon's token is not elevated, so
     `Administrators:(F)` does not count); every folder failed and the agents ran unfenced (Medium). `labelLow` then grants
     the account `(OI)(CI)F` on that folder and labels it again (measured on BEAST: denied, grant, label, files inside
     inherit Low).
@@ -711,7 +711,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   any worker root.
 - **Only the folders workers write are Low; a new root folder is Medium until listed** (w5539, from the w5451 audit).
   Until then every root child but `daemon` and `secrets` was labelled Low, and on BEAST that reached
-  `F:fw\instances` (its `update-all.ts` runs every 5 minutes at Medium from the scheduled task
+  `F:\ffw\instances` (its `update-all.ts` runs every 5 minutes at Medium from the scheduled task
   `ff-instances-update`), `demos` and the instance portals `ben-factory` and `lens-factory`, whose config holds vault,
   ledger and Claude keys: one edit from a Low worker ran at Medium there. lothsahn: "File it: make the BEAST instances
   folder unwritable by workers". `lowTargets` now labels only `WORKER_CHILDREN` and keeps the rest Medium; a folder a
