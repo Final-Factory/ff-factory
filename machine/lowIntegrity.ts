@@ -17,7 +17,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
 /** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
@@ -394,6 +394,9 @@ export function noReadUpTargets(o: { root: string; appDir: string; allowBack: re
   // steam (w5639): steamcmd's cached login and the upload config; the daemon runs the uploads at Medium, which NR leaves alone.
   const daemonOnly = DAEMON_ONLY_CHILDREN.map((c) => path.join(o.root, c));
   for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), ...daemonOnly, path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
+  // w5731 (N2 of the #1237 review): steam's secret files by name, so one that kept an explicit Low label (BEAST's steam was
+  // Low from 2026-11-24 to 2026-11-25) gets NR of its own; the folder's inherited label would not reach it.
+  for (const f of STEAM_SECRET_FILES) add(path.join(o.root, STEAM_CHILD, ...f.split('/')), NO_READ_UP);
   for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(path.isAbsolute(a) ? a : path.join(o.appDir, a), READ_BACK);
   return out;
 }

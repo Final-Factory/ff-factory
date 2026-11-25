@@ -27,7 +27,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -3199,6 +3199,8 @@ export class Daemon {
       };
       // w5377: the Unity slots mailbox workers write exists before the root's children are listed, so it is labelled.
       fs.mkdirSync(this.slotMailbox, { recursive: true });
+      // w5731: <root>/steam before the listing, so it is labelled (kept Medium, and NR with the read fence on) before steamcmd exists.
+      ensureDaemonOnlyDirs(root);
       const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
       const targets = lowTargets({
         root,
@@ -3409,6 +3411,8 @@ export class Daemon {
   private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     if (!this.cfg.root) return;
     const appDir = appDirOfConfig(this.cfg);
+    // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
+    ensureDaemonOnlyDirs(this.cfg.root);
     const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions], secrets: this.secretsDirs });
     if (mode === 'on') {
       if (!(await labelNoReadUp(t, exec, say))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
