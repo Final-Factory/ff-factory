@@ -18,6 +18,7 @@ import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable.ts';
 import { armScriptReimport } from './scriptReimport.ts';
+import { borrowsFrom, convertToSlotRepo, finishConversion, guardStorePrune, isSlotRepo, isWorktree, keepSlotBranches, makeSlotRepo, storeGitDir, takeStoreBranch } from './slotRepo.ts';
 import { MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
 import type { BenchTicket } from './benchQueue.ts';
@@ -55,6 +56,9 @@ export interface MachineSandboxBenchClosed {
 }
 
 /** A sandbox as sandboxes.json keeps it; the editor's state is found again at every look. */
+/** keepSlotBranches could not put a slot repo's branches into the clone: the delete stops before it deletes anything. */
+class KeepFailed extends Error {}
+
 interface Rec {
   id: string;
   branch: string;
@@ -389,6 +393,8 @@ export class SandboxPool {
   private lastGitAt = 0;
   private lastReseedLookAt = 0;
   private reseeding = false;
+  private lastConvertLookAt = 0;
+  private converting = false;
   private ticking = false;
 
   constructor(o: PoolOptions, d: PoolDeps) {
@@ -435,6 +441,12 @@ export class SandboxPool {
       else if (r.status === 'creating' || r.status === 'deleting') Object.assign(r, { status: 'error', statusDetail: `interrupted while ${r.status} (the daemon restarted); delete it and create it again` });
       // A trim a restart cut off: the caches are intact or partly trimmed, both fine; the sandbox is free again.
       else if (r.status === 'cleanup') Object.assign(r, { status: 'ready', statusDetail: undefined });
+      // A slot repo conversion (w5614) a restart cut between its two renames: finish it.
+      try {
+        if (finishConversion(r.path)) this.o.onEvent({ text: `sandbox ${r.id}: finished its conversion to a slot repo, which a restart had cut off` });
+      } catch (e) {
+        this.o.onEvent({ text: `sandbox ${r.id}: could not finish its conversion to a slot repo: ${(e as Error).message}` });
+      }
       this.recs.set(r.id, r);
     }
   }
@@ -683,6 +695,8 @@ export class SandboxPool {
     if (problem) throw new Error(problem);
     if (req.base.startsWith('-') || /[\s\x00-\x1f\x7f]/.test(req.base)) throw new Error(`base "${req.base}" is not a usable ref`);
     if (this.disk.level !== 'ok') throw new Error(`disk space is ${this.disk.level} on ${s.root} (${((this.disk.freeBytes ?? 0) / GB).toFixed(0)} GB free); new sandboxes wait until space is freed`);
+    const holder = this.settings?.slotRepos ? this.slotBranchHolder(id, req.branch, true) : undefined;
+    if (holder) throw new Error(`branch ${req.branch} is checked out in sandbox ${holder}: one sandbox holds a branch at a time`);
     if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`); // raced another create
     const r: Rec = { id, branch: req.branch, base: req.base, path: dir, createdAt: new Date(this.d.now()).toISOString(), status: 'creating', statusDetail: 'queued' };
     this.recs.set(id, r);
@@ -743,6 +757,18 @@ export class SandboxPool {
           fs.rmSync(into, { recursive: true, force: true });
         }
         if (added) return;
+        if (this.settings?.slotRepos) {
+          // w5614: its own repo, borrowing the clone's objects (machine/slotRepo.ts); the checkout below is the same.
+          step(`making a slot repo on ${r.branch}`);
+          const note = await guardStorePrune(this.d.git, signal);
+          if (note) this.o.log?.(`sandbox ${r.id}: ${note}`);
+          r.base = (await makeSlotRepo(this.d.git, into, r.branch, r.base, signal)).base;
+          if (into !== r.path) {
+            fs.renameSync(path.join(into, '.git'), path.join(r.path, '.git'));
+            fs.rmSync(into, { recursive: true, force: true });
+          }
+          return;
+        }
         step(`creating worktree on ${r.branch}`);
         const local = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/heads/${r.branch}`], { signal });
         const remote = await this.d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${r.branch}`], { signal });
@@ -857,23 +883,37 @@ export class SandboxPool {
         ed.watch?.expectExit();
         await ed.unity.stop({ force: false }).catch((e) => problems.push(`Unity: ${(e as Error).message}`));
       }
+      // A slot repo's branches exist only in its own .git (w5614): they go into the clone first, or nothing is deleted.
+      const slot = isSlotRepo(r.path);
+      if (slot) {
+        this.changed(r, { statusDetail: 'keeping its branches in the main clone' });
+        const lost = await withBaseRepoLock(() => keepSlotBranches(this.d.git, r.id, r.path, r.branch));
+        if (lost) throw new KeepFailed(lost);
+      }
       this.changed(r, { statusDetail: 'removing Library' });
       const lib = path.join(r.path, 'Library');
       if (fs.existsSync(lib)) {
         const res = await this.d.removeTree(lib);
         if (fs.existsSync(lib)) problems.push(`Library removal failed (${res.code}): ${tail(res.stderr || res.stdout)}`);
       }
-      this.changed(r, { statusDetail: 'removing worktree' });
-      await withBaseRepoLock(async () => {
-        const res = await this.d.git(['worktree', 'remove', '--force', '--force', r.path], { timeoutMs: 30 * 60_000 });
-        if (res.code !== 0 && fs.existsSync(r.path)) problems.push(`git worktree remove failed (${res.code}): ${tail(res.stderr)}`);
-      });
+      if (!slot) {
+        this.changed(r, { statusDetail: 'removing worktree' });
+        await withBaseRepoLock(async () => {
+          const res = await this.d.git(['worktree', 'remove', '--force', '--force', r.path], { timeoutMs: 30 * 60_000 });
+          if (res.code !== 0 && fs.existsSync(r.path)) problems.push(`git worktree remove failed (${res.code}): ${tail(res.stderr)}`);
+        });
+      }
       if (fs.existsSync(r.path)) {
         const res = await this.d.removeTree(r.path);
         if (fs.existsSync(r.path)) problems.push(`folder removal failed (${res.code}): ${tail(res.stderr || res.stdout)}`);
       }
       await withBaseRepoLock(() => this.d.git(['worktree', 'prune']));
     } catch (e) {
+      if (e instanceof KeepFailed) {
+        const detail = `delete refused: ${e.message}; nothing was deleted`;
+        this.changed(r, { status: 'error', statusDetail: detail });
+        throw new Error(detail);
+      }
       problems.push((e as Error).message);
     }
     if (fs.existsSync(r.path)) {
@@ -910,6 +950,9 @@ export class SandboxPool {
     if (!fs.existsSync(req.path)) throw new Error(`${req.path} does not exist`);
     const common = await this.d.git(['-C', req.path, 'rev-parse', '--path-format=absolute', '--git-common-dir']);
     if (common.code !== 0) throw new Error(`${req.path} is not a git worktree: ${tail(common.stderr || common.stdout)}`);
+    // A slot repo (w5614) is its own repo: it must borrow this machine's clone's objects instead.
+    const slot = isSlotRepo(req.path);
+    if (slot && !borrowsFrom(req.path, await storeGitDir(this.d.git))) throw new Error(`${req.path} is a slot repo that does not borrow from this machine's main clone ${this.o.repoPath}`);
     // Real paths: git names the folder as the file system resolves it (a symlinked temp folder on a Mac, a junction on Windows).
     const real = (p: string) => {
       try {
@@ -920,7 +963,7 @@ export class SandboxPool {
     };
     // A worker root's clone is bare (w513): its git folder is the clone itself.
     const own = [path.join(this.o.repoPath, '.git'), this.o.repoPath].map(real);
-    if (!own.some((p) => samePath(real(common.stdout.trim()), p))) throw new Error(`${req.path} is a worktree of ${common.stdout.trim()}, not of this machine's main clone ${this.o.repoPath}`);
+    if (!slot && !own.some((p) => samePath(real(common.stdout.trim()), p))) throw new Error(`${req.path} is a worktree of ${common.stdout.trim()}, not of this machine's main clone ${this.o.repoPath}`);
     const head = await this.d.git(['-C', req.path, 'symbolic-ref', '--quiet', '--short', 'HEAD']);
     const branch = head.code === 0 && head.stdout.trim() ? head.stdout.trim() : req.branch;
     if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`); // raced another adopt
@@ -1010,6 +1053,63 @@ export class SandboxPool {
     })();
     this.trimming.set(id, run);
     return run;
+  }
+
+  /**
+   * The sandbox other than `id` that holds `branch` where git would no longer refuse it (w5614): a slot repo does not
+   * share refs with the clone, so git's "already checked out" never comes. Only when one of the two is a slot repo (or
+   * `slotNew`, a sandbox about to be made as one); between worktrees git still refuses, in its own words.
+   */
+  private slotBranchHolder(id: string, branch: string, slotNew = false): string | undefined {
+    const me = this.recs.get(id);
+    const mine = slotNew || (!!me && isSlotRepo(me.path));
+    for (const x of this.recs.values()) {
+      if (x.id === id) continue;
+      const on = this.git.get(x.id)?.branch ?? x.branch;
+      if ((on === branch || x.branch === branch) && (mine || isSlotRepo(x.path))) return x.id;
+    }
+    return undefined;
+  }
+
+  /**
+   * Pool setting slotRepos 'all' (w5614): turn one free, idle worktree sandbox into a slot repo, at most one every 2 minutes.
+   * Free means what reseedIdle means (no live agent, no editor or build with the project open, no activity going on); its
+   * files, index and branch are kept, so the next editor start imports nothing (measured on slot4, r384). The sandbox is
+   * 'cleanup' meanwhile, so nobody is handed it half done.
+   */
+  private async convertIdle() {
+    const s = this.settings;
+    const now = this.d.now();
+    if (s?.slotRepos !== 'all' || this.converting || now - this.lastConvertLookAt < 2 * 60_000) return;
+    this.lastConvertLookAt = now;
+    for (const r of this.recs.values()) {
+      if (r.status !== 'ready' || this.busy.has(r.id) || this.trimming.has(r.id) || this.editorUp(r.id) || projectOpen(r.path)) continue;
+      if (!isWorktree(r.path) || (this.o.liveAgents?.(r.id) ?? 0) > 0 || this.o.activity(r.id).busy) continue;
+      this.converting = true;
+      this.busy.add(r.id);
+      this.changed(r, { status: 'cleanup', statusDetail: 'becoming a slot repo (its own git folder; files untouched)' });
+      try {
+        const line = await withBaseRepoLock(async () => {
+          const note = await guardStorePrune(this.d.git);
+          return `${await convertToSlotRepo(this.d.git, r.path)}${note ? `; ${note}` : ''}`;
+        });
+        this.o.log?.(`sandbox ${r.id}: ${line}`);
+        this.git.set(r.id, await this.d.gitStatus(r.path).catch(() => undefined));
+      } catch (e) {
+        // A worktree it never swapped is still a whole worktree; one it did is a whole slot repo (finishConversion).
+        try {
+          finishConversion(r.path);
+        } catch {
+          // reported below
+        }
+        this.o.onEvent({ text: `sandbox ${r.id}: could not become a slot repo: ${(e as Error).message}` });
+      } finally {
+        this.busy.delete(r.id);
+        this.converting = false;
+        this.changed(r, { status: 'ready', statusDetail: undefined });
+      }
+      return;
+    }
   }
 
   /**
@@ -1307,7 +1407,11 @@ export class SandboxPool {
     if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}`);
     const problem = await sandboxBranchProblem(branch, this.d.git);
     if (problem) throw new Error(problem);
+    const holder = this.slotBranchHolder(id, branch);
+    if (holder) throw new Error(`branch ${branch} is checked out in sandbox ${holder}: one sandbox holds a branch at a time`);
     if (this.editorUp(id)) throw new Error(`the editor of sandbox ${id} is running: stop it first (unity stop), switch, then start it again. A switch under a running editor stops Unity on "The open scene(s) have been modified externally".`);
+    const slot = isSlotRepo(r.path);
+    const took = slot ? await withBaseRepoLock(() => takeStoreBranch(this.d.git, r.path, branch)) : undefined;
     const res = await switchBranch({
       dir: r.path,
       branch,
@@ -1322,9 +1426,20 @@ export class SandboxPool {
       const foreign = await recordForeign(r.path, res.to).catch(() => []);
       if (foreign.length) res.notes.push(`${foreign.length} untracked file(s) were already here from before, not yours, and a save of ${res.to} leaves them uncommitted (w2988): ${someFiles(foreign)}`);
     }
+    if (took) res.notes.unshift(took);
+    if (slot && res.from && res.from !== res.to) await this.keepInStore(r, res.from);
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r, { branch: res.to });
     return res;
+  }
+
+  /**
+   * A slot repo's branches into the main clone (w5614), so a worker placed again elsewhere on this machine finds commits
+   * no push carried (a failed or held push): what worktrees of one repository gave for free. Never throws; logs a failure.
+   */
+  private async keepInStore(r: Rec, branch: string) {
+    const lost = await withBaseRepoLock(() => keepSlotBranches(this.d.git, r.id, r.path, branch)).catch((e: Error) => e.message);
+    if (lost) this.o.log?.(`sandbox ${r.id}: ${lost}`);
   }
 
   /**
@@ -1335,6 +1450,7 @@ export class SandboxPool {
     const r = this.require(id);
     if (r.status !== 'ready') throw new Error(`sandbox ${id} is ${r.status}`);
     const res = await saveWork({ dir: r.path, branch, message, env, holdPush });
+    if (isSlotRepo(r.path)) await this.keepInStore(r, branch);
     this.git.set(id, await this.d.gitStatus(r.path));
     this.changed(r);
     return res;
@@ -1352,6 +1468,7 @@ export class SandboxPool {
       this.remakeGone();
       this.trimReleased();
       await this.reseedIdle();
+      await this.convertIdle();
     } catch (e) {
       this.o.onEvent({ text: `sandbox pool look failed: ${(e as Error).message}` });
     } finally {
