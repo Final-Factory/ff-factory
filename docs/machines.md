@@ -57,6 +57,28 @@ before redeploying by hand.
 
 - **Auth.** A 256-bit token per machine; the portal keeps only its SHA-256 (state.json) and compares
   in constant time. `/machine` is on the public Funnel URL, so a bad token is logged and throttled.
+- **The daemon link is tailnet-only** (w5575, finding 3 of the w5450 network audit; `server/machineLinkGate.ts`). Every
+  `/machine` request and upgrade (`/machine`, `/machine/live/<id>`, `/machine/whoami`, `/machine/attachments/...`, all of
+  `/machine/*`) is judged by `tailnetOnly` (`server/remoteChat.ts`): Tailscale's Funnel header refuses it, and the client
+  address (`clientAddress`, `server/clientAddress.ts`: the last X-Forwarded-For entry, believed only from a proxy on this
+  machine such as Tailscale Serve; any other peer by its own socket address) must be loopback, `100.64.0.0/10` or
+  `fd7a:115c:a1e0::/48`. The owner's setting `machineLinkTailnet` picks what happens, read live (no restart):
+  - `warn` (the default while unset): every connection is let in as before, and one that would be refused is logged
+    `machine link: WOULD REFUSE <route> from <address> ... : <why>` (once per address, route and reason an hour);
+  - `enforce`: it is answered 403 and closed, before its token is read, and logged `machine link: refused ...`;
+  - `off`: no check and no log.
+
+  Each daemon link that opens is logged `machine <id>: link from <address>`, so the portal's journal lists the address
+  every machine connects from: `portal_logs` source `portal`, grep `link from` and grep `WOULD REFUSE`. Enforce is turned
+  on only once those show every machine on a tailnet address and no would-be refusal of a daemon.
+
+  **Recovery, with no person at any machine:** if enforce cuts a daemon off (its link drops and `machine link: refused`
+  lines carry its address), Ben's or Lothsahn's orchestrator calls `set_app_config` with `machineLinkTailnet` `"off"`
+  (or `"warn"`). The portal VM runs the orchestrators, so this needs no daemon; it applies at once, and a refused daemon
+  gets in on its next redial (a daemon redials forever after a refusal, at most 30 s apart: `reconnectDelayMs`,
+  `machine/daemon.ts`). Without an orchestrator: the ops worker (on the portal VM) or anyone with
+  the VM's shell sets `"machineLinkTailnet": "off"` in the portal's `config.json` and runs `fffctl restart`; or a revert
+  of the enforcing commit merged on GitHub deploys by itself.
 - **Sessions.** The portal creates the session record and tells the daemon what to launch (a
   serialisable launch spec: cwd, model, brief, tools, guard settings, budget). Transcript sequence
   numbers are assigned by the daemon, starting from the portal's last one, so a session resumes

@@ -106,6 +106,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
 import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -2356,6 +2357,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
+    // The daemon link's HTTP routes from the tailnet only (w5575; machineLinkTailnet: warn logs, enforce refuses, off skips).
+    if (isMachineLinkPath(url.pathname) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), `HTTP ${url.pathname.split('/').slice(0, 3).join('/')}`).refuse) {
+      return send(res, 403, { error: 'the daemon link is tailnet-only' });
+    }
     if (url.pathname === '/mcp' || url.pathname === '/mcp/upload') {
       return await routeMcp({ agents, auth, identity, attachments, send, readJson }, req, res, url);
     }
@@ -2549,6 +2554,13 @@ server.on('upgrade', (req, socket, head) => {
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
     providers.upgrade(req, socket, head, clientAddress(req));
+    return;
+  }
+  const upgradePath = parseUrl(req.url)?.pathname ?? '';
+  if (isMachineLinkPath(upgradePath) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), upgradePath === '/machine' ? 'link /machine' : 'link /machine/live').refuse) {
+    // The daemon link from the tailnet only (w5575), before its token is even read.
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
