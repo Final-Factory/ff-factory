@@ -10,11 +10,12 @@
 //
 // stdout: {"event":"ready"}, then {"event":"memory","pid":N}, {"event":"processes","active":N} (enforce only),
 // {"event":"killed","n":N[,"why":"..."]} and {"event":"stat","active":N,"peak":B}.
-// stdin: "kill-tools <host pid>" ends every process of the job but the host and its own children (its claude): the tools its
-// agent ran, a runaway among them. It ends nothing when the process snapshot is empty or lacks the host (then the host's own
-// children cannot be told from the tools), and skips a pid that is no longer in the job (a reused pid). "count" says how many
-// processes the job holds; "stat" says the active count and the job's peak commit (PeakJobMemoryUsed). EOF (its host is gone)
-// ends the helper.
+// stdin: "pids" answers {"event":"pids","pids":[...]}, the job's processes now. "kill-tools <host pid> <pid>..." ends only the
+// listed pids, each still in the job and neither the host nor one of its own children (its claude): the tools its agent ran, a
+// runaway among them, less the ones the daemon spares (UnityMCP, a program started for a person; w5766). With no list it ends
+// nothing. It ends nothing when the process snapshot is empty or lacks the host (then the host's own children cannot be told
+// from the tools), and skips a pid that is no longer in the job (a reused pid). "count" says how many processes the job holds;
+// "stat" says the active count and the job's peak commit (PeakJobMemoryUsed). EOF (its host is gone) ends the helper.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -209,8 +210,28 @@ static class FfJob
                     Say("{\"event\":\"stat\",\"active\":" + active + ",\"peak\":" + peak + "}");
                     continue;
                 }
+                if (line == "pids")
+                {
+                    Say("{\"event\":\"pids\",\"pids\":[" + string.Join(",", Pids(job)) + "]}");
+                    continue;
+                }
                 if (!line.StartsWith("kill-tools ")) continue;
-                uint host = uint.Parse(line.Substring(11).Trim());
+                var words = line.Substring(11).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                uint host = 0;
+                var allowed = new HashSet<uint>();
+                bool parsed = words.Length > 0 && uint.TryParse(words[0], out host);
+                for (int i = 1; parsed && i < words.Length; i++)
+                {
+                    uint w;
+                    if (uint.TryParse(words[i], out w)) allowed.Add(w); else parsed = false;
+                }
+                // Only the pids the daemon chose, from a list it read and checked against the processes it spares: one that
+                // joined the job since is not on it and lives. A line it cannot read ends nothing.
+                if (!parsed || allowed.Count == 0)
+                {
+                    Say("{\"event\":\"killed\",\"n\":0,\"why\":\"" + (parsed ? "no pids were listed" : "the kill-tools line could not be read") + "\"}");
+                    continue;
+                }
                 var parents = Parents();
                 // With no snapshot, or none of the host, the host's own children (its claude) cannot be told from the tools.
                 if (parents.Count == 0 || !parents.ContainsKey(host))
@@ -223,7 +244,7 @@ static class FfJob
                 {
                     uint parent;
                     // A pid missing from the snapshot started after it (it may be the host's new claude): spared, as toolsToEnd does.
-                    if (p == host || !parents.TryGetValue(p, out parent) || parent == host) continue;
+                    if (p == host || !allowed.Contains(p) || !parents.TryGetValue(p, out parent) || parent == host) continue;
                     IntPtr h = OpenProcess(Terminate | QueryLimited, false, p);
                     if (h == IntPtr.Zero) continue;
                     // The pid may have been reused by a process outside the job since the list was read.

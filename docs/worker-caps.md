@@ -15,7 +15,7 @@ controls. A host keeps the mode it started with, so a change reaches workers sta
 | Mode | What runs | What the worker and the portal see |
 | --- | --- | --- |
 | `off` | Nothing: no job, no scope limits, no watch, no temp stop. (The 15 GB temp warning of `server/tempSizeHook.ts` is its own hook and stays.) | Nothing. `host.log`: "worker caps: off". |
-| `warn` (default) | Everything is measured, nothing is limited or ended. | A note and a ledger line that say "would have hit ... (warn-only: nothing was stopped)", at most once per cap kind per minute. `host.log` says the mode at start and, when the host stops, the peaks seen (most processes at once, peak memory, peak temp). |
+| `warn` (default) | Everything is measured, nothing is limited or ended. | A note for the worker ("For your information: your tools went past the ... The caps only measure for now, so nothing was stopped and you can carry on", with a tip for that kind of cap, w5766) and a ledger line ("went past its ... (measured only: nothing was stopped)"), at most once per cap kind per minute. `host.log` keeps "would have hit ... (warn-only: nothing was stopped)". `host.log` says the mode at start and, when the host stops, the peaks seen (most processes at once, peak memory, peak temp). |
 | `enforce` | The limits and the stop, as "The caps" and "When a cap is hit" below describe, with the safeguards under them. | The note and ledger line of a hit that ended tools. |
 
 How warn measures, by OS:
@@ -23,17 +23,30 @@ How warn measures, by OS:
 - **Windows:** the job exists and holds the host, with **no limit flags** (the helper's fourth argument is the mode, and only
   `enforce` sets limits). The helper answers `stat` on its stdin with `{"event":"stat","active":N,"peak":B}`: the job's
   active process count and `PeakJobMemoryUsed`. The host asks every 2 s.
-- **Linux:** the scope is launched with no `MemoryMax` or `TasksMax`. The host reads `memory.peak` (older kernels:
-  `memory.current`) and `pids.peak` (`pids.current`) every 2 s. `memory.peak` counts page cache, so it reads higher than the
-  resident memory of the processes.
+- **Linux:** the scope is launched with no `MemoryMax` or `TasksMax` (`hostCommand` in `machine/agentHost.ts` adds them only
+  in enforce, with `OOMPolicy=continue` usable). The host reads the scope's anonymous memory, `memory.stat`'s `anon` line
+  (w5766), and `pids.peak` (`pids.current`) every 2 s. `memory.peak` and `memory.current` count page cache too, which the
+  kernel reclaims before `MemoryMax` acts, so a worker that only read a big clone looked over the cap; without `memory.stat`
+  the host falls back to `memory.current`.
 - **macOS:** the tree watch of "What is capped", reporting only.
-- **Temp folder:** reported over the cap, never stopped.
+- **Temp folder:** reported over the cap, never stopped. A file with several hard links counts once per measure, by its
+  device and inode (`sizeOf`'s `links`, `measureTemp`, w5766): a cargo target or a git clone that hard-links its objects
+  read at several times its real size.
 
 Enforce's safeguards (a lock-out costs more than a miss):
 
 - **Never the host or its claude.** Tools are ended only when the process list proves who the host is: an empty list, or one
   without the host's pid, ends nothing and `host.log` says why (the host's own, and the Windows helper's `kill-tools`). The
   Windows helper also checks `IsProcessInJob` just before it ends a pid, so a pid reused since the list was read is left alone.
+- **Never a pid that names another process now** (Linux and a Mac, w5766). The list carries each process's start time
+  (`ps -o lstart`); just before the kill the host reads `ps` again and ends only the pids whose start time is unchanged
+  (`sameProcess`). `host.log` counts the ones left as pid reuse.
+- **Never the Unity MCP server or a program started for a person** (w5766). A process whose environment has `FF_UNITY_MCP=1`
+  (set by `scopedUnityMcp`, `machine/unityMcp.ts`) or `FF_FOR_PERSON` without `FF_SESSION_ID` (`ff-leftovers launch`) is
+  spared, with its descendants. The environments are read with `ff-leftovers`' `readEnvs`; if they cannot be read, nothing is
+  ended and `host.log` says so. On Windows the host asks the helper for the job's pids (`pids`), takes the spared ones out
+  and sends `kill-tools <host> <pids...>`: the helper ends only the pids listed. A worker could set either marker on a tool of
+  its own to keep it from a temp stop; the kernel and the job's limits still bind it, as for the leftovers sweep.
 - **Linux limits only with `OOMPolicy=continue`.** Without it systemd's default (`stop`) ends the whole scope, the host and its
   claude with it, when the kernel ends one process. Where `oomPolicyUsable()` is false, the scope runs with no limits and
   `host.log` says so.
@@ -98,15 +111,15 @@ process tree but not the job or the scope.
   - Jetsam limits and coalitions need root or an entitlement.
   - `RLIMIT_RSS` is not enforced (xnu sources).
 
-  So the host reads its tree (`ps -axo pid=,ppid=,rss=`) every 2 s and ends the tools when their resident memory or process
+  So the host reads its tree (`ps -axo pid=,ppid=,rss=,lstart=`) every 2 s and ends the tools when their resident memory or process
   count is over the cap. A fork bomb between two looks is bounded by the kernel's per-user process limit meanwhile.
 - **Every OS: the temp folder.** The host reads its temp drive's free space every 2 s. It measures the folder when the drive
   lost 2 GB since the last measure, and at least every 10 minutes. When the folder is over the cap, it ends the tools.
 
 ## When a cap is hit
 
-Enforce mode. In warn mode the steps are the same, except step 1 (nothing is ended) and the wording of 2 and 3 ("would have
-hit", "warn-only: nothing was stopped"). On Linux in enforce mode the kernel is what acted, and the host only reports it.
+Enforce mode. In warn mode the steps are the same, except step 1 (nothing is ended) and the wording of 2 and 3 (the note says
+the caps only measure for now and nothing was stopped; the ledger line says "measured only"). On Linux in enforce mode the kernel is what acted, and the host only reports it.
 
 1. The host ends the worker's tools: every process of the job (Windows), the scope (Linux) or the tree (a Mac), except the
    host and its direct children (its claude, which every OS starts directly or execs in place). The session goes on. If a
@@ -153,7 +166,12 @@ All runs are inside the test's own process tree.
 The modes have their own tests there: off starts nothing (no helper is even built), warn reports with `warn: true` and ends
 nothing (a temp folder, a process cap on any OS; on Windows the job's `stat` and its no-limit flags, a 700 MB tool under a
 512 MB cap going through), a fake cgroup folder tests Linux's warn reads and enforce's kernel report on any OS, and a process
-list without the host ends nothing. `server/linuxScope.test.ts` has the scope with no limits when `OOMPolicy` is not usable.
+list without the host ends nothing. Since w5766 they also cover: the mode reaching the host's start record (off, warn,
+enforce); `hostCommand` adding Linux's `MemoryMax` and `TasksMax` only in enforce; `memory.stat`'s anon read; an enforce temp
+stop that spares a stand-in Unity MCP server and a program started for a person; unreadable environments ending nothing; and
+a pid whose start time changed being left alone. `server/tempSizeHook.test.ts` counts three hard links to one file once. The
+Git Bash in-job test skips when a Git Bash exists but cannot start. `server/linuxScope.test.ts` has the scope with no limits
+when `OOMPolicy` is not usable. CI runs `scripts/worker/*.test.ts` (the link job's `worker_caps` flag) with the rest.
 The Windows helper (`winJob.cs`) was compiled with Add-Type and run in warn mode against a `ping`: `stat` answered
 `{"event":"stat","active":1,"peak":1044480}` with no limit flags, and `kill-tools` for a pid the snapshot lacks answered
 `{"event":"killed","n":0,"why":"the host is not in the process snapshot"}`.

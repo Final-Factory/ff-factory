@@ -60,11 +60,14 @@ const writeIfChanged = (file: string, text: string) => {
 /**
  * Bring a sandbox's status folder up to date. `editor` is its editor while that process is alive (`since`:
  * when it was launched); its status file is copied only if written since then, so a stale file a crashed
- * editor left (whose port another editor may have taken since) never is.
+ * editor left (whose port another editor may have taken since) never is. `strict`: written after `since`, no allowance.
  */
-export function syncStatusDir(dir: string, project: string, editor: { since?: number } | undefined, files: StatusFile[]) {
+export function syncStatusDir(dir: string, project: string, editor: { since?: number; strict?: boolean } | undefined, files: StatusFile[]) {
   const want = normProject(project);
-  const mine = editor ? files.filter((f) => f.project === want && f.mtimeMs >= (editor.since ?? 0) - 2000).sort((a, b) => b.mtimeMs - a.mtimeMs)[0] : undefined;
+  // A daemon-launched editor's file may carry an mtime up to 2 s before its recorded launch (clock and mtime rounding); a
+  // `strict` one (an EditorInstance.json pid, w5746) gets no such allowance: its file must be newer than `since` (w5779).
+  const fresh = (f: StatusFile) => (editor?.strict ? f.mtimeMs > (editor.since ?? 0) : f.mtimeMs >= (editor?.since ?? 0) - 2000);
+  const mine = editor ? files.filter((f) => f.project === want && fresh(f)).sort((a, b) => b.mtimeMs - a.mtimeMs)[0] : undefined;
   fs.mkdirSync(dir, { recursive: true });
   for (const n of fs.readdirSync(dir)) {
     if (n.startsWith('unity-mcp-') && n.endsWith('.json') && n !== mine?.name && n !== LEGACY_PORT_FILE) fs.rmSync(path.join(dir, n), { force: true });

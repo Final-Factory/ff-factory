@@ -29,7 +29,8 @@ import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
  *   Code fetches the marketplace over HTTPS only, with a longer git timeout (REGISTER_ENV), and a failed run is run once
  *   more (w1895).
  * - Puts back publish-skills' checkout marker (`~/.claude/final-factory-agents-checkout`, which `registerAgents.sh` points at
- *   the checkout it ran from), so a person's skill edits keep going to their own checkout.
+ *   the checkout it ran from), so a person's skill edits keep going to their own checkout. A marker that names no checkout
+ *   (an earlier run's removed clone, w5784) is not put back: it names the lasting checkout.
  * - Reads the versions again and compares them with the checkout's marketplace.json: every installed plugin on master's
  *   version, or it fails.
  *
@@ -74,10 +75,12 @@ export function readableToolsCheckout(root: string, rel: string, exists: (p: str
 }
 /** w5776: how many publishes in a row may find the same fault in FF Factory's checkout before it is moved aside and cloned again. */
 export const REPAIR_AFTER = 3;
-/** w5776: where a broken checkout is moved before it is cloned again; one backup, the newest. */
+/** w5776: where a broken checkout is moved when its new clone replaces it; one backup, the newest. */
 export const checkoutBackup = (root: string) => `${toolsCheckout(root)}.broken`;
 /** w5776: the fault the last publishes found and how many in a row, beside the checkout (Medium only, like it). */
 export const repairStateFile = (root: string) => `${toolsCheckout(root)}.repair.json`;
+/** w5776 follow-up (w5787 review): the repair clones here first and swaps only once that clone worked (Medium only, like it). */
+export const checkoutStaging = (root: string) => `${toolsCheckout(root)}.new`;
 const samePath = (a: string, b: string) => {
   const r = (p: string) => path.resolve(p).replace(/[\\/]+$/, '');
   return process.platform === 'win32' || /^[a-z]:/i.test(a) ? r(a).toLowerCase() === r(b).toLowerCase() : r(a) === r(b);
@@ -269,20 +272,41 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
         fs.writeFileSync(state, JSON.stringify({ kind: fault.kind, count }));
       } else {
         const bak = checkoutBackup(root);
+        const next = checkoutStaging(root);
         const times = fault.kind === 'no-git' ? '' : ` for ${count} publishes in a row`;
-        let moved = false;
+        const keep = () => fs.writeFileSync(state, JSON.stringify({ kind: fault!.kind, count }));
+        // The new clone is made first, beside it, and swapped in only once it worked (w5787's review): a fault that is the
+        // network (a fetch that failed three times) then leaves the old, readable checkout in place rather than nothing.
+        let r: Ran = { code: 1, stdout: '', stderr: '' };
         try {
-          fs.rmSync(bak, { recursive: true, force: true, maxRetries: 3 });
-          fs.renameSync(co, bak);
-          moved = true;
+          fs.rmSync(next, { recursive: true, force: true, maxRetries: 3 });
+          r = await git(['clone', '--quiet', '--branch', BRANCH, AGENTS_REPO_URL, next]);
         } catch (e) {
-          d.say(`WARNING: ${co} ${fault.why}${times}, and it could not be moved aside (${(e as Error).message}); it is left as it is${fresh}.`);
-          fs.writeFileSync(state, JSON.stringify({ kind: fault.kind, count }));
+          r = { code: 1, stdout: '', stderr: (e as Error).message };
         }
-        if (moved) {
-          d.say(`WARNING: ${co} ${fault.why}${times}; it was moved to ${bak} (the one backup kept) and is cloned again.`);
-          fs.rmSync(state, { force: true });
-          await clone(`Repaired FF Factory's checkout: cloned ${MARKETPLACE} into ${co} again.`);
+        if (r.code !== 0) {
+          fs.rmSync(next, { recursive: true, force: true, maxRetries: 3 });
+          d.say(`WARNING: ${co} ${fault.why}${times}, and a new clone to replace it failed (${tail(r)}); it is left as it is${fresh}.`);
+          keep();
+        } else {
+          let moved = false;
+          try {
+            fs.rmSync(bak, { recursive: true, force: true, maxRetries: 3 });
+            fs.renameSync(co, bak);
+            moved = true;
+            fs.renameSync(next, co);
+          } catch (e) {
+            d.say(`WARNING: ${co} ${fault.why}${times}, and it could not be ${moved ? `replaced after it was moved to ${bak}` : 'moved aside'} (${(e as Error).message}); ${moved ? 'the next publish clones it' : 'it is left as it is'}${fresh}.`);
+            fs.rmSync(next, { recursive: true, force: true, maxRetries: 3 });
+            if (moved) fs.rmSync(state, { force: true });
+            else keep();
+            moved = false;
+          }
+          if (moved) {
+            d.say(`WARNING: ${co} ${fault.why}${times}; it was moved to ${bak} (the one backup kept) and replaced by a new clone.`);
+            d.say(`Repaired FF Factory's checkout: cloned ${MARKETPLACE} into ${co} again.`);
+            fs.rmSync(state, { force: true });
+          }
         }
       }
     }
@@ -344,11 +368,17 @@ async function registerInto(
     d.say(`registerAgents.sh exited ${r.code} (${tail(r)}); running it once more.`);
     r = await register();
   }
-  // w5597: a marker that names FF Factory's old checkout moves with it (that one is no longer taken forward).
-  const markerKeep = markerBefore !== undefined && co && markerBefore.trim() && samePath(markerBefore.trim(), legacy) ? `${co}\n` : markerBefore;
+  // w5597: a marker that names FF Factory's old checkout moves with it (that one is no longer taken forward). w5784: so does
+  // one that names no checkout at all (empty, or a folder without .claude-plugin/marketplace.json, such as an earlier run's
+  // ff-agents-run-* clone that is gone): putting it back as it was kept BEAST's marker on a removed run folder for every
+  // publish after, and publish-skills stops on it.
+  const before = markerBefore?.trim().split(/\r?\n/)[0]?.trim() ?? '';
+  const oldCo = markerBefore !== undefined && before !== '' && samePath(before, legacy);
+  const noCheckout = markerBefore !== undefined && !oldCo && (before === '' || !fs.existsSync(path.join(before, '.claude-plugin', 'marketplace.json')));
+  const markerKeep = co && (oldCo || noCheckout) ? `${co}\n` : markerBefore;
   if (markerKeep !== undefined && readText(marker) !== markerKeep) {
     fs.writeFileSync(marker, markerKeep);
-    d.say(markerKeep === markerBefore ? `publish-skills' checkout marker kept on ${markerKeep.trim()}.` : `publish-skills' checkout marker now names ${co} (it named the old ${legacy}).`);
+    d.say(markerKeep === markerBefore ? `publish-skills' checkout marker kept on ${markerKeep.trim()}.` : oldCo ? `publish-skills' checkout marker now names ${co} (it named the old ${legacy}).` : `publish-skills' checkout marker now names ${co} (it named ${before || 'nothing'}, which is not a checkout).`);
   } else if (markerKeep === undefined && co) {
     // The script ran from a temp folder, which it does not record (or did): the marker names the lasting checkout.
     fs.mkdirSync(path.dirname(marker), { recursive: true });

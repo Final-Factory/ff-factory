@@ -16,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { trustedGh } from './evidenceGate.ts';
 
-export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain';
+export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain' | 'credentials';
 
 export interface OwnerSecret {
   path: string;
@@ -113,14 +113,72 @@ export const KEYCHAIN_MACH_SERVICES = ['com.apple.authd', 'com.apple.SecuritySer
 /**
  * The owner-secret paths a fenced run may not read, for this run. The gh login's folder is left out only for a run that
  * has no GitHub token at all (no vault token and the daemon read no machine token): that run still reads the login
- * itself, as before (w5548 "Keep it only for the runs that have no vault token"). Windows gets none: every path is on the
+ * itself, as before (w5548 "Keep it only for the runs that have no vault token"). With them, ownerReadMore's paths
+ * (w5749's enforce PR). Windows gets none: every path is on the
  * system drive, where the fence writes no label (w5548 "Never touch C: on Windows"; handed up, docs/worker-fence.md).
  */
 export function ownerReadDenied(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
   if (o.platform === 'win32') return [];
-  return ownerSecretPaths(o)
+  const main = ownerSecretPaths(o)
     .filter((s) => o.hasToken || s.kind !== 'gh')
     .map((s) => realOr(s.path));
+  return [...new Set([...main, ...ownerReadMore(o)])];
+}
+
+/**
+ * w5749 (from w5733's review of #1232): owner secrets beyond ownerSecretPaths, closed with them on macOS and Linux
+ * (ownerReadDenied). They had a warn stage first (#1248, lothsahn's lockout rule: warn-only first, enforce in a separate
+ * PR); now they are in the owner rules, so `warn` lists them in sayOwnerRules' line before any machine runs `on`. Each can
+ * stop a tool a worker runs under `on` (uv and curl read ~/.netrc; git's `store` helper reads ~/.git-credentials), which
+ * the per-machine warn verdicts before `on` are for.
+ * - git and curl's stored passwords: `~/.netrc`, `~/.git-credentials` and git's XDG `git/credentials` (git-credential-store(1)).
+ * - gh's other config folders: gh reads only one (ghConfigFolder), but a login left in another (`~/.config/gh` when the
+ *   daemon has GH_CONFIG_DIR or XDG_CONFIG_HOME set elsewhere) is one `GH_CONFIG_DIR=` away for a worker.
+ * - Linux: flatpak browsers' homes (`~/.var/app/<id>`), snap Brave, and the browsers under `~/.config` when
+ *   XDG_CONFIG_HOME points elsewhere (ownerSecretPaths looks only under XDG_CONFIG_HOME then).
+ * Windows: none. Every such path is in the owner's profile on the system drive, which the fence never labels (handed up to
+ * lothsahn as a decision, docs/worker-fence.md "Owner secrets").
+ */
+export function ownerSecretPathsMore(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): OwnerSecret[] {
+  const { platform, home, env } = o;
+  if (platform === 'win32') return [];
+  const p = path.posix;
+  const h = (...s: string[]) => p.join(home, ...s);
+  const out: OwnerSecret[] = [];
+  const add = (s: OwnerSecret) => {
+    if (!out.some((x) => x.path === s.path)) out.push(s);
+  };
+  const active = ghConfigFolder(env, platform, home);
+  for (const g of [env.GH_CONFIG_DIR, env.XDG_CONFIG_HOME ? p.join(env.XDG_CONFIG_HOME, 'gh') : undefined, h('.config', 'gh')])
+    if (g && g !== active) add({ path: g, kind: 'gh' });
+  add({ path: h('.netrc'), kind: 'credentials' });
+  add({ path: h('.git-credentials'), kind: 'credentials' });
+  if (env.XDG_CONFIG_HOME) add({ path: p.join(env.XDG_CONFIG_HOME, 'git', 'credentials'), kind: 'credentials' });
+  add({ path: h('.config', 'git', 'credentials'), kind: 'credentials' });
+  if (platform === 'linux') {
+    for (const id of ['org.mozilla.firefox', 'com.google.Chrome', 'org.chromium.Chromium', 'com.brave.Browser', 'com.microsoft.Edge', 'com.vivaldi.Vivaldi', 'com.opera.Opera', 'io.gitlab.librewolf-community'])
+      add({ path: h('.var', 'app', id), kind: 'browser' });
+    add({ path: h('snap', 'brave'), kind: 'browser' });
+    if (env.XDG_CONFIG_HOME && p.normalize(env.XDG_CONFIG_HOME + '/') !== p.normalize(h('.config') + '/'))
+      for (const b of ['google-chrome', 'chromium', 'microsoft-edge', 'BraveSoftware']) add({ path: h('.config', b), kind: 'browser' });
+  }
+  const closed = new Set(ownerSecretPaths(o).map((s) => s.path));
+  return out.filter((s) => !closed.has(s.path));
+}
+
+/**
+ * ownerSecretPathsMore's paths for a run, as ownerReadDenied closes them: gh's other folders stay open to a run with no
+ * GitHub token at all, as the gh folder does.
+ */
+export function ownerReadMore(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
+  // Windows first: nothing below may even resolve a path on the system drive (w5757's review).
+  if (o.platform === 'win32') return [];
+  // A folder linked to the gh folder a run uses is that folder: never closed through its other name.
+  const active = realOr(ghConfigFolder(o.env, o.platform, o.home));
+  return ownerSecretPathsMore(o)
+    .filter((s) => o.hasToken || s.kind !== 'gh')
+    .map((s) => realOr(s.path))
+    .filter((p) => p !== active);
 }
 
 /** A path resolved through its links when it exists (Seatbelt and Landlock match resolved paths), else as given. */

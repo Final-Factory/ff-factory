@@ -68,6 +68,24 @@ export const OVER_NOTICE_MS = 15_000;
 /** w5324: how long a preemption the editor skipped (busy) waits before it is asked again. */
 export const PREEMPT_RETRY_MS = 60_000;
 
+/**
+ * w5746: the run's environment with UNITY_MCP_STATUS_DIR set to FF_UNITY_MCP_EDITOR_STATUS_DIR (daemon.ts slotEnv), so a
+ * Unity editor it starts writes its bridge status where its worker may write and the daemon reads it (machine/unityMcp.ts
+ * workerEditorStatusDir), not in the worker's own synced folder in the daemon's folder, which the fences keep read-only (the
+ * editor's heartbeat failed there silently and the worker's Unity MCP server found no editor, measured on m5 in w5693).
+ * Unset (an older daemon, an install with no root): unchanged.
+ */
+export function editorStatusEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const dir = env.FF_UNITY_MCP_EDITOR_STATUS_DIR;
+  if (!dir) return env;
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch {
+    // the daemon makes it at its start; the editor makes it too (Directory.CreateDirectory)
+  }
+  return { ...env, UNITY_MCP_STATUS_DIR: dir };
+}
+
 /** w5324: the pid Unity wrote to a project's Library/EditorInstance.json at boot ({"process_id": n, ...}), or undefined. */
 export function editorInstancePid(projectPath: string): number | undefined {
   const pid = readJson<{ process_id?: unknown }>(path.join(projectPath, 'Library', 'EditorInstance.json'))?.process_id;
@@ -1627,7 +1645,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     const logFile = batchUnityLogFile(o.rest, env, o.label ?? 'batch');
     if (logFile) d.say(`no -logFile given: Unity logs to ${logFile} (w5297: never the person's own Editor.log)`);
     const run = commandToSpawn(logFile ? [...o.rest, '-logFile', logFile] : o.rest, process.platform, env);
-    const { FF_UNITY_SLOT_JOB: _job, ...childEnv } = env;
+    const { FF_UNITY_SLOT_JOB: _job, ...childEnv } = editorStatusEnv(env);
     const child = spawn(run.cmd, run.args, {
       stdio: 'inherit',
       shell: run.shell,

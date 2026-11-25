@@ -76,11 +76,100 @@ spawner reports no pid, so its seals are never final: a line appended after it e
 
 ## What it does not cover yet
 
-- **Windows per-conversation access**: there the fence still lets a worker write any transcript in `<root>/claude`; the
-  seal makes an edited one fail to resume, but the write itself is not refused (`projects` labelled Medium with each
-  conversation's file and folder labelled Low, a follow-up). Linux too while its switch is off (the default until a
-  machine is turned on after the w5702 review).
+- **Windows, while a conversation runs**: with `workerTranscriptLabels` on (below), another *live* conversation's own file
+  and folder are Low, and every worker is the same user at the same level, so a Low worker can write them until that
+  claude exits; the seal fails such an edit at its next resume. With the switch off (the default), every transcript in
+  `<root>\claude` is open to every Low worker.
+- **Linux** while its switch is off (the default until a machine is turned on after the w5702 review): the write lock
+  lets a worker write any transcript in `<root>/claude`; the seal fails an edited one at its next resume.
 - **A live conversation's own worker** can still edit its own transcript (it must write it). An edit to what was already
   hashed fails the next resume; an edit to the tail between the CLI's write and the turn's seal is sealed as written.
 - **Medium and standing agents** run on their own Claude home, `<root>/claude-medium`, read-only to workers on every OS
   (w5543/w5565); the seal covers them as well.
+
+## Windows: transcript labels (w5703)
+
+`daemon.json` `workerTranscriptLabels: true`, with the Low fence on (`workerIntegrity: "low"`), labels
+`<CLAUDE_CONFIG_DIR>\projects` Medium (no-write-up), with each project folder and each transcript and conversation folder in
+them. A Low worker is then refused when it writes, plants, renames or deletes a transcript there, makes a new folder in a
+project folder, or moves `projects` itself aside. Code: `server/transcriptLabels.ts`.
+
+Two things the first CI run on the Windows runner showed (w5703):
+
+- `icacls <folder> /setintegritylevel (OI)(CI)medium` without `/T` labels only that folder. What is already inside keeps
+  its own label, and after the root's `labelLow` that is an explicit Low. So the lock labels every entry itself (folders
+  walked, below).
+- A Low process renamed the Medium `projects` from inside the Low `claude`: it had delete-child on `claude` through the
+  account's Full grant. The lock adds a deny entry for delete-child (`/deny <account>:(DC)`, this folder only) on `claude`,
+  on `projects` and on each project folder; the agent host adds it to a project folder it makes. Files still delete and
+  rename through their own DELETE right, so Claude Code's own writes in `claude` (its settings file's replace) are not
+  affected. The deny entries go on before any label: a DACL change on a folder pushes its inheritable entries down again,
+  and with the deny on `claude` added last the second CI run found every transcript writable at Low.
+- **Limit, measured:** a Low worker owns the Low `claude` folder, so it can take that deny entry off again (icacls
+  `/remove:d` at Low succeeded on the runner) and then move `projects` aside and make its own. This takes two deliberate
+  steps. A transcript planted that way under a sealed conversation's id still fails its seal at resume, and before each
+  resume the agent host checks that `projects` still carries its own Medium label, logging `transcript labels: WARNING:
+  ... the transcript lock is undone` when it does not. Closing it outright would mean a Medium `claude`, where Claude Code
+  makes its own files.
+
+- **The daemon** (`lowTranscripts` in `machine/daemon.ts`, once per start): if `projects` has no explicit Medium label yet,
+  it denies delete-child as above, labels `projects` and each project folder Medium, then each entry in them: a
+  conversation running now (its id on a process's command line, `--resume`/`--session-id`, read with `Get-CimInstance
+  Win32_Process`: `liveSessionIds`) or written in the last hour is pinned Low; when what runs could not be read, everything
+  written in the last 3 days is. Agents outlive the daemon (w605), so a conversation running at that moment keeps
+  appending. Everything else is labelled Medium. The pins are kept in `transcript-pins.json` in the daemon's own folder
+  (Medium, which no worker can write). At every later start it takes back to Medium each pin that is no longer running and
+  was not written in the last hour (kept when what runs could not be read), and gives the delete-child deny to any project
+  folder made since without one (a person's or the orchestrator's Medium claude makes them; the agent host gives it to the
+  folders it makes, also when the folder already existed without it). Both were the w5774 review's findings: without them
+  a pin stayed Low for good, and a Medium-made folder let a Low worker delete what was in it. A Low copy
+  of node tries to make a file in `projects` and in a project folder. The expected result is a refusal ("transcript labels:
+  self-test at Low"). A write that went through is logged as a `WARNING` and changes nothing else (warn-only).
+  One way it goes through: a token with `SeBackupPrivilege`/`SeRestorePrivilege` **enabled** keeps them at Low, and Node
+  (libuv) opens every file with `FILE_FLAG_BACKUP_SEMANTICS`, which then passes both the label and the ACL. A GitHub
+  Windows runner's account is such a token (measured, w5703: every Low write went through, while `cmd`'s `>>` from the
+  same Low process was refused); a worker's filtered user token holds neither, so the Windows test removes both from its
+  own process first (`removePrivileges` in `server/transcriptLabels.test.ts`).
+- **A folder and everything in it** is labelled by walking it (`labelTreeSync`): the plain level (`medium` or `low`) on
+  every file, `(OI)(CI)<level>` on every folder. A single `(OI)(CI)` label reaches only folders: a file keeps its own
+  explicit label, so the way back left the transcripts the lock had labelled Medium still Medium, and an older explicit
+  Low on a subagent's transcript inside a conversation folder would stay Low under the lock (measured on the Windows CI
+  runner and on LothDesktop, w5703).
+- **Never `icacls /T`: it follows junctions** (the w5774 review, measured on BEAST). A Low worker can make a junction in
+  its own Low conversation folder pointing at any folder; a `/T` relabel run by the Medium host then labelled that folder
+  Low, and the Low fence was gone. `labelTreeSync` skips every junction, symlink and other reparse point (by the folder's
+  listing, and by comparing `realpathSync.native` with the folder's own place: Node 24.22's `lstat` called a junction a
+  plain folder on LothDesktop, measured), counts it and logs it; `setLabelSync` refuses one. One `<dir>\*` call labels a
+  folder's entries when none is a link, else each entry alone. No link can be added while it runs: to Medium it labels a
+  folder before reading it, to Low after (contents first, the folder last) and leaves a folder already Low as it is, so
+  every folder it reads is Medium, where no Low process can make an entry. Windows itself refused the Low stand-in CLI a
+  junction to a Medium folder on the CI runner (EPERM, measured: a Low process may point a junction only at a folder it can
+  write), but symlinks and other routes remain, so the labels do not lean on it. The Windows test puts a junction there
+  anyway (from the Low CLI where Windows lets it, else from the test) to a Medium folder and checks that folder stays Medium and refuses a Low write after the exit relabel and
+  after the way back.
+- **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
+  claude starts, it makes the conversation's `<id>\` folder and labels it and what is in it Low (walked). On a resume it also labels the
+  existing `<id>.jsonl` (found in any project folder) `low`. When the last process of that conversation exits, both go back
+  to Medium. A label that fails is logged, and the process still starts.
+- **A new conversation's file**: Claude Code refuses `--session-id <id>` when `<id>.jsonl` already exists ("Session ID ...
+  is already in use"). It also refuses an empty or stub file for `--resume` ("No conversation found"). So the file cannot be
+  made ahead. The spawner passes the SDK's control lines through and holds the first user message until the CLI has
+  answered `initialize`, by which point the start-up check is done. It then makes the empty file, labels it Low and passes
+  the message on; the CLI appends to that file. If no answer comes in 60 s, it makes the file anyway and logs that.
+  Measured on BEAST with Claude Code 2.1.x against a mock API, with the project folder refusing new files and folders,
+  these all ran: a new conversation, a planted file (refused), a resume, a real /compact (the first bytes unchanged), and a
+  resume after it. `memory\` was not made, and nothing failed because of it.
+- **The way back** needs nobody at the machine: set `workerTranscriptLabels` to false (or remove it) and restart the
+  daemon. At start, if `projects` still has the explicit Medium label, the daemon removes the deny entries, labels
+  everything in it Low (walked) and `projects` itself last, and deletes the pins file ("transcript labels: off; labelled
+  ... Low again"). Because `projects` is labelled last, a way back cut off half way is tried again at the next start.
+- **Reverting the code** (taking this change out) is done in that order: first turn the switch off and let the daemon
+  restart and log "transcript labels: off", and only then deploy the revert. Code without this file never takes the
+  Medium labels and deny entries back off, and workers could not write their own transcripts.
+- **Limits, accepted:** the pins and the denies are tidied only at a daemon start, so between starts a finished pinned
+  conversation stays Low and a folder a Medium claude just made has no deny. A conversation a spawner starts while the
+  daemon's lock runs may be labelled Medium under it (it then fails its own writes until it restarts). Hard links are not
+  links to `labelTreeSync`: a Low worker cannot make one to a Medium file (that needs write access to it).
+- **A host that dies before its claude** leaves that conversation Low until its next process ends.
+- **Tests**: `server/transcriptLabels.test.ts`. Its real-label leg runs on the Windows CI runner (`.github/windows-tests.txt`)
+  and is skipped where the test process itself runs at Low, since a fenced worker cannot set a Medium label.

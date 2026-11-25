@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, legacyToolsCheckout, prependPath, publishAgentTools, REPAIR_AFTER, checkoutBackup, repairStateFile, readableToolsCheckout, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
+import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, legacyToolsCheckout, prependPath, publishAgentTools, REPAIR_AFTER, checkoutBackup, checkoutStaging, repairStateFile, readableToolsCheckout, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
 import { toolsResult } from './machineRollout.ts';
 
 /** The agent tools publish on a machine (w1476, server/agentTools.ts; docs/worker-install.md "The agent tools"). */
@@ -126,8 +126,31 @@ function machine(o: Machine = {}) {
 
 const ran = (m: ReturnType<typeof machine>, what: string) => m.calls.filter((c) => [c.cmd, ...c.args].join(' ').includes(what));
 
+/** A person's own final-factory-agents checkout (BEAST's ~/final-factory-agents), which the marker may name. */
+function personCheckout(): string {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'person-')), 'final-factory-agents');
+  fs.mkdirSync(path.join(dir, '.claude-plugin'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '.claude-plugin', 'marketplace.json'), JSON.stringify(marketplaceJson(LATEST)));
+  return dir;
+}
+
+test('w5784: a marker naming no checkout (a removed ff-agents-run-* folder, or empty) is not put back: it names the lasting checkout', async () => {
+  for (const before of ['F:/ffw/tools/ff-agents-run-jadTAl/final-factory-agents\n', '\n']) {
+    const m = machine({ marker: before, medium: true });
+    assert.equal(await m.run(), EXIT.ok);
+    assert.equal(m.marker(), `${m.co}\n`, 'the marker names a checkout that exists');
+    assert.ok(m.lines.includes(`publish-skills' checkout marker now names ${m.co} (it named ${before.trim() || 'nothing'}, which is not a checkout).`));
+    assert.equal(m.lines.filter((l) => l.includes('checkout marker')).at(-1), `publish-skills' checkout marker kept on ${m.co}.`, 'the Medium pass finds it healed and keeps it');
+  }
+  // With no lasting checkout this run there is nothing better to name: it stays as it was.
+  const m = machine({ marker: 'F:/gone\n', coCloneCode: 128 });
+  assert.equal(await m.run(), EXIT.ok);
+  assert.equal(m.marker(), 'F:/gone\n');
+});
+
 test("a first run clones FF Factory's own checkout in the root, runs registerAgents.sh from it, and verifies every plugin is on master", async () => {
-  const m = machine({ marker: 'C:/Users/rydin/final-factory-agents\n' });
+  const person = personCheckout();
+  const m = machine({ marker: `${person}\n` });
   assert.equal(await m.run('/home/x/.local/bin/claude'), EXIT.ok);
   assert.equal(m.co, path.join(m.root, 'tools-medium', 'final-factory-agents'), 'w5597: inside the worker root, in the child only Medium writes');
   const clone = ran(m, 'clone')[0];
@@ -140,7 +163,7 @@ test("a first run clones FF Factory's own checkout in the root, runs registerAge
   assert.equal(path.dirname(path.dirname(sh.cwd!)), m.tmpdir);
   assert.equal(fs.existsSync(sh.cwd!), false, 'the fresh clone is removed after the run');
   assert.match(sh.env?.PATH ?? '', /^\/home\/x\/\.local\/bin:/, "the daemon's Claude Code comes first on PATH");
-  assert.equal(m.marker(), 'C:/Users/rydin/final-factory-agents\n', "publish-skills' marker still names the person's checkout");
+  assert.equal(m.marker(), `${person}\n`, "publish-skills' marker still names the person's checkout");
   assert.deepEqual(m.lines.filter((l) => l.startsWith('Agent tools')), [
     'Agent tools before: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed',
     'Agent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7',
@@ -184,8 +207,8 @@ test('w5776: a folder in the way that is not a checkout is moved aside at once, 
   fs.writeFileSync(path.join(m.co, 'keep.txt'), 'x');
   assert.equal(await m.run(), EXIT.ok);
   assert.equal(fs.readFileSync(path.join(checkoutBackup(m.root), 'keep.txt'), 'utf8'), 'x', 'the one backup keeps what was there');
-  assert.equal(ran(m, 'clone').filter((c) => c.args.includes(m.co)).length, 1);
-  assert.ok(m.lines.includes(`WARNING: ${m.co} holds files but no git checkout; it was moved to ${checkoutBackup(m.root)} (the one backup kept) and is cloned again.`));
+  assert.equal(ran(m, 'clone').filter((c) => c.args.includes(checkoutStaging(m.root))).length, 1);
+  assert.ok(m.lines.includes(`WARNING: ${m.co} holds files but no git checkout; it was moved to ${checkoutBackup(m.root)} (the one backup kept) and replaced by a new clone.`));
   assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
   assert.equal(m.marker(), `${m.co}\n`);
 });
@@ -214,7 +237,7 @@ test('w5776: each broken state is repaired after the same WARNING on REPAIR_AFTE
     const w = m.lines.filter((l) => l.startsWith('WARNING:'));
     assert.equal(w.length, 1, w.join(' / '));
     assert.match(w[0], why);
-    assert.ok(w[0].endsWith(` for ${REPAIR_AFTER} publishes in a row; it was moved to ${checkoutBackup(m.root)} (the one backup kept) and is cloned again.`), w[0]);
+    assert.ok(w[0].endsWith(` for ${REPAIR_AFTER} publishes in a row; it was moved to ${checkoutBackup(m.root)} (the one backup kept) and replaced by a new clone.`), w[0]);
     assert.ok(fs.existsSync(path.join(checkoutBackup(m.root), '.git', 'PLANTED')), 'the broken one is the backup');
     assert.ok(m.lines.includes(`Repaired FF Factory's checkout: cloned final-factory-agents into ${m.co} again.`));
     assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
@@ -268,6 +291,34 @@ test('w5776: on the real file system (NTFS on Windows) a real git checkout is mo
   assert.ok(fs.existsSync(path.join(checkoutBackup(m.root), '.git', 'PLANTED')), 'the newer broken checkout is the backup');
   assert.equal(fs.existsSync(path.join(m.co, '.git', 'PLANTED')), false, 'cloned again');
   assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
+});
+
+test('w5776 follow-up: a repair whose new clone fails (the network) leaves the old checkout where it is and keeps the count', async () => {
+  // w5787's review: three failed fetches most likely mean no network; moving the checkout first left readers nothing.
+  const m = machine({ existing: true, plantedOnly: true, fetchCode: 128, coCloneCode: 128 });
+  fs.writeFileSync(path.join(m.co, '.git', 'PLANTED'), '');
+  for (let i = 0; i < REPAIR_AFTER; i++) assert.equal(await m.run(), EXIT.ok);
+  assert.ok(m.lines.some((l) => l.startsWith(`WARNING: ${m.co} could not be fetched`) && l.includes(`for ${REPAIR_AFTER} publishes in a row, and a new clone to replace it failed (fatal: unable to access); it is left as it is`)), m.lines.join('\n'));
+  assert.ok(fs.existsSync(path.join(m.co, '.git', 'PLANTED')), 'the old checkout stays');
+  assert.equal(fs.existsSync(checkoutBackup(m.root)), false, 'nothing was moved aside');
+  assert.equal(fs.existsSync(checkoutStaging(m.root)), false, 'no half clone is left');
+  assert.equal(JSON.parse(fs.readFileSync(repairStateFile(m.root), 'utf8')).count, REPAIR_AFTER, 'the count is kept, so the next publish tries again');
+  assert.ok(m.lines.some((l) => l.startsWith(`Agent tools checkout: ${m.co} at `)), 'readers keep a checkout');
+});
+
+test('w5776 follow-up: a backup that is a link (a junction on Windows) is removed, never what it points to', async () => {
+  // w5787's review measured this on beast; the test holds the line on NTFS, APFS and ext4 (Node's rmSync went native in 23).
+  const m = machine({ existing: true, plantedOnly: true, branch: 'leg' });
+  fs.writeFileSync(path.join(m.co, '.git', 'PLANTED'), '');
+  const target = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-tools-target-'));
+  fs.writeFileSync(path.join(target, 'precious.txt'), 'x');
+  fs.symlinkSync(target, checkoutBackup(m.root), process.platform === 'win32' ? 'junction' : 'dir');
+  for (let i = 0; i < REPAIR_AFTER; i++) assert.equal(await m.run(), EXIT.ok);
+  assert.equal(fs.readFileSync(path.join(target, 'precious.txt'), 'utf8'), 'x', 'the link target is untouched');
+  assert.ok(fs.lstatSync(checkoutBackup(m.root)).isDirectory() && !fs.lstatSync(checkoutBackup(m.root)).isSymbolicLink(), 'the backup is now the broken checkout itself');
+  assert.ok(fs.existsSync(path.join(checkoutBackup(m.root), '.git', 'PLANTED')));
+  assert.equal(fs.existsSync(path.join(m.co, '.git', 'PLANTED')), false, 'cloned again');
+  fs.rmSync(target, { recursive: true, force: true });
 });
 
 test('a fetch or registerAgents.sh failure, or a plugin left behind master, fails and says which', async () => {

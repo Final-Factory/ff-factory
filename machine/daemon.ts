@@ -18,6 +18,7 @@ import { probeFence } from './fenceProbe.ts';
 import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
+import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
 import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
@@ -46,12 +47,12 @@ import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
-import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
-import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, type StdioServer } from './unityMcp.ts';
+import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
-import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome } from '../server/claudeHome.ts';
+import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, workerClaudeDir } from '../server/claudeHome.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -190,6 +191,12 @@ export interface DaemonConfig {
    * where the owner asked (BEAST). Workers' own games write to their sandbox's folder in the root (gameData.ts).
    */
   workerIntegrityLockGameData?: boolean;
+  /**
+   * w5703: with the fence on, also keep `<CLAUDE_CONFIG_DIR>\projects` Medium, so a Low worker cannot plant, edit, rename or
+   * delete another conversation's transcript; each agent's own conversation is labelled Low while its claude runs
+   * (server/transcriptLabels.ts). Off by default; turning it off again labels everything there Low again at the next start.
+   */
+  workerTranscriptLabels?: boolean;
   /**
    * w5540: false keeps sandbox editors unfenced (Medium) while agents are fenced. Unset or true: with the Windows fence on,
    * the daemon starts each sandbox editor at Low integrity too (machine/unity.ts EditorFence), so C# a worker writes, and
@@ -654,6 +661,8 @@ export class Daemon {
   private staleCtx?: StaleContext;
   /** Each place's Unity MCP status folder, kept holding only its own editor (machine/unityMcp.ts). */
   private readonly mcpScopes = new McpScopes();
+  /** w5746: the machine's top-level Unity processes at the last McpScopes look (refreshMcpScopes); undefined: not read yet. */
+  private mcpEditors?: { pid: number; project?: string }[];
   /** Windows: the folder Git Bash maps /tmp to, never cleaned up and made again when missing (server/gitBashTmp.ts, w603). */
   private bashTmp?: string;
 
@@ -1442,8 +1451,22 @@ export class Daemon {
         return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
       }
     };
-    const places = this.pool.list().map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) }));
+    const places = mcpPlaces(this.pool.list(), alive, editorInstancePid, this.mcpEditors);
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
+  }
+
+  /**
+   * w5746: read the machine's Unity processes, so an EditorInstance.json pid counts only while it is a Unity editor of its
+   * sandbox's project (mcpPlaces), then sync. A failed read forgets the list: no such pid counts until the next one.
+   */
+  async refreshMcpScopes() {
+    try {
+      this.mcpEditors = unityProcesses(await this.procs(), machinePlatformOf(process.platform));
+    } catch (e) {
+      this.mcpEditors = undefined;
+      log(`unity mcp: reading the processes: ${(e as Error).message}`);
+    }
+    this.syncMcpScopes();
   }
 
   get connected() {
@@ -1657,7 +1680,17 @@ export class Daemon {
         }
       })();
     }
-    this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
+    // w5746: the status folder of the editors workers start (slotEnv FF_UNITY_MCP_EDITOR_STATUS_DIR) is read from the start.
+    if (this.cfg.root) {
+      const editors = workerEditorStatusDir(this.cfg.root);
+      try {
+        fs.mkdirSync(editors, { recursive: true });
+      } catch (e) {
+        log(`unity mcp: the status folder of workers' editors ${editors}: ${(e as Error).message}`);
+      }
+      addMcpStatusDir(editors);
+    }
+    this.timers.push(setInterval(() => void this.refreshMcpScopes(), 5_000));
     this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
@@ -2289,6 +2322,9 @@ export class Daemon {
     // w5650: the shell's bridge (the game repo's scripts/unity-bridge.py, which reads UNITY_MCP_STATUS_DIR, else
     // ~/.unity-mcp) finds its sandbox's editor in the same synced folder its MCP server reads, fenced or not.
     if (spec.sandbox) env.UNITY_MCP_STATUS_DIR = mcpStatusDir(appDirOfConfig(this.cfg), spec.sandbox);
+    // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
+    // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
+    if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
@@ -3097,7 +3133,7 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   private ghMemo?: { at: number; token?: string };
@@ -3200,7 +3236,7 @@ export class Daemon {
   }
 
   /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
-  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: LowEditorFence };
+  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: LowEditorFence; transcripts?: boolean };
   private lowStarted = false;
   /** Why lowSetup left the Low fence off (w5555): the fence gate's failure and the portal's alert say it. */
   private lowWhy?: string;
@@ -3389,7 +3425,8 @@ export class Daemon {
       const versions = await lowUnityJunctions(root, found, exec, say);
       const gh = ghConfigDirFor(process.env);
       const editor = versions.length && this.cfg.editorFence !== false ? await this.lowEditorFence(root, exec, say) : undefined;
-      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}) };
+      const transcripts = await this.lowTranscripts(root, exec, say);
+      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}), ...(transcripts ? { transcripts } : {}) };
       log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'}); sandbox editors ${editor ? `start at Low too (launcher ${editor.launcher}), from their next start` : this.cfg.editorFence === false ? 'stay Medium (editorFence false)' : 'stay Medium (no Low launcher or no Unity junction)'}`);
       await this.lowGhSelfTest(root, gh, exec, say);
       // w5717: the agent Git sits in a folder Low workers write, so its bash runs here with nothing of the daemon's
@@ -3420,6 +3457,28 @@ export class Daemon {
     } catch (e) {
       this.lowFail((e as Error).message);
     }
+  }
+
+  /**
+   * w5703: daemon.json `workerTranscriptLabels`: on, `projects` is labelled Medium and a Low node tries to plant a file there
+   * (warn-only: a WARNING in the log when it can, never worse than before); off, an earlier lock is undone (everything there
+   * Low again), so the way back is the switch and a daemon restart, from anywhere. Answers whether agents get their own
+   * conversation labelled Low (launch.ts lowTranscriptSpawner).
+   */
+  private async lowTranscripts(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<boolean> {
+    const projects = path.join(process.env.CLAUDE_CONFIG_DIR || workerClaudeDir(root), 'projects');
+
+    // The pinned conversations, in the daemon's own folder: a Low worker can write anywhere in the Claude home (w5774).
+    const pins = path.join(appDirOfConfig(this.cfg), 'transcript-pins.json');
+    if (!this.cfg.workerTranscriptLabels) {
+      await unlockTranscripts(projects, exec, say, undefined, undefined, pins);
+      return false;
+    }
+    if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
+    const node = await lowCopy(root, process.execPath, exec, say);
+    const probe = node ? probeTranscriptLock(node, projects) : 'no Low node copy';
+    log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
+    return true;
   }
 
   /**

@@ -77,8 +77,13 @@ export function tempSizeLedgerLine(sessionId: string, arg: unknown): string | un
   return `worker ${sessionId.slice(0, 8)}: temp folder ${gb(a.total)} GB, over ${overGb(a.step)} GB (w3686)${names.length ? `: ${names.join(', ')}` : ''}`;
 }
 
-/** The bytes under each direct child of `dir` (a child that cannot be read counts 0), their sum, and the biggest children. */
+/**
+ * The bytes under each direct child of `dir` (a child that cannot be read counts 0), their sum, and the biggest children. A
+ * file hard-linked more than once in the folder counts once, in the first child that holds it (w5766: a copy made with
+ * links takes no more disk, and the caps' temp size, machine/workerCaps.ts, would count it twice).
+ */
 export async function measureTemp(dir: string): Promise<TempMeasure> {
+  const links = new Set<string>();
   let names: string[] = [];
   try {
     names = await fs.promises.readdir(dir);
@@ -90,7 +95,7 @@ export async function measureTemp(dir: string): Promise<TempMeasure> {
   for (const name of names) {
     let bytes = 0;
     try {
-      bytes = await sizeOf(path.join(dir, name), TEMP_CHILD_BUDGET);
+      bytes = await sizeOf(path.join(dir, name), TEMP_CHILD_BUDGET, links);
     } catch {
       // counts 0
     }

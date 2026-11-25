@@ -280,10 +280,31 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
 - **Git never uses the Keychain for github.com**: launch.ts `githubCredentialEnv` clears the system `osxkeychain` helper
   and sets the app helper (a traced `git credential fill` ran only ghApp.ts's helper), and the Claude CLI gets its token as
   `CLAUDE_CODE_OAUTH_TOKEN`, so neither needs the Keychain.
-- **Windows: none of this.** Every owner path is on the system drive, where the fence writes no label ("Never touch C: on
-  Windows"). There `lowEnv` moves gh's `APPDATA` into the root, so a Low worker's gh finds no login, and the login's folder
-  is passed (`GH_CONFIG_DIR`) only to a run with no token. A deny ACL for the Low SID on the owner's profile folders is a
-  person's decision, not applied.
+- **Also closed (w5749, from w5733's review)**: `~/.netrc`, `~/.git-credentials`, git's
+  `$XDG_CONFIG_HOME/git/credentials` and `~/.config/git/credentials`; gh's other config folders (`~/.config/gh` when the
+  daemon has `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` set elsewhere: gh reads one folder, but a worker can point
+  `GH_CONFIG_DIR` at any; open, as the gh folder is, to a run with no GitHub token); on Linux the flatpak browsers' homes
+  (`~/.var/app/<id>`), snap Brave, and `~/.config`'s browsers when `XDG_CONFIG_HOME` points elsewhere
+  (ownerSecrets.ts `ownerSecretPathsMore`, `ownerReadMore`, part of `ownerReadDenied`). They had a warn stage of their
+  own first (#1248); since the enforce PR they are owner rules like the rest, so they act only in `on`, and in `warn`
+  the probe's `owner-secret rules would close` line lists them. That line is the per-machine check before `on`: uv and
+  curl read `~/.netrc` and git's `store` helper reads `~/.git-credentials`, so a machine whose worker tools need one is
+  found in `warn`, not by a failed run.
+- **Windows: none of this, and no env or wrapper route closes it** (w5749, measured on LothDesktop 2026-11-25). Every
+  owner path is in the profile on the system drive, where the fence writes no label ("Never touch C: on Windows"). There
+  `lowEnv` moves gh's `APPDATA` into the root, so a Low worker's gh finds no login, and the login's folder is passed
+  (`GH_CONFIG_DIR`) only to a run with no token. That stops an honest worker, not one that sets the variable itself:
+  - Windows' integrity rule for files is No-Write-Up only, so a Low process reads a Medium file unless the file carries a
+    No-Read-Up label (sourced: Microsoft, "Mandatory Integrity Control"). A worker sandbox's agent here runs at
+    `Low Mandatory Level` (`whoami /groups`, measured).
+  - gh keeps the token in Windows Credential Manager, not in a file: the daemon's own Low self-test (`lowGhSelfTest`, gh
+    at Low with the owner's `GH_CONFIG_DIR`) logged `gh authenticates for Low workers (... Lothsahn (keyring))` at
+    2026-11-25 13:43 UTC. So a label or deny ACL on `%APPDATA%\GitHub CLI` alone would hide `hosts.yml` but not the
+    token: closing the gh login also needs the token out of Credential Manager (git's Credential Manager entries too).
+  - What would close it, each a change on the system drive or the person's own login, so lothsahn's or Ben's decision
+    (handed up by w5749): No-Read-Up labels (or a deny ACE for Low) on `~\.ssh`, the gh folder and the browser profile
+    folders, with the gh login moved out of Credential Manager; or workers as their own Windows account. Until then a Low
+    worker can read them.
 - **Known limits**: the person's own unfenced processes (the sandbox's Unity editor) are not fenced. `spctl -a -t exec`
   rejects Unity.app with or without the fence ("Unnotarized Developer ID"), so it is no fence check. Linux: a closed path
   in `$HOME` makes `$HOME` a parent the read lock walks, so a file rewritten there by rename after a run started is
