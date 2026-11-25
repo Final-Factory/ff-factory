@@ -421,6 +421,8 @@ agents to `<root>/claude`, in four parts that landed together:
    scrubber (which scans the legacy `projects/` too), `cliTranscriptPath`, plugin paths (`FF_SKILLS`), the evidence gate.
    It does nothing when `daemon.json` `env` names a `CLAUDE_CONFIG_DIR` (an instance's own) or sets `FF_CLAUDE_HOME` to
    `legacy` (the off switch).
+   The variable stays on the daemon's side: `buildOptions` drops it from every agent's environment (w5559,
+   `withoutLoginPaths`), since that folder holds the machine's own claude.ai login and a worker runs on its vault token.
 2. **Plugins before agents.** `worker.ts tools` (the rollout's tools publish after each verified portal deploy) runs
    `registerAgents.sh` with `CLAUDE_CONFIG_DIR=<root>/claude`, so the plugins (the machine's remembered set, ff-discord
    included where a person asked for it) install there. Until `<root>/claude/plugins/installed_plugins.json` lists
