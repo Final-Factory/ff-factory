@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { gitExecFile } from './safeGit.ts';
 import { freeableBytes, localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
@@ -666,7 +666,7 @@ export function reposAround(p: string, root: string): RepoAt[] {
 /** Git ignores `p` in `repo` (a build cache, node_modules): deleting it takes nothing git holds. Unknown counts as no. */
 export function gitIgnores(repo: string, p: string, timeoutMs = 30_000): Promise<boolean> {
   return new Promise((resolve) =>
-    execFile('git', ['--no-optional-locks', '-C', repo, 'check-ignore', '-q', '--', path.relative(repo, p)], { timeout: timeoutMs, windowsHide: true }, (e) => resolve(!e)),
+    gitExecFile(['--no-optional-locks', '-C', repo, 'check-ignore', '-q', '--', path.relative(repo, p)], { timeout: timeoutMs, windowsHide: true }, (e) => resolve(!e)),
   );
 }
 

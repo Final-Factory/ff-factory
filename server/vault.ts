@@ -14,7 +14,17 @@ import { POOL_DEFAULTS, pickOrder, pickPool, reserveOf, usable, type PoolLimits,
 
 export type { VaultEntryMeta, VaultKind, VaultRole, VaultShare, VaultStatus } from '../shared/types.ts';
 export const VAULT_KINDS: readonly VaultKind[] = ['claude', 'github', 'env', 'github-app'];
-export const VAULT_ROLES: readonly VaultRole[] = ['workers', 'standing'];
+export const VAULT_ROLES: readonly VaultRole[] = ['workers', 'standing', 'releases'];
+/**
+ * Variables no agent's environment gets, whatever their entry's roles (w5551): the Steam build account's credential. The
+ * portal reads them only for the daemon's steam_upload job (releaseSecrets), which passes them to ffsteam.py alone. Their
+ * entries belong to the `releases` role; one still granted to `workers` (w1639's) is read for the job too, and never given
+ * to a run.
+ */
+// FFSTEAM_ACCOUNT (w5640): the build account's name, which steam_upload's install writes into config.json; a setting, never
+// a name in code (lothsahn, w1639), and kept from runs like the password.
+export const DAEMON_ONLY_ENV: readonly string[] = ['FFSTEAM_PASSWORD', 'FFSTEAM_GUARD_SECRET', 'FFSTEAM_GUARD_CODE', 'FFSTEAM_ACCOUNT'];
+export const daemonOnly = (name: string | undefined) => !!name && DAEMON_ONLY_ENV.includes(name.toUpperCase());
 
 interface Sealed {
   iv: string;
@@ -708,6 +718,33 @@ export class Vault {
     }
   }
 
+  /**
+   * The Steam build account's credential for a daemon release job on `machineId` (w5551, steam_upload): the enabled env
+   * entries of DAEMON_ONLY_ENV granted to `releases` (or still to `workers`) on that machine, by variable name. Never part
+   * of a run's environment (forRun skips them).
+   */
+  releaseSecrets(machineId: string): { env: Record<string, string>; problems: string[] } {
+    this.reload();
+    const out = { env: {} as Record<string, string>, problems: [] as string[] };
+    const mine = this.data.entries.filter((e) => e.kind === 'env' && !e.disabled && daemonOnly(e.env)
+      && (e.roles.includes('releases') || e.roles.includes('workers'))
+      && (e.machines.includes('*') || e.machines.some((m) => same(m, machineId))));
+    if (!mine.length) return out;
+    const { key, status } = this.key();
+    if (!key) {
+      out.problems.push(`the vault cannot open ${mine.map((e) => e.name).join(', ')}: ${status.why}`);
+      return out;
+    }
+    for (const e of mine.sort((a, b) => a.name.localeCompare(b.name))) {
+      const name = e.env!.toUpperCase();
+      if (name in out.env) continue;
+      const v = this.open(key, e);
+      if (v === undefined) out.problems.push(`vault entry ${e.name} does not open with this key (rotate it)`);
+      else out.env[name] = v;
+    }
+    return out;
+  }
+
   /** Tell redaction every value (on each load and change); a vault with no key teaches nothing. */
   private publishValues() {
     if (!this.o.onValues) return;
@@ -868,7 +905,7 @@ export class Vault {
     for (const e of [...granted].sort((a, b) => order(a).localeCompare(order(b)))) {
       if (e.kind === 'claude') continue;
       const name = e.kind === 'github' ? 'GH_TOKEN' : e.env;
-      if (!name || name in out.env) continue;
+      if (!name || name in out.env || daemonOnly(name)) continue;
       const v = this.open(key, e);
       if (!v) {
         out.problems.push(`vault entry ${e.name} does not open with this key (rotate it)`);

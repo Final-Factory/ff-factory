@@ -2,7 +2,7 @@ import { noteBench, recentPlayers, type PlayerSeen } from './crashHolds.ts';
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import type { SaveResult } from './saveWork.ts';
 import path from 'node:path';
 import type http from 'node:http';
@@ -16,7 +16,7 @@ import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { AnsweredCalls } from './answeredCalls.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
-import { LINK_ACK_MS, PendingCalls, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
+import { LINK_ACK_MS, PendingCalls, THIN_REFUSED, type UpdateBundle, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { PortalPinStatus } from '../machine/portalPin.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
@@ -1103,7 +1103,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; portalPin?: PortalPinStatus }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1205,12 +1205,12 @@ export class MachineManager {
     return this.isOnline(id) && this.hellos.has(id);
   }
 
-  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   /** The portal hosts its daemon follows and what pinning would have refused (w5576), from its hello; undefined from an older daemon. */
   portalPinOf(id: string): PortalPinStatus | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.portalPin : undefined;
   }
 
+  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
   }
@@ -1284,7 +1284,23 @@ export class MachineManager {
   async linkUpdate(id: string, o: { form?: 'update' | 'tools'; flags?: LinkUpdateFlags; commit?: string; timeoutMs?: number } = {}): Promise<LinkUpdateReport> {
     refuseInDryRun(`an update of ${id} over its link`);
     if (!this.canLink(id)) throw new Error(`${id}'s daemon does not update over its link (offline, not a worker root install, or a daemon from before w1596)`);
-    const b = await this.bundles.prepare(o.commit);
+    const full = await this.bundles.prepare(o.commit);
+    // w5593: only what its checkout lacks, from the commit its daemon runs (machineLink.ts thin); the full bundle when there is
+    // none, or when its daemon cannot read that one (THIN_REFUSED), so a machine is never left with less than before.
+    const thin = await this.bundles.thin(full, this.daemonCommit(id));
+    if (thin) {
+      try {
+        return await this.linkUpdateWith(id, thin, o);
+      } catch (e) {
+        if (!THIN_REFUSED.test((e as Error).message)) throw e;
+        console.log(`machine ${id}: its daemon could not read the incremental bundle (${(e as Error).message}); sending the full one`);
+      }
+    }
+    return this.linkUpdateWith(id, full, o);
+  }
+
+  /** linkUpdate with this bundle. */
+  private async linkUpdateWith(id: string, b: UpdateBundle, o: { form?: 'update' | 'tools'; flags?: LinkUpdateFlags; timeoutMs?: number }): Promise<LinkUpdateReport> {
     this.bundles.offer(id, b);
     const callId = randomUUID();
     const form = o.form ?? 'update';
@@ -1294,7 +1310,7 @@ export class MachineManager {
     // then git), so its refusal arrives while this still waits (w1641: beast's came 16 s after a 5-minute wait).
     const ack = this.linkAcks.wait(callId, id, LINK_ACK_MS, `the ${form} over its link`);
     this.post(id, { type: 'self_update', id: callId, form, commit: b.commit, bundle: { sha256: b.sha256, size: b.size }, ...(o.flags && Object.keys(o.flags).length ? { flags: o.flags } : {}) });
-    console.log(`machine ${id}: ${form} over its link to ${b.commit.slice(0, 12)} (bundle ${b.size} bytes, sha256 ${b.sha256.slice(0, 12)}…), job ${callId.slice(0, 8)}`);
+    console.log(`machine ${id}: ${form} over its link to ${b.commit.slice(0, 12)} (${b.from ? `incremental bundle from ${b.from.map((c) => c.slice(0, 12)).join(', ')}` : 'bundle'} ${b.size} bytes, sha256 ${b.sha256.slice(0, 12)}…), job ${callId.slice(0, 8)}`);
     try {
       await ack;
       // w2313: its job restarts the daemon: the agents a dropped link cuts off mid-turn are resumed saying why.
@@ -1309,9 +1325,11 @@ export class MachineManager {
   }
 
   /** Restart a machine's daemon over its link (its agents run on), or unload it as removeMachine does over ssh (w1596). */
-  async linkControl(id: string, action: 'restart' | 'uninstall'): Promise<void> {
+  async linkControl(id: string, action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on'): Promise<void> {
     refuseInDryRun(`a daemon ${action} of ${id} over its link`);
     if (!this.canLink(id)) throw new Error(`${id}'s daemon does not take a ${action} over its link`);
+    // w5546: an older daemon reads any action but restart as uninstall, so the switch goes only to one that offers it.
+    if (action.startsWith('read-fence') && !this.hellos.get(id)?.readFenceSwitch) throw new Error(`${id}'s daemon has no read fence switch (it runs code from before w5546): nothing was sent`);
     const callId = randomUUID();
     const done = this.linkControls.wait(callId, id, 60_000, `the ${action}`);
     this.post(id, { type: 'daemon_control', id: callId, action });
@@ -1945,9 +1963,15 @@ export class MachineManager {
    * while any run unless forced (as a redeploy is). A stopped daemon is left alone by the offline redeploy until
    * it is started (or redeployed) again.
    */
-  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart', force = false): Promise<string> {
+  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on', force = false): Promise<string> {
     const m = this.require(id);
     refuseInDryRun(`a daemon ${action} on ${m.id}`);
+    // w5546: the worker read fence's live off switch, over the daemon's link only; no restart, its agents run on.
+    if (action === 'read-fence-off' || action === 'read-fence-warn' || action === 'read-fence-on') {
+      await this.linkControl(m.id, action);
+      const mode = action.slice('read-fence-'.length);
+      return `${m.id}: the worker read fence is ${mode} for runs started from now on${mode === 'on' ? ' once its probe passes' : ' (Windows: any No-Read-Up label taken off; macOS and Linux: runs already going keep the read rules they started with until they end)'}; its daemon log says what the probe found.`;
+    }
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
     // A daemon whose agents run in agent hosts (w605) restarts without stopping them; a stop still ends them.
@@ -2473,7 +2497,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
@@ -2856,6 +2880,9 @@ export class MachineManager {
       case 'lab_fixture_sent':
         this.labFixtureReport?.(id, msg);
         return;
+      case 'steam_upload_state':
+        this.steamUploadReport?.(id, msg);
+        return;
       case 'bench_hours':
         this.benchHours?.(id, msg.rows);
         return;
@@ -3066,6 +3093,9 @@ export class MachineManager {
   /** w3939: a daemon that holds the nightly lab's fixtures said hello, and what it answers of one (server/labFixtures.ts). */
   onLabHolder?: (machineId: string) => void;
   labFixtureReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'lab_fixture_result' | 'lab_fixture_sent' }>) => void;
+  /** A steam_upload job's word (w5551, server/steamUpload.ts); `lost` when the daemon's link dropped with jobs running. */
+  steamUploadReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'steam_upload_state' }>) => void;
+  steamUploadLost?: (machineId: string, why: string) => void;
 
   /** Whether a machine's daemon is online and holds the nightly lab's fixtures (w3939: its hello offered `labFixtures`). */
   offersLabFixtures(machineId: string): boolean {
@@ -3178,6 +3208,8 @@ export class MachineManager {
    * urgent w4609 as fitting biscuit/slot3 at 11:15, waited until 11:19. So the drop answers them at once, as unknown.
    */
   private failCallsOf(machineId: string, why: string) {
+    // w5551: a Steam upload's daemon process ends with its daemon, so its job ends too.
+    this.steamUploadLost?.(machineId, `the daemon on ${machineId} ${why}`);
     const calls = [
       ...[...this.switchCalls].map(([cid, c]) => ({ cid, c, map: this.switchCalls as Map<string, unknown>, what: 'branch switch' })),
       ...[...this.saveCalls].map(([cid, c]) => ({ cid, c, map: this.saveCalls as Map<string, unknown>, what: 'save of uncommitted work' })),
@@ -3304,6 +3336,22 @@ export class MachineManager {
         reject(e as Error);
       }
     });
+  }
+
+  /** Whether a machine's daemon is online and runs the Steam check and upload (w5551: its hello offered `steamUpload`). */
+  canSteamUpload(machineId: string): boolean {
+    return this.isOnline(machineId) && !!this.hellos.get(machineId)?.steamUpload;
+  }
+
+  /** Whether a machine's daemon installs steamcmd for steam_upload (w5640: its hello offered `steamInstall`). */
+  canSteamInstall(machineId: string): boolean {
+    return this.canSteamUpload(machineId) && !!this.hellos.get(machineId)?.steamInstall;
+  }
+
+  /** Start a Steam check or upload on the machine (w5551); its word comes back through steamUploadReport. */
+  steamUpload(machineId: string, msg: Extract<ToDaemon, { type: 'steam_upload' }>) {
+    if (!this.canSteamUpload(machineId)) throw new Error(`${machineId}'s daemon does not run Steam uploads yet (it needs a daemon update)`);
+    this.post(machineId, msg);
   }
 
   /** An image file from a machine's clone, sandboxes or standing-agent folders, or from that session's temp folder. */
@@ -3520,7 +3568,7 @@ export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'pl
 /** The commit a checkout is at, or undefined. */
 function gitHead(dir: string): string | undefined {
   try {
-    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
+    return gitExecFileSync(['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
   } catch {
     return undefined;
   }

@@ -15,7 +15,7 @@
 //
 // No module here may need an npm package: linkJob.ts imports these from a checkout that has none.
 import { createHash } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { gitExecFile } from '../server/safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -207,7 +207,7 @@ export async function downloadBundle(
 
 const git = (args: string[], timeoutMs = 5 * 60_000) =>
   new Promise<string>((resolve, reject) =>
-    execFile('git', args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, stdout, stderr) =>
+    gitExecFile(args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }, (err, stdout, stderr) =>
       err ? reject(new Error(`git ${args[0] === '-C' ? args[2] : args[0]} failed: ${String(stderr || err.message).trim().split('\n').pop()}`)) : resolve(String(stdout)),
     ),
   );
@@ -331,6 +331,8 @@ export interface SelfUpdaterDeps {
   nodeArgs?: string[];
   platform?: NodeJS.Platform;
   launch?: typeof launchJob;
+  /** w5546: sets the worker read fence's mode (daemon_control read-fence-off / read-fence-warn / read-fence-on). */
+  readFence?: (mode: 'off' | 'warn' | 'on') => Promise<void>;
   remove?: typeof removeJob;
   fetch?: typeof fetch;
   now?: () => number;
@@ -465,6 +467,17 @@ export class SelfUpdater {
     const answer = (ok: boolean, error?: string) => {
       this.answer({ type: 'daemon_control_result', id: msg.id, ok, ...(error ? { error } : {}) });
     };
+    if (msg.action === 'read-fence-off' || msg.action === 'read-fence-warn' || msg.action === 'read-fence-on') {
+      if (!this.deps.readFence) return answer(false, 'this daemon has no read fence switch');
+      try {
+        await this.deps.readFence(msg.action === 'read-fence-off' ? 'off' : msg.action === 'read-fence-warn' ? 'warn' : 'on');
+        answer(true);
+      } catch (e) {
+        answer(false, (e as Error).message);
+      }
+      return;
+    }
+    if (msg.action !== 'restart' && msg.action !== 'uninstall') return answer(false, `unknown action ${String((msg as { action?: unknown }).action)}`);
     if (msg.action === 'restart') {
       answer(true);
       this.deps.log('restart over the link: going; the supervisor starts the daemon again and it takes its agents back');

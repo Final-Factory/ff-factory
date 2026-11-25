@@ -1,7 +1,7 @@
 import type { AttachmentConfig } from './attachments.ts';
 import type { ReviewConfig } from './review.ts';
 import type { DevRequestsConfig } from './devRequests.ts';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode, ProjectView } from '../shared/types.ts';
@@ -324,6 +324,12 @@ export interface Config {
    * each prompt adds one line saying who that is (ownerLine), so agents can address them by name.
    */
   ownerName?: string;
+  /**
+   * The Steam build account the urgent release lane uploads as (w5640): steam_upload's install writes it into a computer's
+   * `<root>/steam/config.json` (release.steam.account). A setting, never a name in code (lothsahn, w1639: "It should not be
+   * hardcoded in the code"); its password stays in the vault (FFSTEAM_PASSWORD, docs/steam-upload.md).
+   */
+  steamBuildAccount?: string;
   /**
    * How often the Claude plan usage of every account is polled, in minutes (docs/accounts.md): this host's token,
    * login and people's own tokens, and each machine daemon's login. Default 15. The usage endpoint rate-limits.
@@ -1330,7 +1336,7 @@ let appOrigin: string | undefined | null = null;
 export function appOriginUrl(): string | undefined {
   if (appOrigin === null) {
     try {
-      appOrigin = execFileSync('git', ['-C', ROOT, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
+      appOrigin = gitExecFileSync(['-C', ROOT, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
     } catch {
       appOrigin = undefined;
     }

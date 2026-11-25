@@ -43,11 +43,26 @@ export const CI_CHILDREN = ['ffu-runners'];
  * and Claude keys (w5451 audit, measured: Low labels and mkdir probes from a Low worker). Each name is one some worker
  * tool writes: docs/worker-root.md 2.1 and 4.1 say which.
  */
+// Not `steam` (w5551): steamcmd's folder, its config and cached login are the daemon's alone (machine/steamUpload.ts);
+// a worker uploads through steam_upload. `gamedata-home` (w5579): FF_PLAYER_HOME, the home every player a worker starts
+// gets on Linux and macOS (gameData.ts workerPlayerHomeDir); left out, a fenced worker's player could not write its prefs.
 export const WORKER_CHILDREN = [
-  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
-  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam', 'steam-lobby-gate',
+  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'gamedata-home', 'home', 'logs', 'nightly', 'nightly-history',
+  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam-lobby-gate',
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];
+
+/**
+ * The root children the Linux Landlock lock and the Mac Seatbelt fence open to workers (w5569): WORKER_CHILDREN, plus the
+ * root child that holds each `extra` the config puts in the root (its temp or sandboxes folder elsewhere than tmp and
+ * sandboxes), less `closed` (daemon, secrets, the daemon's own folder). Names as written: these file systems match case.
+ */
+export function openChildren(root: string, extra: (string | undefined)[] = [], closed: Iterable<string> = MEDIUM_CHILDREN): string[] {
+  const shut = new Set(closed);
+  const open = new Set(WORKER_CHILDREN);
+  for (const e of extra) if (e && inside(path.resolve(e), path.resolve(root)) && !same(e, root)) open.add(path.relative(path.resolve(root), path.resolve(e)).split(/[\\/]/)[0]);
+  return [...open].filter((c) => !shut.has(c)).sort();
+}
 
 export interface LowTargetsInput {
   root: string;
@@ -334,6 +349,167 @@ export async function lowUnityJunctions(root: string, editors: { version: string
 export function strayLowServers(servers: { pid: number; rid: number; dll: string }[], root: string): number[] {
   const under = lowUnityDir(root).toLowerCase();
   return servers.filter((s) => s.rid > 0 && s.rid < 0x2000 && s.dll && !path.resolve(s.dll).toLowerCase().startsWith(under)).map((s) => s.pid);
+}
+
+/**
+ * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the read half of the Windows fence. A
+ * mandatory label with No-Read-Up (NR) on a Medium path refuses reads to Low processes, as No-Write-Up (NW, icacls' only
+ * policy) refuses writes. icacls cannot set NR, so the daemon sets the label's SDDL through SetNamedSecurityInfoW
+ * (LABEL_SECURITY_INFORMATION), which also passes an inheritable label on to what is already inside a folder.
+ *
+ * Closed: the daemon's folder (its own, and `<root>\daemon` where that differs), `<root>\secrets` and `<root>\root.json`.
+ * Given back with an explicit Medium No-Write-Up label (an explicit label overrides an inherited one, measured in w5377):
+ * what workers read or run in the daemon's folder (daemonReads.ts FENCE_READ_ALLOW) and the runs' own GitHub App token
+ * files (gh-app\sessions, w5547: every Low worker shares one Low token, so a Low worker can read every run's file there,
+ * which holds only the apps runs on that machine were given; macOS and Linux give each run only its own).
+ *
+ * Never on the system drive (lothsahn: "Never touch C: on Windows"): a target that is, or resolves through a junction to,
+ * the system drive is skipped and said (BEAST's daemon and secrets are junctions into C:\ffw-anchor).
+ */
+export const NO_READ_UP = { dir: 'S:(ML;OICI;NWNR;;;ME)', file: 'S:(ML;;NWNR;;;ME)' };
+export const READ_BACK = { dir: 'S:(ML;OICI;NW;;;ME)', file: 'S:(ML;;NW;;;ME)' };
+
+export interface LabelTarget {
+  path: string;
+  sddl: string;
+}
+
+/** The NR labels, closed paths first, then the read-backs. Paths that do not exist are left out. Exported for tests. */
+export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; secrets?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined }): LabelTarget[] {
+  const stat =
+    o.stat ??
+    ((p: string) => {
+      try {
+        return fs.statSync(p).isDirectory() ? 'dir' : 'file';
+      } catch {
+        return undefined;
+      }
+    });
+  const out: LabelTarget[] = [];
+  const add = (p: string, l: { dir: string; file: string }) => {
+    const k = stat(p);
+    if (k && !out.some((t) => t.path.toLowerCase() === p.toLowerCase())) out.push({ path: p, sddl: k === 'dir' ? l.dir : l.file });
+  };
+  // secrets: every secrets folder (readFence.ts secretsDirs), the Dev Drive host folder's too (B3 of the #1193 lockout review).
+  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
+  for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(path.isAbsolute(a) ? a : path.join(o.appDir, a), READ_BACK);
+  return out;
+}
+
+/**
+ * Whether icacls says the path already carries this label explicitly (not inherited): its Medium label line with NR for a
+ * closed path, without NR for a read-back. Exported for tests.
+ */
+export function hasLabel(icaclsOut: string, sddl: string): boolean {
+  const line = icaclsOut.split(/\r?\n/).find((l) => /Mandatory Label\\Medium Mandatory Level/i.test(l));
+  if (!line || /\(I\)/.test(line)) return false;
+  return /\bNR\b/.test(line) === sddl.includes('NWNR') && /\bNW\b/.test(line);
+}
+
+/** Whether a path is on (or, through a junction, resolves to) the system drive. Exported for tests. */
+export function onSystemDrive(p: string, systemDrive = process.env.SystemDrive || 'C:', real: (p: string) => string = (x) => fs.realpathSync.native(x)): boolean {
+  const drive = (x: string) => path.win32.parse(path.win32.resolve(x)).root.slice(0, 2).toLowerCase();
+  const sys = systemDrive.slice(0, 2).toLowerCase();
+  if (drive(p) === sys) return true;
+  try {
+    return drive(real(p)) === sys;
+  } catch {
+    return false;
+  }
+}
+
+const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+/** The PowerShell that sets each label and prints `ok <i>` or `err <i> <win32 error>` per target. Exported for tests. */
+export function labelScript(t: readonly LabelTarget[]): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public static class FfLabel {',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint rev, out IntPtr sd, IntPtr size);',
+    '  [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] public static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);',
+    '  [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);',
+    '  public static uint Set(string path, string sddl) {',
+    '    IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();',
+    '    try { bool p, d; IntPtr sacl; if (!GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();',
+    '      return SetNamedSecurityInfoW(path, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl); } finally { LocalFree(sd); }',
+    '  }',
+    '}',
+    '"@',
+    ...t.map((x, i) => `$r = [FfLabel]::Set(${psq(x.path)}, ${psq(x.sddl)}); if ($r -eq 0) { 'ok ${i}' } else { 'err ${i} ' + $r }`),
+  ].join('\n');
+}
+
+/**
+ * Sets the No-Read-Up labels (w5546). A target on the system drive is skipped and said; one refused for want of
+ * WRITE_OWNER gets the account's Full grant first (as labelLow, w5402) and is tried again. Returns whether every label not
+ * skipped was set; never throws.
+ */
+export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean } = {}): Promise<boolean> {
+  const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
+  const todo: LabelTarget[] = [];
+  for (const x of t) {
+    if (sys(x.path)) {
+      say(`worker integrity: left ${x.path} without a read label: it is on the system drive, which the fence does not touch`);
+      continue;
+    }
+    // Already so: not set again (setting a folder's label walks everything inside it).
+    const now = await exec('icacls', [x.path], { timeoutMs: 60_000 });
+    if (now.code === 0 && hasLabel(now.stdout, x.sddl)) continue;
+    todo.push(x);
+  }
+  if (!todo.length) return true;
+  const runOnce = async (list: readonly LabelTarget[]) => {
+    const script = labelScript(list);
+    const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
+    const failed = new Map<number, string>();
+    const seen = new Set<number>();
+    for (const line of r.stdout.split(/\r?\n/)) {
+      const m = /^(ok|err) (\d+)(?: (\d+))?$/.exec(line.trim());
+      if (!m) continue;
+      seen.add(Number(m[2]));
+      if (m[1] === 'err') failed.set(Number(m[2]), m[3] ?? '?');
+    }
+    list.forEach((_, i) => !seen.has(i) && failed.set(i, `no answer (${(r.stderr || r.stdout).trim().slice(-200)})`));
+    return failed;
+  };
+  let failed = await runOnce(todo);
+  const account = o.account ?? currentAccount();
+  const denied = [...failed].filter(([, c]) => c === '5').map(([i]) => todo[i]);
+  if (denied.length && account) {
+    for (const x of denied) {
+      const g = await exec('icacls', [x.path, '/grant', `${account}:${x.sddl.includes('OICI') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
+      if (g.code === 0) say(`worker integrity: gave ${account} Full on ${x.path}, which setting its label needs (WRITE_OWNER)`);
+    }
+    const again = await runOnce(denied);
+    const rest = new Map<number, string>();
+    for (const [i, c] of failed) {
+      const j = denied.indexOf(todo[i]);
+      if (j < 0) rest.set(i, c);
+      else if (again.has(j)) rest.set(i, again.get(j)!);
+    }
+    failed = rest;
+  }
+  for (const [i, c] of failed) say(`worker integrity: could not set ${todo[i].sddl} on ${todo[i].path}: ${c}`);
+  say(`worker integrity: read labels set on ${todo.length - failed.size} of ${todo.length} paths (No-Read-Up on the daemon's folder, secrets and root.json; their worker reads given back)`);
+  return failed.size === 0;
+}
+
+/**
+ * Takes the No-Read-Up labels off again (w5546 lockout review B1: the read fence off or warn, or a reverted build): each
+ * closed path that still carries an explicit NR label gets the plain No-Write-Up one. A path without one is not touched
+ * (setting a folder's label walks everything in it). Returns the paths it opened, or undefined when one could not be set.
+ */
+export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean } = {}): Promise<string[] | undefined> {
+  const open: LabelTarget[] = [];
+  for (const x of t.filter((x) => x.sddl.includes('NWNR'))) {
+    const now = await exec('icacls', [x.path], { timeoutMs: 60_000 });
+    if (now.code === 0 && hasLabel(now.stdout, x.sddl)) open.push({ path: x.path, sddl: x.sddl.replace('NWNR', 'NW') });
+  }
+  if (open.length && !(await labelNoReadUp(open, exec, say, o))) return undefined;
+  return open.map((x) => x.path);
 }
 
 /** Whether icacls says this path carries a Medium mandatory label. Exported for tests. */
