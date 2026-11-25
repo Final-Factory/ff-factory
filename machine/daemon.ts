@@ -85,7 +85,8 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, workerGhConfigDir } from './ownerSecrets.ts';
+import { trustedGh } from './evidenceGate.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -3065,21 +3066,22 @@ export class Daemon {
     const readOff = !this.readFenceEnforced();
     // w5548: a fenced run gets the machine's gh login only when it has no vault token, and then as GH_TOKEN read by the
     // daemon (machineGh), never as the login's folder: GH_CONFIG_DIR is only the fallback when the daemon read no token.
-    const ghMachine = spec.sandbox && !hasOwnGithub(spec.env) ? this.machineGh() : {};
     // w5553/w5560: the owner's secrets (gh login, ~/.ssh, browser profiles, the Keychain) are closed with the read fence,
     // on its own off switch; the gh folder stays open only to a run with no GitHub token at all (ownerReadDenied).
-    const owner = spec.sandbox && !readOff ? ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: hasOwnGithub(spec.env) || !!ghMachine.GH_TOKEN }) : [];
+    // w5747: wired in ownerSecrets.ts ownerRunWiring, whose test pins what follows the switch and what follows the token.
+    const ow = ownerRunWiring({ sandbox: !!spec.sandbox, enforced: !readOff, platform: process.platform, home: os.homedir(), env: process.env, specEnv: spec.env, root: this.cfg.root, machineGh: () => this.machineGh() });
+    const { ghMachine, owner } = ow;
     const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
-    const readFence = baseFence && owner.length ? { ...baseFence, readDenied: [...(baseFence.readDenied ?? []), ...owner], ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : baseFence;
+    const readFence = baseFence && ow.ownerSecrets ? { ...baseFence, readDenied: [...(baseFence.readDenied ?? []), ...owner], ownerSecrets: ow.ownerSecrets } : baseFence;
     const fence = readFence && readOff ? { ...readFence, readOff: true } : readFence && ownDir ? { ...readFence, readAllowed: [...(readFence.readAllowed ?? []), ownDir] } : readFence;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
-    const ghDir = spec.sandbox && !hasOwnGithub(spec.env) && !ghMachine.GH_TOKEN ? low?.gh : undefined;
+    const ghDir = ow.ghLoginFolder ? low?.gh : undefined;
     // w5548 probe (m5, 2026-11-25): with the owner's gh folder denied, gh refuses to start even with a token ("failed to
     // load config: open ~/.config/gh/config.yml: operation not permitted"), so a token-holding fenced run on macOS or Linux
     // gets an empty gh folder of its own in the root. Windows already moves gh's APPDATA into the root (lowEnv).
-    const ghOwn: Record<string, string> = spec.sandbox && this.cfg.root && process.platform !== 'win32' && (hasOwnGithub(spec.env) || ghMachine.GH_TOKEN) ? { GH_CONFIG_DIR: workerGhConfigDir(this.cfg.root) } : {};
+    const { ghOwn } = ow;
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, ghDir), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
@@ -3490,12 +3492,21 @@ export class Daemon {
     try {
       ensureReadBackDirs(appDir);
       fs.mkdirSync(ghAppPaths(appDir).sessions, { recursive: true });
-      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW });
-      let argv: string[] | undefined;
+      // w5747 (w5733's review of #1232): the probe runs the owner-secret rules too, as a run that holds a token gets them in
+      // on mode (the most closed case: the gh login's folder closed), so a passing probe has run every rule on mode adds.
+      const owner = ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: true });
+      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
+      log(sayOwnerRules(mode, process.platform, owner));
       const fence = this.workerFence;
       const lock = this.writeLock;
-      if (process.platform === 'darwin' && fence) argv = fencedArgv({ ...fence, secretsDirs: this.secretsDirs, readOff: false }, process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open]);
-      else if (process.platform === 'linux' && lock) argv = ['python3', FF_LANDLOCK, ...lock, ...this.readLock, '--', process.execPath, '-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open];
+      const ownerFence = fence && { ...fence, secretsDirs: this.secretsDirs, readOff: false, readDenied: [...(fence.readDenied ?? []), ...owner], ...(owner.length ? { ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : {}) };
+      const fenced = (cmd: string, args: string[]): string[] | undefined =>
+        process.platform === 'darwin' && ownerFence
+          ? fencedArgv(ownerFence, cmd, args)
+          : process.platform === 'linux' && lock
+            ? ['python3', FF_LANDLOCK, ...lock, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), '--', cmd, ...args]
+            : undefined;
+      const argv = fenced(process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open]);
       if (!argv) {
         // Windows (labels, set only in on mode by lowSetup), or no fence here: nothing a probe child could show.
         this.readProbeBlocks = process.platform !== 'win32';
@@ -3505,12 +3516,13 @@ export class Daemon {
       const [cmd, ...args] = argv;
       const r = await run(cmd, args, { timeoutMs: 60_000 });
       const v = judgeReadProbe(t, r.stdout);
-      this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0;
       log(sayReadProbe(mode, process.platform, v, t));
+      const tools = await this.probeOwnerTools(fenced, ownerFence ? fenceEnv(ownerFence) : {});
+      this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
       if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock);
       if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
       else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
-      else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused or could not judge one; runs start without read rules until a probe passes (warn, not a lockout)');
+      else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
       log(`read fence (${mode}): the probe could not run (${(e as Error).message}); runs start without read rules`);
@@ -3519,6 +3531,47 @@ export class Daemon {
 
   /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
   private ownerSocketsOpen: string[] = ['(not probed)'];
+
+  /**
+   * w5747: the probe's tool legs (ownerSecrets.ts ownerToolLegs), each run under the probe's fence with the owner rules: gh
+   * and git ls-remote with the machine login's token and an empty gh folder must work, and on a Mac a Keychain write must be
+   * refused at once. A failed or skipped leg blocks enforcing. The token is never logged.
+   */
+  private async probeOwnerTools(fenced: (cmd: string, args: string[]) => string[] | undefined, extraEnv: Record<string, string>): Promise<{ blocks: boolean }> {
+    const root = this.cfg.root;
+    if (!root) return { blocks: true };
+    const appDir = appDirOfConfig(this.cfg);
+    const holdFile = keychainHoldFile(appDir);
+    const version = readVersion();
+    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: this.machineGh().GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env), keychainHeld: keychainHeld(holdFile, version) });
+    const said: ToolLegVerdict[] = [];
+    for (const leg of legs) {
+      const argv = fenced(leg.cmd, leg.args);
+      if (!argv) continue;
+      const [cmd, ...args] = argv;
+      const env: NodeJS.ProcessEnv = { ...process.env, ...extraEnv, ...leg.env };
+      if (!leg.env.GH_TOKEN) delete env.GH_TOKEN;
+      delete env.GITHUB_TOKEN;
+      const r = await run(cmd, args, { timeoutMs: leg.timeoutMs, env, cwd: root });
+      const v = judgeToolLeg(leg, r);
+      said.push(v);
+      if (leg.name === 'security' && !v.ok) {
+        // w5752: never again on this code: a hung write may have put a dialog on the person's screen.
+        try {
+          holdKeychainLeg(holdFile, version, r.timedOut ? 'hung, a dialog may have been on the screen' : 'let through');
+        } catch (e) {
+          log(`read fence probe: could not record the Keychain leg's hold (${(e as Error).message}); the next probe runs it again`);
+        }
+      }
+      if (leg.name === 'security' && r.code === 0) {
+        // The write got through: take the probe's item out of the person's keychain again, outside the fence.
+        await run('/usr/bin/security', ['delete-generic-password', '-a', PROBE_KEYCHAIN_ITEM, '-s', PROBE_KEYCHAIN_ITEM], { timeoutMs: 20_000 });
+      }
+    }
+    const blocks = said.some((s) => !s.ok) || skipped.length > 0;
+    log(`read fence probe, tools under the owner rules (w5747): ${[...said.map((s) => `${s.name} ${s.ok ? '' : 'FAILED '}${s.said}`), ...skipped.map((s) => `not run: ${s}`)].join('; ') || 'none here'}${blocks ? '; on mode would not enforce' : ''}`);
+    return { blocks };
+  }
 
   /**
    * w5748: whether a fenced run reaches the Secret Service (the gh keyring login) and the ssh and gpg agents: a child of the

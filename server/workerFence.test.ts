@@ -374,6 +374,13 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
     assert.deepEqual(t2.closed, [path.join(r, 'steam')]);
     // Linux: Landlock cannot refuse the folder's own open (its parents' READ_DIR is inherited), so the probe opens its files.
     assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: true }).closed, [path.join(r, 'steam', 'config.json')]);
+    // w5747: the owner's secrets are closed targets too (existing ones; on Linux the files inside a folder).
+    const ssh = path.join(dir, 'home', '.ssh');
+    fs.mkdirSync(ssh, { recursive: true });
+    fs.writeFileSync(path.join(ssh, 'id_ed25519'), 'x');
+    const owner = [ssh, path.join(dir, 'home', '.mozilla')];
+    assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: false, owner }).closed, [path.join(r, 'steam'), ssh]);
+    assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: true, owner }).closed, [path.join(r, 'steam', 'config.json'), path.join(ssh, 'id_ed25519')]);
     if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
       // Under the real profile: steam's folder and its config.json refused, the lobby gate's file open.
       const real = fs.realpathSync(r);
