@@ -328,6 +328,7 @@ export async function cleanupPass(o: {
   const phasesMs: Record<string, number> = {};
   const timed = async <T>(name: string, f: () => Promise<T>): Promise<T> => {
     const t = Date.now();
+    o.opts.step?.(name, { ...phasesMs });
     try {
       return await f();
     } finally {
