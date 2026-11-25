@@ -9,18 +9,21 @@
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 import { openChildren } from './lowIntegrity.ts';
 
 /** The launcher beside this file. */
 export const FF_LANDLOCK = path.join(import.meta.dirname, 'ff-landlock.py');
 
+/** The .NET runtime's IPC folder in /tmp (`.dotnet/shm`): made before a worker starts, since /tmp is create-only. */
+export const DOTNET_DIR = '.dotnet';
+
 /**
  * Folders of the install root a worker never writes: the daemon's own (its code, config, hosts), the secrets, and the Medium
- * agents' Claude Code folder (w5543: its settings, plugins and hooks run in agents outside the lock).
+ * agents' Claude Code folder (w5543: its settings, plugins and hooks run in agents outside the lock), and steamcmd's (w5551).
  */
-export const LOCKED_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN] as const;
+export const LOCKED_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN, ...DAEMON_ONLY_CHILDREN] as const;
 
 export interface WriteLockPaths {
   /** The worker root (`~/ffw`). Only the folders workers write are writable (lowIntegrity.ts openChildren, w5569). */
@@ -39,6 +42,8 @@ export interface WriteLockPaths {
    * XDG_CONFIG_HOME would move them, and with them the Unity licence Unity looks for there.
    */
   home?: string;
+  /** The system temp folder Unity writes whatever TMPDIR says (default /tmp): create-only, its .dotnet writable. */
+  tmp?: string;
   /** More writable folders, each with its reason in daemon.json (`writeLockExtra`). */
   extra?: string[];
   /** The configured temp and sandboxes folders: one in the root opens its root child too (w5569). */
@@ -63,17 +68,26 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // outside the lock (measured escaping on biscuit, w5463). Needs Landlock ABI 9 (Linux 7.1); a no-op before it.
   if (p.runtimeDir) args.push('--deny-unix', path.join(p.runtimeDir, 'bus'), '--deny-unix', path.join(p.runtimeDir, 'systemd'));
   if (p.home) args.push('--rw', path.join(p.home, '.config', 'unity3d'), '--rw', path.join(p.home, '.local', 'share', 'unity3d'));
-  // Unity ignores TMPDIR for its Package Manager socket (/tmp/Unity-Upm-<pid>.sock), its shader compiler's lock
-  // (/tmp/Unity-ShaderCompilerIPC-*.lock) and its runtime's /tmp/.dotnet/shm: without them the editor exits 1 or aborts
-  // (measured on biscuit, w5333). A private /tmp needs a mount namespace, which this machine refuses an unprivileged user.
-  if (p.home) args.push('--rw', '/tmp');
+  // Unity ignores TMPDIR for its sockets (/tmp/Unity-Upm-<pid>.sock, Unity-ShaderCompilerIPC-*.sock, ilpp.sock-<hash>)
+  // and its shader compiler's lock (/tmp/Unity-ShaderCompilerIPC-*.lock, opened O_RDONLY|O_CREAT and flock'd), and its
+  // .NET runtime keeps IPC files in /tmp/.dotnet/shm (measured on biscuit, w5333 and w5561). A private /tmp needs a mount
+  // namespace, which this machine refuses an unprivileged user. So /tmp is create-only (w5561): new files and sockets and
+  // removing them, never a write, truncate, folder or link, so the person's own files there cannot be changed. Only
+  // .dotnet, the runtime's own folder, stays writable. /dev/shm stays writable through /dev (w5561): POSIX semaphores
+  // and shared memory live only there (glibc's sem_open and shm_open), and Python's multiprocessing and Chromium fail
+  // without it.
+  if (p.home) {
+    const tmp = p.tmp ?? '/tmp';
+    args.push('--create', tmp, '--rw', path.join(tmp, DOTNET_DIR));
+  }
   for (const e of p.extra ?? []) args.push('--rw', e);
   return args;
 }
 
 /**
  * Options.spawnClaudeCodeProcess that starts claude under ff-landlock.py with these arguments. The folders a rule names
- * must exist when it starts (a missing one is skipped, so it stays unwritable): cc-socks is made here first. The Max
+ * must exist when it starts (a missing one is skipped, so it stays unwritable): cc-socks and the .NET runtime's
+ * /tmp/.dotnet/shm (mode 1777, as the runtime makes it) are made here first. The Max
  * events file is no longer granted (w5552): it is the daemon's, read-only for workers like the rest of its folder.
  */
 export function writeLockSpawner(args: string[], o: { python?: string; script?: string } = {}) {
@@ -81,6 +95,7 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
     for (let i = 0; i < args.length - 1; i++) {
       try {
         if (args[i] === '--sock') fs.mkdirSync(args[i + 1], { recursive: true, mode: 0o700 });
+        else if (args[i] === '--rw' && path.basename(args[i + 1]) === DOTNET_DIR) makeDotnetShm(args[i + 1]);
       } catch {
         /* the rule is skipped and the write refused: the agent says so */
       }
@@ -92,4 +107,13 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
       stdio: ['pipe', 'pipe', 'ignore'],
     });
   };
+}
+
+/** /tmp/.dotnet and its shm, world-writable and sticky like the .NET runtime makes them (pal/src/sharedmemory). */
+export function makeDotnetShm(dir: string): void {
+  for (const d of [dir, path.join(dir, 'shm')]) {
+    if (fs.existsSync(d)) continue;
+    fs.mkdirSync(d);
+    fs.chmodSync(d, 0o1777);
+  }
 }

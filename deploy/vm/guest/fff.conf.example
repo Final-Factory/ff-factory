@@ -6,6 +6,11 @@
 
 FFF_ROOT=/srv/fff
 FFF_USER=fff
+# The account that builds each release (npm ci, the web build; w5523): neither root nor fff, so nothing fff or an agent
+# running as fff writes can get into the node_modules or the web build that root later runs code from. Its home holds
+# its npm cache and is closed to fff. fff-update makes the account and the home when they are missing.
+FFF_BUILD_USER=fffbuild
+FFF_BUILD_HOME=/var/lib/fff-build
 # Must match config.json's "port".
 FFF_PORT=8790
 # The app (ff-factory) and the branch updates follow.

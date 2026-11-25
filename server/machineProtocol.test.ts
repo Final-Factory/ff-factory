@@ -157,7 +157,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // portal ignores it, and an older daemon sends none (list_machines says so).
 // w5554 (no bump): signal `workerCap`, a worker's host hit a cap and ended its tools; an older portal re-emits it with no
 // listener, as it does `tempSize`, and an older daemon or host never sends it.
-const DECIDED = { protocol: 9, fingerprint: 'f2c36d679cf53ac1' };
+// w5551 (no bump): `steamUpload` in the hello, `steam_upload` and its answer `steam_upload_state`; the portal sends a job only
+// to a daemon whose hello offered it, so an older daemon never gets one (the tool says that computer cannot upload yet), and
+// an older portal never sends one and drops the hello field.
+const DECIDED = { protocol: 9, fingerprint: 'baac18e97996e8c6' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

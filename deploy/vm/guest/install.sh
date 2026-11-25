@@ -112,11 +112,12 @@ log "3/10 packages"
 # e2fsprogs: the orchestration worker's scratch file system (w597).
 # ffmpeg: the web previews of review videos the chat plays (server/videoPreview.ts, w1248).
 # python3: the merge-on-green pilot runs pr_evidence.py on the portal (machine/evidenceGate.ts portalPrEvidence, w3110).
-pkgs=(nodejs git git-lfs gh python3 openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2 e2fsprogs ffmpeg)
+# acl: setfacl lets the build account (FFF_BUILD_USER) pass through $FFF_ROOT to the release it builds (w5523).
+pkgs=(nodejs git git-lfs gh python3 openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2 e2fsprogs ffmpeg acl)
 missing=()
 for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
-if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q; fi
-if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}"; fi
+if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -q; fi
+if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q --no-install-recommends "${missing[@]}"; fi
 if [ "$DRY_RUN" != 1 ]; then
   have=$(node -p 'process.versions.node.split(".")[0]')
   [ "$have" = "$NODE_MAJOR" ] || die "node is $have, not $NODE_MAJOR (another nodejs package won?)"

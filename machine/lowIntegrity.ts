@@ -43,9 +43,11 @@ export const CI_CHILDREN = ['ffu-runners'];
  * and Claude keys (w5451 audit, measured: Low labels and mkdir probes from a Low worker). Each name is one some worker
  * tool writes: docs/worker-root.md 2.1 and 4.1 say which.
  */
+// Not `steam` (w5551): steamcmd's folder, its config and cached login are the daemon's alone (machine/steamUpload.ts);
+// a worker uploads through steam_upload.
 export const WORKER_CHILDREN = [
   'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
-  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam', 'steam-lobby-gate',
+  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam-lobby-gate',
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];
 
