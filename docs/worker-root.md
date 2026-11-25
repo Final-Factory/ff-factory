@@ -768,13 +768,16 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     `<root>/home/Library` instead. The licence still resolves through the user's running LicenseClient. The project's
     Library is untouched, so the caches stay warm.
   - **The bridge's files.** The bridge writes its port file (`unity-mcp-port-<hash>.json`) under the moved home, so its
-    status file goes there too. The daemon reads that folder (`addMcpStatusDir`, `server/unityHang.ts`) and copies the
+    status file goes there too. The daemon reads that folder from its own start on macOS, so an editor that runs through a
+    daemon restart or self-update keeps its bridge (`fenceSetup`, `macEditorStatusDir`; `addMcpStatusDir`,
+    `server/unityHang.ts`; w5712's review found it read only from the first fenced start), and copies the
     status file into each sandbox's own folder for its agents (`syncStatusDir`, `server/unityMcp.ts`), as on Windows. With
     the status left in the real `~/.unity-mcp`, a port file an unfenced start had left there (6403, a day old) beat the
     fresh status file (6402) in `bridgeInfo`, so the daemon would have pinged the wrong port (measured on m5, found by
     the PR's review).
   - **EditorPrefs** go through cfprefsd, which writes outside the sandbox, so they still land in the real
-    `~/Library/Preferences/com.unity3d.UnityEditor5.x.plist`. The daemon's own EditorPrefs (App Nap off, Burst on)
+    `~/Library/Preferences/com.unity3d.UnityEditor5.x.plist`, unless daemon.json also says `workerPrefFence: true`
+    (w5659, PR #1220) and `editorFence: true`: then a fenced editor's EditorPrefs writes are refused, silently to Unity. The daemon's own EditorPrefs (App Nap off, Burst on)
     therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
     `defaults write` of a new domain from inside the fence created its plist in the real `~/Library/Preferences`.
   - **Warn-only first** (lothsahn's lockout rule). With `editorFence` unset, the profile's every `(deny ...)` becomes

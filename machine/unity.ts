@@ -123,6 +123,15 @@ export interface SeatbeltEditorFence {
 
 export type EditorFence = LowEditorFence | SeatbeltEditorFence;
 
+/**
+ * w5630: this install's licensing client runs: a `ps -axo command=` line whose program is exactly `lc` (w5712's review: a
+ * substring of any line was fooled by another Unity version's client or by any process naming the path in its arguments,
+ * and the fenced editor then started its own client under the moved home and quit unlicensed). The path has no spaces
+ * in a Hub install; a line equal to it or starting with it and a space is the client.
+ */
+export const licensingClientRunning = (psCommands: string, lc: string) =>
+  psCommands.split('\n').some((l) => { const t = l.trim(); return t === lc || t.startsWith(lc + ' '); });
+
 export const isSeatbeltFence = (f: EditorFence | undefined): f is SeatbeltEditorFence => f?.kind === 'seatbelt';
 
 /**
@@ -130,6 +139,14 @@ export const isSeatbeltFence = (f: EditorFence | undefined): f is SeatbeltEditor
  * profile with `<root>/home` writable as the editor's home, warn-only unless `mode` is enforce. Its
  * home's `.unity-mcp` is the bridge's status folder.
  */
+/**
+ * w5630: the bridge status folder of a fenced macOS editor, `<root>/home/.unity-mcp`. The daemon reads it from its own start
+ * (daemon.ts fenceSetup), not only from the first fenced editor start: an editor that keeps running through a daemon
+ * restart or self-update writes its status only there, and without it the new daemon took its bridge for gone (it
+ * wrote the agents' port as 0) or pinged a stale port from ~/.unity-mcp (w5712's review of PR #1217).
+ */
+export const macEditorStatusDir = (root: string) => path.join(root, 'home', '.unity-mcp');
+
 export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' | 'enforce'): SeatbeltEditorFence | undefined {
   if (!worker) return undefined;
   const home = path.join(worker.root, 'home');
@@ -138,7 +155,7 @@ export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' 
     kind: 'seatbelt',
     profile: mode === 'warn' ? warnOnlyProfile(enforced) : enforced,
     warn: mode === 'warn',
-    env: { HOME: home, CFFIXED_USER_HOME: home, UNITY_MCP_STATUS_DIR: path.join(home, '.unity-mcp') },
+    env: { HOME: home, CFFIXED_USER_HOME: home, UNITY_MCP_STATUS_DIR: macEditorStatusDir(worker.root) },
   };
 }
 
@@ -692,7 +709,7 @@ function realDepsMac(): UnityDeps {
       const lc = macLicensingClientBin(bin);
       if (!fs.existsSync(lc)) return `no licensing client at ${lc}; the fenced editor starts its own`;
       const r = await run('ps', ['-axo', 'command='], { timeoutMs: 15_000 });
-      if (r.stdout.split('\n').some((l) => l.includes('/Unity.Licensing.Client'))) return undefined;
+      if (licensingClientRunning(r.stdout, lc)) return undefined;
       const child = spawn(lc, [], { detached: true, stdio: 'ignore', env: process.env });
       child.unref();
       await new Promise((res) => setTimeout(res, 3000)); // its channel is up within a few seconds (measured: up at 5 s)

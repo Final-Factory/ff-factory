@@ -3,7 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { MacUnity, macEditorFenceFor, macLicensingClientBin, warnOnlyProfile, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
+import os from 'node:os';
+import path from 'node:path';
+import { bridgeInfo } from './unityHang.ts';
+import { MacUnity, licensingClientRunning, macEditorFenceFor, macEditorStatusDir, macLicensingClientBin, warnOnlyProfile, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
 import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from './workerFence.ts';
 
 const ROOT = '/Users/u/ffw';
@@ -123,4 +126,38 @@ test('w5630: the licensing client starts outside the fence before a fenced edito
   off.u['d'].licensingClient = async () => void asked++;
   await off.u.start();
   assert.equal(asked, 0, 'an unfenced editor starts its own client, as before');
+});
+
+test('w5630 (w5712 review): after a daemon restart, a running fenced editor\'s bridge is read from <root>/home/.unity-mcp, from the daemon\'s start', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5630restart-'));
+  const root = path.join(tmp, 'ffw');
+  const project = path.join(root, 'sandboxes', 'slot2');
+  const realHome = path.join(tmp, 'realhome', '.unity-mcp');
+  const fenced = macEditorStatusDir(root);
+  assert.equal(fenced, macEditorFenceFor({ ...WORKER, root }, 'warn')!.env.UNITY_MCP_STATUS_DIR, 'the folder the daemon reads is the one the editor is given');
+  fs.mkdirSync(realHome, { recursive: true });
+  fs.mkdirSync(fenced, { recursive: true });
+  // An unfenced start of days ago left its port file in the real ~/.unity-mcp; the fenced editor that runs now writes under the moved home.
+  const old = path.join(realHome, 'unity-mcp-port-a.json');
+  fs.writeFileSync(old, JSON.stringify({ project_path: project, unity_port: 6403 }));
+  fs.utimesSync(old, new Date(Date.now() - 86_400_000), new Date(Date.now() - 86_400_000));
+  fs.writeFileSync(path.join(fenced, 'unity-mcp-status-a.json'), JSON.stringify({ project_path: project, unity_port: 6402, reloading: false }));
+  // A new daemon process that read only the real folder (the bug): the stale port.
+  assert.equal(bridgeInfo(project, [realHome]).port, 6403);
+  // The daemon's start (fenceSetup) adds the fenced folder before any editor starts: the live port.
+  assert.equal(bridgeInfo(project, [realHome, fenced]).port, 6402);
+  // fenceSetup adds it on macOS before its early return, so with every switch off (or a fence that failed) too.
+  const src = fs.readFileSync(new URL('../machine/daemon.ts', import.meta.url), 'utf8');
+  const setup = src.slice(src.indexOf('private async fenceSetup()'), src.indexOf('private editorFence()'));
+  const add = setup.indexOf("if (process.platform === 'darwin' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));");
+  assert.ok(add > 0 && add < setup.indexOf("if (this.fence.state.state !== 'setting_up') return;"), 'read from the daemon\'s start, before the gate can return');
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+test('w5630 (w5712 review): only this install\'s licensing client counts as running', () => {
+  const lc = '/Applications/Unity/Hub/Editor/6000.3.19f1/Unity.app/Contents/Helpers/UnityLicensingClient.app/Contents/MacOS/Unity.Licensing.Client';
+  assert.ok(licensingClientRunning(`/sbin/launchd\n${lc}\n`, lc));
+  assert.ok(licensingClientRunning(`  ${lc} --namedPipe x\n`, lc));
+  assert.ok(!licensingClientRunning(`${lc.replace('6000.3.19f1', '6000.0.1f1')}\n`, lc), 'another version\'s client');
+  assert.ok(!licensingClientRunning(`/bin/bash -c echo ${lc}\n`, lc), 'a process naming the path in its arguments');
 });

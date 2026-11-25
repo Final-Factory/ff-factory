@@ -72,7 +72,7 @@ import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
-import { hubEditorDirs, hubListedEditors, listWinDialogs, macEditorFenceFor, realDeps as realUnityDeps, type EditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
+import { hubEditorDirs, hubListedEditors, listWinDialogs, macEditorFenceFor, macEditorStatusDir, realDeps as realUnityDeps, type EditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
 import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
@@ -3124,13 +3124,18 @@ export class Daemon {
   private async fenceSetup(): Promise<void> {
     try {
       if (process.platform === 'win32') await this.lowSetup();
+      // w5630: a fenced editor that ran through this daemon's restart writes its bridge status only under <root>/home; read
+      // that folder from the start, whatever the fence switches say now (an extra folder is harmless: the newest status wins).
+      if (process.platform === 'darwin' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));
       if (this.fence.state.state !== 'setting_up') return;
       if (process.platform === 'win32') {
         if (this.low) this.fence.on();
         else this.fence.failed(this.lowWhy ?? 'the Low setup ended without a Low claude');
       } else if (process.platform === 'darwin') {
-        if (this.workerFence) this.fence.on();
-        else this.fence.failed(this.fenceMemo?.why ?? 'seatbelt could not apply');
+        if (this.workerFence) {
+          this.fence.on();
+          addMcpStatusDir(macEditorStatusDir(this.workerFence.root)); // the root as the fence resolved it
+        } else this.fence.failed(this.fenceMemo?.why ?? 'seatbelt could not apply');
       } else if (process.platform === 'linux') {
         if (this.writeLock) this.fence.on();
         else this.fence.failed(this.lockMemo?.why ?? 'landlock could not apply');
