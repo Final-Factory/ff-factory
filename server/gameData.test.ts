@@ -99,16 +99,18 @@ test('w5557: each sandbox keeps its game data in a folder of its own under the o
   assert.deepEqual(gameDataRoots({ FF_GAME_DATA_DIR: base }, 'win32', home, list), [base, path.join(base, 'sandboxes', 'slot1'), path.join(base, 'sandboxes', 'slot3'), legacyGameDataRoot('win32', home)]);
 });
 
-test('w5579: every worker folder rootEnv puts in the root is one the Landlock and Seatbelt fences open (WORKER_CHILDREN)', async () => {
-  const { WORKER_CHILDREN } = await import('../machine/lowIntegrity.ts');
+test('w5579: every worker folder rootEnv puts in the root is one the Landlock and Seatbelt fences open', async () => {
+  const { openChildren } = await import('../machine/lowIntegrity.ts');
+  const { LOCKED_CHILDREN } = await import('../machine/writeLock.ts');
   const root = path.resolve('/ffw');
+  const open = openChildren(root, [], LOCKED_CHILDREN);
   // UV_CACHE_DIR is the daemon's and Medium agents' own cache (w5565), closed to workers on purpose; FF_WORKER_ROOT is the root.
   for (const platform of ['linux', 'darwin'] as const) {
     for (const [k, v] of Object.entries(rootEnv(root, platform))) {
       if (k === 'FF_WORKER_ROOT' || k === 'UV_CACHE_DIR') continue;
       const rel = path.relative(root, v);
       if (rel.startsWith('..') || path.isAbsolute(rel)) continue;
-      assert.ok(WORKER_CHILDREN.includes(rel.split(/[\\/]/)[0]), `${k}=${v} (${platform}): its root folder is not in WORKER_CHILDREN`);
+      assert.ok(open.includes(rel.split(/[\\/]/)[0]), `${k}=${v} (${platform}): the fences keep its root folder read-only (lowIntegrity.ts WORKER_CHILDREN)`);
     }
   }
 });
