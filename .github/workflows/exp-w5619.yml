@@ -1,0 +1,70 @@
+name: EXP w5619 unit-test timing (scaffolding, to delete)
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 24
+  GITLEAKS_VERSION: 8.30.1
+  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
+  COV: --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**'
+
+jobs:
+  exp:
+    name: exp ${{ matrix.v }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - v: base
+            extra: ''
+            cov: 'yes'
+          - v: conc4
+            extra: '--test-concurrency=4'
+            cov: 'yes'
+          - v: conc8
+            extra: '--test-concurrency=8'
+            cov: 'yes'
+          - v: nocov
+            extra: ''
+            cov: 'no'
+          - v: shard1of2
+            extra: '--test-shard=1/2'
+            cov: 'yes'
+          - v: shard2of2
+            extra: '--test-shard=2/2'
+            cov: 'yes'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - uses: ./.github/actions/gitleaks
+        with:
+          version: ${{ env.GITLEAKS_VERSION }}
+      - run: |
+          git config --global user.name "FF Factory CI"
+          git config --global user.email "ci@users.noreply.github.com"
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix web --no-audit --no-fund
+      - run: nproc; free -g
+      - name: Unit tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cov=''
+          if [ "${{ matrix.cov }}" = yes ]; then cov="$COV"; fi
+          start=$(date +%s)
+          eval node scripts/test-watchdog.ts --minutes 20 -- node --test $TEST_FLAGS ${{ matrix.extra }} $cov server/*.test.ts scripts/*.test.ts 2>&1 | tee out.txt || true
+          echo "EXP_WALL ${{ matrix.v }} $(( $(date +%s) - start )) s"
+          grep -E '^ℹ (tests|pass|fail|duration_ms) ' out.txt || true
