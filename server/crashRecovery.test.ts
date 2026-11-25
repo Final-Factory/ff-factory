@@ -128,6 +128,24 @@ test('orchestrator memory: backed up when changed, and a zeroed file gets its la
   assert.match(healed[0].label ?? '', /orchestrator memory person-ben\//);
 });
 
+test('w5607: a file changed in the last half millisecond of a second is not backed up again when nothing changed', async (t) => {
+  // Stats.mtime is a Date rounded to the nearest millisecond, so a copy stamped with it landed in the next second
+  // whenever the original was written in the last 0.5 ms of one, and the change check saw a change that never happened
+  // (CI run 45567844642, 2026-11-25: the second backupMemory above returned true).
+  const root = path.join(tmp(t, 'ffsb-crash-mem-edge-'), 'orchestrator-memory');
+  const ben = path.join(root, 'person-ben');
+  fs.mkdirSync(ben, { recursive: true });
+  const file = path.join(ben, 'MEMORY.md');
+  fs.writeFileSync(file, '- [Deploys](deploys.md) wait for Ben\n');
+  const edge = 1_764_055_921.9996;
+  fs.utimesSync(file, edge, edge);
+  assert.equal(Math.floor(fs.statSync(file).mtimeMs / 1000), 1_764_055_921, 'the original sits just under the second');
+  assert.equal(await backupMemory(root), true);
+  const copy = path.join(memoryBackupRoot(root), '1', 'person-ben', 'MEMORY.md');
+  assert.equal(Math.floor(fs.statSync(copy).mtimeMs / 1000), 1_764_055_921, 'the copy keeps the second of the original');
+  assert.equal(await backupMemory(root), false, 'nothing changed: no new copy');
+});
+
 test('the real server comes back by itself from a zeroed state.json and users.json', { timeout: 90_000 }, async (t) => {
   const base = tmp(t, 'ffsb-crash-boot-');
   const data = path.join(base, 'data');

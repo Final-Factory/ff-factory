@@ -143,7 +143,7 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },
-  vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'add-claude', 'put', 'rotate', 'grant', 'remove', 'rename', 'export', 'new-key'] },
+  vault: { allowed: ['list', 'list --names', 'help'], changes: ['init', 'export-key', 'add', 'add-claude', 'put', 'rotate', 'grant', 'remove', 'rename', 'export', 'new-key', 'verify'] },
   'machine-credential': { allowed: ['list'], changes: ['issue', 'revoke'] },
   // API keys for member logins (w1415): issue writes the key straight into a file on a machine (fff-ops-priv), revoke ends one.
   apikey: {
@@ -173,6 +173,10 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   'base-clone': { allowed: [], changes: [''] },
   backup: { allowed: [], changes: [''] },
   'backup-config': { allowed: [], changes: [''] },
+  // The restore drill (w5529): fetch sends a whole encrypted backup to stdout, drill unpacks one as root and writes its result.
+  // vault verify (above) opens every entry of a vault file it is given with the live key: a person's, like the drill it serves.
+  'backup-fetch': { allowed: [], changes: [''] },
+  'backup-drill': { allowed: [], changes: [''] },
   configure: { allowed: [], changes: [''] },
 };
 
@@ -743,6 +747,7 @@ export function workerUpdateFlags(
   nums: { maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number },
   dev: { devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number } = {},
   workerFence?: 'on' | 'off',
+  workerCaps?: 'off' | 'warn' | 'enforce',
 ): string[] {
   const win = platform === 'win32';
   return (
@@ -756,8 +761,9 @@ export function workerUpdateFlags(
           dev.moveToDevDrive && '-MoveToDevDrive',
           dev.devDriveMaxGB !== undefined && `-DevDriveMaxGB ${dev.devDriveMaxGB}`,
           workerFence && `-WorkerFence ${workerFence}`,
+          workerCaps && `-WorkerCaps ${workerCaps}`,
         ]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`]
   ).filter((f): f is string => !!f);
 }
 
@@ -993,7 +999,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1014,6 +1020,8 @@ export class OpsWorker {
     if (dev.devDriveMaxGB !== undefined && (!Number.isInteger(dev.devDriveMaxGB) || dev.devDriveMaxGB < 50 || dev.devDriveMaxGB > 65536)) throw new Error('dev_drive_max_gb: a whole number of GB from 50 (Windows\' own minimum for a Dev Drive) to 65536');
     // w5377: the worker write fence's remote switch, on every platform (each installer sets its own platform's daemon.json key).
     if (o.workerFence !== undefined && o.workerFence !== 'on' && o.workerFence !== 'off') throw new Error('worker_fence: on or off');
+    // w5554: the worker caps' mode, the recovery switch of docs/worker-caps.md (daemon.json `workerCaps`), on every platform.
+    if (o.workerCaps !== undefined && !['off', 'warn', 'enforce'].includes(o.workerCaps)) throw new Error('worker_caps: off, warn or enforce');
     // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
     // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
     // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the
@@ -1026,7 +1034,7 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps }).filter(([, v]) => v !== undefined && v !== false));
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1041,7 +1049,7 @@ export class OpsWorker {
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;

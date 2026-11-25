@@ -55,16 +55,38 @@ fi
 
 log "2/10 apt sources: NodeSource node_$NODE_MAJOR.x, GitHub CLI, Tailscale"
 codename=${VERSION_CODENAME:?}
-key() { # URL DEST [dearmor]
-  [ -s "$2" ] && return 0
-  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would fetch the key $1 to $2"; return 0; fi
-  install -d -m 0755 "$(dirname "$2")"
-  if [ "${3:-}" = dearmor ]; then curl -fsSL "$1" | gpg --dearmor -o "$2"; else curl -fsSL -o "$2" "$1"; fi
-  chmod 0644 "$2"
+# Each repository has its own keyring (signed-by= in its source line below), and its key is trusted only by a pinned
+# fingerprint (w5530, security audit finding 22): downloaded to a temp file, checked by verify_key_fprs (lib.sh; a
+# mismatch aborts the install before anything is written), then written to the keyring. A keyring already there is
+# checked the same way, so a rerun also catches a swapped key.
+# Where each fingerprint comes from (read 2026-11-24):
+#  - GitHub CLI: the two fingerprints github.com/cli/cli docs/install_linux.md lists for its packages and repository
+#    metadata. The 2C61... key expires 2026-09 and 7F38... replaces it; the keyring file holds both, so both are pinned.
+#  - NodeSource 6F71F525...: the key served at deb.nodesource.com/gpgkey/nodesource-repo.gpg.key ("NSolid
+#    <nsolid-gpg@nodesource.com>", created 2016, re-signed 2026, same fingerprint). NodeSource's docs
+#    (github.com/nodesource/distributions) publish no fingerprint: this one was read from the vendor's own key URL over TLS.
+#  - Tailscale 2596A99E...: "Tailscale Inc. (Package repository signing key)", identical in the jammy and noble files at
+#    pkgs.tailscale.com/stable/ubuntu. Tailscale's docs publish no fingerprint either: read from pkgs.tailscale.com over TLS.
+# A vendor that rotates its key makes this fail loudly: take the new fingerprint from the vendor's docs, not the download.
+FPR_NODESOURCE=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
+FPR_GITHUB_CLI=(2C6106201985B60E6C7AC87323F3D4EA75716059 7F38BBB59D064DBCB3D84D725612B36462313325)
+FPR_TAILSCALE=2596A99EAAB33821893C0A79458CA832957F5868
+key() { # URL DEST dearmor|raw FINGERPRINT...
+  local url=$1 dest=$2 mode=$3 tmp
+  shift 3
+  if [ -s "$dest" ]; then verify_key_fprs "$dest" "$@"; return 0; fi
+  if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would fetch the key $url, check it against $*, and write it to $dest"; return 0; fi
+  tmp=$(mktemp)
+  curl -fsSL -o "$tmp" "$url" || { rm -f "$tmp"; die "could not download the apt key $url"; }
+  (verify_key_fprs "$tmp" "$@") || { rm -f "$tmp"; exit 1; }
+  install -d -m 0755 "$(dirname "$dest")"
+  if [ "$mode" = dearmor ]; then gpg --batch --yes --dearmor -o "$dest" <"$tmp"; else cp "$tmp" "$dest"; fi
+  rm -f "$tmp"
+  chmod 0644 "$dest"
 }
-key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key /etc/apt/keyrings/nodesource.gpg dearmor
-key https://cli.github.com/packages/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg
-key "https://pkgs.tailscale.com/stable/ubuntu/$codename.noarmor.gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg
+key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key /etc/apt/keyrings/nodesource.gpg dearmor "$FPR_NODESOURCE"
+key https://cli.github.com/packages/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg raw "${FPR_GITHUB_CLI[@]}"
+key "https://pkgs.tailscale.com/stable/ubuntu/$codename.noarmor.gpg" /usr/share/keyrings/tailscale-archive-keyring.gpg raw "$FPR_TAILSCALE"
 c=""
 c+=$(echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_$NODE_MAJOR.x nodistro main" | write_file /etc/apt/sources.list.d/nodesource.list 0644)
 c+=$(printf 'Package: nodejs\nPin: origin deb.nodesource.com\nPin-Priority: 600\n' | write_file /etc/apt/preferences.d/nodesource 0644)
@@ -90,11 +112,12 @@ log "3/10 packages"
 # e2fsprogs: the orchestration worker's scratch file system (w597).
 # ffmpeg: the web previews of review videos the chat plays (server/videoPreview.ts, w1248).
 # python3: the merge-on-green pilot runs pr_evidence.py on the portal (machine/evidenceGate.ts portalPrEvidence, w3110).
-pkgs=(nodejs git git-lfs gh python3 openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2 e2fsprogs ffmpeg)
+# acl: setfacl lets the build account (FFF_BUILD_USER) pass through $FFF_ROOT to the release it builds (w5523).
+pkgs=(nodejs git git-lfs gh python3 openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2 e2fsprogs ffmpeg acl)
 missing=()
 for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
-if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q; fi
-if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}"; fi
+if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -q; fi
+if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q --no-install-recommends "${missing[@]}"; fi
 if [ "$DRY_RUN" != 1 ]; then
   have=$(node -p 'process.versions.node.split(".")[0]')
   [ "$have" = "$NODE_MAJOR" ] || die "node is $have, not $NODE_MAJOR (another nodejs package won?)"

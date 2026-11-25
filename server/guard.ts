@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { gitFenceSync } from './safeGit.ts';
 import { STALE_EVIDENCE, TRUSTED_GIT, checkoutScript, evidenceGated, evidenceRefusal, evidenceVerdict, noScriptRefusal, refreshTrustedCheckout, trustedAgentsCheckout, trustedAppDir, trustedEvidenceRun, trustedGh, trustedGit } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
@@ -882,7 +883,9 @@ export type RemoteResolver = (dir: string) => Map<string, string> | undefined;
 
 export const gitRemotes: RemoteResolver = (dir) => {
   try {
-    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, '-C', dir, 'remote', '-v'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    // w5541: the fence (server/safeGit.ts) on the trusted git (w5542).
+    const f = gitFenceSync(['-C', dir, 'remote', '-v']);
+    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, ...f.args], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: f.env });
     const m = new Map<string, string>();
     for (const line of out.split('\n')) {
       const [name, url, kind] = line.trim().split(/\s+/);
@@ -1017,7 +1020,8 @@ export const isNoreplyEmail = (email: string) => /@users\.noreply\.github\.com$/
 export const gitPushedEmails = (dir: string, remote: string, srcs: string[]): string[] | undefined => {
   try {
     const not = /[/:\\]/.test(remote) ? '--remotes' : `--remotes=${remote}`;
-    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, '-C', dir, 'log', '--no-show-signature', '--no-ext-diff', '--format=%ae%n%ce', ...srcs, '--not', not, '--'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const f = gitFenceSync(['-C', dir, 'log', '--no-show-signature', '--format=%ae%n%ce', ...srcs, '--not', not, '--']);
+    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, ...f.args], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: f.env });
     return [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
   } catch {
     return undefined;

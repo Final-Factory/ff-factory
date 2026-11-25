@@ -43,11 +43,26 @@ export const CI_CHILDREN = ['ffu-runners'];
  * and Claude keys (w5451 audit, measured: Low labels and mkdir probes from a Low worker). Each name is one some worker
  * tool writes: docs/worker-root.md 2.1 and 4.1 say which.
  */
+// Not `steam` (w5551): steamcmd's folder, its config and cached login are the daemon's alone (machine/steamUpload.ts);
+// a worker uploads through steam_upload. `gamedata-home` (w5579): FF_PLAYER_HOME, the home every player a worker starts
+// gets on Linux and macOS (gameData.ts workerPlayerHomeDir); left out, a fenced worker's player could not write its prefs.
 export const WORKER_CHILDREN = [
-  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
-  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam', 'steam-lobby-gate',
+  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'gamedata-home', 'home', 'logs', 'nightly', 'nightly-history',
+  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam-lobby-gate',
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];
+
+/**
+ * The root children the Linux Landlock lock and the Mac Seatbelt fence open to workers (w5569): WORKER_CHILDREN, plus the
+ * root child that holds each `extra` the config puts in the root (its temp or sandboxes folder elsewhere than tmp and
+ * sandboxes), less `closed` (daemon, secrets, the daemon's own folder). Names as written: these file systems match case.
+ */
+export function openChildren(root: string, extra: (string | undefined)[] = [], closed: Iterable<string> = MEDIUM_CHILDREN): string[] {
+  const shut = new Set(closed);
+  const open = new Set(WORKER_CHILDREN);
+  for (const e of extra) if (e && inside(path.resolve(e), path.resolve(root)) && !same(e, root)) open.add(path.relative(path.resolve(root), path.resolve(e)).split(/[\\/]/)[0]);
+  return [...open].filter((c) => !shut.has(c)).sort();
+}
 
 export interface LowTargetsInput {
   root: string;

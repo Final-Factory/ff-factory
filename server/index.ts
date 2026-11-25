@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, FINAL_FACTORY_PRODUCT_NAME, brandName, configPath, loadConfig, productName, projectOf, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
@@ -66,6 +66,7 @@ import { PATH_HEALTH_FILE, PathHealthMonitor, filePathHealth } from './pathHealt
 import { withDismissed } from '../shared/dismissals.ts';
 import { diskCriticalNotice } from '../shared/blockers.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
+import { backupStatusLines } from './backupStatus.ts';
 import { ActScope, NOT_YOURS, type ActPolicy } from '../shared/actAccess.ts';
 import { dataRecoveries, describeRecovery } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
@@ -271,8 +272,9 @@ github.start();
 startGhCallLog(ghRunner(undefined, 'the rate limit read'));
 // Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
 // per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
-setTimeout(() => {
-  const held = store.scrubSecrets();
+setTimeout(async () => {
+  // w5613: both halves yield to the event loop (the records in slices, the files on their own thread).
+  const held = await store.scrubSecrets().catch((e: NodeJS.ErrnoException) => (console.warn(`secrets: the held records' scrub failed (${e?.code ?? e?.name ?? 'error'})`), 0));
   if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
   void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
   // The orchestrators' own Claude Code transcripts on this host (w1688), masked in place as they are written; the first pass
@@ -637,6 +639,7 @@ const labFixtures = new LabFixtures({
 agents.labFixtures = labFixtures;
 machines.onLabHolder = (id) => labFixtures.onHolder(id);
 machines.labFixtureReport = (id, msg) => labFixtures.onReport(id, msg);
+agents.wireSteamUploads();
 // What each machine's exclusive bench tickets cost it, per UTC hour (w1996): portal_logs source bench_hours.
 const benchHours = new BenchHoursStore({ dataDir: cfg.dataDir });
 machines.benchHours = (id, rows) => {
@@ -2403,6 +2406,10 @@ function parseUrl(raw: string | undefined): URL | undefined {
 }
 
 const server = http.createServer(async (req, res) => {
+  // Every answer (w5518): no content sniffing, and over HTTPS (Funnel) HSTS, so a browser never comes back over plain HTTP.
+  // writeHead's own headers win over these; a browser ignores HSTS sent over plain HTTP anyway.
+  res.setHeader('x-content-type-options', 'nosniff');
+  if (auth.isHttps(req)) res.setHeader('strict-transport-security', 'max-age=31536000');
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
@@ -2811,7 +2818,7 @@ server.listen(cfg.port, cfg.host, () => {
 /** This app's git HEAD, to tell the orchestrator what an update or restart changed. */
 function appHead(): string | undefined {
   try {
-    return execFileSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim() || undefined;
+    return gitExecFileSync(['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim() || undefined;
   } catch {
     return undefined;
   }
@@ -3041,7 +3048,7 @@ agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, 
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   const idle = liveIdleStatusLine(cfg.live?.enabled === true, cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES, machines.list(), liveIdle.keptOpen());
-  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {

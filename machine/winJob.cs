@@ -1,14 +1,20 @@
-// The worker caps' Windows job (w5554, machine/workerCaps.ts): puts one process (an agent host) in a new job object with a
-// commit limit for the whole job and an active-process limit, then reports what the job's completion port says, one JSON
-// object a line on stdout. Everything the process starts afterwards is in the job, whatever integrity it runs at, and a
-// process may not break away (no JOB_OBJECT_LIMIT_BREAKAWAY_OK). The limits are the kernel's: they hold after this helper
-// exits, as long as one process of the job runs.
+// The worker caps' Windows job (w5554, machine/workerCaps.ts): puts one process (an agent host) in a new job object, then
+// reports what the job's completion port says, one JSON object a line on stdout. Everything the process starts afterwards is
+// in the job, whatever integrity it runs at, and a process may not break away (no JOB_OBJECT_LIMIT_BREAKAWAY_OK).
 //
-//   ffjob.exe <pid> <job memory bytes> <active processes>
+//   ffjob.exe <pid> <job memory bytes> <active processes> <mode>
 //
-// stdout: {"event":"ready"}, then {"event":"memory","pid":N}, {"event":"processes","active":N}, {"event":"killed","n":N}.
+// mode "enforce": the job gets a commit limit for the whole job and an active-process limit. They are the kernel's: they hold
+// after this helper exits, as long as one process of the job runs. Any other mode (warn, which the host passes by default,
+// and anything this does not know) sets NO limit flags: the job only counts, and `stat` reads the counts.
+//
+// stdout: {"event":"ready"}, then {"event":"memory","pid":N}, {"event":"processes","active":N} (enforce only),
+// {"event":"killed","n":N[,"why":"..."]} and {"event":"stat","active":N,"peak":B}.
 // stdin: "kill-tools <host pid>" ends every process of the job but the host and its own children (its claude): the tools its
-// agent ran, a runaway among them; "count" says how many processes the job holds. EOF (its host is gone) ends the helper.
+// agent ran, a runaway among them. It ends nothing when the process snapshot is empty or lacks the host (then the host's own
+// children cannot be told from the tools), and skips a pid that is no longer in the job (a reused pid). "count" says how many
+// processes the job holds; "stat" says the active count and the job's peak commit (PeakJobMemoryUsed). EOF (its host is gone)
+// ends the helper.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
@@ -66,6 +72,8 @@ static class FfJob
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr job, int cls, ref CompletionPort info, int len);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr ret);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int cls, out Accounting info, int len, IntPtr ret);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool QueryInformationJobObject(IntPtr job, int cls, out ExtendedLimit info, int len, IntPtr ret);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
     [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr proc, uint code);
@@ -79,7 +87,8 @@ static class FfJob
     const int BasicAccountingInformation = 1;
     const uint LimitActiveProcess = 0x8;
     const uint LimitJobMemory = 0x200;
-    const uint SetQuota = 0x0100, Terminate = 0x0001;
+    const uint LimitBreakawayOk = 0x800;
+    const uint SetQuota = 0x0100, Terminate = 0x0001, QueryLimited = 0x1000;
     const uint MsgActiveProcessLimit = 3, MsgJobMemoryLimit = 10;
 
     static readonly object Gate = new object();
@@ -156,12 +165,22 @@ static class FfJob
         uint pid = uint.Parse(a[0]);
         ulong memory = ulong.Parse(a[1]);
         uint processes = uint.Parse(a[2]);
+        // Limits only when asked for by name: a missing or unknown mode counts, and never limits (a lockout is worse than a miss).
+        bool enforce = a.Length > 3 && a[3] == "enforce";
         IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
         if (job == IntPtr.Zero) return Fail("CreateJobObject");
         var lim = new ExtendedLimit();
-        lim.Basic.LimitFlags = LimitJobMemory | LimitActiveProcess;
-        lim.Basic.ActiveProcessLimit = processes;
-        lim.JobMemoryLimit = new UIntPtr(memory);
+        if (enforce)
+        {
+            lim.Basic.LimitFlags = LimitJobMemory | LimitActiveProcess;
+            lim.Basic.ActiveProcessLimit = processes;
+            lim.JobMemoryLimit = new UIntPtr(memory);
+        }
+        else
+        {
+            // Warn: a child started with CREATE_BREAKAWAY_FROM_JOB may leave the job, so the job never refuses a start (w5554 review).
+            lim.Basic.LimitFlags = LimitBreakawayOk;
+        }
         if (!SetInformationJobObject(job, ExtendedLimitInformation, ref lim, Marshal.SizeOf(typeof(ExtendedLimit)))) return Fail("SetInformationJobObject");
         IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, IntPtr.Zero, 1);
         if (port == IntPtr.Zero) return Fail("CreateIoCompletionPort");
@@ -183,17 +202,35 @@ static class FfJob
                     Say("{\"event\":\"count\",\"n\":" + Pids(job).Count + "}");
                     continue;
                 }
+                if (line == "stat")
+                {
+                    Accounting a2;
+                    ExtendedLimit ext;
+                    uint active = QueryInformationJobObject(job, BasicAccountingInformation, out a2, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) ? a2.ActiveProcesses : 0;
+                    ulong peak = QueryInformationJobObject(job, ExtendedLimitInformation, out ext, Marshal.SizeOf(typeof(ExtendedLimit)), IntPtr.Zero) ? ext.PeakJobMemoryUsed.ToUInt64() : 0;
+                    Say("{\"event\":\"stat\",\"active\":" + active + ",\"peak\":" + peak + "}");
+                    continue;
+                }
                 if (!line.StartsWith("kill-tools ")) continue;
                 uint host = uint.Parse(line.Substring(11).Trim());
                 var parents = Parents();
+                // With no snapshot, or none of the host, the host's own children (its claude) cannot be told from the tools.
+                if (parents.Count == 0 || !parents.ContainsKey(host))
+                {
+                    Say("{\"event\":\"killed\",\"n\":0,\"why\":\"" + (parents.Count == 0 ? "the process snapshot was empty" : "the host is not in the process snapshot") + "\"}");
+                    continue;
+                }
                 int n = 0;
                 foreach (var p in Pids(job))
                 {
                     uint parent;
-                    if (p == host || (parents.TryGetValue(p, out parent) && parent == host)) continue;
-                    IntPtr h = OpenProcess(Terminate, false, p);
+                    // A pid missing from the snapshot started after it (it may be the host's new claude): spared, as toolsToEnd does.
+                    if (p == host || !parents.TryGetValue(p, out parent) || parent == host) continue;
+                    IntPtr h = OpenProcess(Terminate | QueryLimited, false, p);
                     if (h == IntPtr.Zero) continue;
-                    if (TerminateProcess(h, 1)) n++;
+                    // The pid may have been reused by a process outside the job since the list was read.
+                    bool inJob;
+                    if (IsProcessInJob(h, job, out inJob) && inJob && TerminateProcess(h, 1)) n++;
                     CloseHandle(h);
                 }
                 Say("{\"event\":\"killed\",\"n\":" + n + "}");
@@ -212,11 +249,12 @@ static class FfJob
             IntPtr key, data;
             if (GetQueuedCompletionStatus(port, out msg, out key, out data, 3000))
             {
+                if (!enforce) continue;
                 if (msg == MsgJobMemoryLimit) Say("{\"event\":\"memory\",\"pid\":" + data.ToInt64() + "}");
                 else if (msg == MsgActiveProcessLimit) Full(ref saidFull, processes);
             }
             Accounting acc;
-            if (QueryInformationJobObject(job, BasicAccountingInformation, out acc, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) && acc.ActiveProcesses >= processes) Full(ref saidFull, acc.ActiveProcesses);
+            if (enforce && QueryInformationJobObject(job, BasicAccountingInformation, out acc, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero) && acc.ActiveProcesses >= processes) Full(ref saidFull, acc.ActiveProcesses);
         }
     }
 

@@ -4,7 +4,7 @@
 // (server/benchWarnings.ts), so a worker mid-turn sees it even while its command runs in the background. lothsahn,
 // 2026-10-23: "At 25 minutes, the holder gets a warning it will actually see"; "Workers should be encouraged to push
 // their uncommitted work at the warning threshold so they can be scheduled on other machines".
-import { execFile } from 'node:child_process';
+import { gitExecFile } from '../server/safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BenchWarning } from '../shared/types.ts';
@@ -16,7 +16,7 @@ type CheckoutState = Pick<BenchWarning, 'dirty' | 'unpushed' | 'branch'> | undef
 /** git in a worker's checkout, off the daemon's event loop, with the checkout's own fsmonitor hook off. */
 const gitIn = (cwd: string) => (args: string[]) =>
   new Promise<string>((resolve, reject) =>
-    execFile('git', ['-c', 'core.fsmonitor=false', '-C', cwd, ...args], { encoding: 'utf8', timeout: 5_000 }, (e, out) => (e ? reject(e) : resolve(out))),
+    gitExecFile(['-C', cwd, ...args], { encoding: 'utf8', timeout: 5_000 }, (e, out) => (e ? reject(e) : resolve(out))),
   );
 
 /** A checkout's uncommitted files and unpushed commits, read with git (a few seconds at most), or undefined. */
