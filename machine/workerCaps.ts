@@ -24,6 +24,19 @@
 // When a cap is hit, the host ends the worker's tools (every process of the tree but the host and its claude), the worker's
 // next tool result carries a note saying which cap and what to do (server/workerCapNotes.ts), and the portal writes a line
 // into its request's ledger ('workerCap' signal). The session itself goes on.
+//
+// The mode (daemon.json `workerCaps`, CapsMode; the daemon hands it to each host in its start record, never through the worker's
+// environment, which a worker controls) says how far that goes. The default is warn: a limit starts warn-only,
+// enforce waits on a week of warn data and the owner's go, and `ops_worker machine_update worker_caps off` is the recovery
+// switch that needs nobody at the machine:
+// - off: nothing starts: no job, no scope limits, no watch, no temp stop.
+// - warn: everything is measured and reported, nothing is limited or ended. Windows: the job exists with no limit flags and the
+//   helper's `stat` answers the active count and the peak commit. Linux: the scope has no MemoryMax or TasksMax, and its
+//   memory.peak and pids.peak are read. A Mac: the tree watch only reports. The temp folder: reported, not stopped. A report
+//   says "would have hit" (capNote) and the host.log's last line says the peaks seen, so a week of it can set enforce.
+// - enforce: the limits above, with two safeguards: tools are ended only when the process list proves who the host's claude is
+//   (an empty or host-less list ends nothing, and the helper skips a pid that is no longer in the job), and on Linux the
+//   kernel's own action (an OOM kill, a refused fork) is reported but never followed by a kill of ours.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -81,12 +94,24 @@ export function capsFor(totalMem: number = os.totalmem()): WorkerCaps {
 
 export type CapKind = 'memory' | 'processes' | 'temp';
 
+/** How the caps act (daemon.json `workerCaps`); see the top of this file. */
+export type CapsMode = 'off' | 'warn' | 'enforce';
+
+/** daemon.json's `workerCaps` as a mode: absent, and anything it does not name, is warn (a typo must not turn the limits on). */
+export function capsModeOf(v: unknown): CapsMode {
+  return v === 'off' || v === 'enforce' ? v : 'warn';
+}
+
 /** What the host says when a cap was hit: which, its limit, what was seen (when known), how many tool processes it ended. */
 export interface CapHit {
   kind: CapKind;
   limit: number;
   seen?: number;
   ended: number;
+  /** Warn mode: the cap would have been hit, nothing was stopped. */
+  warn?: boolean;
+  /** Linux: the kernel enforced the scope's limit (an OOM kill, a refused fork); the host ended nothing. */
+  kernel?: boolean;
 }
 
 const gb = (b: number) => (b / GB).toFixed(1);
@@ -107,6 +132,12 @@ export function capNote(h: CapHit): string {
       : h.kind === 'memory'
         ? 'Something you ran asked for more memory than a worker may use: run fewer heavy jobs at once (a batch Unity build is about 15 GB), or find the runaway before you start it again.'
         : 'Something you ran started processes without end (a fork loop, a runaway script): fix it before you run it again.';
+  if (h.warn) {
+    return `FF Factory measured your tools: you would have hit your ${capWords(h)} (warn-only: nothing was stopped; w5554, docs/worker-caps.md). ${what} Say in your report that this happened.`;
+  }
+  if (h.kernel) {
+    return `You hit your ${capWords(h)} (w5554, docs/worker-caps.md): the kernel ended the biggest process of your scope or refused a new one; FF Factory ended nothing else and your session goes on. ${what} Say in your report that this happened.`;
+  }
   return (
     `FF Factory stopped your tools: you hit your ${capWords(h)} (w5554, docs/worker-caps.md). It ended ${h.ended} process${h.ended === 1 ? '' : 'es'} you had started ` +
     `(shells, builds, background jobs, a batch Unity among them); your session goes on. ${what} Say in your report that this happened.`
@@ -118,7 +149,10 @@ export function capLedgerLine(sessionId: string, arg: unknown): string | undefin
   const a = arg as Partial<CapHit> | null | undefined;
   if (!a || !['memory', 'processes', 'temp'].includes(a.kind as string) || typeof a.limit !== 'number' || typeof a.ended !== 'number') return undefined;
   const seen = typeof a.seen === 'number' ? a.seen : undefined;
-  return `worker ${sessionId.slice(0, 8)} hit its ${capWords({ kind: a.kind as CapKind, limit: a.limit, seen })}: FF Factory ended ${a.ended} of its tool processes (w5554)`;
+  const words = capWords({ kind: a.kind as CapKind, limit: a.limit, seen });
+  if (a.warn === true) return `worker ${sessionId.slice(0, 8)} would have hit its ${words} (warn-only: nothing was stopped; w5554)`;
+  if (a.kernel === true) return `worker ${sessionId.slice(0, 8)} hit its ${words}: the kernel ended a process or refused a fork, FF Factory ended nothing (w5554)`;
+  return `worker ${sessionId.slice(0, 8)} hit its ${words}: FF Factory ended ${a.ended} of its tool processes (w5554)`;
 }
 
 // ------------------------------------------------------------------------------------------------ the process tree
@@ -160,6 +194,18 @@ export function treeOf(rows: PsRow[], root: number): PsRow[] {
 /** The tools among `pids`: all but the host and its own children (its claude, and nothing else a host starts stays). */
 export function toolPids(pids: number[], host: number, parentOf: (pid: number) => number | undefined): number[] {
   return pids.filter((p) => p !== host && parentOf(p) !== host);
+}
+
+/**
+ * The tools among `pids` that are safe to end, given one process list: none, and why, when the list is empty or does not hold
+ * the host (then nobody can say which process is its claude, and a kill could hit it); else `toolPids` of those the list knows
+ * (a pid it lacks started after it, and is left for the next hit).
+ */
+export function toolsToEnd(rows: PsRow[], host: number, pids: number[]): { pids: number[]; why?: string } {
+  if (!rows.length) return { pids: [], why: 'the process list was empty, so the host and its claude cannot be told from the tools' };
+  if (!rows.some((r) => r.pid === host)) return { pids: [], why: `the host (pid ${host}) is not in the process list, so its claude cannot be told from the tools` };
+  const parent = new Map(rows.map((r) => [r.pid, r.ppid]));
+  return { pids: toolPids(pids.filter((p) => parent.has(p)), host, (q) => parent.get(q)) };
 }
 
 /** A Linux cgroup's `memory.events` or `pids.events` counter (`oom_kill 3`, `max 12`), 0 when absent. */
@@ -254,39 +300,58 @@ export function jobHelper(appDir: string, log: (s: string) => void = () => undef
 
 export interface CapsOptions {
   caps: WorkerCaps;
+  /** How the caps act (daemon.json `workerCaps`, from the host's start record); unset: warn. */
+  mode?: CapsMode;
   /** The worker's temp folder, watched on every OS. */
   tempDir?: string;
   /** The daemon's app folder (Windows: where the job helper is built). */
   appDir: string;
-  /** A cap was hit and its tools ended. */
+  /** A cap was hit (and its tools ended), or in warn mode would have been. */
   onCap: (h: CapHit) => void;
   log: (s: string) => void;
   platform?: NodeJS.Platform;
   /** The host's pid (tests). */
   hostPid?: number;
+  /** The scope's cgroup folder (tests; else this process's own, on Linux). */
+  cgroup?: string;
   /** CAP_WATCH's timings (tests). */
   watch?: Partial<typeof CAP_WATCH>;
 }
 
 /**
- * The caps of the host this runs in, live: returns a stop, which resolves once the job helper is gone (Windows: its exe can be
- * deleted then). Starts the job before the host starts its claude.
+ * The caps of the host this runs in, live: returns a stop, which logs the peaks seen and resolves once the job helper is gone
+ * (Windows: its exe can be deleted then). Starts the job before the host starts its claude.
  */
 export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<void>> {
   const platform = o.platform ?? process.platform;
+  const mode = capsModeOf(o.mode);
+  const warn = mode === 'warn';
+  o.log(`worker caps: mode ${mode}${warn ? ' (warn-only: nothing is limited or ended, peaks are logged when this host stops)' : ''}`);
+  if (mode === 'off') {
+    o.log('worker caps: off (daemon.json workerCaps): no job, no scope limits, no watch, no temp stop');
+    return () => Promise.resolve();
+  }
   const w = { ...CAP_WATCH, ...o.watch };
   const host = o.hostPid ?? process.pid;
   const timers: NodeJS.Timeout[] = [];
   let job: ChildProcess | undefined;
   const reported = new Map<CapKind, number>();
+  const reportedSeen = new Map<CapKind, number>();
   let killing: Promise<number> | undefined;
+  // What was seen, for the line the host logs when it stops (a week of these sets enforce): the most processes (Linux: tasks)
+  // at once, the peak memory (Windows: commit; Linux: the scope's, page cache included; a Mac: resident), the biggest temp
+  // folder measured (it is measured only now and then).
+  const peaks = { active: 0, memory: 0, temp: 0 };
+  const finals: Array<() => Promise<void> | void> = [];
 
   const ps = (): PsRow[] => parsePs(spawnSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '');
-  const cgroup = platform === 'linux' ? ownCgroup() : undefined;
+  const cgroup = o.cgroup ?? (platform === 'linux' ? ownCgroup() : undefined);
   const scoped = !!cgroup && /\/ffw-agent-[^/]+\.scope$/.test(cgroup);
 
   // Ends the tools: the job's (Windows), the scope's (Linux, a setsid escapee included), else the tree's. Resolves how many.
+  // Never in warn mode, and never without a process list that holds the host: with none, which process is its claude is a guess.
   const endTools = (): Promise<number> => {
+    if (warn) return Promise.resolve(0);
     if (killing) return killing;
     killing = new Promise<number>((resolve) => {
       if (job?.stdin?.writable) {
@@ -294,6 +359,8 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
           const m = /"event":"killed","n":(\d+)/.exec(String(d));
           if (!m) return;
           job?.stdout?.off('data', onLine);
+          const why = /"why":"([^"]*)"/.exec(String(d))?.[1];
+          if (why) o.log(`worker caps: the job helper ended nothing: ${why}`);
           resolve(Number(m[1]));
         };
         job.stdout?.on('data', onLine);
@@ -302,7 +369,6 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
         return;
       }
       const rows = ps();
-      const parent = new Map(rows.map((r) => [r.pid, r.ppid]));
       let pids = treeOf(rows, host).map((r) => r.pid);
       if (scoped) {
         try {
@@ -311,8 +377,14 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
           // the tree's
         }
       }
+      const ends = toolsToEnd(rows, host, pids);
+      if (ends.why) {
+        o.log(`worker caps: ended nothing: ${ends.why}`);
+        resolve(0);
+        return;
+      }
       let n = 0;
-      for (const p of toolPids(pids, host, (q) => parent.get(q))) {
+      for (const p of ends.pids) {
         try {
           process.kill(p, 'SIGKILL');
           n++;
@@ -325,25 +397,50 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
     return killing;
   };
 
-  const hit = async (kind: CapKind, limit: number, seen?: number) => {
-    const ended = await endTools();
-    const last = reported.get(kind) ?? Number.NEGATIVE_INFINITY;
-    o.log(`worker caps: ${capWords({ kind, limit, seen })} hit; ended ${ended} tool processes`);
-    if (Date.now() - last < w.REPEAT_MS) return;
-    reported.set(kind, Date.now());
+  const report = (h: CapHit) => {
     try {
-      o.onCap({ kind, limit, ...(seen === undefined ? {} : { seen }), ended });
+      o.onCap(h);
     } catch (e) {
       o.log(`worker caps: could not report: ${(e as Error).message}`);
     }
   };
 
+  /**
+   * A cap was hit. Warn: said once per kind per REPEAT_MS, nothing ended; `peak` marks a value that only rises (a peak counter),
+   * said again only when it rose. Enforce: the tools are ended (every time), unless `kernel`: the kernel already acted.
+   */
+  const hit = async (kind: CapKind, limit: number, seen?: number, how: { peak?: boolean; kernel?: boolean } = {}) => {
+    const fresh = () => Date.now() - (reported.get(kind) ?? Number.NEGATIVE_INFINITY) >= w.REPEAT_MS;
+    if (warn) {
+      if (!fresh() || (how.peak && seen !== undefined && seen <= (reportedSeen.get(kind) ?? 0))) return;
+      reported.set(kind, Date.now());
+      reportedSeen.set(kind, seen ?? 0);
+      o.log(`worker caps: would have hit the ${capWords({ kind, limit, seen })} (warn-only: nothing was stopped)`);
+      report({ kind, limit, ...(seen === undefined ? {} : { seen }), ended: 0, warn: true });
+      return;
+    }
+    const ended = how.kernel ? 0 : await endTools();
+    o.log(`worker caps: ${capWords({ kind, limit, seen })} hit; ${how.kernel ? 'the kernel acted, nothing ended here' : `ended ${ended} tool processes`}`);
+    if (!fresh()) return;
+    reported.set(kind, Date.now());
+    report({ kind, limit, ...(seen === undefined ? {} : { seen }), ended, ...(how.kernel ? { kernel: true } : {}) });
+  };
+
   if (platform === 'win32') {
     const exe = jobHelper(o.appDir, o.log);
     if (exe) {
-      job = spawn(exe, [String(host), String(o.caps.memoryBytes), String(o.caps.processes)], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
+      job = spawn(exe, [String(host), String(o.caps.memoryBytes), String(o.caps.processes), mode], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true });
       job.on('error', (e) => o.log(`worker caps: the job helper failed: ${e.message}`));
       job.stdin?.on('error', () => undefined);
+      const statWaiters: Array<() => void> = [];
+      const onStat = (active: number, peak: number) => {
+        peaks.active = Math.max(peaks.active, active);
+        peaks.memory = Math.max(peaks.memory, peak);
+        for (const f of statWaiters.splice(0)) f();
+        if (!warn) return;
+        if (active > o.caps.processes) void hit('processes', o.caps.processes, active);
+        if (peak > o.caps.memoryBytes) void hit('memory', o.caps.memoryBytes, peak, { peak: true });
+      };
       const ready = await new Promise<boolean>((resolve) => {
         let buf = '';
         const t = setTimeout(() => resolve(false), 20_000);
@@ -355,16 +452,41 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
             buf = buf.slice(i + 1);
             if (line.includes('"ready"')) (clearTimeout(t), resolve(true));
             else if (line.includes('"error"')) (o.log(`worker caps: the job helper: ${line}`), clearTimeout(t), resolve(false));
-            else if (line.includes('"memory"')) void hit('memory', o.caps.memoryBytes);
+            else if (line.includes('"stat"')) {
+              const m = /"active":(\d+),"peak":(\d+)/.exec(line);
+              if (m) onStat(Number(m[1]), Number(m[2]));
+            } else if (line.includes('"memory"')) void hit('memory', o.caps.memoryBytes);
             else if (line.includes('"processes"')) void hit('processes', o.caps.processes, Number(/"active":(\d+)/.exec(line)?.[1]) || undefined);
           }
         });
         job!.on('exit', () => (clearTimeout(t), resolve(false)));
       });
-      o.log(ready ? `worker caps: in a job of ${gb(o.caps.memoryBytes)} GB and ${o.caps.processes} processes` : 'worker caps: no job (the helper did not start); temp cap only');
+      const asking = () => !!job?.stdin?.writable && job.exitCode === null;
+      if (ready) {
+        // The job's own counters, asked every POLL_MS: warn mode's only measure, and enforce mode's peaks for the stop line.
+        timers.push(setInterval(() => asking() && job!.stdin!.write('stat\n'), w.POLL_MS));
+        finals.push(
+          () =>
+            new Promise<void>((resolve) => {
+              if (!asking()) return resolve();
+              statWaiters.push(resolve);
+              setTimeout(resolve, 1500).unref();
+              job!.stdin!.write('stat\n');
+            }),
+        );
+      }
+      o.log(
+        ready
+          ? warn
+            ? `worker caps: in a job with no limits (warn-only); measuring against ${gb(o.caps.memoryBytes)} GB and ${o.caps.processes} processes`
+            : `worker caps: in a job of ${gb(o.caps.memoryBytes)} GB and ${o.caps.processes} processes`
+          : 'worker caps: no job (the helper did not start); temp cap only',
+      );
     }
   } else if (scoped) {
-    // The scope's limits are the kernel's; its events say when they were hit.
+    // Enforce: the scope's limits are the kernel's (set when the host was launched, only where the user manager delegates them
+    // and takes OOMPolicy=continue, machine/linuxScope.ts); its events say when they were hit, and the host ends nothing then:
+    // the kernel already acted, and a ps-based kill here could reach the claude. Warn: the scope has no limits, its peaks are read.
     const counts = { oom: -1, max: -1 };
     const read = (f: string, key: string) => {
       try {
@@ -373,28 +495,56 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
         return -1;
       }
     };
+    const readFirst = (...files: string[]) => {
+      for (const f of files) {
+        try {
+          const n = Number(fs.readFileSync(path.join(cgroup!, f), 'utf8').trim());
+          if (Number.isFinite(n)) return n;
+        } catch {
+          // the next file: an older kernel has no *.peak
+        }
+      }
+      return -1;
+    };
     const look = () => {
-      const oom = read('memory.events', 'oom_kill');
+      // memory.peak counts page cache too, so warn mode reads high against MemoryMax (which reclaims cache first): a warning, never a stop.
+      const mem = readFirst('memory.peak', 'memory.current');
+      const tasks = readFirst('pids.peak', 'pids.current');
+      peaks.memory = Math.max(peaks.memory, mem);
+      peaks.active = Math.max(peaks.active, tasks);
+      if (warn) {
+        if (tasks > o.caps.tasks) void hit('processes', o.caps.tasks, tasks, { peak: true });
+        if (mem > o.caps.memoryBytes) void hit('memory', o.caps.memoryBytes, mem, { peak: true });
+        return;
+      }
+      const local = read('memory.events.local', 'oom_kill');
+      const oom = local >= 0 ? local : read('memory.events', 'oom_kill');
       const max = read('pids.events', 'max');
-      if (counts.oom >= 0 && oom > counts.oom) void hit('memory', o.caps.memoryBytes);
-      if (counts.max >= 0 && max > counts.max) void hit('processes', o.caps.tasks);
+      if (counts.oom >= 0 && oom > counts.oom) void hit('memory', o.caps.memoryBytes, undefined, { kernel: true });
+      if (counts.max >= 0 && max > counts.max) void hit('processes', o.caps.tasks, undefined, { kernel: true });
       counts.oom = oom;
       counts.max = max;
     };
     look();
     timers.push(setInterval(look, w.POLL_MS));
-    o.log(`worker caps: in scope ${path.posix.basename(cgroup!)}`);
+    finals.push(look);
+    o.log(`worker caps: in scope ${path.posix.basename(cgroup!)}${warn ? ' (no limits: warn-only)' : ''}`);
   } else {
     // A Mac (or a Linux PC with no scope): the tree, read.
     const look = () => {
       if (killing) return;
       const tree = treeOf(ps(), host);
       const rss = tree.reduce((n, r) => n + r.rss, 0);
-      if (rss > o.caps.memoryBytes) void hit('memory', o.caps.memoryBytes, rss);
-      else if (tree.length > o.caps.processes) void hit('processes', o.caps.processes, tree.length);
+      peaks.active = Math.max(peaks.active, tree.length);
+      peaks.memory = Math.max(peaks.memory, rss);
+      const overMemory = rss > o.caps.memoryBytes;
+      if (overMemory) void hit('memory', o.caps.memoryBytes, rss);
+      // Enforced, one hit ends the tools for both; warn says each.
+      if (tree.length > o.caps.processes && (warn || !overMemory)) void hit('processes', o.caps.processes, tree.length);
     };
     timers.push(setInterval(look, w.POLL_MS));
-    o.log(`worker caps: watching the tree (${gb(o.caps.memoryBytes)} GB, ${o.caps.processes} processes)`);
+    finals.push(look);
+    o.log(`worker caps: watching the tree (${gb(o.caps.memoryBytes)} GB, ${o.caps.processes} processes)${warn ? ', warn-only' : ''}`);
   }
 
   if (o.tempDir) {
@@ -413,7 +563,10 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
       if (!watch.look(free)) return;
       measuring = true;
       void measureTemp(dir)
-        .then((m: TempMeasure) => (m.total > o.caps.tempBytes ? hit('temp', o.caps.tempBytes, m.total) : undefined))
+        .then((m: TempMeasure) => {
+          peaks.temp = Math.max(peaks.temp, m.total);
+          return m.total > o.caps.tempBytes ? hit('temp', o.caps.tempBytes, m.total) : undefined;
+        })
         .catch(() => undefined)
         .finally(() => (measuring = false));
     };
@@ -421,11 +574,23 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
     timers.push(setInterval(look, w.POLL_MS));
   }
   for (const t of timers) t.unref();
-  return () => {
+  return async () => {
     for (const t of timers) clearInterval(t);
+    for (const f of finals) {
+      try {
+        await f();
+      } catch {
+        // the peaks so far
+      }
+    }
+    const tasks = platform === 'linux' && scoped;
+    o.log(
+      `worker caps: peaks (mode ${mode}): ${peaks.active} ${tasks ? 'tasks' : 'processes'} at once (cap ${tasks ? o.caps.tasks : o.caps.processes}), ` +
+        `${gb(peaks.memory)} GB memory (cap ${gb(o.caps.memoryBytes)} GB), ${gb(peaks.temp)} GB temp (cap ${gb(o.caps.tempBytes)} GB)`,
+    );
     const helper = job;
-    if (!helper || helper.exitCode !== null || helper.signalCode !== null) return Promise.resolve();
-    return new Promise<void>((resolve) => {
+    if (!helper || helper.exitCode !== null || helper.signalCode !== null) return;
+    await new Promise<void>((resolve) => {
       helper.once('exit', () => resolve());
       setTimeout(resolve, 5000).unref();
       helper.stdin?.end();

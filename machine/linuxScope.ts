@@ -87,7 +87,7 @@ export function resetScopeProbe() {
   probedLimits = undefined;
 }
 
-/** A scope's limits (w5554): the bytes and tasks the whole scope may use. */
+/** A scope's limits (w5554, enforce mode only): the bytes and tasks the whole scope may use. */
 export interface ScopeLimits {
   memoryBytes: number;
   tasks: number;
@@ -126,8 +126,12 @@ export function scoped(
 ): { bin: string; args: string[]; unit?: string; limited?: boolean } {
   if ((o.platform ?? process.platform) !== 'linux') return { bin, args };
   if (!(o.usable ?? scopesUsable)()) return { bin, args };
-  const limits = o.limits && (o.limitsOk ?? limitsUsable)() ? o.limits : undefined;
-  return { ...inScope(scopeUnit(kind, tag), bin, args, (o.oom ?? oomPolicyUsable)(), limits), ...(limits ? { limited: true } : {}) };
+  const oom = (o.oom ?? oomPolicyUsable)();
+  // Limits only where the scope also takes OOMPolicy=continue: without it systemd's default (`stop`) ends the whole scope, the
+  // host and its claude with it, when the kernel's OOM killer ends one process of it (w2884), so MemoryMax would be a way to
+  // kill the agent. The scope then runs with no limits, and the caller says so (`limited` unset).
+  const limits = o.limits && oom && (o.limitsOk ?? limitsUsable)() ? o.limits : undefined;
+  return { ...inScope(scopeUnit(kind, tag), bin, args, oom, limits), ...(limits ? { limited: true } : {}) };
 }
 
 /**

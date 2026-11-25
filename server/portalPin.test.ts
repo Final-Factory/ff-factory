@@ -82,3 +82,10 @@ test('w5576: list_machines says the mode, the host and the newest warnings; an o
   const line = describePortalPin({ mode: 'warn', host: 'x.example', pinned: false, hosts: [], warnings: [w(1), w(2), w(3), w(4)] });
   assert.match(line, /dials x\.example \(NOT pinned\); 4 warnings kept, newest first: 2026-11-25T00:04:00Z relocate: w4 \| .*w3 \| .*w2$/);
 });
+
+test('w5576 (w5620 review): a malformed hello from one daemon never throws in list_machines', () => {
+  const odd = { mode: 'warn', host: 'fff.tailedfcad.ts.net', pinned: true, hosts: ['fff.tailedfcad.ts.net', 7, null], warnings: [null, 3, 'x', { at: 't', kind: 'dial', what: 'w' }] } as never;
+  const line = describePortalPin(odd);
+  assert.match(line, /follows fff\.tailedfcad\.ts\.net; 1 warning kept, newest first: t dial: w$/);
+  assert.doesNotThrow(() => describePortalPin({ mode: 'warn', host: 'h', pinned: false, hosts: 'nope', warnings: 'nope' } as never));
+});

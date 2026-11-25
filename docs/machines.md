@@ -1088,6 +1088,17 @@ only that editor's status file from `~/.unity-mcp` (and a fallback port file poi
 down) (`readStatusFiles` and `syncStatusDir`, `server/unityMcp.ts`). So a pinned agent never lands on another sandbox's
 editor while its own restarts. A status file counts only if written since that editor started (for an editor already
 running at the daemon's first look, any age). The daemon logs the command it found, or that there is none, at start.
+The server's own preflight (`transport/legacy/unity_connection.py` `read_status_file`, mcpforunityserver 10.0.0) ignores
+`UNITY_MCP_STATUS_DIR` and reads only `Path.home()/.unity-mcp`, falling back to the newest status file of any project: a
+fenced editor writes to `<root>/home/.unity-mcp`, so a stale `reloading: true` file in the person's home refused every
+call ("Unity is reloading", w5650). So on Windows the server's `USERPROFILE` and `HOME` are its status folder, and the
+daemon keeps the same files in `<status folder>/.unity-mcp` too (`mcpHomeStatusDir`, `machine/unityMcp.ts`). Not on Mac
+or Linux: uv finds its Pythons and config under `$HOME` there (the w5402 failure), while on Windows it reads `%APPDATA%`
+(w5677's review). `daemon.json` `unityMcpScopedHome: false` restores the person's home; the daemon reads it at start, so
+it needs a daemon restart and reaches agents started after it. Every sandbox agent's shell gets the same
+`UNITY_MCP_STATUS_DIR` (`slotEnv`), so the game repo's `scripts/unity-bridge.py` finds its own editor, fenced or not;
+an editor the daemon does not watch (a ParrelSync clone, a second editor for a peer run) is found with
+`UNITY_MCP_STATUS_DIR=` (empty) on the command, the person's own `~/.unity-mcp`.
 
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
