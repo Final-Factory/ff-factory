@@ -22,6 +22,7 @@ import { TranscriptHasher, checkSeal, pidGone, type SealStore } from './transcri
 import { CliTranscriptTail, cliTranscriptPath, rebuildMeterAsync } from './cliTranscript.ts';
 import { refreshKeptToolsAsync, sdkToolsNow } from './keptTools.ts';
 import { tempSizeHook } from './tempSizeHook.ts';
+import { capNotesHook } from './workerCapNotes.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -769,7 +770,8 @@ export class AgentSession implements SessionHandle {
     // (the read-chain nudge). Its 'tempSize' signal reaches the portal's ledger the way 'rateLimit' does (machine/agentHost.ts SIGNALS).
     if (this.info.kind === 'worker' && this.tempDir && /^ffa-/i.test(path.basename(this.tempDir))) {
       const watch = tempSizeHook(this.tempDir, ({ total, biggest, step }) => this.events.emit('tempSize', this, { total, biggest, step }));
-      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch] }] };
+      // w5554: and hears when its host ended its tools at a cap (machine/workerCaps.ts, server/workerCapNotes.ts).
+      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch, capNotesHook()] }] };
     }
     this.costBase = this.info.costUsd;
     // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept, or is rebuilt
