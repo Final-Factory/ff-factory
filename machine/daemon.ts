@@ -68,7 +68,7 @@ import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
@@ -1205,8 +1205,34 @@ export class Daemon {
         this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
       },
       done: (summary, notice) => {
-        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${notice ? `; ${notice}` : ''}`);
+        const mins = summary.passMs !== undefined ? ` in ${(summary.passMs / 60_000).toFixed(1)} min` : '';
+        const q = summary.quick ? `; a quick plan first would have freed ${(summary.quick.bytes / 2 ** 30).toFixed(1)} GB (${summary.quick.items} item(s), planned in ${(summary.quick.ms / 1000).toFixed(0)} s)` : '';
+        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${mins}${q}${notice ? `; ${notice}` : ''}`);
         this.out({ type: 'cleanup', summary, notice });
+      },
+      // w5795: a pass a restart cuts off said at the next start, and every start said, so the log shows passes lost to restarts.
+      marker: passMarkerFile(appDirOfConfig(cfg)),
+      started: (trigger, low) => log(`clean-up (${trigger}): pass started${low ? ', below the soft threshold' : ''}`),
+      cutOff: (text, m) => {
+        log(text);
+        appendCleanupLog(appDirOfConfig(cfg), { at: new Date().toISOString(), trigger: m.trigger, cutOff: true, startedAt: new Date(m.startedAt).toISOString(), removed: 0, freedBytes: 0 });
+      },
+      // w5795, report-only: what the cargo-target cap with the low-space rules would free at once, before the full plan.
+      quick: async () => {
+        if (!this.cfg.root || staleOutputSettings(this.cleanupSettings.staleOutput).mode !== 'on') return [];
+        const plan = await planInstallLeftovers({
+          root: this.cfg.root,
+          sandboxes: [],
+          tempRoots: [agentTempRoot(this.cfg.tempDir)],
+          guard: this.cleanupGuard(),
+          ctx: this.staleCtx,
+          procs: await this.procs().catch(() => undefined),
+          self: [process.pid, process.ppid],
+          scope: 'cargo-cap',
+          low: true,
+          closed: this.closedSessionDirs(),
+        });
+        return sizePlan(fenceToRoot(plan.items, [this.cfg.root, ...(this.cfg.extraRoots ?? [])]).inside);
       },
     });
   }

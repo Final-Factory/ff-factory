@@ -324,30 +324,43 @@ export async function cleanupPass(o: {
     outside.push(...f.outside);
     return f.inside;
   };
-  const regular = fence(await o.regular());
-  const planned: StalePlan = o.opts.stale && o.mode !== 'off' ? await o.stale() : o.mode === 'on' && o.cap ? await o.cap() : { items: [], listed: [] };
+  // w5795: each step timed, for the summary (LothDesktop's low passes took over an hour to plan, longer than its daemon ran).
+  const phasesMs: Record<string, number> = {};
+  const timed = async <T>(name: string, f: () => Promise<T>): Promise<T> => {
+    const t = Date.now();
+    try {
+      return await f();
+    } finally {
+      phasesMs[name] = Date.now() - t;
+    }
+  };
+  const regular = fence(await timed('regular', o.regular));
+  const planned: StalePlan = o.opts.stale && o.mode !== 'off' ? await timed('stale', o.stale) : o.mode === 'on' && o.cap ? await timed('cap', o.cap) : { items: [], listed: [] };
   const plan = { ...planned, items: fence(planned.items) };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
   // A failure there must not cost the regular pass: nothing of it is removed then.
-  const own0 = o.own ? await o.own.plan().catch(() => none) : none;
+  const ownPlan = o.own;
+  const own0 = ownPlan ? await timed('own', () => ownPlan.plan().catch(() => none)) : none;
   const own = { ...own0, items: fence(own0.items) };
   const listed: NonNullable<CleanupRun['listed']> = [];
   // On Windows nothing off the install drive is measured or listed (w1755, lothsahn: "You need to only look at v:.  Stop
   // messing with my c:"): a listed C: folder was a clean-up worker's cue to measure it.
   const roots = o.root ? (Array.isArray(o.root) ? o.root : [o.root]) : [];
   const onDrive = (p: string) => !roots.length || roots.some((r) => onInstallDrive(p, r));
-  for (const l of [...plan.listed, ...own.listed, ...outside]) if (onDrive(l.path)) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
+  await timed('listed', async () => {
+    for (const l of [...plan.listed, ...own.listed, ...outside]) if (onDrive(l.path)) listed.push({ ...l, bytes: await sizeOf(l.path, 300_000) });
+  });
   listed.sort((a, b) => b.bytes - a.bytes);
   const held = (plan.held ?? []).filter((h) => onDrive(h.path)).sort((a, b) => b.bytes - a.bytes);
-  const kept = held.length ? { held } : {};
-  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await sizePlan([...regular, ...plan.items, ...own.items]), listed, ...kept };
+  const kept = { ...(held.length ? { held } : {}), phasesMs };
+  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await timed('size', () => sizePlan([...regular, ...plan.items, ...own.items])), listed, ...kept };
   const live = o.mode === 'on' ? plan.items : [];
   if (o.mode === 'on' && plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
   const { first, own: ownItems } = withoutOverlap([...regular, ...live], own);
   own.items = ownItems;
-  const r = await runCleanup(first, o.guard, o.busyNow);
-  if (o.own && own.items.length) {
-    const r2 = await o.own.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun);
+  const r = await timed('remove', () => runCleanup(first, o.guard, o.busyNow));
+  if (ownPlan && own.items.length) {
+    const r2 = await timed('ownRemove', () => ownPlan.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun));
     r.removed.push(...r2.removed);
     r.failed.push(...r2.failed);
     r.bytes += r2.bytes;
