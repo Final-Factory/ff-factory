@@ -241,6 +241,14 @@ shares them. A sparse checkout would free about nothing more. It would also chan
 (`extensions.worktreeConfig`) and make `git add` refuse proof files. lothsahn dropped it, and with it the proposed
 proofs-through-`publish_review` rule.
 
+### Slot repos borrow the clone's objects (w5614)
+
+A slot-repo sandbox ([Slot repos](machines.md#slot-repos-w5614)) has its own `.git` whose `objects/info/alternates`
+names the main clone's objects, so its git folder starts near empty (0 objects) and its LFS files come from the
+clone's LFS store as with A3 (measured, w5614 step 1). Objects its own fetches and commits make stay in its `.git`
+until it is deleted. The clone's `gc.pruneExpire=never` keeps unreachable objects in a cruft pack instead of pruning
+them, so the clone's `.git` does not shrink by pruning while slot repos exist.
+
 ### D and E: release trim and re-seeding (FF Factory PR #465)
 
 - **D:** the release trim dropped `Library/EntitySceneBundles` and each `Library/PlayerDataCache/<target>` whole once nothing
