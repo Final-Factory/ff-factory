@@ -44,18 +44,27 @@ The code: `server/max.ts` (the manager), `server/maxEvents.ts` (the events file)
 was made, `MaxManager.ingest` with the computer's id as `where`, so it shows here and in `max_activity` like the rest.)
 
 The CLI appends one JSON line per write it makes to the file named by `FF_MAX_EVENTS`. FF Factory puts
-that variable, and `FF_SESSION_ID`, in the environment of every agent it starts:
+that variable, and `FF_SESSION_ID`, in the environment of the agents it trusts with the file:
 
-- **on this host** (sandbox workers, standing agents): `FF_MAX_EVENTS` is config `max.eventsFile`,
+- **on this host** (standing agents): `FF_MAX_EVENTS` is config `max.eventsFile`,
   default `~/.config/ff-factory/max-events.jsonl`. The server tails it every 2 s.
-- **on a machine** (a Mac or a Windows PC): the daemon sets `FF_MAX_EVENTS` to the same default path there, tails it every
-  3 s, and forwards each line to the portal as a `max_event` message (queued while the link is down,
-  its read position kept in `<file>.daemon-offset`). A portal older than this ignores the message.
+- **on a machine** (a Mac, a Linux box or a Windows PC): the daemon's file is `<daemon>/max/max-events.jsonl` in a worker
+  root (`machine/daemon.ts` `daemonMaxEventsFile`; `daemon.json` cannot move it), else `maxEventsFile` or the default
+  path above. It tails it every 3 s and forwards each line to the portal as a `max_event` message (queued while the link
+  is down, its read position kept in `<file>.daemon-offset`). A portal older than this ignores the message.
+
+**Sandbox workers get no `FF_MAX_EVENTS`, and cannot write the file** (w5552, lothsahn: "Max events go in a folder workers
+can't write"). The portal marks an intake thread replied or closed from these lines (`server/intake.ts` `onMaxEvent`), so a
+line a hijacked worker appended could quietly drop a player's report. The file is in the daemon's own folder, which every
+fence keeps read-only: Landlock's `--except daemon` (`machine/writeLock.ts`), Seatbelt's `READ_ONLY_IN_ROOT`
+(`server/workerFence.ts`) and the Medium label Windows keeps on the daemon's folder (`machine/lowIntegrity.ts`). A worker
+posts as Max with `post_as_max`, which goes through the daemon to the portal with the calling session (above). At start
+the daemon runs a shell inside each fence it uses and opens the file for append (`machine/maxEventsFence.ts`), and logs
+`max events: <fence> refuses a fenced worker's write to <file> (checked)`, or a WARNING if the fence let it write.
 
 Why a file: it needs no new secret and no network path. The line says what was posted where; it never
 holds the bot token. An endpoint the CLI posts to would have needed a token for the CLI and a way to
-reach the portal from every machine. The file is outside the folders the text guard refuses to agents (a seatbelt, not a protection) on purpose, since
-agents write it. A session outside FF Factory has no `FF_MAX_EVENTS`, so the CLI writes nothing.
+reach the portal from every machine. A session outside FF Factory has no `FF_MAX_EVENTS`, so the CLI writes nothing.
 
 One line, version 1 (unknown fields are ignored; a line that fails this is dropped):
 
