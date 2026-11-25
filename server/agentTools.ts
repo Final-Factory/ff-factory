@@ -29,7 +29,8 @@ import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
  *   Code fetches the marketplace over HTTPS only, with a longer git timeout (REGISTER_ENV), and a failed run is run once
  *   more (w1895).
  * - Puts back publish-skills' checkout marker (`~/.claude/final-factory-agents-checkout`, which `registerAgents.sh` points at
- *   the checkout it ran from), so a person's skill edits keep going to their own checkout.
+ *   the checkout it ran from), so a person's skill edits keep going to their own checkout. A marker that names no checkout
+ *   (an earlier run's removed clone, w5784) is not put back: it names the lasting checkout.
  * - Reads the versions again and compares them with the checkout's marketplace.json: every installed plugin on master's
  *   version, or it fails.
  *
@@ -367,11 +368,17 @@ async function registerInto(
     d.say(`registerAgents.sh exited ${r.code} (${tail(r)}); running it once more.`);
     r = await register();
   }
-  // w5597: a marker that names FF Factory's old checkout moves with it (that one is no longer taken forward).
-  const markerKeep = markerBefore !== undefined && co && markerBefore.trim() && samePath(markerBefore.trim(), legacy) ? `${co}\n` : markerBefore;
+  // w5597: a marker that names FF Factory's old checkout moves with it (that one is no longer taken forward). w5784: so does
+  // one that names no checkout at all (empty, or a folder without .claude-plugin/marketplace.json, such as an earlier run's
+  // ff-agents-run-* clone that is gone): putting it back as it was kept BEAST's marker on a removed run folder for every
+  // publish after, and publish-skills stops on it.
+  const before = markerBefore?.trim().split(/\r?\n/)[0]?.trim() ?? '';
+  const oldCo = markerBefore !== undefined && before !== '' && samePath(before, legacy);
+  const noCheckout = markerBefore !== undefined && !oldCo && (before === '' || !fs.existsSync(path.join(before, '.claude-plugin', 'marketplace.json')));
+  const markerKeep = co && (oldCo || noCheckout) ? `${co}\n` : markerBefore;
   if (markerKeep !== undefined && readText(marker) !== markerKeep) {
     fs.writeFileSync(marker, markerKeep);
-    d.say(markerKeep === markerBefore ? `publish-skills' checkout marker kept on ${markerKeep.trim()}.` : `publish-skills' checkout marker now names ${co} (it named the old ${legacy}).`);
+    d.say(markerKeep === markerBefore ? `publish-skills' checkout marker kept on ${markerKeep.trim()}.` : oldCo ? `publish-skills' checkout marker now names ${co} (it named the old ${legacy}).` : `publish-skills' checkout marker now names ${co} (it named ${before || 'nothing'}, which is not a checkout).`);
   } else if (markerKeep === undefined && co) {
     // The script ran from a temp folder, which it does not record (or did): the marker names the lasting checkout.
     fs.mkdirSync(path.dirname(marker), { recursive: true });
