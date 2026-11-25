@@ -6,6 +6,7 @@ import { fmtBytes, fmtRelative, href, lsGet, lsSet, navigate, PLAIN_TEXT } from 
 import { attachmentUrl } from './Attachments';
 import { fileUrl } from './Images';
 import { LocalImages, Markdown } from './Markdown';
+import { reportImageSrc } from '../../../shared/imagePaths';
 import { Icon } from './ui';
 
 /** A report's kind in words (w2541, docs/reports.md). */
@@ -196,7 +197,7 @@ function ReportRow({ r, snippet, now }: { r: ReportSummary; snippet: string; now
 }
 
 /** Media a report keeps is served from /api/reports/…; any other local path it names is read as its worker's session would. */
-const reportImage = (sessionId: string | undefined) => (p: string) => (p.startsWith('/api/reports/') || !sessionId ? p : fileUrl({ session: sessionId }, p));
+const reportImage = (sessionId: string | undefined) => (p: string) => reportImageSrc(p, sessionId ? (q) => fileUrl({ session: sessionId }, q) : undefined);
 
 /**
  * One report's page (w2541): its Markdown with its stills and clips, who asked for it, the request it answers (a link

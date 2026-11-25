@@ -106,7 +106,11 @@ function MdImage({ src, alt }: ComponentProps<'img'> & ExtraProps) {
   const url = typeof src === 'string' ? src : '';
   const shown = useMemo(() => {
     const path = localPath(url);
-    if (path) return resolve ? { src: resolve(path), name: baseName(path), video: isVideoPath(path) } : undefined;
+    if (path) {
+      if (!resolve) return undefined;
+      const r = resolve(path);
+      return r ? { src: r, name: baseName(path), video: isVideoPath(path) } : { refused: true };
+    }
     if (url.startsWith('data:')) {
       const safe = safeDataImage(url);
       return safe ? { src: safe, name: alt || 'image' } : { refused: true };
