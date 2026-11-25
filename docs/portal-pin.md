@@ -13,8 +13,8 @@ network audit.
   installs only a commit published on GitHub's ff-factory `main`; `checkPublished` in `machine/selfUpdate.ts` checks
   that on the machine itself (w5516). No signing key is involved. Signed updates were put off by lothsahn on
   2026-11-25 ("Drop build signing for now, remind me in 1 week").
-- **One machine's extra hosts.** daemon.json's `pinnedPortalHosts` (a list of names) adds hosts on one machine. The
-  installer writes it. Nothing sent over the link can: `patchDaemonConfig` takes only `portalUrl`,
+- **One machine's extra hosts.** daemon.json's `pinnedPortalHosts` (a list of names) adds hosts on one machine. A
+  person or the ops worker edits it by hand over ssh: no installer flag writes it; an installer update (`-Update`/`--update`, a reinstall or a migration) keeps it; a full install rerun drops it. Nothing sent over the link can: `patchDaemonConfig` takes only `portalUrl`,
   `previousPortalUrl` and `relocatedAt`, and a link update's `LinkUpdateFlags` carry no portal field.
 - **Why a host name, not an IP or a certificate pin.** The tailnet name is what every daemon.json already holds. Node
   checks its HTTPS certificate as it does for any site. A Tailscale certificate is a Let's Encrypt one that renews
@@ -69,9 +69,18 @@ then stays on the old portal while that portal still runs.
   reaches the machine:
   1. **The old host still runs.** Merge the new host into `PINNED_PORTAL_HOSTS`, update the machine over its link from
      the old portal, then relocate it.
-  2. **An ssh machine.** The ops worker reruns the installer over ssh with `--portal-url <new URL>` (or adds
-     `pinnedPortalHosts`), as in [ops-worker.md](ops-worker.md), "Updating and re-running a machine's installer". The
-     installer writes daemon.json directly, and the daemon dials the `portalUrl` it finds there.
+  2. **An ssh machine.** The ops worker, over ssh, takes the first of these that fits:
+     - **(a) Edit daemon.json, then update.** Set `portalUrl` to the new URL, and add the new host to
+       `pinnedPortalHosts` if it is not built in. Then run the installer's update form (`-Update` on Windows,
+       `--update` on macOS and Linux), as in [ops-worker.md](ops-worker.md#updating-and-re-running-a-machines-installer-w855).
+       The update reads `portalUrl` from daemon.json (it has no `--portal-url` flag), keeps both fields and the
+       machine's other carried settings, and restarts the daemon. An update alone, without the edit, keeps the old
+       `portalUrl`, and the daemon goes on dialling the dead host.
+     - **(b) A full install rerun** with `--portal-url <new URL>` (it needs the machine's credential,
+       `-CredentialFile`). It rewrites daemon.json and drops `pinnedPortalHosts` and the other settings only an update
+       carries. The daemon dials the new URL anyway: the start-up check of the configured URL never stops a dial (it
+       only warns, `machine/daemon.ts`, the `dial` check in the constructor). If the new host is not built in, add it
+       back to `pinnedPortalHosts` by hand afterwards and run (a)'s update.
   3. **A `-NoSsh` machine.** Route 2 does not exist for it, so route 1 must stay open: keep the old portal running until
      every machine has moved.
 - **A lost key, a CI secret or a certificate.** None of them is involved: the list lives in the code, and the hosts'
