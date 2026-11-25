@@ -8,6 +8,7 @@ import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { CompactionTrigger, DeliveredAttachment, EffortLevel, ImageInput, ImageRef, OrchestratorRole, PendingPermission, PermissionMode, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { attachmentBlock } from '../shared/attachments.ts';
+import { RELAYED_MARK } from '../shared/conditional.ts';
 import { emit } from './store.ts';
 import { accountKeyOf } from './usage.ts';
 import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
@@ -244,6 +245,13 @@ export interface SessionHandle {
    * (docs/orchestrators.md, "Loops, limits and safety").
    */
   readonly turnFrom?: 'human' | 'orchestrator' | 'system';
+  /**
+   * w5507: a turn its person started (turnFrom 'human') that a message not theirs has joined since (a [worker update], a
+   * [dispatch], an FFBox relay, a timer): the model has read text that is not the person's in it, so a gate reserved for
+   * their own words takes their words quoted (Orchestrators.ownTurn), or a click, not the turn alone. Sessions without
+   * the notion leave it undefined (false).
+   */
+  readonly turnRelayed?: boolean;
   /** The uuid of the message that opened the current turn, as turnFrom's sender; without a turn, the last message's (w1867: a timer's turn). */
   readonly turnId?: string;
   /**
@@ -477,6 +485,8 @@ export class AgentSession implements SessionHandle {
   private readonly outstanding = new Map<string, Unanswered & { attachments?: DeliveredAttachment[] }>();
   /** The message the current turn answers first (w607): its sender is turnFrom. Cleared when the turn ends. */
   private turnStarter?: { uuid: string; from: 'human' | 'orchestrator' | 'system' };
+  /** A message not the person's own joined the turn they started (w5507): turnRelayed. Cleared with turnStarter. */
+  private relayedInTurn = false;
   /** Stopped or interrupted by a person or the orchestrator since its last message: a restart leaves it alone. */
   private stoppedOnPurpose = false;
   private graceTimer?: NodeJS.Timeout;
@@ -535,6 +545,10 @@ export class AgentSession implements SessionHandle {
     return this.turnStarter?.from ?? this.lastFrom;
   }
 
+  get turnRelayed(): boolean {
+    return this.turnStarter?.from === 'human' && this.relayedInTurn;
+  }
+
   get turnId(): string | undefined {
     return this.turnStarter?.uuid ?? this.lastUuid;
   }
@@ -543,6 +557,7 @@ export class AgentSession implements SessionHandle {
   private clearOutstanding() {
     this.outstanding.clear();
     this.turnStarter = undefined;
+    this.relayedInTurn = false;
   }
 
   private update(patch: Partial<SessionInfo>) {
@@ -565,6 +580,13 @@ export class AgentSession implements SessionHandle {
     else if (pick && pick.model !== this.liveModel) this.switchModel(pick.model, pick.kind);
     // The message that opens a turn decides whose it is (w607); one sent while it runs joins it without changing that.
     if (opensTurn) this.turnStarter = { uuid, from };
+    // w5507: a message that is not the person's own (a [worker update], a [dispatch], an FFBox relay) joining a turn they
+    // started marks the turn relayed, so a gate reserved for their own words asks for those words (turnRelayed), and
+    // says so to the agent at its end.
+    else if (from !== 'human' && this.turnStarter?.from === 'human') {
+      this.relayedInTurn = true;
+      if (this.info.kind === 'orchestrator' && text && !text.endsWith(RELAYED_MARK)) text = `${text}\n\n${RELAYED_MARK}`;
+    }
     this.lastFrom = from;
     this.lastUuid = uuid;
     this.stoppedOnPurpose = false;
@@ -931,6 +953,8 @@ export class AgentSession implements SessionHandle {
         if (this.turnStarter && answered.includes(this.turnStarter.uuid)) {
           const next = this.outstanding.entries().next();
           if (!next.done) this.turnStarter = { uuid: next.value[0], from: next.value[1].from };
+          // The next turn is relayed (w5507) when a message not its person's waits in it behind theirs.
+          this.relayedInTurn = !next.done && [...this.outstanding].some(([u, x]) => u !== next.value[0] && x.from !== 'human');
         }
         this.store.append(id, {
           kind: 'result',
