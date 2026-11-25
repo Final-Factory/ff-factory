@@ -82,7 +82,8 @@ before redeploying by hand.
   them under enforce: set `machineLinkTailnet` to `"warn"` before such a move. `fffctl migrate --cut-over` checks this
   itself (w5716, `machineLinkPreflight` in `server/vmMigration.ts`): on the config the new portal will start on, under
   enforce, it goes on only when the daemons are sent to a tailnet URL: a `publicUrl` whose host is a Tailscale address
-  or a `*.ts.net` name (and, with Tailscale Serve in front, `trustProxy` on in the VM's config.json). Serve being on is
+  or a `*.ts.net` name (and, with Tailscale Serve in front, `trustProxy` on in the VM's config.json: `set_app_config trustProxy true` on the
+  VM's portal; an https `*.ts.net` URL counts as Serve in front even with `--no-tailscale`, w5786). Serve being on is
   not enough by itself (w5771: a LAN `publicUrl` sends the daemons past it). Otherwise it stops with exit code 4 before
   the typed confirmation, with BEAST and the VM's portal untouched, saying to set `"warn"` first or to use a tailnet URL;
   the final copy is checked again after the drain, and a lockout there rolls back.
