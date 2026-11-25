@@ -9,7 +9,7 @@ import type { WorkItem } from '../shared/types.ts';
 
 /**
  * w1600: the daemon reads the bench lock the game repo's scripts/bench/quiet_gate.sh holds for a whole timed run
- * (`$FF_WORKER_ROOT/tmp/bench.lock`, its holder in `owner`), so the portal keeps a Live view editor from starting beside it.
+ * (`$FF_WORKER_ROOT/daemon/bench.lock`, its holder in `owner`), so the portal keeps a Live view editor from starting beside it.
  */
 test('w1600: readBenchLock reports a held lock with its owner line, nothing when free, stale or without a worker root', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w1600-'));
@@ -17,7 +17,7 @@ test('w1600: readBenchLock reports a held lock with its owner line, nothing when
   assert.equal(readBenchLock(undefined), undefined, 'no worker root: nothing to read');
   assert.equal(readBenchLock(root), undefined, 'free');
   const dir = benchLockDir(root);
-  assert.equal(dir, path.join(root, 'tmp', 'bench.lock'));
+  assert.equal(dir, path.join(root, 'daemon', 'bench.lock'));
   fs.mkdirSync(dir, { recursive: true });
   const now = Date.now();
   assert.deepEqual(readBenchLock(root, now)?.owner, 'its owner line is not written yet', 'mkdir comes a moment before the owner line');

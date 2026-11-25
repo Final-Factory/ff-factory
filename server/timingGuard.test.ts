@@ -63,11 +63,13 @@ function world(t: { after: (f: () => void) => void }) {
   fs.mkdirSync(tmp, { recursive: true });
   fs.writeFileSync(path.join(tmp, 'bench.cs'), W1892_BENCH);
   fs.writeFileSync(path.join(tmp, 'open_scene.cs'), ORDINARY[0]);
+  // timing.jsonl stays in tmp/bench.queue (the game repo's timing_gate.py writes it); tickets are the daemon's (w5545)
   const qdir = path.join(root, 'tmp', 'bench.queue');
+  const tickets = path.join(root, 'daemon', 'bench.queue');
   const grant = (name: string, info: Record<string, unknown>) => {
-    fs.mkdirSync(path.join(qdir, name), { recursive: true });
-    fs.writeFileSync(path.join(qdir, name, 'info.json'), JSON.stringify({ ticket: name, mode: 'exclusive', pid: 4242, turn_min: 30, ...info }));
-    fs.writeFileSync(path.join(qdir, name, 'granted'), JSON.stringify({ at: 'x', ts: Date.now() / 1000 }));
+    fs.mkdirSync(path.join(tickets, name), { recursive: true });
+    fs.writeFileSync(path.join(tickets, name, 'info.json'), JSON.stringify({ ticket: name, mode: 'exclusive', pid: 4242, turn_min: 30, ...info }));
+    fs.writeFileSync(path.join(tickets, name, 'granted'), JSON.stringify({ at: 'x', ts: Date.now() / 1000 }));
   };
   const log = () => {
     try {
@@ -76,7 +78,7 @@ function world(t: { after: (f: () => void) => void }) {
       return [];
     }
   };
-  return { root, sandbox, tmp, qdir, grant, log };
+  return { root, sandbox, tmp, qdir, tickets, grant, log };
 }
 
 test('w1923: the markers find the clocks w1892 and w1893 used and nothing in ordinary snippets', () => {
@@ -173,10 +175,10 @@ test("w1923: the sandbox guard refuses a pinned session's timed execute_code unt
   assert.equal(decision(await call('mcp__UnityMCP__run_tests', { mode: 'EditMode', test_names: ['FFTests.MapMarkerDoubleClickTest'] })), undefined, 'an ordinary test run');
   w.grant('t00000001', { session: 'someoneelse' });
   assert.equal(decision(await call('mcp__UnityMCP__execute_code', { action: 'execute', code: W1892_BENCH })), 'deny', "another worker's ticket is not this session's");
-  fs.rmSync(path.join(w.qdir, 't00000001'), { recursive: true });
+  fs.rmSync(path.join(w.tickets, 't00000001'), { recursive: true });
   w.grant('t00000002', { session: 'ffb56863', mode: 'shared' });
   assert.equal(decision(await call('mcp__UnityMCP__execute_code', { action: 'execute', code: W1892_BENCH })), 'deny', 'a shared ticket is not one');
-  fs.rmSync(path.join(w.qdir, 't00000002'), { recursive: true });
+  fs.rmSync(path.join(w.tickets, 't00000002'), { recursive: true });
   w.grant('t00000003', { session: 'ffb56863' });
   assert.equal(decision(await call('mcp__UnityMCP__execute_code', { action: 'execute', code: W1892_BENCH })), undefined, 'inside its own exclusive ticket');
 });

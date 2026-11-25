@@ -34,9 +34,9 @@ function put(root: string, rel: string, ageH: number, body = 'x') {
   for (let p = f; p.length > root.length; p = path.dirname(p)) fs.utimesSync(p, at, at);
 }
 
-/** A bench ticket in the install's queue (machine/benchQueue.ts layout: <root>/tmp/bench.queue/tNNNNNNNN/info.json). */
+/** A bench ticket in the install's queue (machine/benchQueue.ts layout: <root>/daemon/bench.queue/tNNNNNNNN/info.json). */
 function ticket(root: string, name: string, info: Record<string, unknown>) {
-  const d = path.join(root, 'tmp', 'bench.queue', name);
+  const d = path.join(root, 'daemon', 'bench.queue', name);
   fs.mkdirSync(d, { recursive: true });
   fs.writeFileSync(path.join(d, 'info.json'), JSON.stringify(info));
 }
@@ -102,7 +102,7 @@ test('w3502 timing: a held or waiting timing ticket keeps cache and builds, and 
   assert.match(why, /timing\/cache: .*bench ticket t00000042 \(reason timing: bench belts 1920\)/);
   assert.match(why, /timing\/builds: /);
   // The timed runner's own ticket (timedRunner.ts takeTicket: timed_run, reason timing) holds them the same way.
-  fs.rmSync(path.join(root, 'tmp', 'bench.queue', 't00000042'), { recursive: true });
+  fs.rmSync(path.join(root, 'daemon', 'bench.queue', 't00000042'), { recursive: true });
   ticket(root, 't00000043', { pid: 4243, mode: 'exclusive', reason: 'timing', timed_run: true, what: 'timed run r7' });
   assert.equal(taken(root, await plan(root, { low: true })).size, 0);
 });

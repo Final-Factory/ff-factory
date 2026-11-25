@@ -40,6 +40,11 @@ export interface UnityDeps {
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
   /** Start the editor detached; its pid (the Windows launch goes through PowerShell, so it may be a promise). */
   launch(bin: string, args: string[], cwd: string, env?: Record<string, string>): number | Promise<number>;
+  /**
+   * w5540: start the editor detached through `fence.launcher`, a Low-labelled program that starts it at Low integrity
+   * (Windows only; machine/lowIntegrity.ts). Absent: fenced launches are not possible here and the editor starts unfenced.
+   */
+  launchFenced?(fence: EditorFence, bin: string, args: string[], cwd: string, env?: Record<string, string>): Promise<number>;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -55,6 +60,40 @@ export interface UnityDeps {
 }
 
 const norm = (p: string) => p.replace(/[\\/]+$/, '');
+
+/**
+ * w5540: how a sandbox editor starts inside the Windows worker fence (Low integrity), from the daemon's lowSetup:
+ * - `launcher`: a Low-labelled copy of node in `<root>\tools\low`. Windows starts a Low-labelled exe at Low from any parent,
+ *   and what it starts inherits Low, so the editor (and its compiler, Burst and licensing children) is Low.
+ * - `unityDir`: `<root>\tools\unity-low`, one junction per version to the install's Editor folder. Unity's Roslyn server
+ *   names its pipe from the compiler's path, so a Low editor through the junction gets its own Low server and never hands
+ *   one to the machine's Medium compiles (w5347).
+ * - `licensingIpc`: the Low licensing channel (`LicenseClient-<user>-low`); the Medium client's pipe and mutex refuse a
+ *   Low Unity (w5427).
+ * - `env`: APPDATA and LOCALAPPDATA in the root (Unity's Roaming preferences on C: are refused at Low and it stops on a
+ *   modal "Moving file failed"), and UNITY_MCP_STATUS_DIR in the root: a Low editor cannot write `~/.unity-mcp`, so its
+ *   bridge status goes there and the daemon reads both (server/unityHang.ts mcpStatusDirs).
+ */
+export interface EditorFence {
+  launcher: string;
+  unityDir: string;
+  licensingIpc: string;
+  env: Record<string, string>;
+}
+
+/** The fenced editor binary: `<unityDir>\<version>\Unity.exe` for an install's `<base>\<version>\Editor\Unity.exe`; undefined when `bin` is not shaped so or the junction lacks it. */
+export function fencedEditorBin(bin: string, unityDir: string, exists: (p: string) => boolean): string | undefined {
+  const w = path.win32;
+  if (w.basename(bin).toLowerCase() !== 'unity.exe' || w.basename(w.dirname(bin)).toLowerCase() !== 'editor') return undefined;
+  const version = w.basename(w.dirname(w.dirname(bin)));
+  if (!/^[0-9][0-9A-Za-z.]*$/.test(version)) return undefined;
+  const fenced = w.join(unityDir, version, 'Unity.exe');
+  return exists(fenced) ? fenced : undefined;
+}
+
+/** The script a Low launcher (a node copy) runs: start argv[1] with the JSON args in argv[3], in argv[2], detached; print its pid. */
+export const FENCED_LAUNCH_SCRIPT =
+  "const{spawn}=require('node:child_process');const[,b,c,a]=process.argv;const p=spawn(b,JSON.parse(a),{cwd:c,detached:true,stdio:'ignore',windowsHide:false});p.on('error',(e)=>{console.error(e.message);process.exit(1)});if(p.pid){console.log(p.pid);p.unref();process.exit(0)}";
 
 /** A path as compared on `platform`: Windows paths are case-insensitive and take either slash. */
 export const pathKey = (p: string, platform: UnityPlatform = 'darwin') => (platform === 'win32' ? p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() : norm(p));
@@ -286,11 +325,16 @@ export class MacUnity {
   private readonly bin: () => string;
   /** w5270: what the last start() found of the Burst EditorPref when it was off (undefined: it was on). */
   burstNote?: string;
+  /** w5540: the worker fence editors start in, while the daemon has one (Windows Low integrity); undefined: unfenced. */
+  private readonly fence?: () => EditorFence | undefined;
+  /** w5540: whether the last start() was fenced, and why not when it was not. */
+  fenced?: { on: boolean; why?: string };
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; env?: Record<string, string> } = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.logFile = opts.logFile;
+    this.fence = opts.fence;
     this.env = opts.env ?? {};
     this.d = deps ?? realDeps(platform);
     this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
@@ -383,14 +427,28 @@ export class MacUnity {
     // w5270: an editor reads Burst's on/off from a user-wide EditorPref when it loads; one left at 0 by another editor
     // would start this one with every job managed.
     this.burstNote = await this.d.burstPrefOn?.().catch((e: Error) => `could not check Unity's Burst EditorPref: ${e.message}`);
-    const bin = this.bin();
+    let bin = this.bin();
     await this.noAppNap(bin);
-    const pid = await this.d.launch(bin, ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])], this.repo, this.env);
+    const args = ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])];
+    const fence = this.platform === 'win32' ? this.fence?.() : undefined;
+    const fencedBin = fence ? fencedEditorBin(bin, fence.unityDir, (p) => this.d.exists(p)) : undefined;
+    let pid: number;
+    if (fence && fencedBin && this.d.launchFenced) {
+      bin = fencedBin;
+      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, this.env);
+      this.fenced = { on: true };
+    } else {
+      // A fence the editor cannot use (no junction for its version, a unity_path not shaped <version>\Editor\Unity.exe):
+      // it starts unfenced, as agents do when their fence cannot be set up, and says so.
+      this.fenced = fence ? { on: false, why: !fencedBin ? `no junction under ${fence.unityDir} for ${bin}` : 'no fenced launcher here' } : undefined;
+      pid = await this.d.launch(bin, args, this.repo, this.env);
+    }
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
     }
-    return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}Started ${bin} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
+    const fenceNote = this.fenced ? (this.fenced.on ? ' at Low integrity (the worker fence)' : ` unfenced (${this.fenced.why})`) : '';
+    return `${aside ? `${aside}. ` : ''}${this.burstNote ? `${this.burstNote}. ` : ''}Started ${bin}${fenceNote} (pid ${pid}). The Unity MCP bridge comes up once the project has loaded (a minute or more); wait for it before Unity MCP calls.`;
   }
 
   /**
@@ -492,6 +550,15 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winLaunchScript(bin, args, cwd)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...env } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+      return pid;
+    },
+    launchFenced: async (fence, bin, args, cwd, env) => {
+      const temp = editorTempEnv(process.env, 'win32');
+      if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
+      for (const k of ['APPDATA', 'LOCALAPPDATA', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
+      const r = await run(fence.launcher, ['-e', FENCED_LAUNCH_SCRIPT, bin, cwd, JSON.stringify(args)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...fence.env, ...env } });
+      const pid = Number(r.stdout.trim().split(/\s+/).pop());
+      if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin} at Low integrity: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
       return pid;
     },
     noAppNap: undefined,

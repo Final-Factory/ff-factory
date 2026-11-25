@@ -106,6 +106,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
 import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -473,6 +474,11 @@ setInterval(() => {
 }, 30_000);
 // trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
 const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
+{
+  // w5533: counts only, never a key, a name or a session: what the refusal of logins that no longer exist cuts off.
+  const gone = auth.goneLogins();
+  console.log(`auth: ${gone.keys} API key(s) and ${gone.sessions} live session(s) name a login that no longer exists and are refused (w5533); ${gone.unboundKeys} unbound MCP key(s) act for the owner`);
+}
 // Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
 configureClientAddress({ trustProxy: () => cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
@@ -518,7 +524,7 @@ const liveHub = new LiveHub({
   changed: () => pushLive(),
   // The switch is in AppState.config (w1417): a page shows the Live view button and route only while it is on.
   switched: () => {
-    for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+    for (const [c, user] of openPages()) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   },
   viewerOpened: (info, who) => liveIdle.viewerOpened(info, who),
   restageFailed: (info, detail) => liveIdle.restageFailed(info, detail),
@@ -677,10 +683,14 @@ agents.onReport = (report) => broadcast({ type: 'report', report });
 // w4613: and the packed players open pair runs name, kept while the run waits for room (w4622).
 attachments.keep = () => [...reports.attachmentIds(), ...pairPlayerIds(store.work.values(), isOpen)];
 
-/** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
+/**
+ * The signed-in person making this request, as work records them (a route only runs for a signed-in user). A session
+ * whose login is gone is refused, never read as the owner's (w5533; auth.user already ends such a session).
+ */
 function requesterOf(req: http.IncomingMessage) {
   const u = auth.userInfo(auth.user(req));
-  return u ? asRequester(u) : identity.owner();
+  if (!u) throw new HttpError(401, 'login required');
+  return asRequester(u);
 }
 
 /**
@@ -1131,8 +1141,9 @@ function poolPeople(): PoolPerson[] {
 
 /** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
 function appState(user: string | undefined): AppState {
-  const u = auth.userInfo(user);
-  const me = u ?? { ...identity.owner(), role: 'owner' as const };
+  // w5533: only a signed-in login gets a state; a page whose login is gone is closed before it gets here (openPages).
+  const me = auth.userInfo(user);
+  if (!me) throw new HttpError(401, 'login required');
   const mine = agents.orchestrators.personalFor(me);
   return {
     app: appNow(),
@@ -1984,7 +1995,7 @@ route('POST', '/api/orchestrator/reset', async (req) => {
   // A fresh conversation keeps its standing timers (server/timers.ts): they are the person's jobs, not the transcript's.
   if (was) agents.timers.rehome(was, id);
   // Each page has its own home chat, so each gets its own state.
-  for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+  for (const [c, user] of openPages()) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   return { id };
 });
 
@@ -2361,6 +2372,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
+    // The daemon link's HTTP routes from the tailnet only (w5575; machineLinkTailnet: warn logs, enforce refuses, off skips).
+    if (isMachineLinkPath(url.pathname) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), `HTTP ${url.pathname.split('/').slice(0, 3).join('/')}`).refuse) {
+      return send(res, 403, { error: 'the daemon link is tailnet-only' });
+    }
     if (url.pathname === '/mcp' || url.pathname === '/mcp/upload') {
       return await routeMcp({ agents, auth, identity, attachments, send, readJson }, req, res, url);
     }
@@ -2534,6 +2549,14 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
+/** The open pages, each with its login; a page whose login no longer exists is closed instead (w5533). */
+function* openPages(): Generator<[WebSocket, string]> {
+  for (const [c, user] of clients) {
+    if (c.readyState !== c.OPEN) continue;
+    if (auth.userInfo(user)) yield [c, user];
+    else c.close(4401, 'login gone');
+  }
+}
 /** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
 const pageSockets = new PageSockets<WebSocket>();
 /** Pages watching a live view (w1398): binary JPEG frames, never compressed (they do not compress). */
@@ -2544,7 +2567,8 @@ function pushLive() {
   for (const [c, user] of clients) {
     if (c.readyState !== c.OPEN) continue;
     const u = auth.userInfo(user);
-    c.send(JSON.stringify({ type: 'live', views: liveHub.viewsFor(u?.userId ?? identity.owner().userId) } satisfies ServerEvent));
+    if (!u) continue;
+    c.send(JSON.stringify({ type: 'live', views: liveHub.viewsFor(u.userId) } satisfies ServerEvent));
   }
 }
 
@@ -2554,6 +2578,13 @@ server.on('upgrade', (req, socket, head) => {
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
     providers.upgrade(req, socket, head, clientAddress(req));
+    return;
+  }
+  const upgradePath = parseUrl(req.url)?.pathname ?? '';
+  if (isMachineLinkPath(upgradePath) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), upgradePath === '/machine' ? 'link /machine' : 'link /machine/live').refuse) {
+    // The daemon link from the tailnet only (w5575), before its token is even read.
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
