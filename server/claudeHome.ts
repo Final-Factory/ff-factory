@@ -62,6 +62,13 @@ export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD] as
  * that labelled one Low relabels it Medium.
  */
 export const DAEMON_ONLY_CHILDREN = [STEAM_CHILD] as const;
+/**
+ * The files in <root>/steam that hold a credential or the upload's config (w5731): the upload config, the uploads record and
+ * steamcmd's config.vdf, where its cached login (ConnectCache) sits. Each gets its own No-Read-Up label on Windows
+ * (lowIntegrity.ts noReadUpTargets), so a file that kept an explicit Low label from before is closed too: an explicit label
+ * on a file wins over the one its folder hands down. Paths only; nothing opens them.
+ */
+export const STEAM_SECRET_FILES = ['config.json', 'uploads.json', 'steamcmd/config/config.vdf'] as const;
 
 /** Whether a worker root's agents move to <root>/claude: CLAUDE_CONFIG_DIR not set already (an instance's own) and no off switch. */
 export function movesClaudeHome(env: Env): boolean {

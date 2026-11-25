@@ -87,7 +87,6 @@ static class FfJob
     const int BasicAccountingInformation = 1;
     const uint LimitActiveProcess = 0x8;
     const uint LimitJobMemory = 0x200;
-    const uint LimitBreakawayOk = 0x800;
     const uint SetQuota = 0x0100, Terminate = 0x0001, QueryLimited = 0x1000;
     const uint MsgActiveProcessLimit = 3, MsgJobMemoryLimit = 10;
 
@@ -176,11 +175,10 @@ static class FfJob
             lim.Basic.ActiveProcessLimit = processes;
             lim.JobMemoryLimit = new UIntPtr(memory);
         }
-        else
-        {
-            // Warn: a child started with CREATE_BREAKAWAY_FROM_JOB may leave the job, so the job never refuses a start (w5554 review).
-            lim.Basic.LimitFlags = LimitBreakawayOk;
-        }
+        // Warn sets no flag at all, JOB_OBJECT_LIMIT_BREAKAWAY_OK included: with it Git Bash (MSYS2/Cygwin) starts every child
+        // with CREATE_BREAKAWAY_FROM_JOB, so whatever a worker ran through Bash left the job and warn's peaks missed it (w5554,
+        // measured on lothdesktop after #1223: a query run from Bash saw another job, one run from PowerShell saw this one).
+        // #1204's jobs had no BREAKAWAY_OK either, and no start was refused on any machine.
         if (!SetInformationJobObject(job, ExtendedLimitInformation, ref lim, Marshal.SizeOf(typeof(ExtendedLimit)))) return Fail("SetInformationJobObject");
         IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, IntPtr.Zero, 1);
         if (port == IntPtr.Zero) return Fail("CreateIoCompletionPort");

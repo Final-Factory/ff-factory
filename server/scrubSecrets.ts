@@ -110,10 +110,11 @@ export const emptyReport = (): ScrubReport => ({ scanned: 0, files: [], total: 0
 /** Every text file below `roots` (files or folders) that a store writes, minus the ones that hold secrets on purpose. */
 export function scrubFiles(roots: readonly string[]): string[] {
   const out: string[] = [];
+  // w5702: a root itself may be a link (a locked Linux worker's `projects` links to `<root>/transcripts`); links below it are skipped.
   const walk = (p: string) => {
     let st: fs.Stats;
     try {
-      st = fs.lstatSync(p);
+      st = roots.includes(p) ? fs.statSync(p) : fs.lstatSync(p);
     } catch {
       return;
     }
