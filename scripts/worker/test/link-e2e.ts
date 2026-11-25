@@ -6,6 +6,9 @@
  *
  *   node scripts/worker/test/link-e2e.ts <scratch folder> [port=8795]
  *
+ * LINK_E2E_INSTALL_FROM=<commit> installs from that older commit instead of this checkout (w5715): the update to B then
+ * proves a daemon of that commit updates over its link to this checkout's code (B is this checkout plus one commit).
+ *
  * The portal runs from a clone of this checkout with a commit of its own on top (B), so the install (from this checkout,
  * A) has something to update to; then a commit whose daemon exits at start (C), so the update has to be put back.
  * Each line PASS or FAIL (exit 1 on any FAIL):
@@ -57,6 +60,15 @@ git(scratch, 'clone', '-q', '--bare', work, game);
 
 // The portal's code: this checkout's commit (A) and one on top (B). The update goes to the portal's own commit.
 const A = git(SRC, 'rev-parse', 'HEAD');
+// w5715: an older daemon (e.g. main before w5576's pin) installed, to update to this checkout's code.
+const FROM = process.env.LINK_E2E_INSTALL_FROM?.trim() || undefined;
+const INSTALL_SRC = FROM ? path.join(scratch, 'install-code') : SRC;
+if (FROM) {
+  git(scratch, 'clone', '-q', '--no-hardlinks', SRC, INSTALL_SRC);
+  git(INSTALL_SRC, 'checkout', '-q', '--detach', FROM);
+  fs.symlinkSync(path.join(SRC, 'node_modules'), path.join(INSTALL_SRC, 'node_modules'), isWin ? 'junction' : 'dir');
+}
+const INSTALLED = git(INSTALL_SRC, 'rev-parse', 'HEAD');
 const P = path.join(scratch, 'portal-code');
 git(scratch, 'clone', '-q', '--no-hardlinks', SRC, P);
 git(P, 'checkout', '-q', '--detach', A);
@@ -130,12 +142,13 @@ const daemonRegistered = () =>
 const jobLog = () => fs.readFileSync(path.join(l.daemon, 'logs', 'update-job.log'), 'utf8');
 
 try {
-  // 1. The install, from this checkout (A), as a person runs it, with no portal ssh (as a join now installs).
-  const install = spawnSync(node[0], [...node.slice(1), path.join(SRC, 'scripts', 'worker', 'worker.ts'), 'install', '--root', root, '--portal-url', portalUrl, '--credential-stdin', '--max-sandboxes', '2', '--max-agents-per-sandbox', '1', '--max-unity', '1', '--service', service, '--repo-url', game, '--no-firewall', '--no-cleanup', '--no-ssh', '--no-dev-drive', '--unity-slots-dir', path.join(scratch, 'slots'), ...(elevated ? ['--owner', os.userInfo().username] : [])], { input: credential + '\n', encoding: 'utf8', timeout: 20 * 60_000 });
+  // 1. The install, from this checkout (A) or LINK_E2E_INSTALL_FROM, as a person runs it, with no portal ssh (as a join now installs).
+  const install = spawnSync(node[0], [...node.slice(1), path.join(INSTALL_SRC, 'scripts', 'worker', 'worker.ts'), 'install', '--root', root, '--portal-url', portalUrl, '--credential-stdin', '--max-sandboxes', '2', '--max-agents-per-sandbox', '1', '--max-unity', '1', '--service', service, '--repo-url', game, '--no-firewall', '--no-cleanup', '--no-ssh', '--no-dev-drive', '--unity-slots-dir', path.join(scratch, 'slots'), ...(elevated ? ['--owner', os.userInfo().username] : [])], { input: credential + '\n', encoding: 'utf8', timeout: 20 * 60_000 });
   process.stdout.write(install.stdout ?? '');
   process.stderr.write(install.stderr ?? '');
-  check(install.status === 0, 'the test install (from A, no portal ssh)', `exit ${install.status}`);
+  check(install.status === 0, `the test install (from ${FROM ? `the older ${short(INSTALLED)}` : 'A'}, no portal ssh)`, `exit ${install.status}`);
   if (install.status !== 0) throw new Error('the install failed');
+  check(version().startsWith(short(INSTALLED)), `the installed daemon's code is ${short(INSTALLED)}`, version());
   check(await waitFor('the daemon to offer updates over its link', async () => (await linkState()).canLink), 'the daemon offers updates over its link, and the portal sees it');
   const cfgFile = path.join(l.daemon, 'daemon.json');
   fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')), updateOrigin: { url: P, branch: 'main' } }, null, 2));

@@ -1,11 +1,14 @@
-// w5576 (machine/portalPin.ts, docs/portal-pin.md): the portal hosts a daemon follows. Stage 1 warns only: what pinning
-// would refuse is logged, kept beside daemon.json, reported in the hello and shown by list_machines, and still happens.
+// w5576/w5715 (machine/portalPin.ts, docs/portal-pin.md): the portal hosts a daemon follows. Stage 1 warned only; stage 2
+// (w5715) enforces: a relocate or a fetch redirect to an unpinned host is refused, and a dial of the daemon's own
+// portalUrl or previousPortalUrl never is (logged, kept, reported).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PINNED_PORTAL_HOSTS, PORTAL_PIN_MODE, PortalPin, describePortalPin, hostOf, isPinned, notePortalRedirect, onPortalRedirect, pinnedHosts } from '../machine/portalPin.ts';
+import { createHash } from 'node:crypto';
+import { PINNED_PORTAL_HOSTS, PORTAL_PIN_MODE, PortalPin, describePortalPin, hostOf, isPinned, notePortalRedirect, onPortalRedirect, pinnedHosts, refusedRedirect } from '../machine/portalPin.ts';
+import { downloadBundle } from '../machine/selfUpdate.ts';
 
 const tmpDir = (t: { after: (fn: () => unknown) => void }) => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-pin-'));
@@ -13,9 +16,9 @@ const tmpDir = (t: { after: (fn: () => unknown) => void }) => {
   return d;
 };
 
-test('w5576: stage 1 ships in warn mode, and every portal host in use today is pinned', () => {
-  // Enforcement is its own change, after every machine has reported clean in warn mode (lothsahn, w5576).
-  assert.equal(PORTAL_PIN_MODE, 'warn');
+test('w5715: stage 2 ships in enforce mode, and every portal host in use today is pinned', () => {
+  // Enforcement is its own change, after every machine reported clean in warn mode (lothsahn, w5576).
+  assert.equal(PORTAL_PIN_MODE, 'enforce');
   // The VM (every machine dials it now) and BEAST, the rollback (docs/portal-on-ffbox-host.md).
   for (const url of ['https://fff.tailedfcad.ts.net', 'https://beast.tailedfcad.ts.net', 'https://FFF.tailedfcad.ts.net:443']) assert.ok(isPinned(url, pinnedHosts()), url);
   // The machine itself: the portal's own host dials loopback, and so do the tests.
@@ -47,9 +50,21 @@ test('w5576: warn mode lets an unpinned host through, logs it and keeps it acros
   assert.equal(st.warnings.length, 1, 'kept in portal-pin.json across a restart');
   assert.equal(st.warnings[0].kind, 'relocate');
   const enforce = new PortalPin(pinnedHosts(), undefined, (l) => lines.push(l), 'enforce');
-  assert.equal(enforce.check('dial', 'https://evil.example', 'x'), false);
+  assert.equal(enforce.check('relocate', 'https://evil.example', 'x'), false);
+  assert.match(lines.at(-1)!, /w5576, enforce\): REFUSED: x: evil\.example is not a pinned portal host/);
+  assert.equal(enforce.check('redirect', 'https://evil.example/u', 'x'), false);
   assert.match(lines.at(-1)!, /REFUSED/);
-  assert.equal(enforce.check('dial', 'https://beast.tailedfcad.ts.net', 'x'), true);
+  assert.equal(enforce.check('relocate', 'https://beast.tailedfcad.ts.net', 'x'), true);
+});
+
+test('w5715: enforce mode never refuses a dial: an unpinned portalUrl is dialled, logged and kept (no lockout)', () => {
+  const lines: string[] = [];
+  const pin = new PortalPin(pinnedHosts(), undefined, (l) => lines.push(l), 'enforce');
+  assert.equal(pin.check('dial', 'https://hand-set-portal.example', 'the portal URL in daemon.json'), true);
+  assert.match(lines.at(-1)!, /w5576, enforce\): dialled anyway, a dial is never refused: the portal URL in daemon\.json: hand-set-portal\.example/);
+  assert.doesNotMatch(lines.at(-1)!, /REFUSED/);
+  assert.equal(pin.status('https://hand-set-portal.example').warnings[0].kind, 'dial');
+  assert.equal(pin.status('https://hand-set-portal.example').pinned, false);
 });
 
 test('w5576: a warning file that cannot be read or written never stops a daemon; at most 20 warnings are kept', (t) => {
@@ -68,11 +83,49 @@ test('w5576: a warning file that cannot be read or written never stops a daemon;
 
 test('w5576: a fetch that came through a redirect is reported; a direct one is not', (t) => {
   const seen: string[] = [];
-  onPortalRedirect((from, to) => seen.push(`${from} -> ${to}`));
+  onPortalRedirect((from, to) => void seen.push(`${from} -> ${to}`));
   t.after(() => onPortalRedirect(undefined));
-  notePortalRedirect('https://fff.tailedfcad.ts.net/machine/update/x', { redirected: false, url: 'https://fff.tailedfcad.ts.net/machine/update/x' });
-  notePortalRedirect('https://fff.tailedfcad.ts.net/machine/update/x', { redirected: true, url: 'https://evil.example/x' });
+  assert.equal(notePortalRedirect('https://fff.tailedfcad.ts.net/machine/update/x', { redirected: false, url: 'https://fff.tailedfcad.ts.net/machine/update/x' }), true);
+  assert.equal(notePortalRedirect('https://fff.tailedfcad.ts.net/machine/update/x', { redirected: true, url: 'https://evil.example/x' }), true, 'a sink that answers nothing refuses nothing');
   assert.deepEqual(seen, ['https://fff.tailedfcad.ts.net/machine/update/x -> https://evil.example/x']);
+});
+
+test('w5715: enforce mode refuses a fetch a redirect took to an unpinned host, and uses one to a pinned host', (t) => {
+  const lines: string[] = [];
+  const pin = new PortalPin(pinnedHosts(), undefined, (l) => lines.push(l), 'enforce');
+  // As the daemon wires it (machine/daemon.ts constructor).
+  onPortalRedirect((from, to) => pin.check('redirect', to, `the portal redirected ${hostOf(from) ?? from} to ${to}`));
+  t.after(() => onPortalRedirect(undefined));
+  const u = 'https://fff.tailedfcad.ts.net/machine/update/x';
+  assert.equal(notePortalRedirect(u, { redirected: true, url: 'https://evil.example/x' }), false);
+  assert.match(lines.at(-1)!, /REFUSED: the portal redirected fff\.tailedfcad\.ts\.net to https:\/\/evil\.example\/x/);
+  assert.equal(notePortalRedirect(u, { redirected: true, url: 'https://beast.tailedfcad.ts.net/machine/update/x' }), true, 'within the pinned hosts');
+  assert.equal(notePortalRedirect(u, { redirected: false, url: u }), true);
+  assert.match(refusedRedirect(u, { url: 'https://evil.example/x' }).message, /redirect to evil\.example, not a pinned portal host \(w5715/);
+});
+
+test('w5715: an unpinned redirect fails that one update bundle download at once, keeping nothing; a pinned one downloads', async (t) => {
+  const dir = tmpDir(t);
+  const pin = new PortalPin(pinnedHosts(), undefined, () => undefined, 'enforce');
+  onPortalRedirect((from, to) => pin.check('redirect', to, `the portal redirected ${from} to ${to}`));
+  t.after(() => onPortalRedirect(undefined));
+  const body = Buffer.from('bundle bytes');
+  let calls = 0;
+  const mk = (finalUrl: string): typeof fetch => (async (u: string | URL) => {
+    calls++;
+    const r = new Response(body, { status: 200 });
+    Object.defineProperty(r, 'redirected', { value: finalUrl !== String(u) });
+    Object.defineProperty(r, 'url', { value: finalUrl });
+    return r;
+  }) as unknown as typeof fetch;
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const portal = 'https://fff.tailedfcad.ts.net';
+  const url = `${portal}/machine/update/${b.sha256}`;
+  await assert.rejects(downloadBundle(portal, 'tok', b, path.join(dir, 'a'), mk('https://evil.example/b')), /not a pinned portal host \(w5715/);
+  assert.equal(calls, 1, 'refused at once, not retried within the attempt');
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'a')), [], 'nothing of the unpinned answer kept');
+  const got = await downloadBundle(portal, 'tok', b, path.join(dir, 'b'), mk(url.replace('fff.', 'beast.')));
+  assert.equal(fs.readFileSync(got, 'utf8'), 'bundle bytes');
 });
 
 test('w5576: list_machines says the mode, the host and the newest warnings; an older daemon says it reports none', () => {

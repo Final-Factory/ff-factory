@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { FromDaemon, LinkUpdateFlags, LinkUpdateReport, ToDaemon } from '../server/machineProtocol.ts';
-import { notePortalRedirect } from './portalPin.ts';
+import { notePortalRedirect, refusedRedirect } from './portalPin.ts';
 import { launchJob, removeJob } from './osJob.ts';
 
 /** The largest bundle a daemon takes (ff-factory's whole history was 19 MB in October 2026). */
@@ -158,7 +158,10 @@ export async function downloadBundle(
       try {
         const from = size;
         const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal });
-        notePortalRedirect(url, res);
+        if (!notePortalRedirect(url, res)) {
+          await res.body?.cancel();
+          throw new Final(refusedRedirect(url, res).message);
+        }
         if (res.status >= 400 && res.status < 500) {
           await res.body?.cancel();
           throw new Final(`the portal answered ${res.status} for the update's bundle`);
