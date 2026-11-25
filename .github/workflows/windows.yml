@@ -56,6 +56,7 @@ on:
       - 'server/sandboxes.ts'
       - 'server/toolsLabelsWin.test.ts'
       - 'server/agentNode.ts'
+      - 'server/storeLock.test.ts'
       - 'server/gitHooks/**'
       - 'server/testPowershell.ts'
       - 'server/transcriptLabels.test.ts'

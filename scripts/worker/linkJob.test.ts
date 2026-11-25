@@ -119,6 +119,13 @@ test('w5702: the transcript lock goes through to the installer update as named; 
   assert.deepEqual(updateFlagsOf('/src', { transcriptLock: 'warn' as never }), { source: '/src' });
 });
 
+test('w5614: the store lock goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { storeLock: m }), { source: '/src', storeLock: m });
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', storeLock: 'warn' }), { source: '/src', workerFence: 'on', storeLock: 'warn' });
+  assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  assert.deepEqual(updateFlagsOf('/src', { storeLock: 'enforce' as never }), { source: '/src' });
+});
+
 test('w5377: the worker fence switch goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'off' }), { source: '/src', workerFence: 'off' });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', maxUnity: 3 }), { source: '/src', maxUnity: 3, workerFence: 'on' });
