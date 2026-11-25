@@ -111,7 +111,8 @@ test('steam upload: no fence lets a worker write steamcmd\'s folder (w5551)', as
   assert.ok(!MEDIUM_CHILDREN.includes('steam'), 'Windows: not left alone, so a Low label from before is made Medium');
   assert.ok(!WORKER_CHILDREN.includes('steam'), 'Windows: never labelled Low');
   assert.ok((LOCKED_CHILDREN as readonly string[]).includes('steam'), 'Linux: Landlock leaves it unwritable');
-  const args = writeLockArgs({ root: '/home/u/ffw' });
-  assert.equal(args[args.indexOf('steam') - 1], '--except');
+  const root = path.resolve('/home/u/ffw');
+  const args = writeLockArgs({ root, workFolders: [path.join(root, 'steam', 'x')] });
+  assert.ok(!args.some((a) => a === path.join(root, 'steam') || a.startsWith(path.join(root, 'steam') + path.sep)), 'Linux: no write grant reaches it');
   assert.ok(READ_ONLY_IN_ROOT.subpaths.includes('steam'), 'macOS: Seatbelt keeps it read-only');
 });

@@ -23,7 +23,19 @@ test('fenceFor: off unless the setting is "seatbelt" on a Mac with a root and sa
   assert.equal(f?.darwinTemp, '/t/DARWIN_USER_TEMP_DIR');
 });
 
-test('the profile refuses every write, then allows the root, then takes the daemon, main clone and secrets back', () => {
+test('the profile opens only the root folders workers write: no blanket root, no portal, instances or runners (w5569)', () => {
+  const p = seatbeltProfile(F);
+  assert.ok(!p.includes('(subpath "/Users/p/ffw")'), 'no blanket grant of the root');
+  for (const c of ['tmp', 'sandboxes', 'repo', 'cache', 'tools']) assert.ok(p.includes(`(subpath "${path.join('/Users/p/ffw', c)}")`), c);
+  for (const c of ['instances', 'demos', 'ben-factory', 'ffu-runners']) assert.ok(!p.includes(path.join('/Users/p/ffw', c)), c);
+  const back = p.lastIndexOf('(deny file-write*');
+  for (const c of ['daemon', 'secrets']) assert.ok(p.indexOf(path.join('/Users/p/ffw', c)) > back, `${c} only in the read-only block`);
+  const f = fenceFor({ setting: 'seatbelt', root: '/r', platform: 'darwin', home: '/h', exists: () => true, getconf: (n) => `/t/${n}`, workFolders: [path.join('/r', 'work', 'temp'), path.join('/r', 'secrets', 'x')] });
+  assert.ok(f?.open?.includes('work') && f.open.includes('tmp'));
+  assert.ok(!f?.open?.includes('secrets') && !f?.open?.includes('daemon'));
+});
+
+test('the profile refuses every write, then allows the worker folders, then takes the daemon and secrets back', () => {
   const p = seatbeltProfile(F);
   const at = (s: string) => {
     const i = p.indexOf(s);
@@ -31,10 +43,10 @@ test('the profile refuses every write, then allows the root, then takes the daem
     return i;
   };
   assert.ok(at('(allow default)') < at('(deny file-write*)'));
-  assert.ok(at('(deny file-write*)') < at('(allow file-write* (subpath "/Users/p/ffw"))'));
+  assert.ok(at('(deny file-write*)') < at('(subpath "/Users/p/ffw/tmp")'));
   const back = p.lastIndexOf('(deny file-write*');
-  assert.ok(back > at('(allow file-write* (subpath "/Users/p/ffw"))'), 'the read-only denies come after the root allow (later rules win)');
-  assert.ok(!p.includes('/Users/p/ffw/repo"'), 'the main clone stays writable: worktree git writes its index and objects there');
+  assert.ok(back > at('(subpath "/Users/p/ffw/tmp")'), 'the read-only denies come after the worker folders (later rules win)');
+  assert.ok(p.indexOf(`(subpath "${path.join('/Users/p/ffw', 'repo')}")`) < back, 'the main clone stays writable: worktree git writes its index and objects there');
   for (const s of ['(subpath "/Users/p/ffw/daemon")', '(subpath "/Users/p/ffw/secrets")', '(literal "/Users/p/ffw/root.json")']) assert.ok(at(s) > back, s);
   // No blanket home or /tmp allowance: only named paths in them.
   assert.ok(!p.includes('(subpath "/Users/p")'));
@@ -45,7 +57,7 @@ test('the profile refuses every write, then allows the root, then takes the daem
 
 test('a path with a quote or backslash cannot break out of its SBPL string', () => {
   const p = seatbeltProfile({ ...F, root: '/Users/p/f"f\\w', extraWritable: ['/x") (allow file-write* (subpath "/']});
-  assert.ok(p.includes('(subpath "/Users/p/f\\"f\\\\w")'));
+  assert.ok(p.includes('(subpath "/Users/p/f\\"f\\\\w/tmp")'));
   assert.ok(!p.includes('(subpath "/")'));
 });
 
@@ -116,7 +128,7 @@ test('w5563: sessionIdOf reads the conversation a claude argv runs', () => {
   assert.equal(sessionIdOf(['--verbose']), undefined);
 });
 
-test("w5563: the profile takes the Claude home's transcripts back after the root, but this conversation's own, and before the read-only folders", () => {
+test("w5563: the profile takes the Claude home's transcripts back after the root's open folders (w5569), but this conversation's own, and before the read-only folders", () => {
   const sid = '4476260e-3192-4e62-b3ac-23e3de4f85e4';
   const p = seatbeltProfile(F, { projects: '/Users/p/ffw/claude/projects', sid });
   const at = (s: string) => {
@@ -124,7 +136,7 @@ test("w5563: the profile takes the Claude home's transcripts back after the root
     assert.ok(i >= 0, `missing: ${s}`);
     return i;
   };
-  const root = at('(allow file-write* (subpath "/Users/p/ffw"))');
+  const root = at('  (subpath "/Users/p/ffw/claude")');
   const deny = at('(deny file-write* (subpath "/Users/p/ffw/claude/projects"))');
   const own = at(`(allow file-write* (regex #"^/Users/p/ffw/claude/projects/[^/]+/${sid}\\.jsonl$") (regex #"^/Users/p/ffw/claude/projects/[^/]+/${sid}(/|$)"))`);
   assert.ok(root < deny && deny < own && own < at('(subpath "/Users/p/ffw/daemon")'), 'later rules win');

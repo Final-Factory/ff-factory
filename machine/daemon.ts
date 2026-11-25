@@ -3031,6 +3031,19 @@ export class Daemon {
     log(probeMaxEvents(fence, argv(file), file).line);
   }
 
+  /**
+   * The root's folders a fenced worker cannot write (w5569): said once when the Linux lock or the Mac fence comes on, so a
+   * folder workers write that WORKER_CHILDREN (machine/lowIntegrity.ts) misses shows in the log at once.
+   */
+  private closedRootChildren(open: string[]): string[] {
+    const o = new Set(open);
+    try {
+      return fs.readdirSync(this.cfg.root!, { withFileTypes: true }).filter((d) => d.isDirectory() && !o.has(d.name)).map((d) => d.name).sort();
+    } catch {
+      return [];
+    }
+  }
+
   private fenceMemo?: { fence?: WorkerFence; why?: string };
   /**
    * The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). Probed once
@@ -3042,12 +3055,12 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       let why: string | undefined;
       try {
-        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()] });
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
           if (probe.ok) {
-            log('worker fence: seatbelt is on for sandbox agents');
+            log(`worker fence: seatbelt is on for sandbox agents; root folders kept read-only: ${this.closedRootChildren(fence.open ?? []).join(', ') || 'none'}`);
             const f = fence;
             this.checkMaxEventsFence('seatbelt', (file) => fencedArgv(f, '/bin/sh', maxProbeArgv('/bin/sh', file).slice(1)));
           }
@@ -3273,10 +3286,10 @@ export class Daemon {
       let why: string | undefined;
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra });
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()] });
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
           if (probe.ok) {
-            log('write lock: landlock is on for sandbox agents');
+            log(`write lock: landlock is on for sandbox agents; root folders kept read-only: ${this.closedRootChildren(args.flatMap((x, i) => (args![i - 1] === '--rw' && path.dirname(x) === path.resolve(this.cfg.root!) ? [path.basename(x)] : []))).join(', ') || 'none'}`);
             const a = args;
             this.checkMaxEventsFence('landlock', (file) => ['python3', FF_LANDLOCK, ...a, '--', ...maxProbeArgv('/bin/sh', file)]);
           }
