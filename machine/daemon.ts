@@ -3144,7 +3144,7 @@ export class Daemon {
       else {
         const probe = probeFence([SANDBOX_EXEC, '-p', fence.profile, '/usr/bin/true']);
         if (probe.ok) addMcpStatusDir(fence.env.UNITY_MCP_STATUS_DIR);
-        if (probe.ok) log(`editor fence: sandbox editors start under the workers' Seatbelt profile${fence.warn ? ', warn-only (refusals logged as "Sandbox: ... allow ... (with report)"; editorFence true enforces)' : ''}, home <root>/home, from their next start`);
+        if (probe.ok) log(`editor fence: sandbox editors start under the workers' Seatbelt profile${fence.warn ? ', warn-only (it refuses nothing and macOS logs nothing; editorFence true enforces)' : ''}, home <root>/home, from their next start`);
         else {
           log(`editor fence: the editor profile could not run a no-op (${probe.why}); sandbox editors start unfenced`);
           fence = undefined;
