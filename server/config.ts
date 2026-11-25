@@ -292,6 +292,12 @@ export function checkProjectConfig(cfg: Partial<Pick<Config, 'project'>>): void 
 
 export interface Config {
   port: number;
+  /**
+   * The address the portal listens on. Default 127.0.0.1 (w5538, security audit finding 30): Tailscale serve and Funnel, the machines
+   * and FFBox all reach the portal through a proxy on this machine, so loopback is enough, and a default of 0.0.0.0 would serve the
+   * dashboard over plain HTTP to a whole LAN. Set it only for a reason: the portal VM sets "0.0.0.0" because the VM host's health
+   * check calls the VM's own address (its firewall admits only that one source). docs/portal-bind-address.md.
+   */
   host: string;
   /**
    * Trust X-Forwarded-For/-Proto from a reverse proxy on this machine (Tailscale serve/funnel,
@@ -844,7 +850,7 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   port: 8790,
   usagePollMinutes: DEFAULT_USAGE_POLL_MINUTES,
   trustProxy: true,
-  host: '0.0.0.0',
+  host: '127.0.0.1',
   dataDir: './data',
   defaultBase: 'origin/master',
   protectedPaths: [],

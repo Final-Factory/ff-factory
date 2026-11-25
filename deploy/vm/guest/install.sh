@@ -221,6 +221,11 @@ fi
 log "8/10 config.json"
 if [ -f "$FFF_ROOT/config/config.json" ]; then
   log "kept: $FFF_ROOT/config/config.json"
+  # A kept config with no "host" now listens on 127.0.0.1 (the code default, w5538: docs/portal-bind-address.md), and the VM
+  # host's health check calls the VM's own address, so it would find the portal down. Say so; the config is never rewritten.
+  if ! jq -e 'has("host")' "$FFF_ROOT/config/config.json" >/dev/null 2>&1; then
+    warn "$FFF_ROOT/config/config.json has no \"host\": the portal now listens on 127.0.0.1 only and the host's health check will fail; set \"host\": \"0.0.0.0\" (the VM's firewall limits who reaches it; docs/portal-bind-address.md)"
+  fi
 else
   write_file "$FFF_ROOT/config/config.json" 0600 "$FFF_USER:$FFF_USER" <"$here/config.vm.example.json" >/dev/null
   log "written from config.vm.example.json; set ownerName (docs, 'Installing')"

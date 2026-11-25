@@ -95,7 +95,7 @@ it, and the workers, standing runs and approvals it causes are recorded as reque
 can have their own Claude tokens in the vault (their pool), which the agents they ask for run on. The first login
 is the owner. Roles are recorded but not enforced yet. See [docs/identity.md](docs/identity.md).
 
-For access from anywhere, bind to loopback (`"host": "127.0.0.1"`) and publish it with
+For access from anywhere, keep the default bind to loopback (`"host": "127.0.0.1"`, docs/portal-bind-address.md) and publish it with
 **Tailscale Funnel**, which terminates TLS with a real certificate and needs no router ports:
 
 ```powershell
