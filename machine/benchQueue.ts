@@ -1,5 +1,5 @@
 // A machine's bench queue (w1615, lothsahn 2026-10-20: "a queued bench lock that also covers builds"): the game repo's
-// scripts/bench/bench_queue.py keeps a first-come, first-served queue under <FF_WORKER_ROOT>/tmp/bench.queue. A timed
+// scripts/bench/bench_queue.py keeps a first-come, first-served queue under <FF_WORKER_ROOT>/daemon/bench.queue (w5545). A timed
 // bench leg takes an `exclusive` ticket and runs alone; a player build, a batch compile or an editor boot takes a
 // `shared` one, which runs beside other shared ones but never beside an exclusive one. The game repo's
 // Documentation/Bench-Lock.md has the design and its deadlock argument.
@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { rpcCall, RpcRefused } from './daemonRpc.ts';
 
 export type BenchMode = 'shared' | 'exclusive';
 
@@ -97,11 +98,11 @@ export function newestBenchQueueScript(checkouts: (string | undefined)[], root: 
   return best?.s ?? sandboxBenchQueueScript(root);
 }
 
-/** The lock dir the queue sits beside: $BENCH_LOCK, else <root>/tmp/bench.lock (quiet_gate.sh's place). */
+/** The lock dir the queue sits beside: $BENCH_LOCK, else <root>/daemon/bench.lock (w5545: the daemon's own folder; benchLock.ts benchLockDir). */
 export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv = process.env): string | undefined {
   if (env.BENCH_LOCK) return env.BENCH_LOCK;
   const r = root ?? env.FF_WORKER_ROOT;
-  return r ? path.join(r, 'tmp', 'bench.lock') : undefined;
+  return r ? path.join(r, 'daemon', 'bench.lock') : undefined;
 }
 
 /** The python the queue runs under: FF_PYTHON, else python on Windows and python3 elsewhere (the game repo's choice). */
@@ -267,6 +268,72 @@ export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & 
     return { ticket: new BenchTicket({ ...o, script: s, lock }).take() };
   }
   return { ticket: new BenchTicket({ ...o, script, lock }).take() };
+}
+
+/** What a launch needs of a ticket: the helper's state, a wait for it, and a release. */
+export type TicketLike = Pick<BenchTicket, 'state' | 'wait' | 'release'>;
+
+/**
+ * w5545: a ticket an agent's process takes through the daemon's calls (machine/benchProxy.ts): the daemon's helper holds
+ * it under the caller's own session, in the queue no worker writes. state() is the last answer (read every `pollMs`).
+ */
+export class RpcBenchTicket implements TicketLike {
+  private last: TicketState = { kind: 'waiting', line: 'taking a ticket' };
+  private handle?: string;
+  private timer?: ReturnType<typeof setInterval>;
+  private released = false;
+  private readonly o: { mode: BenchMode; what: string; maxMin?: number; reason?: 'timing' | 'machine'; ownerPid?: number; env?: NodeJS.ProcessEnv; pollMs?: number };
+
+  constructor(o: RpcBenchTicket['o']) {
+    this.o = o;
+  }
+
+  async take(): Promise<this> {
+    try {
+      const r = await rpcCall<{ handle: string }>('bench/take', { mode: this.o.mode, what: this.o.what, ownerPid: this.o.ownerPid ?? process.pid, ...(this.o.maxMin ? { maxMin: this.o.maxMin } : {}), ...(this.o.reason ? { reason: this.o.reason } : {}) }, this.o.env);
+      this.handle = r.handle;
+    } catch (e) {
+      this.last = { kind: 'failed', line: `the daemon took no ticket: ${(e as Error).message}` };
+      return this;
+    }
+    const poll = async () => {
+      if (!this.handle || this.released) return;
+      try {
+        const s = await rpcCall<{ kind: TicketState['kind']; line: string; ticket?: string }>('bench/state', { handle: this.handle }, this.o.env);
+        this.last = s.kind === 'granted' && s.ticket ? { kind: 'granted', ticket: s.ticket, line: s.line } : s.kind === 'failed' ? { kind: 'failed', line: s.line } : { kind: 'waiting', line: s.line };
+      } catch (e) {
+        // The daemon restarting: the helper holds on meanwhile; a handle it no longer knows is gone.
+        if (e instanceof RpcRefused && e.status === 404) this.last = { kind: 'failed', line: `the daemon no longer knows this ticket: ${e.message}` };
+      }
+    };
+    await poll();
+    this.timer = setInterval(() => void poll(), this.o.pollMs ?? 1000);
+    this.timer.unref?.();
+    return this;
+  }
+
+  state(): TicketState {
+    return this.last;
+  }
+
+  async wait(ms = Infinity, onLine?: (line: string) => void, sleep = (n: number) => new Promise((r) => setTimeout(r, n))): Promise<TicketState> {
+    const until = Date.now() + ms;
+    let last = '';
+    for (;;) {
+      const s = this.state();
+      if (s.kind !== 'waiting') return s;
+      if (s.line !== last) onLine?.((last = s.line));
+      if (Date.now() >= until) return s;
+      await sleep(Math.min(500, Math.max(0, until - Date.now())));
+    }
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    if (this.timer) clearInterval(this.timer);
+    if (this.handle) void rpcCall('bench/release', { handle: this.handle }, this.o.env).catch(() => undefined);
+  }
 }
 
 /** A caller that holds the bench lock waits this long at most for anything else (bench_queue.py HELD_WAIT_CAP_S). */

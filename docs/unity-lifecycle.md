@@ -239,6 +239,35 @@ answers it: a `Daemon` built anywhere else, a test's, keeps its own under its `a
 and keeps `arbiter.json` fresh (the counts line, who waits, who holds) every 15 s, every 5 s while anything waits or
 holds. The daemon looks with the process listing its sandbox watch already makes (cached 5 s).
 
+**Asking the daemon, not writing its files** (w5545, item 9 of lothsahn's w5451 rogue-worker audit: "Unity slot and
+bench requests only through the daemon's own tool calls, not worker-writable files"). Before it, any process that could
+write `<root>/unity-slots` or `<root>/tmp/bench.queue` filed a slot request or a bench ticket under whatever holder,
+session and priority it wrote. Now:
+
+- The daemon serves calls on `127.0.0.1` (a port the OS picks, named in `<app_dir>/rpc.json`; `machine/daemonRpc.ts`).
+  Each agent gets `FF_DAEMON_RPC` (that file) and `FF_DAEMON_TOKEN`, a token naming its session and sandbox, signed with
+  `<root>/secrets/daemon-rpc.key` (owner-only, kept across restarts). The daemon's own children run under
+  `daemon-<machine id>`. The session, the sandbox (so the holder) and the priority (`priorities.json`, by session) come
+  from the token, never from the body; a call naming another session's request or ticket is refused (403).
+- **Slots**: `slots/status`, `slots/request`, `slots/touch`, `slots/look`, `slots/release` (`slotRpcHandlers` in
+  `machine/unitySlots.ts`). The arbiter reads requests only from `<app_dir>/slot-queue`, where no worker writes (the
+  fences' `LOCKED_CHILDREN`). `<root>/unity-slots` stays the workers' mailbox for `unity-slot run --detach` jobs, the
+  process broker, shell groups and the shims, and is never read as requests: a `req-*.json` dropped there is nothing. An
+  old `unity-slot` (a branch from before) sees no fresh `arbiter.json` there and runs ungated; the process count still
+  holds it to the limit.
+- **Bench**: the queue is `<root>/daemon/bench.lock` and `<root>/daemon/bench.queue` (`benchLockDir`), with
+  `priorities.json`, `person.json`, `runners.json` and `closed.json` beside it. A ticket for a worker is taken by the
+  daemon (`machine/benchProxy.ts`: `bench/take`, `bench/state`, `bench/release`, `bench/register`), which starts
+  `bench_queue.py hold` itself with the token's `FF_SESSION_ID` and `FF_SANDBOX_ID`. A revoked turn stops the owner process
+  (`--owner-kind script`) only when that process runs under the caller's own session; else the ticket is a service one.
+  `timing.jsonl` stays in `<root>/tmp/bench.queue`, where the timing gate logs. A ticket or `priorities.json` left or
+  written in `<root>/tmp/bench.queue` counts for nothing; a timing from an old branch's `bench_queue.py` there is refused
+  by the timing guard, which says to merge origin/master.
+- Limits, said plainly: a process of the same OS user that reads the key or another agent's environment can still make a
+  token; the fences stop writes, not reads. What this closes is the open mailbox. Tests: `server/daemonRpc.test.ts`
+  (forged tokens, forged request files and tickets in the old folders, session keying) and the w5545 test in
+  `server/beastMachine.test.ts`.
+
 **Where it shows.** `list_sandboxes` (the machine's header and its Capacity line), `system_status` (each machine's
 line), the dashboard's group header (`4/3 editors`) and `unity status` all say "editors 4 of 3: 1 interactive, 3 batch",
 with what waits, the RAM line and the game players. A machine with no `max_unity` (no sandbox root) is counted and never
@@ -437,7 +466,7 @@ w1832), the daemon:
   in a fresh process listing right before it is asked (the leftovers' list can be a minute old). A holder with no
   worker session (a person's own timed run) asks no player to quit: the bench scripts start the measured player with
   `--detach`, so it has no parent to tell it from the others by.
-- **refuses Unity MCP calls into a closed editor** (the guard, `benchClosed`, from `<root>/tmp/bench.queue/closed.json`)
+- **refuses Unity MCP calls into a closed editor** (the guard, `benchClosed`, from `<root>/daemon/bench.queue/closed.json`)
   with why and when it comes back, so a worker mid-turn knows instead of waiting on a bridge that is gone. Its shell and
   other tools keep running. A worker whose player was asked to quit, or whose editor came back, hears it at the start of
   its next message (`[bench turn] ...`).
@@ -466,7 +495,7 @@ w1832), the daemon:
   `Runner.Listener` run writes its own, a `--version` too (biscuit, 2026-11-06: a 16:30:34Z `--version` log, newer by
   name, said idle, and at 17:08:50Z ffu-runner was paused a second after acknowledging job bd216421). A listener whose
   log cannot be read, or whose whole log has no job or "Listening for Jobs" line, is not paused. A process run from a runner's `_work` folder that no worker started is a leftover:
-  SIGTERM, never forced. What was paused and ended is in `<root>/tmp/bench.queue/runners.json`, so a daemon restarted
+  SIGTERM, never forced. What was paused and ended is in `<root>/daemon/bench.queue/runners.json`, so a daemon restarted
   mid-turn continues them. On Windows the listener is suspended and resumed instead (NtSuspendProcess, w3454: BEAST's ffu runners took new jobs under ticket t00006095 before), and a leftover is not ended (process.kill there is a forced end).
   An operations runner is never paused (w3424): a runner whose root holds an `ff-ops-runner` file (biscuit's
   `ffu-biscuit-world`, label `ffu-world`, takes only the shared FFU world's deploy) takes its jobs during the turn, and
@@ -567,7 +596,7 @@ after the game is first seen gone, so a restart of the game (a crash, a settings
 keeps it one turn. Then the editors reopen in the next shared turn, the idle-priority builds go back to normal
 (`restoreBuilds`: every sandbox batch Unity process at `PRIORITY_LOW`), and the hold lifts.
 
-**Nothing left stuck.** No process is suspended. The state is `<root>/tmp/bench.queue/person.json`, written at every look:
+**Nothing left stuck.** No process is suspended. The state is `<root>/daemon/bench.queue/person.json`, written at every look:
 the guard and `unity-slot run` hold only while it is fresh (`STALE_MS`, 5 minutes), so a daemon that is gone holds
 nothing. A daemon restart keeps a game seen just before it until its first look, reopens the editors marked closed
 (`benchClosed` in `sandboxes.json`, as after a timed run) and puts back to normal any build left at idle priority, at its

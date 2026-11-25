@@ -43,7 +43,7 @@ left out. Lines are cut at 1,000 characters. The journal and the clean-up passes
 ### bench_hours: what the exclusive bench tickets cost (w1996)
 
 lothsahn, w1996: "We're wasting system resources like crazy locking beast down to a single timing job." A machine's bench
-queue history stays on that machine (`<root>/tmp/bench.queue/history.jsonl`, rotated to `history.1.jsonl` at 5 MB), so nothing
+queue history stays on that machine (`<root>/daemon/bench.queue/history.jsonl` since w5545, rotated to `history.1.jsonl` at 5 MB), so nothing
 could compare BEAST or LothDesktop before and after a change. Each daemon now reads both files (`machine/benchHours.ts`), computes
 the last 72 UTC hours and sends them as `bench_hours` after each welcome and every 60 minutes; the portal keeps them in
 `data/bench-hours.json` (14 days; an hour reported again replaces the one kept; `server/benchHoursStore.ts`). A machine whose
