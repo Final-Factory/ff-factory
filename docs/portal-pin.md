@@ -81,16 +81,26 @@ then stays on the old portal while that portal still runs.
 
 ## Renaming the tailnet
 
-Every pinned name ends in the tailnet's name (`tailedfcad.ts.net`). Renaming the tailnet changes every portal host's
-name at once, so in enforce mode no machine would follow a relocate to the new names. Before any rename:
+Every pinned name ends in the tailnet's name (`tailedfcad.ts.net`). A rename changes every MagicDNS name at once: the
+old `fff.tailedfcad.ts.net` stops resolving the moment the rename lands, so every daemon loses its portal together, and
+no relocate can reach a machine afterwards (a relocate travels over the link that just broke). This holds in warn mode
+too: pinning does not cause it and turning enforce off does not avoid it. A rename is a recovery of every machine, not
+a move. Do it only when a person has decided it is worth that, and in this order:
 
-1. Add the new names (`fff.<new tailnet>`, `beast.<new tailnet>`) to `PINNED_PORTAL_HOSTS` and merge.
-2. Let the rollout put that on every machine, and check each machine's pin line in `list_machines`.
-3. Rename the tailnet, then relocate the machines (`relocate_machines`), as in "Moving the portal to a new host".
-4. Drop the old names in a later merge.
-
-A rename done first does not lock a machine out by itself: each daemon still dials the `portalUrl` in its daemon.json.
-But that old name stops resolving, so the machine is offline until route 2 in "Recovery" below.
+1. Add the new names (`fff.<new tailnet>`, `beast.<new tailnet>`) to `PINNED_PORTAL_HOSTS`, merge, and let the rollout
+   put that on every machine; check each machine's pin line in `list_machines`. The new portal URL is then pinned
+   everywhere, so the recovery below needs no hand edit of `pinnedPortalHosts`.
+2. Write down each machine's tailnet IP (`tailscale ip -4` on it, or the `link from` lines in the portal's journal;
+   [machines.md](machines.md) lists those of 2026-11-25). A rename keeps the IPs but changes the MagicDNS names, and an
+   ssh alias that names a machine by its `*.tailedfcad.ts.net` name breaks with it.
+3. Rename the tailnet, then bring the portal up on its new name (Tailscale Serve's certificate follows the new name).
+4. Recover every machine with route 2(a) in "Recovery" below, one at a time: the ops worker sshes to the machine **by
+   its tailnet IP**, sets `portalUrl` in daemon.json to the new URL, runs the installer's update, and checks the
+   machine is back online in `list_machines` before it moves to the next one. One at a time keeps a mistake to one
+   machine.
+5. A `-NoSsh` machine has no route 2: a person at that machine reruns its installer with the new `--portal-url`.
+   While one exists, renaming the tailnet means arranging that person first.
+6. Drop the old names in a later merge.
 
 ## Recovery
 
