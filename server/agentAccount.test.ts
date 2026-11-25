@@ -51,7 +51,7 @@ function launcher(file: string, answer: string | undefined, seen: { header?: Rec
     });
     c.on('end', () => c.end());
   });
-  return new Promise((r) => srv.listen(file, () => r(srv)));
+  return new Promise((r) => srv.listen({ path: file }, () => r(srv)));
 }
 
 /** Reads the process's stdout until `n` lines arrived, or it ended. */
@@ -140,7 +140,7 @@ for (const [name, answer, want] of [
 test('w5598: the fallback: a launcher that never answers is given up after answerMs', async () => {
   const { dir, file } = sockPath();
   const srv = net.createServer(() => {});
-  await new Promise<void>((r) => srv.listen(file, () => r()));
+  await new Promise<void>((r) => srv.listen({ path: file }, () => r()));
   const fell: string[] = [];
   try {
     const p = agentSpawner(file, { version: '9', answerMs: 200, fallback: tokenPipeSpawner(spawn), fellBack: (w) => fell.push(w) })(opts());
@@ -246,7 +246,7 @@ test('w5598: an agent through the socket that ends before any result is a failur
       setTimeout(() => c.end(), 20);
     });
   });
-  await new Promise<void>((r) => srv.listen(file, () => r()));
+  await new Promise<void>((r) => srv.listen({ path: file }, () => r()));
   const ran: [boolean, string][] = [];
   try {
     const p = agentSpawner(file, { version: '9', fallback: () => assert.fail('no fallback after OK'), fellBack: () => {}, ran: (ok, why) => ran.push([ok, why]) })(opts());

@@ -247,7 +247,10 @@ printf '%s' "$out" | matches -x 'fence: holds' || fail "fffctl fence-check: $out
 # The portal's agents' own account (w5598, docs/vault.md "In the VM"): the orchestrators, the dispatcher and the judge run
 # as fff-agent through fff-agent.socket, in a unit that sees the portal's folders through idmapped views. As fff-agent, the
 # key, the portal's environ, mem and fd, a running git stand-in's environ and every fff process's environ are refused.
-g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fff-agent.socket is not listening (w5598)"
+if ! g 'systemctl is-active fff-agent.socket' | matches -x active; then
+  g 'journalctl -u fff-agent-views.service -u fff-agent.socket -n 30 --no-pager -o cat' || true
+  fail "fff-agent.socket is not listening (w5598)"
+fi
 [ "$(g 'sudo stat -c "%a %U %G" /run/fff-agent/claude.sock')" = "600 fff fff" ] || fail "fff-agent.socket is not 0600 fff"
 g 'sudo /usr/local/lib/fff/fff-agent-views check' || fail "the agents' views are not mounted, or not shown as fff-agent's"
 g 'systemctl show -p Environment fff-portal.service' | matches -F 'FFF_AGENT_SOCKET=/run/fff-agent/claude.sock' || fail "the portal does not name fff-agent.socket"

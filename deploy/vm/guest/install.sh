@@ -298,6 +298,7 @@ agent_setup() {
 }
 if ! agent_setup; then
   warn "the portal's agents' own account is not set up (above): they start as $FFF_USER, and the portal alerts its owners"
+  journalctl -u fff-agent-views.service -n 20 --no-pager -o cat 2>/dev/null | sed 's/^/  fff-agent-views: /' >&2 || true
   run_cmd systemctl disable --now fff-agent.socket 2>/dev/null || true
 fi
 

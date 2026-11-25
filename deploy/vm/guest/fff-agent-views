@@ -34,7 +34,8 @@ check() {
     if ! mountpoint -q "$VIEWS/$name"; then
       log "fff-agent-views: $VIEWS/$name is not mounted"
       bad=1
-    elif [ "$(stat -c %u "$VIEWS/$name")" != "$agent_uid" ]; then
+    elif [ "$(stat -c %u "$src")" = "$fff_uid" ] && [ "$(stat -c %u "$VIEWS/$name")" != "$agent_uid" ]; then
+      # Only a folder fff owns shows as AGENT_USER's; a root-owned one (the app folder) shows unmapped, as nobody's.
       log "fff-agent-views: $VIEWS/$name shows owner $(stat -c %U "$VIEWS/$name"), not $AGENT_USER (no idmapped mount?)"
       bad=1
     fi
@@ -46,7 +47,12 @@ case "${1:-}" in
   start)
     install -d -m 0700 -o root -g root "$VIEWS"
     while read -r name src mode; do
-      install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$src"
+      # Only a written folder is made, and only when missing: an existing one keeps its owner and mode (the app folder is
+      # root's, 0755, so that fff cannot change the portal's code).
+      if [ ! -d "$src" ]; then
+        [ "$mode" = rw ] || die "fff-agent-views: $src is missing (install.sh makes it)"
+        install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$src"
+      fi
       install -d -m 0700 -o root -g root "$VIEWS/$name"
       mountpoint -q "$VIEWS/$name" && continue
       # u:<in the view>:<on disk>:1, util-linux mount(8) X-mount.idmap (2.39 and newer: noble and resolute).
