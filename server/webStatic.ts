@@ -84,6 +84,35 @@ export function brandedManifest(json: string, brand: WebBrand): string {
   return JSON.stringify(m, null, 2);
 }
 
+/**
+ * The app page's Content-Security-Policy (w5518, finding 12 of the w5452 audit): scripts only from this origin, so markup an
+ * agent's text or a diagram slips into the page cannot run script; no plug-ins; no framing (clickjacking). What the built app
+ * needs, from web/dist and web/src: its hashed bundles and sw.js ('self'); styles inline as well (React's style attributes,
+ * Mermaid's <style> inside the SVG it draws); stills and clips from /api/image and the review folders ('self'), a data: still
+ * in a message, and blob: previews of a file before it is sent (PendingFiles.tsx); the page socket and /live/ on this host.
+ * A remote image in agent text no longer loads (img-src has no remote origin). The voice tap's AudioWorklet is a file of its
+ * own (web/public/voice-tap.js), so script-src needs no blob:. `host` (the request's Host) names the socket's origin
+ * outright as well as 'self', for browsers that do not match ws: and wss: to 'self'; an odd Host is left out.
+ */
+export function appCsp(host?: string): string {
+  const okHost = !!host && /^([A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(:\d{1,5})?$/.test(host);
+  return [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    `connect-src 'self'${okHost ? ` wss://${host} ws://${host}` : ''}`,
+    "font-src 'self' data:",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+    "object-src 'none'",
+    "base-uri 'none'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; ');
+}
+
 function etagMatches(header: string | undefined, etag: string): boolean {
   return !!header && header.split(',').some((t) => t.trim().replace(/^W\//, '') === etag);
 }
@@ -137,7 +166,7 @@ function serveIndex(webDir: string, req: http.IncomingMessage, res: http.ServerR
     return res.end('Web UI not built. Run: npm run build');
   }
   const etag = `"${index.build}"`;
-  const headers = { 'content-type': TYPES['.html'], 'cache-control': REVALIDATE, etag };
+  const headers = { 'content-type': TYPES['.html'], 'cache-control': REVALIDATE, etag, 'content-security-policy': appCsp(req.headers.host), 'x-content-type-options': 'nosniff' };
   if (etagMatches(req.headers['if-none-match'], etag)) {
     res.writeHead(304, headers);
     return res.end();

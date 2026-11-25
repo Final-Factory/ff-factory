@@ -213,8 +213,19 @@ export async function pastePng(page: Page, selector: string, base64: string, nam
   );
 }
 
+/**
+ * What the page's Content-Security-Policy refused (server/webStatic.ts appCsp, w5518), as each browser reports it on its console.
+ * The `authed` page fails its test on any: normal use breaks no rule. The one refusal that is meant, a remote image, has a login
+ * of its own (e2e/csp.spec.ts).
+ */
+const CSP_REFUSAL = /Content[ -]Security[ -]Policy|CSP violation/i;
+
 export const test = base.extend<{ authed: Page }>({
   authed: async ({ page }, use) => {
+    const refused: string[] = [];
+    page.on('console', (m) => {
+      if (CSP_REFUSAL.test(m.text())) refused.push(m.text());
+    });
     await signIn(page);
     await page.goto('/');
     await expect(page.locator('.sidebar')).toBeAttached();
@@ -223,6 +234,7 @@ export const test = base.extend<{ authed: Page }>({
     // page keeps polling): Playwright then fails the test with "route.fetch: Test ended" or "Response has been disposed".
     // Taking the routes down waits for the handlers in flight and ignores what they throw.
     await page.unrouteAll({ behavior: 'ignoreErrors' });
+    expect(refused, 'the page broke its Content-Security-Policy').toEqual([]);
   },
 });
 

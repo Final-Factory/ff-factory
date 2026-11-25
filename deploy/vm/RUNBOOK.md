@@ -110,7 +110,9 @@ it is empty or a different ts.net address; a URL off ts.net is left alone. Typic
   the whole `from="<the VM's tailnet IP>",no-agent-forwarding,... ssh-ed25519 ...` line (design 4.3). Add it to
   `~/.ssh/authorized_keys`, or on a Windows admin account `C:\ProgramData\ssh\administrators_authorized_keys`.
 - **the backup key**, when the first backup could not reach the target yet: it prints the `restrict ssh-ed25519 ...`
-  line for the backup account's `~/.ssh/authorized_keys`. Then `sudo fff-vm ssh`, `sudo fffctl backup`.
+  line for the backup account's `~/.ssh/authorized_keys`. Then pin the target's host key (read it on the target, e.g.
+  `C:\ProgramData\ssh\ssh_host_ed25519_key.pub` on BEAST, and check its fingerprint there): `sudo fff-vm ssh`,
+  `sudo fffctl backup-config --host-key ed25519.pub`, `sudo fffctl backup`. Without a pin the backup does not run (w5529).
 
 Then check:
 
@@ -136,6 +138,31 @@ mountpoint, the owner name and the tokens), and inside the VM it does only what 
 `--yes` (or no terminal) takes the stored answers and stops, before any change, with the list of what is missing and
 where to put it: exit code 2. `GUEST_TAILSCALE=skip` and `GUEST_GITHUB=skip` in `fff-vm.conf` leave those out on
 purpose (CI does). Parts on their own: `--host-only`, `--guest-only`.
+
+### The backups' age keys (Ben and Lothsahn, each on their own computer)
+
+The backups are encrypted to age public keys, one per person. As of 2026-11-25 nobody is known to have made one
+(lothsahn, w5529: "I also don't know that Ben and I have the key. This is the first I've heard of it."), so the
+list below stays empty until each person adds theirs. Each person, once, on their own computer (not the FFBox host,
+not the VM):
+
+```bash
+age-keygen -o fff-backup-<name>.agekey     # prints "Public key: age1..."; install age from your package manager
+```
+
+- Keep `fff-backup-<name>.agekey` offline: a password manager, an encrypted USB stick, or paper. It is the only way
+  to read a backup; it never goes on the FFBox host, the VM, BEAST or into a chat.
+- Hand over only the `age1...` public line. Lothsahn puts each one on its own line in
+  `/etc/fff-vm/backup-recipients.txt` on the host and reruns the install (or `sudo fffctl backup-config
+  --recipients-file FILE` in the VM).
+- Restoring needs one of these private files: `age -d -i fff-backup-<name>.agekey <archive>.tar.age | tar -x`.
+
+Recipients (public keys, to be filled in):
+
+| Person | age public key |
+|---|---|
+| Ben | (none yet) |
+| Lothsahn | (none yet) |
 
 ## 3. Rebuilding the VM
 

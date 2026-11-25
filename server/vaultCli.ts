@@ -296,8 +296,27 @@ try {
       console.log(`removed ${e.name} (…${e.last4}). Revoke the token itself where it was made, too.`);
       break;
     }
+    case 'verify': {
+      // A restored copy of the vault (fff-backup-drill, w5529): does every entry open with this vault key? Counts only,
+      // never a value or a name's secret.
+      const file = o.file ?? die('verify --file VAULT_JSON');
+      if (!fs.existsSync(file)) die(`${file}: no such file`);
+      const copy = new Vault({ file, key: () => (keyFile ? { file: keyFile } : keySource(cfg)) });
+      const all = copy.list();
+      let bad = 0;
+      for (const e of all) {
+        try {
+          copy.reveal(e.name);
+        } catch {
+          bad++;
+        }
+      }
+      console.log(`vault copy: ${all.length} entr${all.length === 1 ? 'y' : 'ies'}, ${all.length - bad} open with the vault key${bad ? `, ${bad} do not` : ''}`);
+      if (bad) process.exit(1);
+      break;
+    }
     default:
-      die(`unknown command ${cmd} (list, add, rotate, grant, rename, remove, export, new-key, machine-credential)`);
+      die(`unknown command ${cmd} (list, add, rotate, grant, rename, remove, export, new-key, machine-credential, verify)`);
   }
 } catch (e) {
   die((e as Error).message);

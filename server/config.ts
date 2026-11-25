@@ -1,7 +1,7 @@
 import type { AttachmentConfig } from './attachments.ts';
 import type { ReviewConfig } from './review.ts';
 import type { DevRequestsConfig } from './devRequests.ts';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { PermissionMode, ProjectView } from '../shared/types.ts';
@@ -1336,7 +1336,7 @@ let appOrigin: string | undefined | null = null;
 export function appOriginUrl(): string | undefined {
   if (appOrigin === null) {
     try {
-      appOrigin = execFileSync('git', ['-C', ROOT, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
+      appOrigin = gitExecFileSync(['-C', ROOT, 'config', '--get', 'remote.origin.url'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
     } catch {
       appOrigin = undefined;
     }
