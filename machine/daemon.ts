@@ -942,7 +942,9 @@ export class Daemon {
     this.makeSession = makeSession ?? ((info, sink, options, events) => new AgentSession(info, sink, options, events));
     this.hosted = cfg.agentHosts ?? !makeSession;
     if (cfg.voice?.enabled) {
-      this.voice = new DaemonVoice(cfg.voice, cfg.root ?? appDirOfConfig(cfg), {
+      // w5574: the tools live in the daemon's folder (<appDir>/voice), never in the worker root.
+      this.voice = new DaemonVoice(cfg.voice, appDirOfConfig(cfg), {
+        root: cfg.root,
         log: (s) => log(s),
         stats: () => this.lastStats?.stats,
         changed: () => this.voice && this.send({ type: 'voice', status: this.voice.status() }),

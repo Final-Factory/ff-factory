@@ -1495,6 +1495,12 @@ fewest agent slots. On a worker computer the daemon (`machine/timedRunner.ts` `w
   `scripts/nightly/player_slots.py` lease rules), the only folders whose firewall rules exist. The run leases them for its
   turn and marks `slot.json` with a fingerprint no build has (`linkInto`), so `player_slots.py` refills the slot at that
   sandbox's next launch.
+- **Checked by content before it runs** (w5574, from w5542's audit): those folders and the piece cache are in the worker
+  root, so a worker could leave a file of the same size there. A build is kept from an earlier run, and a leg's player
+  starts, only while its folder holds exactly the order's files, each piece hashing to the SHA-256 the order names, and
+  nothing else (`buildProblem` in machine/timedRunner.ts; a planted DLL beside the exe is refused too). A laid-out build
+  that fails it is removed with the bad cached piece and the run fails; a leg that fails it fails the run. The hashing
+  reads the whole player before each leg (about 2 GB), outside the leg's timed part.
 
 While a run is queued or sent to a computer whose agent cap is 1, it is no `single_worker` for its bench queue
 (`MachineManager.singleWorker`): its own worker's turn ends at 30 minutes again while the run waits. What the timing machine runs is the build's own
