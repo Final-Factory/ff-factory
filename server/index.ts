@@ -115,7 +115,7 @@ import { warmSearchIndex } from './search.ts';
 import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './dataGuard.ts';
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
-import { PageSockets, fromThisMachine } from './pageSockets.ts';
+import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 const WEB = path.join(ROOT, 'web', 'dist');
@@ -2507,7 +2507,7 @@ const server = http.createServer(async (req, res) => {
 
 // Big messages (the full state a page gets when it connects, megabytes at thousands of sessions) go compressed;
 // the stream of small events does not pay for zlib. No context takeover: no zlib memory kept per page between messages.
-const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
+const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
 /** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
