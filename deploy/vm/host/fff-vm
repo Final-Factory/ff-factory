@@ -396,7 +396,7 @@ dom_status() {
 }
 
 cmd_backup_drill() {
-  local id="" name="" rc
+  local id="" name="" codes
   while [ $# -gt 0 ]; do
     case "$1" in --identity) id=$2; shift ;; -*) die "unknown option $1" ;; *) name=$1 ;; esac
     shift
@@ -409,12 +409,12 @@ cmd_backup_drill() {
   set +o errexit
   # shellcheck disable=SC2086 # an empty NAME is no argument: the newest
   ssh_guest sudo fffctl backup-fetch $name | age -d -i "$id" | ssh_guest sudo fffctl backup-drill --name "${name:-newest}"
-  rc=("${PIPESTATUS[@]}")
+  codes=("${PIPESTATUS[@]}")
   set -o errexit
   ssh_guest sudo fffctl status 2>/dev/null | grep -A1 'restore drill:' | head -n 2 || true
-  [ "${rc[0]}" = 0 ] || die "fetching the backup through the VM failed (exit ${rc[0]})"
-  [ "${rc[1]}" = 0 ] || die "age could not decrypt it with $id (exit ${rc[1]}): is that key one of the recipients?"
-  [ "${rc[2]}" = 0 ] || die "the drill's checks failed (exit ${rc[2]}): fff-vm ssh sudo fffctl status"
+  [ "${codes[0]}" = 0 ] || die "fetching the backup through the VM failed (exit ${codes[0]})"
+  [ "${codes[1]}" = 0 ] || die "age could not decrypt it with $id (exit ${codes[1]}): is that key one of the recipients?"
+  [ "${codes[2]}" = 0 ] || die "the drill's checks failed (exit ${codes[2]}): fff-vm ssh sudo fffctl status"
   log "restore drill passed"
 }
 
