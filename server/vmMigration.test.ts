@@ -268,3 +268,21 @@ test('vmMigration (w5716): the cut-over refuses a move that would lock every dae
   assert.equal(machineLinkPreflight({ trustProxy: false }, 'http://fff.tail1234.ts.net:8790', { serve: false }), undefined);
   assert.match(machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: true }) ?? '', /VM's config\.json/);
 });
+
+test('vmMigration (w5786): the trustProxy refusal names a real route, and an https ts.net URL is Serve even with --no-tailscale', () => {
+  // fffctl configure has no trustProxy option (deploy/vm/guest/fffctl cmd_configure); set_app_config does (appConfig.ts).
+  const served = machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: true }) ?? '';
+  assert.match(served, /set_app_config trustProxy true on the VM's portal/);
+  assert.doesNotMatch(served, /fffctl configure/);
+  // --no-tailscale, an https ts.net URL and trustProxy off: only Serve or the Funnel answers https on a ts.net name, so
+  // every daemon comes through it and is refused. The preflight refuses it before anything is touched.
+  const noTs = machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: false }) ?? '';
+  assert.match(noTs, /trustProxy is off in the VM's config\.json/);
+  assert.match(noTs, /set_app_config trustProxy true/);
+  assert.ok(machineLinkPreflight({ trustProxy: false }, 'HTTPS://FFF.Tail1234.TS.NET:443', { serve: false }), 'case and port do not hide it');
+  // The same move with trustProxy on (or unset, its default) or under warn still goes on; http straight to the node too.
+  assert.equal(machineLinkPreflight({ trustProxy: true }, 'https://fff.tail1234.ts.net', { serve: false }), undefined);
+  assert.equal(machineLinkPreflight({}, 'https://fff.tail1234.ts.net', { serve: false }), undefined);
+  assert.equal(machineLinkPreflight({ trustProxy: false, machineLinkTailnet: 'warn' }, 'https://fff.tail1234.ts.net', { serve: false }), undefined);
+  assert.equal(machineLinkPreflight({ trustProxy: false }, 'http://fff.tail1234.ts.net:8790', { serve: false }), undefined);
+});

@@ -93,6 +93,7 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
  * Whether Serve is on here (`serve`: --tailscale, whose check needs the Funnel on) proves nothing about the URL (w5771:
  * a LAN publicUrl with the Funnel on sends every daemon past Serve, and each is refused), so it only adds one refusal:
  * with Serve in front, trustProxy off in the VM's config.json (a HOST_KEY) would refuse every daemon Serve forwards.
+ * An https *.ts.net URL is Serve in front too, with or without --tailscale (w5786).
  * Anything else (a LAN, loopback or public address or name) is refused, before anything is touched.
  */
 export function machineLinkPreflight(config: Json, publicUrl: string, o: { serve: boolean }): string | undefined {
@@ -103,14 +104,18 @@ export function machineLinkPreflight(config: Json, publicUrl: string, o: { serve
     'or send the daemons to a tailnet URL (--public-url https://<node>.<tailnet>.ts.net through Tailscale Serve, or the VM\'s 100.x address); docs/machines.md, "The daemon link is tailnet-only"';
   const unset = config.machineLinkTailnet === undefined || config.machineLinkTailnet === null;
   const why = `machineLinkTailnet is ${unset ? 'unset (enforce)' : '"enforce"'}`;
-  if (o.serve && config.trustProxy === false) return `${why} and trustProxy is off in the VM's config.json, so every daemon that comes in through Tailscale Serve would be refused (the portal may not believe Serve's forwarded address): turn trustProxy on in the VM's config.json (fffctl configure), or ${fix}`;
   let host = '';
   try {
     host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase();
   } catch {
     // an unparsable URL is no tailnet address
   }
-  if (host && (tailnetAddress(host) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host))) return undefined;
+  const tsName = !!host && /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host);
+  // Serve in front: --tailscale, or an https *.ts.net URL, which only Serve or the Funnel answers (Tailscale holds its
+  // certificate), even when --no-tailscale skipped the Funnel check (w5786).
+  const viaServe = o.serve || (tsName && publicUrl.trim().toLowerCase().startsWith('https:'));
+  if (viaServe && config.trustProxy === false) return `${why} and trustProxy is off in the VM's config.json, so every daemon that comes in through Tailscale Serve would be refused (the portal may not believe Serve's forwarded address): turn it on with set_app_config trustProxy true on the VM's portal (an owner's call; the copy keeps the VM's trustProxy, not BEAST's), or ${fix}`;
+  if (host && (tailnetAddress(host) || tsName)) return undefined;
   return `${why} and the daemons would be sent to ${publicUrl || '(no URL)'}, which is neither a Tailscale address nor a *.ts.net name, so they would not come from the tailnet and the portal would refuse every daemon: ${fix}`;
 }
 
