@@ -109,6 +109,13 @@ export interface InstallLeftoverSettings {
    * window narrows to 24, 6 and 1 h. 0: no sweep (the w3764 rule: incremental cache, then the whole target).
    */
   ffuSlotKeepHours: number;
+  /**
+   * A released slot (no running or resumable worker holds it, nothing runs from it) is swept to what its last worker built
+   * within this many hours of its newest build per profile, under the cap or not (w5503): the next worker on another branch
+   * keeps the dependencies that build used warm, and the variants an earlier build left stop riding along for a week
+   * (LothDesktop slot2, 2026-11-25: 8.8 of 12.8 GB was units no build of its last hour used). 0: the held-slot window.
+   */
+  ffuSlotReleasedKeepHours: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -131,6 +138,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   ffuSlotTargetCapGB: 16,
   ffuSlotIdleDays: 7,
   ffuSlotKeepHours: 48,
+  ffuSlotReleasedKeepHours: 1,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -158,6 +166,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     ffuSlotTargetCapGB: n('ffuSlotTargetCapGB', 0, 10_000),
     ffuSlotIdleDays: n('ffuSlotIdleDays', 1, 365),
     ffuSlotKeepHours: n('ffuSlotKeepHours', 0, 24 * 365),
+    ffuSlotReleasedKeepHours: n('ffuSlotReleasedKeepHours', 0, 24 * 365),
   };
 }
 
@@ -1284,7 +1293,8 @@ export async function planInstallLeftovers(o: {
   // - a slot no running or resumable worker holds, nothing running from it, untouched ffuSlotIdleDays: the whole target;
   // - on every pass, the stale units: what no workspace unit built within ffuSlotKeepHours of the newest one uses, and
   //   superseded object files (server/cargoGraphSweep.ts, w4258); over ffuSlotTargetCapGB or on a low pass the window narrows to
-  //   24, 6 and 1 h;
+  //   24, 6, 1 h and 15 min, weighed without an idle incremental cache the w5499 trim takes anyway (w5503); a released slot (no
+  //   running or resumable holder, nothing running from it) starts at ffuSlotReleasedKeepHours (w5503);
   // - still over the cap: its debug/incremental (a rebuild after an edit: 30 s whole, 52 s without it, w3426), and the whole
   //   target only when no worker holds the slot and nothing runs from it;
   // - a low pass: debug/incremental of a held target, the whole target of one no running or resumable worker holds.
@@ -1326,21 +1336,39 @@ export async function planInstallLeftovers(o: {
     const incremental = path.join(target, 'debug', 'incremental');
     const inc = await sizeOf(incremental);
     const whole = (why: string) => items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target (${gbs(bytes)}), ${why}; the next build in the slot rebuilds it`, base: slot });
-    const trim = (why: string) => inc > 0 && items.set(incremental, { path: incremental, rule: 'ffu-slot-target', why: `the incremental cache of ffu ${e.name}'s cargo target (${gbs(inc)} of ${gbs(bytes)}), ${why} (rebuildable)`, base: slot });
+    let trimmed = false;
+    const trim = (why: string) => {
+      if (inc <= 0 || trimmed) return;
+      trimmed = true;
+      const text = `the incremental cache of ffu ${e.name}'s cargo target (${gbs(inc)} of ${gbs(bytes)}), ${why} (rebuildable)`;
+      // w5503: beside a sweep of the same target the cache joins the sweep's members: an item inside another is dropped from
+      // the plan (the within() pass at its end), which kept a swept slot's incremental cache on every pass.
+      const sweep = items.get(target);
+      if (sweep?.members) {
+        sweep.members = [...sweep.members.filter((m) => !within(m, incremental)), incremental];
+        sweep.why += `; and ${text}`;
+      } else items.set(incremental, { path: incremental, rule: 'ffu-slot-target', why: text, base: slot });
+    };
     const idleFor = now - newest;
     if (!kept && idleFor > s.ffuSlotIdleDays * DAY) {
       whole(`no running or resumable worker holds the slot and nothing in it was written for ${s.ffuSlotIdleDays} days`);
       continue;
     }
     let swept = { bytes: 0, incrementalBytes: 0 };
+    // w5503: an incremental cache no build wrote for the settle time goes on this pass anyway (the w5499 trim below), so
+    // the cap is weighed without it: a slot whose 14 GB of incremental took it over no longer loses warm units to a 1 h window.
+    const incIdle = inc > 0 && (await newestTopWrite(incremental)) <= now - settleMs ? inc : 0;
+    const released = !holding && !running;
     if (s.ffuSlotKeepHours > 0) {
-      const windows = [...new Set([s.ffuSlotKeepHours, 24, 6, 1].filter((h) => h <= s.ffuSlotKeepHours))];
+      const first = released && s.ffuSlotReleasedKeepHours > 0 ? Math.min(s.ffuSlotKeepHours, s.ffuSlotReleasedKeepHours) : s.ffuSlotKeepHours;
+      const windows = [...new Set([first, 24, 6, 1, 0.25].filter((h) => h <= first))];
       let plan: CargoSweep | undefined;
       let hours = windows[0];
       for (const h of windows) {
         plan = await planCargoSweep(target, { keepHours: h, pinned: runners.map((r) => r.cmd), settleMs, now });
         hours = h;
-        if (!o.low && !(cap && bytes - plan.bytes > cap)) break;
+        const after = bytes - plan.bytes - Math.max(0, incIdle - plan.incrementalBytes);
+        if (!o.low && !(cap && after > cap)) break;
       }
       if (plan && plan.paths.length) {
         swept = plan;
@@ -1348,7 +1376,7 @@ export async function planInstallLeftovers(o: {
         items.set(target, {
           path: target,
           rule: 'ffu-slot-target',
-          why: `stale build output in ffu ${e.name}'s cargo target (${gbs(plan.bytes)} of ${gbs(bytes)}): ${units} entries of units no workspace build of the last ${hours} h uses${plan.objects ? `, ${plan.objects} superseded object files` : ''}; ${plan.live} of ${plan.units} units stay${kept ? ` (${kept})` : ''}`,
+          why: `stale build output in ffu ${e.name}'s cargo target (${gbs(plan.bytes)} of ${gbs(bytes)}): ${units} entries of units no workspace build of the last ${hours < 1 ? `${hours * 60} min` : `${hours} h`}${released && hours === first && first < s.ffuSlotKeepHours ? ' before its last worker released it' : ''} uses${plan.objects ? `, ${plan.objects} superseded object files` : ''}; ${plan.live} of ${plan.units} units stay${kept ? ` (${kept})` : ''}`,
           base: slot,
           members: plan.paths,
         });
@@ -1357,7 +1385,7 @@ export async function planInstallLeftovers(o: {
     const left = bytes - swept.bytes;
     const incLeft = Math.max(0, inc - swept.incrementalBytes);
     if (recent) {
-      if (cap && left > cap) await keptSlot(`over the ${s.ffuSlotTargetCapGB} GB cap after its stale units, ${recent}`);
+      if (cap && left - Math.max(0, incIdle - swept.incrementalBytes) > cap) await keptSlot(`over the ${s.ffuSlotTargetCapGB} GB cap after its stale units, ${recent}`);
     } else if (cap && left > cap) {
       if (left - incLeft <= cap || kept) trim(`over the ${s.ffuSlotTargetCapGB} GB slot cap after its stale units, with no cargo process and no write for ${settleMs / 60_000} min${kept ? ` (${kept})` : ''}`);
       else whole(`over the ${s.ffuSlotTargetCapGB} GB slot cap even without its stale units and incremental cache, no worker holds the slot, and nothing was written for ${settleMs / 60_000} min`);
@@ -1370,7 +1398,7 @@ export async function planInstallLeftovers(o: {
     // what builds before that left, or a worker's own CARGO_INCREMENTAL=1 loop: it goes, held slot or not, once no build has
     // written it for the settle time (BEAST slot2: 38 of 55 GB, measured 2026-11-24).
     const wholeTaken = items.has(target) && !items.get(target)!.members;
-    if (incLeft > 0 && !wholeTaken && !items.has(incremental) && (await newestTopWrite(incremental)) <= now - settleMs) {
+    if (incLeft > 0 && !wholeTaken && !trimmed && incIdle > 0) {
       trim(`no build has written it for ${settleMs / 60_000} min and ffu slots now build with incremental off, as ffu CI does (w5499)${kept ? ` (${kept})` : ''}`);
     }
   }

@@ -109,9 +109,21 @@ sweep spares the units they run. Otherwise:
 |---|---|
 | No running or resumable worker holds the slot, nothing runs from it, and nothing was written for `ffuSlotIdleDays` (7) | the whole target |
 | Every pass | the stale units (below): what no workspace unit built within `ffuSlotKeepHours` (48) of the newest one uses, and superseded object files |
-| Over `ffuSlotTargetCapGB` (16 GB), or a low pass | the sweep's window narrows to 24, 6, then 1 h until the target fits |
+| No running or resumable worker holds the slot and nothing runs from it (released, w5503) | the sweep's window starts at `ffuSlotReleasedKeepHours` (1 h): what the last worker built in its last hour, and the dependencies that used, stay warm; older variants go |
+| Over `ffuSlotTargetCapGB` (16 GB), or a low pass | the sweep's window narrows to 24, 6, 1 h, then 15 min until the target fits. An incremental cache no build wrote for the settle time goes on this pass anyway, so it is not counted (w5503) |
 | Still over the cap | `debug/incremental`; the whole target only when no worker holds the slot and nothing runs from it (a held one is kept and listed) |
 | A low pass (the drive under its soft threshold) | the whole target of a slot no running or resumable worker holds; only `debug/incremental` of a held one |
+
+**The bound (w5503).** A released slot's target goes back to its last worker's last hour of builds within an hour of the
+release, and to nothing after `ffuSlotIdleDays`; any slot over the cap is swept down to that slot's 15 min of builds, and
+an unheld one goes whole if it still does not fit. A held slot over the cap after that is named in every pass's kept list.
+The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
+swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
+2026-11-25 04:40 UTC, before w5499 reached it: the slot targets were 4.1, 19.2, 32.1 and 25.6 GB. Of that, 0, 6.5, 19.9
+and 12.4 GB was `debug/incremental`, leaving 4.1 to 13.2 GB without it. A dry run of the sweep freed 0 GB from every slot
+at the 48 h window, and 8.8 GB (slot2) and 1.4 GB (slot3) at 1 h. A cold workspace test build costs 366 s and an edit
+rebuild 150 to 179 s, both with incremental off (measured on BEAST, w5499). So the sweep keeps the
+dependencies of the last build rather than taking a released target whole.
 
 ### The stale-unit sweep (`server/cargoGraphSweep.ts`, w4258)
 
