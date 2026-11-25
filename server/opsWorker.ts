@@ -14,6 +14,7 @@ import { redactSecrets } from './secrets.ts';
 import type { TimerAuthority } from './timers.ts';
 import type { LinkUpdateFlags, LinkUpdateReport } from './machineProtocol.ts';
 import { linkReportSummary } from './machineRollout.ts';
+import { FULL_COMMIT, portalCommit } from './version.ts';
 
 /**
  * The orchestration worker (w597, docs/ops-worker.md): ONE Claude Code session with a real shell, for Lothsahn's and
@@ -634,7 +635,7 @@ export function opsBrief(ownerName: string | undefined): string {
 You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials and member logins' API keys. Anything heavy runs on the target machine over ssh, never here.
 
 What you have:
-- \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. A machine whose worker install has no ssh (list_machines says "no ssh": it joined with -NoSsh, w1596, like LothLaptop) has no sshd, and port 22 there times out by design: your guard refuses ssh, scp and sftp to it with the reason (w4674). Its routes are an update over its daemon's link (the orchestrator's ops_worker machine_update, or the rollout after a deploy) and a local worker in one of its sandboxes; tell your requester that, and never set or keep a timer that tries ssh there again. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root <root>"'\`. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
+- \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. A machine whose worker install has no ssh (list_machines says "no ssh": it joined with -NoSsh, w1596, like LothLaptop) has no sshd, and port 22 there times out by design: your guard refuses ssh, scp and sftp to it with the reason (w4674). Its routes are an update over its daemon's link (the orchestrator's ops_worker machine_update, or the rollout after a deploy) and a local worker in one of its sandboxes; tell your requester that, and never set or keep a timer that tries ssh there again. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --update --ref <commit> --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Update -Ref <commit> -Root <root>"'\`. <commit> is the portal's own full commit, the \`commit\` field of \`curl -fsS <portal>/api/health\` (w5516: never main, whose head may be code nobody verified); the installer checks that exact commit out and refuses when it cannot, and puts the daemon on it. Better still, ask the orchestrator for machine_update, which writes the command itself. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
 - An installer rerun is yours, never a person's (w855, lothsahn: "don't ask ben to run installers"): the same update command with \`--max-sandboxes N\`, \`--max-agents-per-sandbox N\` or \`--max-unity N\` (Windows \`-MaxSandboxes\`, …) changes only what it names, and a sandbox count on a worker-root install changes in no other way. You run it when the job's message says an owner's open request asks for it (a \`[machine update for wNNN, approved by <name> …]\` message from ops_worker machine_update, or a job in which Lothsahn or Ben asked for the change themselves); the settings are the ones the message names, not more. A change nobody asked for, or one the message does not name, is not yours to make: report it instead. After it, check that list_machines shows the machine online with the new limits.
 - \`scp\` and \`sftp\` (w612): files between your scratch folder and a machine, both ways, over the same ssh (the portal's key, pinned host keys, port 22): \`scp ./check.sh m5:/tmp/\`, \`scp m5:/tmp/install.log ./\`, \`sftp -b cmds m5\` (a batch file: there is no terminal). They run as you, so they copy only what you may read and write: never the portal's files. No ssh options (-o, -i, -F, -J, -S): the machine is all they take.
 - \`fffctl restart\` (w974): a plain, soft portal restart with no new code (only the portal process restarts; the machines' workers keep running), only after a [restart] message (Lothsahn or Ben asked for it in their own words: the portal leaves a grant good once for 15 minutes; without it the command is refused). It takes no option. Run it, end your turn at once, and report after the portal is back as that message says, with the before-and-after list of the live worker sessions. Follow that message's steps.
@@ -692,6 +693,8 @@ export interface OpsDeps {
   linkUpdate?: (machineId: string, flags: LinkUpdateFlags) => Promise<LinkUpdateReport> | undefined;
   /** Why its connected daemon does not take one (server/machines.ts linkProblem, w1918): then no ssh either; undefined otherwise. */
   linkProblem?: (machineId: string) => string | undefined;
+  /** The portal's own full commit, which a machine update installs (w5516); default: this checkout's HEAD (server/version.ts). */
+  portalCommit?: () => string | undefined;
   /**
    * Set a root install's editor and agent limits on the portal's record (w2474, server/machines.ts deployMachine ->
    * setRootSettings): what its daemon runs by, sent to it in a new welcome. Throws on a value the record refuses.
@@ -755,23 +758,30 @@ export function workerUpdateFlags(
 
 /**
  * What runs on the machine to update its worker install (docs/worker-install.md, "Updating"): the installer's update
- * form, fetched from ff-factory's main, with the root folder and only the settings named in `extra`. Shared by
- * ops_worker machine_update (the worker types it after `ssh <target>`) and the automatic rollout after a verified
- * deploy (server/machineRollout.ts, which runs it over ssh itself).
+ * form, fetched at `commit` (the portal's own verified commit, never main's head: w5516, finding 11 of the w5452 audit),
+ * with `--ref <commit>` so the installer checks that exact commit out and refuses when it cannot, with the root folder and
+ * only the settings named in `extra`. The daemon code is that commit too unless `extra` names a `--daemon-ref` (a
+ * rollback). Shared by ops_worker machine_update (the worker types it after `ssh <target>`) and the automatic rollout after
+ * a verified deploy (server/machineRollout.ts, which runs it over ssh itself).
  */
-export function workerUpdateRemote(m: { root: string; platform?: string }, extra = ''): string {
-  return installerRemote(m, m.platform === 'win32' ? '-Update' : '--update', extra);
+export function workerUpdateRemote(m: { root: string; platform?: string }, commit: string, extra = ''): string {
+  return installerRemote(m, commit, m.platform === 'win32' ? '-Update' : '--update', extra);
 }
 
 /** The installer's agent tools form (w1476, server/agentTools.ts): the latest final-factory-agents plugins, nothing else changed. */
-export function workerToolsRemote(m: { root: string; platform?: string }): string {
-  return installerRemote(m, m.platform === 'win32' ? '-Tools' : '--tools');
+export function workerToolsRemote(m: { root: string; platform?: string }, commit: string): string {
+  return installerRemote(m, commit, m.platform === 'win32' ? '-Tools' : '--tools');
 }
 
-function installerRemote(m: { root: string; platform?: string }, mode: string, extra = ''): string {
+/** Where the installer is fetched from: ff-factory at one commit (raw.githubusercontent.com serves a commit id as a ref). */
+export const installerUrl = (commit: string, platform?: string) => `https://raw.githubusercontent.com/Final-Factory/ff-factory/${commit}/scripts/worker/install.${platform === 'win32' ? 'ps1' : 'sh'}`;
+
+function installerRemote(m: { root: string; platform?: string }, commit: string, mode: string, extra = ''): string {
+  // w5516: only a full commit id pins anything; a branch or a short id would let whatever is on GitHub then run.
+  if (!FULL_COMMIT.test(commit)) throw new Error(`the installer is pinned to a full 40-character commit id, not "${commit}" (w5516)`);
   return m.platform === 'win32'
-    ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) ${mode} -Root ${m.root}${extra ? ` ${extra}` : ''}"`
-    : `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- ${mode} --root ${m.root}${extra ? ` ${extra}` : ''}`;
+    ? `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm ${installerUrl(commit, 'win32')}))) ${mode} -Ref ${commit} -Root ${m.root}${extra ? ` ${extra}` : ''}"`
+    : `bash -c "$(curl -fsSL ${installerUrl(commit)})" -- ${mode} --ref ${commit} --root ${m.root}${extra ? ` ${extra}` : ''}`;
 }
 
 /** What the worker reports after a restart a person asked for (w974): the same lines in the instruction before and after it. */
@@ -1027,7 +1037,9 @@ export class OpsWorker {
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
     const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence).join(' ');
-    const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, extra)}'`;
+    const commit = (this.d.portalCommit ?? portalCommit)();
+    if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
+    const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
     const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.${dev.moveToDevDrive ? ` This one moves the sandboxes onto a Dev Drive (docs/worker-install.md, "The Dev Drive"): it refuses, naming them, while an agent is in a sandbox or a Unity editor runs from one, and then nothing has changed: report which and stop. When it can go ahead it takes an hour or more (it saves each sandbox's work on its branch first, moves the Library seed, and re-creates each sandbox): run it in the background and read its output until it ends, never twice at once, and never interrupt it; if it stops half way, run the same command again (it picks up where it stopped). Report the free space on the root's drive before and after (\`Get-PSDrive <letter>\` on the machine) and the sandboxes it moved.` : dev.devDrive ? ' This one also makes the Dev Drive (docs/worker-install.md, "The Dev Drive") but moves no sandbox; report the letter it chose and the size it printed.' : ''}`;
     return `${this.send(caller, text, false, [id], true)}${recorded}`;

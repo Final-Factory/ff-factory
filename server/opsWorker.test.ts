@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, workerUpdateFlags } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -902,6 +902,7 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
     personTurn: () => false, // a [dispatch] or a timer: the harness's turn
     file: path.join(dir, 'ops-worker.json'),
     workProblem: () => undefined,
+    portalCommit: () => '3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a',
     machine: (id) => machines[id],
     ownRequestProblem: (id, who) => (id === 'w847' && who === 'ben' ? undefined : `${id} is not one of their own requests`),
   });
@@ -921,13 +922,13 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   await new Promise((r) => setTimeout(r, 300));
   const sent = store.readTranscript(OPS_ID, 20).find((e) => e.kind === 'user') as { text: string };
   assert.match(sent.text, /^\[machine update for w847, approved by Ben through that request\]/);
-  assert.ok(sent.text.includes(`ssh ben-ryding@biscuit 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /home/ben-ryding/ffw --max-sandboxes 3'`), sent.text);
+  assert.ok(sent.text.includes(`ssh ben-ryding@biscuit 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a/scripts/worker/install.sh)" -- --update --ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a --root /home/ben-ryding/ffw --max-sandboxes 3'`), sent.text);
   assert.match(sent.text, /This job is the step left on w847/);
   // Windows, and an update that changes nothing.
   ops.machineInstall(ben, { machine: 'beast', workId: 'w847' });
   await new Promise((r) => setTimeout(r, 300));
   const win = store.readTranscript(OPS_ID, 40).filter((e) => e.kind === 'user').at(-1) as { text: string };
-  assert.ok(win.text.includes(`-Update -Root C:\\ffw"'`), win.text);
+  assert.ok(win.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw"'`), win.text);
   assert.match(win.text, /with no setting changed/);
   assert.doesNotMatch(win.text, /Dev Drive/, 'an update without the flags says nothing of a drive, so the automatic rollout (w887) never makes one');
   // The Dev Drive (w900): Windows only, the flags the installer takes and nothing free-form.
@@ -936,12 +937,12 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   ops.machineInstall(ben, { machine: 'beast', workId: 'w847', devDrive: true, devDriveMaxGB: 600 });
   await new Promise((r) => setTimeout(r, 300));
   const dd = store.readTranscript(OPS_ID, 60).filter((e) => e.kind === 'user').at(-1) as { text: string };
-  assert.ok(dd.text.includes(`-Update -Root C:\\ffw -DevDrive -DevDriveMaxGB 600"'`), dd.text);
+  assert.ok(dd.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw -DevDrive -DevDriveMaxGB 600"'`), dd.text);
   assert.doesNotMatch(dd.text, /MoveToDevDrive/);
   ops.machineInstall(ben, { machine: 'beast', workId: 'w847', moveToDevDrive: true });
   await new Promise((r) => setTimeout(r, 300));
   const mv = store.readTranscript(OPS_ID, 80).filter((e) => e.kind === 'user').at(-1) as { text: string };
-  assert.ok(mv.text.includes(`-Update -Root C:\\ffw -MoveToDevDrive"'`), mv.text);
+  assert.ok(mv.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw -MoveToDevDrive"'`), mv.text);
   assert.match(mv.text, /refuses, naming them, while an agent is in a sandbox/);
   assert.match(mv.text, /free space on the root's drive before and after/);
   // w5377: the worker fence's remote switch: one flag per platform's installer, on or off and nothing else, alone or with others.
@@ -950,12 +951,12 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerFence: 'off' });
   await new Promise((r) => setTimeout(r, 300));
   const wfWin = store.readTranscript(OPS_ID, 100).filter((e) => e.kind === 'user').at(-1) as { text: string };
-  assert.ok(wfWin.text.includes(`-Update -Root C:\\ffw -WorkerFence off"'`), wfWin.text);
+  assert.ok(wfWin.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw -WorkerFence off"'`), wfWin.text);
   assert.match(wfWin.text, /with these settings changed: -WorkerFence off/);
   ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', maxUnity: 1, workerFence: 'on' });
   await new Promise((r) => setTimeout(r, 300));
   const wfLin = store.readTranscript(OPS_ID, 120).filter((e) => e.kind === 'user').at(-1) as { text: string };
-  assert.ok(wfLin.text.includes(`--update --root /home/ben-ryding/ffw --max-unity 1 --worker-fence on'`), wfLin.text);
+  assert.ok(wfLin.text.includes(`--update --ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a --root /home/ben-ryding/ffw --max-unity 1 --worker-fence on'`), wfLin.text);
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, 'on'), ['-WorkerFence on']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, 'off'), ['--worker-fence off']);
   assert.deepEqual(workerUpdateFlags('linux', {}), [], 'unset: no flag, the install keeps its fence');
@@ -1137,4 +1138,13 @@ test('w1869: a git or GitHub job works the first time: the brief gives the route
   assert.match(brief, /A branch delete needs no clone: .*repos\/OWNER\/REPO\/git\/refs\/heads\/BRANCH.*git ls-remote --heads/);
   assert.match(brief, /no git here \(git and GitHub jobs run over ssh, above\)/);
   assert.match(String(shell('gh auth status')), new RegExp(OPS_GITHUB_ROUTE.slice(0, 60).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+});
+
+test('w5516: the installer commands pin a full commit, fetched at it and named to it, and refuse a branch or a short id', () => {
+  const c = '3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a';
+  assert.equal(workerUpdateRemote({ root: '/home/x/ffw', platform: 'linux' }, c), `bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/${c}/scripts/worker/install.sh)" -- --update --ref ${c} --root /home/x/ffw`);
+  assert.equal(workerToolsRemote({ root: 'D:\\ffw', platform: 'win32' }, c), `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/${c}/scripts/worker/install.ps1))) -Tools -Ref ${c} -Root D:\\ffw"`);
+  assert.equal(installerUrl(c), `https://raw.githubusercontent.com/Final-Factory/ff-factory/${c}/scripts/worker/install.sh`);
+  for (const bad of ['main', c.slice(0, 12), c.toUpperCase(), `${c} --ref main`, ''])
+    assert.throws(() => workerUpdateRemote({ root: '/x', platform: 'linux' }, bad), /pinned to a full 40-character commit id/, bad);
 });
