@@ -1109,6 +1109,18 @@ export interface MachinePause {
   at?: string;
 }
 
+/** A machine's worker write fence as its daemon reports it (w5555, machine/fenceGate.ts). */
+export interface WorkerFenceReport {
+  /** off: this OS's fence key is absent (switched off on purpose); setting_up: workers wait; on; failed: workers are held. */
+  state: 'off' | 'setting_up' | 'on' | 'failed';
+  /** Which fence: macOS Seatbelt, Linux Landlock, Windows Low integrity. */
+  kind?: 'seatbelt' | 'landlock' | 'low';
+  /** Why it failed: the probe's error, for the portal's alert. */
+  why?: string;
+  /** When it reached this state (ISO). */
+  since?: string;
+}
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -1151,6 +1163,11 @@ export interface Machine {
   daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number; hostGuard?: MachineGuardSettings };
   /** Its daemon runs the host guard (w466, machine/hostGuard.ts) and this is its last state: the sandbox drive, disk levels, what waits. */
   guard?: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'>;
+  /**
+   * Its worker write fence (w5555, machine/fenceGate.ts): off (this OS's key absent, on purpose), setting up, on, or failed
+   * with the probe's error. A failed fence holds its sandbox workers, and placement counts the machine busy.
+   */
+  fence?: WorkerFenceReport;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.
@@ -2810,11 +2827,18 @@ export interface WorkHandedUp {
   /** When the requester's orchestrator was sent them again (once, 2 h after the hand-up: Orchestrators.handUpStep, w4352). */
   remindedAt?: string;
   /**
-   * w4352: still unfiled 12 h after the hand-up, FF Factory filed them itself as the requester's low-priority requests
-   * (`filed`, also in `filed` above), each de-duplicated against open and recently done work like an FFBox dev request
-   * (`dropped`: what covers it). Nothing is pending after it (handUpsPending).
+   * w4352, until w5577: still unfiled 12 h after the hand-up, FF Factory filed them itself. No longer set (w5577: a hand-up
+   * never files itself); kept so a record written before reads as settled (handUpsPending).
    */
   autoFiled?: { at: string; filed: string[]; dropped: { title: string; by: string; why: string }[] };
+  /**
+   * w5577: when, still unfiled 12 h after the hand-up, they became a Waiting-on-input card for the person they were handed
+   * up to (Orchestrators.handUpStep, once): File them (filed through that person's orchestrator's file_follow_ups, every
+   * request_work limit included) or Drop them. Nothing files them by itself.
+   */
+  card?: string;
+  /** w5577: the person dropped them (the card's Drop, Orchestrators.dropHandUps): nothing is pending after it. */
+  dropped?: { at: string; by: string; note?: string };
 }
 
 /** One pull request linked to a request: where it is, and what it did. */
@@ -2991,7 +3015,13 @@ export interface WorkBlocker {
    * itself when every check passed, at this head (--match-head-commit), and files `report` as the worker's report, with no model
    * turn. On red, or a merge that fails, the worker is resumed as without it. `session`: the worker that set it.
    */
-  mergeOnGreen?: { head: string; report: string; session: string };
+  mergeOnGreen?: {
+    head: string;
+    report: string;
+    session: string;
+    /** w5549: the pull request's head branch as GitHub said when it was armed (the worker's own, server/mergeOwner.ts); the merge checks it again. */
+    headRef?: string;
+  };
   /**
    * deploy (w2140): the portal's automatic deploy is held because CI failed on the head of its main, so this gate cannot
    * clear until that is fixed. `text` is what the request's live state says ("deploy held: master CI failed on 5a1909756
@@ -3726,8 +3756,12 @@ export interface PermissionDecisionRequest {
 // ---------------------------------------------------------------- the token vault (docs/vault.md, w512)
 
 export type VaultKind = 'claude' | 'github' | 'env' | 'github-app';
-/** The roles a machine run has (config claudeAccounts' names): sandbox workers, standing agents. */
-export type VaultRole = 'workers' | 'standing';
+/**
+ * The roles a machine run has (config claudeAccounts' names): sandbox workers, standing agents. `releases` (w5551) is no
+ * run's: an entry granted to it reaches no agent and is read by the portal only for the daemon's own release jobs
+ * (steam_upload, server/steamUpload.ts).
+ */
+export type VaultRole = 'workers' | 'standing' | 'releases';
 /** owner: only work the entry's owner asked for. anyone: any run it is granted to. */
 export type VaultShare = 'owner' | 'anyone';
 

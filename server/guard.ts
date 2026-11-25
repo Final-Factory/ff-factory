@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal, updateLocalPlugin } from '../machine/evidenceGate.ts';
+import { gitFenceSync } from './safeGit.ts';
+import { STALE_EVIDENCE, TRUSTED_GIT, checkoutScript, evidenceGated, evidenceRefusal, evidenceVerdict, noScriptRefusal, refreshTrustedCheckout, trustedAgentsCheckout, trustedAppDir, trustedEvidenceRun, trustedGh, trustedGit } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
 import { checkGitBashPathInPowerShell } from './gitBashPath.ts';
@@ -30,8 +31,9 @@ import type { CrashHoldMark } from '../shared/types.ts';
  * This is a SEATBELT, not a security boundary: it catches the mistakes a well-meaning agent makes
  * (pushing to master, killing the wrong Unity, editing the live checkout) by pattern-matching tool
  * input. A determined or prompt-injected agent can get around it (a script file, execute_code in
- * its own editor, a junction). The real boundaries are GitHub branch rules and, if ever needed, a
- * separate low-privilege Windows account for sandboxes. Keep the rules simple and legible.
+ * its own editor, a junction). The real protection is the OS write fences (Windows Low integrity, macOS
+ * Seatbelt, Linux Landlock), the read blocks and the daemon-side checks, and GitHub branch rules; what each covers and
+ * what is still open: docs/worker-fence.md, "What protects a machine, and what does not". Keep the rules simple and legible.
  *
  * Rules:
  *   - git, every repo: no force pushes (--force-with-lease is allowed), no remote branch deletion,
@@ -881,7 +883,9 @@ export type RemoteResolver = (dir: string) => Map<string, string> | undefined;
 
 export const gitRemotes: RemoteResolver = (dir) => {
   try {
-    const out = execFileSync('git', ['-C', dir, 'remote', '-v'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    // w5541: the fence (server/safeGit.ts) on the trusted git (w5542).
+    const f = gitFenceSync(['-C', dir, 'remote', '-v']);
+    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, ...f.args], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: f.env });
     const m = new Map<string, string>();
     for (const line of out.split('\n')) {
       const [name, url, kind] = line.trim().split(/\s+/);
@@ -911,7 +915,7 @@ export type PrBaseResolver = (pr: string | undefined, repo: string | undefined, 
 /** PrBaseResolver through gh (`gh pr view --json baseRefName`); a failure (offline, no such PR) reads as unknown. */
 export const ghPrBase: PrBaseResolver = (pr, repo, dir) => {
   try {
-    const out = execFileSync('gh', ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'baseRefName', '-q', '.baseRefName'], { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const out = execFileSync(trustedGh(), ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'baseRefName', '-q', '.baseRefName'], { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     return out.trim() || undefined;
   } catch {
     return undefined;
@@ -920,35 +924,69 @@ export const ghPrBase: PrBaseResolver = (pr, repo, dir) => {
 
 export type EvidenceResolver = (pr: string | undefined, repo: string | undefined, dir: string | undefined, env?: Record<string, string | undefined>) => string | undefined;
 
+/** What ghEvidence runs with; tests replace each. */
+export interface GhEvidenceDeps {
+  /** The PR's URL (`gh pr view --json url`), or undefined when gh cannot read it. */
+  prUrl?: (pr: string | undefined, repo: string | undefined, dir: string | undefined) => string | undefined;
+  /** The daemon's folder, where the trusted checkout lives (evidenceGate.ts trustedAppDir). */
+  appDir?: string;
+  /** Brings the trusted checkout up to date (evidenceGate.ts refreshTrustedCheckout): what failed, or undefined. */
+  refresh?: (co: string, force: boolean) => string | undefined;
+  run?: (cmd: string, args: string[], opts: { cwd: string; env: NodeJS.ProcessEnv }) => { status: number | null; stdout: string; stderr: string; error?: Error };
+  exists?: (p: string) => boolean;
+  log?: (line: string) => void;
+}
+
+/** gh, run by the guard from a trusted PATH and never from the worker's folder (w5542: Windows looks there first). */
 /**
  * w3088: a raw `gh pr merge` (or the API's merge) of a Final-Factory/FinalFactory pull request runs the same Evidence check
  * as `ff-pr merge` (machine/evidenceGate.ts), so no merge path skips it: #3180 merged on green with its section failing.
  * The PR's own repository is read from GitHub; one outside the gated set, or one gh cannot read (the merge would fail
  * there too), is let through. The check took 1.5 s on #3180 (measured, BEAST, 2026-11-04).
+ *
+ * w5542: this runs in the agent host, above the worker fence, so it runs only the pr_evidence.py of its own checkout of
+ * final-factory-agents' master in the daemon's folder (refreshed from GitHub when older than 10 minutes, or when the copy
+ * says a newer one is released), never the newest copy in the plugin cache, FF_SKILLS or `<root>/tools`, which workers
+ * can write: a planted "999" copy there would have run at the host's level. Its python and gh come from a PATH with no
+ * worker-writable folder, with no PYTHON* settings, no user site (-s) and the checkout as working directory.
  */
-export const ghEvidence: EvidenceResolver = (pr, repo, dir, env) => {
-  let url = '';
-  try {
-    url = execFileSync('gh', ['pr', 'view', ...(pr ? [pr] : []), ...(repo ? ['-R', repo] : []), '--json', 'url', '-q', '.url'], { cwd: dir, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
-  } catch {
-    return undefined;
-  }
-  const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url);
-  if (!m || !evidenceGated(m[1])) return undefined;
-  const all = { ...process.env, ...env } as NodeJS.ProcessEnv;
-  const script = findPrEvidence({ env: all, home: os.homedir() });
-  const why = (s: string) => `Not merged: ${s}. Fix the evidence or the claim (gh pr edit ${m[2]} --body-file <f>), then merge with ff-pr merge.`;
-  if (!script) return why(noScriptRefusal(m[1], m[2]));
-  const check = (s: string) => {
-    const r = spawnSync(evidencePython(all), evidenceArgs(s, m[1], m[2]), { cwd: dir, encoding: 'utf8', timeout: 120_000, windowsHide: true, env: all });
-    const code = r.status ?? (r.error ? 127 : 1);
-    return { code, text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`, v: evidenceVerdict(code, r.stdout ?? '', r.stderr ?? (r.error ? r.error.message : '')) };
+export function makeGhEvidence(d: GhEvidenceDeps = {}): EvidenceResolver {
+  return (pr, repo, dir, env) => {
+    const url = (d.prUrl ?? ((p, r, w) => {
+      try {
+        return execFileSync(trustedGh(), ['pr', 'view', ...(p ? [p] : []), ...(r ? ['-R', r] : []), '--json', 'url', '-q', '.url'], { cwd: w, encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim();
+      } catch {
+        return undefined;
+      }
+    }))(pr, repo, dir);
+    const m = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(url ?? '');
+    if (!m || !evidenceGated(m[1])) return undefined;
+    const workerEnv = { ...process.env, ...env } as NodeJS.ProcessEnv;
+    const appDir = d.appDir ?? trustedAppDir();
+    const co = trustedAgentsCheckout(appDir);
+    const script = checkoutScript(co);
+    const exists = d.exists ?? ((p: string) => fs.existsSync(p));
+    const refresh = d.refresh ?? ((c: string, force: boolean) => refreshTrustedCheckout(c, {}, { force }));
+    const log = d.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
+    const why = (s: string) => `Not merged: ${s}. Fix the evidence or the claim (gh pr edit ${m[2]} --body-file <f>), then merge with ff-pr merge.`;
+    const fetched = refresh(co, false);
+    if (!exists(script)) return why(`${noScriptRefusal(m[1], m[2])}${fetched ? ` (the guard's trusted copy: ${fetched})` : ''}`);
+    const check = () => {
+      const t = trustedEvidenceRun({ script, repo: m[1], pr: m[2], workerEnv, appDir, ...(dir ? { sandboxDir: dir } : {}), exists });
+      if ('error' in t) return { code: 127, text: t.error, v: { ok: false, lines: [t.error] } };
+      const r = (d.run ?? ((cmd, args, o) => spawnSync(cmd, args, { ...o, encoding: 'utf8', timeout: 120_000, windowsHide: true })))(t.python, t.args, { cwd: t.cwd, env: t.env });
+      const code = r.status ?? (r.error ? 127 : 1);
+      log(`w5542 evidence check ${m[1]}#${m[2]}: ${t.python} ${t.args.slice(0, 2).join(' ')}: exit ${code}`);
+      return { code, text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`, v: evidenceVerdict(code, r.stdout ?? '', r.stderr ?? (r.error ? r.error.message : '')) };
+    };
+    let c = check();
+    // w4926: a copy behind the released one refuses for a reason no PR edit fixes: fetch the checkout and check once more.
+    if (!c.v.ok && STALE_EVIDENCE.test(c.text) && !refresh(co, true)) c = check();
+    return c.v.ok ? undefined : why(evidenceRefusal(m[1], m[2], c.code, c.v));
   };
-  let c = check(script);
-  // w4926: a copy one release behind refuses for a reason no PR edit fixes: update the plugin and check once more.
-  if (!c.v.ok && STALE_EVIDENCE.test(c.text) && !updateLocalPlugin(all)) c = check(findPrEvidence({ env: all, home: os.homedir() }) ?? script);
-  return c.v.ok ? undefined : why(evidenceRefusal(m[1], m[2], c.code, c.v));
-};
+}
+
+export const ghEvidence: EvidenceResolver = makeGhEvidence();
 
 export interface ShellContext {
   cwd?: string;
@@ -982,7 +1020,8 @@ export const isNoreplyEmail = (email: string) => /@users\.noreply\.github\.com$/
 export const gitPushedEmails = (dir: string, remote: string, srcs: string[]): string[] | undefined => {
   try {
     const not = /[/:\\]/.test(remote) ? '--remotes' : `--remotes=${remote}`;
-    const out = execFileSync('git', ['-C', dir, 'log', '--format=%ae%n%ce', ...srcs, '--not', not, '--'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const f = gitFenceSync(['-C', dir, 'log', '--no-show-signature', '--format=%ae%n%ce', ...srcs, '--not', not, '--']);
+    const out = execFileSync(trustedGit(), [...TRUSTED_GIT, ...f.args], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, env: f.env });
     return [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
   } catch {
     return undefined;

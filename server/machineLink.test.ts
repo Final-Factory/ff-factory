@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -13,10 +13,10 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
+import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { ANSWERS, SelfUpdater, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -82,7 +82,7 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
     fs.rmSync(root, { recursive: true });
     fs.writeFileSync(root, 'not a drive');
   }
-  const config: DaemonConfig = { portalUrl: url, id: 'mx', token, repoPath: tmp, ...(o.root !== false ? { root } : {}), appDir, claude: 'no-such-claude', maxEventsFile: null, cleanup: { everyMinutes: 0 } } as DaemonConfig;
+  const config: DaemonConfig = { portalUrl: url, id: 'mx', token, repoPath: tmp, ...(o.root !== false ? { root } : {}), appDir, claude: 'no-such-claude', maxEventsFile: null, cleanup: { everyMinutes: 0 }, updateOrigin: { url: repo.root, branch: git(repo.root, 'branch', '--show-current') } } as DaemonConfig;
   RECONNECT_MS.value = 200;
   REOFFER_MS.value = 200;
   const d = new Daemon(config, undefined, PROBES);
@@ -149,6 +149,123 @@ test('w1596: a worker install says it updates over its link; the portal sends th
   assert.equal(bad.rollback, 'ok');
 });
 
+/**
+ * w5593: a daemon whose update stand-in job ran is updated again here, so its job's task is "removed" by a stub (the real one
+ * starts PowerShell on Windows for each job: the w5642 review's 238-329 s), and each step waits for that clean-up's job.json write.
+ */
+async function thinSetup(t: { after: (fn: () => unknown) => void }) {
+  const s = await setup(t);
+  await until('online, its hello read', () => s.mm.canLink('mx'));
+  s.d.selfUpdate.deps.launch = finishing(s, {});
+  s.d.selfUpdate.deps.remove = async () => undefined;
+  const offered: UpdateBundle[] = [];
+  const offer = s.mm.bundles.offer.bind(s.mm.bundles);
+  s.mm.bundles.offer = (id, b, now) => (offered.push(b), offer(id, b, now));
+  const daemon = { runs: undefined as string | undefined };
+  s.mm.daemonCommit = () => daemon.runs;
+  const f = updateFiles(s.appDir);
+  const update = async (form?: 'tools') => {
+    const r = await s.mm.linkUpdate('mx', form ? { form } : {});
+    // The daemon's own tick may be removing the job already (then this tick returns at once): wait for its job.json write.
+    await s.d.selfUpdate.tick();
+    await until('the ended job removed', () => readJson<UpdateJob>(f.job)?.removed === true);
+    return r;
+  };
+  return { s, offered, daemon, update, f };
+}
+
+test('w5593: a machine gets only what its checkout lacks, from the commit its daemon runs; the tools run from HEAD\'s parents', async (t) => {
+  const { s, offered, daemon, update, f } = await thinSetup(t);
+  // A daemon that does not say its commit (or names one the portal lacks) gets the full bundle, as before.
+  const one = s.repo.commit;
+  daemon.runs = 'f'.repeat(40);
+  assert.equal((await update()).ok, true);
+  assert.equal(offered.at(-1)?.from, undefined, 'an unknown commit: the full bundle');
+  const full1 = offered.at(-1)!;
+  // The portal moved on, with a big file: the daemon on `one` (a short id in its hello) gets a bundle without what it has.
+  fs.writeFileSync(path.join(s.repo.root, 'big.bin'), randomBytes(200_000));
+  const two = portalRepo(s.repo.root, 'two').commit;
+  daemon.runs = one.slice(0, 8);
+  assert.equal((await update()).ok, true);
+  assert.deepEqual([offered.at(-1)!.commit, offered.at(-1)!.from], [two, [one]]);
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), two, 'checked out from the incremental bundle');
+  const three = portalRepo(s.repo.root, 'three').commit;
+  const full3 = await s.mm.bundles.prepare();
+  daemon.runs = two;
+  assert.equal((await update()).ok, true);
+  assert.ok(offered.at(-1)!.size < full3.size / 10, `incremental ${offered.at(-1)!.size} bytes against the full ${full3.size}`);
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), three);
+  // The tools publish on a daemon that runs this commit already: from its parents.
+  daemon.runs = three;
+  assert.equal((await update('tools')).ok, true);
+  assert.deepEqual(offered.at(-1)!.from, [two]);
+  // Bundles of the current commit stay; of older ones only the newest.
+  const left = fs.readdirSync(path.join(s.tmp, 'data', 'update-bundles')).filter((x) => x.endsWith('.bundle'));
+  assert.equal(left.includes(path.basename(full1.file)), false, "the first commit's bundle is gone");
+  assert.equal(left.filter((x) => x.startsWith(three.slice(0, 16))).length, 2, `both of three's bundles stay: ${left.join(', ')}`);
+});
+
+test('w5593: a checkout without the base refuses the incremental bundle and gets the full one in the same call', async (t) => {
+  const { s, offered, daemon, update, f } = await thinSetup(t);
+  const one = s.repo.commit;
+  assert.equal((await update()).ok, true);
+  // A machine installed another way, or a checkout made again: its daemon names `one`, its checkout lacks it.
+  const two = portalRepo(s.repo.root, 'two').commit;
+  daemon.runs = one;
+  fs.rmSync(f.src, { recursive: true, force: true });
+  const n = offered.length;
+  assert.equal((await update()).ok, true);
+  assert.deepEqual(offered.slice(n).map((b) => b.from), [[one], undefined], 'the incremental bundle, then the full one');
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), two);
+});
+
+test('w5593: any other refusal (a job still running) is not mended by the full bundle: it is not sent', async (t) => {
+  const { s, offered, daemon, update, f } = await thinSetup(t);
+  const one = s.repo.commit;
+  assert.equal((await update()).ok, true);
+  portalRepo(s.repo.root, 'two');
+  daemon.runs = one;
+  writeJson(f.job, { ...readJson<UpdateJob>(f.job)!, phase: 'staged', reported: false });
+  const n = offered.length;
+  await assert.rejects(s.mm.linkUpdate('mx'), /mx refused it: an update job of this machine is still running/);
+  assert.deepEqual(offered.slice(n).map((b) => b.from), [[one]], 'one offer, no fall back');
+});
+
+test('w5593: the incremental base: a merge HEAD leaves out every parent; a short id is resolved; a bad, unknown or diverged one, or a root HEAD, gets none', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-thin-'));
+  try {
+    const repo = path.join(tmp, 'repo');
+    fs.mkdirSync(repo);
+    const one = portalRepo(repo, 'one').commit;
+    const b = new UpdateBundles({ dataDir: path.join(tmp, 'data'), root: repo });
+    // A root commit as HEAD, on a daemon that runs it already: no parents to leave out.
+    const root = await b.prepare();
+    assert.equal(await b.thin(root, one), undefined, 'a root HEAD');
+    const main = git(repo, 'branch', '--show-current');
+    git(repo, 'checkout', '-q', '-b', 'side');
+    fs.writeFileSync(path.join(repo, 'side.txt'), 'side\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'side');
+    const side = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'checkout', '-q', main);
+    const two = portalRepo(repo, 'two').commit;
+    git(repo, 'merge', '-q', '--no-ff', '-m', 'merge', 'side');
+    const merge = git(repo, 'rev-parse', 'HEAD');
+    const full = await b.prepare();
+    assert.equal(full.commit, merge);
+    assert.deepEqual((await b.thin(full, merge))?.from, [two, side], 'a daemon on the merge: every parent left out');
+    assert.deepEqual((await b.thin(full, one.slice(0, 7)))?.from, [one], 'a short id');
+    for (const bad of [undefined, '', 'abc', 'not-a-sha', 'g'.repeat(40), '0'.repeat(40), `${one.slice(0, 7)}^`]) assert.equal(await b.thin(full, bad), undefined, `"${bad}"`);
+    // A commit the portal has that HEAD does not descend from.
+    git(repo, 'checkout', '-q', '-b', 'other', one);
+    const other = portalRepo(repo, 'other').commit;
+    git(repo, 'checkout', '-q', main);
+    assert.equal(await b.thin(full, other), undefined, 'not behind HEAD');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test('w1596: the bundle goes only to the machine it was offered to, with its own credential; a wrong size, SHA-256 or commit changes nothing', async (t) => {
   const s = await setup(t);
   await until('online', () => s.mm.canLink('mx'));
@@ -182,6 +299,19 @@ test('w1596: the bundle goes only to the machine it was offered to, with its own
   assert.equal(git(src, 'rev-parse', 'HEAD'), s.repo.commit);
   fs.writeFileSync(path.join(s.tmp, 'junk.bundle'), 'not a bundle');
   await assert.rejects(checkoutFromBundle(src, path.join(s.tmp, 'junk.bundle'), s.repo.commit), /not one git can read/);
+
+  // w5516: the daemon takes a commit only when it is on the published branch, whatever the portal said.
+  const branch = git(s.repo.root, 'branch', '--show-current');
+  await checkPublished(src, s.repo.commit, { url: s.repo.root, branch });
+  await assert.rejects(checkPublished(src, other.commit, { url: s.repo.root, branch }), /commit .* is not on .* refused, nothing was changed/);
+  await assert.rejects(checkPublished(src, s.repo.commit, { url: path.join(s.tmp, 'nowhere'), branch }), /could not read .* nothing was changed/);
+  await assert.rejects(checkPublished(src, s.repo.commit, { url: s.repo.root, branch: 'main;rm' }), /not a branch name/);
+  const before = git(src, 'rev-parse', 'HEAD');
+  const unpublished = portalRepo(path.join(s.tmp, 'portal3'), 'three');
+  const ub = path.join(s.tmp, 'unpublished.bundle');
+  git(unpublished.root, 'bundle', 'create', '-q', ub, 'HEAD');
+  await assert.rejects(checkoutFromBundle(src, ub, unpublished.commit, (dir) => checkPublished(dir, unpublished.commit, { url: s.repo.root, branch })), /is not on/);
+  assert.equal(git(src, 'rev-parse', 'HEAD'), before, 'an unpublished commit is never checked out');
 
   assert.match(selfUpdateProblem({ commit: 'abc', bundle: { sha256: sha, size: 1 } }) ?? '', /full git commit/);
   assert.match(selfUpdateProblem({ commit: s.repo.commit, bundle: { sha256: 'x', size: 1 } }) ?? '', /SHA-256/);
@@ -485,4 +615,36 @@ test('w1641: the portal logs each update bundle it serves, finished or cut', () 
     bundleServedLine('beast', { start: 6_962_988, sent: 1_000_000, size: 18_595_141, ms: 312_000, finished: false }),
     'machine beast: the update bundle was cut from byte 6962988 after 7962988 of 18595141 bytes in 312.0 s (3 KB/s)',
   );
+});
+
+test('w5546: the read fence goes to warn, on and off again over the link with nobody at the machine; an older daemon is never sent it; an unknown action is refused, never taken as an unload', async (t) => {
+  const s = await setup(t);
+  await until('online', () => s.mm.canLink('mx'));
+  const marker = path.join(s.appDir, 'read-fence');
+  assert.equal(fs.existsSync(marker), false, 'off by default: no mode file');
+  await s.mm.controlDaemon('mx', 'read-fence-warn');
+  assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'warn');
+  assert.equal(s.exits.length, 0, 'no restart');
+  if (process.platform === 'linux') {
+    // Lockout re-review B4 of #1193: on is refused on Linux, with the reason, and the mode stays as it was.
+    await assert.rejects(s.mm.controlDaemon('mx', 'read-fence-on'), /refused on Linux/);
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'warn');
+  } else {
+    await s.mm.controlDaemon('mx', 'read-fence-on');
+    assert.equal(fs.readFileSync(marker, 'utf8').trim(), 'on');
+  }
+  await s.mm.controlDaemon('mx', 'read-fence-off');
+  assert.equal(fs.existsSync(marker), false, 'off: the file is gone, so runs start with no read rules');
+  // A daemon from before the switch said no readFenceSwitch in its hello: its onControl took any other action as an unload.
+  (s.mm as unknown as { hellos: Map<string, { readFenceSwitch?: boolean }> }).hellos.get('mx')!.readFenceSwitch = undefined;
+  await assert.rejects(s.mm.linkControl('mx', 'read-fence-off'), /no read fence switch|before the read fence switch/);
+  assert.equal(s.launched.length, 0, 'nothing was unloaded');
+  // This daemon's own answer to an action it does not know.
+  const sent: { ok: boolean; error?: string }[] = [];
+  const u = new SelfUpdater({ appDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ffrf-')), portalUrl: () => 'http://127.0.0.1:1', token: 'tok', send: (m) => (sent.push(m as { ok: boolean }), true), exit: () => assert.fail('no exit'), log: () => undefined });
+  await u.onControl({ type: 'daemon_control', id: 'c1', action: 'something-new' as 'restart' });
+  await u.onControl({ type: 'daemon_control', id: 'c2', action: 'read-fence-off' });
+  assert.deepEqual(sent.map((m) => m.ok), [false, false]);
+  assert.match(sent[0].error ?? '', /unknown action something-new/);
+  assert.match(sent[1].error ?? '', /no read fence switch/);
 });

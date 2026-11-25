@@ -110,7 +110,7 @@ export interface JoinAnswer {
   installer?: { name: string; text: string };
 }
 
-/** A browser that asked to sign in as a member, or was approved for one (device approval, docs/identity.md). */
+/** A browser that asked to sign in, or was approved for a login (device approval, docs/identity.md; owners too since w5524). */
 export interface DeviceInfo {
   id: string;
   username: string;
@@ -123,12 +123,36 @@ export interface DeviceInfo {
   decidedAt?: string;
   decidedBy?: string;
   lastSeenAt?: string;
+  /** An owner's login let in by ownerDeviceApproval "advisory" that would need approval. */
+  advisory?: boolean;
+}
+
+/** An owner's login advisory device approval let in that would need approval (w5524). */
+export interface DeviceLogInfo {
+  at: string;
+  username: string;
+  displayName: string;
+  device: string;
+  label: string;
+  ip: string;
+  userAgent: string;
+  mode: 'off' | 'advisory';
+  outcome: 'would-need-approval' | 'would-be-refused';
+}
+
+export interface DevicesView {
+  deviceApproval: 'off' | 'members';
+  ownerDeviceApproval: 'off' | 'advisory';
+  devices: DeviceInfo[];
+  /** This browser's own device record, if it has one. */
+  current?: string;
+  log: DeviceLogInfo[];
 }
 
 export const api = {
   /** pending: the password was right, but this browser waits for an owner's approval (HTTP 202, no session). */
   login: (username: string, password: string) => request<{ username?: string; pending?: boolean; error?: string }>('POST', '/api/login', { username, password }),
-  devices: () => request<{ deviceApproval: 'off' | 'members'; devices: DeviceInfo[] }>('GET', '/api/devices'),
+  devices: () => request<DevicesView>('GET', '/api/devices'),
   decideDevice: (id: string, action: 'approve' | 'deny' | 'revoke') => request<{ devices: DeviceInfo[] }>('POST', `/api/devices/${encodeURIComponent(id)}/${action}`),
   logout: () => request<unknown>('POST', '/api/logout'),
   /** `timeoutMs`: give up after it (the socket's failure check, w5318); absent, wait as long as the browser does. */
@@ -233,6 +257,9 @@ export const api = {
   toggleNightly: (which: 'enabled' | 'run' | 'review', on: boolean) => request<{ key: string; before: boolean; after: boolean }>('POST', '/api/intake/nightly/toggle', { which, on }),
   /** A request's priority (w2049): frantic (w4620, named release until w4710), urgent, high, normal or low. */
   setWorkPriority: (id: string, priority: WorkPriority) => request<{ id: string; priority: WorkPriority }>('POST', `/api/work/${encodeURIComponent(id)}/priority`, { priority }),
+  /** w5577: a hand-up's card: file its follow-ups (through the viewer's own orchestrator) or drop them. */
+  fileHandUps: (id: string) => request<{ id: string; text: string; left: number }>('POST', `/api/work/${encodeURIComponent(id)}/handups/file`, {}),
+  dropHandUps: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/handups/drop`, { note }),
   declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
   /** A sandbox on this host's own daemon (docs/beast-machine.md), which is making it; the portal holds none itself (w510). */
   createSandbox: (req: CreateSandboxRequest) => request<{ machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),

@@ -12,7 +12,8 @@ public issue. Include what an attacker needs (network access, a login, an API ke
 reads) and what they gain. There is no bug bounty.
 
 Things that are known and documented rather than vulnerabilities: an agent in `bypassPermissions`
-can do anything its OS user can (the guard is a seatbelt, not a sandbox), and an agent that reads
+can do anything its OS user can (the text guard is a seatbelt that catches mistakes, not a sandbox: a script file gets past it; the OS write fences are
+the real protection and do not yet cover reads or other workers' sandboxes, see docs/worker-fence.md, "What protects a machine, and what does not"), and an agent that reads
 untrusted text can be steered by it.
 
 ## Keeping your install safe
@@ -24,3 +25,7 @@ untrusted text can be steered by it.
 - Prefer a private network (Tailscale) over a public URL; if you publish it, the login page is on
   the internet.
 - List every checkout agents must never touch in `protectedPaths`.
+- The app page sends a Content-Security-Policy (`server/webStatic.ts` `appCsp`: scripts from the portal only, no framing,
+  no plug-ins, no remote images), every answer `X-Content-Type-Options: nosniff`, and HTTPS answers HSTS. Serve the
+  portal behind a TLS proxy that sets `X-Forwarded-Proto` (Tailscale serve or Funnel does), and keep the CSP strict:
+  a new need is a narrow source in `appCsp`, never `'unsafe-inline'` or `'unsafe-eval'` for scripts.

@@ -18,7 +18,7 @@
 // The machine credential (the `ffm_<id>_…` token the portal issued for this machine) is read from stdin, kept only in
 // <root>/secrets/machine-token (owner-only) and never printed or put on a command line.
 
-import { carrySettings, movesClaudeHome, workerClaudeDir } from '../../server/claudeHome.ts';
+import { carrySettings, mediumClaudeDir, movesClaudeHome, workerClaudeDir } from '../../server/claudeHome.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -37,6 +37,7 @@ import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJso
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
 import { agentGitDir, ensureAgentGit } from '../../server/agentGit.ts';
+import { gitFence, isGit } from '../../server/safeGit.ts';
 import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
@@ -352,9 +353,11 @@ interface Ran {
 }
 
 /** Run a program, its output captured; `live` streams its stderr (git's own progress) instead. */
-export function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; live?: boolean; timeoutMs?: number; onLine?: (line: string) => void } = {}): Promise<Ran> {
+export async function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; live?: boolean; timeoutMs?: number; onLine?: (line: string) => void } = {}): Promise<Ran> {
+  // w5541: git runs no program the checkout's own config names (server/safeGit.ts).
+  const f = isGit(cmd) ? await gitFence(args, { cwd: o.cwd, env: o.env }) : { args, env: o.env ?? process.env };
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: o.cwd, env: o.env ?? process.env, windowsHide: true, stdio: ['pipe', 'pipe', o.live ? 'inherit' : 'pipe'] });
+    const child = spawn(cmd, f.args, { cwd: o.cwd, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', o.live ? 'inherit' : 'pipe'] });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -707,8 +710,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     appDir: l.daemon,
     tempDir: l.tmp,
     // The Unity slots mailbox and the Max events file are left to the daemon's root defaults (machine/daemon.ts
-    // withRootDefaults, w5377): both inside the root, `<root>/unity-slots` and `<root>/max/max-events.jsonl`, so no fence
-    // needs an exception for them; the old `<daemon>/max-events.jsonl` is drained while it exists (maxEventsLegacy).
+    // withRootDefaults): the mailbox inside the root, `<root>/unity-slots` (w5377), so no fence needs an exception for it;
+    // the events file in the daemon's own folder, `<daemon>/max/max-events.jsonl`, which no fence lets a worker write (w5552).
     ...(o.unitySlotsDir ? { unitySlotsDir: o.unitySlotsDir } : {}),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),
@@ -828,7 +831,7 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
   const newDir = path.join(l.daemon, 'app.new');
   fs.rmSync(newDir, { recursive: true, force: true });
   fs.mkdirSync(newDir, { recursive: true });
-  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir]);
+  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir], { env: (await gitFence(['-C', l.src, 'archive'])).env });
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   fs.writeFileSync(path.join(newDir, 'machine', 'VERSION'), version + '\n');
   say('npm ci for the daemon...');
@@ -862,7 +865,7 @@ async function installDaemonLinux(o: InstallOptions, l: Layout, id: string, prob
   const newDir = path.join(l.daemon, 'app.new');
   fs.rmSync(newDir, { recursive: true, force: true });
   fs.mkdirSync(newDir, { recursive: true });
-  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir]);
+  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir], { env: (await gitFence(['-C', l.src, 'archive'])).env });
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   fs.writeFileSync(path.join(newDir, 'machine', 'VERSION'), version + '\n');
   say('npm ci for the daemon...');
@@ -1941,6 +1944,8 @@ export interface UpdateFlags {
   voiceWhisper?: string;
   /** The worker write fence (w5377): "on" sets this platform's daemon.json key, "off" removes it; unset carries daemon.json's. */
   workerFence?: 'on' | 'off';
+  /** The worker caps' mode (w5554, docs/worker-caps.md): written as daemon.json's `workerCaps`; unset carries daemon.json's (absent: warn). */
+  workerCaps?: 'off' | 'warn' | 'enforce';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -1982,6 +1987,18 @@ export function applyWorkerFence(config: Record<string, unknown>, setting: 'on' 
   return rest;
 }
 
+/** `--worker-caps off|warn|enforce` (w5554): anything else is refused, never guessed at. Exported for tests. */
+export function workerCapsFlag(v: string | undefined): 'off' | 'warn' | 'enforce' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'enforce') throw new Error(`--worker-caps is off, warn or enforce, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the worker caps' mode set (w5554); undefined: the config as it is. The same key on every platform. Exported for tests. */
+export function applyWorkerCaps(config: Record<string, unknown>, mode: 'off' | 'warn' | 'enforce' | undefined): Record<string, unknown> {
+  return mode ? { ...config, workerCaps: mode } : config;
+}
+
 /**
  * The install options an update runs with (w613): the root's own root.json and daemon.json, every setting carried
  * (beast's agent total, protected paths, the Library seed, the editors' priority, the disk guard, cleanup, the Unity
@@ -2018,7 +2035,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyWorkerFence(config, f.workerFence, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2082,7 +2099,10 @@ const anonymousEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTE
 async function portalSha(portalUrl: string, fetcher: typeof fetch = fetch): Promise<string | undefined> {
   try {
     const r = await fetcher(`${portalUrl}/api/health`, { signal: AbortSignal.timeout(15_000) });
-    const sha = r.ok ? ((await r.json()) as { sha?: string }).sha : undefined;
+    const j = r.ok ? ((await r.json()) as { sha?: string; commit?: string }) : undefined;
+    // w5516: the full commit when the portal says it (a portal from w5516 on), else its short sha.
+    if (j?.commit && /^[0-9a-f]{40}$/i.test(j.commit)) return j.commit;
+    const sha = j?.sha;
     return sha && /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
   } catch {
     return undefined;
@@ -2116,6 +2136,12 @@ async function updateSource(l: Layout, f: UpdateFlags, portalUrl: string): Promi
   const r = await exec('git', ['-C', l.src, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`]);
   const commit = r.stdout.trim();
   if (r.code !== 0 || !commit) throw new Error(`${f.ref ?? `the portal's commit ${want}`} is not on ff-factory's main (fetched from ${FF_FACTORY}): pass --ref main or --source <checkout>`);
+  // w5516: a commit id names code only when it is on ff-factory's main as GitHub has it (the portal deploys nothing else,
+  // deploy/vm/guest/fff-update `prepare --on-branch`); one the checkout holds from an earlier bundle but main does not is refused.
+  if (name === want) {
+    const onMain = await exec('git', ['-C', l.src, 'merge-base', '--is-ancestor', commit, 'refs/remotes/github/main']);
+    if (onMain.code !== 0) throw new Error(`ff-factory ${commit.slice(0, 12)} is not on ff-factory's main (fetched from ${FF_FACTORY}): refusing to install it, nothing was changed`);
+  }
   await must('checking out the daemon code', 'git', ['-C', l.src, '-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--force', '--detach', commit]);
   return { from: l.src, commit };
 }
@@ -2243,6 +2269,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   const rel = (await exec('git', ['-C', l.repo, 'config', '--get', 'worktree.useRelativePaths'])).stdout.trim();
   const o = planUpdate(l.root, m, config, token, { ...f, absoluteWorktrees: rel === 'false', ...(owner ? { owner } : {}) });
   if (f.workerFence) say(workerFenceLine(f.workerFence));
+  if (f.workerCaps) say(`worker caps: ${f.workerCaps}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2315,16 +2342,22 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   }
   // w5305: a main install's agents use <root>/claude, as its daemon sets at start (server/claudeHome.ts): the plugins go there,
   // after the legacy settings.json is carried across (once). The person's ~/.claude keeps its own plugins as they are.
+  // w5543: and the Medium agents' own folder (<root>/claude-medium, which no worker fence lets a worker write) gets the same
+  // plugins in the same run.
+  let medium: string | undefined;
   if (movesClaudeHome(env)) {
     const dir = workerClaudeDir(l.root);
     fs.mkdirSync(dir, { recursive: true });
     say(`Claude Code's folder for this install's agents: ${dir} (settings.json from ~/.claude: ${carrySettings(path.join(os.homedir(), '.claude'), dir)}).`);
     env = { ...env, CLAUDE_CONFIG_DIR: dir };
+    medium = mediumClaudeDir(l.root);
+    fs.mkdirSync(medium, { recursive: true });
+    say(`Claude Code's folder for this install's Medium agents: ${medium} (settings.json from ~/.claude: ${carrySettings(path.join(os.homedir(), '.claude'), medium)}).`);
   }
   let owner = ownerFlag;
   if (isWin && elevated() && !owner) owner = (await taskUser(m.service))?.owner;
   say(`FF Factory agent tools on ${m.machineId} (${l.root})`);
-  const code = await publishAgentTools(l.root, { exec, say, env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
+  const code = await publishAgentTools(l.root, { exec, say, env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude, ...(medium ? { medium } : {}) });
   // The agents' node at one fixed path (w1742): a WARNING when it cannot be placed, never a failed publish of the plugins.
   if ((await ensureAgentNode(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
     await giveTo(owner, [agentNodeDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentNodeDir(l.root)} to ${owner}: ${(e as Error).message}`));
@@ -2349,10 +2382,11 @@ export async function firewallRepair(l: Layout, m: Manifest) {
   const node = agentNodeExe(l.root);
   const ffu = ffuServerExes(l.root);
   const exes = [...slots, ...(fs.existsSync(node) ? [node] : []), ...ffu];
-  const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp), 2 * 60_000).catch((e) => `${(e as Error).message}`));
+  const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp, [...(fs.existsSync(node) ? [node] : []), ...ffu]), 2 * 60_000).catch((e) => `${(e as Error).message}`));
   if (!seen) return say('WARNING: Windows Firewall: could not read the rules, so they were not checked.');
-  if (!seen.missing.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ', the agent node' : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
-  const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
+  // w5581: a rule that lets the agent node or ffu-server in from any address (the node's, before w5581) is made again, tailnet only.
+  if (!seen.missing.length && !seen.wide.length && !seen.stale) return say(`Windows Firewall: the rules for the ${slots.length} player folders${exes.includes(node) ? ', the agent node (tailnet only)' : ''} and ffu-server in the ${ffu.length / 3} ffu slots are there.`);
+  const what = [...(seen.missing.length ? [`no allow rule for ${seen.missing.join(', ')}`] : []), ...(seen.wide.length ? [`a rule lets ${seen.wide.join(', ')} in from any address, not the tailnet only`] : []), ...(seen.stale ? [`${seen.stale} rule(s) earlier prompts left under ${l.tmp}`] : [])].join('; ');
   if (!elevated()) return say(`WARNING: Windows Firewall: ${what}. This session is not elevated; an elevated tools run or update (the portal's ssh, ops_worker machine_update) makes them.`);
   const sfx = m.firewallSuffix ? ` ${m.firewallSuffix}` : '';
   try {
@@ -2798,6 +2832,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--voice-whisper <model>|off] (the GPU Whisper for the portal's mic, w615; default: as daemon.json has it)
             [--worker-fence on|off] (w5377: this platform's worker write fence in daemon.json: the Landlock write lock on Linux,
              Seatbelt on macOS, Low integrity on Windows; default: as daemon.json has it)
+            [--worker-caps off|warn|enforce] (w5554: the per-worker memory, process and temp caps' mode, daemon.json workerCaps;
+             absent means warn; docs/worker-caps.md)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -2894,6 +2930,7 @@ export async function main(argv = process.argv.slice(2)) {
     const opt = (k: string) => (opts[k] === undefined ? undefined : Number(opts[k]));
     // A bare `--worker-fence` parses as a flag with no value: refused like any other value that is not on or off.
     const workerFence = flags.has('worker-fence') ? workerFenceFlag('') : workerFenceFlag(opts['worker-fence']);
+    const workerCaps = flags.has('worker-caps') ? workerCapsFlag('') : workerCapsFlag(opts['worker-caps']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -2905,6 +2942,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(flags.has('no-ssh') ? { ssh: false } : {}),
       ...(opts['voice-whisper'] !== undefined ? { voiceWhisper: opts['voice-whisper'] } : {}),
       ...(workerFence ? { workerFence } : {}),
+      ...(workerCaps ? { workerCaps } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

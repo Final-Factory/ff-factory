@@ -43,7 +43,7 @@ left out. Lines are cut at 1,000 characters. The journal and the clean-up passes
 ### bench_hours: what the exclusive bench tickets cost (w1996)
 
 lothsahn, w1996: "We're wasting system resources like crazy locking beast down to a single timing job." A machine's bench
-queue history stays on that machine (`<root>/tmp/bench.queue/history.jsonl`, rotated to `history.1.jsonl` at 5 MB), so nothing
+queue history stays on that machine (`<root>/daemon/bench.queue/history.jsonl` since w5545, rotated to `history.1.jsonl` at 5 MB), so nothing
 could compare BEAST or LothDesktop before and after a change. Each daemon now reads both files (`machine/benchHours.ts`), computes
 the last 72 UTC hours and sends them as `bench_hours` after each welcome and every 60 minutes; the portal keeps them in
 `data/bench-hours.json` (14 days; an hour reported again replaces the one kept; `server/benchHoursStore.ts`). A machine whose
@@ -246,11 +246,12 @@ The steady `Drop: TCP{... > ...:59343} no rules matched` line, about one a minut
   command line but a time. A file under `data/` is opened only after `realpath` shows it inside the data folder and `lstat`
   shows it is not a link. `server/portalLogs.test.ts` fails on any write call, any second command, and on a data folder
   that differs after a read.
-- **Redacted before filtered.** `redactLogText`: the existing `redactSecrets` (`server/secrets.ts`: Claude OAuth, refresh and API
-  keys, GitHub, Discord, Tailscale and machine tokens, age and private keys, provider tokens, and every value the token
-  vault holds, whatever its shape), plus what a log line carries that it does not: Authorization and cookie headers, bearer
-  tokens, a password or long token in a URL, `?token=` query values, `password=` / `"token": "…"` assignments, JWTs, AWS and
-  Slack keys, and the Claude credentials file's refresh token. The same families FFBox redacts before its `logs` view picks
+- **Redacted before filtered.** `redactLogText` (`server/logRedact.ts`): the existing `redactSecrets` (`server/secrets.ts`:
+  Claude OAuth, refresh and API keys, GitHub, Discord, Tailscale and machine tokens, age and private keys, provider tokens,
+  JWTs, AWS and Slack keys, Bearer credentials, a password or long token in a URL, and every value the token vault holds,
+  whatever its shape; the token shapes are `shared/secretShapes.ts`, one set for every path since w5526), plus the forms
+  only a log line carries: Authorization and cookie headers, Basic credentials, `?token=` query values, `password=` /
+  `"token": "…"` assignments, and the Claude credentials file's refresh token. The same families FFBox redacts before its `logs` view picks
   lines ([ffbox.md](ffbox.md)). The text is redacted whole before it is split into lines (a private key spans lines), then
   `grep` and `regex` run on the redacted line, so a pattern cannot probe a secret. A line that still looks like a secret after
   that (`stillLooksSecret`) is left out and counted ("N line(s) left out"). Paths, URLs, addresses, commits and ids stay.
@@ -269,7 +270,24 @@ and that `install.sh` guards it. On a portal that does not run under systemd (th
 the journal sources say so.
 
 This gives the server's account (not a worker) read access to the whole system journal. The tool's answers are redacted;
-the journal's own contents are what `fffctl logs` shows to the orchestration worker (which redacts the same families).
+the journal's own contents are what `fffctl logs` shows to the orchestration worker, through the same redactor.
+
+## The journal is written redacted, and `fffctl logs` redacts as it reads (w5525)
+
+Security audit w5452 (finding 16): the portal's console output reached the journal as printed, and `fffctl logs` masked it
+with a `sed` that knew a few shapes (`sk-ant-`, GitHub tokens, Bearer and `token=`). Now:
+
+- **Written redacted.** `server/index.ts` imports `server/journalRedactStart.ts` first, which routes `process.stdout.write`
+  and `process.stderr.write` through `redactLogLines` (`server/journalRedact.ts`): every console method and every direct
+  write, text or Buffer. A line still flagged after redaction is withheld; a redactor that throws prints
+  `[log output withheld: the redactor failed]`, never the raw text. Modules that `logRedact.ts` itself imports load before
+  the hook, and print nothing at import.
+- **Read redacted.** `fffctl logs` (`deploy/vm/guest/fff-ops-priv`) pipes `journalctl` through `node server/redactLogsCli.ts`
+  in the running release, with the vault's values opened by `/etc/fff/vault.key`, so entries from before w5525 come out
+  masked too. The journal keeps each line of a multi-line write as its own entry, so the CLI withholds every line from a
+  private key's `BEGIN` line to its `END` (`lineRedactor`). A release without the CLI prints nothing (fails closed).
+- **Cost.** 2.2 to 2.9 µs a line (measured, lothdesktop, 20,000 typical portal lines, one in fifty with a secret, fifty vault
+  values registered; `server/journalRedact.test.ts`, "the cost per line").
 
 ## A journal read that fails says why, and the list of sources checks it (w5072)
 

@@ -41,7 +41,7 @@ interface FakeMachine extends RolloutMachine {
 const toolsOut = (before = 'ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed', after = 'ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed', extra = '') =>
   `Agent tools before: ${before}\nAgent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7\n` +
   `  == Claude Code ==\n${extra}Agent tools after: ${after}\nAgent tools published: every installed plugin is on master.`;
-const isTools = (remote: string) => / -Tools -Root | -- --tools --root /.test(remote);
+const isTools = (remote: string) => / -Tools -Ref \S+ -Root | -- --tools --ref \S+ --root /.test(remote);
 
 const mac = (id: string, over: Partial<FakeMachine> = {}): FakeMachine => ({
   id,
@@ -120,10 +120,10 @@ test('a verified deploy updates every online machine with the installer, naming 
   await r.tick();
   assert.equal(w.calls.length, 2);
   const beast = w.calls.find((c) => c.target === 'rydin@beast')!;
-  assert.equal(beast.remote, workerUpdateRemote({ root: 'C:\\ffw', platform: 'win32' }));
-  assert.match(beast.remote, /-Update -Root C:\\ffw"$/);
+  assert.equal(beast.remote, workerUpdateRemote({ root: 'C:\\ffw', platform: 'win32' }, NEW));
+  assert.match(beast.remote, /-Update -Ref [0-9a-f]{40} -Root C:\\ffw"$/);
   const m5 = w.calls.find((c) => c.target === 'ben@m5')!;
-  assert.match(m5.remote, /-- --update --root \/Users\/Shared\/ffw-m5$/);
+  assert.match(m5.remote, /-- --update --ref [0-9a-f]{40} --root \/Users\/Shared\/ffw-m5$/);
   for (const c of w.calls) assert.doesNotMatch(c.remote, /max-sandboxes|max-agents|max-unity|MaxSandboxes|MaxAgents|MaxUnity/i, 'the limits are not touched');
   assert.equal(w.told.length, 1, 'one message');
   assert.equal(w.told[0].to?.userId, 'lothsahn');
@@ -383,9 +383,9 @@ test('w1476: after its daemon step every worker root machine gets the latest age
   assert.deepEqual(w.calls.map((c) => c.target), ['rydin@beast'], 'm5 is current: no daemon update');
   assert.deepEqual(w.toolCalls.map((c) => c.target), ['rydin@beast', 'ben@m5'], 'both get the tools');
   assert.equal(w.toolCalls[0].at, 1, "beast's tools ran after its daemon update");
-  assert.equal(w.toolCalls[0].remote, workerToolsRemote({ root: 'C:\\ffw', platform: 'win32' }));
-  assert.match(w.toolCalls[0].remote, / -Tools -Root C:\\ffw"$/);
-  assert.match(w.toolCalls[1].remote, /-- --tools --root \/Users\/Shared\/ffw-m5$/);
+  assert.equal(w.toolCalls[0].remote, workerToolsRemote({ root: 'C:\\ffw', platform: 'win32' }, NEW));
+  assert.match(w.toolCalls[0].remote, / -Tools -Ref [0-9a-f]{40} -Root C:\\ffw"$/);
+  assert.match(w.toolCalls[1].remote, /-- --tools --ref [0-9a-f]{40} --root \/Users\/Shared\/ffw-m5$/);
   assert.equal(w.told.length, 1, 'still one report');
   const t = w.told[0].text;
   assert.match(t, /updated the machines' daemons and published the latest agent tools \(final-factory-agents\) on them by itself/);
@@ -523,7 +523,7 @@ test('w1742: a tools run over the link that finds a firewall rule missing runs a
   const w = world([lothdesktop], { requester: LOTH });
   w.verify();
   await w.make().tick();
-  assert.deepEqual(w.toolCalls.map((c) => [c.target, c.remote]), [['Lothsahn@loth2800', workerToolsRemote({ root: 'D:\\ffw', platform: 'win32' })]]);
+  assert.deepEqual(w.toolCalls.map((c) => [c.target, c.remote]), [['Lothsahn@loth2800', workerToolsRemote({ root: 'D:\\ffw', platform: 'win32' }, NEW)]]);
   assert.match(w.told[0].text, /Agent tools: ff-agents 1\.29\.19 → 1\.29\.20/);
   assert.doesNotMatch(w.told[0].text, /WARNING/, 'made over ssh: nothing left to warn of');
 
@@ -621,6 +621,164 @@ test('w4421: an update a full disk refused is sent again by itself once the disk
   for (let i = 0; i < 4; i++) await r3.tick();
   assert.equal(w3.linkCalls.length, 1);
   assert.doesNotMatch(w3.told[0].text, /disk was full/);
+});
+
+test('w5593: an update or tools run whose bundle download was cut is sent again by itself 5 minutes later, at most 3 times', async () => {
+  // BEAST 2026-11-25 08:20:52Z (machine/selfUpdate.ts downloadBundle), over a link relayed at 35 KB/s.
+  const cut = "beast refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)";
+  let tries = 0;
+  const m = mac('beast', { linkRun: (form) => (form === 'tools' ? { throws: cut } : ++tries <= 2 ? { throws: cut } : { report: { ok: true }, after: { online: true, daemon: NEW.slice(0, 7) } }) });
+  const w = world([m]);
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.deepEqual(w.linkCalls.map((c) => c.form), ['update', 'tools']);
+  assert.match(w.told[0].text, /- beast: FAILED: .*did not finish in 480 s.*sent again by itself in 5 min/);
+
+  // Not before 5 minutes, and not while offline.
+  w.advance(4 * 60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'too soon');
+  w.advance(2 * 60_000);
+  m.online = false;
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'offline');
+  m.online = true;
+  await r.tick();
+  assert.deepEqual(w.linkCalls.slice(2).map((c) => c.form), ['update', 'tools'], 'the update, then its tools, again');
+
+  // The third update goes through; its tools are cut once more and sent again on their own, then the cap holds.
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.deepEqual(w.linkCalls.slice(4).map((c) => c.form), ['update', 'tools']);
+  assert.equal(m.daemon, NEW.slice(0, 7));
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.deepEqual(w.linkCalls.slice(6).map((c) => c.form), ['tools'], 'retry 3: the tools alone');
+  for (let i = 0; i < 3; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.equal(w.linkCalls.length, 7, 'three retries used: the tools wait for the next deploy');
+
+  // A refusal that is not a cut download is never sent again.
+  const other = mac('m3', { linkRun: () => ({ throws: 'm3 refused it: the bundle does not match what the portal said on the link' }) });
+  const w2 = world([other], { tools: false });
+  w2.verify();
+  const r2 = w2.make();
+  for (let i = 0; i < 4; i++) {
+    w2.advance(6 * 60_000);
+    await r2.tick();
+  }
+  assert.equal(w2.linkCalls.length, 1);
+});
+
+// w5641 (the w5622 review's M3): the cut-download resend across a restart, a deploy, an adoption and a second machine.
+const cutMsg = (id: string) => `${id} refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)`;
+
+test('w5641: a portal restart while a cut download waits to be sent again keeps its count: 1 + 3 link calls across the restart', async () => {
+  const m = mac('beast', { linkRun: () => ({ throws: cutMsg('beast') }) });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'the first try and resend 1');
+  assert.equal(r.state.machines.beast.cutDownload?.retries, 1);
+  await r.idle();
+  r.close();
+
+  const r2 = w.make();
+  assert.equal(r2.state.machines.beast.cutDownload?.retries, 1, 'saved with the state');
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r2.tick();
+  }
+  assert.equal(w.linkCalls.length, 4, 'resends 2 and 3 after the restart, then the cap holds');
+  r2.close();
+});
+
+test('w5641: a deploy while a cut download waits to be sent again starts afresh: the new commit goes at once, the old one never again', async () => {
+  const NEW2 = 'e'.repeat(40);
+  const m = mac('beast', { linkRun: (_form, commit) => (commit === NEW ? { throws: cutMsg('beast') } : { report: { ok: true }, after: { online: true, daemon: commit.slice(0, 7) } }) });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.equal(r.state.machines.beast.status, 'failed');
+  w.advance(2 * 60_000); // the resend is not due yet
+  w.verify(NEW2);
+  await r.tick();
+  assert.deepEqual(w.linkCalls.map((c) => c.commit), [NEW, NEW2], 'the new deploy is sent at once');
+  assert.equal(r.state.machines.beast.cutDownload, undefined, "the old rollout's resend went with it");
+  for (let i = 0; i < 4; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.deepEqual(w.linkCalls.map((c) => c.commit), [NEW, NEW2], 'nothing goes out for the old commit');
+  assert.equal(m.daemon, NEW2.slice(0, 7));
+  r.close();
+});
+
+test('w5641: a machine that already runs the commit when its resend comes due is not sent it again and ends current', async () => {
+  const m = mac('beast', { linkRun: () => ({ throws: cutMsg('beast') }) });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  m.daemon = NEW.slice(0, 7); // updated meanwhile, another way
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.length, 1);
+  assert.equal(r.state.machines.beast.status, 'current');
+  r.close();
+});
+
+test('w5641: two machines: m3 updates in the tick beast is cut; each outcome stays on its own machine', async () => {
+  const beast = mac('beast', { linkRun: () => ({ throws: cutMsg('beast') }) });
+  const m3 = mac('m3', { linkRun: () => ({ report: { ok: true }, after: { online: true, daemon: NEW.slice(0, 7) } }) });
+  const w = world([beast, m3], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.deepEqual(w.linkCalls.map((c) => c.id), ['beast', 'm3'], 'the cut does not hold m3 back');
+  assert.equal(r.state.machines.beast.status, 'failed');
+  assert.equal(r.state.machines.beast.cutDownload?.retries, 0, "m3's update does not clear beast's resend");
+  assert.equal(r.state.machines.m3.status, 'ok');
+  assert.equal(r.state.machines.m3.cutDownload, undefined);
+  assert.match(w.told[0].text, /- beast: FAILED: .*did not finish in 480 s.*sent again by itself in 5 min/);
+  assert.doesNotMatch(w.told[0].text, /- m3: [^\n]*(FAILED|sent again)/);
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.deepEqual(w.linkCalls.map((c) => c.id), ['beast', 'm3', 'beast', 'beast', 'beast'], 'only beast is sent again, 3 times');
+  assert.equal(r.state.machines.m3.status, 'ok');
+  r.close();
+});
+
+test('w5628: once its 3 resends were cut too, the report says its link is slow, stalls or drops and it waits for the next deploy', async () => {
+  const cut = "beast refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)";
+  const m = mac('beast', { linkRun: () => ({ throws: cut }) });
+  const w = world([m]);
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.equal(w.linkCalls.length, 8, 'the first send and 3 resends, each an update and its tools');
+  const ranOut = /its 3 resends were cut too: its link to the portal is slow, stalls or drops, so it waits for the next deploy \(needs a look\)/;
+  const o = r.state.machines.beast;
+  assert.match(o.note!, ranOut);
+  assert.match(o.tools!.note!, ranOut);
+  assert.doesNotMatch(`${o.note} ${o.tools!.note}`, /sent again by itself/);
+  // The follow-up report lifts both notes.
+  const last = w.told.at(-1)!.text;
+  assert.match(last, new RegExp(`- beast: FAILED: .*did not finish in 480 s.*${ranOut.source}`));
+  assert.match(last, new RegExp(`Agent tools FAILED: .*${ranOut.source}`));
 });
 
 test('w2005: a machine that went offline before its update reached it is not called failed, nothing is put back over ssh, and it is updated when it comes back', async () => {
@@ -746,4 +904,47 @@ test('w2044: a tick saves in the background: no synchronous write per machine, a
   assert.equal(saved.machines.m5.status, r.state.machines.m5.status);
   assert.equal(saved.machines.biscuit.status, 'pending');
   r.close();
+});
+
+test('w5516: every installer the rollout runs is fetched at the verified commit and told to install exactly it, the rollback too', async () => {
+  let n = 0;
+  const w = world([
+    mac('m5', { run: () => (++n === 1 ? { code: 1, out: 'FAILED', after: { online: false } } : { code: 0, out: 'After: daemon 1111111', after: { online: true, daemon: OLD.slice(0, 7) } }) }),
+    mac('beast', { platform: 'win32', root: 'C:\\ffw', target: 'rydin@beast' }),
+  ]);
+  w.verify();
+  await w.make().tick();
+  const remotes = [...w.calls, ...w.toolCalls].map((c) => c.remote);
+  assert.equal(remotes.length, 5, "m5's update and its rollback, beast's update, and the tools on both");
+  for (const r of remotes) {
+    assert.ok(r.includes(`https://raw.githubusercontent.com/Final-Factory/ff-factory/${NEW}/scripts/worker/install.`), r);
+    assert.match(r, new RegExp(`(--ref|-Ref) ${NEW} `), r);
+    assert.doesNotMatch(r, /ff-factory\/main\//, r);
+  }
+  assert.match(w.calls.find((c) => c.target === 'ben@m5' && /--daemon-ref/.test(c.remote))!.remote, new RegExp(`--ref ${NEW} --root .* --daemon-ref 1111111$`), "the rollback names the commit it goes back to, with the verified commit's installer");
+});
+
+test('w5516: a daemon that comes back on another commit than the verified one is a failure, named, with nothing put back', async () => {
+  const w = world([mac('m5', { run: () => ({ code: 0, out: 'After: ok', after: { online: true, daemon: 'deadbeef1234' } }) }), mac('m3')]);
+  w.verify();
+  await w.make().tick();
+  assert.equal(w.calls.filter((c) => c.target === 'ben@m5').length, 1, 'it is online: nothing is run again');
+  assert.match(w.told[0].text, /- m5: FAILED: its daemon came back on deadbeef1234, not on the verified commit c5a93e060aaa/);
+  assert.match(w.told[0].text, /- m3: updated\./);
+});
+
+test('w5516: over the link too, a daemon on another commit after the update is a failure', async () => {
+  const w = world([mac('pc', { linkRun: (form) => (form === 'tools' ? { report: { log: toolsOut() } } : { report: { log: 'After: ok' }, after: { online: true, daemon: 'deadbeef1234' } }) })]);
+  w.verify();
+  await w.make().tick();
+  assert.deepEqual(w.linkCalls.map((c) => [c.form, c.commit]).slice(0, 1), [['update', NEW]], 'the link is sent the verified commit');
+  assert.match(w.told[0].text, /- pc: FAILED: its daemon came back on deadbeef1234, not on the verified commit/);
+});
+
+test('w5516: a verified commit that is not a full sha updates nothing: no installer can be pinned to it', async () => {
+  const w = world([mac('m5')]);
+  w.verify(NEW.slice(0, 12));
+  await w.make().tick();
+  assert.equal(w.calls.length, 0, 'no installer ran');
+  assert.match(w.told[0].text, /- m5: FAILED: the verified commit "c5a93e060aaa" is not a full 40-character sha/);
 });

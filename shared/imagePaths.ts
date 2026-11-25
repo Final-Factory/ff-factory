@@ -66,3 +66,13 @@ export function messageImagePaths(text: string): string[] {
   const all = new Set([...markdownImagePaths(text), ...mentionedPaths(text).filter((p) => !isVideoPath(p))]);
   return [...all].slice(0, MAX_MESSAGE_IMAGES);
 }
+
+/** What the reports API serves for a report's kept media (server/index.ts: /api/reports/rN/media/<name>), nothing else. */
+export const REPORT_MEDIA_PATH = /^\/api\/reports\/r[0-9]+\/media\/[A-Za-z0-9._%-]+$/;
+
+/** A path a report's Markdown names, as an image source: its own media as is, else read as `viaSession` would, else '' (shown as text). */
+export function reportImageSrc(p: string, viaSession: ((p: string) => string) | undefined): string {
+  if (REPORT_MEDIA_PATH.test(p) && !p.includes('..')) return p;
+  if (p.startsWith('/api/')) return ''; // any other API path is never an image source
+  return viaSession ? viaSession(p) : p;
+}

@@ -29,6 +29,7 @@ const PROBE_TTL_MS = 10 * 60_000;
 
 let probed: { ok: boolean; at: number } | undefined;
 let probedOom: { ok: boolean; at: number } | undefined;
+let probedLimits: { ok: boolean; at: number } | undefined;
 let seq = 0;
 
 const PROBE_MARK = 'ffw-scope-ok';
@@ -60,10 +61,36 @@ export function oomPolicyUsable(probe: () => boolean = probeOomPolicy, now = Dat
   return probedOom.ok;
 }
 
+/**
+ * Whether a scope here enforces MemoryMax and TasksMax (w5554, machine/workerCaps.ts): the user manager must delegate the memory
+ * and pids controllers (systemd's user@.service does, `Delegate=pids memory cpu`, since systemd 252: a guess for older ones), or
+ * systemd takes the properties and nothing holds them. So the probe reads its own scope's memory.max back. Exported for tests.
+ */
+export function probeLimits(run: () => { status: number | null; stdout: string } = () => spawnSync('systemd-run', ['--user', '--scope', '--quiet', '--collect', '-p', `MemoryMax=${PROBE_MEMORY}`, '-p', 'TasksMax=4096', '--', 'sh', '-c', 'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max" "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/pids.max"'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
+  const r = run();
+  const lines = (r.stdout ?? '').split(/\s+/);
+  return r.status === 0 && lines.includes(String(PROBE_MEMORY)) && lines.includes('4096');
+}
+
+const PROBE_MEMORY = 1073741824;
+
+/** Whether scopes enforce limits now: probed once, the answer kept PROBE_TTL_MS. Exported for tests. */
+export function limitsUsable(probe: () => boolean = probeLimits, now = Date.now()): boolean {
+  if (!probedLimits || now - probedLimits.at > PROBE_TTL_MS) probedLimits = { ok: probe(), at: now };
+  return probedLimits.ok;
+}
+
 /** Forget the probes' answers (tests). */
 export function resetScopeProbe() {
   probed = undefined;
   probedOom = undefined;
+  probedLimits = undefined;
+}
+
+/** A scope's limits (w5554, enforce mode only): the bytes and tasks the whole scope may use. */
+export interface ScopeLimits {
+  memoryBytes: number;
+  tasks: number;
 }
 
 /** The property that keeps a scope running when the OOM killer ends one of its processes (w2884). */
@@ -80,18 +107,31 @@ export function scopeUnit(kind: 'unity' | 'agent', tag: string, now = Date.now()
 }
 
 /** The command line that runs bin args in a scope of its own. Exported for tests. */
-export function inScope(unit: string, bin: string, args: string[], oomContinue = false): { bin: string; args: string[]; unit: string } {
-  return { bin: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, ...(oomContinue ? OOM_CONTINUE : []), '--', bin, ...args], unit };
+export function inScope(unit: string, bin: string, args: string[], oomContinue = false, limits?: ScopeLimits): { bin: string; args: string[]; unit: string } {
+  // MemorySwapMax stays unset: a worker's build may page, as before; MemoryMax bounds what it holds in RAM.
+  const lim = limits ? ['-p', `MemoryMax=${limits.memoryBytes}`, '-p', `TasksMax=${limits.tasks}`] : [];
+  return { bin: 'systemd-run', args: ['--user', '--scope', '--quiet', '--collect', `--unit=${unit}`, ...(oomContinue ? OOM_CONTINUE : []), ...lim, '--', bin, ...args], unit };
 }
 
 /**
  * bin args, run in a scope of their own on a Linux PC whose user manager answers (with OOMPolicy=continue where systemd
  * takes it); unchanged anywhere else. `unit`: the scope's name, when there is one.
  */
-export function scoped(kind: 'unity' | 'agent', tag: string, bin: string, args: string[], o: { platform?: NodeJS.Platform; usable?: () => boolean; oom?: () => boolean } = {}): { bin: string; args: string[]; unit?: string } {
+export function scoped(
+  kind: 'unity' | 'agent',
+  tag: string,
+  bin: string,
+  args: string[],
+  o: { platform?: NodeJS.Platform; usable?: () => boolean; oom?: () => boolean; limits?: ScopeLimits; limitsOk?: () => boolean } = {},
+): { bin: string; args: string[]; unit?: string; limited?: boolean } {
   if ((o.platform ?? process.platform) !== 'linux') return { bin, args };
   if (!(o.usable ?? scopesUsable)()) return { bin, args };
-  return inScope(scopeUnit(kind, tag), bin, args, (o.oom ?? oomPolicyUsable)());
+  const oom = (o.oom ?? oomPolicyUsable)();
+  // Limits only where the scope also takes OOMPolicy=continue: without it systemd's default (`stop`) ends the whole scope, the
+  // host and its claude with it, when the kernel's OOM killer ends one process of it (w2884), so MemoryMax would be a way to
+  // kill the agent. The scope then runs with no limits, and the caller says so (`limited` unset).
+  const limits = o.limits && oom && (o.limitsOk ?? limitsUsable)() ? o.limits : undefined;
+  return { ...inScope(scopeUnit(kind, tag), bin, args, oom, limits), ...(limits ? { limited: true } : {}) };
 }
 
 /**

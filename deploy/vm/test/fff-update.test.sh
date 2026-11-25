@@ -3,13 +3,19 @@
 # fake npm and systemctl: run by lint.sh --units (root; skipped otherwise). What it checks:
 #   the move from a layout fff made (its clone, its release, its links) to root's: $FFF_ROOT root:fff 1770, $APP, the
 #   clone and every release root's and read-only to fff, the old release still readable by fff's git;
-#   a release is built as fff and then made root's (fff can write nothing in it), node_modules reused as root's links;
+#   a release is built and then made root's (fff can write nothing in it), node_modules reused as root's links;
 #   release_problem refuses a mismatched commit, a changed, added or ignored file, a symbolic link on the way or out of the
 #   tree, a file not root's or writable by others, a forged .git, a .ready not root's or naming another commit;
 #   activate takes no forged record (fff's data/update.prepared.json, a root record of a mismatched or dirty tree) and
 #   installs nothing from it, and switches to the root record's release when it is fit;
 #   rollback goes back only to a fit root's release;
-#   a build that keeps a file open for writing, leaves a link out of the tree or adds a file is never marked ready.
+#   a build that leaves a link out of the tree or adds a file is never marked ready;
+#   w5523: the release is built by its own build account (made by fff-update: not fff, not in fff's group, a home of its
+#   own fff cannot write, only --x on $FFF_ROOT by an ACL, a clean environment without NODE_ENV), whose leftover processes
+#   are ended before harden; with an unfit build account the release is built as fff, as before, and the journal and the
+#   dispatcher are told, and fff's leftover writer is refused.
+#   root's clone and the release stay readable by fff (its update bundles) when activate runs under umask 077, and init
+#   mends objects an earlier run under it left unreadable (w5593).
 set -o errexit -o nounset -o pipefail
 cd "$(dirname "$0")/../../.."
 here=$(pwd)
@@ -18,13 +24,17 @@ fail() { echo "FAIL: $*"; exit 1; }
 ok() { echo "ok: $*"; }
 matches() { grep "$@" >/dev/null; }
 if [ "$(id -u)" != 0 ]; then echo "skip: fff-update.test.sh needs root (lint.sh --units on a throwaway machine)"; exit 0; fi
-for c in git jq runuser find realpath; do command -v "$c" >/dev/null || fail "needs $c"; done
+command -v setfacl >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q acl >/dev/null || true
+for c in git jq runuser find realpath setfacl getfacl pkill; do command -v "$c" >/dev/null || fail "needs $c"; done
 
 U=fffupdtest
 id "$U" >/dev/null 2>&1 || useradd --system --user-group --no-create-home --shell /usr/sbin/nologin "$U"
+# The build account (w5523): fff-update makes it itself, the first time it builds.
+B=fffupdbuild
+! id "$B" >/dev/null 2>&1 || userdel "$B"
 T=$(mktemp -d)
 T=$(cd -P "$T" && pwd)
-cleanup() { pkill -u "$U" 2>/dev/null || true; rm -rf "$T"; }
+cleanup() { pkill -u "$U" 2>/dev/null || true; pkill -u "$B" 2>/dev/null || true; userdel "$B" 2>/dev/null || true; rm -rf "$T"; }
 trap cleanup EXIT
 chmod 0755 "$T"
 R=$T/srv/fff
@@ -36,6 +46,8 @@ cp "$T/lib/lib.sh" "$T/lib.sh.orig"
 cat >"$T/fff.conf" <<EOF
 FFF_ROOT=$R
 FFF_USER=$U
+FFF_BUILD_USER=$B
+FFF_BUILD_HOME=$T/buildhome
 FFF_BRANCH=main
 FFF_REPO_URL=$T/src.git
 RELEASES_KEEP_EXTRA=5
@@ -47,6 +59,8 @@ cat >"$T/bin/npm" <<'EOF'
 evil=$(cat "${FAKE_NPM_EVIL:-@EVIL@}" 2>/dev/null || true)
 case "$1" in
   ci) mkdir -p node_modules/dep/bin node_modules/.bin; echo 'module.exports = 1' >node_modules/dep/index.js
+    # Who built it, with which home and NODE_ENV, and the folder's owner and mode while it was built (w5523).
+    echo "$(id -un) $HOME ${NODE_ENV:-none} $(stat -c '%U %a' .)" >node_modules/dep/builder
     echo x >node_modules/dep/bin/x; ln -sfn ../dep/bin/x node_modules/.bin/x ;;
   --prefix)
     mkdir -p "$2/dist"; echo built >"$2/dist/index.html"
@@ -62,7 +76,8 @@ printf '#!/bin/sh\nexit 0\n' >"$T/bin/systemctl"
 chmod 0755 "$T/bin/npm" "$T/bin/systemctl"
 : >"$T/evil"
 chmod 0644 "$T/evil"
-export FFF_LIB=$T/lib FFF_CONF=$T/fff.conf FAKE_NPM_EVIL=$T/evil FFF_PATH_PREFIX=$T/bin PATH=$T/bin:$PATH
+# NODE_ENV=production: fff-portal.service's, which the activate step inherits; the build must not get it (w5523).
+export FFF_LIB=$T/lib FFF_CONF=$T/fff.conf FAKE_NPM_EVIL=$T/evil FFF_PATH_PREFIX=$T/bin PATH=$T/bin:$PATH NODE_ENV=production
 upd() { "$T/lib/fff-update" "$@"; }
 as_u() { (cd / && runuser -u "$U" -- env HOME="$R/home" GIT_TERMINAL_PROMPT=0 "$@"); }
 # problem DIR SHA: release_problem's answer, from lib.sh as fff-update has it.
@@ -107,6 +122,18 @@ if as_u touch "$(r "$S1")/server/x" 2>/dev/null || as_u sh -c "echo x >>'$(r "$S
   fail "fff could write into the release, \$APP or $R's app"
 fi
 ok "the old layout moved to root's: the clone again, a root's release, root's links, fff's old release still read by fff's git"
+# w5523: the build account made it: its own account and home, through $R by an ACL that lets it pass and nothing more.
+[ "$(cat "$(r "$S1")/node_modules/dep/builder")" = "$B $T/buildhome none $B 755" ] ||
+  fail "S1 was not built as $B in its own home, without NODE_ENV, in a folder only it writes: $(cat "$(r "$S1")/node_modules/dep/builder")"
+[ "$(mode "$T/buildhome")" = "$B:$B 700" ] || fail "the build home is $(mode "$T/buildhome"), not $B:$B 700"
+! id -nG "$B" | tr ' ' '\n' | grep -qxF "$U" || fail "$B is in $U's group"
+getfacl -cp "$R" 2>/dev/null | matches -xF "user:$B:--x" || fail "no ACL entry lets $B pass through $R: $(getfacl -cp "$R" 2>/dev/null | paste -sd' ' -)"
+[ "$(mode "$R")" = "root:$U 1770" ] || fail "$R is $(mode "$R") after the ACL, not root:$U 1770"
+if as_u touch "$T/buildhome/.npmrc" 2>/dev/null || runuser -u "$B" -- ls "$R" >/dev/null 2>&1 || runuser -u "$B" -- touch "$R/x" 2>/dev/null; then
+  fail "fff could write the build home, or $B could read or write $R"
+fi
+[ -z "$(pgrep -u "$B")" ] || fail "the build account still runs after the build"
+ok "the build account made the release: its own account, its closed home, no NODE_ENV, an ACL to pass through $R and nothing more"
 
 # ---- 2. The update route: fff asks (data/update.wanted), root records the release, activate switches to it.
 as_u sh -c "echo '{\"ref\":\"$S1\",\"drainMinutes\":0}' >'$R/data/update.wanted'"
@@ -128,6 +155,7 @@ git -C "$T/src.git" update-ref refs/heads/main "$S2"
 upd prepare origin/main >/dev/null
 R1=$(r "$S1") R2=$(r "$S2")
 [ "$(stat -c %i "$R1/node_modules/dep/index.js")" = "$(stat -c %i "$R2/node_modules/dep/index.js")" ] || fail "node_modules was not reused"
+[ "$(cat "$R1.builder")" = "$B" ] && [ "$(cat "$R2.builder")" = "$B" ] && [ "$(stat -c %U "$R2.builder")" = root ] || fail "the releases built as $B do not record it in root's .builder"
 [ -z "$(problem "$R2" "$S2")" ] || fail "the second release is not fit: $(problem "$R2" "$S2")"
 
 # ---- 4. release_problem: each change is refused, and undoing it makes the release fit again.
@@ -179,17 +207,80 @@ ok "a root record of a mismatched or dirty tree is not taken, and rollback to a 
 
 # ---- 6. A build that leaves a writer, a link out of the tree or an added file is never marked ready.
 git -C "$T/src.git" update-ref refs/heads/main "$S3"
-for e in holdfd outlink untracked; do
+for e in outlink untracked; do
   echo "$e" >"$T/evil"
   if upd prepare origin/main >/dev/null 2>"$T/evil-$e.log"; then fail "a build that did $e was marked ready"; fi
   [ ! -e "$(r "$S3").ready" ] || fail "$e: the release is marked ready"
-  pkill -u "$U" sleep 2>/dev/null || true
 done
-matches 'still writes into' "$T/evil-holdfd.log" || { cat "$T/evil-holdfd.log"; fail "holdfd: refused for another reason"; }
 matches 'leads out' "$T/evil-outlink.log" || { cat "$T/evil-outlink.log"; fail "outlink: refused for another reason"; }
 matches 'not clean' "$T/evil-untracked.log" || { cat "$T/evil-untracked.log"; fail "untracked: refused for another reason"; }
+ok "a build that leaves a link out or adds a file is refused"
+# A process the build account left holding a built file open is ended before the release becomes root's (w5523).
+echo holdfd >"$T/evil"
+upd prepare origin/main >/dev/null 2>"$T/s3.log" || { cat "$T/s3.log"; fail "a build whose leftover writer was ended failed"; }
+[ -z "$(pgrep -u "$B")" ] || fail "the build account's leftover writer still runs"
+[ -z "$(problem "$(r "$S3")" "$S3")" ] || fail "the rebuilt release is not fit: $(problem "$(r "$S3")" "$S3")"
+ok "the build account's leftover writer is ended, and the release builds"
+
+# ---- 7. Root's clone stays readable by fff whatever umask root runs under (w5593). activate runs inside fff-portal.service
+# (UMask=0077, kept by its "+" ExecStartPre); its own build of origin/main fetched objects only root could read, and every
+# machine's update bundle (server/machineLink.ts: fff's git bundle create) failed with "Permission denied".
+unreadable() { find "$REPO" ! -perm -o=r -print -quit; }
+bundles() { as_u git -C "$1" bundle create --quiet "$R/home/u.bundle" HEAD 2>"$T/bundle.log"; }
+gs commit -q --allow-empty -m s4
+S4=$(gs rev-parse HEAD)
+git -C "$T/src" push -q "$T/src.git" "$S4:refs/heads/main"
+as_u touch "$R/data/update.request"
+(umask 077 && upd activate) 2>"$T/act-umask.log" || { cat "$T/act-umask.log"; fail "activate under umask 077 failed"; }
+[ "$(readlink -e "$CURRENT")" = "$(r "$S4")" ] || { cat "$T/act-umask.log"; fail "activate under umask 077 did not build and switch to S4"; }
+[ -z "$(unreadable)" ] || fail "activate under umask 077 left $(unreadable) unreadable by fff"
+bundles "$(r "$S4")" || { cat "$T/bundle.log"; fail "fff's git could not bundle the release activate built under umask 077"; }
+[ -z "$(find "$(r "$S4")" ! -perm -o=r -print -quit)" ] || fail "the release built under umask 077 is not readable by fff"
+ok "activate under the portal unit's umask 077 leaves root's clone and the release readable: fff's git bundles it"
+# What a run under umask 077 wrote before this fix (objects 0400 in folders 0700) is mended by the next update's init.
+o=$(git -C "$REPO" rev-parse "$S4^{tree}")
+f=$(find "$REPO/objects" -type f -name "${o:2}" -print -quit)
+[ -n "$f" ] || f=$(find "$REPO/objects/pack" -type f -name '*.pack' -print -quit)
+chmod 0400 "$f"
+chmod 0700 "$(dirname "$f")"
+bundles "$(r "$S4")" && fail "the test's broken object did not break fff's bundle"
+upd init origin/main 2>"$T/init-mend.log" || { cat "$T/init-mend.log"; fail "init failed"; }
+[ -z "$(unreadable)" ] || fail "init left $(unreadable) unreadable by fff"
+bundles "$(r "$S4")" || { cat "$T/bundle.log"; fail "after init, fff's git still cannot bundle the release"; }
+ok "init (each update's system setup runs it) mends objects and folders root wrote under umask 077"
+# ---- 8. An unfit build account (w5523): the release is built as fff, as before, the update goes on, and the journal
+# and the dispatcher are told; fff's leftover writer is then refused by harden_release, as before.
+gs commit -q --allow-empty -m s5
+S5=$(gs rev-parse HEAD)
+git -C "$T/src" push -q "$T/src.git" "$S5:refs/heads/main"
+sed -i "s|^FFF_BUILD_USER=.*|FFF_BUILD_USER=root|" "$T/fff.conf"
+echo holdfd >"$T/evil"
+if upd prepare origin/main >/dev/null 2>"$T/fb1.log"; then fail "fff's build with a leftover writer was marked ready"; fi
+matches 'still writes into' "$T/fb1.log" || { cat "$T/fb1.log"; fail "fff's leftover writer: refused for another reason"; }
+pkill -u "$U" sleep 2>/dev/null || true
 : >"$T/evil"
-upd prepare origin/main >/dev/null 2>"$T/s3.log" || { cat "$T/s3.log"; fail "a clean build after the refused ones failed"; }
-[ -z "$(problem "$(r "$S3")" "$S3")" ] || fail "the rebuilt release is not fit"
-ok "a build that keeps a file open for writing, leaves a link out or adds a file is refused; the next clean one builds"
+upd prepare origin/main >/dev/null 2>"$T/fb.log" || { cat "$T/fb.log"; fail "the build as fff, with an unfit build account, failed"; }
+matches -F 'SECURITY: the build account root is not fit' "$T/fb.log" || { cat "$T/fb.log"; fail "the fall back to fff was not said"; }
+matches -F "web build as $U" "$T/fb.log" || { cat "$T/fb.log"; fail "with an unfit build account, S5 was not built as $U"; }
+grep -lF 'SECURITY (w5523)' "$R"/data/orchestrator-inbox/*.txt >/dev/null 2>&1 || fail "the dispatcher was not told of the fall back to fff"
+[ -z "$(problem "$(r "$S5")" "$S5")" ] || fail "the release built as fff is not fit: $(problem "$(r "$S5")" "$S5")"
+ok "an unfit build account: the release is built as fff, made root's, and the fall back is said to the journal and the dispatcher"
+[ "$(cat "$(r "$S5").builder")" = "$U" ] && [ "$(stat -c %U "$(r "$S5").builder")" = root ] || fail "the release built as fff does not record root's .builder $U"
+
+# ---- 9. node_modules fff built are not carried into a release the build account builds (w5523 B1): S5 (built as fff)
+# runs, S6 has the same lockfiles, the build account is fit again; S6 gets its own npm ci, not links to S5's files.
+sed -i "s|^FFF_BUILD_USER=.*|FFF_BUILD_USER=$B|" "$T/fff.conf"
+ln -sfn "$(r "$S5")" "$CURRENT"
+gs commit -q --allow-empty -m s6
+S6=$(gs rev-parse HEAD)
+git -C "$T/src" push -q "$T/src.git" "$S6:refs/heads/main"
+upd prepare origin/main >/dev/null 2>"$T/b1.log" || { cat "$T/b1.log"; fail "the build of S6 as $B failed"; }
+if matches -F 'node_modules reused' "$T/b1.log"; then cat "$T/b1.log"; fail "S6 reused node_modules from fff's build of S5"; fi
+for sub in . web; do
+  [ "$(stat -c %i "$(r "$S5")/$sub/node_modules/dep/index.js")" != "$(stat -c %i "$(r "$S6")/$sub/node_modules/dep/index.js")" ] ||
+    fail "$sub/node_modules of S6 are links to fff's build of S5"
+done
+[ "$(cut -d' ' -f1 "$(r "$S6")/node_modules/dep/builder")" = "$B" ] || fail "S6's node_modules were not built by $B"
+[ "$(cat "$(r "$S6").builder")" = "$B" ] || fail "S6 does not record $B in .builder"
+ok "node_modules fff built are never reused by a build of the build account"
 echo "fff-update.test.sh: all passed"

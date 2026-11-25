@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inScope, probeOomPolicy, probeScopes, resetScopeProbe, scopeEndCause, scopeUnit, scoped, scopesUsable } from '../machine/linuxScope.ts';
+import { inScope, limitsUsable, probeLimits, probeOomPolicy, probeScopes, resetScopeProbe, scopeEndCause, scopeUnit, scoped, scopesUsable } from '../machine/linuxScope.ts';
 
 // w2474: on Linux each editor and agent host gets a systemd scope of its own, out of the daemon's cgroup, so that
 // systemd-oomd's whole-cgroup kill under memory pressure takes the editor, not the daemon and its link to the portal.
@@ -75,4 +75,42 @@ test("w2884: scopeEndCause names systemd's OOM line from a scope's journal, and 
   assert.equal(scopeEndCause('u', () => ({ status: 0, stdout: 'Started ffw-agent-h1.scope.\nffw-agent-h1.scope: Consumed 3min CPU time.\n' })), undefined);
   assert.equal(scopeEndCause('u', () => ({ status: null, stdout: '' })), undefined, 'no journal');
   assert.equal(scopeEndCause('u', () => { throw new Error('no journalctl'); }), undefined);
+});
+
+test('w5554: a worker host scope carries MemoryMax and TasksMax where the user manager delegates them', () => {
+  const lim = { memoryBytes: 51_539_607_552, tasks: 16384 };
+  const c = scoped('agent', 'h', '/bin/node', ['host.ts'], { platform: 'linux', usable: () => true, oom: () => true, limits: lim, limitsOk: () => true });
+  const at = c.args.indexOf('--');
+  const before = c.args.slice(0, at);
+  assert.ok(before.includes('MemoryMax=51539607552') && before.includes('TasksMax=16384'), before.join(' '));
+  assert.ok(before.includes('OOMPolicy=continue'), 'an OOM kill in the scope ends the runaway, not the host');
+  assert.equal(c.limited, true);
+  assert.deepEqual(c.args.slice(at + 1), ['/bin/node', 'host.ts']);
+  // a user manager without the controllers: no properties systemd would take and nothing would hold
+  const d = scoped('agent', 'h', '/bin/node', ['host.ts'], { platform: 'linux', usable: () => true, oom: () => false, limits: lim, limitsOk: () => false });
+  assert.ok(!d.args.some((a) => a.startsWith('MemoryMax=') || a.startsWith('TasksMax=')));
+  assert.equal(d.limited, undefined);
+  // an editor, or a session that is no worker, has none
+  assert.ok(!scoped('unity', 's', '/u', [], { platform: 'linux', usable: () => true, oom: () => false }).args.some((a) => a.startsWith('MemoryMax=')));
+});
+
+test('w5554: without a usable OOMPolicy the scope has no limits: systemd would end the whole scope, the agent included', () => {
+  const lim = { memoryBytes: 51_539_607_552, tasks: 16384 };
+  const c = scoped('agent', 'h', '/bin/node', ['host.ts'], { platform: 'linux', usable: () => true, oom: () => false, limits: lim, limitsOk: () => true });
+  assert.ok(!c.args.some((a) => a.startsWith('MemoryMax=') || a.startsWith('TasksMax=') || a.startsWith('OOMPolicy=')), c.args.join(' '));
+  assert.equal(c.limited, undefined, 'the caller logs that the limits are not applied');
+  assert.match(c.unit ?? '', /^ffw-agent-h-/, 'still in a scope of its own');
+});
+
+test('w5554: the limits probe trusts only the scope reading its own limits back', () => {
+  assert.equal(probeLimits(() => ({ status: 0, stdout: '1073741824\n4096\n' })), true);
+  assert.equal(probeLimits(() => ({ status: 0, stdout: 'max\nmax\n' })), false, 'systemd took the properties, the cgroup holds nothing');
+  assert.equal(probeLimits(() => ({ status: 0, stdout: '' })), false, 'no memory controller: no file');
+  assert.equal(probeLimits(() => ({ status: 1, stdout: '1073741824\n4096\n' })), false);
+  resetScopeProbe();
+  let n = 0;
+  assert.equal(limitsUsable(() => (n++, true), 0), true);
+  assert.equal(limitsUsable(() => (n++, false), 1000), true, 'kept');
+  assert.equal(n, 1);
+  resetScopeProbe();
 });

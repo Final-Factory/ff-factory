@@ -99,10 +99,37 @@ export function ownerSecretPaths(o: { platform: NodeJS.Platform; home: string; e
 }
 
 /**
- * The Keychain's mach services on macOS (w5553: "a Keychain/securityd mach-lookup deny if it tests safe"). Denied only
- * when the daemon's probe shows git over HTTPS and gh still work under it (daemon.ts ownerFenceProbe).
+ * The mach services a fenced Mac run may not look up (w5560, measured on m5 2026-11-25, probe 4): with
+ * ~/Library/Keychains unreadable there is no default keychain, and a write (`security add-generic-password`) then has
+ * SecurityAgent raise a "keychain not found" dialog on the person's screen and waits for a click (its "Reset To Defaults"
+ * would replace their login keychain). Denying com.apple.authd makes the write fail at once ("Unable to obtain
+ * authorization", exit 152) but still logged one SecurityAgent dialog line; denying both logged none, and git over
+ * HTTPS, gh, codesign, python, uv, node, curl, the Claude CLI and a Unity batch run with its licence update all passed.
+ * Denying com.apple.SecurityServer alone still hung. So both, always together with the Keychains read deny.
  */
-export const KEYCHAIN_MACH_SERVICES = ['com.apple.SecurityServer', 'com.apple.securityd.xpc'];
+export const KEYCHAIN_MACH_SERVICES = ['com.apple.authd', 'com.apple.SecurityServer'];
+
+/**
+ * The owner-secret paths a fenced run may not read, for this run. The gh login's folder is left out only for a run that
+ * has no GitHub token at all (no vault token and the daemon read no machine token): that run still reads the login
+ * itself, as before (w5548 "Keep it only for the runs that have no vault token"). Windows gets none: every path is on the
+ * system drive, where the fence writes no label (w5548 "Never touch C: on Windows"; handed up, docs/worker-fence.md).
+ */
+export function ownerReadDenied(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
+  if (o.platform === 'win32') return [];
+  return ownerSecretPaths(o)
+    .filter((s) => o.hasToken || s.kind !== 'gh')
+    .map((s) => realOr(s.path));
+}
+
+/** A path resolved through its links when it exists (Seatbelt and Landlock match resolved paths), else as given. */
+function realOr(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return p;
+  }
+}
 
 /** The run's own GitHub credential: a vault token (GH_TOKEN, w868), which also carries any GitHub App (FF_GH_APP_NAMES). */
 export const hasOwnGithub = (specEnv: Record<string, string | undefined> | undefined) => Boolean(specEnv?.GH_TOKEN);

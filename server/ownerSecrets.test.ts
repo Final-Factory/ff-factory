@@ -64,3 +64,20 @@ test('machineGhToken: runs gh auth token without any inherited token, and keeps 
   assert.equal(machineGhToken(() => ({ status: 0, stdout: 'no oauth token found\n' })), undefined);
   assert.equal(machineGhToken(() => { throw new Error('ENOENT'); }), undefined);
 });
+
+test('ownerReadDenied: the gh folder is closed only to a run with a token; Windows gets none (w5553, w5548)', async () => {
+  const { ownerReadDenied } = await import('../machine/ownerSecrets.ts');
+  const home = '/Users/nobody-w5553';
+  const withTok = ownerReadDenied({ platform: 'darwin', home, env: {}, hasToken: true });
+  const noTok = ownerReadDenied({ platform: 'darwin', home, env: {}, hasToken: false });
+  assert.ok(withTok.includes(`${home}/.config/gh`));
+  assert.ok(!noTok.includes(`${home}/.config/gh`));
+  for (const p of [`${home}/.ssh`, `${home}/Library/Keychains`, `${home}/Library/Safari`]) assert.ok(noTok.includes(p), p);
+  assert.deepEqual(ownerReadDenied({ platform: 'win32', home: 'C:\\Users\\p', env: { APPDATA: 'C:\\Users\\p\\AppData\\Roaming', LOCALAPPDATA: 'C:\\Users\\p\\AppData\\Local' }, hasToken: true }), []);
+  assert.ok(ownerReadDenied({ platform: 'linux', home: '/home/nobody-w5553', env: {}, hasToken: true }).includes('/home/nobody-w5553/.ssh'));
+});
+
+test('KEYCHAIN_MACH_SERVICES: authd and SecurityServer together, as probe 4 measured (w5560)', async () => {
+  const { KEYCHAIN_MACH_SERVICES } = await import('../machine/ownerSecrets.ts');
+  assert.deepEqual([...KEYCHAIN_MACH_SERVICES].sort(), ['com.apple.SecurityServer', 'com.apple.authd']);
+});

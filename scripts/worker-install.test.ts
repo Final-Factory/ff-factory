@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -138,17 +138,17 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.appDir, path.join('/r', 'daemon'));
   assert.equal(cfg.tempDir, path.join('/r', 'tmp'));
   assert.equal(cfg.tokenFile, path.join('/r', 'secrets', 'machine-token'));
-  // w5377: what workers write for the daemon is inside the root, outside its Medium daemon folder; the old events file is drained.
+  // w5377: the Unity slots mailbox workers write is inside the root, outside its Medium daemon folder. w5552: the Max events
+  // file is the daemon's own, in its folder, whatever daemon.json names (a path a worker could write would let it forge lines).
   assert.equal(cfg.unitySlotsDir, path.join('/r', 'unity-slots'));
-  assert.equal(cfg.maxEventsFile, path.join('/r', 'max', 'max-events.jsonl'));
-  assert.equal(cfg.maxEventsLegacy, path.join('/r', 'daemon', 'max-events.jsonl'));
-  const own = withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d', maxEventsFile: '/e.jsonl', unitySlotsDir: '/s' });
-  assert.deepEqual([own.maxEventsFile, own.maxEventsLegacy, own.unitySlotsDir], ['/e.jsonl', undefined, '/s'], 'daemon.json\'s own paths win');
-  assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d' }).maxEventsLegacy, path.join('/d', 'max-events.jsonl'));
+  assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max', 'max-events.jsonl'));
+  const own = withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d', maxEventsFile: '/r/max/max-events.jsonl', unitySlotsDir: '/s' });
+  assert.deepEqual([own.maxEventsFile, own.unitySlotsDir], [path.join('/d', 'max', 'max-events.jsonl'), '/s'], 'the slots mailbox may move; the events file stays the daemon\'s');
+  assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', maxEventsFile: null }).maxEventsFile, null, 'null still turns it off');
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   // w1099: no FF_NIGHTLY_ROOT: the nightly lab root is gone (the night keeps its history in <root>/nightly-history).
-  // w5281: the shared uv cache and the determinism audits' folder are inside the root.
-  assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), UV_CACHE_DIR: path.join('/r', 'cache', 'uv'), CARGO_HOME: path.join('/r', 'cache', 'cargo'), FF_DETERMINISM_AUDIT_DIR: path.join('/r', 'cache', 'determinism-audit'), FF_GAME_DATA_DIR: path.join('/r', 'gamedata'), FF_PLAYER_HOME: path.join('/r', 'gamedata-home'), ...workerToolCacheEnv('/r') });
+  // w5281: the shared uv cache and the determinism audits' folder are inside the root; w5565: the daemon's own uv cache is the Medium one.
+  assert.deepEqual(rootEnv('/r'), { FF_WORKER_ROOT: '/r', FF_PLAYER_SLOT_ROOT: path.join('/r', 'players'), UV_CACHE_DIR: path.join('/r', 'cache-medium', 'uv'), CARGO_HOME: path.join('/r', 'cache', 'cargo'), FF_DETERMINISM_AUDIT_DIR: path.join('/r', 'cache', 'determinism-audit'), FF_GAME_DATA_DIR: path.join('/r', 'gamedata'), FF_PLAYER_HOME: path.join('/r', 'gamedata-home'), ...workerToolCacheEnv('/r') });
   assert.equal(readToken({ token: 'in-json' }), 'in-json');
   assert.equal(readToken({ token: '', tokenFile: 'f' }, () => `${TOKEN}\r\n`), TOKEN);
   assert.throws(() => readToken({ token: '', tokenFile: 'f' }, () => '\n'), /is empty/);
@@ -691,6 +691,31 @@ test('w5377: worker update --worker-fence sets or removes the fence key for its 
   assert.equal(workerFenceLine('on', 'darwin'), 'worker fence: on (workerFence)');
   assert.equal(workerFenceLine('on', 'win32'), 'worker fence: on (workerIntegrity)');
   assert.equal(workerFenceLine('off', 'linux'), 'worker fence: off');
+});
+
+test('w5554: worker update --worker-caps writes the mode to daemon.json as workerCaps; unset carries it', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-caps-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { workerCaps?: 'off' | 'warn' | 'enforce' }) => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, 'linux'), l, 'beast', undefined);
+  assert.equal('workerCaps' in written(BEAST_CONFIG, {}), false, 'no key unless asked: absent means warn');
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.equal(written(BEAST_CONFIG, { workerCaps: m }).workerCaps, m);
+  const had = { ...BEAST_CONFIG, workerCaps: 'enforce' };
+  assert.equal(written(had, {}).workerCaps, 'enforce', 'unset carries it');
+  assert.equal(written(had, { workerCaps: 'off' }).workerCaps, 'off', 'the switch replaces it');
+  assert.deepEqual(written(had, { workerCaps: 'off' }).protectedPaths, BEAST_CONFIG.protectedPaths, 'the other settings are carried');
+  const cfg = { a: 1 };
+  assert.equal(applyWorkerCaps(cfg, undefined), cfg, 'unset: the very config');
+});
+
+test('w5554: --worker-caps takes off, warn or enforce and refuses anything else, before the update touches anything', async () => {
+  assert.deepEqual(parseArgs(['update', '--root', '/r', '--worker-caps', 'off']).opts, { root: '/r', 'worker-caps': 'off' });
+  assert.equal(workerCapsFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.equal(workerCapsFlag(m), m);
+  for (const bad of ['ON', 'true', 'on', '']) assert.throws(() => workerCapsFlag(bad), /--worker-caps is off, warn or enforce/);
+  const none = path.join(os.tmpdir(), `ffw-caps-none-${process.pid}`);
+  await assert.rejects(main(['update', '--root', none, '--worker-caps', 'maybe']), /--worker-caps is off, warn or enforce, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--worker-caps']), /--worker-caps is off, warn or enforce/);
+  assert.equal(fs.existsSync(none), false);
 });
 
 test('w5377: --worker-fence takes on or off and refuses anything else, before the update touches anything', async () => {

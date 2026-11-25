@@ -17,6 +17,14 @@ set -euo pipefail
 
 PORTAL_URL='__FF_PORTAL_URL__'
 INSTALL_URL='https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh'
+# The portal writes its own full commit here (w5516): the installer is fetched at it and checks exactly it out (--ref),
+# so this computer installs the code the portal runs, never whatever main's head is then. Unset (run from a clone): main.
+PORTAL_COMMIT='__FF_PORTAL_COMMIT__'
+REF_ARGS=()
+if [[ $PORTAL_COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+  INSTALL_URL="https://raw.githubusercontent.com/Final-Factory/ff-factory/$PORTAL_COMMIT/scripts/worker/install.sh"
+  REF_ARGS=(--ref "$PORTAL_COMMIT")
+fi
 ROOT='' MAX_SANDBOXES='' MAX_AGENTS='' MAX_UNITY='' DRY_RUN=0 YES=0 TAILSCALE='' INSTALLER='' SKIP_SETUP=0
 
 while [ $# -gt 0 ]; do
@@ -131,7 +139,7 @@ if root_installed "$ROOT"; then
   step "Already installed at $ROOT: updating it (no join code needed)"
   if [ "$DRY_RUN" = 1 ]; then say "Dry run: it would update the install at $ROOT (install.sh --update)."; exit 0; fi
   if [ "$SKIP_SETUP" = 0 ]; then install_tools || exit 2; fi
-  args=(--update --root "$ROOT")
+  args=(--update --root "$ROOT" ${REF_ARGS[@]+"${REF_ARGS[@]}"})
   [ -n "$MAX_SANDBOXES" ] && args+=(--max-sandboxes "$MAX_SANDBOXES")
   [ -n "$MAX_AGENTS" ] && args+=(--max-agents-per-sandbox "$MAX_AGENTS")
   [ -n "$MAX_UNITY" ] && args+=(--max-unity "$MAX_UNITY")
@@ -183,7 +191,7 @@ node -e 'const fs=require("fs");const j=JSON.parse(fs.readFileSync(process.argv[
 say "The portal made the record for '$ID' and issued its credential (...$(json "$WORK/join.json" last4)), written to a private file for the installer."
 
 step 'Installing (install.sh)'
-args=(--root "$ROOT" --portal-url "$PORTAL" --max-sandboxes "$LS" --max-agents-per-sandbox "$LA" --max-unity "$LU" --credential-file "$CRED" --no-ssh)
+args=(--root "$ROOT" --portal-url "$PORTAL" --max-sandboxes "$LS" --max-agents-per-sandbox "$LA" --max-unity "$LU" --credential-file "$CRED" --no-ssh ${REF_ARGS[@]+"${REF_ARGS[@]}"})
 rc=0
 if [ -n "$INSTALLER" ]; then bash "$INSTALLER" "${args[@]}" || rc=$?; else bash -c "$(curl -fsSL "$INSTALL_URL")" -- "${args[@]}" || rc=$?; fi
 rm -f "$CRED"

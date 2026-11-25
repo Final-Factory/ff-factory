@@ -217,7 +217,7 @@ See `config.example.json` and `server/config.ts` (every field is documented ther
 ones: `host`, `repo` (the base clone the orchestrators read; the only required key), `sandboxRoot` (optional: the
 sandbox root of this host's own daemon when `add_machine local` is used, and the default parent of `review.root` and
 `standingRoot`; keep it short: Windows path lengths), `protectedPaths` (checkouts agents must never touch),
-`limits.minFreeRamGB` (editors are ~8-12 GB RAM each), `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user").
+`limits.minFreeRamGB` (editors are ~8-12 GB RAM each), `ownerName` (optional: the name agents' prompts use for you; otherwise they say "the user"). `steamBuildAccount` (optional: the Steam build account `steam_upload` action `install` sets up on an urgent-lane computer, docs/steam-upload.md).
 `publicGitIdentity` (optional `name`/`email`/`repos`): repos whose history is public, by default this
 app's own origin. Any other GitHub repo that GitHub reports as public counts too (`gh api`, cached;
 `server/publicGit.ts`). The guard refuses an agent's push to a public repo when a commit carries an email
@@ -284,7 +284,10 @@ FF Factory gives AI agents a shell on your machine. Treat access to it like SSH 
 - **What agents can do:** workers default to `bypassPermissions`. The guard hook (`server/guard.ts`,
   `server/standingGuard.ts`) blocks the known-destructive git operations and paths listed under
   `protectedPaths`, and pins Unity MCP calls to the agent's own editor. It is a seatbelt against
-  mistakes, not a sandbox against an agent that is trying (see Known gaps).
+  mistakes, not a sandbox: it matches only command text, and a script file gets past it, so it does not stop a determined
+  or hijacked worker. The real protection is the OS write fences (Windows Low integrity, macOS Seatbelt, Linux Landlock),
+  the read blocks and the daemon-side checks; each one's coverage, and what is still open, is in
+  [docs/worker-fence.md](docs/worker-fence.md) ("What protects a machine, and what does not").
 - **Secrets on disk:** `config.json` holds none since w1078 (Claude tokens are the vault's, FFBox's connector hash is a file in
   the secrets folder; `fffctl config --check` in the VM says so), and `data/` (users,
   sessions, API keys, VAPID keys, machine tokens, transcripts) are gitignored and stay on the host.
@@ -305,7 +308,8 @@ Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Known gaps
 
-- **Workers run as the user's Windows user.** The guard is a seatbelt; a hijacked worker (e.g. prompt
+- **Workers run as the user's Windows user.** The guard is a seatbelt (text matching only; the fences, not the guard, are
+  the protection, and they are write-only so far: docs/worker-fence.md, "What protects a machine, and what does not"); a hijacked worker (e.g. prompt
   injection via Discord text) could still use `execute_code` or a script file to touch the user's files,
   processes and the co-op checkout, and can read the Claude token in its environment. The real fix,
   tabled 2026-09-23: run workers and sandbox editors as a low-privilege local user (`ffsb`). First

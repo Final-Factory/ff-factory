@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NIGHTLY_SENTRY, PoolHeldError, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
+import { NIGHTLY_SENTRY, PoolHeldError, UNATTRIBUTED_DEFAULTS, Vault, tokenPersonForWork, unattributedKind, unattributedPerson, eligible, type KeySource, envNameProblem, fingerprintOf, keySource, newKeyText, takeOpenedKey, readKey, valueProblem, vaultStatusLine, type VaultEntryMeta, type VaultContext } from './vault.ts';
 import { SECRET_ENV, addSecretValues, machineRunEnv, redactSecrets, registerSecretValues } from './secrets.ts';
 import { GH_LOGIN_HELPER, GITHUB_HELPER, ghLoginCredentialEnv, githubCredentialEnv } from './launch.ts';
 import { buildAccounts, tokenKey } from './usage.ts';
@@ -656,4 +656,53 @@ test('w5430: ghLoginCredentialEnv clears github.com helpers and asks gh, after t
   });
   assert.equal(GH_LOGIN_HELPER, '!gh auth git-credential');
   assert.equal(ghLoginCredentialEnv({}).GIT_CONFIG_COUNT, '2');
+});
+
+test('vault: the Steam build account reaches no run, only releaseSecrets for the daemon (w5551)', (t) => {
+  const { make } = setup(t);
+  const v = make();
+  const PW = 'steam-password-value-1234';
+  v.add({ name: 'steam', kind: 'env', env: 'FFSTEAM_PASSWORD', value: PW, share: 'anyone', roles: ['workers'], machines: ['beast', 'lothdesktop'] });
+  v.add({ name: 'max', kind: 'env', env: 'FFDISCORD_APP_TOKEN', value: DISCORD, share: 'anyone', machines: ['beast'] });
+  for (const role of ['workers', 'standing', 'orchestrator', 'ops'] as const) {
+    const env = v.forRun({ machineId: 'beast', role }, { claude: false, github: true }).env;
+    assert.equal(env.FFSTEAM_PASSWORD, undefined, `${role} gets no Steam password`);
+  }
+  assert.equal(v.forRun({ machineId: 'beast', role: 'workers' }, { claude: false }).env.FFDISCORD_APP_TOKEN, DISCORD, 'other env entries still reach workers');
+  assert.deepEqual(v.releaseSecrets('beast'), { env: { FFSTEAM_PASSWORD: PW }, problems: [] });
+  assert.deepEqual(v.releaseSecrets('m3').env, {}, 'only on the machines it is granted to');
+  v.add({ name: 'steam2', kind: 'env', env: 'FFSTEAM_GUARD_SECRET', value: 'guard-secret-5678', share: 'anyone', roles: ['releases'], machines: ['m3'] });
+  assert.deepEqual(v.releaseSecrets('m3').env, { FFSTEAM_GUARD_SECRET: 'guard-secret-5678' });
+  assert.equal(v.forRun({ machineId: 'm3', role: 'workers' }, { claude: false }).env.FFSTEAM_GUARD_SECRET, undefined);
+});
+
+test("w5506: the key systemd opened (OpenFile=) is read from its descriptor, closed, and its variables leave the environment", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vault-fd-'));
+  const file = path.join(dir, 'vault.key');
+  fs.writeFileSync(file, newKeyText(), { mode: 0o600 });
+  const real = fs.openSync(file, 'r');
+  const closed: number[] = [];
+  // fd 4 (the second name) stands for the real descriptor.
+  const fsx = {
+    fstatSync: (fd: number) => fs.fstatSync(fd === 4 ? real : -1),
+    readFileSync: (fd: number, enc: 'utf8') => fs.readFileSync(fd === 4 ? real : -1, enc),
+    closeSync: (fd: number) => closed.push(fd),
+  } as unknown as Parameters<typeof takeOpenedKey>[1] extends infer O ? NonNullable<O extends { fsx?: infer F } ? F : never> : never;
+  const env: NodeJS.ProcessEnv = { LISTEN_FDS: '2', LISTEN_PID: '77', LISTEN_FDNAMES: 'other:fff-vault-key', LISTEN_PIDFDID: '9', KEEP: '1' };
+  const got = takeOpenedKey(env, { pid: 77, platform: 'linux', fsx });
+  assert.equal(got?.key?.length, 32);
+  assert.doesNotMatch(got?.file ?? '', /\//, 'names the descriptor, not a path');
+  assert.deepEqual(closed, [4]);
+  assert.deepEqual(env, { KEEP: '1' });
+  // Another process's descriptors, or none named for the key: nothing read, the variables still gone.
+  const other: NodeJS.ProcessEnv = { LISTEN_FDS: '1', LISTEN_PID: '78', LISTEN_FDNAMES: 'fff-vault-key' };
+  assert.equal(takeOpenedKey(other, { pid: 77, platform: 'linux', fsx }), undefined);
+  assert.deepEqual(other, {});
+  assert.equal(takeOpenedKey({}, { pid: 77, platform: 'linux', fsx }), undefined);
+  if (process.platform !== 'win32') {
+    fs.chmodSync(file, 0o644);
+    assert.match(takeOpenedKey({ LISTEN_FDS: '2', LISTEN_PID: '77', LISTEN_FDNAMES: 'x:fff-vault-key' }, { pid: 77, platform: 'linux', fsx })?.why ?? '', /readable by other users/);
+  }
+  fs.closeSync(real);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

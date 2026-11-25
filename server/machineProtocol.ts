@@ -1,6 +1,7 @@
 // The WebSocket protocol between the portal (server/machines.ts) and a machine daemon
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
+import type { PortalPinStatus } from '../machine/portalPin.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
@@ -12,7 +13,7 @@ import type { DesktopSession } from '../shared/desktop.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
 import type { BenchHourRow } from '../shared/benchHours.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport, WorkerFenceReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -50,6 +51,11 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * at the hello (its Dev Drive not yet attached); an older portal drops it.
  * Also (w4922, no bump): `test_history`, a sandbox's local test run for the portal's per-test history, which an older portal
  * drops (the daemon sends it again later), answered by `test_history_ack`, which an older daemon drops.
+ * Also (w5576, no bump): `portalPin` in the hello (machine/portalPin.ts), which an older portal ignores.
+ * Also (w5640, no bump): `steamInstall` in the hello, and action `install` and `account` (the build account to set up) in
+ * `steam_upload`, sent only to a daemon that offered it.
+ * Also (w5551, no bump): `steamUpload` in the hello and `steam_upload`, sent only to a daemon that offered it, answered by
+ * `steam_upload_state`, which an older portal drops.
  */
 export const PROTOCOL_VERSION = 9;
 
@@ -118,8 +124,10 @@ export interface LinkUpdateFlags {
   devDrive?: boolean;
   moveToDevDrive?: boolean;
   devDriveMaxGB?: number;
-  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it ignores it. */
+  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it passes it on to linkJob unchanged, and a linkJob that predates it does not write it. */
   workerFence?: 'on' | 'off';
+  /** The worker caps' mode (w5554, docs/worker-caps.md): daemon.json `workerCaps`; unset: carried. A daemon that predates it ignores it. */
+  workerCaps?: 'off' | 'warn' | 'enforce';
 }
 
 /**
@@ -156,8 +164,12 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
  * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
  * portal re-emits it with no listener, and an older daemon or host never sends it.
+ * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended,
+ * warn?, kernel? } (machine/workerCaps.ts); `warn`: warn mode, the cap would have been hit and nothing was ended; `kernel`:
+ * Linux, the kernel acted and the host ended nothing. An older portal ignores it, and one that predates the two flags words a
+ * warn hit as an enforced one (its ledger line says "ended 0").
  */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize';
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
@@ -238,7 +250,7 @@ export type ToDaemon =
   | { type: 'cleanup_context'; context: StaleContext }
   /**
    * Each worker's request priority on this machine (w1628), for its bench queue: the daemon writes it to
-   * <root>/tmp/bench.queue/priorities.json, which the game repo's scripts/bench/bench_queue.py reads at every decision.
+   * <root>/daemon/bench.queue/priorities.json (w5545), which the game repo's scripts/bench/bench_queue.py reads at every decision.
    */
   | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns; timedAsk?: TimedAskMark; personPlay?: { enabled: boolean; graceMinutes: number; who?: string } }
   /**
@@ -296,6 +308,14 @@ export type ToDaemon =
    * branch as before): why the branch must not move on origin now (its PR's CI runs), so the save goes to a side branch.
    */
   | { type: 'save_work'; id: string; sandbox: string; branch: string; message: string; githubToken?: string; holdPush?: string }
+  /**
+   * The urgent release lane's Steam login check or upload (w5551, server/steamUpload.ts, docs/steam-upload.md), checked by
+   * the portal first: the daemon copies `runs` (each inside the calling session's sandbox or temp folder) into `<root>/steam`,
+   * checks them with ffbox ffrelease-check.py and runs ffbox ffsteam.py there, with `secrets` (FFSTEAM_PASSWORD and
+   * FFSTEAM_GUARD_SECRET from the vault, which no agent's environment holds) and `guardCode` in that process only. Answered
+   * by steam_upload_state. Sent only to a daemon whose hello offered `steamUpload`.
+   */
+  | { type: 'steam_upload'; id: string; action: 'check' | 'upload' | 'install'; session: string; sandbox?: string; version?: string; app?: 'main' | 'demo'; runs?: Partial<Record<'windows' | 'mac' | 'linux', string>>; live?: string; preview?: boolean; secrets: Record<string, string>; guardCode?: string; githubToken?: string; account?: string }
   /** GitHub App installation tokens for this machine's runs (w1519, docs/github-apps.md): the whole set, each time it changes. */
   | { type: 'gh_app_tokens'; tokens: GhAppToken[] }
   /**
@@ -327,7 +347,7 @@ export type ToDaemon =
    * over ssh: its supervisor stopped and unregistered, its agents ended, its files kept. Answered by daemon_control_result
    * before it goes (w1596). Sent only to a daemon whose hello offered `selfUpdate`.
    */
-  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' };
+  | { type: 'daemon_control'; id: string; action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on' };
 
 /** A live view a daemon runs (w1509), as its hello reports it. */
 export interface DaemonLiveView {
@@ -385,12 +405,23 @@ export type FromDaemon =
       /** It runs timed runs on a play-only machine (w1946, `timed_run`), and the ones it holds now, running first. An older portal ignores both. */
       timedRuns?: boolean;
       timedActive?: string[];
+      /** It runs the urgent lane's Steam check and upload itself (w5551, `steam_upload`). An older portal ignores it. */
+      steamUpload?: boolean;
+      /** It runs steam_upload's `install` (w5640). */
+      steamInstall?: boolean;
       /** It holds the nightly lab's fixtures (w3939, `<root>/nightly-history/fixtures`, never on C:) and serves `lab_fixture` and `lab_fixture_upload`. An older portal ignores it. */
       labFixtures?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
       selfUpdate?: number;
+      /**
+       * w5546: it takes daemon_control `read-fence-off` / `read-fence-warn` / `read-fence-on`, the worker read fence's live mode. Sent
+       * only to a daemon that says so: an older one reads any action but restart as uninstall.
+       */
+      readFenceSwitch?: boolean;
+      /** The portal hosts it follows and what pinning would have refused (w5576, machine/portalPin.ts). An older portal ignores it. */
+      portalPin?: PortalPinStatus;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       /** `ssh` (w4674): whether its installer set up the portal's ssh (root.json); absent from an older daemon or an unreadable root.json. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null; ssh?: boolean };
@@ -403,6 +434,8 @@ export type FromDaemon =
   | { type: 'activity_set'; activity: { enabled: boolean; idleMinutes: number } }
   /** Its host guard's state, when it changes (protocol 8, w466). */
   | { type: 'host_health'; health: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'> }
+  /** Its worker write fence's state, at welcome and when it changes (w5555): a failed one holds its sandbox workers. */
+  | { type: 'worker_fence'; fence: WorkerFenceReport }
   /** The session's current record (the daemon's AgentSession changed it). */
   | { type: 'session'; info: SessionInfo; live: boolean }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }
@@ -454,6 +487,8 @@ export type FromDaemon =
   | TimedRunReport
   /** The answer to a `lab_fixture` (w3939): the fixtures it holds that match, or why not. An older portal drops it. */
   | { type: 'lab_fixture_result'; id: string; ok: boolean; files?: { name: string; size: number; sha256: string }[]; error?: string }
+  /** A steam_upload job's progress and end (w5551): its phase, its last lines (redacted), steam-upload.json's facts. */
+  | { type: 'steam_upload_state'; id: string; state: 'running' | 'done' | 'failed'; phase?: string; said?: string; result?: Record<string, unknown>; error?: string }
   /** The end of a `lab_fixture_upload` (w3939): the attachment the portal made of it, or why it did not arrive. */
   | { type: 'lab_fixture_sent'; id: string; attachmentId?: string; error?: string }
   /**

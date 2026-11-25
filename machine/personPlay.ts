@@ -17,9 +17,10 @@
 // legs wait, and the portal places nothing new there. A grace period after the game closes (GRACE_MIN) covers a restart of
 // the game, then everything comes back as after a timed run.
 //
-// The state is kept in <root>/tmp/bench.queue/person.json, written at every look: the guard and unity-slot read it to hold
+// The state is kept in <root>/daemon/bench.queue/person.json (w5545: where no worker writes), written at every look: the guard and unity-slot read it to hold
 // new work (personHoldReason), and a daemon restart keeps a game seen just before it until its first look. A file the daemon
 // stopped writing (STALE_MS) holds nothing, so a daemon that is gone never keeps work waiting.
+import { writeInPlace } from './readFence.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -55,7 +56,7 @@ export interface PersonPlayState {
   until?: number;
 }
 
-export const personFile = (root: string) => path.join(root, 'tmp', 'bench.queue', 'person.json');
+export const personFile = (root: string) => path.join(root, 'daemon', 'bench.queue', 'person.json');
 
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(11, 16) + 'Z';
 
@@ -142,9 +143,8 @@ export class PersonPlay {
     const file = personFile(root);
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      const tmp = `${file}.${process.pid}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify({ at: this.d.now(), ...body }));
-      fs.renameSync(tmp, file);
+      // In place, not by rename (w5546 lockout review): fenced workers read it, and their grant is on this file.
+      writeInPlace(file, JSON.stringify({ at: this.d.now(), ...body }));
       this.written = j;
     } catch (e) {
       if (this.written !== j) this.d.log(`person play: could not write ${file}: ${(e as Error).message}`);

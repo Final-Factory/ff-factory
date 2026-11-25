@@ -4,9 +4,13 @@
 // (it says so in the URL: web/src/api.ts), and on close the code, the reason, who closed it and how long it was open.
 // Never per message, never a token. docs/portal-logs.md, "Connection lost".
 import type http from 'node:http';
-import { clientAddress, tailnetAddress } from './remoteChat.ts';
+import { tailnetAddress } from './remoteChat.ts';
+import { clientAddress, directAddress, isLoopback } from './clientAddress.ts';
 
 /** Who ended a socket: the page (a close frame), the server (its ping went unanswered), or nobody (1006: the network). */
+/** The most a page may send in one message (w5527: ws's default is 100 MiB). The page sends none on /ws; ws closes the socket with 1009 above this, and the page reconnects with its backoff. */
+export const PAGE_MAX_PAYLOAD = 1024 * 1024;
+
 export type ClosedBy = 'page' | 'ping-timeout' | 'network';
 export type Via = 'funnel' | 'tailnet' | 'local' | 'other';
 
@@ -27,14 +31,13 @@ const DROP_WINDOW_MS = 3_600_000;
 export function viaOf(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): { addr: string; via: Via } {
   const addr = clientAddress(req);
   if (req.headers['tailscale-funnel-request'] !== undefined) return { addr, via: 'funnel' };
-  if (addr === '::1' || /^127\./.test(addr)) return { addr, via: 'local' };
+  if (isLoopback(addr)) return { addr, via: 'local' };
   return { addr, via: tailnetAddress(addr) ? 'tailnet' : 'other' };
 }
 
 /** A request from this machine itself (fffctl status's curl), not one Tailscale Serve proxied in: it may see people's logins. */
 export function fromThisMachine(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): boolean {
-  const direct = (req.socket.remoteAddress ?? '').replace(/^::ffff:/i, '');
-  return (direct === '::1' || /^127\./.test(direct)) && req.headers['x-forwarded-for'] === undefined && req.headers['tailscale-funnel-request'] === undefined;
+  return isLoopback(directAddress(req)) && req.headers['x-forwarded-for'] === undefined && req.headers['tailscale-funnel-request'] === undefined;
 }
 
 /**

@@ -24,7 +24,10 @@
     & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\ffw
   It asks nothing: every setting, the credential and the task's user come from the install. -MaxSandboxes,
   -MaxAgentsPerSandbox, -MaxUnity change those; -WorkerFence on|off sets the worker write fence; -DaemonRef (default: the
-  commit the portal runs).
+  pinned -Ref, else the commit the portal runs).
+  -Ref <full commit id> (w5516) pins the installer and the daemon code to that exact commit and refuses when it cannot check
+  it out; the portal's rollout fetches this script at its own verified commit and passes it:
+    & ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Update -Ref <commit> -Root D:\ffw
 
 .PARAMETER Tools
   Publish the latest agent tools (final-factory-agents' plugins) for Claude Code on this PC, and change nothing else
@@ -39,6 +42,10 @@
 .PARAMETER WorkerFence
   With -Update (w5377): turn the worker write fence on or off, as ops_worker machine_update worker_fence does. On sets this
   PC's daemon.json key (workerIntegrity: low, Low integrity level), off removes it. Left out: the install keeps what it has.
+.PARAMETER WorkerCaps
+  With -Update (w5554, docs/worker-caps.md): set the per-worker memory, process and temp-disk caps' mode in daemon.json
+  (workerCaps), as ops_worker machine_update worker_caps does: warn (the default when absent: measure and report only),
+  enforce (limits and kills) or off (nothing). Left out: the install keeps what it has.
 .PARAMETER PlayOnly
   A play-only computer (w1946, w2004): no game repo clone, no sandboxes and no Dev Drive; the daemon, its tray app and one
   player-slot pair as on any computer. join.ps1 passes it when the join code is a play-only one.
@@ -93,6 +100,7 @@ param(
     [string]$Owner = '',
     [string]$VoiceWhisper = '',
     [ValidateSet('on', 'off')][string]$WorkerFence,
+    [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -183,6 +191,12 @@ if ($gitOut -match 'git version (\d+)\.(\d+)') { $gitv = [version]"$($Matches[1]
 if (-not $gitv -or $gitv -lt [version]'2.48') { Offer-Winget "git 2.48 or newer (found: $(if ($gitOut) { $gitOut } else { 'none' }))" 'Git.Git' }
 
 # --- the installer's own code: -Source, this script's checkout, or a fresh clone in the temp folder
+# -Ref is a branch, or a full commit id (w5516: what the portal's rollout and its join scripts pass, the commit it verified
+# and runs); a commit is checked out exactly or the installer refuses. A short id names nothing for certain: refused.
+$Ref = $Ref.Trim()
+$pinned = $Ref -match '^[0-9a-fA-F]{40}$'
+if ($pinned) { $Ref = $Ref.ToLower() }
+elseif ($Ref -match '^[0-9a-fA-F]{7,39}$') { Write-Host "-Ref $Ref looks like a short commit id: pass the full 40-character id (or a branch name). Nothing was changed."; exit 2 }
 $temp = $null
 if (-not $Source -and $PSScriptRoot) {
     $here = Resolve-Path (Join-Path $PSScriptRoot '..\..') -ErrorAction SilentlyContinue
@@ -192,9 +206,23 @@ if (-not $Source) {
     $temp = Join-Path $env:TEMP ("ff-worker-src-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
     # ff-factory is public: no credential helper and no prompt (an ssh session cannot reach the credential manager, w613).
     $env:GIT_TERMINAL_PROMPT = '0'; $env:GCM_INTERACTIVE = 'never'
-    git -c credential.helper= -c credential.interactive=never clone --quiet --depth 1 --branch $Ref https://github.com/Final-Factory/ff-factory.git $temp
-    if ($LASTEXITCODE -ne 0) { Write-Host 'Could not download the installer (git clone ff-factory failed).'; exit 2 }
+    if ($pinned) {
+        # A commit (w5516): exactly that commit, fetched by its id, or nothing.
+        git init --quiet $temp
+        if ($LASTEXITCODE -eq 0) { git -C $temp -c credential.helper= -c credential.interactive=never fetch --quiet --depth 1 --no-tags https://github.com/Final-Factory/ff-factory.git $Ref }
+        if ($LASTEXITCODE -eq 0) { git -C $temp -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD }
+        if ($LASTEXITCODE -ne 0) { Write-Host "Could not download ff-factory at commit $Ref (an anonymous git fetch of that commit failed): nothing was changed."; exit 2 }
+    } else {
+        git -c credential.helper= -c credential.interactive=never clone --quiet --depth 1 --branch $Ref https://github.com/Final-Factory/ff-factory.git $temp
+        if ($LASTEXITCODE -ne 0) { Write-Host 'Could not download the installer (git clone ff-factory failed).'; exit 2 }
+    }
     $Source = $temp
+}
+if ($pinned) {
+    # The code that runs must be the commit asked for, to the id, wherever it came from; else nothing is changed.
+    $head = (git -C $Source rev-parse HEAD | Out-String).Trim().ToLower()
+    if ($head -ne $Ref) { Write-Host "-Ref $Ref, but the installer's checkout ($Source) is at $(if ($head) { $head } else { 'no commit git can read' }): refusing, nothing was changed."; exit 2 }
+    Write-Host "The installer and the daemon code: ff-factory $Ref (pinned, -Ref)."
 }
 
 $flags = @('--disable-warning=ExperimentalWarning')
@@ -233,10 +261,12 @@ if ($Update) {
     if ($MaxSandboxes) { $argv += @('--max-sandboxes', $MaxSandboxes) }
     if ($MaxAgentsPerSandbox) { $argv += @('--max-agents-per-sandbox', $MaxAgentsPerSandbox) }
     if ($MaxUnity) { $argv += @('--max-unity', $MaxUnity) }
-    if ($DaemonRef) { $argv += @('--ref', $DaemonRef) }
+    # The daemon code: -DaemonRef (a rollback), else the pinned -Ref itself (w5516), else the commit the portal runs.
+    if ($DaemonRef) { $argv += @('--ref', $DaemonRef) } elseif ($pinned) { $argv += @('--ref', $Ref) }
     if ($Owner) { $argv += @('--owner', $Owner) }
     if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
     if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
+    if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }

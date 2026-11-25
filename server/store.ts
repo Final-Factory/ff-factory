@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { LEGACY_FRANTIC } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
+import { sealStore, type SealStore } from './transcriptSeal.ts';
 import { removedUpload } from './mediaRetention.ts';
 import { pairText, repairText, transientPairAvoids } from '../shared/capacity.ts';
 import { settleOutcome } from './findings.ts';
@@ -201,6 +202,8 @@ export class Store {
   private readonly uploadDir: string;
   /** The context meter's tally per conversation, for the next process of the portal's own sessions (w1484). */
   readonly meters: MeterStates;
+  /** w5563: each of the portal's own conversations' transcript seal (server/transcriptSeal.ts). */
+  readonly seals: SealStore;
   private readonly seqs = new Map<string, number>();
   /** lastSeqAsync's unzips, one after another (w2026). */
   private unzipQueue: Promise<unknown> = Promise.resolve();
@@ -213,6 +216,7 @@ export class Store {
     this.transcriptDir = path.join(dataDir, 'transcripts');
     this.uploadDir = path.join(dataDir, 'uploads');
     this.meters = meterStates(path.join(dataDir, 'meters'));
+    this.seals = sealStore(path.join(dataDir, 'transcript-seals'));
     fs.mkdirSync(this.transcriptDir, { recursive: true });
     this.stateFile = new SnapshotFile(file, () => JSON.stringify(this.persisted(), null, 2), { ...STATE_SAVE, label: 'state' });
     this.workFile = new SnapshotFile(workFile, () => JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2), { ...WORK_SAVE, label: 'work ledger' });
@@ -980,13 +984,29 @@ export class Store {
   /**
    * Redact every session, standing agent, delegation and work item held (w1584): records saved before their store redacted
    * (a result or a log line with a token). Run at start, before the files are scrubbed. How many strings changed.
+   * w5613: it yields to the event loop every `sliceMs` (one record is never split), so a big store does not hold the
+   * portal's thread: the walk over every record took 0.6 s of a 1.1 s block at the a1701f9 start. A record added or
+   * removed meanwhile is fine: the store redacts what it takes, and a removed one is masked to no harm.
    */
-  scrubSecrets(): number {
+  async scrubSecrets(sliceMs = 20): Promise<number> {
     let n = 0;
-    for (const m of [this.sessions, this.standing, this.delegations]) for (const v of m.values()) n += redactInPlace(v);
-    if (n) this.save();
     let w = 0;
-    for (const v of this.work.values()) w += redactInPlace(v);
+    let since = Date.now();
+    const pause = async () => {
+      if (Date.now() - since < sliceMs) return;
+      await new Promise<void>((r) => setImmediate(r));
+      since = Date.now();
+    };
+    for (const m of [this.sessions, this.standing, this.delegations])
+      for (const v of [...m.values()]) {
+        n += redactInPlace(v);
+        await pause();
+      }
+    for (const v of [...this.work.values()]) {
+      w += redactInPlace(v);
+      await pause();
+    }
+    if (n) this.save();
     if (w) this.saveWork();
     return n + w;
   }

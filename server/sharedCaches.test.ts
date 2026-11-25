@@ -4,7 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { judgePath } from './cleanupFolders.ts';
-import { UvCachePruner, findUv, prunedBytes, uvCandidates, workerDeterminismAuditDir, workerUvCacheDir } from '../machine/sharedCaches.ts';
+import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, mediumUvToolDir, mediumUvToolFor, workerUvToolDir, prunedBytes, sandboxUvEnv, uvCandidates, workerDeterminismAuditDir, workerUvCacheDir } from '../machine/sharedCaches.ts';
+import { rootEnv } from '../machine/daemon.ts';
+import { MEDIUM_CHILDREN } from '../machine/lowIntegrity.ts';
+import { LOCKED_CHILDREN } from '../machine/writeLock.ts';
+import { READ_ONLY_IN_ROOT } from './workerFence.ts';
 
 // w5281: m5 had 36.9 GB in ~/.cache/uv and 5.2 GB of DeterminismAudit in the game's data folder, both outside the worker
 // install folder. The daemon now points both inside it and prunes them there.
@@ -89,4 +93,55 @@ test('shared caches: ff-leftovers keeps the cache folder and says why', () => {
   const row = judgePath('/r/cache/uv', facts, now);
   assert.equal(row.verdict, 'keep');
   assert.match(row.why, /shared caches/);
+});
+
+test("w5565: the daemon and Medium agents use their own uv cache, in a root child every fence keeps from workers; sandbox agents keep the workers' one", () => {
+  const r = path.resolve('/r');
+  assert.equal(mediumUvCacheDir(r), path.join(r, 'cache-medium', 'uv'));
+  for (const list of [MEDIUM_CHILDREN, [...LOCKED_CHILDREN], READ_ONLY_IN_ROOT.subpaths]) assert.ok(list.includes('cache-medium'), String(list));
+  for (const platform of ['win32', 'darwin', 'linux'] as const) assert.equal(rootEnv(r, platform).UV_CACHE_DIR, mediumUvCacheDir(r), platform);
+  // the daemon's start: unset or the workers' cache (an older daemon's) moves; one daemon.json names stays
+  assert.equal(mediumUvCacheFor({}, r), mediumUvCacheDir(r));
+  assert.equal(mediumUvCacheFor({ UV_CACHE_DIR: workerUvCacheDir(r) }, r), mediumUvCacheDir(r));
+  assert.equal(mediumUvCacheFor({ UV_CACHE_DIR: mediumUvCacheDir(r) }, r), undefined);
+  assert.equal(mediumUvCacheFor({ UV_CACHE_DIR: path.resolve('/elsewhere') }, r), undefined);
+  // a sandbox agent: the workers' cache in place of the Medium one, nothing else touched
+  const t = { UV_TOOL_DIR: mediumUvToolDir(r) };
+  assert.deepEqual(sandboxUvEnv({ ...t, UV_CACHE_DIR: mediumUvCacheDir(r) }, r), { UV_CACHE_DIR: workerUvCacheDir(r), UV_TOOL_DIR: workerUvToolDir(r) });
+  assert.deepEqual(sandboxUvEnv({ ...t, UV_CACHE_DIR: path.resolve('/elsewhere') }, r), { UV_TOOL_DIR: workerUvToolDir(r) });
+  assert.deepEqual(sandboxUvEnv({ UV_CACHE_DIR: mediumUvCacheDir(r) }, undefined), {});
+});
+
+test("w5693: uvx's tool folder: sandbox agents get one inside the workers' cache, the daemon and Medium agents their own, which every fence keeps from workers", () => {
+  const r = path.resolve('/r');
+  assert.equal(workerUvToolDir(r), path.join(r, 'cache', 'uv-tools'));
+  assert.equal(mediumUvToolDir(r), path.join(r, 'cache-medium', 'uv-tools'));
+  // the workers' one is inside the cache child every fence opens; the Medium one inside cache-medium, which none does
+  assert.ok(workerUvToolDir(r).startsWith(workerUvCacheDir(r).replace(/uv$/, '')));
+  for (const list of [[...LOCKED_CHILDREN], READ_ONLY_IN_ROOT.subpaths]) assert.ok(list.includes(path.relative(r, mediumUvToolDir(r)).split(path.sep)[0]), String(list));
+  // a fenced (sandbox) agent: unset (uv's default in the person's home, which the fence refuses) or the Medium one -> the workers'
+  for (const env of [{}, { UV_TOOL_DIR: mediumUvToolDir(r) }, { UV_TOOL_DIR: '' }]) assert.equal(sandboxUvEnv(env, r).UV_TOOL_DIR, workerUvToolDir(r), JSON.stringify(env));
+  assert.equal(sandboxUvEnv({ UV_TOOL_DIR: path.resolve('/elsewhere') }, r).UV_TOOL_DIR, undefined, 'one daemon.json names stays');
+  // the daemon's start: unset or the workers' one moves to the Medium one; one daemon.json names stays
+  assert.equal(mediumUvToolFor({}, r), mediumUvToolDir(r));
+  assert.equal(mediumUvToolFor({ UV_TOOL_DIR: workerUvToolDir(r) }, r), mediumUvToolDir(r));
+  assert.equal(mediumUvToolFor({ UV_TOOL_DIR: path.resolve('/elsewhere') }, r), undefined);
+});
+
+test('w5693: the Medium tool folder is set only once made; a folder that cannot be made keeps the old one and warns (no lockout)', () => {
+  const r = path.resolve('/r');
+  const made: string[] = [];
+  const env: Record<string, string | undefined> = {};
+  assert.match(applyMediumUvToolDir(env, r, (d) => made.push(d)) ?? '', /for the daemon and Medium agents/);
+  assert.deepEqual(made, [mediumUvToolDir(r)]);
+  assert.equal(env.UV_TOOL_DIR, mediumUvToolDir(r));
+  assert.equal(applyMediumUvToolDir(env, r, () => assert.fail('already set')), undefined);
+  const failing: Record<string, string | undefined> = {};
+  const line = applyMediumUvToolDir(failing, r, () => {
+    throw new Error('EACCES: permission denied');
+  });
+  assert.match(line ?? '', /could not make .*EACCES.*keep uv's own default/);
+  assert.equal(failing.UV_TOOL_DIR, undefined, "uv's default stays");
+  // the sandbox agents still get the workers' folder on such a machine
+  assert.equal(sandboxUvEnv(failing, r).UV_TOOL_DIR, workerUvToolDir(r));
 });

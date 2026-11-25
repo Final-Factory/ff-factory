@@ -29,7 +29,9 @@ env:
   # Every unit-test run: a test that runs 5 min fails by name (none takes over 70 s; the few longer ones set their own
   # timeout), and scripts/test-watchdog.ts ends a run that outlives its deadline, naming the tests still running and the
   # processes under it. Before, a hung run was cancelled at the job's timeout with its whole log lost (w906).
-  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
+  # scripts/test-file-times.ts records each file's time; the step after the tests fails on a file whose process lives on
+  # past its tests (an open handle: w5619, two such files took the run past its watchdog).
+  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --test-reporter=./scripts/test-file-times.ts --test-reporter-destination=stdout
 
 # WHERE THESE JOBS RUN (w1194, lothsahn 2026-10-13: "I'd like to move the ff-factory CI processes off githubrunner and
 # back to hosted githubrunner processes"). Every job runs on GitHub's hosted runners, which cost this public repository
@@ -41,12 +43,43 @@ jobs:
   checks:
     # Not on a push to main (w925): see concurrency above.
     if: github.event_name != 'push'
+    name: Typecheck, build (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm ci --prefix web --no-audit --no-fund
+      - name: Typecheck (server, shared, scripts, e2e)
+        run: npm run typecheck
+      - name: Typecheck (web)
+        run: npm --prefix web run typecheck
+      - name: Build the web UI
+        run: npm --prefix web run build
+
+  unit:
+    # Not on a push to main (w925): see concurrency above.
+    if: github.event_name != 'push'
     # Linux only: every unit test runs here. The few that also need Windows run in windows.yml, only when a pull request
     # touches what they cover (.github/windows-tests.txt; w910, lothsahn 2026-10-10). Until w910 the whole suite ran
     # again on two Windows runners for every pull request.
-    name: Typecheck, unit tests, build (Linux)
+    # Two shards, each on its own runner (w5679): one run of the whole suite took 408-541 s of its 600 s watchdog on 18
+    # pull requests (2026-11-25, after w5619), on a suite that grew from 339 to 499 files in a month. node --test-shard
+    # deals the files out in turn. Each shard writes its coverage as lcov; the coverage job adds them up.
+    name: Unit tests (Linux, ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -66,34 +99,73 @@ jobs:
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
+      # A few tests load the web's code (server/swClick.test.ts, server/vault.test.ts, scripts/release.test.ts).
       - run: npm ci --prefix web --no-audit --no-fund
-      - name: Typecheck (server, shared, scripts, e2e)
-        run: npm run typecheck
-      - name: Typecheck (web)
-        run: npm --prefix web run typecheck
       - name: Unit tests with coverage
         timeout-minutes: 11
         shell: bash
+        env:
+          FF_TEST_FILE_TIMES: ${{ runner.temp }}/file-times.json
         run: |
           set -o pipefail
           # npm run test:coverage, with TEST_FLAGS: node takes options only before the files. PowerShell 7 (pwsh, on
           # the runner) runs the scripts' tests that need no Windows (server/testPowershell.ts).
-          node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts 2>&1 | tee coverage.txt
-      - name: Coverage summary
+          node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --test-shard=${{ matrix.shard }}/2 --test-reporter=lcov --test-reporter-destination="$RUNNER_TEMP/unit.lcov" --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts 2>&1 | tee coverage.txt
+      - name: Test files' time (a file whose process outlives its tests fails here)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node scripts/test-file-times.ts --check "$RUNNER_TEMP/file-times.json" > file-times.txt || rc=$?
+          cat file-times.txt
+          { echo '### Test files'; echo '```'; cat file-times.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - name: Unit test counts
         if: always()
         shell: bash
         run: |
           {
-            echo '### Unit tests'
+            echo '### Unit tests, shard ${{ matrix.shard }}/2'
             grep -E '^ℹ (tests|pass|fail|skipped) ' coverage.txt | sed 's/^ℹ /- /'
-            echo
-            echo '### Coverage (files the tests load)'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep this shard's coverage
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unit-lcov-${{ matrix.shard }}
+          path: ${{ runner.temp }}/unit.lcov
+          if-no-files-found: ignore
+          retention-days: 3
+
+  coverage:
+    # The shards' coverage added up (scripts/lcov-merge.ts): the table one run of the whole suite printed before w5679.
+    if: ${{ !cancelled() && github.event_name != 'push' }}
+    needs: unit
+    name: Unit test coverage (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unit-lcov-*
+          path: ${{ runner.temp }}/lcov
+      - name: Coverage summary
+        shell: bash
+        run: |
+          set -o pipefail
+          node scripts/lcov-merge.ts "$RUNNER_TEMP"/lcov/unit-lcov-1/unit.lcov "$RUNNER_TEMP"/lcov/unit-lcov-2/unit.lcov | tee coverage.txt
+          {
+            echo '### Coverage (files the unit tests load, both shards)'
             echo '```'
-            sed -n '/start of coverage report/,/end of coverage report/p' coverage.txt | sed 's/^ℹ //'
+            cat coverage.txt
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - name: Build the web UI
-        run: npm --prefix web run build
 
   e2e:
     # Not on a push to main (w925): see concurrency above.
@@ -129,7 +201,7 @@ jobs:
         # A pull request that changes only words or what these tests never load skips them (w1191): docs/, changelog.d/, a
         # top-level *.md, deploy/ (the VM scripts, tested in vm-scripts.yml) and .github/ other than this file. Neither
         # server/, machine/, shared/, web/ nor e2e/ reads any of them at run time (grep, 2026-10-13); unit tests do, so the
-        # checks job always runs. A pull request's merge commit has the base as its first parent: HEAD^1..HEAD is its change.
+        # unit job always runs. A pull request's merge commit has the base as its first parent: HEAD^1..HEAD is its change.
         id: need
         shell: bash
         env:
@@ -287,3 +359,9 @@ jobs:
             range="$AFTER"
           fi
           node scripts/check-identity.ts "$range"
+      - name: npm audit, production dependencies of the server and web (high and critical fail)
+        # w5519 (finding 13 of the w5452 security audit). Runs `npm audit --omit=dev --audit-level=high` in . and web from
+        # the lockfiles (no install). An advisory with no fix yet is allowed only by one entry in .github/npm-audit-allow.json,
+        # with a reason and an end date (docs/ci.md, "npm audit"). On a push to main too, so a new advisory shows on main.
+        if: ${{ !cancelled() }}
+        run: node scripts/audit-gate.ts

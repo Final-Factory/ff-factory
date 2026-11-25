@@ -16,6 +16,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
+import { gitFenceSync, isGit } from '../server/safeGit.ts';
 import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
 import { noPrCi } from './ciPaths.ts';
 import { fontAtlasNoise, mayBeDynamicFont } from '../server/editorNoise.ts';
@@ -89,6 +90,9 @@ interface Pr {
   state: string;
   baseRefName: string;
   baseRefOid?: string;
+  /** w5549: its head branch, and whether that branch is in another repository (a fork). */
+  headRefName?: string;
+  isCrossRepository?: boolean;
 }
 
 interface Opts {
@@ -146,7 +150,7 @@ export const USAGE = `usage: ff-pr push [--base <branch>] [--title <t> --body-fi
 Exit: 0 done, 1 you must act (conflict, red, push not landed, Evidence check failed), 2 usage, 3 CI still running.
 `;
 
-const PR_FIELDS = 'number,url,headRefOid,mergeable,state,baseRefName,baseRefOid';
+const PR_FIELDS = 'number,url,headRefOid,mergeable,state,baseRefName,baseRefOid,headRefName,isCrossRepository';
 
 function prView(d: PrDeps, pr?: string): Pr | undefined {
   const r = d.run('gh', ['pr', 'view', ...(pr ? [pr] : []), '--json', PR_FIELDS]);
@@ -463,10 +467,29 @@ function evidencePasses(d: PrDeps, pr: Pr): boolean {
   return false;
 }
 
+/**
+ * w5549 (the w5451 audit, item 17): ff-pr merge merges the worker's own pull request, the one of the branch it has checked
+ * out, as merge on green does (server/mergeOwner.ts). A head in another repository (a fork) is refused, and so is a --pr
+ * whose head branch is not the checkout's: the refusal names both. A careless `--pr <n>` with another worker's number is
+ * caught here; this runs in the worker's own shell, so it is no wall against a worker that means harm (merge on green is).
+ */
+function notOwnPr(d: PrDeps, o: Opts, pr: Pr): string | undefined {
+  if (pr.isCrossRepository === true) return `its head ${pr.headRefName ?? ''} is a branch of another repository (a fork), not of ${repoOf(pr.url)}`;
+  if (!o.pr || !pr.headRefName) return undefined;
+  const mine = git(d, ['branch', '--show-current']).out.trim();
+  if (mine && mine === pr.headRefName) return undefined;
+  return `its head branch is ${pr.headRefName}, and this checkout is on ${mine || 'no branch'}`;
+}
+
 export function merge(d: PrDeps, o: Opts): number {
   const got = prAndCi(d, o);
   if (typeof got === 'number') return got;
   const { pr, v } = got;
+  const notOwn = pr.state === 'OPEN' ? notOwnPr(d, o, pr) : undefined;
+  if (notOwn) {
+    d.write(`ff-pr: not merged: ${pr.url} is not this branch's pull request: ${notOwn}. ff-pr merge merges only your own (w5549): run it in the checkout of the branch you pushed.\n`);
+    return 1;
+  }
   if (pr.state === 'MERGED') {
     d.write(`ff-pr: ${pr.url} is already merged\n`);
     return 0;
@@ -545,8 +568,10 @@ export const realPrDeps: PrDeps = {
   run: (cmd, args) => {
     // gh on a repository a GitHub App is installed on (w1519): the app's token. Node finds gh.exe itself on Windows, past the
     // gh shim (a .cmd), so ff-pr asks machine/ghApp.ts directly; elsewhere the shim would do the same.
-    const env = cmd === 'gh' && process.env.FF_GH_APP_NAMES ? (ghEnvFor(args, process.env, readGhAppTokens(process.env.FF_GH_APP_FILE), remotesOf(process.cwd()), Date.now()) as NodeJS.ProcessEnv) : undefined;
-    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 10 * 60_000, ...(env ? { env } : {}) });
+    const env = cmd === 'gh' && process.env.FF_GH_APP_NAMES ? (ghEnvFor(args, process.env, readGhAppTokens(process.env.FF_GH_APP_SESSION_FILE), remotesOf(process.cwd()), Date.now()) as NodeJS.ProcessEnv) : undefined;
+    // w5541: git runs no program the checkout's own config names (server/safeGit.ts).
+    const f = isGit(cmd) ? gitFenceSync(args, { env }) : { args, env };
+    const r = spawnSync(cmd, f.args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 10 * 60_000, ...(f.env ? { env: f.env } : {}) });
     return { code: r.status ?? (r.error ? 127 : 1), out: r.stdout ?? '', err: r.stderr ?? (r.error ? r.error.message : '') };
   },
   write: (s) => void process.stdout.write(s),

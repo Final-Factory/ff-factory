@@ -11,6 +11,20 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 - Each person has a login in `data/users.json`: a username, a scrypt hash, a display name and a role
   (`server/auth.ts`). The username is the **user id**. It never changes, and it is what FFBox maps to an
   account. The display name is what people and prompts see ("Lothsahn").
+- Failed logins are throttled per attempted username and per client address, never globally (w5521,
+  `server/loginThrottle.ts`): an address (an IPv6 /64) is refused for 15 minutes after 5 failures; a username, from
+  any address, after 10, with a backoff of 1 s that doubles on each further failure and stops at 60 s, so its owner
+  waits at most a minute. Both tables hold at most 10,000 entries (keys cut to 64 characters, about 3 MB each when
+  full, measured) and are swept every minute; an evicted entry's count stays in a fixed table of 65,536 salted
+  hash buckets, so flooding the table with made-up names cannot reset a targeted name's backoff. Every login answer
+  (unknown name, wrong or right password, throttled) is held to one time, measured on the machine: the slowest of
+  its recent logins plus a tenth and 3 ms (`LoginTimer`), waited on a timer.
+- The client address, for the login throttle and every other caller (join codes, the /provider, /machine and
+  /machine/live sockets, page sockets, the tailnet-only checks, logs), comes from one helper,
+  `server/clientAddress.ts` (w5535): X-Forwarded-For is believed only with `trustProxy` on and only from a connection
+  out of this machine (Tailscale Serve and Funnel) or a configured proxy, and only its last entry, the one the proxy
+  added; the entries before it are whatever the client wrote. The Funnel header is checked before any address, and a
+  proxied request is not taken for this machine when `trustProxy` is off.
 - Roles: `owner` (Ben, who runs the portal) and `member` (a teammate). The first login is the owner and
   later ones are members. A `users.json` written before roles existed reads every login as the owner.
   **Roles are recorded, and enforced in a few places so far:** an owner may close or reopen another person's request
@@ -47,7 +61,7 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   right password on a browser no owner approved for them opens no session: the login answers 202 and waits as a request,
   the owners get a push notice ("Cassidy asks to sign in from a new device"), and every owner's page shows a bar with
   the browser ("Safari on iPhone"), its address and **Approve** / **Deny**. The member's login page asks again every 10
-  seconds for up to 30 minutes and signs in once an owner approves. Owners are never held.
+  seconds for up to 30 minutes and signs in once an owner approves. This setting never holds an owner (owners: "Owner device approval" below).
   - A browser is known by a random 256-bit id in its own cookie (`ffsb_device`, HttpOnly, SameSite=Strict, 400 days);
     only its SHA-256 is kept, per login, in `data/devices.json` (`server/devices.ts`). Clearing the cookies, a private
     window or another browser is a new device.
@@ -60,9 +74,46 @@ worker then runs on that person's Claude account when FF Factory holds one for t
     wants `trustProxy` true (also an owner's setting now) so the bar shows the member's real address and the cookies
     are `Secure`.
 
+- **Owner device approval** (w5524, from finding 15 of the w5452 security audit; config `ownerDeviceApproval`, default
+  `"advisory"`). The dashboard is public through Funnel, so a phished or reused owner password alone would let anyone in.
+  This first step only records: an owner's right password on a browser no owner approved for that login, from **outside
+  the tailnet**, is a new device, and the login **always goes through**. Nothing in it can refuse or hold an owner's
+  login: an error in the check itself (the device store, the log, the setting) is written to the portal log and the
+  login goes on as with it off, and no notification is sent for an owner's new device. Holding such logins
+  ("enforce") is a later change, after the owners are back (lothsahn, w5524: "make it advisory for now so we can make
+  sure people won't get locked out. We'll turn it on later"); set_app_config refuses `"enforce"` until then.
+  - `"advisory"` (the default): the owners see a request in the bar above every page ("Ben signed in from a new device
+    (advisory, let in)"), the portal log says `owner login for "ben" from <address> would need approval ... let in
+    (ownerDeviceApproval advisory)`, and the login is written to the device log as **would need approval** (or **would
+    be refused**, for a browser an owner denied).
+  - `"off"`: nothing is recorded. Any other value in config.json reads as advisory.
+  - **The tailnet bypass.** A login that did not come through Funnel (no `Tailscale-Funnel-Request` header, and a
+    tailnet or local address: `server/remoteChat.ts` `tailnetOnly`, the same test `/mcp` uses) approves its browser
+    (`decidedBy` "tailnet login") and is not logged. So a browser an owner signs in on once over the tailnet is known
+    when it later comes through Funnel.
+  - The device cookie is the members' one (`ffsb_device`, HttpOnly, SameSite=Strict, Secure behind HTTPS, 400 days):
+    a random 256-bit id, of which the portal keeps only the SHA-256. It cannot be forged without the portal's file: an id
+    the portal has no record of is a new device, so it needs no signature on top.
+  - **Seeing who would be locked out.** Settings (This device) > **Devices**, for owners only: every browser approved,
+    waiting or refused for a login, with **Approve**, **Deny**, **Revoke** (forget it and end its sessions; its next login
+    outside the tailnet is a new device again, and still let in), and **Would have needed approval**: each such login of
+    the last 180 days (time, who, browser, address, outcome; the User-Agent on hover). The same is `GET /api/devices`
+    `log`, and `data/device-log.json` on the portal (no cookie or hash in it; the same browser's repeat within 30 minutes
+    is one line). Before enforcement exists, approve the browsers you know (or sign in once on each over the tailnet) so
+    that list shows only the ones that would really be locked out.
+  - **The way back in, once enforcement exists** (kept here for that change): sign in over the tailnet (the portal's
+    `https://<host>.<tailnet>.ts.net` address from a device on the tailnet, not the Funnel address); it approves that
+    browser, which can then approve the others. Without a tailnet device: on the VM, set `"ownerDeviceApproval": "off"`
+    in the portal's config.json (where `sudo fffctl config` reads it) and `sudo fffctl restart`; or have an owner's
+    Claude Code on the tailnet call set_app_config `ownerDeviceApproval` `"off"` over `/mcp` with their key. A forgotten
+    password is the set-password link above, which also approves the browser that redeems it.
+
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key
-  minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a
+  minted before this change, or without `--user`, acts for the owner (by name in `server/mcp.ts`, the only owner default
+  left in a login lookup). A bound key whose login no longer exists (`users.json` edited or restored) is refused with a
+  401, and so is a browser session of such a login, which ends there (w5533, `Auth.bearer` and `Auth.user` in
+  `server/auth.ts`); neither is ever read as the owner's. A key for a member login, written straight into a
   0600 file on a machine and never printed, is the orchestration worker's `fffctl apikey issue` (w1415,
   [ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)); owner logins and Ben's and Lothsahn's stay `apikey.ts`.
 - Deleting a login (w1864): `sudo fffctl user delete <id> --by <your login>` in the VM (`server/userCli.ts`; the

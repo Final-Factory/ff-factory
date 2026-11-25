@@ -1,5 +1,5 @@
 // What a machine's exclusive bench tickets cost it, per UTC hour (w1996, shared/benchHours.ts), computed from the bench
-// queue's own history: <FF_WORKER_ROOT>/tmp/bench.queue/history.jsonl (rotated to history.1.jsonl at 5 MB), one JSON
+// queue's own history: <FF_WORKER_ROOT>/daemon/bench.queue/history.jsonl (rotated to history.1.jsonl at 5 MB), one JSON
 // line per event, written by the game repo's scripts/bench/bench_queue.py. Pure: lines in, rows out.
 import fs from 'node:fs';
 import path from 'node:path';

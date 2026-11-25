@@ -1,4 +1,4 @@
-import { agentClaudeEnv } from './claudeHome.ts';
+import { agentClaudeEnv, withoutLoginPaths } from './claudeHome.ts';
 import { createSdkMcpServer, tool, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { POST_TARGETS } from '../shared/ffboxPost.ts';
 import { z } from 'zod';
@@ -368,6 +368,7 @@ export const CATALOG = {
     file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
     diagnosis: z.string().max(120).optional().describe('Instead of the zip: one file FFBox\'s diagnosis of the report kept, by its name (e.g. "summary.md"); list_ffbox_files what "diagnosis" lists them.'),
     run: z.number().int().min(1).optional().describe('With diagnosis: which diagnosis run (default the newest that kept the file).'),
+    game: z.enum(['ff', 'ffu']).optional().describe('ff: a Final Factory report (default). ffu: a Final Factory Universe (FFU) report, which FFBox keeps apart.'),
   },
   /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal asks FFBox; nothing on the machine is read. */
   list_ffbox_files: {
@@ -379,6 +380,7 @@ export const CATALOG = {
     app: z.string().max(16).optional().describe('symbols: main or demo.'),
     id: z.string().max(64).optional().describe('reports: only this report. diagnosis, required: the report id, e.g. 20261003T101500Z-crash-3a9f01c2d4.'),
     kind: z.enum(['any', 'crash', 'desync', 'hang']).optional().describe('reports only (default any).'),
+    game: z.enum(['ff', 'ffu']).optional().describe('reports only: ff, Final Factory\'s reports (default), or ffu, Final Factory Universe\'s (FFU), which FFBox keeps apart.'),
     since: z.string().max(40).optional().describe('reports: received from this ISO time with a zone. threads: created from this ISO time with a zone, e.g. 2026-10-28T22:44:00Z (default 7 days ago).'),
     until: z.string().max(40).optional().describe('reports: received up to this ISO time with a zone. threads: created up to this time (default now).'),
     channel: z.string().max(64).optional().describe('threads and open_threads: one channel by its alias as the list shows it (default every bug channel; open_threads also the feedback channel).'),
@@ -414,6 +416,21 @@ export const CATALOG = {
       .max(6)
       .optional()
       .describe('One per build to file, as urgent_release.py lists them. Leave it out to see how an upload of this version stands.'),
+  },
+  /** docs/steam-upload.md (w5551): the daemon runs ffbox ffsteam.py with the build account's credential, which no worker holds. */
+  steam_upload: {
+    action: z.enum(['check', 'upload', 'status', 'install']).describe('check: can this computer log in to Steam (once every 10 min, or now with guard_code); install: set steamcmd up on this computer (a check or upload does it too when it is missing); upload: upload your release build; status: how the job stands.'),
+    version: z.string().max(32).optional().describe('upload: the release, e.g. "1.0.0.12".'),
+    app: z.enum(['main', 'demo']).optional().describe('upload: which Steam app (default main).'),
+    sha: z.string().max(40).optional().describe('upload: the full commit built (the bump carrying cicd/release-lane.json).'),
+    runs: z
+      .object({ windows: z.string().max(400).optional(), mac: z.string().max(400).optional(), linux: z.string().max(400).optional() })
+      .optional()
+      .describe("upload: each platform's run folder (build-release.sh's: release.json, build.log, release/player), in your sandbox or temp folder."),
+    live: z.string().max(40).optional().describe('upload: the Steam branch to set live, only the one the release names (development for a master main release); leave out for none.'),
+    preview: z.boolean().optional().describe('upload: steamcmd --preview, a dry run that uploads nothing and sets nothing live.'),
+    guard_code: z.string().max(8).optional().describe("check: the code from Steam Guard's email, when a check stopped for one."),
+    job: z.string().max(40).optional().describe('status: a job id (default: the job running on this computer).'),
   },
   /** docs/ffbox.md, "Bug threads' files". On a machine the portal fetches the files from FFBox and the daemon puts them in the Inbox. */
   fetch_discord_thread_files: {
@@ -619,10 +636,12 @@ export function standingGitEnv(prior: Record<string, string | undefined>, platfo
  */
 export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
   // w5305: the worker root's own Claude Code folder once its plugins are in, else the legacy ~/.claude (server/claudeHome.ts).
-  const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env);
+  // w5543: a launch that is not a sandbox's runs at Medium, outside every worker fence: the Medium agents' folder instead.
+  const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env, undefined, !spec.sandbox);
   const g = spec.guard;
   // Git fails fast instead of waiting on a credential prompt nobody will answer.
-  const agentEnv = (() => {
+  // w5559: no path to the machine's own Claude login (FF_CLAUDE_LEGACY_DIR) reaches the agent (claudeHome.ts withoutLoginPaths).
+  const agentEnv = withoutLoginPaths((() => {
     // w2012: a sandbox worker learns where the ff-agents scripts are (FF_SKILLS), read on this machine at launch, so it never
     // searches the disk for ui_look.py or pr_evidence.py (server/pluginPaths.ts).
     const plugins = localPluginEnv(baseEnv, g.workerRoot);
@@ -632,7 +651,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     const cred = spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : spec.env?.GH_CONFIG_DIR && !env.FF_GH_APP_HELPER ? { ...env, ...ghLoginCredentialEnv(env) } : env;
     // w5514: a standing agent's git ignores what a repository's own config says about programs to run (standingGitEnv).
     return g.standing ? { ...cred, ...standingGitEnv(cred) } : cred;
-  })();
+  })());
   // w3758: a worker with a vault GitHub token keeps the token's last calls for the portal's CI waits and merges, and hears
   // when one command of its own spent hundreds of them (server/ghSpendHook.ts).
   const spend = spec.env?.GH_TOKEN ? ghSpendHooks(rateLimitReader(spec.env.GH_TOKEN)) : undefined;

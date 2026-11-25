@@ -171,6 +171,17 @@ test("accounts: a machine's run (login true) starts on the vault token alone, ov
   assert.equal(o.env?.HOME, '/Users/b');
 });
 
+test("w5559: no agent gets a path to the machine's own Claude login (FF_CLAUDE_LEGACY_DIR); the daemon keeps it", () => {
+  const root = path.join(os.tmpdir(), 'ffw-w5559');
+  const daemonEnv = { HOME: '/home/b', FF_CLAUDE_LEGACY_DIR: '/home/b/.claude', FF_CLAUDE_WORKER_DIR: path.join(root, 'claude'), CLAUDE_CONFIG_DIR: path.join(root, 'claude') };
+  for (const login of [true, false]) {
+    const o = buildOptions(spec({ env: { CLAUDE_CODE_OAUTH_TOKEN: fakeToken('ben') }, login }), {}, daemonEnv);
+    assert.equal(o.env?.FF_CLAUDE_LEGACY_DIR, undefined, `login ${login}`);
+    assert.ok(!Object.values(o.env ?? {}).includes('/home/b/.claude'), `no variable names the legacy folder (login ${login})`);
+  }
+  assert.equal(daemonEnv.FF_CLAUDE_LEGACY_DIR, '/home/b/.claude', "the daemon's own environment is untouched");
+});
+
 test('accounts: a session records the account its process started on', async (t) => {
   setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-accounts-s-'));

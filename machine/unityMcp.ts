@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { readStatusFiles, syncStatusDir } from '../server/unityMcp.ts';
+import { mcpStatusDirs } from '../server/unityHang.ts';
 import { normProject } from '../server/unityHang.ts';
 import type { StdioServer } from '../server/launch.ts';
 
@@ -13,6 +14,16 @@ export type { StdioServer };
 
 /** The status folder of a place: the only editor its agents' Unity MCP server can find (UNITY_MCP_STATUS_DIR). */
 export const mcpStatusDir = (appDir: string, place: string) => path.join(appDir, 'unity-mcp', place);
+
+/**
+ * w5650: the same status, in `<status folder>/.unity-mcp`, for the server's home. MCP for Unity's preflight
+ * (transport/legacy/unity_connection.py read_status_file, mcpforunityserver 10.0.0) reads only Path.home()/.unity-mcp
+ * and ignores UNITY_MCP_STATUS_DIR; with no file for its editor there it falls back to the newest status file of any
+ * project, and a stale `reloading: true` one in the person's own ~/.unity-mcp refused every call to a fenced editor
+ * ("Unity is reloading") on LothDesktop. The scoped server's USERPROFILE and HOME are the status folder, so its
+ * preflight reads this copy, which holds only its own editor's file.
+ */
+export const mcpHomeStatusDir = (appDir: string, place: string) => path.join(mcpStatusDir(appDir, place), '.unity-mcp');
 
 const asServer = (x: unknown): StdioServer | undefined => {
   const s = x as { type?: string; command?: unknown; args?: unknown; env?: unknown } | undefined;
@@ -67,9 +78,17 @@ function unityMcpFrom(claudeJson: string, repoPath: string): { server?: StdioSer
   return best ? { server: best.server, source: `${claudeJson} (project ${best.first}, used by ${best.n} project(s))` } : { source: `no UnityMCP entry in ${claudeJson}` };
 }
 
-/** The server an agent in `place` runs: `server`, confined to that place's status folder. */
-export function scopedUnityMcp(server: StdioServer, appDir: string, place: string): StdioServer {
-  return { command: server.command, args: server.args, env: { ...server.env, UNITY_MCP_STATUS_DIR: mcpStatusDir(appDir, place) } };
+/**
+ * The server an agent in `place` runs: `server`, confined to that place's status folder. `home` (w5650, default on):
+ * on Windows its USERPROFILE and HOME are that folder too, so the preflight's Path.home()/.unity-mcp is
+ * mcpHomeStatusDir; false keeps the person's own home (the path before w5650, daemon.json unityMcpScopedHome: false).
+ * Windows only (w5677's review): there uv reads %APPDATA%, not the home, so its Pythons and config stay found; on Mac
+ * and Linux uv finds both under $HOME (~/.local/share/uv/python, ~/.config/uv), the w5402 failure, and only Windows
+ * editors run fenced with another home.
+ */
+export function scopedUnityMcp(server: StdioServer, appDir: string, place: string, home = true, platform: NodeJS.Platform = process.platform): StdioServer {
+  const dir = mcpStatusDir(appDir, place);
+  return { command: server.command, args: server.args, env: { ...server.env, UNITY_MCP_STATUS_DIR: dir, ...(home && platform === 'win32' ? { USERPROFILE: dir, HOME: dir } : {}) } };
 }
 
 /**
@@ -80,25 +99,29 @@ export function scopedUnityMcp(server: StdioServer, appDir: string, place: strin
  */
 export class McpScopes {
   private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number }>();
-  private readonly home: string;
+  private readonly home?: string;
 
-  constructor(home = path.join(os.homedir(), '.unity-mcp')) {
+  /** `home`: one status folder (tests); unset: every folder editors write in (server/unityHang.ts mcpStatusDirs, w5540). */
+  constructor(home?: string) {
     this.home = home;
   }
 
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
   sync(appDir: string, places: { place: string; project: string; pid?: number }[], now: number, log: (line: string) => void = () => undefined) {
-    const files = readStatusFiles(this.home);
+    const files = readStatusFiles(this.home ?? mcpStatusDirs());
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
       if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? 0;
       st.pid = p.pid;
       st.lookedAt = now;
       this.seen.set(p.place, st);
-      try {
-        syncStatusDir(mcpStatusDir(appDir, p.place), p.project, p.pid ? { since: st.since } : undefined, files);
-      } catch (e) {
-        log(`unity mcp ${p.place}: status folder: ${(e as Error).message}`);
+      // Each folder on its own: a failed first one must not leave the home copy with a stale `reloading: true` (w5677).
+      for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) {
+        try {
+          syncStatusDir(dir, p.project, p.pid ? { since: st.since } : undefined, files);
+        } catch (e) {
+          log(`unity mcp ${p.place}: status folder ${dir}: ${(e as Error).message}`);
+        }
       }
     }
     // A deleted sandbox: its folder goes too.
@@ -114,7 +137,8 @@ export class McpScopes {
  * The uvx runs that fill a uv cache with the server's package, when the server is `uvx --offline --from <pkg> <tool>`
  * (what MCP for Unity registers): first a check that needs no network (the package already there), then the same run
  * online. Agents run the server against the worker install's own uv cache (UV_CACHE_DIR, w5281), which nothing else
- * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377).
+ * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377). Since w5565
+ * Medium agents have their own cache (sharedCaches.ts mediumUvCacheDir), filled the same way.
  * Undefined for any other server.
  */
 export function uvWarmRuns(server: StdioServer): { offline: string[]; online: string[] } | undefined {

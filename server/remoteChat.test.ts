@@ -197,6 +197,25 @@ test('a wrong key, a scoped key and a key without a login are refused; a key rea
   assert.deepEqual(userEvents(chat(LOTH).info.id)[0].requestedBy, LOTH);
 });
 
+test('a key whose login no longer exists is refused with 401, never read as the owner’s; a real key still works (w5533)', async (t) => {
+  const { connect, keys, base, dir, chat, userEvents } = await setup(t);
+  const post = (key: string) => fetch(`${base}/mcp`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: '{}' });
+  // Before: Lothsahn's key works.
+  assert.equal((await (await connect(keys.loth)).call('orchestrator_send', { text: 'before' })).isError, false);
+  // users.json edited or restored without Lothsahn; their key is still in api-keys.json.
+  const usersFile = path.join(dir, 'users.json');
+  const users = JSON.parse(fs.readFileSync(usersFile, 'utf8')) as { username: string }[];
+  fs.writeFileSync(usersFile, JSON.stringify(users.filter((u) => u.username !== 'lothsahn')));
+  assert.equal((await post(keys.loth)).status, 401);
+  await assert.rejects(connect(keys.loth));
+  assert.equal(userEvents(chat(BEN).info.id).length, 0, 'nothing reached the owner’s orchestrator');
+  // Ben's key, bound to a login that still exists, still works.
+  const ben = await connect(keys.ben);
+  const r = await ben.call('orchestrator_send', { text: 'still here' });
+  assert.equal(r.isError, false, r.text);
+  assert.equal(userEvents(chat(BEN).info.id).filter((e) => e.text.includes('still here')).length, 1);
+});
+
 test('/mcp is tailnet-only: over Funnel or from outside the tailnet every tool is refused at the endpoint, old and new alike (w1865)', async (t) => {
   const { connect, keys, chat, userEvents, base } = await setup(t);
   const outside: Record<string, string>[] = [{ 'tailscale-funnel-request': '?1' }, { 'x-forwarded-for': '203.0.113.9' }, { 'x-forwarded-for': '100.63.0.1' }, { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '100.101.102.103' }];
@@ -243,8 +262,8 @@ test('tailnetOnly and tailnetAddress: Funnel header, forwarded address only from
   assert.equal(tailnetOnly(req('::ffff:127.0.0.1', { 'x-forwarded-for': '100.90.1.2' })), undefined);
   assert.match(tailnetOnly(req('127.0.0.1', { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '100.90.1.2' }))!, /Funnel/);
   assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4' }))!, /tailnet/);
-  // The first forwarded address is the client's: Serve sets it, it does not append to what the client sent.
-  assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4, 100.90.1.2' }))!, /tailnet/);
+  // The last forwarded address is the one the proxy added; a tailnet address the client wrote in front of it means nothing (w5535).
+  assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '100.90.1.2, 198.51.100.4' }))!, /tailnet/);
   // A connection that is not from this machine is judged by its own address; a forwarded header it sends means nothing.
   assert.equal(tailnetOnly(req('100.90.1.2', { 'x-forwarded-for': '8.8.8.8' })), undefined);
   assert.match(tailnetOnly(req('203.0.113.7', { 'x-forwarded-for': '100.90.1.2' }))!, /tailnet/);
