@@ -702,13 +702,16 @@ test('windows (real tray app): built with the in-box csc, it starts, counts a Se
   t.diagnostic(`tray hello: ${JSON.stringify(hello)}`);
   tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'No schedule: work runs any time', schedule: 'none', work: 'No agents working here', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] }, activity: { enabled: true, idleMinutes: 90 } }, machine: 'test' })}\n`);
   if (hello.hooks === 'keyboard and mouse') {
-    // F24: a key no program acts on, injected the way agents' tools inject input.
+    // An injector started and compiled before the key is due (Add-Type takes seconds on a cold runner), then sending on cue:
+    // F24 down and up (a key no program acts on) and an X button press with no button named (an X click no program acts
+    // on), injected the way agents' tools inject input.
     const ps1 = path.join(dir, 'inject.ps1');
     fs.writeFileSync(ps1, `Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
 public static class Inj {
   [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT { public ushort wVk; public ushort wScan; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
-  [StructLayout(LayoutKind.Explicit, Size = 40)] public struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT ki; }
+  [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT { public int dx; public int dy; public uint mouseData; public uint dwFlags; public uint time; public IntPtr dwExtraInfo; }
+  [StructLayout(LayoutKind.Explicit, Size = 40)] public struct INPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public KEYBDINPUT ki; [FieldOffset(8)] public MOUSEINPUT mi; }
   [DllImport("user32.dll", SetLastError = true)] public static extern uint SendInput(uint n, INPUT[] inputs, int size);
   public static uint Key(ushort vk) {
     var a = new INPUT[2];
@@ -716,18 +719,47 @@ public static class Inj {
     a[1].type = 1; a[1].ki.wVk = vk; a[1].ki.dwFlags = 2;
     return SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
   }
+  public static uint XClick() {
+    var a = new INPUT[2];
+    a[0].type = 0; a[0].mi.dwFlags = 0x80;
+    a[1].type = 0; a[1].mi.dwFlags = 0x100;
+    return SendInput(2, a, Marshal.SizeOf(typeof(INPUT)));
+  }
 }
 '@
-[Inj]::Key(0x87)
+[Console]::Out.WriteLine('ready')
+[Console]::Out.Flush()
+$null = [Console]::In.ReadLine()
+[Console]::Out.WriteLine(([string][Inj]::Key(0x87)) + ' ' + ([string][Inj]::XClick()))
 `);
-    const sent = execFileSync(powershell ?? 'powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1], { windowsHide: true }).toString().trim();
-    assert.equal(sent, '2', 'SendInput took the key down and up');
+    const inj = spawn(powershell ?? 'powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    let injOut = '';
+    t.after(() => { if (inj.exitCode === null && inj.signalCode === null) inj.kill(); });
+    inj.stdout.on('data', (d: Buffer) => { injOut += d.toString(); });
+    const injSaid = async (re: RegExp) => {
+      const end = Date.now() + 60_000;
+      for (let m = re.exec(injOut); !m; m = re.exec(injOut)) {
+        if (Date.now() > end || inj.exitCode !== null) throw new Error(`the injector said: ${injOut}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return re.exec(injOut)!;
+    };
+    await injSaid(/ready/);
+    // w5743: the tray's window thread busy for longer than Windows waits for a low-level hook (LowLevelHooksTimeout, at most
+    // 1 s since Windows 10 1709) while the key and the click arrive, as a slow paint or a registry scan makes it. The hooks
+    // run on a thread of their own, so they still see both. Before w5743 they ran on that thread: Windows skipped them.
+    tray.stdin.write(`${JSON.stringify({ type: 'busy', ms: 1200 })}\n`);
+    await waitFor('busy');
+    inj.stdin.write('go\n');
+    const sent = (await injSaid(/(\d+) (\d+)/)).slice(1);
+    assert.deepEqual(sent, ['2', '2'], 'SendInput took the key and the click down and up');
     await new Promise((r) => setTimeout(r, 1500));
     tray.stdin.write(`${JSON.stringify({ type: 'counts' })}\n`);
     const counts = await waitFor('counts');
     t.diagnostic(`tray counts: ${JSON.stringify(counts)}`);
-    assert.ok(Number(counts.injectedKeys) >= 1, "the hook saw the injected key as injected");
-    if (Number(counts.personKeys) === 0 && Number(counts.personClicks) === 0) assert.equal(lines.filter((l) => l.type === 'input').length, 0, 'an injected key is never a person\'s input');
+    assert.ok(Number(counts.injectedKeys) >= 1, 'the hook saw the injected key as injected, its window thread busy');
+    assert.ok(Number(counts.injectedClicks) >= 1, 'the hook saw the injected click as injected, its window thread busy');
+    if (Number(counts.personKeys) === 0 && Number(counts.personClicks) === 0) assert.equal(lines.filter((l) => l.type === 'input').length, 0, "injected input is never a person's input");
     else t.diagnostic('someone used this computer during the test: the no-input check is skipped');
   } else t.diagnostic(`the tray's input hooks did not install here (${String(hello.hooks)}): the injected-key check is skipped`);
   tray.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);

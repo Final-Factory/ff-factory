@@ -6,7 +6,8 @@
 //                   answered by the keys and clicks seen since it started, a person's and injected; {"type":"quit"}
 //                   {"type":"firefox","state":"closing"|"idle"} the Close Firefox item's state; {"type":"notify","title":
 //                   "...","text":"...","warn":bool} a notification; {"type":"firefox_item"} answered by the item as shown;
-//                   the state's "firefox" is whether closing Firefox is allowed here (off unless turned on)
+//                   the state's "firefox" is whether closing Firefox is allowed here (off unless turned on);
+//                   {"type":"busy","ms":n} a test's: the window thread sleeps n ms (answered {"type":"busy"} first)
 //   tray -> daemon  {"type":"hello"}, {"type":"pause"}, {"type":"unpause"}, {"type":"settings","settings":{...}},
 //                   {"type":"input","kind":"key"|"click","at":<epoch ms>} a person's key or click (at most one per
 //                   INPUT_EVERY_MS), {"type":"injected","keys":n,"clicks":n} input programs injected, ignored (once a
@@ -329,6 +330,16 @@ namespace FFFactory
             else if (type == "firefox") { firefoxBusy = Str(m, "state") == "closing"; RefreshFirefox(); }
             else if (type == "notify") icon.ShowBalloonTip(15000, Str(m, "title") ?? "FF Factory", Str(m, "text") ?? "", Equals(m.ContainsKey("warn") ? m["warn"] : null, true) ? ToolTipIcon.Warning : ToolTipIcon.Info);
             else if (type == "firefox_item") { RefreshFirefox(); Send(new Dictionary<string, object> { { "type", "firefox_item" }, { "allowed", firefoxAllowed }, { "allowItem", firefoxAllow.Checked }, { "visible", firefox.Available }, { "enabled", firefox.Enabled }, { "text", firefox.Text } }); }
+            // For a test (w5743): this window thread busy for ms (at most 5 s), as a slow paint or a registry scan makes it; the
+            // daemon never sends it. Answered before it starts.
+            else if (type == "busy")
+            {
+                int ms;
+                if (!int.TryParse(Str(m, "ms"), out ms)) ms = 0;
+                ms = Math.Max(0, Math.Min(ms, 5000));
+                Send(new Dictionary<string, object> { { "type", "busy" }, { "ms", ms } });
+                Thread.Sleep(ms);
+            }
             else if (type == "quit") Quit();
         }
 
