@@ -95,6 +95,7 @@ import { beltFor, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
 import { DEFAULT_WAIT_SECONDS, MAX_SEND_CHARS, MAX_TOOL_FILE_BYTES, MAX_WAIT_SECONDS, RemoteChat, type Progress, type RemoteCaller } from './remoteChat.ts';
+import { tokenPipeOptions } from './tokenPipe.ts';
 import { OPS_ID, OPS_LIMITS, OPS_PATHS, OPS_PEOPLE, OPS_REFUSED, OpsWorker, opsAllowedOrchestrator, opsBrief, opsGuard, opsSpawner } from './opsWorker.ts';
 import { deleteMemoryFile, MEMORY_TRASH_DAYS, memoryDirFor, memoryGuard, memoryKey, memoryRootOf, memoryTrashDir, restoreMemoryFile } from './orchestratorMemory.ts';
 import { ownerDataReads, portalSecretRules, secretFilesOf, secretReadGuard, type SecretRules } from './secretGuard.ts';
@@ -9008,6 +9009,8 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
       // Who pays (docs/orchestrators.md, docs/accounts.md): a person's own orchestrator runs on their own vault pool; the
       // dispatcher on the vault token config claudeAccounts.dispatcher pins (w996), else on the system payer's pool (w1078).
       env: this.orchestratorEnv(owner, info.id),
+      // Its vault token on a pipe, not in its environment, where another orchestrator's tools could read it (w5506).
+      ...tokenPipeOptions(),
       systemPrompt: { type: 'preset', preset: 'claude_code', append: branded(`${owner ? this.personalBrief(owner) : this.dispatcherBrief()}${orchestratorDeployment(this.cfg)}\n\n${memoryBrief(memory, owner?.displayName)}${opsAllowedOrchestrator(info) ? `\n\n${dataBrief(this.cfg.dataDir)}` : ''}${mayReadConfig(info) ? `\n\n${configBrief(configPath(), owner?.displayName)}` : ''}`, this.cfg) },
       ...(this.cfg.claudeExecutable ? { pathToClaudeCodeExecutable: this.cfg.claudeExecutable } : {}),
     };
