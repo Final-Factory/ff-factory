@@ -28,7 +28,7 @@ const MIN = 60_000;
  * - HUNG_MS: a guess. A host's heartbeat is a 3 s timer in its own small process; on BEAST two hosts missed 30 s of it
  *   together under load (daemon.log 2026-10-09T20:01:56Z) and then beat on for hours. A host silent 5 min while its
  *   process runs is stuck, not slow, and is stopped.
- * - EXIT_WAIT_MS: a host that closed exits 200 ms after its last line (agentHost.ts close()); 10 s is a wide margin.
+ * - EXIT_WAIT_MS: a host that closed exits within about 3.2 s of its last line (agentHost.ts close(): a worker's caps stop and peaks line first, w5554); 10 s is a wide margin.
  * - KILL_WAIT_MS: a guess; taskkill /T /F ends a tree within a second or two, a busy machine's within seconds.
  * - SWEEP_AFTER_MS: a guess. The portal keeps the transcript; a gone host's folder is only a post-mortem's evidence
  *   (w799's was read half an hour after), so it stays 6 h after its last write and then goes.
