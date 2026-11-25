@@ -151,12 +151,18 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // daemon.json has `writeLock` (off by default), and a launch that lacks it starts claude unlocked as before.
 // w5333 (no bump): `LaunchSpec.fence`, the Mac worker write fence. The daemon sets it for its own agent host; the portal
 // never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
+// w5546 (no bump): `daemon_control` actions `read-fence-off`/`read-fence-on`, the hello's `readFenceSwitch`, and
+// `LaunchSpec.fence.readAllowed`/`readOff`. The portal sends a read-fence action only to a daemon whose hello offers the
+// switch (an older one took any action but restart as an unload), `read-fence-warn` among them (lockout review); an older portal ignores the hello field; an older agent
+// host ignores the fence's read fields and runs the write fence alone.
 // w5555 (no bump): `worker_fence`, the daemon's worker fence state. An older portal's switch has no case for it and drops
 // it (the fence then holds workers without the alert); an older daemon never sends it.
+// w5546, w5555, w5554 and w5576 merged together.
 // w5576 (no bump): `portalPin` in the hello, the portal hosts the daemon follows and what pinning would refuse; an older
 // portal ignores it, and an older daemon sends none (list_machines says so).
 // w5554 (no bump): signal `workerCap`, a worker's host hit a cap and ended its tools; an older portal re-emits it with no
 // listener, as it does `tempSize`, and an older daemon or host never sends it.
+// w5546 merged with w5551 too.
 // w5554 (no bump): `LinkUpdateFlags.workerCaps` (off, warn or enforce), the worker caps' mode; an older daemon ignores the
 // field and keeps its own (it has no caps at all before w5554), and an older portal never sends it. The signal's arg gained
 // the optional `warn` and `kernel` flags: an older portal reads neither.
@@ -167,7 +173,7 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // an older portal never sends one and drops the hello field.
 // w5640 (no bump): `steamInstall` in the hello; `steam_upload` takes action `install` and `account`. The portal sends install
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
-const DECIDED = { protocol: 9, fingerprint: 'b98e13cc58922cf7' };
+const DECIDED = { protocol: 9, fingerprint: '366702299df02cc5' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

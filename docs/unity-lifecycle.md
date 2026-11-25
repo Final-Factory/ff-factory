@@ -244,7 +244,7 @@ bench requests only through the daemon's own tool calls, not worker-writable fil
 write `<root>/unity-slots` or `<root>/tmp/bench.queue` filed a slot request or a bench ticket under whatever holder,
 session and priority it wrote. Now:
 
-- The daemon serves calls on `127.0.0.1` (a port the OS picks, named in `<app_dir>/rpc.json`; `machine/daemonRpc.ts`).
+- The daemon serves calls on `127.0.0.1` (a port the OS picks, named in `<app_dir>/rpc/rpc.json`, a folder workers may read under the read fence, w5546; `machine/daemonRpc.ts`).
   Each agent gets `FF_DAEMON_RPC` (that file) and `FF_DAEMON_TOKEN`, a token naming its session and sandbox, signed with
   `<root>/secrets/daemon-rpc.key` (owner-only, kept across restarts). The daemon's own children run under
   `daemon-<machine id>`. The session, the sandbox (so the holder) and the priority (`priorities.json`, by session) come
