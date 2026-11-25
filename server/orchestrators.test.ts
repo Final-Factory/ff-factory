@@ -9545,6 +9545,25 @@ test('w2457: a stopped worker whose report says it waits on an FF Factory change
   assert.equal(portalWaitIn('w1: still open: waiting on ff-factory #742 to deploy'), true);
 });
 
+test('w5827: a still-open line that names the ff-factory repo or one of its PRs waits on no portal deploy (w5786 was gated on one three times); a line that says deploy or update still does', () => {
+  // w5786's worker 812c50cd, word for word (its ledger log, 17:16, 18:26 and 18:54 UTC on 2026-11-25, and the first at 17:05).
+  for (const line of [
+    'w5786: still open: waiting on the independent review of ff-factory PR #1258 at 2856d777, then the merge',
+    'w5786: still open: waiting on the independent review of ff-factory PR #1258 at 2856d777 to be filed and to pass, then the merge',
+    'w5786: still open: blocked on CI on Final-Factory/ff-factory#1258, then an independent review, then the merge',
+    'w5786: still open: waiting on the independent lockout review of PR #1258 at 2856d777 (handed up to be filed), then the merge',
+  ]) assert.equal(portalWaitIn(line, ['lothsahn']), false, line);
+  assert.equal(portalWaitIn('w1: still open: waiting on FF Factory PR #1260 to merge'), false);
+  assert.equal(portalWaitIn('w1: still open: blocked on the ff-factory repo review'), false);
+  assert.equal(portalWaitIn('w1: still open: waiting for CI on ff-factory PR #1258, then the portal deploy'), false, 'the wait is CI; its worker merges');
+  // A PR and a real deploy wait in one line.
+  assert.equal(portalWaitIn('w1: still open: waiting on ff-factory PR #1258 to merge and deploy to the portal'), true);
+  assert.equal(portalWaitIn('w1: still open: blocked on the portal deploy that carries ff-factory PR #1258 (merged at 29b42750)'), true);
+  assert.equal(portalWaitIn('w1: still open: the rerun, after the daemon update brings ff-factory #1258'), true);
+  assert.equal(portalWaitIn('w1: still open: waiting on FF Factory to deploy the fix'), true);
+  assert.equal(portalWaitIn('w1: still open: waiting for the next deploy'), true);
+});
+
 test("w2495: a report that waits on a person (w2443: \"waiting on lothsahn to click Pause in FF Factory's tray\") is the person's wait, never a deploy's; the person's answer resumes its worker through a gate the ledger read from its report, and keeps a real gate", async (t) => {
   const { store, sessions, agents, o, dispatcher, chat, call, heard } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);

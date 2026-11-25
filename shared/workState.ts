@@ -360,8 +360,18 @@ export function requestWaitOf(line: string, selfId: string): string | undefined 
  * the exclusive ticket", "waiting for the portal fix to deploy"): w2434's worker said so at 03:44 UTC and sat idle until
  * 07:57, though the fix deployed at 04:28. Not a wait on CI or a pull request in the ff-factory repo ("blocked on CI on
  * Final-Factory/ff-factory#743"): its worker merges that itself.
+ *
+ * w5827: the wait (its words after "waiting on", "blocked on", "until" or "after", up to a ; or . or a "then") must say a
+ * deploy or an update ("the portal deploy", "ff-factory #742 to deploy", "after the daemon update"), or wait on FF Factory
+ * or the portal itself ("blocked on FF Factory letting …"). The repo's name alone is neither: w5786's worker 812c50cd wrote
+ * "waiting on the independent review of ff-factory PR #1258 at 2856d777, then the merge", the ledger read a wait on a
+ * portal deploy three times (17:17, 18:26, 18:55 UTC on 2026-11-25), and each deploy resumed it for nothing.
  */
-const PORTAL_WAIT = /\b(?:waiting (?:for|on)|waits (?:for|on)|blocked on|until)\b([^;.]{0,80}?)(?<![\w/-])(?:ff[- ]?factory(?![\w-]*#\d)|the portal|portal (?:fix|deploy|update|change)|(?:a|the|its|next) (?:portal )?deploy)\b/i;
+const PORTAL_WAIT_LEAD = /\b(?:waiting (?:for|on)|waits (?:for|on)|blocked on|until|after)\b((?:[^;.]|\.(?=\w)){0,140})/gi;
+const DEPLOY_WORD = /\b(?:re)?deploy(?:s|ed|ing|ment)?\b|\b(?:portal|daemon|ff[- ]?factory)(?:'s)?\s+(?:update|upgrade|rollout)s?\b/i;
+/** FF Factory or the portal as the thing waited on, not as the repo a PR, CI run or review is in ("ff-factory PR #1258"). */
+const FFF_ITSELF =
+  /^\s*(?:the |an? |our |its |next )?(?:ff[- ]?factory|portal)(?:'s)?(?![\w/#-])(?!\s*#\d|\s+(?:prs?|pull requests?|repo|repository|ci|checks?|reviews?|issues?|branch|commits?|tests?|diff|code)\b)/i;
 /**
  * w2495: a "<who> to <do>" before the product name is someone else acting, not FF Factory: w2443's worker wrote "waiting
  * on lothsahn to click Pause in FF Factory's tray on LothLaptop for the live test", the ledger read a wait on a portal
@@ -371,8 +381,15 @@ const PORTAL_WAIT = /\b(?:waiting (?:for|on)|waits (?:for|on)|blocked on|until)\
 const SOMEONE_ACTS = /^\s*(?:the |a |an )?[A-Za-z][\w.'-]*\s+to\s+\w/i;
 export function portalWaitIn(line: string, people: readonly string[] = []): boolean {
   if (personWaitOn(line, people)) return false;
-  const m = PORTAL_WAIT.exec(line);
-  return !!m && !/\b(?:ci|checks?|pr|pull request)\b/i.test(m[1]) && !SOMEONE_ACTS.test(m[1]);
+  for (const m of line.matchAll(PORTAL_WAIT_LEAD)) {
+    const wait = m[1].split(/\bthen\b/i)[0];
+    if (FFF_ITSELF.test(wait)) return true;
+    const d = DEPLOY_WORD.exec(wait);
+    if (!d) continue;
+    const before = wait.slice(0, d.index);
+    if (!/\b(?:ci|checks?)\b/i.test(before) && !SOMEONE_ACTS.test(before)) return true;
+  }
+  return false;
 }
 
 /**
