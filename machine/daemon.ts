@@ -837,7 +837,7 @@ export class Daemon {
         log(`leftovers: could not write the worker shells' zsh files: ${(e as Error).message}`);
       }
     }
-    this.procsBroker = real && platform === 'darwin' ? new ProcsBroker({ dir: procsMailbox(this.slotMailbox), answer: answerProcsAsk(platform), log: (line) => log(line) }) : undefined;
+    this.procsBroker = real && platform === 'darwin' ? new ProcsBroker({ dir: procsMailbox(this.slotMailbox), answer: answerProcsAsk(platform, undefined, { root: this.cfg.root, groups: (session) => readShellGroups(shellGroupsDir(this.slotMailbox), { session }) }), log: (line) => log(line) }) : undefined;
     this.benchTurn = new BenchTurn({
       // w1894: a timed run's turn first (it ends within its 30 minutes; no new one is granted while a person plays), then a
       // person's game
