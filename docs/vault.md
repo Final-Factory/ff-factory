@@ -80,7 +80,7 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   still ran, spawned children and read its own `/proc/self/mountinfo`)*. That holds where `fs.suid_dumpable` is 0 or 2,
   not 1; `ci-vm-e2e.sh` checks it. `--disable-sigusr1` keeps a SIGUSR1, which any `fff` process may send, from
   opening the inspector. Yama's `ptrace_scope` 1 already kept a descendant from tracing it.
-  **The agents' Claude tokens (w5506).** Orchestrators, the dispatcher and the bug-thread judge get their vault token on a
+  **The agents' Claude tokens (w5506).** Orchestrators, the dispatcher, the bug-thread judge and the usage probe (`fetchPlanUsage`) get their vault token on a
   pipe at descriptor 3 (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`; `server/tokenPipe.ts`), the way the ops worker's
   launcher does. It is never in their environment, where another orchestrator's tools could read it in `/proc`.
   **What is left.** The portal's own git and gh carry a GitHub token in their environment while they run. The read guard's
