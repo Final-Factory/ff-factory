@@ -18,17 +18,29 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   const daemonDir = path.join(w.base, 'daemon');
   fs.mkdirSync(daemonDir);
   const configFile = path.join(daemonDir, 'daemon.json');
-  const dc: DaemonConfig = { portalUrl: `http://127.0.0.1:${w.beastPortal.port}`, id: 'beast', token: w.machineToken, repoPath: w.beastBase, appDir: daemonDir, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null };
+  const dc: DaemonConfig = { portalUrl: `http://127.0.0.1:${w.beastPortal.port}`, id: 'beast', token: w.machineToken, repoPath: w.beastBase, appDir: daemonDir, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null,
+    // w5715 enforce mode: a daemon follows a relocate only to a pinned host; the test VM's address is this runner's own,
+    // so it is pinned here as a person pins a new portal host before a cut-over (docs/portal-pin.md).
+    pinnedPortalHosts: [new URL(w.publicUrl).hostname] };
   fs.writeFileSync(configFile, JSON.stringify(dc, null, 2));
   const daemon = new Daemon({ ...dc, configFile, agentHosts: false }, undefined, PROBES);
   t.after(() => daemon.shutdown());
   daemon.start();
   await until("the daemon at BEAST's portal", () => /machine beast connected/.test(w.beastPortal.log()));
 
-  // A typed "no" first: nothing on BEAST changes.
+  // w5715 (w5726 finding 1): a target that is not a pinned portal host is refused before anything is copied or drained.
   const beastBefore = treeHash(w.beastRoot + '/scripts');
+  const pinned = { pinnedHosts: [new URL(w.publicUrl).hostname] };
+  const un = migration(w, 'cut-over');
+  assert.equal(await un.cutOver(), 4);
+  assert.match(un.report.join('\n'), /refused, nothing on BEAST or here was touched: [\d.]+ is not a pinned portal host .*pass --pinned-host/);
+  assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')));
+  assert.ok(w.beastPortal.child, "BEAST's portal still runs");
+  assert.doesNotMatch(w.beastPortal.log(), /drain/);
+
+  // A typed "no" next: nothing on BEAST changes.
   w.sys.answers = ['no'];
-  const no = migration(w, 'cut-over');
+  const no = migration(w, 'cut-over', pinned);
   assert.equal(await no.cutOver(), 3);
   assert.match(no.report.join('\n'), /stopped: nothing on BEAST was touched/);
   assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')));
@@ -36,7 +48,7 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   assert.deepEqual(treeHash(w.beastRoot + '/scripts'), beastBefore);
 
   w.sys.answers = ['CUT OVER'];
-  const m = migration(w, 'cut-over');
+  const m = migration(w, 'cut-over', pinned);
   const code = await m.cutOver();
   const report = m.report.join('\n');
   t.diagnostic(report);
@@ -68,6 +80,38 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   assert.doesNotMatch(report, new RegExp(`${FAKE_TOKEN}|${BEAST_TOKEN}`));
 });
 
+test('fffctl migrate --cut-over (w5715, w5726 finding 1): a daemon that refuses the relocate for its pin keeps BEAST\'s portal running', { skip: skip ?? (lanIp() ? undefined : 'no network address for the daemon to dial'), timeout: 300_000 }, async (t) => {
+  const w = await world(t);
+  await w.beastPortal.start();
+  await w.beastPortal.healthy();
+  await w.vmPortal.start();
+  await w.vmPortal.healthy();
+  // BEAST's own daemon, pinning only the built-in hosts: it refuses a relocate to the test VM's address.
+  const daemonDir = path.join(w.base, 'daemon');
+  fs.mkdirSync(daemonDir);
+  const configFile = path.join(daemonDir, 'daemon.json');
+  const dc: DaemonConfig = { portalUrl: `http://127.0.0.1:${w.beastPortal.port}`, id: 'beast', token: w.machineToken, repoPath: w.beastBase, appDir: daemonDir, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null };
+  fs.writeFileSync(configFile, JSON.stringify(dc, null, 2));
+  const daemon = new Daemon({ ...dc, configFile, agentHosts: false }, undefined, PROBES);
+  t.after(() => daemon.shutdown());
+  daemon.start();
+  await until("the daemon at BEAST's portal", () => /machine beast connected/.test(w.beastPortal.log()));
+
+  // The script is told the host is pinned (as if by hand on every machine), but this daemon does not pin it.
+  w.sys.answers = ['CUT OVER'];
+  const m = migration(w, 'cut-over', { pinnedHosts: [new URL(w.publicUrl).hostname] });
+  const code = await m.cutOver();
+  const report = m.report.join('\n');
+  t.diagnostic(report);
+  assert.equal(code, 1, report);
+  assert.match(report, /NOT relocated: beast \([\d.]+ is not a portal host this machine follows/);
+  assert.match(report, /beast refused the relocate: [\d.]+ is not a portal host it follows \(w5715\).*Stopping here: BEAST keeps running/);
+  assert.doesNotMatch(report, /BEAST portal: stopped|Cut over\./);
+  assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')), "BEAST's task is not disabled");
+  assert.ok(w.beastPortal.child, "BEAST's portal still runs");
+  assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).portalUrl, dc.portalUrl, 'the daemon stays on BEAST');
+});
+
 /** BEAST's config.json with machineLinkTailnet unset (enforce, the default since w5575), as a real BEAST's is now. */
 function enforceOnBeast(w: Awaited<ReturnType<typeof world>>) {
   const f = path.join(w.beastRoot, 'config.json');
@@ -84,7 +128,7 @@ test('fffctl migrate --cut-over (w5716): with machineLinkTailnet on enforce and 
   w.sys.answers = ['CUT OVER'];
   // A LAN address as the daemons' new URL, named here so a runner whose own address is a tailnet one changes nothing.
   const lan = 'http://192.168.77.20:8790';
-  const m = migration(w, 'cut-over', { publicUrl: lan });
+  const m = migration(w, 'cut-over', { publicUrl: lan, pinnedHosts: ['192.168.77.20'] });
   const code = await m.cutOver();
   const report = m.report.join('\n');
   assert.equal(code, 4, report);
@@ -104,7 +148,7 @@ test('fffctl migrate --cut-over (w5716): with enforce on and the portal behind T
   w.sys.funnelState = async () => 'funnel';
   w.sys.answers = ['no'];
   // The daemons are sent through Serve's own name (w5771: the world's default publicUrl is a LAN address).
-  const m = migration(w, 'cut-over', { tailscale: true, publicUrl: 'https://fff.tail1234.ts.net' });
+  const m = migration(w, 'cut-over', { tailscale: true, publicUrl: 'https://fff.tail1234.ts.net', pinnedHosts: ['fff.tail1234.ts.net'] });
   const code = await m.cutOver();
   const report = m.report.join('\n');
   assert.equal(code, 3, report);
@@ -119,7 +163,7 @@ test('fffctl migrate --cut-over (w5771): with enforce on, Serve on is not enough
   w.sys.funnelState = async () => 'funnel';
   w.sys.answers = ['CUT OVER'];
   const lan = 'http://192.168.77.20:8790';
-  const m = migration(w, 'cut-over', { tailscale: true, publicUrl: lan });
+  const m = migration(w, 'cut-over', { tailscale: true, publicUrl: lan, pinnedHosts: ['192.168.77.20'] });
   const code = await m.cutOver();
   const report = m.report.join('\n');
   assert.equal(code, 4, report);

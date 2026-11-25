@@ -706,12 +706,14 @@ export class Daemon {
 
   constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => LiveDeps) {
     this.cfg = cfg;
-    // w5576: the portal hosts it follows. Stage 1 warns only: what pinning would refuse is logged, kept and reported.
+    // w5576/w5715: the portal hosts it follows. Its own portalUrl and previousPortalUrl are always dialled (an unpinned
+    // one is logged, kept and reported); a relocate, or a review or attachment fetch's redirect, to an unpinned host is refused
+    // (enforce mode); an update bundle's redirect is only reported (portalPin.ts portalFetch).
     this.pin = new PortalPin(pinnedHosts(cfg.pinnedPortalHosts), PortalPin.fileFor(cfg.configFile), (line) => log(line));
     for (const [url, what] of [[cfg.portalUrl, 'the portal URL in daemon.json'], [cfg.previousPortalUrl, 'the portal URL before a relocate, in daemon.json']] as const) {
       if (url) this.pin.check('dial', url, what);
     }
-    onPortalRedirect((from, to) => void this.pin.check('redirect', to, `the portal redirected ${hostOf(from) ?? from} to ${to}`));
+    onPortalRedirect((from, to, refusable) => this.pin.redirect(from, to, refusable));
     this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
     this.fence = new FenceGate({ wanted: fenceWanted(cfg, process.platform), kind: fenceKindFor(process.platform), machine: cfg.id, changed: (r) => this.send({ type: 'worker_fence', fence: r }) });
@@ -1848,7 +1850,8 @@ export class Daemon {
     if (bad) return this.send({ type: 'relocate_result', id, ok: false, error: bad });
     const before = this.cfg.portalUrl.replace(/\/+$/, '');
     if (url === before) return this.send({ type: 'relocate_result', id, ok: true });
-    // w5576: a portal moves only to a pinned host (warn mode: an unpinned one is logged, kept and reported, and followed).
+    // w5576/w5715: a portal moves only to a pinned host. Refused here, the daemon stays on the portal it has (nothing is
+    // written, the link is not closed), and the portal's relocateAll takes the ok:false like any other refusal.
     if (!this.pin.check('relocate', url, `a relocate from ${before} to ${url}`)) {
       return this.send({ type: 'relocate_result', id, ok: false, error: `${hostOf(url) ?? url} is not a portal host this machine follows (w5576, docs/portal-pin.md): add it to PINNED_PORTAL_HOSTS and roll that out first` });
     }

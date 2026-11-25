@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { FromDaemon, LinkUpdateFlags, LinkUpdateReport, ToDaemon } from '../server/machineProtocol.ts';
-import { notePortalRedirect } from './portalPin.ts';
+import { portalFetch } from './portalPin.ts';
 import { launchJob, removeJob } from './osJob.ts';
 
 /** The largest bundle a daemon takes (ff-factory's whole history was 19 MB in October 2026). */
@@ -157,8 +157,9 @@ export async function downloadBundle(
       arm();
       try {
         const from = size;
-        const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal });
-        notePortalRedirect(url, res);
+        // w5715 (w5726 review, finding 2): a redirect of the bundle is only reported, never refused: the SHA-256 and the
+        // published-commit check decide what installs, and a pin must never stop a machine's updates.
+        const res = await portalFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal }, { fetch: doFetch, refuse: false });
         if (res.status >= 400 && res.status < 500) {
           await res.body?.cancel();
           throw new Final(`the portal answered ${res.status} for the update's bundle`);

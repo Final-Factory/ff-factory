@@ -22,7 +22,7 @@ test('fffctl migrate --cut-over: a portal here that does not come up puts everyt
     if (starts === 1) return;
     await realStart();
   };
-  const m = migration(w, 'cut-over', { healthSeconds: 5 });
+  const m = migration(w, 'cut-over', { healthSeconds: 5, pinnedHosts: [new URL(w.publicUrl).hostname] });
   assert.equal(await m.cutOver(), 1);
   const report = m.report.join('\n');
   t.diagnostic(report);
@@ -45,7 +45,7 @@ test('fffctl migrate --cut-over: a BEAST portal too old to relocate is left runn
   const vmCfgBefore = fs.readFileSync(w.vmCfgFile, 'utf8');
   fs.writeFileSync(path.join(w.base, 'old-beast'), '');
   w.sys.answers = ['CUT OVER'];
-  const m = migration(w, 'cut-over');
+  const m = migration(w, 'cut-over', { pinnedHosts: [new URL(w.publicUrl).hostname] });
   assert.equal(await m.cutOver(), 1);
   const report = m.report.join('\n');
   t.diagnostic(report);

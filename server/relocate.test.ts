@@ -274,25 +274,63 @@ test('relocate at the cut-over (w499): a drain-and-hold request with relocate se
   assert.equal(onDisk().portalUrl, b.url);
 });
 
-test('w5576 warn mode: a relocate to a host that is not pinned is followed as before, and logged, kept and reported in the hello', async (t) => {
-  const { tmp, mm, a, daemon, onDisk } = await setup(t);
-  const saved = RELOCATE_FALLBACK_MS.value;
-  RELOCATE_FALLBACK_MS.value = 1500;
-  t.after(() => (RELOCATE_FALLBACK_MS.value = saved));
+test('w5715 enforce mode: a relocate to a host that is not pinned is refused; the daemon stays on its portal, link and daemon.json untouched', async (t) => {
+  const { tmp, store, mm, daemon, onDisk, a, b } = await setup(t);
   daemon();
   await until('online at A, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0);
+  assert.equal(mm.portalPinOf('mx')?.mode, 'enforce');
   assert.deepEqual(mm.portalPinOf('mx')?.warnings, [], 'a loopback portal is pinned: nothing to say');
-  assert.equal(mm.portalPinOf('mx')?.mode, 'warn');
-  // .invalid never resolves (RFC 2606): the daemon follows it in warn mode, then falls back to A after the window.
+  const before = fs.readFileSync(path.join(tmp, 'daemon.json'), 'utf8');
   const unpinned = 'http://unpinned-portal.invalid:8790';
-  await mm.relocate('mx', unpinned);
-  assert.equal(onDisk().portalUrl, unpinned, 'warn mode: the relocate went ahead as before');
-  await until('back at A after the window, its hello seen', () => mm.isOnline('mx') && !!mm.portalPinOf('mx')?.warnings.length, 30_000);
-  const pin = mm.portalPinOf('mx')!;
-  assert.equal(pin.pinned, true, 'it dials A again');
-  assert.equal(pin.warnings[0].kind, 'relocate');
-  assert.match(pin.warnings[0].what, /unpinned-portal\.invalid is not a pinned portal host/);
-  const kept = JSON.parse(fs.readFileSync(path.join(tmp, 'portal-pin.json'), 'utf8')) as { warnings: { kind: string }[] };
-  assert.equal(kept.warnings[0].kind, 'relocate', 'kept beside daemon.json');
+  await assert.rejects(mm.relocate('mx', unpinned), /unpinned-portal\.invalid is not a portal host this machine follows \(w5576/);
+  assert.equal(fs.readFileSync(path.join(tmp, 'daemon.json'), 'utf8'), before, 'daemon.json not written');
   assert.equal(onDisk().portalUrl, a.url);
+  // Still on A, on the same link: a dropped link would be offline for the reconnect's ~200 ms.
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(mm.isOnline('mx'), true);
+  assert.equal(store.machines.get('mx')?.relocatedTo, undefined, 'the portal does not think it went');
+  const kept = JSON.parse(fs.readFileSync(path.join(tmp, 'portal-pin.json'), 'utf8')) as { warnings: { kind: string; what: string }[] };
+  assert.equal(kept.warnings[0].kind, 'relocate', 'kept beside daemon.json, reported in its next hello');
+  assert.match(kept.warnings[0].what, /a relocate from .* to http:\/\/unpinned-portal\.invalid:8790/);
+  // A pinned move still works after a refusal (the refusal changed nothing).
+  await mm.relocate('mx', b.url);
+  await until('online at B', () => mm.isOnline('mx') && onDisk().portalUrl === b.url && !store.machines.get('mx')?.relocatedTo);
+});
+
+test('w5715 cut-over (w499): a refused relocate still releases the drain-and-hold: drain.done is written with the refusal in the outcome', async (t) => {
+  const { mm, daemon, onDisk, tmp, a } = await setup(t);
+  LongAgent.all = [];
+  daemon();
+  await until('online at A, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0);
+  const stops: string[] = [];
+  const logs: string[] = [];
+  const d = new Drainer({ dataDir: tmp, snapshot: () => [], tell: () => undefined, stop: (r) => void stops.push(r.reason), changed: () => undefined, log: (l) => void logs.push(l), relocate: (url) => mm.relocateAll(url) });
+  const req = parseRestartRequest(JSON.stringify({ drain: true, drainMinutes: 10, reason: 'cut-over to an unpinned host', update: false, hold: true, relocate: 'http://unpinned-portal.invalid:8790' }));
+  assert.notEqual(req, 'now');
+  d.request(req as RestartRequest);
+  t.after(() => d.stopNow(req as RestartRequest));
+  await until('drain.done', () => fs.existsSync(path.join(tmp, 'drain.done')));
+  const result = JSON.parse(fs.readFileSync(path.join(tmp, RELOCATE_RESULT_FILE), 'utf8'));
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.machines.map((m: { machine: string; ok: boolean }) => [m.machine, m.ok]), [['mx', false]]);
+  assert.match(result.machines[0].note, /not a portal host this machine follows/);
+  assert.deepEqual(stops, [], 'held for scripts/restart.ps1, as with an accepted relocate');
+  assert.equal(onDisk().portalUrl, a.url, 'the daemon stays on the portal it has');
+  assert.equal(mm.isOnline('mx'), true);
+});
+
+test('w5715: a daemon whose own portalUrl is not pinned still dials it, live, and says so in its hello (a dial is never refused)', async (t) => {
+  const { tmp, mm, a, daemon, configFile, onDisk } = await setup(t);
+  // The same portal by a name the pin does not list: an IPv4-mapped IPv6 address of loopback ([::ffff:7f00:1]).
+  const port = new URL(a.url).port;
+  const unpinned = `http://[::ffff:127.0.0.1]:${port}`;
+  fs.writeFileSync(configFile, JSON.stringify({ ...onDisk(), portalUrl: unpinned }, null, 2));
+  daemon();
+  await until('online through the unpinned URL, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0 && !!mm.portalPinOf('mx'));
+  const pin = mm.portalPinOf('mx')!;
+  assert.equal(pin.mode, 'enforce');
+  assert.equal(pin.pinned, false);
+  assert.equal(pin.warnings[0].kind, 'dial');
+  assert.match(pin.warnings[0].what, /the portal URL in daemon\.json: \[::ffff:7f00:1\] is not a pinned portal host/);
+  assert.ok(fs.existsSync(path.join(tmp, 'portal-pin.json')));
 });
