@@ -480,6 +480,10 @@ export function checkAgeRules(value: unknown, cfg?: Pick<Config, 'protectedPaths
   });
 }
 
+/** w5575 review: trustProxy false and machineLinkTailnet enforce together refuse every daemon that comes in through Serve. */
+const TRUST_PROXY_ENFORCE =
+  'trustProxy false with machineLinkTailnet "enforce" (the default) would refuse every daemon: they come in through Tailscale Serve, whose X-Forwarded-For is then not believed (docs/machines.md, "The daemon link is tailnet-only"). Set machineLinkTailnet to "warn" first';
+
 /** The value to store for `key`, or throws with what is wrong. `null` removes the key (back to the default). */
 export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config, users?: readonly string[]): unknown {
   if (value === null || value === undefined) return undefined;
@@ -570,7 +574,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'trustProxy': {
       if (value === true || value === 'true') return true;
-      if (value === false || value === 'false') return false;
+      if (value === false || value === 'false') {
+        // w5575: every daemon comes in through Tailscale Serve, a hop on this machine; with trustProxy off its X-Forwarded-For
+        // is not believed, so under enforce each one is judged by that hop and refused.
+        if (cfg && (cfg.machineLinkTailnet === undefined || cfg.machineLinkTailnet === 'enforce')) throw new Error(TRUST_PROXY_ENFORCE);
+        return false;
+      }
       throw new Error("trustProxy is true (believe X-Forwarded-For/-Proto from a proxy on this machine, such as Tailscale Funnel) or false");
     }
     case 'deviceApproval': {
@@ -586,7 +595,10 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'machineLinkTailnet': {
       if (value === undefined || value === null) return undefined;
-      if (value === 'off' || value === 'warn' || value === 'enforce') return value;
+      if (value === 'off' || value === 'warn' || value === 'enforce') {
+        if (value === 'enforce' && cfg?.trustProxy === false) throw new Error(TRUST_PROXY_ENFORCE);
+        return value;
+      }
       throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back the default, "enforce"');
     }
     case 'privacyGuards': {

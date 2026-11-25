@@ -81,13 +81,28 @@ before redeploying by hand.
   `fffctl migrate --cut-over` to such a host, or a test world: `scripts/fff-migrate.world.ts` sets `"off"`) refuses
   them under enforce: set `machineLinkTailnet` to `"warn"` before such a move.
 
-  **Recovery, with no person at any machine:** if enforce cuts a daemon off (its link drops and `machine link: refused`
-  lines carry its address), Ben's or Lothsahn's orchestrator calls `set_app_config` with `machineLinkTailnet` `"off"`
-  (or `"warn"`). The portal VM runs the orchestrators, so this needs no daemon; it applies at once, and a refused daemon
-  gets in on its next redial (a daemon redials forever after a refusal, at most about 37.5 s apart: 30 s with up to 25% jitter,
-  `reconnectDelayMs`, `machine/daemon.ts`). Without an orchestrator: the ops worker (on the portal VM) or anyone with
-  the VM's shell sets `"machineLinkTailnet": "off"` in the portal's `config.json` and runs `fffctl restart`; or a revert
-  of the enforcing commit merged on GitHub deploys by itself.
+  **A refused machine is named and alerted** (w5575 review): when the check refuses a request whose bearer token is a
+  machine's, the portal logs `machine <id>: link refused by machineLinkTailnet (enforce) from <address>: <why>` and,
+  once an hour per machine, alerts the orchestrator and the host's devices (`linkRefusedAlert`, `server/machines.ts`
+  `linkRefused`), saying it is locked out, not offline. The token only names the machine; the request stays refused.
+  Without this a refused machine would look like any offline one, whose alert says to ask nobody.
+
+  **Recovery, with no person anywhere** (both owners away), first route first; each brings every refused daemon back on
+  its next redial (a daemon redials forever after a refusal, at most about 37.5 s apart: 30 s with up to 25% jitter,
+  `reconnectDelayMs`, `machine/daemon.ts`), and the portal VM runs the orchestrators, so none needs a daemon:
+  1. **The dispatcher** calls `set_app_config` `machineLinkTailnet` `"warn"` with `work_id` set to an open request an owner
+     (an identity of role `owner`) asked for in their own words: `machineLinkTailnet` is owner-only
+     (`OWNER_ONLY_KEYS`, `server/appConfig.ts`), and the dispatcher runs it for such a request (`userAskedProblem`,
+     `ownerOnlyProblem`, `server/agents.ts`; tested in `server/machineLinkRecovery.test.ts`). Applied live and written
+     to `config.json`. It needs that request to be open: w5575 is one while it is open.
+  2. **Any worker**, when no such request is open: a pull request that changes the default in `machineLinkMode`
+     (`server/machineLinkGate.ts`, `'enforce'` to `'warn'` for an unset value), merged on green CI, deploys by itself
+     ([automatic deploys](ops-worker.md#automatic-deploys-w1634), 15 to 60 minutes after the merge). No person's words
+     are needed for this.
+  3. A person's own orchestrator (Ben's or Lothsahn's) calls `set_app_config` in a turn of theirs, or has the ops
+     worker set `"machineLinkTailnet": "warn"` in the portal's `config.json` and run `fffctl restart`. A typo there
+     counts as `warn`.
+
 - **Sessions.** The portal creates the session record and tells the daemon what to launch (a
   serialisable launch spec: cwd, model, brief, tools, guard settings, budget). Transcript sequence
   numbers are assigned by the daemon, starting from the portal's last one, so a session resumes
