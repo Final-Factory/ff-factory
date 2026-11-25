@@ -56,7 +56,7 @@ test('the profile refuses every write, then allows the worker folders, then take
 
 test('a path with a quote or backslash cannot break out of its SBPL string', () => {
   const p = seatbeltProfile({ ...F, root: '/Users/p/f"f\\w', extraWritable: ['/x") (allow file-write* (subpath "/']});
-  assert.ok(p.includes('(subpath "/Users/p/f\\"f\\\\w")'));
+  assert.ok(p.includes('(subpath "/Users/p/f\\"f\\\\w/tmp")'));
   assert.ok(!p.includes('(subpath "/")'));
 });
 
