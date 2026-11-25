@@ -37,6 +37,9 @@ interface Machine {
   claudeConfigDir?: boolean;
   /** More of the environment `worker.ts tools` runs in. */
   env?: NodeJS.ProcessEnv;
+  /** w5543: the Medium agents' folder the run also installs into; registerAgents.sh fails there with this code. */
+  medium?: boolean;
+  mediumShCode?: number;
 }
 
 function machine(o: Machine = {}) {
@@ -44,6 +47,7 @@ function machine(o: Machine = {}) {
   const home = path.join(base, 'home');
   const root = path.join(base, 'ffw');
   const claudeDir = o.claudeConfigDir ? path.join(root, 'claude') : path.join(home, '.claude');
+  const mediumDir = path.join(root, 'claude-medium');
   fs.mkdirSync(path.join(claudeDir, 'plugins'), { recursive: true });
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
   fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson({ 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2' })));
@@ -82,17 +86,22 @@ function machine(o: Machine = {}) {
     if (cmd === 'sh') {
       // registerAgents.sh: records the checkout it ran from, refreshes the marketplace, updates every remembered plugin.
       fs.writeFileSync(marker, `${co}\n`);
-      const fails = o.shCode !== undefined && (o.shFails === undefined || calls.filter((c) => c.cmd === 'sh').length <= o.shFails);
-      if (!fails) fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson(o.installs ?? { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2' })));
-      const code = fails ? o.shCode! : 0;
+      const into = x.env?.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
+      const mediumRun = into === mediumDir;
+      const fails = mediumRun ? o.mediumShCode !== undefined : o.shCode !== undefined && (o.shFails === undefined || calls.filter((c) => c.cmd === 'sh').length <= o.shFails);
+      if (!fails) {
+        fs.mkdirSync(path.join(into, 'plugins'), { recursive: true });
+        fs.writeFileSync(path.join(into, 'plugins', 'installed_plugins.json'), JSON.stringify(installedJson(o.installs ?? { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2' })));
+      }
+      const code = fails ? (mediumRun ? o.mediumShCode! : o.shCode!) : 0;
       return { code, stdout: "== Claude Code ==\nmarketplace 'final-factory-agents' already registered — refreshing from GitHub\nchecking 'ff-agents@final-factory-agents' for updates\n", stderr: code ? 'claude CLI not on PATH — skipping Claude Code' : '' };
     }
     return { code: 1, stdout: '', stderr: `unexpected ${cmd}` };
   };
   const env: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: home, ...(o.claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeDir } : {}), ...o.env };
-  const run = (claude?: string) => publishAgentTools(root, { exec, say: (l) => lines.push(l), env, home, platform: 'linux' }, { claude });
+  const run = (claude?: string) => publishAgentTools(root, { exec, say: (l) => lines.push(l), env, home, platform: 'linux' }, { claude, ...(o.medium ? { medium: mediumDir } : {}) });
   const read = (p: string) => (fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : undefined);
-  return { root, co, calls, lines, run, marker: () => read(marker), installed: () => installedVersions(JSON.parse(read(path.join(claudeDir, 'plugins', 'installed_plugins.json'))!)) };
+  return { root, co, calls, lines, run, mediumDir, marker: () => read(marker), installed: () => installedVersions(JSON.parse(read(path.join(claudeDir, 'plugins', 'installed_plugins.json'))!)) };
 }
 
 const ran = (m: ReturnType<typeof machine>, what: string) => m.calls.filter((c) => [c.cmd, ...c.args].join(' ').includes(what));
@@ -228,4 +237,18 @@ test('the version helpers', () => {
   assert.deepEqual(staleAfter({ 'ff-speckit': '1.0.2' }, LATEST), ['ff-agents not installed (master: 1.29.20)']);
   assert.equal(checkoutProblem({ porcelain: '', branch: 'master', origin: 'git@github.com:Final-Factory/final-factory-agents.git' }), undefined);
   assert.equal(checkoutProblem({ porcelain: '', branch: '', origin: 'https://github.com/Final-Factory/final-factory-agents' }), 'is on a detached HEAD, not master');
+});
+
+test("w5543: one run installs the plugins into the workers' folder and the Medium agents' one, and fails when either is behind", async () => {
+  const m = machine({ claudeConfigDir: true, medium: true });
+  assert.equal(await m.run(), EXIT.ok);
+  const sh = m.calls.filter((c) => c.cmd === 'sh');
+  assert.deepEqual(sh.map((c) => c.env?.CLAUDE_CONFIG_DIR), [path.join(m.root, 'claude'), m.mediumDir], 'both folders, from the one checkout');
+  assert.ok(sh.every((c) => c.cwd === m.co));
+  assert.deepEqual(installedVersions(JSON.parse(fs.readFileSync(path.join(m.mediumDir, 'plugins', 'installed_plugins.json'), 'utf8'))), { 'ff-agents': '1.29.20', 'ff-speckit': '1.0.2', 'ff-discord': undefined });
+  assert.ok(m.lines.includes(`Agent tools before (Medium agents, ${m.mediumDir}): ff-agents not installed, ff-speckit not installed, ff-discord not installed`));
+  assert.equal(m.lines.filter((l) => l.startsWith('Agent tools after:')).length, 1, "the rollout reads the workers' folder's line");
+  const bad = machine({ claudeConfigDir: true, medium: true, mediumShCode: 1 });
+  assert.equal(await bad.run(), EXIT.failed);
+  assert.ok(bad.lines.some((l) => l.startsWith(`FAILED (Medium agents, ${bad.mediumDir}): registerAgents.sh exited 1`)));
 });

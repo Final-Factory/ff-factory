@@ -18,7 +18,7 @@
 // The machine credential (the `ffm_<id>_…` token the portal issued for this machine) is read from stdin, kept only in
 // <root>/secrets/machine-token (owner-only) and never printed or put on a command line.
 
-import { carrySettings, movesClaudeHome, workerClaudeDir } from '../../server/claudeHome.ts';
+import { carrySettings, mediumClaudeDir, movesClaudeHome, workerClaudeDir } from '../../server/claudeHome.ts';
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -2324,16 +2324,22 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   }
   // w5305: a main install's agents use <root>/claude, as its daemon sets at start (server/claudeHome.ts): the plugins go there,
   // after the legacy settings.json is carried across (once). The person's ~/.claude keeps its own plugins as they are.
+  // w5543: and the Medium agents' own folder (<root>/claude-medium, which no worker fence lets a worker write) gets the same
+  // plugins in the same run.
+  let medium: string | undefined;
   if (movesClaudeHome(env)) {
     const dir = workerClaudeDir(l.root);
     fs.mkdirSync(dir, { recursive: true });
     say(`Claude Code's folder for this install's agents: ${dir} (settings.json from ~/.claude: ${carrySettings(path.join(os.homedir(), '.claude'), dir)}).`);
     env = { ...env, CLAUDE_CONFIG_DIR: dir };
+    medium = mediumClaudeDir(l.root);
+    fs.mkdirSync(medium, { recursive: true });
+    say(`Claude Code's folder for this install's Medium agents: ${medium} (settings.json from ~/.claude: ${carrySettings(path.join(os.homedir(), '.claude'), medium)}).`);
   }
   let owner = ownerFlag;
   if (isWin && elevated() && !owner) owner = (await taskUser(m.service))?.owner;
   say(`FF Factory agent tools on ${m.machineId} (${l.root})`);
-  const code = await publishAgentTools(l.root, { exec, say, env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude });
+  const code = await publishAgentTools(l.root, { exec, say, env, home: os.homedir(), platform: process.platform, ...(owner ? { giveTo: (paths: string[]) => giveTo(owner, paths) } : {}) }, { claude, ...(medium ? { medium } : {}) });
   // The agents' node at one fixed path (w1742): a WARNING when it cannot be placed, never a failed publish of the plugins.
   if ((await ensureAgentNode(l.root, { exec, say, platform: process.platform })) === 'installed' && owner) {
     await giveTo(owner, [agentNodeDir(l.root)]).catch((e) => say(`WARNING: could not give ${agentNodeDir(l.root)} to ${owner}: ${(e as Error).message}`));
