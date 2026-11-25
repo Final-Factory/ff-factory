@@ -303,6 +303,21 @@ test('live w5562: a fenced shell signals and kills its own children (job control
   }
 });
 
+test('w5659: preference writes through cfprefsd are refused only when prefDeny is set, and ~/Library/Preferences stays a file deny', () => {
+  assert.ok(!seatbeltProfile(F).includes('user-preference-write'), 'off unless daemon.json workerPrefFence is true');
+  const p = seatbeltProfile({ ...F, prefDeny: true });
+  assert.ok(p.includes('(deny user-preference-write)'));
+  // cfprefsd lets a client write when it may write preferences OR the plist's file (measured on m5), so the rule needs the
+  // file deny of ~/Library/Preferences: no allow may open that folder.
+  assert.ok(!/\(allow file-write\*[^)]*\(subpath "\/Users\/p\/Library\/Preferences"\)/.test(p));
+  assert.ok(!p.includes('(subpath "/Users/p/Library")'));
+  assert.ok(!/\(allow user-preference-write/.test(p));
+  const on = fenceFor({ setting: 'seatbelt', root: '/', home: '/', platform: 'darwin', prefDeny: true, exists: () => true, getconf: () => '/' });
+  assert.equal(on?.prefDeny, true);
+  const off = fenceFor({ setting: 'seatbelt', root: '/', home: '/', platform: 'darwin', exists: () => true, getconf: () => '/' });
+  assert.equal(off?.prefDeny, undefined);
+});
+
 test('w5546 lockout review B3: a Dev Drive install\'s secrets in the host folder are closed too, on every OS', () => {
   assert.deepEqual(secretsDirs('/r'), ['/r/secrets']);
   assert.deepEqual(secretsDirs('/r', '/r/secrets/machine-token'), ['/r/secrets'], 'the same folder once');
