@@ -304,6 +304,17 @@ export interface HostDeps {
 }
 
 /**
+ * The command that runs a host for `dir` (w5766: exported for tests). A worker's scope holds its caps (w5554,
+ * machine/workerCaps.ts) where the user manager delegates memory and pids, and only in enforce mode: warn and off leave the
+ * scope without limits. `scope` passes linuxScope's probes through (tests force a Linux scope that takes limits).
+ */
+export function hostCommand(dir: string, start: HostStart, scope: { platform?: NodeJS.Platform; usable?: () => boolean; oom?: () => boolean; limitsOk?: () => boolean } = {}): { bin: string; args: string[]; unit?: string; limited?: boolean; capped: boolean } {
+  const caps = start.info.kind === 'worker' && capsModeOf(start.capsMode) === 'enforce' ? capsFor() : undefined;
+  const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir], { ...scope, ...(caps ? { limits: { memoryBytes: caps.memoryBytes, tasks: caps.tasks } } : {}) });
+  return { ...cmd, capped: !!caps };
+}
+
+/**
  * Start a host: detached (outside node's own kill-on-exit job on Windows, its own session on a Mac, its own systemd scope
  * on Linux: machine/linuxScope.ts, w2474), output to host.log.
  */
@@ -312,11 +323,8 @@ export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv
   const log = fs.openSync(f.log, 'a');
   try {
     // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
-    // A worker's scope holds its caps (w5554, machine/workerCaps.ts) where the user manager delegates memory and pids, and
-    // only in enforce mode: warn and off leave the scope without limits.
-    const caps = start.info.kind === 'worker' && capsModeOf(start.capsMode) === 'enforce' ? capsFor() : undefined;
-    const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir], caps ? { limits: { memoryBytes: caps.memoryBytes, tasks: caps.tasks } } : {});
-    if (caps && cmd.unit && !cmd.limited) fs.writeSync(log, `${new Date().toISOString()} worker caps: its scope has no MemoryMax or TasksMax (this user manager does not delegate them or takes no OOMPolicy=continue): the limits are not applied\n`);
+    const cmd = hostCommand(dir, start);
+    if (cmd.capped && cmd.unit && !cmd.limited) fs.writeSync(log, `${new Date().toISOString()} worker caps: its scope has no MemoryMax or TasksMax (this user manager does not delegate them or takes no OOMPolicy=continue): the limits are not applied\n`);
     // Its systemd scope's name (w2884): read when the host dies, for why (an OOM kill names itself in that scope's journal).
     if (cmd.unit) fs.writeFileSync(f.scope, cmd.unit);
     const child = spawn(cmd.bin, cmd.args, {

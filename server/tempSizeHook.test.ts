@@ -178,6 +178,20 @@ test('measureTemp: sums the direct children (files and folders) and names the th
   assert.deepEqual(await measureTemp(path.join(dir, 'missing')), { total: 0, biggest: [] });
 });
 
+test('measureTemp: a file hard-linked in two children counts once, in the first child that holds it (w5766)', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-temp-links-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'build'));
+  fs.mkdirSync(path.join(dir, 'slot'));
+  fs.writeFileSync(path.join(dir, 'build', 'player.bin'), Buffer.alloc(8000));
+  fs.linkSync(path.join(dir, 'build', 'player.bin'), path.join(dir, 'slot', 'player.bin'));
+  fs.linkSync(path.join(dir, 'build', 'player.bin'), path.join(dir, 'slot', 'again.bin'));
+  fs.writeFileSync(path.join(dir, 'slot', 'own.txt'), Buffer.alloc(100));
+  const m = await measureTemp(dir);
+  assert.equal(m.total, 8000 + 100, 'three links to one 8000-byte file take 8000 bytes of disk');
+  assert.equal(m.biggest.reduce((n, c) => n + c.bytes, 0), 8100);
+});
+
 test('AgentSession: a worker in an ffa-<session> temp folder gets the watch beside its other PostToolUse hooks; an orchestrator or another folder gets none', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-temp-size-s-'));
   const store = new Store(dir);

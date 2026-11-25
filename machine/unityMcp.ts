@@ -126,11 +126,13 @@ function unityMcpFrom(claudeJson: string, repoPath: string): { server?: StdioSer
  * mcpHomeStatusDir; false keeps the person's own home (the path before w5650, daemon.json unityMcpScopedHome: false).
  * Windows only (w5677's review): there uv reads %APPDATA%, not the home, so its Pythons and config stay found; on Mac
  * and Linux uv finds both under $HOME (~/.local/share/uv/python, ~/.config/uv), the w5402 failure, and only Windows
- * editors run fenced with another home.
+ * editors run fenced with another home. FF_UNITY_MCP=1 marks the server and what it starts (its uvx and python) so a kill of
+ * the worker's tools spares it (w5766, machine/workerCaps.ts sparedByEnv): UNITY_MCP_STATUS_DIR cannot, since every
+ * worker's shell carries it too (w5650, machine/daemon.ts).
  */
 export function scopedUnityMcp(server: StdioServer, appDir: string, place: string, home = true, platform: NodeJS.Platform = process.platform): StdioServer {
   const dir = mcpStatusDir(appDir, place);
-  return { command: server.command, args: server.args, env: { ...server.env, UNITY_MCP_STATUS_DIR: dir, ...(home && platform === 'win32' ? { USERPROFILE: dir, HOME: dir } : {}) } };
+  return { command: server.command, args: server.args, env: { ...server.env, UNITY_MCP_STATUS_DIR: dir, FF_UNITY_MCP: '1', ...(home && platform === 'win32' ? { USERPROFILE: dir, HOME: dir } : {}) } };
 }
 
 /**
