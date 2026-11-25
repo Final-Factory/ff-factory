@@ -129,6 +129,27 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
 export const READ_PROBE_SCRIPT =
   "const fs=require('fs');process.argv.slice(1).forEach((p,i)=>{try{fs.closeSync(fs.openSync(p,'r'));console.log(i+' ok')}catch(e){console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))}})";
 
+/**
+ * The owner-socket probe's program (w5748): connects to each UNIX socket and closes at once, sending nothing and reading
+ * nothing, and prints `abi <n>` (ff-landlock.py's FF_LANDLOCK_ABI) then `<i> ok|refused|<code>` per socket. A connect
+ * still pending after 5 s prints `timeout`.
+ */
+export const SOCKET_PROBE_SCRIPT =
+  "const net=require('net');console.log('abi '+(process.env.FF_LANDLOCK_ABI||'?'));process.argv.slice(1).forEach((p,i)=>{const s=net.createConnection({path:p});const t=setTimeout(()=>{console.log(i+' timeout');s.destroy()},5000);s.on('connect',()=>{clearTimeout(t);console.log(i+' ok');s.destroy()});s.on('error',(e)=>{clearTimeout(t);console.log(i+' '+(e.code==='EACCES'||e.code==='EPERM'?'refused':e.code||'error'))})})";
+
+/**
+ * One log line for the owner-socket probe (w5748), and the sockets it found reachable: on Linux `on` waits for none
+ * (docs/worker-fence.md, "The Secret Service and the agents").
+ */
+export function sayOwnerSocketProbe(mode: ReadFenceMode, socks: readonly string[], stdout: string): { line: string; open: string[] } {
+  const abi = /^abi (\S+)$/m.exec(stdout)?.[1] ?? '?';
+  const v = judgeReadProbe({ closed: socks, open: [] }, stdout);
+  const open = [...v.leftOpen, ...v.unknown];
+  if (!socks.length) return { line: `read fence (${mode}, linux) owner sockets: none found to probe (Landlock ABI ${abi})`, open };
+  const why = open.length ? `; reachable from a fenced run: ${open.join(', ')}${Number(abi) < 9 ? ` (Landlock ABI ${abi}: refusing a socket's connect needs ABI 9, Linux 7.1), so the Secret Service and the agents stay open to workers here` : ''}` : '';
+  return { line: `read fence (${mode}, linux) owner sockets: ${socks.length - open.length}/${socks.length} refused (Landlock ABI ${abi})${why}`, open };
+}
+
 export interface ReadProbeVerdict {
   /** Paths workers need that the fence refused: a lockout if enforced. */
   wronglyRefused: string[];
