@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 type PlatformPath = typeof path.posix;
-import { evidenceGated, evidencePython, evidenceVerdict, fetchHudData, findPrEvidence, portalPrEvidence, type GitRun } from '../machine/evidenceGate.ts';
+import { evidenceGated, installPythonShim, evidencePython, evidenceVerdict, fetchHudData, findPrEvidence, portalPrEvidence, type GitRun } from '../machine/evidenceGate.ts';
 import { prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { ghMerge } from './blockerWatch.ts';
 import { checkShell, type EvidenceResolver } from './guard.ts';
@@ -410,4 +411,27 @@ test('w4926: other refusals never update the plugin', () => {
   d.updatePlugin = () => { updates++; return undefined; };
   assert.equal(prMain(['merge', '--pr', '3180'], d), 1);
   assert.equal(updates, 0);
+});
+
+test('w5836: a python shim runs python3 where a macOS or Linux machine has only python3, and nowhere else', { skip: process.platform === 'win32' && 'POSIX shim' }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pyshim-'));
+  const bin = path.join(dir, 'bin');
+  const usr = path.join(dir, 'usr');
+  fs.mkdirSync(usr);
+  const exe = (name: string, body: string) => {
+    fs.writeFileSync(path.join(usr, name), `#!/bin/sh\n${body}\n`);
+    fs.chmodSync(path.join(usr, name), 0o755);
+  };
+  exe('python3', 'echo "py3 $*"');
+  const PATH = `${bin}:${usr}:/usr/bin:/bin`;
+  // /usr/bin may hold a real python on the test machine: look only at bin and usr.
+  const only = (p: string) => p.startsWith(usr) && fs.existsSync(p);
+  assert.equal(installPythonShim(bin, `${bin}:${usr}`, 'linux', only), 'written');
+  const r = spawnSync('python', ['pr_evidence.py', '--pr', '7'], { env: { PATH }, encoding: 'utf8' });
+  assert.equal(r.stdout.trim(), 'py3 pr_evidence.py --pr 7', r.stderr);
+  assert.equal(installPythonShim(bin, `${bin}:${usr}`, 'win32', only), 'none');
+  exe('python', 'echo real');
+  assert.equal(installPythonShim(bin, `${bin}:${usr}`, 'linux', only), 'removed');
+  assert.ok(!fs.existsSync(path.join(bin, 'python')));
+  fs.rmSync(dir, { recursive: true, force: true });
 });
