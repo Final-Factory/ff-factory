@@ -153,7 +153,16 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
 // w5555 (no bump): `worker_fence`, the daemon's worker fence state. An older portal's switch has no case for it and drops
 // it (the fence then holds workers without the alert); an older daemon never sends it.
-const DECIDED = { protocol: 9, fingerprint: '0cded9969265111d' };
+// w5576 (no bump): `portalPin` in the hello, the portal hosts the daemon follows and what pinning would refuse; an older
+// portal ignores it, and an older daemon sends none (list_machines says so).
+// w5554 (no bump): signal `workerCap`, a worker's host hit a cap and ended its tools; an older portal re-emits it with no
+// listener, as it does `tempSize`, and an older daemon or host never sends it.
+// w5551 (no bump): `steamUpload` in the hello, `steam_upload` and its answer `steam_upload_state`; the portal sends a job only
+// to a daemon whose hello offered it, so an older daemon never gets one (the tool says that computer cannot upload yet), and
+// an older portal never sends one and drops the hello field.
+// w5640 (no bump): `steamInstall` in the hello; `steam_upload` takes action `install` and `account`. The portal sends install
+// only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
+const DECIDED = { protocol: 9, fingerprint: '9c1bba0eef275f8b' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # fff-update: the portal VM's updater (deploy/vm/guest; /usr/local/lib/fff/fff-update), in place of supervise.ps1,
-# update.ps1 and update-steps.ps1. Root; npm and the web build run as fff, in a release that is not yet ready.
+# update.ps1 and update-steps.ps1. Root; npm and the web build run as the build account (FFF_BUILD_USER, w5523), in a
+# release that is not yet ready.
 #
 # Releases are git worktrees of one bare clone, $FFF_ROOT/app/releases/<sha12>, each with its own node_modules and
 # web build; $FFF_ROOT/app/current is the one fff-portal.service runs, previous the one before it. So the new code is
@@ -8,7 +9,9 @@
 #
 # Root runs a release's own install.sh and installs its scripts, so the clone, the release folders, the links and the
 # record of the prepared release ($APP/update.prepared.json) are root's and read-only to fff (w5505): a release is built
-# as fff, then made root's (harden_release), and root takes one only when release_problem (lib.sh) finds nothing wrong.
+# by the build account in a folder fff cannot write, then made root's (harden_release), and root takes one only when
+# release_problem (lib.sh) finds nothing wrong. So nothing fff or an agent running as fff plants in a release's
+# node_modules or web build reaches root (w5523).
 #
 #   fff-update request       fff-update.path started it: data/update.wanted is there (request_app_update, "fffctl
 #                            update" or the portal's automatic deploy, w1634). Builds origin/<branch> (or the commit its
@@ -43,16 +46,36 @@ current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 # deps_from OLD NEW SUB: NEW/SUB/node_modules as hard links of OLD's when SUB's package.json and package-lock.json are
 # the same in both, which is what npm ci would install anyway (seconds instead of half a minute). The caches tools write
 # into node_modules are left out, so nothing writes through a link into the running release's files.
-# The old release must be a checked root's one; the links are root's (the kernel's protected_hardlinks refuses fff a
-# link to root's file), and only the folders are fff's for the build, so fff can add files but change none of them.
+# The old release must be a checked root's one; the links are root's (the kernel's protected_hardlinks refuses the
+# build account a link to root's file), and only the folders become the build account's for the build (prepare), so
+# it can add files but change none of them. Run while NEW is still root's (w5531).
+# Only from a release the build account built (its root's OLD.builder names it), into one it builds now: node_modules
+# fff built (before w5523, or in a fall back) are never carried into a release the build account builds (w5523 B1).
 deps_from() {
   local old=$1 new=$2 sub=$3 f
   [ -n "$old" ] && release_ok "$old" && [ -d "$old/$sub/node_modules" ] && [ ! -L "$old/$sub/node_modules" ] || return 1
+  [ -n "${FFF_BUILD_USER:-}" ] && [ "$BUILD_AS" = "$FFF_BUILD_USER" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 1
+  root_owned "$old.builder" && [ "$(cat "$old.builder")" = "$FFF_BUILD_USER" ] || return 1
   for f in package.json package-lock.json; do cmp -s "$old/$sub/$f" "$new/$sub/$f" || return 1; done
   rm -rf "$new/$sub/node_modules"
   cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
   rm -rf "$new/$sub/node_modules/.cache" "$new/$sub/node_modules/.vite" "$new/$sub/node_modules/.tmp"
-  find "$new/$sub/node_modules" -type d -exec chown "$FFF_USER:$FFF_USER" {} +
+}
+
+# pick_builder: BUILD_AS and BUILD_HOME for this build: the build account when ensure_build_user (lib.sh) finds it fit.
+# When it is not (it cannot be made, setfacl is missing), the release is built as fff, as before w5523, so updates keep
+# working and a fix can still be deployed with nobody at the VM; the journal and the dispatcher are told every time.
+# fff cannot make the account unfit: the account, its home and the ACL are root's to change.
+pick_builder() {
+  local why
+  if why=$(ensure_build_user 2>&1); then
+    [ -z "$why" ] || printf '%s\n' "$why" >&2
+    BUILD_AS=$FFF_BUILD_USER BUILD_HOME=$FFF_BUILD_HOME
+    return 0
+  fi
+  BUILD_AS=$FFF_USER BUILD_HOME=$FFF_ROOT/home
+  warn "SECURITY: the build account ${FFF_BUILD_USER:-} is not fit ($why); building as $FFF_USER instead, so code $FFF_USER could change reaches root (w5523)"
+  tell_dispatcher "[app update] SECURITY (w5523): the portal's release is being built as $FFF_USER, not as the build account ${FFF_BUILD_USER:-}, because: $why. The update goes on, but the node_modules and web build root runs code from are open to $FFF_USER while they are built. Fix the build account (ensure_build_user in deploy/vm/guest/lib.sh; journalctl -u fff-update in the VM)." || true
 }
 
 # ensure_repo: root's bare clone of $FFF_REPO_URL. One fff made (before w5505) is replaced by a new clone, since fff
@@ -104,7 +127,7 @@ ensure_repo() {
 # prepare [REF]: build REF beside the running release and print its folder. Every step is checked here: this runs in
 # $(...) and under "if", where bash ignores errexit, so a failed npm ci would otherwise still mark the release ready.
 prepare() {
-  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t
+  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t reused
   log "fetching $ref"
   t=$(date +%s)
   own_app
@@ -125,28 +148,41 @@ prepare() {
   [ ! -e "$dir" ] || log "release ${sha:0:12}: $(release_problem "$dir" "$sha"); building it again"
   log "building ${sha:0:12} ($ref) in $dir"
   t=$(date +%s)
-  rm -f "$dir.ready"
+  rm -f "$dir.ready" "$dir.builder"
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     [ "$(current_dir)" != "$dir" ] || die "$dir is the running release and not fit to run; not removing it under the portal"
     rm -rf "$dir"
   fi
   git_root -C "$REPO" worktree prune >&2 || true
   git_root -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
-  # fff builds it (npm ci, the web build); harden_release makes it root's afterwards.
-  chown -R -h "$FFF_USER:$FFF_USER" "$dir"
+  pick_builder
   cur=$(current_dir)
+  reused=" "
   for sub in . web; do
     if [ "$cur" != "$dir" ] && deps_from "$cur" "$dir" "$sub"; then
       log "building ${sha:0:12}: $sub dependencies unchanged, node_modules reused from $(basename "$cur")"
-    else
-      log "building ${sha:0:12}: npm ci ($sub)"
-      as_fff_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || die "npm ci in $sub failed"
+      reused+="$sub "
     fi
   done
-  log "building ${sha:0:12}: web build"
-  as_fff_in "$dir" npm --prefix web run build --silent >&2 || die "the web build failed"
+  # The build account builds it (npm ci, the web build), in a folder fff cannot write (w5523); harden_release makes it
+  # root's afterwards. Given to it from the bottom up (-depth, chown -h), so each folder above the one root changes is
+  # still root's and it cannot have swapped it for a link (w5531); the files of the reused node_modules stay root's links.
+  find "$dir" -depth \( -type d -o \( ! -path "$dir/node_modules/*" ! -path "$dir/web/node_modules/*" \) \) \
+    -exec chown -h "$BUILD_AS:$BUILD_AS" {} +
+  for sub in . web; do
+    case $reused in *" $sub "*) continue ;; esac
+    log "building ${sha:0:12}: npm ci ($sub) as $BUILD_AS"
+    as_build_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || { end_build_processes; die "npm ci in $sub failed"; }
+  done
+  log "building ${sha:0:12}: web build as $BUILD_AS"
+  as_build_in "$dir" npm --prefix web run build --silent >&2 || { end_build_processes; die "the web build failed"; }
+  end_build_processes
   harden_release "$dir" "$sha" >&2 || die "release ${sha:0:12} could not be made root's and read-only"
-  log "release ${sha:0:12} built in $(($(date +%s) - t)) s"
+  # Who built it, root's like .ready: deps_from reuses only node_modules the build account built (w5523).
+  printf '%s\n' "$BUILD_AS" >"$dir.builder.new"
+  chmod 0644 "$dir.builder.new"
+  mv -f "$dir.builder.new" "$dir.builder"
+  log "release ${sha:0:12} built in $(($(date +%s) - t)) s, as $BUILD_AS"
   echo "$dir"
 }
 
@@ -163,7 +199,7 @@ prune() {
     [ "$n" -gt "$RELEASES_KEEP_EXTRA" ] || continue
     log "removing old release $(basename "$d")"
     rm -rf "$d"
-    rm -f "$d.ready"
+    rm -f "$d.ready" "$d.builder"
   done
   git_root -C "$REPO" worktree prune
 }
@@ -324,17 +360,19 @@ cmd_activate() {
 # back there from its file in the secrets folder (the start of a newer release moves it out again). Nothing else needs
 # undoing: config keeps claudeAccounts.orchestrator "vault", which those releases read too.
 restore_inline_hash() {
-  local cfg=$FFF_ROOT/config/config.json f h tmp
+  local cfg=$FFF_ROOT/config/config.json f h
   [ -f "$1/server/configMigration.ts" ] && return 0
   f=$(jq -r '.providers.ffbox.tokenSha256File // ""' "$cfg" 2>/dev/null) || return 0
   [ -n "$f" ] && [ -s "$f" ] || return 0
-  h=$(tr -d '[:space:]' <"$f")
+  # fff reads the file config.json names and edits its own config (w5531: root would follow a link fff put there).
+  h=$(as_fff cat -- "$f" | tr -d '[:space:]') || h=""
   [[ $h =~ ^[0-9a-f]{64}$ ]] || { warn "$f does not hold one SHA-256: FFBox's connector hash not put back into config.json"; return 0; }
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  if ! jq --arg h "$h" '.providers.ffbox.tokenSha256 = $h' "$cfg" >"$tmp"; then rm -f "$tmp"; warn "could not put FFBox's connector hash back into config.json"; return 0; fi
-  chown --reference="$cfg" "$tmp"
-  chmod --reference="$cfg" "$tmp"
-  mv -f "$tmp" "$cfg"
+  no_link "$cfg" "putting FFBox's connector hash back into config.json" || return 0
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  if ! as_fff sh -c 't=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg h "$2" ".providers.ffbox.tokenSha256 = \$h" "$1" >"$t" &&
+    chmod --reference="$1" "$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$h"; then
+    warn "could not put FFBox's connector hash back into config.json"; return 0
+  fi
   log "FFBox's connector hash put back into config.json for $(basename "$1"), a release from before w1078"
 }
 

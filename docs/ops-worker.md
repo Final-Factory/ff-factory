@@ -801,7 +801,11 @@ job, no worker.
   device": w4421, biscuit refused 3acff0c at 04:08:20Z on 2026-11-16 when it could not write the bundle) is sent again by
   itself once that machine is online with its disk back over the line the disk gate uses (its warning line + 5 GB,
   `diskAboveLine` in `shared/blockers.ts`), at most 3 times per rollout (`ROLLOUT_LIMITS.diskFullRetries`), instead of
-  waiting for the next deploy; each try is reported, and the report says when no further one is coming. A link update that gets no answer from a machine that
+  waiting for the next deploy; each try is reported, and the report says when no further one is coming. An update or tools
+  run whose bundle download the daemon gave up on ("the bundle's download did not finish in 480 s", "stalled" or "broke",
+  `machine/selfUpdate.ts` `DOWNLOAD`; w5593, BEAST 2026-11-25 08:20:52Z, 13754368 of 29217059 bytes at 35 KB/s over a relayed
+  link) changed nothing either, and is sent again by itself 5 minutes after it failed while the machine is online, at most 3
+  times per rollout (`ROLLOUT_LIMITS.cutRetries`, `cutRetryMs`); a failed update's tools run follows it again. Once the 3 resends were cut too, its line says "its 3 resends were cut too: its link to the portal is slow, stalls or drops, so it waits for the next deploy (needs a look)" (w5628): look at that machine's link (its speed in the journal's "update bundle went out / was cut" lines). A link update that gets no answer from a machine that
   went offline **without fetching its bundle** (w2005: m3 went dark 17 s before its update was sent, on 2026-10-24) never
   reached it, since the daemon fetches the bundle before it changes anything: it stays pending ("offline before the update
   reached it"), nothing is put back over ssh, and it is updated after its next hello like any machine offline at the deploy.

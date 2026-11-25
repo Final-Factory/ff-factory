@@ -3,7 +3,7 @@
 // it runs from (deploy/vm/guest/fff-update makes each release a worktree of one clone), at its HEAD. The bundle's SHA-256
 // and size go in the `self_update` message on the machine's own authenticated link; the machine downloads it with its own
 // credential (GET /machine/update/<sha256>, only a machine it was offered to) and checks both, and git checks the commit.
-import { spawn } from 'node:child_process';
+import { gitSpawn } from './safeGit.ts';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,11 +13,19 @@ export interface UpdateBundle {
   file: string;
   sha256: string;
   size: number;
+  /** An incremental bundle (w5593): the commits it leaves out, which the machine's checkout must already hold. */
+  from?: string[];
 }
+
+/**
+ * What a daemon answers when an incremental bundle's base is not in its checkout (machine/selfUpdate.ts checkoutFromBundle:
+ * `git bundle verify` names the missing prerequisite, or `git fetch` fails), so the full bundle is sent instead (w5593).
+ */
+export const THIN_REFUSED = /refused it: (the bundle is not one git can read|git fetch failed)/;
 
 const git = (cwd: string, args: string[]) =>
   new Promise<string>((resolve, reject) => {
-    const p = spawn('git', ['-C', cwd, ...args], { windowsHide: true });
+    const p = gitSpawn(['-C', cwd, ...args], { windowsHide: true });
     let out = '';
     let err = '';
     p.stdout.on('data', (d) => (out += d));
@@ -63,23 +71,62 @@ export class UpdateBundles {
     return p;
   }
 
-  private async make(commit: string): Promise<UpdateBundle> {
+  /**
+   * w5593: the bundle of `full`'s commit without what the machine's checkout already holds: everything from `from` (the commit
+   * its daemon runs, which its update put in its checkout) on, or from the commit's parents when it runs that commit already
+   * (the tools publish after its update). beast took 35-50 KB/s from the portal on 2026-11-25 and never finished the 29 MB full
+   * bundle in the daemon's 480 s; from its 0a239f1c to a1701f9 the incremental one is 790 KB. Undefined when there is none to
+   * make (an unknown or ambiguous commit, one not behind this one, a first commit): the full bundle goes then. A daemon whose
+   * checkout lacks the base refuses it (THIN_REFUSED) and machines.ts linkUpdate sends the full one.
+   */
+  async thin(full: UpdateBundle, from: string | undefined): Promise<UpdateBundle | undefined> {
+    if (!from || !/^[0-9a-f]{7,40}$/i.test(from)) return undefined;
+    const base = (await git(this.root, ['rev-parse', '--verify', '--quiet', `${from}^{commit}`]).catch(() => '')).trim();
+    if (!/^[0-9a-f]{40}$/.test(base)) return undefined;
+    let not: string[];
+    if (base === full.commit) {
+      not = (await git(this.root, ['rev-parse', `${full.commit}^@`]).catch(() => '')).split(/\s+/).filter((x) => /^[0-9a-f]{40}$/.test(x));
+      if (!not.length) return undefined;
+    } else {
+      if (!(await git(this.root, ['merge-base', '--is-ancestor', base, full.commit]).then(() => true, () => false))) return undefined;
+      not = [base];
+    }
+    const key = `${full.commit}^${not.join(',')}`;
+    let p = this.made.get(key);
+    if (!p) {
+      p = this.make(full.commit, not);
+      this.made.set(key, p);
+      p.catch(() => this.made.delete(key));
+    }
+    return p.catch(() => undefined);
+  }
+
+  private async make(commit: string, not: string[] = []): Promise<UpdateBundle> {
     fs.mkdirSync(this.dir, { recursive: true });
-    const file = path.join(this.dir, `${commit.slice(0, 16)}.bundle`);
+    const head = `${commit.slice(0, 16)}.`;
+    const file = path.join(this.dir, not.length ? `${head}from-${not[0].slice(0, 12)}.bundle` : `${head}bundle`);
     if (!fs.existsSync(file)) {
       const tmp = `${file}.${process.pid}.tmp`;
       // Its HEAD as the bundle's HEAD: the machine fetches HEAD and checks the commit (machine/selfUpdate.ts checkoutFromBundle).
-      await git(this.root, ['bundle', 'create', '--quiet', tmp, 'HEAD']);
+      // The portal's HEAD is `commit` (prepare checked it), and an incremental one leaves out what `not` reaches.
+      await git(this.root, ['bundle', 'create', '--quiet', tmp, 'HEAD', ...not.map((c) => `^${c}`)]);
       fs.renameSync(tmp, file);
     }
     const sha256 = await new Promise<string>((resolve, reject) => {
       const h = createHash('sha256');
       fs.createReadStream(file).on('data', (d) => h.update(d)).on('error', reject).on('end', () => resolve(h.digest('hex')));
     });
-    // The two newest stay: one a rollout may still hand out, one before it.
-    const old = fs.readdirSync(this.dir).filter((n) => n.endsWith('.bundle') && path.join(this.dir, n) !== file).map((n) => path.join(this.dir, n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
-    for (const f of old.slice(1)) fs.rmSync(f, { force: true });
-    return { commit, file, sha256, size: fs.statSync(file).size };
+    // This commit's bundles stay (its full one and each machine's incremental one, which a rollout may still hand out), and
+    // the newest one before it.
+    const old = fs.readdirSync(this.dir).filter((n) => n.endsWith('.bundle') && !n.startsWith(head)).map((n) => path.join(this.dir, n)).sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    for (const f of old.slice(1)) {
+      try {
+        fs.rmSync(f, { force: true });
+      } catch {
+        // Best effort: a bundle still being sent (EBUSY on Windows) goes at the next one.
+      }
+    }
+    return { commit, file, sha256, size: fs.statSync(file).size, ...(not.length ? { from: not } : {}) };
   }
 
   /** This machine may fetch this bundle for the next hour. */

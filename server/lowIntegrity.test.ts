@@ -69,7 +69,10 @@ test("only the folders workers write are labelled Low; BEAST's instances, demos,
     'lens-factory', 'logs', 'max', 'migration', 'nightly-history', 'nightly', 'player-cache', 'players', 'release-records', 'repo', 'sandboxes',
     'scratch-slot3', 'scratch', 'secrets', 'seed', 'steam-lobby-gate', 'steam', 'test-history', 'tmp', 'tools', 'unity-slots', 'voice', 'some-new-portal');
   const t = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: beast, exists: (p) => p === path.join(R, 'repo', 'HEAD') });
-  const fenced = ['archives', 'ben-factory', 'demos', 'ffu-runners', 'instances', 'lens-factory', 'migration', 'scratch-slot3', 'some-new-portal'];
+  // max: the old worker-writable Max events folder, unused since w5552 (the events file is the daemon's).
+  const fenced = ['archives', 'ben-factory', 'demos', 'ffu-runners', 'instances', 'lens-factory', 'max', 'migration', 'scratch-slot3', 'some-new-portal',
+    // steamcmd's folder and cached login are the daemon's alone (w5551).
+    'steam'];
   for (const n of fenced) {
     assert.ok(!t.dirs.includes(path.join(R, n)), `${n} is not labelled Low`);
     assert.ok(t.medium.includes(path.join(R, n)), `${n} is kept Medium`);

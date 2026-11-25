@@ -31,6 +31,27 @@ run_cmd() {
   fi
 }
 
+# key_primary_fprs FILE: the fingerprint of every primary key in an OpenPGP key file (armored or not), one per line.
+# Subkeys' fingerprints are left out: a vendor pins its primary keys.
+key_primary_fprs() {
+  gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }'
+}
+
+# verify_key_fprs FILE FPR...: dies unless FILE holds at least one key and every primary key in it is one of the pinned
+# fingerprints (w5530: an apt signing key fetched over the network is trusted only by its fingerprint). An unlisted key,
+# an extra key in the file, an unreadable file and a wrong fingerprint all fail, naming what was found.
+verify_key_fprs() {
+  local file=$1 found f p ok
+  shift
+  found=$(key_primary_fprs "$file")
+  [ -n "$found" ] || die "apt key check FAILED: $file holds no readable OpenPGP key"
+  for f in $found; do
+    ok=0
+    for p in "$@"; do [ "$f" = "$p" ] && ok=1; done
+    [ "$ok" = 1 ] || die "apt key check FAILED: $file has the key $f, expected one of: $* (the vendor's key changed, or the download was tampered with; nothing was installed)"
+  done
+}
+
 # write_file PATH MODE [OWNER]: stdin to PATH when it differs; prints "changed" when it wrote (or would).
 write_file() {
   local path=$1 mode=$2 owner=${3:-root:root} tmp
@@ -54,7 +75,7 @@ install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
   for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-watchdog fff-backup fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-watchdog fff-backup fff-backup-drill fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
   # The orchestration worker's PATH (w597): its ssh and fffctl, each one sudo call to a wrapper above; its scp and sftp
   # (w612), /usr/bin/scp and sftp as itself over fff-ops-scp-ssh; its fff-machine-ssh (w676), through fff-ops-priv.
   for f in ssh fffctl scp sftp fff-machine-ssh; do [ -z "$(write_file "$FFF_LIB/ops-bin/$f" 0755 <"$src/ops-bin/$f")" ] || c+=" ops-bin/$f"; done
@@ -74,7 +95,7 @@ tailnet_url() {
 # when it is empty or another ts.net address (a renamed node, a copy from another portal). A URL off ts.net was set by
 # a person on purpose and stays. Succeeds when it changed the file, so the caller restarts the portal.
 sync_public_url() {
-  local cfg=$FFF_ROOT/config/config.json want have tmp
+  local cfg=$FFF_ROOT/config/config.json want have
   [ -f "$cfg" ] || return 1
   want=$(tailnet_url)
   if [ -z "$want" ]; then log "publicUrl: Tailscale has not joined yet, so it stays as it is (fffctl tailscale-join sets it)"; return 1; fi
@@ -86,12 +107,12 @@ sync_public_url() {
     return 1
   fi
   if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would set config.json publicUrl to $want (was ${have:-empty})"; return 1; fi
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  jq --arg url "$want" '.publicUrl = $url' "$cfg" >"$tmp" || { rm -f "$tmp"; warn "could not edit $cfg"; return 1; }
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  cp -p --remove-destination "$cfg" "$cfg.prev"
-  mv -f "$tmp" "$cfg"
+  # fff edits its own config (w5531: root writing in fff's folder would follow a link fff put there).
+  no_link "$cfg" "setting publicUrl" || return 1
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  as_fff sh -c 'umask 077 && t=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg url "$2" ".publicUrl = \$url" "$1" >"$t" &&
+    cp -p --remove-destination "$1" "$1.prev" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$want" ||
+    { warn "could not edit $cfg"; return 1; }
   log "publicUrl: set to $want (was ${have:-empty})"
 }
 
@@ -118,30 +139,132 @@ load_conf() {
 # stat ("fatal: failed to stat '/home/fffadmin/ff-factory': Permission denied" from fffctl gh-login).
 as_fff() { as_fff_in / "$@"; }
 # as_fff_in DIR CMD...: the same, started in DIR.
-as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@"); }
+# Already the service account (the unit tests, which run as themselves): no runuser, which refuses a caller that is not root.
+as_fff_in() {
+  local dir=$1 run=(runuser -u "$FFF_USER" --)
+  shift
+  [ "$(id -un)" != "$FFF_USER" ] || run=()
+  (cd "$dir" && "${run[@]}" env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
 
-# data_write NAME: stdin to $DATA/NAME, whole (a temp file and a rename) and owned by fff, which the server needs to
-# read and remove it.
+# The release build's account (w5523): FFF_BUILD_USER with its own home, or fff when that account cannot be made fit
+# (pick_builder, fff-update). as_build_in DIR CMD... runs CMD in DIR as it, with a clean environment: its PATH
+# (lib.sh's fixed one), its home (its TMPDIR too, not a /tmp fff shares) and nothing of the caller's (NODE_ENV=production from fff-portal.service's ExecStartPre
+# would leave out the web build's tools).
+BUILD_AS='' BUILD_HOME=''
+as_build_in() {
+  local dir=$1; shift
+  (cd "$dir" && runuser -u "${BUILD_AS:-$FFF_USER}" -- env -i PATH="$PATH" HOME="${BUILD_HOME:-$FFF_ROOT/home}" TMPDIR="${BUILD_HOME:-$FFF_ROOT/home}" LANG=C.UTF-8 \
+    npm_config_update_notifier=false GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
+
+# ensure_build_user: FFF_BUILD_USER is there and fit to build a release, made when missing: an account of its own (not
+# root, not fff, not in fff's group, no password, no login shell), its home (FFF_BUILD_HOME: its npm cache) its own and
+# closed (0700) in a folder root's and closed to fff's writes, so fff cannot plant an .npmrc or a cached package there;
+# and an ACL entry on $FFF_ROOT (root:fff 1770) that lets it pass through to $RELEASES and read nothing there. Prints why
+# it is not fit, and fails.
+ensure_build_user() {
+  local b=${FFF_BUILD_USER:-} h=${FFF_BUILD_HOME:-} uid
+  case $b in '' | root | "$FFF_USER") echo "FFF_BUILD_USER is '$b': it must be an account of its own"; return 1 ;; esac
+  [[ $h == /?* ]] && [[ $h != */ ]] || { echo "FFF_BUILD_HOME '$h' is not an absolute folder"; return 1; }
+  case "$h/" in "$FFF_ROOT"/*) echo "FFF_BUILD_HOME $h is inside $FFF_ROOT, where fff makes folders"; return 1 ;; esac
+  root_owned "$(dirname "$h")" || { echo "$(dirname "$h") is not root's, or is writable by others"; return 1; }
+  if ! id "$b" >/dev/null 2>&1; then
+    # A group of its name may be left from an earlier account (userdel keeps a group with other members): use it.
+    local grp=(--user-group)
+    if getent group "$b" >/dev/null 2>&1; then grp=(-g "$b"); fi
+    useradd --system "${grp[@]}" --home-dir "$h" --no-create-home --shell /usr/sbin/nologin --comment 'FF Factory release builds (w5523)' "$b" >&2 ||
+      { echo "useradd $b failed"; return 1; }
+    log "made the build account $b"
+  fi
+  uid=$(id -u "$b") || { echo "no account $b"; return 1; }
+  [ "$uid" != 0 ] || { echo "$b has uid 0"; return 1; }
+  [ "$uid" != "$(id -u "$FFF_USER")" ] || { echo "$b has $FFF_USER's uid"; return 1; }
+  if id -nG "$b" | tr ' ' '\n' | matches -xF "$FFF_USER"; then echo "$b is in $FFF_USER's group"; return 1; fi
+  passwd -l "$b" >/dev/null 2>&1 || true
+  [ ! -L "$h" ] || { echo "$h is a symbolic link"; return 1; }
+  install -d -m 0700 -o "$b" -g "$b" "$h" || { echo "could not make $h"; return 1; }
+  { chown "$b:$b" "$h" && chmod 0700 "$h"; } || { echo "could not make $h $b's alone"; return 1; }
+  command -v setfacl >/dev/null || { echo "setfacl is missing (the acl package: the guest install.sh installs it)"; return 1; }
+  setfacl -m "u:$b:--x" "$FFF_ROOT" || { echo "setfacl on $FFF_ROOT failed"; return 1; }
+  # shellcheck disable=SC2016 # $1 is expanded by the inner sh
+  runuser -u "$b" -- sh -c 'cd "$1"' _ "$RELEASES" 2>/dev/null || { echo "$b cannot reach $RELEASES"; return 1; }
+  # shellcheck disable=SC2016
+  if runuser -u "$b" -- sh -c 'ls "$1" || test -w "$1"' _ "$FFF_ROOT" >/dev/null 2>&1; then echo "$b can read or write $FFF_ROOT"; return 1; fi
+}
+
+# end_build_processes: whatever the build account still runs after a build (a watcher npm left behind) is ended, so
+# nothing of it writes into the release once it is root's. Only for the build account, never fff, whose portal runs.
+end_build_processes() {
+  [ -n "$BUILD_AS" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 0
+  pkill -KILL -u "$BUILD_AS" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$BUILD_AS" >/dev/null 2>&1 || return 0; sleep 0.5; done
+  warn "the build account $BUILD_AS still runs: $(pgrep -u "$BUILD_AS" -l | head -n 3 | paste -sd' ' -)"
+}
+
+# ---------------------------------------------------------------- root in fff's folders (w5531)
+# fff owns $DATA, config, home and its other folders, and can rename anything in them (and them, in the sticky $FFF_ROOT)
+# and put a symbolic link in its place, at any moment. Root that wrote, chowned or chmodded there by name would follow
+# the link to whatever it points at (/etc/shadow, /root/.ssh): so root does none of that. What lands in fff's folders is
+# written by fff (as_fff, through fff's own permissions, so a link only leads fff to what fff could reach anyway); root
+# changes only the owner of a folder, with chown -h from inside its checked parent; and a symbolic link on the way is
+# refused and logged first, so a swap shows in the journal.
+
+# real_dir DIR: DIR is a folder reached through no symbolic link (DIR itself included).
+real_dir() { [ "$(cd -P -- "$1" 2>/dev/null && pwd -P)" = "$1" ]; }
+
+# no_link PATH WHAT: PATH and every folder above it are no symbolic link (PATH may be missing); else logs and fails.
+no_link() {
+  local p=$1 up=${1%/*}
+  [ -L "$p" ] || ! real_dir "$up" || return 0
+  if [ ! -L "$p" ] && [ ! -e "$up" ] && [ ! -L "$up" ]; then
+    warn "$2 refused: $up does not exist"
+  else
+    warn "$2 refused: $p, or a folder above it, is a symbolic link (to $(readlink -m -- "$p" 2>/dev/null || echo '?')), which root does not follow into fff's folders (w5531)"
+  fi
+  return 1
+}
+
+# fff_dir DIR...: each DIR a folder of fff's with mode 0700, made in order (a parent before its child), never by root
+# following a link: a symbolic link at DIR or above it is refused (no_link); a folder there that is not fff's gets fff
+# as owner by root's chown -h from inside its parent (checked real, so a later swap of a folder above changes nothing);
+# fff makes it and sets its mode.
+fff_dir() {
+  local d p
+  for d in "$@"; do
+    if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would make $d fff's folder (0700)"; continue; fi
+    no_link "$d" "making $d fff's folder" || return 1
+    p=${d%/*}
+    if [ -e "$d" ] && [ -z "$(find "$d" -maxdepth 0 -user "$FFF_USER" 2>/dev/null)" ]; then
+      (cd -P -- "$p" && [ "$(pwd -P)" = "$p" ] && chown -h "$FFF_USER:$FFF_USER" -- "./${d##*/}") || { warn "could not give $d to $FFF_USER"; return 1; }
+    fi
+    as_fff mkdir -p -- "$d"
+    as_fff chmod 0700 -- "$d"
+  done
+}
+
+# fff_write FILE: stdin to FILE, in a folder of fff's, whole (a temp file and a rename), 0600, written by fff (w5531:
+# root writes nothing in fff's folders). Fails, logged, when FILE or a folder above it is a symbolic link.
+fff_write() {
+  no_link "$1" "writing $1" || return 1
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  as_fff sh -c 'umask 077 && t=$(mktemp "${1%/*}/.${1##*/}.XXXXXX") && cat >"$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$1"
+}
+
+# data_write NAME: stdin to $DATA/NAME (fff_write), which the server needs to read and remove.
 data_write() {
-  local tmp
-  tmp=$(mktemp "$DATA/.$1.XXXXXX")
-  cat >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  mv -f "$tmp" "$DATA/$1"
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "data_write: not a file name: $1"
+  fff_write "$DATA/$1"
 }
 
 # tell_dispatcher TEXT: a system message to the dispatcher through data/orchestrator-inbox (server/index.ts reads
 # *.txt there every 5 s and sends each once), for what happens outside the server: a failed build, a rollback.
-# The temp file is mktemp's, never a name fff could have put a symbolic link at first (w5505).
+# fff makes the folder and writes the file (w5531: root's install -d -o fff and chown there followed a link fff could
+# have put in place of the folder or of the temp file).
 tell_dispatcher() {
-  local dir=$DATA/orchestrator-inbox name tmp
-  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$dir"
-  name="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  tmp=$(mktemp "$dir/.$name.XXXXXX")
-  printf '%s\n' "$1" >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  mv -f "$tmp" "$dir/$name.txt"
+  local dir=$DATA/orchestrator-inbox
+  fff_dir "$dir" || return 1
+  printf '%s\n' "$1" | fff_write "$dir/$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
 }
 
 health_json() { curl -fsS -m 10 "http://127.0.0.1:$FFF_PORT/api/health"; }
@@ -284,7 +407,7 @@ release_ok() {
 # its .git link is rewritten, and DIR.ready names SHA. Fails, saying why, unless release_problem then finds nothing.
 harden_release() {
   local dir=$1 sha=$2 admin p
-  rm -f "$dir.ready"
+  rm -f "$dir.ready" "$dir.builder"
   chown -R -h -P root:root "$dir"
   chmod -R go-w,ug-s "$dir"
   admin=$(release_admin "$dir")
@@ -347,4 +470,50 @@ own_app() {
       rm -rf "$e"
     fi
   done
+}
+
+# ---------------------------------------------------------------- backups (fff-backup, fff-backup-drill; w5529)
+# What the backup and the drill wrote last, read by fffctl status and the portal's system_status (server/backupStatus.ts):
+# root-owned, world-readable, no secrets in them.
+FFF_STATE_DIR=${FFF_STATE_DIR:-/var/lib/fff}
+# The backup target's pinned host key: root:root, not group- or other-writable, one line "fff-backup-target <type> <key>"
+# (fffctl backup-config --host-key). ssh checks the target against it under that alias and nothing else; a changed key
+# fails the backup loudly and is never re-trusted by itself.
+FFF_BACKUP_KNOWN_HOSTS=${FFF_BACKUP_KNOWN_HOSTS:-/etc/fff/backup_known_hosts}
+FFF_BACKUP_HOST_ALIAS=fff-backup-target
+
+# backup_pin_problem: why the pinned host key cannot be used (one line), or nothing when it can.
+backup_pin_problem() {
+  local kh=$FFF_BACKUP_KNOWN_HOSTS perm
+  if [ ! -f "$kh" ]; then echo "no pinned host key for the backup target ($kh is missing; sudo fffctl backup-config --host-key FILE)"; return; fi
+  if [ "${FFF_TEST_NOROOT:-}" != 1 ] && [ "$(stat -c %u "$kh")" != 0 ]; then echo "$kh is not owned by root"; return; fi
+  perm=$(stat -c %a "$kh")
+  if (((8#$perm & 8#022) != 0)); then echo "$kh can be written by others than root (mode $perm)"; return; fi
+  grep -q "^$FFF_BACKUP_HOST_ALIAS " "$kh" || echo "no pinned host key for the backup target in $kh (sudo fffctl backup-config --host-key FILE)"
+}
+
+# backup_sftp BATCH ERR: one sftp batch file to BACKUP_SSH_TARGET, checked only against the pinned key; stderr to ERR.
+backup_sftp() {
+  sftp -q -b "$1" -i "$BACKUP_SSH_KEY" -o BatchMode=yes -o HostKeyAlias="$FFF_BACKUP_HOST_ALIAS" \
+    -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o CheckHostIP=no \
+    -o UserKnownHostsFile="$FFF_BACKUP_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null "$BACKUP_SSH_TARGET" 2>"$2"
+}
+
+# backup_sftp_why ERR: one line saying why an sftp batch failed; a host key that changed is said so plainly.
+backup_sftp_why() {
+  if grep -qE 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|No [A-Za-z0-9-]+ host key is known' "$1" 2>/dev/null; then
+    echo "the backup target's host key does not match the pinned one in $FFF_BACKUP_KNOWN_HOSTS: check the target's key out of band and re-pin it (sudo fffctl backup-config --host-key FILE); it is never re-trusted by itself"
+  else
+    echo "sftp to $BACKUP_SSH_TARGET failed: $(grep -v '^sftp>' "$1" 2>/dev/null | tail -n 1 | cut -c1-200)"
+  fi
+}
+
+# state_write NAME: stdin (JSON) to $FFF_STATE_DIR/NAME, whole, 0644 root.
+state_write() {
+  local tmp
+  install -d -m 0755 "$FFF_STATE_DIR"
+  tmp=$(mktemp "$FFF_STATE_DIR/.$1.XXXXXX")
+  cat >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$FFF_STATE_DIR/$1"
 }

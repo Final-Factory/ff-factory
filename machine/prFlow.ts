@@ -16,6 +16,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
+import { gitFenceSync, isGit } from '../server/safeGit.ts';
 import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
 import { noPrCi } from './ciPaths.ts';
 import { fontAtlasNoise, mayBeDynamicFont } from '../server/editorNoise.ts';
@@ -568,7 +569,9 @@ export const realPrDeps: PrDeps = {
     // gh on a repository a GitHub App is installed on (w1519): the app's token. Node finds gh.exe itself on Windows, past the
     // gh shim (a .cmd), so ff-pr asks machine/ghApp.ts directly; elsewhere the shim would do the same.
     const env = cmd === 'gh' && process.env.FF_GH_APP_NAMES ? (ghEnvFor(args, process.env, readGhAppTokens(process.env.FF_GH_APP_FILE), remotesOf(process.cwd()), Date.now()) as NodeJS.ProcessEnv) : undefined;
-    const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 10 * 60_000, ...(env ? { env } : {}) });
+    // w5541: git runs no program the checkout's own config names (server/safeGit.ts).
+    const f = isGit(cmd) ? gitFenceSync(args, { env }) : { args, env };
+    const r = spawnSync(cmd, f.args, { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 10 * 60_000, ...(f.env ? { env: f.env } : {}) });
     return { code: r.status ?? (r.error ? 127 : 1), out: r.stdout ?? '', err: r.stderr ?? (r.error ? r.error.message : '') };
   },
   write: (s) => void process.stdout.write(s),

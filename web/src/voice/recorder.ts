@@ -4,23 +4,6 @@
 import { downsample, encodeWav, level } from '../../../shared/voice';
 import { chunksFrom } from '../../../shared/liveTranscript';
 
-// Batches the 128-sample render quanta into ~85 ms messages.
-const WORKLET = `
-class FfsbTap extends AudioWorkletProcessor {
-  constructor() { super(); this.buf = new Float32Array(4096); this.n = 0; }
-  process(inputs) {
-    const ch = inputs[0] && inputs[0][0];
-    if (ch) {
-      for (let i = 0; i < ch.length; i++) {
-        this.buf[this.n++] = ch[i];
-        if (this.n === this.buf.length) { this.port.postMessage(this.buf); this.buf = new Float32Array(4096); this.n = 0; }
-      }
-    }
-    return true;
-  }
-}
-registerProcessor('ffsb-tap', FfsbTap);
-`;
 
 export function canRecord(): boolean {
   return !!navigator.mediaDevices?.getUserMedia && typeof AudioContext !== 'undefined';
@@ -70,9 +53,8 @@ export class PcmRecorder {
     mute.gain.value = 0;
     mute.connect(this.ctx.destination);
     try {
-      const url = URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
-      await this.ctx.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
+      // A file of its own, not a blob: URL, so the page's script-src stays 'self' (w5518, server/webStatic.ts appCsp).
+      await this.ctx.audioWorklet.addModule('/voice-tap.js');
       const node = new AudioWorkletNode(this.ctx, 'ffsb-tap', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
       node.port.onmessage = (e) => this.take(e.data as Float32Array);
       this.tap = node;
