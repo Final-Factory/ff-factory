@@ -266,8 +266,9 @@ g 'sudo journalctl -u fff-portal.service -b --no-pager -o cat' | matches -F 'vau
 cicred=/srv/fff/home/.claude/.credentials.json
 if g "sudo test -e $cicred"; then cicred=""; else g "sudo -u fff sh -c 'umask 077; echo ci-stand-in-not-a-login >$cicred'"; fi
 g 'sudo test -s /srv/fff/data/vapid.json' || fail "the portal wrote no push key (vapid.json), so its fence probe proves nothing"
-out=$(g 'sudo fffctl fence-check' 2>&1) || fail "fffctl fence-check (w5506): $out"
+rc=0; out=$(g 'sudo fffctl fence-check' 2>&1) || rc=$?
 [ -z "$cicred" ] || g "sudo rm -f $cicred"
+[ "$rc" = 0 ] || fail "fffctl fence-check (w5506): $out"
 echo "$out"
 for f in environ mem fd; do printf '%s' "$out" | matches -E "^refused: the portal's $f " || fail "the portal's $f is open to its account (w5506): $out"; done
 printf '%s' "$out" | matches -E '^refused: the vault key ' || fail "the vault key is open to the portal's account: $out"

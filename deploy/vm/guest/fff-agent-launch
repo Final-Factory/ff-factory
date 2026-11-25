@@ -17,6 +17,8 @@ OPS_LIB=${OPS_LIB:-/usr/local/lib/fff/ops}
 FFF_ROOT=${FFF_ROOT:-/srv/fff}
 AGENT_ROOT=${AGENT_ROOT:-/srv/fff-agent}
 me=$(id -un)
+# As pid 1 (PrivatePIDs=) a signal with no handler is ignored: until the trap below, systemd's stop ends this at once.
+trap 'exit 143' TERM INT HUP
 answer_err() {
   printf 'ERR %s\n' "$*"
   echo "fff-agent-launch: refused: $*" >&2
