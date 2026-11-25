@@ -596,6 +596,18 @@ until [ "$(health 2>/dev/null | jq -r .sha 2>/dev/null)" = "$want" ]; do
 done
 echo "MEASURE update: $(($(date +%s) - t0)) s from fffctl update to the new version answering; health unanswered for about $down s of it"
 g 'sudo cat /srv/fff/data/update.result.json' | jq -e --arg w "$want" '.ok == true and (.headAfter | startswith($w)) and (.headBefore | length) > 0' || fail "update.result.json does not record the switch to $want"
+# w5505: what root runs code from is root's and read-only to fff: the clone, the releases, the links; $FFF_ROOT root:fff
+# 1770, so fff cannot rename /srv/fff/app away; the release is clean and at its commit.
+owners=$(g 'sudo stat -c "%U:%G %a %n" /srv/fff /srv/fff/app /srv/fff/app/releases /srv/fff/app/repo.git /srv/fff/app/current/ /srv/fff/app/current/server')
+echo "$owners"
+[ "$(printf '%s\n' "$owners" | sed -n 1p | cut -d' ' -f1-2)" = "root:fff 1770" ] || fail "/srv/fff is not root:fff 1770"
+[ "$(printf '%s\n' "$owners" | sed 1d | cut -d' ' -f1-2 | sort -u)" = "root:root 755" ] || fail "the app folder, the releases, the clone or the release are not root's 0755"
+g 'sudo sh -c "find /srv/fff/app/current/ ! -user root -print -quit | grep . && exit 1; test \"\$(stat -c %U /srv/fff/app/current)\" = root"' || fail "something in the current release, or the link, is not root's"
+if g 'sudo -u fff touch /srv/fff/app/current/server/w5505 /srv/fff/app/update.prepared.json' 2>/dev/null; then fail "fff could write into the release or the app folder"; fi
+ok_tree=$(g 'sudo bash -c ". /usr/local/lib/fff/lib.sh; load_conf; d=\$(readlink -e \$CURRENT); release_problem \$d \$(cat \$d.ready)"')
+[ -z "$ok_tree" ] || fail "the current release is not fit to run: $ok_tree"
+[ "$(g 'sudo -u fff env HOME=/srv/fff/home git -C /srv/fff/app/current rev-parse --short=7 HEAD')" = "$want" ] || fail "fff's git does not read the root's release (safe.directory)"
+echo "ok: the clone, the releases and the links are root's and read-only to fff, and the current release is clean at $want"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 # A verified update leaves the marker the portal's machine rollout reads (server/machineRollout.ts, w887); the server
 # retires it to update.verified.done.json once it has taken it, so either file counts.
