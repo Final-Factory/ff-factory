@@ -131,6 +131,7 @@ namespace FFFactory
         IntPtr keyHook = IntPtr.Zero, mouseHook = IntPtr.Zero;
         Thread hookThread;
         uint hookThreadId;
+        volatile bool hooksStopping;
         const uint REINSTALL_MS = 30 * 60 * 1000;
         static long lastKey, lastClick, injectedKeys, injectedClicks;
         // Since it started, for the daemon's counts message (a test, the evidence of what was injected).
@@ -266,6 +267,8 @@ namespace FFFactory
             catch (Exception e) { Log("the input hooks' thread failed: " + e.Message); }
             finally
             {
+                // Ended by anything but StopHooks (a WM_QUIT someone else posted, the failure above): say so, the hooks are gone.
+                if (!hooksStopping) Log("the input hooks' thread ended: no hooks until the tray restarts");
                 RemoveHooks();
                 ready.Set();
             }
@@ -274,6 +277,7 @@ namespace FFFactory
         void StopHooks()
         {
             if (hookThread == null) return;
+            hooksStopping = true;
             if (hookThreadId != 0) Native.PostThreadMessage(hookThreadId, Native.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
             hookThread.Join(2000);
         }

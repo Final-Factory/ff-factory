@@ -702,6 +702,10 @@ test('windows (real tray app): built with the in-box csc, it starts, counts a Se
   t.diagnostic(`tray hello: ${JSON.stringify(hello)}`);
   tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'No schedule: work runs any time', schedule: 'none', work: 'No agents working here', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0, 1, 2, 3, 4, 5, 6] }, activity: { enabled: true, idleMinutes: 90 } }, machine: 'test' })}\n`);
   if (hello.hooks === 'keyboard and mouse') {
+    let counts: Record<string, unknown>;
+    // Injected input only on a CI runner (w5754's review): on a person's own Windows PC a plain `npm test` must not press keys
+    // or buttons into the window they have focused (an X2 press is "Forward" in a browser). The selftest leg below runs anywhere.
+    if (onWindowsCi) {
     // An injector started and compiled before the key is due (Add-Type takes seconds on a cold runner), then sending on cue:
     // F24 down and up (a key no program acts on) and an X2 ("forward") button press, injected the way agents' tools inject
     // input. An X press that names no button never reaches a hook (CI run 45644678696: the key counted, that click not).
@@ -755,12 +759,17 @@ $null = [Console]::In.ReadLine()
     assert.deepEqual(sent, ['2', '2'], 'SendInput took the key and the click down and up');
     await new Promise((r) => setTimeout(r, 1500));
     tray.stdin.write(`${JSON.stringify({ type: 'counts' })}\n`);
-    const counts = await waitFor('counts');
+    counts = await waitFor('counts');
     t.diagnostic(`tray counts: ${JSON.stringify(counts)}`);
     assert.ok(Number(counts.injectedKeys) >= 1, 'the hook saw the injected key as injected, its window thread busy');
     assert.ok(Number(counts.injectedClicks) >= 1, 'the hook saw the injected click as injected, its window thread busy');
     if (Number(counts.personKeys) === 0 && Number(counts.personClicks) === 0) assert.equal(lines.filter((l) => l.type === 'input').length, 0, "injected input is never a person's input");
     else t.diagnostic('someone used this computer during the test: the no-input check is skipped');
+    } else {
+      t.diagnostic('not a CI runner: no input is injected here (Windows CI only); the selftest leg still runs');
+      tray.stdin.write(`${JSON.stringify({ type: 'counts' })}\n`);
+      counts = await waitFor('counts');
+    }
     // w5743: a person's key and click (the hook data a keyboard and a mouse make: no injected flag) through the same hook
     // procedures count as a person's, and the tray tells the daemon (input). No program can make that input itself.
     const from = lines.length;

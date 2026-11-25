@@ -655,7 +655,7 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   every 30 minutes. Before w5743 they ran on the window thread: with it busy 1.2 s, the CI runner's tray counted neither an
   injected key nor click (run 45643653098; the flake in run 45638958877), and a person's input would be lost the same way.
   The real-tray test in `server/machineDeployWin.test.ts` injects a key and a click while the window thread is busy (the
-  tray's test-only `busy` message) and feeds a person's key and click through the hook procedures (`selftest`).
+  tray's test-only `busy` message) and feeds a person's key and click through the hook procedures (`selftest`). It injects only on a CI runner (`onWindowsCi`): a plain `npm test` on a person's Windows PC must not press keys or buttons into their focused window (w5754); the selftest runs anywhere.
 - **On the portal a paused machine is held** (`Agents.placement()`, `pauseHolds` in `server/machinePause.ts`): it joins
   `placement.hold` with "paused from its tray app: someone is using it (w1532)", so no new work is placed there, the Capacity
   block reads `ROOM n% but HELD (…)`, nothing resumes there (w1376), and it is no capacity ping's room. The machines view
