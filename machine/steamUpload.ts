@@ -90,15 +90,15 @@ const defaultDownload: Download = async (url, file) => {
  * Install steamcmd for ffsteam (w5640; what urgent_release.py steam-install did in a worker before w5551): Valve's steamcmd
  * into `<root>/steam/steamcmd` when it is not there (unpacked with the system tar, which reads a zip on Windows, then run
  * once with +quit, which updates it and logs nobody in), and config.json's release.steam: the build account, steamcmd and
- * its home. The account is a setting, never a name in code (lothsahn, w1639): the vault entry FFSTEAM_ACCOUNT, else the
- * account config.json names already. Other keys of config.json are kept.
+ * its home. The account is a setting, never a name in code (lothsahn, w1639): the portal's steamBuildAccount, sent with the
+ * job, else the account config.json names already. Other keys of config.json are kept.
  */
 export async function installSteamcmd(root: string, account: string | undefined, run: Runner, o: { platform?: NodeJS.Platform; download?: Download; log?: (line: string) => void } = {}): Promise<{ steamcmd: string; downloaded: boolean }> {
   const platform = o.platform ?? process.platform;
   const cfg = readConfig(root);
   const name = account || cfg.release?.steam?.account;
-  if (!name) throw new Error('no build account to set up: the vault entry FFSTEAM_ACCOUNT (kind env, role releases, granted to this computer) names it; nothing was installed');
-  if (!ACCOUNT.test(name)) throw new Error('FFSTEAM_ACCOUNT is not a Steam account name (letters, digits and _); nothing was installed');
+  if (!name) throw new Error('no build account to set up: the portal setting steamBuildAccount names it (config.json, docs/steam-upload.md); nothing was installed');
+  if (!ACCOUNT.test(name)) throw new Error('steamBuildAccount is not a Steam account name (letters, digits and _); nothing was installed');
   const src = STEAMCMD[platform];
   if (!src) throw new Error(`Valve has no steamcmd for ${platform}`);
   const sdir = steamDir(root);
@@ -279,6 +279,8 @@ export async function runSteamJob(msg: SteamUploadMsg, d: SteamRunDeps): Promise
   const say = (m: Omit<StateMsg, 'type' | 'id'>) => d.send({ type: 'steam_upload_state', id: msg.id, ...m });
   addSecretValues(Object.values(msg.secrets ?? {}).filter((v) => v));
   if (msg.guardCode) addSecretValues([msg.guardCode]);
+  // The account name is no secret, but no output repeats it (w5640).
+  if (msg.account) addSecretValues([msg.account]);
   if (busy) return say({ state: 'failed', error: 'this computer runs another Steam job now (one steamcmd session per account): ask again when it ends' });
   const sdir = steamDir(d.root);
   const lock = path.join(sdir, 'job.lock');
@@ -297,7 +299,7 @@ export async function runSteamJob(msg: SteamUploadMsg, d: SteamRunDeps): Promise
     const missing = steamMissing(d.root);
     if (msg.action === 'install' || missing) {
       say({ state: 'running', phase: 'installing steamcmd' });
-      const got = await installSteamcmd(d.root, msg.secrets?.FFSTEAM_ACCOUNT, run, { download: d.download, log: d.log });
+      const got = await installSteamcmd(d.root, msg.account, run, { download: d.download, log: d.log });
       d.log(`steam install ${msg.id}: ${got.downloaded ? 'downloaded steamcmd' : 'steamcmd was there'}; config.json written`);
       if (msg.action === 'install') return say({ state: 'done', phase: 'install', result: { steamcmd: got.steamcmd, downloaded: got.downloaded, ...(missing ? { was: missing } : {}) } });
     }
