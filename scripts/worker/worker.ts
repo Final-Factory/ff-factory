@@ -2407,6 +2407,12 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
   return code;
 }
 
+/** w5581: true when the agent node's rule lets it in from outside the tailnet, or cannot be read (an update then keeps it as it is). */
+async function agentNodeRuleWide(l: Layout, node: string): Promise<boolean> {
+  const seen = parseFirewallCheck(await ps("reading the agent node's firewall rule", firewallCheckScript([node], l.tmp, [node]), 2 * 60_000).catch((e) => `${(e as Error).message}`));
+  return !seen || seen.wide.includes(node);
+}
+
 /**
  * The install's firewall rules, checked on every tools rollout and made again when one is missing (w1742). A daemon update
  * runs without administrator rights and skips firewall.ps1, so the agent node's rule (new in #517) never reached
@@ -2414,12 +2420,6 @@ export async function tools(root: string, ownerFlag?: string): Promise<number> {
  * tools run comes over the portal's ssh, elevated on an administrator's computer (administrators_authorized_keys,
  * w568), so it can run the step itself; otherwise it says what is missing, never a prompt nobody answers.
  */
-/** w5581: true when the agent node's rule lets it in from outside the tailnet, or cannot be read (an update then keeps it as it is). */
-async function agentNodeRuleWide(l: Layout, node: string): Promise<boolean> {
-  const seen = parseFirewallCheck(await ps("reading the agent node's firewall rule", firewallCheckScript([node], l.tmp, [node]), 2 * 60_000).catch((e) => `${(e as Error).message}`));
-  return !seen || seen.wide.includes(node);
-}
-
 export async function firewallRepair(l: Layout, m: Manifest) {
   const slots = Array.from({ length: m.slots }, (_, i) => [0, 1].map((p) => path.join(l.players, `slot${i + 1}-${p}`, 'player', 'finalfactory.exe'))).flat();
   const node = agentNodeExe(l.root);
