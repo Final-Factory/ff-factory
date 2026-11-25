@@ -57,7 +57,7 @@ test('rate limit: five failures per client lock it out for a while; others are u
   for (let i = 0; i < 5; i++) assert.equal((await a.login(req({ ip: '203.0.113.9' }), 'ben', `guess number ${i}`)).ok, false);
   // Now even the right password is refused from there, without hashing anything.
   const locked = await a.login(req({ ip: '203.0.113.9' }), 'ben', 'correct horse battery');
-  assert.deepEqual(locked, { ok: false, status: 429, error: 'Too many failed attempts. Try again in 15 minutes.' });
+  assert.deepEqual(locked, { ok: false, status: 429, error: 'Too many failed attempts. Try again later.' });
   // Another address still gets in, and a success clears that address's record.
   const other = req({ ip: '203.0.113.10' });
   assert.equal((await a.login(other, 'ben', 'nope nope nope')).ok, false);
@@ -66,7 +66,8 @@ test('rate limit: five failures per client lock it out for a while; others are u
 
 test('client address: X-Forwarded-For is believed only from a local proxy, and only with trustProxy', () => {
   const trusting = new Auth(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-')), { trustProxy: true });
-  const fwd = { 'x-forwarded-for': '198.51.100.1, 10.0.0.1' };
+  // The last entry is the one the proxy added; the client wrote the ones before it (w5535).
+  const fwd = { 'x-forwarded-for': '10.0.0.1, 198.51.100.1' };
   assert.equal(trusting.clientIp(req({ ip: '127.0.0.1', headers: fwd })), '198.51.100.1');
   assert.equal(trusting.clientIp(req({ ip: '::1', headers: fwd })), '198.51.100.1');
   // A remote peer cannot pick its own address for the rate limiter.
@@ -208,4 +209,111 @@ test('w3714: a one-time set-password link sets the password once, within its hou
   const throttled = await a.usePasswordLink(req({ ip: '198.51.100.9' }), fresh, 'another long password');
   assert.equal(throttled.ok ? 200 : throttled.status, 429);
   assert.ok((await a.usePasswordLink(req({ ip: '198.51.100.10' }), fresh, 'another long password')).ok);
+});
+
+// ---- w5521: per-username and per-address throttling, no global lockout, a fixed login time ----
+
+function fakeClock(start = Date.now()) {
+  let t = start;
+  return { now: () => t, advance: (ms: number) => (t += ms) };
+}
+
+const statusOf = (r: { ok: boolean; status?: number }) => (r.ok ? 200 : r.status);
+
+test('w5521: many addresses failing against one username throttle only that username; other users still log in', async (t) => {
+  const c = fakeClock();
+  const a = new Auth(dataDir(t), { trustProxy: false, now: c.now });
+  await a.setUser('ben', 'correct horse battery');
+  await a.setUser('lothsahn', 'another good password');
+  // One failure from each of ten addresses: no address is near its own limit, but the name is at its free failures.
+  for (let i = 1; i <= 10; i++) assert.equal(statusOf(await a.login(req({ ip: `198.51.100.${i}` }), 'ben', `guess ${i} wrong`)), 401);
+  // Now ben is throttled from anywhere, even with the right password, even from a fresh address...
+  assert.deepEqual(await a.login(req({ ip: '192.0.2.200' }), 'ben', 'correct horse battery'), { ok: false, status: 429, error: 'Too many failed attempts. Try again later.' });
+  // ...while another login, from those same addresses, gets in.
+  assert.equal((await a.login(req({ ip: '198.51.100.1' }), 'lothsahn', 'another good password')).ok, true);
+  // The backoff is bounded and short: once it passes, ben's owner gets in and the record clears.
+  c.advance(1_000);
+  assert.equal((await a.login(req({ ip: '192.0.2.200' }), 'ben', 'correct horse battery')).ok, true);
+});
+
+test('w5521: one address, or one IPv6 /64, trying different usernames throttles only that address or /64', async (t) => {
+  const a = new Auth(dataDir(t), { trustProxy: false });
+  await a.setUser('ben', 'correct horse battery');
+  for (let i = 0; i < 5; i++) assert.equal(statusOf(await a.login(req({ ip: `2001:db8:1:2::${i + 1}` }), `name${i}`, 'not a password')), 401);
+  // Anywhere in that /64 is refused, for any name, the right password included.
+  assert.equal(statusOf(await a.login(req({ ip: '2001:db8:1:2:ffff:ffff:ffff:ffff' }), 'ben', 'correct horse battery')), 429);
+  // The next /64 is not.
+  assert.equal((await a.login(req({ ip: '2001:db8:1:3::1' }), 'ben', 'correct horse battery')).ok, true);
+  for (let i = 0; i < 5; i++) await a.login(req({ ip: '203.0.113.50' }), `other${i}`, 'not a password');
+  assert.equal(statusOf(await a.login(req({ ip: '203.0.113.50' }), 'ben', 'correct horse battery')), 429);
+  assert.equal((await a.login(req({ ip: '203.0.113.51' }), 'ben', 'correct horse battery')).ok, true, 'IPv4 is per address: the next one is fine');
+});
+
+test('w5521: no global lockout: failures spread over many addresses and names lock out nobody else', async (t) => {
+  const a = new Auth(dataDir(t), { trustProxy: false });
+  await a.setUser('ben', 'correct horse battery');
+  // 25 failures inside a minute (the old global limit was 20 a minute), each from its own address against its own name.
+  for (let i = 1; i <= 25; i++) assert.equal(statusOf(await a.login(req({ ip: `198.51.100.${i}` }), `stranger${i}`, 'not a password')), 401);
+  assert.equal((await a.login(req({ ip: '192.0.2.1' }), 'ben', 'correct horse battery')).ok, true);
+});
+
+test('w5521: failures expire, and the sweep on its timer removes them', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval'] });
+  const c = fakeClock();
+  const a = new Auth(dataDir(t), { trustProxy: false, now: c.now });
+  await a.setUser('ben', 'correct horse battery');
+  for (let i = 0; i < 5; i++) await a.login(req({ ip: '203.0.113.60' }), 'ben', 'not a password');
+  assert.equal(statusOf(await a.login(req({ ip: '203.0.113.60' }), 'ben', 'correct horse battery')), 429);
+  assert.deepEqual(a.failureCounts(), { addresses: 1, users: 1, keys: 0 });
+  c.advance(15 * 60_000);
+  // Expired is expired before any sweep: the address gets in (which clears its records itself)...
+  assert.equal((await a.login(req({ ip: '203.0.113.60' }), 'ben', 'correct horse battery')).ok, true);
+  // ...and records nobody clears go when the sweep timer fires.
+  await a.login(req({ ip: '203.0.113.61' }), 'nobody', 'not a password');
+  assert.deepEqual(a.failureCounts(), { addresses: 1, users: 1, keys: 0 });
+  c.advance(15 * 60_000);
+  t.mock.timers.tick(60_000);
+  assert.deepEqual(a.failureCounts(), { addresses: 0, users: 0, keys: 0 });
+});
+
+test('w5521: the attempted username is logged quoted and escaped, so it cannot forge a log line', async (t) => {
+  const a = new Auth(dataDir(t), { trustProxy: false });
+  const lines: string[] = [];
+  t.mock.method(console, 'warn', (m: string) => lines.push(m));
+  await a.login(req({ ip: '203.0.113.70' }), 'x" ok\nlogin ok for "ben', 'not a password');
+  assert.equal(lines.length, 1);
+  assert.equal(lines[0], 'login failed for "x\\" ok\\u000alogin ok for \\"ben" from "203.0.113.70"');
+});
+
+/**
+ * A timing test (the ff-factory equivalent of the game's [Category("Performance")]): skipped unless FF_TIMING_TESTS=1, so
+ * it never runs in CI. It prints each path's times. Run: FF_TIMING_TESTS=1 node --import ./scripts/testEnv.ts --test
+ * --test-name-pattern "fixed time" server/auth.test.ts
+ */
+test('w5521: every login takes the fixed time: unknown user, wrong password and success within a few ms', { skip: process.env.FF_TIMING_TESTS === '1' ? false : 'timing test: set FF_TIMING_TESTS=1' }, async (t) => {
+  const a = new Auth(dataDir(t), { trustProxy: false });
+  await a.setUser('ben', 'correct horse battery');
+  // Warm up: the floor follows this machine's own logins.
+  for (let i = 0; i < 6; i++) {
+    await a.login(req({ ip: `192.0.2.${i + 1}` }), 'ben', 'correct horse battery');
+    await a.login(req({ ip: `192.0.2.${i + 1}` }), 'ben', 'wrong password!!');
+  }
+  const paths: Record<string, (i: number) => Promise<unknown>> = {
+    unknown: (i) => a.login(req({ ip: `198.51.100.${i}` }), `nobody${i}`, 'whatever it is'),
+    wrong: (i) => a.login(req({ ip: `198.51.101.${i}` }), 'ben', 'wrong password!!'),
+    success: (i) => a.login(req({ ip: `198.51.102.${i}` }), 'ben', 'correct horse battery'),
+  };
+  const ms: Record<string, number[]> = { unknown: [], wrong: [], success: [] };
+  for (let i = 1; i <= 15; i++) {
+    for (const [k, f] of Object.entries(paths)) {
+      const s = performance.now();
+      await f(i);
+      ms[k].push(performance.now() - s);
+    }
+  }
+  const median = (v: number[]) => [...v].sort((x, y) => x - y)[Math.floor(v.length / 2)];
+  const med = Object.fromEntries(Object.entries(ms).map(([k, v]) => [k, median(v)]));
+  console.log(`w5521 timing (ms): floor ${a.loginTimer.floorMs().toFixed(1)}; ${Object.entries(ms).map(([k, v]) => `${k} median ${med[k].toFixed(1)} min ${Math.min(...v).toFixed(1)} max ${Math.max(...v).toFixed(1)}`).join('; ')}`);
+  const spread = Math.max(...Object.values(med)) - Math.min(...Object.values(med));
+  assert.ok(spread < 5, `medians differ by ${spread.toFixed(1)} ms`);
 });

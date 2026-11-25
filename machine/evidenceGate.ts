@@ -109,6 +109,178 @@ export const findLocalPrEvidence = (env: NodeJS.ProcessEnv = process.env) => fin
 /** final-factory-agents, public: cloned with no credential helper and no prompt (server/agentTools.ts publishAgentTools). */
 export const AGENTS_REPO = 'https://github.com/Final-Factory/final-factory-agents.git';
 const AGENTS_BRANCH = 'master';
+const ANON_GIT = ['-c', 'credential.helper=', '-c', 'credential.interactive=never'];
+
+/** pr_evidence.py in a checkout of final-factory-agents: one path, never a pick among versions (w5542). */
+export const checkoutScript = (co: string, P: PlatformPath = path) => P.join(co, 'plugins', 'ff-agents', ...SCRIPT);
+
+/**
+ * w5542: the daemon's folder (daemon.ts appDirOfConfig: daemon.json's appDir, else `<root>/daemon`, else ~/.ff-factory),
+ * read from the host's own environment, which a worker cannot change. Workers cannot write it on any OS: Windows keeps it
+ * Medium against the Low workers, the Mac fence and Linux's ff-landlock.py take it out of the root (docs/worker-fence.md).
+ */
+export function trustedAppDir(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir(), P: PlatformPath = path): string {
+  if (env.FF_APP_DIR) return env.FF_APP_DIR;
+  return env.FF_WORKER_ROOT ? P.join(env.FF_WORKER_ROOT, 'daemon') : P.join(home, '.ff-factory');
+}
+
+/** The guard's own checkout of final-factory-agents, in the daemon's folder (w5542). */
+export const trustedAgentsCheckout = (appDir: string, P: PlatformPath = path) => P.join(appDir, 'trusted', 'final-factory-agents');
+
+/** How old the trusted checkout may be before the guard fetches it again before a check (a stale copy FAILs, w733). */
+export const TRUSTED_MAX_AGE_MS = 10 * 60_000;
+const REFRESHED = 'ff-refreshed';
+
+export interface TrustedRefreshDeps {
+  /** git, run synchronously: the guard answers a tool call synchronously (server/guard.ts). */
+  git?: (args: string[]) => { code: number; stderr: string };
+  now?: () => number;
+  /** The host's environment for git: never the worker's PATH or git settings. */
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * w5542: brings the guard's trusted checkout of final-factory-agents' master up to date from GitHub, as the portal's own
+ * (portalPrEvidence), when it is missing, older than maxAgeMs, or `force` (the copy said a newer one is released). A first
+ * clone goes to a folder of its own and is renamed into place, so two agent hosts never see half a clone. Answers what
+ * failed, or undefined; a failed fetch leaves the copy it had.
+ */
+export function refreshTrustedCheckout(co: string, d: TrustedRefreshDeps = {}, opts: { maxAgeMs?: number; force?: boolean } = {}): string | undefined {
+  const now = d.now ?? Date.now;
+  const env: NodeJS.ProcessEnv = { ...(d.env ?? process.env), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
+  const git = d.git ?? ((args: string[]) => {
+    const r = spawnSync('git', [...ANON_GIT, ...args], { encoding: 'utf8', timeout: 2 * 60_000, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    return { code: r.status ?? 1, stderr: String(r.stderr || r.error?.message || '') };
+  });
+  const said = (r: { code: number; stderr: string }) => r.stderr.replace(/\s+/g, ' ').trim().slice(0, 200) || `exit ${r.code}`;
+  const marker = path.join(co, '.git', REFRESHED);
+  try {
+    if (!fs.existsSync(path.join(co, '.git'))) {
+      fs.mkdirSync(path.dirname(co), { recursive: true });
+      const tmp = `${co}.clone-${process.pid}-${now()}`;
+      const r = git(['clone', '--quiet', '--depth', '1', '--branch', AGENTS_BRANCH, AGENTS_REPO, tmp]);
+      if (r.code !== 0) {
+        fs.rmSync(tmp, { recursive: true, force: true });
+        return `git clone ${AGENTS_REPO}: ${said(r)}`;
+      }
+      fs.writeFileSync(path.join(tmp, '.git', REFRESHED), '');
+      try {
+        if (fs.existsSync(co)) fs.rmSync(co, { recursive: true, force: true });
+        fs.renameSync(tmp, co);
+      } catch {
+        // Another host's clone got there first: use its.
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+      return undefined;
+    }
+    let age = Infinity;
+    try { age = now() - fs.statSync(marker).mtimeMs; } catch { /* never refreshed */ }
+    if (!opts.force && age < (opts.maxAgeMs ?? TRUSTED_MAX_AGE_MS)) return undefined;
+    const f = git(['-C', co, 'fetch', '--quiet', '--depth', '1', 'origin', AGENTS_BRANCH]);
+    if (f.code !== 0) return `git fetch in ${co}: ${said(f)}`;
+    const r = git(['-C', co, 'reset', '--quiet', '--hard', 'FETCH_HEAD']);
+    if (r.code !== 0) return `git reset in ${co}: ${said(r)}`;
+    fs.writeFileSync(marker, '');
+    return undefined;
+  } catch (e) {
+    return `the trusted checkout ${co}: ${(e as Error).message}`;
+  }
+}
+
+/** Whether `p` is `dir` or inside it, by the path rules of the machine (Windows: no case). */
+function within(p: string, dir: string, P: PlatformPath): boolean {
+  const fold = (s: string) => (P === path.win32 ? s.toLowerCase() : s);
+  const rel = P.relative(fold(P.resolve(dir)), fold(P.resolve(p)));
+  return rel === '' || (!!rel && !rel.startsWith('..') && !P.isAbsolute(rel));
+}
+
+/**
+ * w5542: a PATH with no folder a worker can write: every entry inside the worker root is dropped except the daemon's
+ * folder (`<root>/unity-slots/bin` comes first in a worker's PATH and is writable, so a planted `python3` or `gh` there
+ * would run at the host's level), and so is every relative or empty entry (the working directory).
+ */
+export function trustedPathValue(value: string | undefined, root: string | undefined, appDir: string, P: PlatformPath = path): string {
+  const delim = P === path.win32 ? ';' : ':';
+  return (value ?? '').split(delim).filter((e) => e && P.isAbsolute(e) && (!root || !within(e, root, P) || within(e, appDir, P))).join(delim);
+}
+
+/**
+ * The program a bare name runs from a trusted PATH, as an absolute path (w5542). On Windows libuv looks in the working
+ * directory before PATH (src/win/process.c search_path), and the guard's working directory is the worker's sandbox, so
+ * the gate never spawns a bare name there. Undefined when there is none.
+ */
+export function resolveTrusted(name: string, pathValue: string, P: PlatformPath = path, exists: (p: string) => boolean = (p) => { try { return fs.statSync(p).isFile(); } catch { return false; } }, pathext = '.COM;.EXE;.BAT;.CMD'): string | undefined {
+  if (P.isAbsolute(name)) return exists(name) ? name : undefined;
+  const win = P === path.win32;
+  const exts = win && !/\.\w+$/.test(name) ? pathext.split(';').filter(Boolean) : [''];
+  for (const dir of pathValue.split(win ? ';' : ':').filter(Boolean)) {
+    for (const ext of exts) {
+      const p = P.join(dir, name + ext.toLowerCase());
+      if (exists(p)) return p;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * w5542/w5572: a python and an environment for a script the host runs at its own level: no PYTHON* setting but UTF8 and
+ * IOENCODING (a PYTHONPATH or pycache prefix could name a worker's folder), a PATH with no worker-writable folder, and the
+ * python resolved on it to an absolute path (FF_PYTHON refused inside the worker root). Run it with `-s`.
+ */
+export function trustedPython(o: {
+  workerEnv: NodeJS.ProcessEnv; host?: NodeJS.ProcessEnv; root: string | undefined; appDir: string;
+  platform?: NodeJS.Platform; P?: PlatformPath; exists?: (p: string) => boolean;
+}): { python: string; env: NodeJS.ProcessEnv } | { error: string } {
+  const platform = o.platform ?? process.platform;
+  const P = o.P ?? (platform === 'win32' ? path.win32 : path.posix);
+  const host = o.host ?? process.env;
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(o.workerEnv)) if (!/^PYTHON/i.test(k) || /^PYTHON(UTF8|IOENCODING)$/i.test(k)) env[k] = v;
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  env[pathKey] = trustedPathValue(env[pathKey] ?? host.PATH, o.root, o.appDir, P);
+  const want = evidencePython(host, platform);
+  if (P.isAbsolute(want) && o.root && within(want, o.root, P) && !within(want, o.appDir, P)) return { error: `FF_PYTHON ${want} is in a folder workers can write` };
+  const python = resolveTrusted(want, env[pathKey]!, P, o.exists, env.PATHEXT ?? host.PATHEXT);
+  if (!python) return { error: `no ${want} on a trusted PATH` };
+  return { python, env };
+}
+
+export interface TrustedEvidence {
+  /** The python, as an absolute path outside the worker-writable folders. */
+  python: string;
+  /** The arguments: `-s` (no user site, where APPDATA or ~/.local could hold a planted .pth), then evidenceArgs. */
+  args: string[];
+  env: NodeJS.ProcessEnv;
+  /** The trusted checkout, as the working directory: never the sandbox (Windows looks for `gh` in it first). */
+  cwd: string;
+}
+
+/**
+ * w5542: how the guard runs pr_evidence.py at the host's level: the script from the trusted checkout only, the python and
+ * PATH with no worker-writable folder, no PYTHON* settings (a PYTHONPATH or pycache prefix could name one), and the game
+ * checkout's HUD pins named by FF_HUD_DATA (the script reads them from its working directory otherwise). Either the run or
+ * why it cannot be run.
+ */
+export function trustedEvidenceRun(o: {
+  script: string; repo: string; pr: string | number; workerEnv: NodeJS.ProcessEnv; hostEnv?: NodeJS.ProcessEnv;
+  appDir: string; sandboxDir?: string; platform?: NodeJS.Platform; P?: PlatformPath; exists?: (p: string) => boolean;
+}): TrustedEvidence | { error: string } {
+  const platform = o.platform ?? process.platform;
+  const P = o.P ?? (platform === 'win32' ? path.win32 : path.posix);
+  const host = o.hostEnv ?? process.env;
+  const t = trustedPython({ ...o, platform, P, host, root: o.workerEnv.FF_WORKER_ROOT || host.FF_WORKER_ROOT });
+  if ('error' in t) return t;
+  const { python, env } = t;
+  if (!env.FF_HUD_DATA && o.sandboxDir) {
+    const has = o.exists ?? ((p: string) => fs.existsSync(p));
+    for (let d = P.resolve(o.sandboxDir); ; d = P.dirname(d)) {
+      const hud = P.join(d, ...HUD_DATA_DIR.split('/'));
+      if (has(P.join(hud, 'hud-pins.json'))) { env.FF_HUD_DATA = hud; break; }
+      if (P.dirname(d) === d) break;
+    }
+  }
+  return { python, args: ['-s', ...evidenceArgs(o.script, o.repo, o.pr)], env, cwd: P.dirname(o.script) };
+}
 
 export type GitRun = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
@@ -130,8 +302,8 @@ let refreshing: Promise<void> | undefined;
  * on the worker's machine, and the portal has no plugin cache, no FF_SKILLS and no worker root: every gated merge after
  * w3088 was refused with "no pr_evidence.py found" (FinalFactory #3186, #3187, ffu #237, 2026-11-04), whichever machine
  * the worker was on. So the portal keeps its own shallow checkout of final-factory-agents' master, brought up to date
- * before each check (pr_evidence.py fails every PR from a copy older than the released one, w733), and finds the script
- * there as findPrEvidence finds a worker root's tools checkout. A clone or fetch that fails leaves the copy it had;
+ * before each check (pr_evidence.py fails every PR from a copy older than the released one, w733), and runs that
+ * checkout's script only (w5542: never the newest of several copies). A clone or fetch that fails leaves the copy it had;
  * with none, undefined, and the merge is refused.
  */
 export async function portalPrEvidence(d: PortalEvidenceDeps): Promise<string | undefined> {
@@ -155,7 +327,9 @@ export async function portalPrEvidence(d: PortalEvidenceDeps): Promise<string | 
     }
   })().finally(() => { refreshing = undefined; });
   await refreshing;
-  return findPrEvidence({ env: d.env ?? process.env, home: d.home ?? os.homedir(), root: d.dataDir, exists, ...(d.list ? { list: d.list } : {}), ...(d.read ? { read: d.read } : {}) });
+  // w5542: its own checkout's script, never the newest of several copies.
+  const script = checkoutScript(co);
+  return exists(script) ? script : undefined;
 }
 
 /** The command the gate runs: the script, the repository and the pull request, always all three. */
@@ -225,3 +399,18 @@ export async function fetchHudData(repo: string, pr: number | string, run: GitRu
   }
   return { dir };
 }
+
+/** w5542: gh on the agent host's PATH with every folder workers can write left out (<root>/unity-slots/bin comes first there). */
+export function trustedGh(root: string | undefined = process.env.FF_WORKER_ROOT, appDir: string = trustedAppDir()): string {
+  return resolveTrusted('gh', trustedPathValue(process.env.PATH ?? process.env.Path, root, appDir)) ?? 'gh';
+}
+
+/** w5542: git the same way, for the guard's reads of a worker's repository. */
+export function trustedGit(): string {
+  return resolveTrusted('git', trustedPathValue(process.env.PATH ?? process.env.Path, process.env.FF_WORKER_ROOT, trustedAppDir())) ?? 'git';
+}
+
+/** w5542: git options for reading a repository a worker can write: none of its config may run a program at the host's level. */
+// `remote -v` and `log` run no hooks, no pager (stdout is a pipe) and no external diff (--no-ext-diff); a repo's fsmonitor and a
+// signature check (gpg.program) are the programs left, both off here.
+export const TRUSTED_GIT = ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false'];

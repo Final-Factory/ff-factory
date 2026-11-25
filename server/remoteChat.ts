@@ -1,4 +1,5 @@
 import type http from 'node:http';
+import { clientAddress, untrustedProxied } from './clientAddress.ts';
 import { Readable } from 'node:stream';
 import { bus, type Store } from './store.ts';
 import { AttachmentError, type AttachmentStore } from './attachments.ts';
@@ -51,11 +52,13 @@ export function tailnetAddress(ip: string): boolean {
  * Tailscale Serve puts `Tailscale-Funnel-Request: ?1` on every request that came in through Funnel and deletes one the client sent itself
  * (tailscale/ipn/ipnlocal/serve.go, addTailscaleIdentityHeaders), and sets X-Forwarded-For to the client's own address (the
  * proxy is a Rewrite, so a header the client sent is dropped). The header is the test; the address is a second one, so a
- * Funnel request is refused even if the header were ever missing. The forwarded address is read only from a connection
- * that came from this machine (the proxy); any other connection is judged by its own address.
+ * Funnel request is refused even if the header were ever missing. The address is clientAddress's (server/clientAddress.ts,
+ * w5535): the last forwarded entry from a trusted proxy on this machine, else the connection's own.
  */
 export function tailnetOnly(req: Pick<http.IncomingMessage, 'headers' | 'socket'>, what = 'the orchestrator chat'): string | undefined {
   if (req.headers['tailscale-funnel-request'] !== undefined) return `this request came in through Tailscale Funnel (the public internet); ${what} is tailnet-only`;
+  // A proxy on this machine forwarded it, but trustProxy is off, so its client is unknown: not "this machine" (w5535).
+  if (untrustedProxied(req)) return `this request came through a proxy the portal does not trust (trustProxy is off); ${what} is tailnet-only`;
   const addr = clientAddress(req);
   if (loopback(addr) || tailnetAddress(addr)) return undefined;
   return `this request did not come from the tailnet (a Tailscale address); ${what} is tailnet-only`;
@@ -66,14 +69,6 @@ export function tailnetDeviceAddress(req: Pick<http.IncomingMessage, 'headers' |
   return tailnetOnly(req) ? undefined : clientAddress(req);
 }
 
-/** The client's address: the proxy's X-Forwarded-For on a connection from this machine (Tailscale Serve), else the connection's own. */
-export function clientAddress(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): string {
-  const direct = (req.socket.remoteAddress ?? '').replace(/^::ffff:/i, '');
-  const fwd = String(req.headers['x-forwarded-for'] ?? '')
-    .split(',')[0]
-    .trim();
-  return (loopback(direct) && fwd ? fwd : direct).replace(/^::ffff:/i, '');
-}
 
 /** `https://fff.<tailnet>.ts.net` for the host the client reached us at, or '' (links then stay relative). Never the Funnel address from config. */
 export function originOf(req: Pick<http.IncomingMessage, 'headers' | 'socket'>): string {
