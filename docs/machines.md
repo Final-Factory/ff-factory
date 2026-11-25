@@ -93,7 +93,9 @@ before redeploying by hand.
   (`nslookup fff.<tailnet>.ts.net 1.1.1.1`) and pin it: `curl --resolve fff.<tailnet>.ts.net:443:<public IPv4>
   https://fff.<tailnet>.ts.net/machine`. Measured: 403 `{"error":"the daemon link is tailnet-only"}` for HTTP and for
   a websocket upgrade, each logged `machine link: refused ... came in through Tailscale Funnel`; the same URL from the
-  tailnet answered 200.
+  tailnet answered 200. Those refusals carry the public address of the site the probe left from (LothDesktop and
+  FFBox share one, so FFBox's connector logs the same address): say the probe's time and source address in the report,
+  so its refusal lines are not taken for a stray client (w5789 traced the three of 16:36Z back to w5575's own probe).
 
   **A refused machine is named and alerted** (w5575 review): when the check refuses a request whose bearer token is a
   machine's, the portal logs `machine <id>: link refused by machineLinkTailnet (enforce) from <address>: <why>` and,
