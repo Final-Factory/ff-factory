@@ -166,7 +166,10 @@ test("w5597: an old-layout machine publishes from the new checkout; hooks and sc
     fs.rmSync(planted);
     lines.length = 0;
     assert.equal(await publishAgentTools(root, d), 0, lines.join('\n'));
-    assert.equal(plain(co, 'rev-parse', 'HEAD'), head, `fast-forwarded: ${lines.join('\n')}`);
+    // Fast-forwarded to the branch's tip: the clone's head or a later one, since the live repo may take a push while
+    // this test runs (w5749: CI run 45659709342 failed when final-factory-agents moved on between the two clones).
+    const now = plain(co, 'rev-parse', 'HEAD');
+    assert.ok(now === head || plain(co, 'merge-base', head, now) === head, `fast-forwarded: ${lines.join('\n')}`);
     assert.equal(fs.existsSync(planted), false, `no hook ran in the publish's fetch and merge: ${fs.existsSync(planted) ? fs.readFileSync(planted, 'utf8') : ''}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
