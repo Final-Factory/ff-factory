@@ -22,6 +22,26 @@ folder to any Steam branch, default included.
   - `action: "upload"`: `version`, `app` (main or demo), `sha` (the bump commit built), `runs` (each platform's run folder),
     `live`, `preview`.
   - `action: "status"`: the job by `job` id.
+  - `action: "install"` (w5640): sets steamcmd up on this computer, logging nobody in (below).
+
+## A new computer: install (w5640)
+
+Workers cannot write `<root>/steam`, so the game repo's `urgent_release.py steam-install` refuses since w5551. The daemon
+sets the folder up itself (`machine/steamUpload.ts` `installSteamcmd`), on `steam_upload` action `install`, and before a
+`check` or `upload` whenever `steamMissing` finds config.json without an account, or no steamcmd where it names:
+
+1. Valve's steamcmd (`STEAMCMD`: `steamcmd.zip` on Windows, `steamcmd_osx.tar.gz` on macOS, `steamcmd_linux.tar.gz` on Linux,
+   from `steamcdn-a.akamaihd.net/client/installer/`) is downloaded into `<root>/steam`, unpacked into `<root>/steam/steamcmd`
+   with the system tar (Windows' own `System32\tar.exe` reads the zip), the archive removed, and steamcmd run once with
+   `+quit`, which updates it and logs nobody in. Skipped when steamcmd is there.
+2. `config.json`'s `release.steam` gets `account`, `steamcmd` and `home` (`<root>/steam/home`); its other keys stay.
+
+The account is a setting, never a name in code (lothsahn, w1639: "It should not be hardcoded in the code"): the portal's
+`steamBuildAccount` in its `config.json`, sent with each job as `account`. Without it the account config.json names already is
+kept (BEAST and LothDesktop were set up by w1639's steam-install); with neither, nothing is installed and the job says so. No
+output repeats the account, the setting's or the one config.json names: the daemon redacts both like secrets (one under 8 characters, `MIN_SECRET_LENGTH`, stays visible). The password stays in the vault (`FFSTEAM_PASSWORD`, which
+the vault keeps from every run). The portal sends `install` only to a daemon whose hello offered `steamInstall`. Tests:
+`machine/steamUpload.test.ts`, "steam install: ...".
 
 ## Who may upload what
 

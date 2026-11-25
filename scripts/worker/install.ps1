@@ -42,6 +42,10 @@
 .PARAMETER WorkerFence
   With -Update (w5377): turn the worker write fence on or off, as ops_worker machine_update worker_fence does. On sets this
   PC's daemon.json key (workerIntegrity: low, Low integrity level), off removes it. Left out: the install keeps what it has.
+.PARAMETER WorkerCaps
+  With -Update (w5554, docs/worker-caps.md): set the per-worker memory, process and temp-disk caps' mode in daemon.json
+  (workerCaps), as ops_worker machine_update worker_caps does: warn (the default when absent: measure and report only),
+  enforce (limits and kills) or off (nothing). Left out: the install keeps what it has.
 .PARAMETER PlayOnly
   A play-only computer (w1946, w2004): no game repo clone, no sandboxes and no Dev Drive; the daemon, its tray app and one
   player-slot pair as on any computer. join.ps1 passes it when the join code is a play-only one.
@@ -96,6 +100,7 @@ param(
     [string]$Owner = '',
     [string]$VoiceWhisper = '',
     [ValidateSet('on', 'off')][string]$WorkerFence,
+    [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -261,6 +266,7 @@ if ($Update) {
     if ($Owner) { $argv += @('--owner', $Owner) }
     if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
     if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
+    if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }

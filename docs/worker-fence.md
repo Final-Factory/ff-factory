@@ -38,7 +38,9 @@ LothDesktop):
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
 **Resource caps** are not a fence, but they bound what one worker can use: memory, processes and temp disk per worker
-(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them).
+(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them). They start in warn mode, which measures
+and reports and stops nothing: `ops_worker machine_update worker_caps off` is the switch, as `worker_fence off` is the
+fence's, and enforce waits on a week of warn data and the owner's go.
 
 **Fixes, by state** (a fix is "merged" only when its PR has merged; everything else is in progress):
 
@@ -114,7 +116,8 @@ project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
 in `server/workerFence.test.ts` now commits in a worktree). The harness's own text guard keeps a careless agent's tools off it, which a script file gets past. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
-and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`).
+and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`), and `UV_TOOL_DIR=<root>/cache/uv-tools` (w5693: uvx
+writes a temp file in `~/.local/share/uv/tools`, so the Unity MCP server died at start; docs/worker-root.md 2.8).
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
 
@@ -135,7 +138,7 @@ Measured with the generated profile unless noted:
 - **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
   sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
   `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`
-  (`PREF_RULES`, w5659), from each agent's next start. Measured on m5, macOS 26.4:
+  (`PREF_RULES`, w5659), once the daemon restarts (the fence is decided once per daemon process). Measured on m5, macOS 26.4:
   - cfprefsd lets a write through when the client may write preferences **or** the plist's file. The rule therefore works
     only with the file deny of `~/Library/Preferences`: together, a fenced `defaults write com.<new>` exits 1 ("Could
     not write domain") and makes no plist. The rule alone did not refuse it.

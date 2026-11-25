@@ -81,6 +81,10 @@ test('reports: the args are checked here first; ids that are paths are refused',
   assert.match((ffboxReportsArgs({ since: 'yesterday' }) as { error: string }).error, /ISO time/);
   assert.match((ffboxReportsArgs({ since: '2026-10-04T00:00:00Z', until: '2026-10-03T00:00:00Z' }) as { error: string }).error, /after until/);
   assert.match((ffboxReportsArgs({ signature: 'a\nb' }) as { error: string }).error, /printable/);
+  // w5678: game ffu reads FFU's reports; ff or nothing sends no game, so an FFBox without the arg still answers.
+  assert.deepEqual(ffboxReportsArgs({ game: 'ffu' }), { args: { limit: 20, offset: 0, game: 'ffu' } });
+  assert.deepEqual(ffboxReportsArgs({ game: 'ff' }), { args: { limit: 20, offset: 0 } });
+  assert.match((ffboxReportsArgs({ game: 'ff2' }) as { error: string }).error, /game: ff .* or ffu/);
 });
 
 test('reports: listed live from FFBox, each report with its facts and files, headed as untrusted players\' data', async (t) => {
@@ -175,6 +179,22 @@ test('report: one file inside the zip, by name', async (t) => {
   assert.match(f.text, /Fetched the file "logs\/Player\.log" inside 20261003T101500Z-crash-3a9f01c2d4/);
 });
 
+test('report: game ffu asks FFBox for an FFU report; ff asks as before (w5678)', async (t) => {
+  const { pm, store, c } = await setup(t);
+  const asked: unknown[] = [];
+  t.after(
+    onQuery(c, (q) => {
+      asked.push(q.args);
+      sendReport(c, q.id, Buffer.from('ffu'));
+    }),
+  );
+  await fetchFfboxReport(pm, store, { id: RID, game: 'ffu' });
+  await fetchFfboxReport(pm, store, { id: RID, file: 'ffu.log', game: 'ff' });
+  assert.deepEqual(asked, [{ id: RID, game: 'ffu' }, { id: RID, file: 'ffu.log' }]);
+  await assert.rejects(fetchFfboxReport(pm, store, { id: RID, game: 'ff1' }), /game: ff .* or ffu/);
+  assert.equal(asked.length, 2, 'a bad game asks nothing');
+});
+
 test('report: a SHA-256 that differs, a gap or a cut link is refused, and nothing is handed out', async (t) => {
   const { pm, store, c } = await setup(t);
   const body = Buffer.alloc(100_000, 7);
@@ -227,7 +247,7 @@ test('no write path: the reports surface is two read-only queries and two inboun
     'no query names a change',
   );
   assert.ok(FROM_CONNECTOR_TYPES.includes('report_chunk') && FROM_CONNECTOR_TYPES.includes('report_end'));
-  assert.deepEqual(Object.keys(CATALOG.fetch_ffbox_report).sort(), ['diagnosis', 'file', 'id', 'run'], 'the worker tool takes an id and file names (and a diagnosis run), nothing else');
+  assert.deepEqual(Object.keys(CATALOG.fetch_ffbox_report).sort(), ['diagnosis', 'file', 'game', 'id', 'run'], 'the worker tool takes an id, its game and file names (and a diagnosis run), nothing else');
   const src = fs.readFileSync(new URL('./ffboxReports.ts', import.meta.url), 'utf8');
   assert.ok(!/\.send\(/.test(src), 'it sends no frame of its own');
   assert.match(src, /queryTransfer\('report'/, 'the one thing it asks FFBox is the report query');

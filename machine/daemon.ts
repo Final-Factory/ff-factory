@@ -26,8 +26,9 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
-import { FF_LANDLOCK, writeLockArgs } from './writeLock.ts';
+import { FF_LANDLOCK, makeOpenRootChildren, writeLockArgs } from './writeLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts';
@@ -41,7 +42,7 @@ import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
-import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, type StdioServer } from './unityMcp.ts';
+import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
@@ -116,7 +117,7 @@ import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type Gh
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { DaemonRpc, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
-import { UvCachePruner, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
+import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -155,9 +156,15 @@ export interface DaemonConfig {
    * w5659: with the Seatbelt fence on, also refuse workers' preference writes through cfprefsd (`defaults write`,
    * EditorPrefs, PlayerPrefs), which otherwise land in ~/Library/Preferences outside the root (server/workerFence.ts
    * PREF_RULES). Off when unset: macOS records no report of a sandbox rule, so there is no warn-only form; true enforces it
-   * from each agent's next start (docs/worker-fence.md "Known limits").
+   * once the daemon restarts (the fence is decided once per daemon process; docs/worker-fence.md "Known limits").
    */
   workerPrefFence?: boolean;
+  /**
+   * The per-worker memory, process and temp-disk caps' mode (w5554, docs/worker-caps.md): "warn" (also when unset) measures and
+   * reports and never limits or kills, "enforce" limits and ends a runaway's tools, "off" does nothing. Handed to each worker's
+   * agent host in its start record; set remotely by `ops_worker machine_update worker_caps`.
+   */
+  workerCaps?: 'off' | 'warn' | 'enforce';
   /**
    * The Windows worker fence (w5377, docs/worker-root.md 4.1): "low" runs each sandbox agent's claude, and all it starts,
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
@@ -236,6 +243,12 @@ export interface DaemonConfig {
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
    */
   unityMcpServer?: StdioServer;
+  /**
+   * w5650: false runs each agent's Unity MCP server with the person's own home, as before w5650. Unset or true: its home
+   * is its sandbox's status folder (machine/unityMcp.ts mcpHomeStatusDir), so the server's preflight reads only its own
+   * editor's status, wherever that editor writes it (a fenced editor: <root>/home/.unity-mcp).
+   */
+  unityMcpScopedHome?: boolean;
   /** Clean-up settings until the portal sends its own (the portal's own host: 0/0, it never cleans by itself). */
   cleanup?: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown };
   /**
@@ -1387,9 +1400,9 @@ export class Daemon {
     if (!server) return undefined;
     const appDir = appDirOfConfig(this.cfg);
     const place = spec.sandbox;
-    fs.mkdirSync(mcpStatusDir(appDir, place), { recursive: true });
+    fs.mkdirSync(mcpHomeStatusDir(appDir, place), { recursive: true });
     this.syncMcpScopes();
-    return { UnityMCP: scopedUnityMcp(server, appDir, place) };
+    return { UnityMCP: scopedUnityMcp(server, appDir, place, this.cfg.unityMcpScopedHome !== false) };
   }
 
   /** Bring every place's Unity MCP status folder up to date, from the editor pids the watches know. */
@@ -2080,7 +2093,7 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
-      ...(this.cfg.root ? { steamUpload: true } : {}),
+      ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
@@ -2242,6 +2255,9 @@ export class Daemon {
   slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>, env0: NodeJS.ProcessEnv = process.env): Record<string, string> {
     const env: Record<string, string> = { FF_UNITY_SLOTS: this.slotMailbox, ...sandboxGameDataEnv(env0, spec.sandbox) };
     if (spec.sandbox) env.FF_UNITY_HOLDER = `sandbox:${spec.sandbox}`;
+    // w5650: the shell's bridge (the game repo's scripts/unity-bridge.py, which reads UNITY_MCP_STATUS_DIR, else
+    // ~/.unity-mcp) finds its sandbox's editor in the same synced folder its MCP server reads, fenced or not.
+    if (spec.sandbox) env.UNITY_MCP_STATUS_DIR = mcpStatusDir(appDirOfConfig(this.cfg), spec.sandbox);
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
@@ -3009,6 +3025,11 @@ export class Daemon {
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
+    // w5676: ff-landlock.py skips an open root folder that does not exist yet, and the locked worker cannot make it.
+    if (lockArgs && this.cfg.root) {
+      const made = makeOpenRootChildren(this.cfg.root, lockArgs, appDirOfConfig(this.cfg), [this.sandboxRoot()]);
+      if (made.length) log(`write lock: made the open root folders ${made.map((m) => path.basename(m)).join(', ')} before a locked worker starts (w5676)`);
+    }
     const lock = lockArgs ? { writeLock: lockArgs } : {};
     const fence = spec.sandbox ? this.workerFence : undefined;
     const low = spec.sandbox ? this.low : undefined;
@@ -3016,7 +3037,7 @@ export class Daemon {
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
-    // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it.
+    // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
   }
@@ -3067,7 +3088,7 @@ export class Daemon {
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
           if (probe.ok) {
-            log(`worker fence: seatbelt is on for sandbox agents; root folders kept read-only: ${this.closedRootChildren(fence.open ?? []).join(', ') || 'none'}`);
+            log(`worker fence: seatbelt is on for sandbox agents${this.cfg.workerPrefFence === true ? " with the preference-write block (workerPrefFence)" : ""}; root folders kept read-only: ${this.closedRootChildren(fence.open ?? []).join(', ') || 'none'}`);
             const f = fence;
             this.checkMaxEventsFence('seatbelt', (file) => fencedArgv(f, '/bin/sh', maxProbeArgv('/bin/sh', file).slice(1)));
           }
@@ -3397,6 +3418,7 @@ export class Daemon {
       },
       changed: () => this.awake(),
       log: (line) => log(line),
+      capsMode: () => capsModeOf(this.cfg.workerCaps),
       toolsCpu: (pid) => this.toolsCpu(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {
@@ -4064,6 +4086,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // w5565: the workers' uv cache carried over from an older daemon moves to the Medium one too.
   const mediumUv = cfg.root ? mediumUvCacheFor(process.env, cfg.root) : undefined;
   if (mediumUv) process.env.UV_CACHE_DIR = mediumUv;
+  // w5693: the daemon's and Medium agents' own uv tool folder (runSpec gives sandbox agents the workers' one, sandboxUvEnv);
+  // a folder that cannot be made leaves uv's default in place, with a warning, never a daemon without uvx.
+  if (cfg.root) {
+    const tool = applyMediumUvToolDir(process.env, cfg.root);
+    if (tool) log(tool);
+  }
   if (cargo) {
     try {
       fs.mkdirSync(cargo.home, { recursive: true });
