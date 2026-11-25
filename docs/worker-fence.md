@@ -74,10 +74,24 @@ fenced agent's `ps -x -o pid=` gave "operation not permitted: ps", and `ff-lefto
 and ff-leftovers finds a process's session by `FF_SESSION_ID` in its environment, so that is not enough.
 
 So the daemon, outside the fence, reads for the worker (`machine/procsBroker.ts`): the worker writes
-`<FF_UNITY_SLOTS>/procs/ask-<id>.json` (`procs`, `env` or `inspect`, with pids), the daemon answers `ans-<id>.json`
-within 250 ms. It answers only those three fixed reads and never runs or ends anything for a worker; ff-leftovers ends
-its own processes with kill(2). A worker tries its own `ps` first and asks only when the exec is refused, so an unfenced
-worker works as before. `stopTree` (unity-slot) falls back to `pgrep -P` when `ps` prints nothing.
+`<FF_UNITY_SLOTS>/procs/ask-<id>.json` (`procs`, `env`, `inspect` or `census`, with pids and `who`), the daemon answers
+`ans-<id>.json` within 250 ms. It answers only those fixed reads and never runs or ends anything for a worker;
+ff-leftovers ends its own processes with kill(2). A worker tries its own `ps` first and asks only when the exec is
+refused, so an unfenced worker works as before. `stopTree` (unity-slot) falls back to `pgrep -P` when `ps` prints nothing.
+
+Each worker sees only its own processes (w5558, the rogue-worker audit w5451 item 32). The ask names `who`: the
+worker's session (`FF_SESSION_ID`) and the asking pid; the daemon refuses it unless that pid runs and the nearest process
+on its parent chain that carries a session carries that one (`sessionScope` in `machine/leftovers.ts`). `procs`, `env`
+and `inspect` then cover the session's processes (by `FF_SESSION_ID`, or its shells' process groups for an Apple program,
+w5401), what they run that carries no other session, and their parents without environment; no other process's
+environment is ever answered. The one worker read that needs more is the clean-up's KEEP check (`ff-leftovers folders`,
+`check`, `remove`, `remove-slot`: does anyone build in, play from or run in this slot, sandbox or runner folder?):
+`census` gives the pid, parent and command line of the processes whose command line names the install folder or an agent
+host, with no environment; without a known install folder it answers nothing, and the clean-up keeps. Limit: a worker
+that sets out to lie can name another live worker's pid and session (same user; it can read a node process's
+environment itself through KERN_PROCARGS2); the check stops the broker handing every worker the whole machine, not a
+determined forger. The broker runs only on macOS: elsewhere there is no worker fence, a worker runs its own `ps`
+(Linux `/proc`, Windows CIM) as the same user, and the daemon hands it nothing.
 
 zsh writes heredocs under `TMPPREFIX` (default `/tmp/zsh`), refused by the fence ("can't create temp file for here
 document"); the fence's environment sets `TMPPREFIX=<root>/tmp/zsh`.
