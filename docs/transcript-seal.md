@@ -147,6 +147,14 @@ Two things the first CI run on the Windows runner showed (w5703):
   write), but symlinks and other routes remain, so the labels do not lean on it. The Windows test puts a junction there
   anyway (from the Low CLI where Windows lets it, else from the test) to a Medium folder and checks that folder stays Medium and refuses a Low write after the exit relabel and
   after the way back.
+- **The daemon's lock and way back never hold its event loop** (w5703, 2026-11-25). The first lock labels every transcript
+  on the machine one icacls call at a time (a few hundred calls; on BEAST 217 entries plus their folders). With
+  `execFileSync` that held the daemon's loop from 19:10:46 to 19:16:00Z on BEAST: no heartbeats, the portal showed BEAST
+  offline and moved w5581 off it. `lockTranscripts` and `unlockTranscripts` now run each icacls through the daemon's
+  asynchronous `exec` (`icaclsOf`), awaited one at a time with a loop turn between, so heartbeats keep beating while they
+  run; the walk is one generator (`labelTreeSteps`) that the spawner's small synchronous labels share
+  (`labelTreeSync`, `setLabelSync`). The test holds each fake icacls 5 ms and checks a 1 ms timer still ticks (it ticked 0
+  times in 16 calls on the old code, measured).
 - **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
   claude starts, it makes the conversation's `<id>\` folder and labels it and what is in it Low (walked). On a resume it also labels the
   existing `<id>.jsonl` (found in any project folder) `low`. When the last process of that conversation exits, both go back

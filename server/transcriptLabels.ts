@@ -47,14 +47,56 @@ const realIcacls: IcaclsSync = (args) => {
  * Setting a label needs WRITE_OWNER; where the account has it only through a group ACE icacls answers "Access is denied",
  * and the owner may still grant itself Full first (lowIntegrity.ts labelLow, measured w5402).
  */
-function icaclsLabel(target: string, label: string, icacls: IcaclsSync, account: string | undefined): void {
+function* icaclsLabel(target: string, label: string, account: string | undefined): Steps<void> {
   const args = [target, '/setintegritylevel', label];
-  let r = icacls(args);
+  let r = yield args;
   if (r.code !== 0 && account && /access is denied/i.test(r.out)) {
-    if (icacls([target, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`]).code === 0) r = icacls(args);
+    if ((yield [target, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`]).code === 0) r = yield args;
   }
   if (r.code !== 0) throw new Error(`icacls ${label} on ${target}: ${r.out.trim().slice(-300)}`);
 }
+
+/**
+ * A run of icacls calls: each `yield` hands over the arguments of one call and gets its answer back, so one walk serves
+ * both drivers below. The spawner labels one conversation's files and may wait (runSteps); the daemon's first lock labels
+ * every transcript on the machine, hundreds of calls, and must not hold its event loop meanwhile (runStepsAsync): on BEAST
+ * the synchronous first pass held heartbeats for 5.5 minutes and the portal showed it offline (w5703, 2026-11-25).
+ */
+type Steps<T> = Generator<string[], T, { code: number; out: string }>;
+
+/** An icacls runner that may answer later: the daemon's Exec (icaclsOf) or a test's synchronous fake. */
+export type Icacls = (args: string[]) => { code: number; out: string } | Promise<{ code: number; out: string }>;
+
+/** Runs `steps` with a synchronous icacls. */
+function runSteps<T>(steps: Steps<T>, icacls: IcaclsSync): T {
+  let n = steps.next();
+  while (!n.done) n = steps.next(icacls(n.value));
+  return n.value;
+}
+
+/** Runs `steps` one icacls call at a time, each awaited, so timers and the heartbeat run between them. */
+async function runStepsAsync<T>(steps: Steps<T>, icacls: Icacls): Promise<T> {
+  let n = steps.next();
+  while (!n.done) {
+    const r = await icacls(n.value);
+    // A synchronous fake answers at once: give the loop a turn anyway, as a real call does.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    n = steps.next(r);
+  }
+  return n.value;
+}
+
+/** icacls through the daemon's asynchronous Exec: the event loop runs while icacls does. */
+export const icaclsOf =
+  (exec: Exec): Icacls =>
+  async (args) => {
+    try {
+      const r = await exec('icacls', args, { timeoutMs: 60_000 });
+      return { code: r.code ?? 1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+    } catch (e) {
+      return { code: 1, out: (e as Error).message };
+    }
+  };
 
 /** A junction, a mount point or a symbolic link: Node's lstat answers each as a link on Windows. Missing: false. */
 export function isLink(p: string): boolean {
@@ -73,14 +115,23 @@ export function isLink(p: string): boolean {
   }
 }
 
-/** Sets `label` on `p` alone. Refuses a link: icacls labels what a junction or link points at (w5774). */
-export function setLabelSync(p: string, label: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+function* setLabelSteps(p: string, label: string, account: string | undefined): Steps<void> {
   if (isLink(p)) throw new Error(`${p} is a junction or link; not labelled (w5703)`);
-  icaclsLabel(p, label, icacls, account);
+  yield* icaclsLabel(p, label, account);
 }
 
+/** Sets `label` on `p` alone. Refuses a link: icacls labels what a junction or link points at (w5774). */
+export function setLabelSync(p: string, label: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+  runSteps(setLabelSteps(p, label, account), icacls);
+}
+
+/** setLabelSync, without holding the event loop. */
+export const setLabel = (p: string, label: string, icacls: Icacls, account = currentAccount()): Promise<void> => runStepsAsync(setLabelSteps(p, label, account), icacls);
+
 /** Whether icacls shows a Low label on `p` (its own or inherited). No label at all is Medium. */
-const labelledLow = (p: string, icacls: IcaclsSync) => /Mandatory Label\\Low Mandatory Level/i.test(icacls([p]).out);
+function* labelledLow(p: string): Steps<boolean> {
+  return /Mandatory Label\Low Mandatory Level/i.test((yield [p]).out);
+}
 
 /**
  * Labels the folder `root` and everything in it `level`: files plain, folders `(OI)(CI)`. Never with icacls /T, which follows
@@ -92,12 +143,12 @@ const labelledLow = (p: string, icacls: IcaclsSync) => /Mandatory Label\\Low Man
  * left as it is (nothing Medium is inside one, and walking it could race a worker). A folder with no link in it is labelled
  * with one `<dir>\*` call; its sub-folders get their inheritable label after that.
  */
-export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: IcaclsSync = realIcacls, account = currentAccount()): number {
+function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string | undefined): Steps<number> {
   if (isLink(root)) throw new Error(`${root} is a junction or link; not labelled (w5703)`);
   const dirLabel = `(OI)(CI)${level}`;
   let links = 0;
   /** Labels what is inside `dir` (Medium while this runs), not `dir` itself. */
-  const inside = (dir: string) => {
+  function* inside(dir: string): Steps<void> {
     // A link by its listing (every reparse point) or by lstat; never followed.
     const entries = fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
       const p = path.join(dir, e.name);
@@ -109,46 +160,61 @@ export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: Ica
     links += skipped;
     if (level === 'medium') {
       if (!entries.length) return;
-      if (skipped) for (const e of entries.filter((x) => !x.link && !x.dir)) icaclsLabel(e.p, level, icacls, account);
-      else icaclsLabel(path.join(dir, '*'), level, icacls, account);
+      if (skipped) for (const e of entries.filter((x) => !x.link && !x.dir)) yield* icaclsLabel(e.p, level, account);
+      else yield* icaclsLabel(path.join(dir, '*'), level, account);
       for (const d of dirs) {
-        icaclsLabel(d, dirLabel, icacls, account);
-        inside(d);
+        yield* icaclsLabel(d, dirLabel, account);
+        yield* inside(d);
       }
       return;
     }
-    const todo = dirs.filter((d) => !labelledLow(d, icacls));
-    for (const d of todo) inside(d);
+    const todo: string[] = [];
+    for (const d of dirs) if (!(yield* labelledLow(d))) todo.push(d);
+    for (const d of todo) yield* inside(d);
     if (!entries.length) return;
-    if (skipped) for (const e of entries.filter((x) => !x.link && !x.dir)) icaclsLabel(e.p, level, icacls, account);
-    else icaclsLabel(path.join(dir, '*'), level, icacls, account);
-    for (const d of skipped ? todo : dirs) icaclsLabel(d, dirLabel, icacls, account);
-  };
+    if (skipped) for (const e of entries.filter((x) => !x.link && !x.dir)) yield* icaclsLabel(e.p, level, account);
+    else yield* icaclsLabel(path.join(dir, '*'), level, account);
+    for (const d of skipped ? todo : dirs) yield* icaclsLabel(d, dirLabel, account);
+  }
   if (level === 'medium') {
-    icaclsLabel(root, dirLabel, icacls, account);
-    inside(root);
-  } else if (!labelledLow(root, icacls)) {
-    inside(root);
-    icaclsLabel(root, dirLabel, icacls, account);
+    yield* icaclsLabel(root, dirLabel, account);
+    yield* inside(root);
+  } else if (!(yield* labelledLow(root))) {
+    yield* inside(root);
+    yield* icaclsLabel(root, dirLabel, account);
   }
   return links;
 }
+
+/** labelTreeSteps with a synchronous icacls (the spawner: one conversation's files). Answers the links skipped. */
+export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: IcaclsSync = realIcacls, account = currentAccount()): number {
+  return runSteps(labelTreeSteps(root, level, account), icacls);
+}
+
+/** labelTreeSync, without holding the event loop (the daemon's lock and unlock of every transcript). */
+export const labelTree = (root: string, level: 'low' | 'medium', icacls: Icacls, account = currentAccount()): Promise<number> => runStepsAsync(labelTreeSteps(root, level, account), icacls);
 
 /**
  * Takes delete-child back from the account on folder `p` (this folder only, not inherited). A Low process that has it on a
  * folder can move a Medium child aside (the measured way `projects` itself was renamed from inside the Low `claude`, w5703)
  * and put its own in its place. Its own files still delete and rename through their own DELETE right.
  */
-export function denyDeleteChildSync(p: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+function* denyDeleteChildSteps(p: string, account: string | undefined): Steps<void> {
   if (!account) throw new Error(`no account to deny delete-child on ${p}`);
-  const r = icacls([p, '/deny', `${account}:(DC)`]);
+  const r = yield [p, '/deny', `${account}:(DC)`];
   if (r.code !== 0) throw new Error(`icacls deny delete-child on ${p}: ${r.out.trim().slice(-300)}`);
 }
 
-/** Removes the deny entries denyDeleteChildSync added. */
-export function undenySync(p: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+export function denyDeleteChildSync(p: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+  runSteps(denyDeleteChildSteps(p, account), icacls);
+}
+
+export const denyDeleteChild = (p: string, icacls: Icacls, account = currentAccount()): Promise<void> => runStepsAsync(denyDeleteChildSteps(p, account), icacls);
+
+/** Removes the deny entries denyDeleteChild added. */
+async function undeny(p: string, icacls: Icacls, account = currentAccount()): Promise<void> {
   if (!account) return;
-  const r = icacls([p, '/remove:d', account]);
+  const r = await icacls([p, '/remove:d', account]);
   if (r.code !== 0) throw new Error(`icacls remove deny on ${p}: ${r.out.trim().slice(-300)}`);
 }
 
@@ -380,7 +446,7 @@ export interface LockOptions {
   live?: Set<string>;
   /** Where the pinned conversations are kept between daemon starts: a file only Medium processes can write (the daemon's folder). */
   pins?: string;
-  icacls?: IcaclsSync;
+  icacls?: Icacls;
   account?: string;
 }
 
@@ -401,6 +467,7 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
   const pin = (p: string, sid: string) => !!o.live?.has(sid) || written(p, o.live ? recentMs : 3 * 86_400_000);
   // After: a pin goes back to Medium only when it is known not to run and was not written lately.
   const keep = (p: string, sid: string) => !o.live || o.live.has(sid) || written(p, recentMs);
+  const ic = o.icacls ?? icaclsOf(exec);
   try {
     fs.mkdirSync(projects, { recursive: true });
     if (isLink(projects)) throw new Error(`${projects} is a junction or link`);
@@ -408,8 +475,8 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
     if (now.code === 0 && explicitMedium(now.stdout)) {
       let denied = 0;
       for (const f of projectFolders(projects)) {
-        if (deniesDeleteChild((o.icacls ?? realIcacls)([f]).out)) continue;
-        denyDeleteChildSync(f, o.icacls, account);
+        if (deniesDeleteChild((await ic([f])).out)) continue;
+        await denyDeleteChild(f, ic, account);
         denied++;
       }
       const pins = readPins(o.pins);
@@ -422,8 +489,8 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
         if (keep(p, sid)) left.push(p);
         else if (isLink(p)) continue;
         else {
-          if (dir) labelTreeSync(p, 'medium', o.icacls, account);
-          else setLabelSync(p, 'medium', o.icacls, account);
+          if (dir) await labelTree(p, 'medium', ic, account);
+          else await setLabel(p, 'medium', ic, account);
           back++;
         }
       }
@@ -441,11 +508,11 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
     // Medium folders a Low process may still hold it through the account's Full grant. First, because a DACL change on a
     // folder pushes its inheritable entries down again, the label included: with the deny on `claude` added last, the
     // Windows runner's second run found every transcript writable at Low again.
-    for (const p of [path.dirname(projects), projects, ...slugs]) denyDeleteChildSync(p, o.icacls, account);
+    for (const p of [path.dirname(projects), projects, ...slugs]) await denyDeleteChild(p, ic, account);
     // The folders first: once one is Medium no Low process can put a junction in it, so what is read in it next stays what it
     // is (w5774). A pinned conversation's files keep their explicit Low (the root's labelLow /T) meanwhile.
-    setLabelSync(projects, DIR_MEDIUM, o.icacls, account);
-    for (const folder of slugs) setLabelSync(folder, DIR_MEDIUM, o.icacls, account);
+    await setLabel(projects, DIR_MEDIUM, ic, account);
+    for (const folder of slugs) await setLabel(folder, DIR_MEDIUM, ic, account);
     const pins: string[] = [];
     for (const folder of slugs) {
       for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
@@ -457,11 +524,11 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
         const dir = fs.statSync(p).isDirectory();
         const sid = conversationOf(e.name, dir);
         if (sid && pin(p, sid)) {
-          setLabelSync(p, dir ? DIR_LOW : 'low', o.icacls, account);
+          await setLabel(p, dir ? DIR_LOW : 'low', ic, account);
           pins.push(p);
         } else {
-          if (dir) links += labelTreeSync(p, 'medium', o.icacls, account);
-          else setLabelSync(p, 'medium', o.icacls, account);
+          if (dir) links += await labelTree(p, 'medium', ic, account);
+          else await setLabel(p, 'medium', ic, account);
           locked++;
         }
       }
@@ -481,13 +548,14 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
  * explicit Medium label lockTranscripts set, and labels `projects` itself last, so a way back that fails half way is
  * tried again at the next start (w5774). Never throws.
  */
-export async function unlockTranscripts(projects: string, exec: Exec, say: (line: string) => void, icacls?: IcaclsSync, account = currentAccount(), pins?: string): Promise<void> {
+export async function unlockTranscripts(projects: string, exec: Exec, say: (line: string) => void, icacls?: Icacls, account = currentAccount(), pins?: string): Promise<void> {
+  const ic = icacls ?? icaclsOf(exec);
   try {
     if (!fs.existsSync(projects) || isLink(projects)) return;
     const now = await exec('icacls', [projects], { timeoutMs: 60_000 });
     if (now.code !== 0 || !explicitMedium(now.stdout)) return;
-    for (const p of [path.dirname(projects), projects, ...projectFolders(projects)]) undenySync(p, icacls, account);
-    const links = labelTreeSync(projects, 'low', icacls, account);
+    for (const p of [path.dirname(projects), projects, ...projectFolders(projects)]) await undeny(p, ic, account);
+    const links = await labelTree(projects, 'low', ic, account);
     if (pins) fs.rmSync(pins, { force: true });
     say(`transcript labels: off; labelled ${projects} and everything in it Low again (w5703)${links ? `; ${links} junction${links === 1 ? '' : 's'} or link${links === 1 ? '' : 's'} skipped` : ''}`);
   } catch (e) {
