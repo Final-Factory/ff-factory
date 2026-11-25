@@ -1,6 +1,7 @@
 // The worker read fence's daemon-side helpers (w5546; docs/worker-fence.md "Reads"). No npm package: linkJob-safe.
 import fs from 'node:fs';
 import path from 'node:path';
+import { DAEMON_ONLY_CHILDREN } from '../server/claudeHome.ts';
 
 /**
  * The read fence's mode on this machine (w5546 lockout review, lothsahn's rule: "warn-only first, enforce only after measured
@@ -57,11 +58,59 @@ export function secretsDirs(root: string, tokenFile?: string): string[] {
   return out;
 }
 
-/** What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only. */
-export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean }): { closed: string[]; open: string[] } {
+/**
+ * The root children only the daemon reads, closed to workers' reads like the secrets (w5639): `<root>/steam` (w5551), which
+ * holds steamcmd and its cached Steam login, the upload config, the daemon's ffbox clone and uploads.json. The daemon runs
+ * steamcmd and the uploads itself, unfenced (machine/steamUpload.ts), so the fence never stands in their way.
+ */
+export function daemonOnlyDirs(root: string): string[] {
+  return DAEMON_ONLY_CHILDREN.map((c) => path.join(path.resolve(root), c));
+}
+
+/**
+ * Makes each daemon-only root child (w5731): on Windows the daemon labels only paths that exist, and steamcmd's first
+ * install made <root>/steam after the start's labelling, leaving it readable to Low workers until the next start (N1 of the
+ * #1237 review). Made before the root's children are listed and labelled, an empty one is kept Medium and closed like the
+ * rest, and what steamcmd later writes inside inherits its label. An empty folder changes nothing for the upload: it looks
+ * for steamcmd's program, not the folder (steamUpload.ts installSteamcmd).
+ */
+export function ensureDaemonOnlyDirs(root: string): void {
+  for (const d of daemonOnlyDirs(root)) fs.mkdirSync(d, { recursive: true });
+}
+
+/**
+ * Up to three regular files directly inside `dir`, by name (w5639): what the Linux probe opens for a closed folder. Landlock
+ * rights are inherited down the tree, so the READ_DIR every parent of a closed path keeps (to list names) reaches the closed
+ * folder too: opening or listing the folder itself succeeds there, and only its files' contents are refused. Names only: the
+ * daemon lists the folder (it is not fenced) and never opens a file.
+ */
+function isDir(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function filesIn(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => path.join(dir, e.name)).sort().slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only.
+ * `linux` (default: this machine is Linux) swaps each closed folder for the files inside it (filesIn), since Landlock cannot
+ * refuse a closed folder's own open; a closed folder with no files is then not probed.
+ */
+export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
+  const linux = o.linux ?? process.platform === 'linux';
   const closed = [
     ...o.secrets,
+    ...daemonOnlyDirs(o.root),
     ...(o.tokenFile ? [path.resolve(o.tokenFile)] : []),
     path.join(o.root, 'root.json'),
     path.join(o.appDir, 'daemon.json'),
@@ -69,7 +118,8 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
   ];
   const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
   const uniq = (l: string[]) => [...new Set(l)].filter(exists);
-  return { closed: uniq(closed), open: uniq(open) };
+  const asProbed = linux ? closed.flatMap((p) => (exists(p) && isDir(p) ? filesIn(p) : [p])) : closed;
+  return { closed: uniq(asProbed), open: uniq(open) };
 }
 
 /**
