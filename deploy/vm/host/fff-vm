@@ -4,6 +4,8 @@
 #   fff-vm status            the VM, its agent, the portal's health, the firewall table, timers, snapshots
 #   fff-vm ssh [CMD...]      a shell (or CMD) in the guest as the admin user, over the private network
 #   fff-vm console           the guest's serial console (Ctrl+] leaves)
+#   fff-vm guest-logs        the guest's boot, cloud-init, ssh and failed units, read through the guest agent: works
+#                            when ssh does not (w5608)
 #   fff-vm watch             one hang check, then one pass over the path from the internet through Funnel to the portal
 #                            (pathwatch.sh; fff-vm-watch.timer runs it every minute)
 #   fff-vm watch status      the last result of every layer of that path (the journal has one line each per pass)
@@ -47,6 +49,17 @@ qemu_age() {
   local pid
   pid=$(cat "/run/libvirt/qemu/$VM_NAME.pid" 2>/dev/null || true)
   [ -n "$pid" ] && ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || echo 999999
+}
+# Seconds since the guest last booted: since QEMU started, or since libvirt's last 'reboot' event (the guest rebooting
+# itself, as cloud-init does after its first upgrade, or a reset), whichever is later. fff-vm events writes the file.
+# A reboot inside a running QEMU leaves qemu_age old, and the watch reset a guest 11 s into the reboot cloud-init asked
+# for (w5608, CI run 45567844311).
+REBOOTED_AT=$FFF_VM_RUN/guest-rebooted-at
+boot_age() {
+  local q r
+  q=$(qemu_age)
+  r=$(cat "$REBOOTED_AT" 2>/dev/null || true)
+  case "$r" in '' | *[!0-9]*) echo "$q" ;; *) r=$(($(now) - r)); echo $((r < q ? r : q)) ;; esac
 }
 in_maintenance() { [ -f "$MAINT" ] && [ $(($(now) - $(stat -c %Y "$MAINT"))) -lt 7200 ]; }
 agent_ok() { guest_agent '{"execute":"guest-ping"}' 10 >/dev/null; }
@@ -113,7 +126,7 @@ cmd_watch() {
     missing) log "no domain $VM_NAME"; return 0 ;;
     *) log "$VM_NAME is $st"; return 0 ;;
   esac
-  if [ "$(qemu_age)" -lt "$WATCH_BOOT_GRACE_SEC" ]; then log "booting ($(qemu_age)s)"; return 0; fi
+  if [ "$(boot_age)" -lt "$WATCH_BOOT_GRACE_SEC" ]; then log "booting ($(boot_age)s)"; return 0; fi
   a=no; h=no
   agent_ok && a=yes
   portal_healthy && h=yes
@@ -349,7 +362,7 @@ cmd_events() {
       *"'lifecycle'"*Crashed*) notify "fff-vm: VM crashed" "$VM_NAME: ${line#*: }" ;;
       *"'lifecycle'"*Stopped*)
         if in_maintenance; then log "$line (nightly)"; else notify "fff-vm: VM stopped" "$VM_NAME: ${line#*: } outside the nightly window."; fi ;;
-      *"'reboot'"*) log "$line" ;;
+      *"'reboot'"*) log "$line"; now >"$REBOOTED_AT" ;;
       *"'lifecycle'"* | *"'io-error"*) log "$line"; case "$line" in *io-error*) notify "fff-vm: VM disk I/O error" "$VM_NAME: ${line#*: }" ;; esac ;;
     esac
   done
@@ -377,12 +390,36 @@ dom_status() {
   fi
 }
 
+# What a stuck first boot or a dead ssh needs, through the guest agent's virtio channel (no network, no sshd, no login).
+# CI's e2e prints it on a failure (w5608: ssh hung for 15 min after a reset and the logs step, over ssh, got nothing).
+cmd_guest_logs() {
+  local rc=0
+  # shellcheck disable=SC2016
+  guest_exec 120 /bin/sh -c '
+    s() { printf "\n---- %s\n" "$*"; sh -c "$*" 2>&1; }
+    s "uptime; cat /proc/sys/kernel/random/boot_id; uname -r"
+    s "journalctl --list-boots --no-pager | tail -n 5"
+    s "cloud-init status --long"
+    s "systemctl is-system-running; systemctl --failed --no-pager --no-legend"
+    s "systemctl list-jobs --no-pager"
+    s "systemd-analyze blame --no-pager | head -n 20"
+    s "systemctl status --no-pager ssh.socket ssh.service systemd-logind.service dbus.service 2>&1 | head -n 60"
+    s "ss -tnp state established \"( sport = :22 )\"; ps -eo pid,etimes,stat,wchan:20,args --sort=etimes | grep -E \"[s]shd|[l]ogind|[c]loud-init|[a]pt|[d]pkg\""
+    s "journalctl -b --no-pager -o short-monotonic -u ssh -u ssh.socket -u systemd-logind -u cloud-init -u cloud-final -u qemu-guest-agent | tail -n 120"
+    s "journalctl -b -1 --no-pager -o short-monotonic -p warning | tail -n 40"
+    s "grep -E \"WARNING|ERROR|Traceback\" /var/log/cloud-init.log | tail -n 40"
+    s "tail -n 60 /var/log/cloud-init-output.log"
+  ' || rc=$?
+  [ "$rc" = 0 ] || echo "(the guest agent: exit $rc; 124 = took longer than 120 s, 125 = the agent did not take it)"
+  return "$rc"
+}
+
 cmd_status() {
   local size
   size=$(dom_size)
   echo "VM $VM_NAME: $(dom_state) (${size:+${size#* } vCPUs, ${size% *} MiB, }disk $(vm_disk_path))"
   echo "  definition: $(dom_status)"
-  echo "  autostart: $(v dominfo "$VM_NAME" 2>/dev/null | awk '/^Autostart:/ {print $2}'); QEMU process age: $(qemu_age) s"
+  echo "  autostart: $(v dominfo "$VM_NAME" 2>/dev/null | awk '/^Autostart:/ {print $2}'); QEMU process age: $(qemu_age) s, since the guest's last boot: $(boot_age) s"
   echo "  guest agent: $(agent_ok && echo answers || echo 'no answer')"
   echo "  portal http://$NET_VM_IP:$PORTAL_PORT/api/health: $(curl -fsS -m 10 "http://$NET_VM_IP:$PORTAL_PORT/api/health" 2>/dev/null || echo 'no answer')"
   echo "  firewall table inet fff_vm: $(firewall_ok && echo loaded || echo MISSING)"
@@ -399,6 +436,7 @@ cmd_status() {
 case "${1:-status}" in
   status) cmd_status ;;
   ssh) shift; if [ $# -eq 0 ]; then ssh_guest -t; else ssh_guest "$@"; fi ;;
+  guest-logs) cmd_guest_logs ;;
   console) exec virsh --connect qemu:///system console "$VM_NAME" ;;
   watch) shift; case "${1:-}" in status) cmd_watch_status ;; "") cmd_watch ;; *) die "unknown option $1 (fff-vm watch [status])" ;; esac ;;
   nightly) shift; cmd_nightly "${1:-}" ;;
