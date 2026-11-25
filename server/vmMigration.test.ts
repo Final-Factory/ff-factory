@@ -15,6 +15,7 @@ import {
   expandSpec,
   historyPlan,
   indexSpec,
+  machineLinkPreflight,
   manifestDiff,
   manifestDir,
   parseManifest,
@@ -232,4 +233,38 @@ test('vmMigration: the cut-over tells Lothsahn the exact FFBox commands that mov
   const blind = ffboxRelinkSteps(undefined, 'https://fff.tailedfcad.ts.net').join('\n');
   assert.ok(!blind.includes('sed -i'), blind);
   assert.ok(blind.includes('set "url" in the "fff" block of ~/.config/ffbox/config.json to "https://fff.tailedfcad.ts.net"'), blind);
+});
+
+test('vmMigration (w5716): the cut-over refuses a move that would lock every daemon out of the tailnet-only link', () => {
+  const lan = 'http://192.168.1.20:8790';
+  // Unset is enforce (machineLinkMode): a LAN address without Serve refuses, saying how to go on.
+  const unset = machineLinkPreflight({ trustProxy: true }, lan, { serve: false });
+  assert.match(unset ?? '', /machineLinkTailnet is unset \(enforce\)/);
+  assert.match(unset ?? '', /set machineLinkTailnet to "warn"/);
+  assert.match(unset ?? '', /Tailscale Serve/);
+  assert.match(machineLinkPreflight({ machineLinkTailnet: 'enforce' }, lan, { serve: false }) ?? '', /"enforce"/);
+  assert.match(machineLinkPreflight({ machineLinkTailnet: null }, lan, { serve: false }) ?? '', /unset/);
+  // A public name or address, not behind Serve, is no better.
+  assert.ok(machineLinkPreflight({}, 'https://portal.example.com', { serve: false }));
+  assert.ok(machineLinkPreflight({}, 'http://100.128.0.1:8790', { serve: false }), 'just outside 100.64.0.0/10');
+  assert.ok(machineLinkPreflight({}, 'not a url', { serve: false }));
+  // Warn, off and a typo (warn) let every daemon in.
+  for (const v of ['warn', 'off', 'enfoce']) assert.equal(machineLinkPreflight({ machineLinkTailnet: v }, lan, { serve: false }), undefined, v);
+  // Daemons that dial a Tailscale address come from one.
+  assert.equal(machineLinkPreflight({}, 'http://100.101.102.103:8790', { serve: false }), undefined);
+  assert.equal(machineLinkPreflight({}, 'http://[fd7a:115c:a1e0::1]:8790', { serve: false }), undefined);
+  // Behind Tailscale Serve the portal sees each daemon's tailnet address, if it believes Serve (trustProxy on, its default).
+  assert.equal(machineLinkPreflight({ trustProxy: true }, 'https://fff.tail1234.ts.net', { serve: true }), undefined);
+  assert.equal(machineLinkPreflight({}, 'https://fff.tail1234.ts.net', { serve: true }), undefined);
+  assert.match(machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: true }) ?? '', /trustProxy is off/);
+  assert.equal(machineLinkPreflight({ trustProxy: false, machineLinkTailnet: 'warn' }, 'https://fff.tail1234.ts.net', { serve: true }), undefined);
+  // w5771: Serve on proves nothing about where the daemons are sent: a LAN or public publicUrl takes them past it.
+  assert.match(machineLinkPreflight({ trustProxy: true }, lan, { serve: true }) ?? '', /neither a Tailscale address nor a \*\.ts\.net name/);
+  assert.ok(machineLinkPreflight({ trustProxy: true }, 'https://portal.example.com', { serve: true }));
+  assert.ok(machineLinkPreflight({}, 'http://127.0.0.1:8790', { serve: true }), 'loopback: no other machine reaches it');
+  assert.ok(machineLinkPreflight({}, 'https://fff.ts.net.example.com', { serve: true }), 'only a real *.ts.net suffix');
+  // A MagicDNS name without Serve: a tailnet daemon connects straight from its own 100.x address.
+  assert.equal(machineLinkPreflight({}, 'http://FFF.tail1234.ts.net:8790', { serve: false }), undefined);
+  assert.equal(machineLinkPreflight({ trustProxy: false }, 'http://fff.tail1234.ts.net:8790', { serve: false }), undefined);
+  assert.match(machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: true }) ?? '', /VM's config\.json/);
 });

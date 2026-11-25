@@ -4,6 +4,8 @@
 
 import { currentAccounts, retiredConfigKeys, withDefaults, withoutRetiredKeys } from './config.ts';
 import { convertMachineRecord, localDaemonExtras } from './machines.ts';
+import { machineLinkMode } from './machineLinkGate.ts';
+import { tailnetAddress } from './remoteChat.ts';
 import type { Machine, SessionInfo, StandingAgent } from '../shared/types.ts';
 
 type Json = Record<string, unknown>;
@@ -75,6 +77,41 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
   if (retired.length) notes.push(`left out, as nothing reads them any more (w510, w1078): ${retired.join(', ')}`);
   const config = withoutRetiredKeys(out);
   return { config, notes, windowsPaths: windowsPathsIn(config) };
+}
+
+/**
+ * The cut-over's preflight for the tailnet-only daemon link (w5716, item 4 of w5707's review of w5575): why moving the
+ * portal with this config to `publicUrl` would lock every daemon out, or undefined when it would not. `config` is the
+ * rewritten config.json the new portal starts on (machineLinkTailnet is BEAST's, trustProxy the VM's: HOST_KEYS).
+ *
+ * Under "enforce" (unset is enforce, server/machineLinkGate.ts machineLinkMode) the portal lets a daemon link in only from
+ * loopback or a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48), judged by clientAddress. The daemons are sent to
+ * `publicUrl` (the relocate), so what counts is where that URL takes them. It passes when:
+ * - machineLinkTailnet is "warn" or "off" (or a typo, which is "warn"): nothing is refused;
+ * - `publicUrl`'s host is a Tailscale address or a MagicDNS name (`*.ts.net`): a daemon on the tailnet connects from its
+ *   own 100.x address, straight to the portal or through Tailscale Serve, which forwards that address.
+ * Whether Serve is on here (`serve`: --tailscale, whose check needs the Funnel on) proves nothing about the URL (w5771:
+ * a LAN publicUrl with the Funnel on sends every daemon past Serve, and each is refused), so it only adds one refusal:
+ * with Serve in front, trustProxy off in the VM's config.json (a HOST_KEY) would refuse every daemon Serve forwards.
+ * Anything else (a LAN, loopback or public address or name) is refused, before anything is touched.
+ */
+export function machineLinkPreflight(config: Json, publicUrl: string, o: { serve: boolean }): string | undefined {
+  const mode = machineLinkMode(config.machineLinkTailnet);
+  if (mode !== 'enforce') return undefined;
+  const fix =
+    "set machineLinkTailnet to \"warn\" in BEAST's config.json first (set_app_config machineLinkTailnet warn; the copy carries it), " +
+    'or send the daemons to a tailnet URL (--public-url https://<node>.<tailnet>.ts.net through Tailscale Serve, or the VM\'s 100.x address); docs/machines.md, "The daemon link is tailnet-only"';
+  const unset = config.machineLinkTailnet === undefined || config.machineLinkTailnet === null;
+  const why = `machineLinkTailnet is ${unset ? 'unset (enforce)' : '"enforce"'}`;
+  if (o.serve && config.trustProxy === false) return `${why} and trustProxy is off in the VM's config.json, so every daemon that comes in through Tailscale Serve would be refused (the portal may not believe Serve's forwarded address): turn trustProxy on in the VM's config.json (fffctl configure), or ${fix}`;
+  let host = '';
+  try {
+    host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  } catch {
+    // an unparsable URL is no tailnet address
+  }
+  if (host && (tailnetAddress(host) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host))) return undefined;
+  return `${why} and the daemons would be sent to ${publicUrl || '(no URL)'}, which is neither a Tailscale address nor a *.ts.net name, so they would not come from the tailnet and the portal would refuse every daemon: ${fix}`;
 }
 
 function pick(o: Json, keys: string[]): Json {
