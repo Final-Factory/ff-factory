@@ -698,6 +698,15 @@ export async function migrate(o: MigrateOptions) {
   // The portal redeploys a machine offline for 2 minutes over ssh (watchOffline): mid-move that put the old daemon back,
   // which held a sandbox open (LothDesktop 2026-10-06, w513: EBUSY renaming barge-v4, a redeploy 2 minutes after the
   // stop). Told first, it leaves the machine alone until a daemon says hello: the root's, or the old one after a rollback.
+  // A slot repo (w5614) has a .git folder, not a worktree's pointer file, which rehome reads and replaces.
+  const slots = old.sandboxes.filter((sb) => {
+    try {
+      return fs.statSync(path.join(sb.path, '.git')).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  if (slots.length) throw new Error(`nothing moved: ${slots.map((sb) => sb.id).join(', ')} ${slots.length === 1 ? 'is a slot repo' : 'are slot repos'} (w5614: moving one is not built yet: its alternates name the clone's old objects folder, and the clone's worktree list does not hold it; delete it from the portal first, which keeps its branches in the clone)`);
   const held = await holdRedeploys(portalUrl, old.token);
   // An older portal: fine once its daemon was stopped with machine_daemon stop, which holds them the same way.
   if (!held.ok && (!held.tooOld || (await oldDaemonRuns(old.appDir, fromService, old.configFile)))) {

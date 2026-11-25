@@ -162,8 +162,10 @@ export const lastLines = (out: string, n = 12) => redactSecrets(out.trim().split
 export function inside(p: string, roots: string[], win = process.platform === 'win32'): boolean {
   const norm = (s: string) => (win ? s.toLowerCase() : s);
   return roots.some((r) => {
-    const rel = path.relative(norm(r), norm(p));
-    return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+    // win picks the path rules, not the host's: C:\a is a plain relative name to posix path (w5725: the test failed on Linux).
+    const P = win ? path.win32 : path.posix;
+    const rel = P.relative(norm(r), norm(p));
+    return rel !== '' && !rel.startsWith('..') && !P.isAbsolute(rel);
   });
 }
 

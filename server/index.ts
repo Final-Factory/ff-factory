@@ -420,6 +420,11 @@ machines.fenceAlert = (_machineId, title, text) => {
   notifier.host(title, text);
   machines.report?.(text);
 };
+// w5575: a known machine's daemon link refused by machineLinkTailnet (enforce), to the orchestrator and the host's devices.
+machines.linkRefusedAlert = (_machineId, title, text) => {
+  notifier.host(title, text);
+  machines.report?.(text);
+};
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
 machines.activityFor = (id) => machineActivityPause(cfg, id);
@@ -498,6 +503,10 @@ const auth = new Auth(cfg.dataDir, {
 }
 // Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
 configureClientAddress({ trustProxy: () => cfg.trustProxy });
+// w5721: a hand-edited config.json can still hold this pair (set_app_config refuses it); say so at boot.
+if (cfg.trustProxy === false && machineLinkMode(cfg.machineLinkTailnet) === 'enforce') {
+  console.warn('[machines] trustProxy is false and machineLinkTailnet is enforce: every daemon behind Tailscale Serve will be refused. Set machineLinkTailnet to "warn" (docs/machines.md, "The daemon link is tailnet-only").');
+}
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
@@ -2419,8 +2428,12 @@ const server = http.createServer(async (req, res) => {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
     // The daemon link's HTTP routes from the tailnet only (w5575; machineLinkTailnet: warn logs, enforce refuses, off skips).
-    if (isMachineLinkPath(url.pathname) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), `HTTP ${url.pathname.split('/').slice(0, 3).join('/')}`).refuse) {
-      return send(res, 403, { error: 'the daemon link is tailnet-only' });
+    if (isMachineLinkPath(url.pathname)) {
+      const v = checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), `HTTP ${url.pathname.split('/').slice(0, 3).join('/')}`);
+      if (v.refuse) {
+        machines.linkRefused(req, v.address, v.why ?? '');
+        return send(res, 403, { error: 'the daemon link is tailnet-only' });
+      }
     }
     if (url.pathname === '/mcp' || url.pathname === '/mcp/upload') {
       return await routeMcp({ agents, auth, identity, attachments, send, readJson }, req, res, url);
@@ -2627,8 +2640,11 @@ server.on('upgrade', (req, socket, head) => {
     return;
   }
   const upgradePath = parseUrl(req.url)?.pathname ?? '';
-  if (isMachineLinkPath(upgradePath) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), upgradePath === '/machine' ? 'link /machine' : 'link /machine/live').refuse) {
-    // The daemon link from the tailnet only (w5575), before its token is even read.
+  const linkVerdict = isMachineLinkPath(upgradePath) ? checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), upgradePath === '/machine' ? 'link /machine' : 'link /machine/live') : undefined;
+  if (linkVerdict?.refuse) {
+    // The daemon link from the tailnet only (w5575), refused before its token opens anything; the token only names the
+    // machine, so a refused real machine is logged and alerted, not taken for an offline one.
+    machines.linkRefused(req, linkVerdict.address, linkVerdict.why ?? '');
     socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
     socket.destroy();
     return;

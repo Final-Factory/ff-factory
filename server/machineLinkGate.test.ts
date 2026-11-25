@@ -76,10 +76,13 @@ test('w5575: warn lets every connection in and logs a would-be refusal once an h
 });
 
 test('w5575: the mode and the paths', () => {
-  assert.equal(machineLinkMode(undefined), 'warn', 'unset is warn: nothing is refused until enforce is set');
+  assert.equal(machineLinkMode(undefined), 'enforce', 'unset is enforce (the warn-only rollout showed every daemon on a tailnet address)');
+  assert.equal(machineLinkMode(null), 'enforce');
+  assert.equal(machineLinkMode('warn'), 'warn');
   assert.equal(machineLinkMode('enforce'), 'enforce');
   assert.equal(machineLinkMode('off'), 'off');
-  assert.equal(machineLinkMode('bogus'), 'warn');
+  assert.equal(machineLinkMode('bogus'), 'warn', 'a hand-edited typo lets in, never a refusal nobody asked for');
+  assert.equal(machineLinkMode('Off'), 'warn');
   for (const p of ['/machine', '/machine/live/abc', '/machine/whoami', '/machine/attachments/att_0123456789ab', '/machine/join']) assert.equal(isMachineLinkPath(p), true, p);
   for (const p of ['/machines', '/api/machines/join', '/provider', '/mcp', '/']) assert.equal(isMachineLinkPath(p), false, p);
 });
