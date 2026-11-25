@@ -680,7 +680,32 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - The root's Git is PortableGit 2.56.1 at `<root>\tools\git`, pinned by SHA-256 (`server/agentGit.ts`). `worker.ts tools`
   installs it on every Windows rollout and runs its first bash login at Medium: run first at Low, it could not make its
   links (measured).
-- The sandbox editors the daemon starts stay Medium. Only what a sandbox agent starts is Low.
+- **The sandbox editors the daemon starts are Low too** (w5540, lothsahn: "run sandbox editors fenced, staged per
+  OS"). Before, they stayed Medium, and an editor compiles and runs whatever C# a worker writes (and `execute_code`), so
+  it was a one-step way out of the fence. `MacUnity.start` (`machine/unity.ts`) now starts a Windows sandbox editor
+  through a Low copy of node in `<root>\tools\low` (`lowEditorFence` in `machine/daemon.ts`, `FENCED_LAUNCH_SCRIPT`),
+  from the version's junction in `<root>\tools\unity-low` (its own Low Roslyn server, w5347), with
+  `-licensingIpc LicenseClient-<user>-low` (w5427) and this environment: APPDATA and LOCALAPPDATA as `lowEnv`,
+  `USERPROFILE=<root>\home`, and `UNITY_MCP_STATUS_DIR=<root>\home\.unity-mcp`. The bridge's status file follows that
+  variable; the daemon reads it and `~/.unity-mcp` (`mcpStatusDirs`, `server/unityHang.ts`), and the newest file for a
+  project answers. An install with no junction for the editor's version starts it unfenced and says so in the start
+  message ("unfenced (no junction ...)"); every start says "at Low integrity (the worker fence)" when fenced.
+  `daemon.json` `editorFence: false` keeps editors Medium while agents stay Low.
+- **The fenced editor, measured** (LothDesktop slot1, 2026-11-25, a GUI editor at Low started from a Low agent the same
+  way):
+  - licensing: the Low licensing client started, the editor resolved its entitlement;
+  - compile: the first load through the junction recompiled every script once (Tundra 193 s, 1791 items; the
+    InitialRefresh 273 s in all), because the compiler's path changed. The asset import cache stayed warm: no cold
+    Library rebuild. Later loads are normal; batch runs already used the junction;
+  - the bridge: its status file in `UNITY_MCP_STATUS_DIR`, `wait-ready` in 3 s; `reload-and-wait` compiled in 56 s;
+    play mode entered and stopped; `SimulationRateConstantsTest` 31 of 31 passed; no "Access is denied" in the log;
+  - a write probe run in the editor: refused (`UnauthorizedAccessException`) for `%USERPROFILE%`, `V:\`,
+    `C:\ProgramData`, `<root>\secrets` and an HKCU key; written in the sandbox's `Temp`.
+  - **Writes outside the root it still makes:** `AppData\LocalLow\Unity` (the GI cache, CrashReports,
+    CoreBusinessMetrics.db) and the game's `persistentDataPath` in LocalLow. That is the LocalLow hole below, shared
+    with every Low worker; Medium editors wrote there before. The port registry (`unity-mcp-port-<hash>.json`) goes to
+    the profile's `.unity-mcp` (`GetFolderPath(UserProfile)` ignores the variable), which a Low editor cannot write: it
+    reuses the port of the file left there and the daemon finds it by the status file, so nothing breaks.
 - Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
   a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
 

@@ -56,7 +56,7 @@ import { backupScenes, idleCloseEditor, idleClosedDetail, idleReopenNote, putBac
 import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } from './matText.ts';
 import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
-import { bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
+import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
@@ -68,7 +68,7 @@ import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
 import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
-import { hubEditorDirs, hubListedEditors, listWinDialogs, realDeps as realUnityDeps } from './unity.ts';
+import { hubEditorDirs, hubListedEditors, listWinDialogs, realDeps as realUnityDeps, type EditorFence } from './unity.ts';
 import { listMacDialogs } from './macDialogs.ts';
 import { UnityReaper, inspectProcs, realReaperDeps, type ReaperDeps } from './unityReaper.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
@@ -156,6 +156,12 @@ export interface DaemonConfig {
    * labelled alone; anything else as a folder. Example: the Unity slots mailbox when it is not in the root.
    */
   workerIntegrityAllow?: string[];
+  /**
+   * w5540: false keeps sandbox editors unfenced (Medium) while agents are fenced. Unset or true: with the Windows fence on,
+   * the daemon starts each sandbox editor at Low integrity too (machine/unity.ts EditorFence), so C# a worker writes, and
+   * its execute_code, run inside the fence.
+   */
+  editorFence?: boolean;
   /** The machine's own `claude` (its login, settings and plugins). */
   claude?: string;
   /**
@@ -597,7 +603,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line));
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence());
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -2864,8 +2870,13 @@ export class Daemon {
   }
 
   /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
-  private low?: { claude: string; git?: string; unity?: string; gh?: string };
+  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: EditorFence };
   private lowStarted = false;
+
+  /** w5540: the fence sandbox editors start in (Windows Low), while the agents' fence is on and editors may join it. */
+  private editorFence(): EditorFence | undefined {
+    return this.cfg.editorFence === false ? undefined : this.low?.editor;
+  }
 
   /**
    * Sets up the Windows worker fence when daemon.json says `workerIntegrity: "low"` (w5377): labels the root's folders
@@ -2940,8 +2951,9 @@ export class Daemon {
       }
       const versions = await lowUnityJunctions(root, found, exec, say);
       const gh = ghConfigDirFor(process.env);
-      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}) };
-      log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'})`);
+      const editor = versions.length && this.cfg.editorFence !== false ? await this.lowEditorFence(root, exec, say) : undefined;
+      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}) };
+      log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'}); sandbox editors ${editor ? `start at Low too (launcher ${editor.launcher}), from their next start` : this.cfg.editorFence === false ? 'stay Medium (editorFence false)' : 'stay Medium (no Low launcher or no Unity junction)'}`);
       await this.lowGhSelfTest(root, gh, exec, say);
       // w5402: Low agents run the Unity MCP server under the root's APPDATA (lowEnv), where uv resolves it again; fill
       // the cache for that too, or they get no bridge (BEAST: Python 3.10 from PATH needed packages the cache lacked).
@@ -2969,6 +2981,27 @@ export class Daemon {
       log(`worker integrity: ${(e as Error).message}; agents run unfenced`);
       this.low = undefined;
     }
+  }
+
+  /**
+   * w5540: the fence for sandbox editors: a Low copy of the daemon's node as the launcher (lowCopy), checked to run, and the
+   * editor's environment (machine/unity.ts EditorFence). Undefined, and editors stay Medium, when the copy cannot be made or
+   * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
+   */
+  private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<EditorFence | undefined> {
+    const launcher = await lowCopy(root, process.execPath, exec, say);
+    if (!launcher) return undefined;
+    const probe = probeFence([launcher, '-e', '0'], { timeoutMs: 60_000 });
+    if (!probe.ok) {
+      log(`worker integrity: the Low node launcher could not run (${probe.why}); sandbox editors stay Medium`);
+      return undefined;
+    }
+    const { APPDATA, LOCALAPPDATA } = lowEnv(root, undefined, 'PATH', undefined);
+    const status = path.join(root, 'home', '.unity-mcp');
+    fs.mkdirSync(status, { recursive: true });
+    addMcpStatusDir(status);
+    const user = process.env.USERNAME || process.env.USER || 'worker';
+    return { launcher, unityDir: lowUnityDir(root), licensingIpc: `LicenseClient-${user}-low`, env: { APPDATA, LOCALAPPDATA, USERPROFILE: path.join(root, 'home'), UNITY_MCP_STATUS_DIR: status } };
   }
 
   /**
