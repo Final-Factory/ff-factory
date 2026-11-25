@@ -2425,8 +2425,10 @@ export async function firewallRepair(l: Layout, m: Manifest) {
   const node = agentNodeExe(l.root);
   const ffu = ffuServerExes(l.root);
   const exes = [...slots, ...(fs.existsSync(node) ? [node] : []), ...ffu];
-  const seen = parseFirewallCheck(await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp, [...(fs.existsSync(node) ? [node] : []), ...ffu]), 2 * 60_000).catch((e) => `${(e as Error).message}`));
-  if (!seen) return say('WARNING: Windows Firewall: could not read the rules, so they were not checked.');
+  const raw = await ps('reading the firewall rules', firewallCheckScript(exes, l.tmp, [...(fs.existsSync(node) ? [node] : []), ...ffu]), 2 * 60_000).catch((e) => `${(e as Error).message}`);
+  const seen = parseFirewallCheck(raw);
+  // w5581: the reason goes with it (the error, or the last lines it printed), so a failed read can be put right from the log.
+  if (!seen) return say(`WARNING: Windows Firewall: could not read the rules, so they were not checked (${raw.trim().split('\n').slice(-4).join(' | ').slice(0, 400) || 'no output'}).`);
   // w5581, warn stage: a rule that lets the agent node or ffu-server in from any address is reported, never made again here,
   // and its warning leaves out "Windows Firewall" so the rollout's elevated rerun (machineRollout.publishTools) does not
   // narrow it either. "peer" names each connection from outside the tailnet that narrowing would cut off; the enforce
