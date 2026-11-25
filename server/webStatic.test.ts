@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { IMMUTABLE, REVALIDATE, brandedManifest, serveStatic, webBuild, withBrand, withBuildMeta } from './webStatic.ts';
+import { IMMUTABLE, REVALIDATE, appCsp, brandedManifest, serveStatic, webBuild, withBrand, withBuildMeta } from './webStatic.ts';
 import { BUILD_META } from '../shared/freshness.ts';
 
 const INDEX_V1 = '<!doctype html><html><head><script type="module" src="/assets/index-aaaa.js"></script></head><body></body></html>';
@@ -45,6 +45,29 @@ async function withSite(fn: (get: (p: string, headers?: Record<string, string>) 
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5 });
   }
 }
+
+test('the app page and /login carry the CSP (scripts from this origin only, no framing, no plug-ins) and nosniff (w5518)', async () => {
+  await withSite(async (get) => {
+    for (const p of ['/', '/login', '/index.html']) {
+      const r = await get(p);
+      const csp = String(r.headers['content-security-policy'] ?? '');
+      assert.match(csp, /(^|; )script-src 'self'(;|$)/, p);
+      assert.match(csp, /(^|; )frame-ancestors 'none'(;|$)/, p);
+      assert.match(csp, /(^|; )object-src 'none'(;|$)/, p);
+      assert.doesNotMatch(csp, /script-src[^;]*(unsafe|blob:|data:)/, p);
+      // Remote images in agent text stop loading: no remote origin, no wildcard.
+      assert.match(csp, /(^|; )img-src 'self' data: blob:(;|$)/, p);
+      assert.equal(r.headers['x-content-type-options'], 'nosniff', p);
+    }
+  });
+});
+
+test('the CSP names the socket origin of a plain Host, and leaves out an odd one', () => {
+  assert.match(appCsp('fff.example.ts.net'), /connect-src 'self' wss:\/\/fff\.example\.ts\.net ws:\/\/fff\.example\.ts\.net;/);
+  assert.match(appCsp('127.0.0.1:8790'), /connect-src 'self' wss:\/\/127\.0\.0\.1:8790 ws:\/\/127\.0\.0\.1:8790;/);
+  assert.match(appCsp('[::1]:8790'), /wss:\/\/\[::1\]:8790/);
+  for (const odd of [undefined, '', "evil; script-src *", 'a b', 'x:99999999']) assert.match(appCsp(odd), /connect-src 'self';/, String(odd));
+});
 
 test('the page (/, index.html and any app route) revalidates every time and names its build; hashed bundles are kept for good', async () => {
   await withSite(async (get, dir) => {

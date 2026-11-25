@@ -1,6 +1,7 @@
 // The WebSocket protocol between the portal (server/machines.ts) and a machine daemon
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
+import type { PortalPinStatus } from '../machine/portalPin.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
 import type { AccountIdentity } from './usage.ts';
 import type { StaleContext } from './staleOutput.ts';
@@ -12,7 +13,7 @@ import type { DesktopSession } from '../shared/desktop.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
 import type { BenchHourRow } from '../shared/benchHours.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport, WorkerFenceReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -50,6 +51,7 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * at the hello (its Dev Drive not yet attached); an older portal drops it.
  * Also (w4922, no bump): `test_history`, a sandbox's local test run for the portal's per-test history, which an older portal
  * drops (the daemon sends it again later), answered by `test_history_ack`, which an older daemon drops.
+ * Also (w5576, no bump): `portalPin` in the hello (machine/portalPin.ts), which an older portal ignores.
  * Also (w5551, no bump): `steamUpload` in the hello and `steam_upload`, sent only to a daemon that offered it, answered by
  * `steam_upload_state`, which an older portal drops.
  */
@@ -158,8 +160,10 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
  * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
  * portal re-emits it with no listener, and an older daemon or host never sends it.
+ * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended }
+ * (machine/workerCaps.ts); an older portal ignores it.
  */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize';
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";
@@ -403,6 +407,8 @@ export type FromDaemon =
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
       selfUpdate?: number;
+      /** The portal hosts it follows and what pinning would have refused (w5576, machine/portalPin.ts). An older portal ignores it. */
+      portalPin?: PortalPinStatus;
       /** A worker root install (w513): its folders, so a record made without a deploy learns them. */
       /** `ssh` (w4674): whether its installer set up the portal's ssh (root.json); absent from an older daemon or an unreadable root.json. */
       layout?: { root: string; appDir: string; repoPath: string; tempDir?: string; sandboxes?: SandboxPoolSettings | null; ssh?: boolean };
@@ -415,6 +421,8 @@ export type FromDaemon =
   | { type: 'activity_set'; activity: { enabled: boolean; idleMinutes: number } }
   /** Its host guard's state, when it changes (protocol 8, w466). */
   | { type: 'host_health'; health: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'> }
+  /** Its worker write fence's state, at welcome and when it changes (w5555): a failed one holds its sandbox workers. */
+  | { type: 'worker_fence'; fence: WorkerFenceReport }
   /** The session's current record (the daemon's AgentSession changed it). */
   | { type: 'session'; info: SessionInfo; live: boolean }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }

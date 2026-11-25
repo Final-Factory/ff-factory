@@ -1,4 +1,5 @@
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
+import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
 import { untimedText } from '../shared/benchGlance.ts';
 import { modelChoices, workerModelChoice } from './workerModel.ts';
@@ -20,7 +21,7 @@ import { FfboxSymbolUploads, describeSymbolUpload } from './ffboxUrgentSymbols.t
 import { postAsMax, postImages } from './ffboxPost.ts';
 import { setFfboxConfig } from './ffboxConfig.ts';
 import type { MaxManager } from './max.ts';
-import { eventsFileOf, maxEnv } from './maxEvents.ts';
+import { maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
@@ -65,6 +66,7 @@ import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWin
 import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { tempSizeLedgerLine } from './tempSizeHook.ts';
+import { capLedgerLine } from '../machine/workerCaps.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -1330,6 +1332,7 @@ export class Agents {
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) => this.onWorkerPermission(s, p));
     // w3686: a worker's temp folder is over its threshold: one line in each open request it serves (the worker was told by its own hook).
     sessions.events.on('tempSize', (s: SessionHandle, arg?: unknown) => this.onWorkerTempSize(s, arg));
+    sessions.events.on('workerCap', (s: SessionHandle, arg?: unknown) => this.onWorkerCap(s, arg));
   }
 
   /**
@@ -3502,6 +3505,16 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined, true);
   }
 
+  /** w5554: a worker's host hit one of its caps and ended its tools (machine/workerCaps.ts): its requests' ledgers say so. */
+  private onWorkerCap(s: SessionHandle, arg: unknown) {
+    const line = capLedgerLine(s.info.id, arg);
+    if (!line) return;
+    console.warn(line);
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    // Not quiet: a person should see a runaway was stopped.
+    for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined);
+  }
+
   private onWorkerPermission(s: SessionHandle, arg: { toolName: string; input: unknown; reason?: string } | undefined) {
     if (s.info.kind !== 'worker' || s.lastFrom !== 'orchestrator') return;
     // A machine's daemon sends the signal without the request (machine/daemon.ts): it is the session's newest pending one.
@@ -5553,8 +5566,8 @@ A report is for a person who asked for one, and people want very few. File one w
         // countdown's (it counts down from a fixed 15,000,000). Claude Code 2.1.284 reads this switch first (`off` is one of its
         // modes); measured on a probe session there: the first message's total_tokens_reminder attachment is gone.
         CLAUDE_CODE_TOTAL_TOKENS_REMINDER: 'off',
-        // On the portal's own host its agents write this server's Max events file (the daemon keeps none of its own there).
-        ...(m.local ? { FF_MAX_EVENTS: eventsFileOf(this.cfg) } : {}),
+        // w5552: no FF_MAX_EVENTS. A sandbox agent posts as Max through post_as_max (the portal records it with its session);
+        // the events file is the daemon's and no fence lets a worker write it (machine/maxEventsFence.ts).
         ...connectorEnv(this.cfg, 'workers'),
         // The nightly run's worker (w864): FF Factory's URL and that night's nightly-scoped key, for the lab's report.
         // Redacted like every *_KEY of a launch spec (server/secrets.ts SECRET_ENV); never in a brief or a file.
@@ -6219,6 +6232,8 @@ A report is for a person who asked for one, and people want very few. File one w
         // there (w1894) and its load are not known. After the 08:07Z restart on 2026-10-27 a room move sent 9524a4bc (w2335)
         // to lothdesktop at 08:07:14, five seconds before its report said lothsahn was playing there.
         online: this.machines.isOnline(m.id) && (!!st || !!m.local),
+        // w5555: its daemon holds every sandbox worker while its worker fence has failed, so placement sends work elsewhere.
+        ...(m.fence?.state === 'failed' ? { fenceFailed: m.fence.why ?? 'no reason given' } : {}),
         live: mine.filter((s) => s.live).length,
         midTurn: mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),
@@ -7472,6 +7487,8 @@ ${w.repo ?? ''}
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : m.noSsh ? 'no ssh (joined with -NoSsh: updated over its link, w4674)' : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? (m.pause?.paused ? PAUSED_STATE : 'online') : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}${this.machines.isOnline(m.id) && m.pause?.paused ? ` (${pauseHold(m.pause, Date.now())}): nothing is placed, queued or planned here, and what waits here moves, as for an offline computer; only work pinned here waits, Blocked` : `; ${m.status}`}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; screen: ${desktopLabel(m.desktop)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
+      // The portal hosts its daemon follows (w5576): online machines only.
+      ...(this.machines.isOnline(m.id) ? [`  ${describePortalPin(this.machines.portalPinOf(m.id))}`] : []),
       sandboxes,
       // A person playing Final Factory there (w1894): why it is busy and until when.
       ...(this.machines.personPlayOf(m.id) ? [`  playing: ${playLine(this.machines.personPlayOf(m.id)!)}`] : []),

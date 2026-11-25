@@ -1109,6 +1109,18 @@ export interface MachinePause {
   at?: string;
 }
 
+/** A machine's worker write fence as its daemon reports it (w5555, machine/fenceGate.ts). */
+export interface WorkerFenceReport {
+  /** off: this OS's fence key is absent (switched off on purpose); setting_up: workers wait; on; failed: workers are held. */
+  state: 'off' | 'setting_up' | 'on' | 'failed';
+  /** Which fence: macOS Seatbelt, Linux Landlock, Windows Low integrity. */
+  kind?: 'seatbelt' | 'landlock' | 'low';
+  /** Why it failed: the probe's error, for the portal's alert. */
+  why?: string;
+  /** When it reached this state (ISO). */
+  since?: string;
+}
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -1151,6 +1163,11 @@ export interface Machine {
   daemonExtras?: { unityMcpServer?: { command: string; args: string[]; env?: Record<string, string> }; sandboxIdleStopMinutes?: number; hostGuard?: MachineGuardSettings };
   /** Its daemon runs the host guard (w466, machine/hostGuard.ts) and this is its last state: the sandbox drive, disk levels, what waits. */
   guard?: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'>;
+  /**
+   * Its worker write fence (w5555, machine/fenceGate.ts): off (this OS's key absent, on purpose), setting up, on, or failed
+   * with the probe's error. A failed fence holds its sandbox workers, and placement counts the machine busy.
+   */
+  fence?: WorkerFenceReport;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.

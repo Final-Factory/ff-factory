@@ -46,7 +46,7 @@ export const CI_CHILDREN = ['ffu-runners'];
 // Not `steam` (w5551): steamcmd's folder, its config and cached login are the daemon's alone (machine/steamUpload.ts);
 // a worker uploads through steam_upload.
 export const WORKER_CHILDREN = [
-  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'max', 'nightly', 'nightly-history',
+  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
   'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam-lobby-gate',
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];

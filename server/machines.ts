@@ -2,7 +2,7 @@ import { noteBench, recentPlayers, type PlayerSeen } from './crashHolds.ts';
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import type { SaveResult } from './saveWork.ts';
 import path from 'node:path';
 import type http from 'node:http';
@@ -18,6 +18,7 @@ import { AnsweredCalls } from './answeredCalls.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
 import { LINK_ACK_MS, PendingCalls, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
+import type { PortalPinStatus } from '../machine/portalPin.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
@@ -31,7 +32,7 @@ import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
 import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary, WorkerFenceReport } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -690,6 +691,29 @@ export class MachineManager {
   offlineAlert?: (machineId: string, title: string, text: string) => void;
   /** The machines offlineAlert told about, with when they went offline, until they are back. */
   private offlineAlerted = new Map<string, number>();
+  /**
+   * A machine's worker fence failed, or is back (w5555; wired by index.ts like offlineAlert: the orchestrator and a push).
+   * Called once per failure: on the change to failed, and once more when a failed fence is on or off again.
+   */
+  fenceAlert?: (machineId: string, title: string, text: string) => void;
+
+  /** Its daemon's worker fence report (w5555, machine/fenceGate.ts): stored on the machine, alerted when it fails. */
+  takeFence(id: string, raw: unknown): void {
+    const f = fenceReportOf(raw);
+    if (!f) return;
+    const m = this.store.machines.get(id);
+    if (!m) return;
+    const was = m.fence?.state;
+    this.update(id, { fence: f });
+    const name = m.name ?? id;
+    if (f.state === 'failed' && was !== 'failed') {
+      console.log(`machine ${id}: worker fence FAILED (${f.why ?? 'no reason given'}): its sandbox workers are held`);
+      this.fenceAlert?.(id, `${name}: worker fence failed`, `[machine ${id}] The worker fence on ${name} failed: ${f.why ?? 'no reason given'}. Its daemon holds every sandbox worker so none starts unfenced, and placement sends work to other machines. Fix the fence (its daemon log says why; a daemon restart probes again) or switch it off on purpose with ops_worker machine_update worker_fence off (docs/worker-root.md, "When the fence fails").`);
+    } else if (was === 'failed' && (f.state === 'on' || f.state === 'off')) {
+      console.log(`machine ${id}: worker fence ${f.state} again: its sandbox workers start`);
+      this.fenceAlert?.(id, `${name}: worker fence ${f.state}`, `[machine ${id}] The worker fence on ${name} is ${f.state === 'on' ? 'on again' : 'switched off'}: its sandbox workers start again.`);
+    }
+  }
 
   // ---------------------------------------------------------------- agents cut off by a dropped link
 
@@ -1072,7 +1096,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; portalPin?: PortalPinStatus }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1175,6 +1199,11 @@ export class MachineManager {
   }
 
   /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
+  /** The portal hosts its daemon follows and what pinning would have refused (w5576), from its hello; undefined from an older daemon. */
+  portalPinOf(id: string): PortalPinStatus | undefined {
+    return this.isOnline(id) ? this.hellos.get(id)?.portalPin : undefined;
+  }
+
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
   }
@@ -2411,7 +2440,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
@@ -2660,6 +2689,9 @@ export class MachineManager {
         return;
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
+        return;
+      case 'worker_fence':
+        this.takeFence(id, msg.fence);
         return;
       case 'self_update_offer': {
         // w4672: the hello offered no update over the link (its root.json unreadable then); the daemon offers it now.
@@ -3474,7 +3506,7 @@ export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'pl
 /** The commit a checkout is at, or undefined. */
 function gitHead(dir: string): string | undefined {
   try {
-    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
+    return gitExecFileSync(['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
   } catch {
     return undefined;
   }
@@ -3507,4 +3539,19 @@ export function daemonBehind(h: { daemon?: string }, portalHead: string | undefi
   if (!d || !p || !/^[0-9a-f]{7,40}$/.test(d)) return undefined;
   if (!p.startsWith(d) && !d.startsWith(p)) return `it runs ${d.slice(0, 9)}, this portal ${p.slice(0, 9)}`;
   return undefined;
+}
+
+const FENCE_STATES = new Set<WorkerFenceReport['state']>(['off', 'setting_up', 'on', 'failed']);
+const FENCE_KINDS = new Set<NonNullable<WorkerFenceReport['kind']>>(['seatbelt', 'landlock', 'low']);
+
+/** A daemon's worker_fence report, checked field by field (w5555); undefined when it is not one. */
+export function fenceReportOf(raw: unknown): WorkerFenceReport | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (!FENCE_STATES.has(r.state as WorkerFenceReport['state'])) return undefined;
+  const out: WorkerFenceReport = { state: r.state as WorkerFenceReport['state'] };
+  if (FENCE_KINDS.has(r.kind as NonNullable<WorkerFenceReport['kind']>)) out.kind = r.kind as WorkerFenceReport['kind'];
+  if (typeof r.why === 'string' && r.why) out.why = r.why.slice(0, 600);
+  if (typeof r.since === 'string' && !Number.isNaN(Date.parse(r.since))) out.since = r.since;
+  return out;
 }
