@@ -638,6 +638,7 @@ const labFixtures = new LabFixtures({
 agents.labFixtures = labFixtures;
 machines.onLabHolder = (id) => labFixtures.onHolder(id);
 machines.labFixtureReport = (id, msg) => labFixtures.onReport(id, msg);
+agents.wireSteamUploads();
 // What each machine's exclusive bench tickets cost it, per UTC hour (w1996): portal_logs source bench_hours.
 const benchHours = new BenchHoursStore({ dataDir: cfg.dataDir });
 machines.benchHours = (id, rows) => {
