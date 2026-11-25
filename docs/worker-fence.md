@@ -129,7 +129,21 @@ machine/readFence.ts, from `tokenFile`), `<root>/root.json` and the daemon's fol
 `FENCE_READ_ALLOW` (server/daemonReads.ts): the guard's diagnostic reads (`DAEMON_READ_ALLOW`: logs, the code in `src` and
 `app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
 given back: `daemon.json`, `hosts` (other sessions' specs and environments), `gh-app/tokens.json` (every app's tokens),
-`root.json` and `root-backup.json` (dropped from the guard's list too). A run's own GitHub App tokens file
+`root.json` and `root-backup.json` (dropped from the guard's list too).
+
+**`<root>/steam` is closed too** (w5639, after w5551 made it unwritable): steamcmd, its cached Steam login (the ConnectCache
+in steamcmd's config), the upload `config.json`, the daemon's ffbox clone and `uploads.json`. It is every root child in
+`DAEMON_ONLY_CHILDREN` (server/claudeHome.ts), read-denied on each OS from that one list: macOS `READ_DENIED_IN_ROOT`
+(server/workerFence.ts), Linux `readLockArgs` (machine/writeLock.ts), Windows `noReadUpTargets` (machine/lowIntegrity.ts),
+and the probe's closed paths (`daemonOnlyDirs`, machine/readFence.ts). Nothing is given back inside it. Why this locks out
+nobody who needs it: the daemon runs steamcmd, the checks and the uploads itself (machine/steamUpload.ts `run`), unfenced and
+at Medium, and a No-Read-Up label refuses only a lower integrity; the person's own processes are Medium or unfenced too; no
+worker tool reads it (the `steam_upload` tool asks the daemon, and `urgent_release.py` stopped installing steamcmd in w5640).
+`steam-lobby-gate`, which workers write, is another child and stays open. It follows the same mode as the rest: `read-fence-off`
+takes its label off (Windows) and leaves it out of new runs' rules (macOS, Linux), from the portal with nobody at the machine.
+Tests: server/workerFence.test.ts "w5639", server/writeLock.test.ts (a live Landlock run on Linux CI).
+
+A run's own GitHub App tokens file
 (`gh-app/sessions/<session>/tokens.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux), as a folder, so its rewrite by rename stays readable.
 
 | OS | How | Where |

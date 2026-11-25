@@ -1,6 +1,7 @@
 // The worker read fence's daemon-side helpers (w5546; docs/worker-fence.md "Reads"). No npm package: linkJob-safe.
 import fs from 'node:fs';
 import path from 'node:path';
+import { DAEMON_ONLY_CHILDREN } from '../server/claudeHome.ts';
 
 /**
  * The read fence's mode on this machine (w5546 lockout review, lothsahn's rule: "warn-only first, enforce only after measured
@@ -57,11 +58,21 @@ export function secretsDirs(root: string, tokenFile?: string): string[] {
   return out;
 }
 
+/**
+ * The root children only the daemon reads, closed to workers' reads like the secrets (w5639): `<root>/steam` (w5551), which
+ * holds steamcmd and its cached Steam login, the upload config, the daemon's ffbox clone and uploads.json. The daemon runs
+ * steamcmd and the uploads itself, unfenced (machine/steamUpload.ts), so the fence never stands in their way.
+ */
+export function daemonOnlyDirs(root: string): string[] {
+  return DAEMON_ONLY_CHILDREN.map((c) => path.join(path.resolve(root), c));
+}
+
 /** What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only. */
 export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
   const closed = [
     ...o.secrets,
+    ...daemonOnlyDirs(o.root),
     ...(o.tokenFile ? [path.resolve(o.tokenFile)] : []),
     path.join(o.root, 'root.json'),
     path.join(o.appDir, 'daemon.json'),

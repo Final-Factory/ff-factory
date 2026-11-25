@@ -314,6 +314,65 @@ test('w5546 lockout review B3: a Dev Drive install\'s secrets in the host folder
   assert.equal(deny.split('(subpath "/Users/p/ffw/secrets")').length, 2, '<root>/secrets once');
 });
 
+test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-denied on every OS, and only it', async () => {
+  const { DAEMON_ONLY_CHILDREN } = await import('./claudeHome.ts');
+  const { readLockArgs } = await import('../machine/writeLock.ts');
+  const { NO_READ_UP, noReadUpTargets } = await import('../machine/lowIntegrity.ts');
+  const { daemonOnlyDirs } = await import('../machine/readFence.ts');
+  assert.deepEqual([...DAEMON_ONLY_CHILDREN], ['steam']);
+  // macOS: in the deny block, absent from the allow block; steam-lobby-gate (the lobby gate's folder) is no subpath of it.
+  const p = seatbeltProfile(F);
+  const deny = p.slice(p.indexOf('(deny file-read-data'), p.indexOf('(allow file-read-data'));
+  const allow = p.slice(p.indexOf('(allow file-read-data'));
+  const sub = `(subpath ${JSON.stringify(path.join(F.root, 'steam'))})`;
+  assert.ok(deny.includes(sub), deny);
+  assert.ok(!/steam/.test(allow), allow);
+  assert.ok(!deny.includes('steam-lobby-gate'), "the lobby gate's folder, which workers write, stays readable");
+  assert.ok(seatbeltProfile({ ...F, readOff: true }).includes(sub), 'read-fence-off keeps the write deny');
+  assert.ok(!/\(deny file-read-data/.test(seatbeltProfile({ ...F, readOff: true })), 'read-fence-off: no read rules, steam included (the recovery route)');
+  // Linux: a --no-read, never a --read.
+  const root = path.resolve('/home/u/ffw');
+  const a = readLockArgs({ root });
+  const steam = path.join(root, 'steam');
+  assert.ok(a.some((x, i) => x === steam && a[i - 1] === '--no-read'), a.join(' '));
+  assert.ok(!a.some((x, i) => a[i - 1] === '--read' && (x === steam || x.startsWith(steam + path.sep))), a.join(' '));
+  // Windows: No-Read-Up on the folder (inherited by everything in it), only when it is there; the same list openNoReadUp
+  // walks to take the labels off at read-fence-off.
+  const W = 'F:\\ffw';
+  const there = new Set([W + '\\daemon', W + '\\secrets', W + '\\steam', W + '\\steam-lobby-gate']);
+  const stat = (x: string) => (there.has(x.replace(/\//g, '\\')) ? ('dir' as const) : undefined);
+  const t = noReadUpTargets({ root: W, appDir: W + '\\daemon', allowBack: [], stat });
+  const s = t.find((x) => x.path.replace(/\//g, '\\') === W + '\\steam');
+  assert.equal(s?.sddl, NO_READ_UP.dir, JSON.stringify(t));
+  assert.ok(!t.some((x) => /steam-lobby-gate/.test(x.path)));
+  assert.ok(!noReadUpTargets({ root: W, appDir: W + '\\daemon', allowBack: [], stat: (x) => (/steam/.test(x) ? undefined : stat(x)) }).some((x) => /steam/.test(x.path)), 'a machine without steam: no target');
+  // The probe: steam is a closed path once it exists.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsteam-'));
+  try {
+    const r = path.join(dir, 'ffw');
+    fs.mkdirSync(path.join(r, 'daemon', 'logs'), { recursive: true });
+    assert.ok(!readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'] }).closed.some((x) => /steam/.test(x)));
+    fs.mkdirSync(path.join(r, 'steam'));
+    fs.mkdirSync(path.join(r, 'steam-lobby-gate'));
+    fs.writeFileSync(path.join(r, 'steam', 'config.json'), '{}');
+    fs.writeFileSync(path.join(r, 'steam-lobby-gate', 'x.json'), '{}');
+    assert.deepEqual(daemonOnlyDirs(r), [path.join(r, 'steam')]);
+    const t2 = readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'] });
+    assert.deepEqual(t2.closed, [path.join(r, 'steam')]);
+    if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
+      // Under the real profile: steam's folder and its config.json refused, the lobby gate's file open.
+      const real = fs.realpathSync(r);
+      const fence: WorkerFence = { ...F, root: real, home: os.homedir(), appDir: path.join(real, 'daemon') };
+      const want = { closed: [path.join(real, 'steam'), path.join(real, 'steam', 'config.json')], open: [path.join(real, 'steam-lobby-gate', 'x.json'), path.join(real, 'daemon', 'logs')] };
+      const [cmd, ...args] = fencedArgv(fence, process.execPath, ['-e', READ_PROBE_SCRIPT, ...want.closed, ...want.open]);
+      const f = spawnSync(cmd, args, { encoding: 'utf8' });
+      if (!/sandbox_apply/.test(f.stderr)) assert.deepEqual(judgeReadProbe(want, f.stdout), { wronglyRefused: [], leftOpen: [], unknown: [] }, f.stdout + f.stderr);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('w5546 lockout review B1: the probe opens each path without reading it and says what would lock workers out', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffprobe-'));
   const root = path.join(dir, 'ffw');

@@ -91,7 +91,7 @@ test('w5546: readLockArgs closes the daemon folder, secrets and root.json, and g
   const root = path.resolve('/r');
   const a = readLockArgs({ root, read: [path.join(root, 'daemon/gh-app/sessions/s1')] });
   const of = (flag: string) => a.flatMap((x, i) => (a[i - 1] === flag ? [x] : []));
-  assert.deepEqual(of('--no-read'), [path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json')]);
+  assert.deepEqual(of('--no-read'), [path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), path.join(root, 'steam')], 'steam: w5639');
   const back = of('--read');
   for (const x of ['logs', 'src', 'app', 'gh-app/bin', 'unity-mcp', 'sandboxes.json', 'gh-app/sessions/s1']) assert.ok(back.includes(path.join(root, 'daemon', x)), x);
   for (const x of back) assert.ok(!/tokens\.json|daemon\.json|hosts|root(-backup)?\.json|secrets/.test(x), `never given back: ${x}`);
@@ -99,18 +99,19 @@ test('w5546: readLockArgs closes the daemon folder, secrets and root.json, and g
   assert.ok(other.includes(path.resolve('/opt/ffd')) && other.includes(path.join(path.resolve('/opt/ffd'), 'logs')));
 });
 
-test('ff-landlock.py w5546: a locked worker cannot read secrets, root.json or a closed daemon file, and reads the rest', { skip: !landlock && 'needs Linux with Landlock' }, () => {
+test('ff-landlock.py w5546: a locked worker cannot read secrets, root.json, steam or a closed daemon file, and reads the rest', { skip: !landlock && 'needs Linux with Landlock' }, () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w5546-'));
   try {
     const root = path.join(base, 'root');
-    for (const d of ['daemon/logs', 'daemon/gh-app/sessions/s1', 'daemon/gh-app/sessions/s2', 'secrets', 'tmp']) fs.mkdirSync(path.join(root, d), { recursive: true });
-    for (const f of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/logs/daemon.log', 'daemon/gh-app/sessions/s1/tokens.json', 'daemon/gh-app/sessions/s2/tokens.json', 'tmp/mine']) fs.writeFileSync(path.join(root, f), 'x');
-    const tries = ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/gh-app/sessions/s2/tokens.json', 'daemon/logs/daemon.log', 'daemon/gh-app/sessions/s1/tokens.json', 'tmp/mine'];
-    const script = ['try() { if cat "$2" >/dev/null 2>&1; then echo "$1 ok"; else echo "$1 refused"; fi; }', ...tries.map((t) => `try ${t} "${path.join(root, t)}"`), 'try etc /etc/passwd'].join('\n');
+    for (const d of ['daemon/logs', 'daemon/gh-app/sessions/s1', 'daemon/gh-app/sessions/s2', 'secrets', 'steam', 'steam-lobby-gate', 'tmp']) fs.mkdirSync(path.join(root, d), { recursive: true });
+    for (const f of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/logs/daemon.log', 'daemon/gh-app/sessions/s1/tokens.json', 'daemon/gh-app/sessions/s2/tokens.json', 'steam/config.json', 'steam-lobby-gate/gate.json', 'tmp/mine']) fs.writeFileSync(path.join(root, f), 'x');
+    // w5639: steam's config.json (steamcmd's cached login sits beside it) is refused; the lobby gate's folder is not.
+    const tries = ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/gh-app/sessions/s2/tokens.json', 'steam/config.json', 'daemon/logs/daemon.log', 'daemon/gh-app/sessions/s1/tokens.json', 'steam-lobby-gate/gate.json', 'tmp/mine'];
+    const script = ['try() { if cat "$2" >/dev/null 2>&1; then echo "$1 ok"; else echo "$1 refused"; fi; }', ...tries.map((t) => `try ${t} "${path.join(root, t)}"`), `if ls "${path.join(root, 'steam')}" >/dev/null 2>&1; then echo 'ls-steam ok'; else echo 'ls-steam refused'; fi`, 'try etc /etc/passwd'].join('\n');
     const args = [...writeLockArgs({ root }), ...readLockArgs({ root, read: [path.join(root, 'daemon/gh-app/sessions/s1')] })];
     const r = spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'bash', '-c', script], { encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
-    assert.deepEqual(r.stdout.trim().split('\n'), [...tries.slice(0, 5).map((t) => `${t} refused`), ...tries.slice(5).map((t) => `${t} ok`), 'etc ok']);
+    assert.deepEqual(r.stdout.trim().split('\n'), [...tries.slice(0, 6).map((t) => `${t} refused`), ...tries.slice(6).map((t) => `${t} ok`), 'ls-steam refused', 'etc ok']);
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
