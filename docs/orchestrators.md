@@ -1585,6 +1585,22 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   in a gated repository) is run, and a failure refused with its lines and the section to add (Kind:, a claims table, Not
   verified:). Before, FinalFactory #3741 (a draft), #3748 and #3760 (no Evidence section) were each refused only after
   green CI, a worker turn each. `ff-pr push` runs the same check after its push and prints a WARNING when it fails.
+- w5549 (the rogue-worker audit w5451, item 17; lothsahn: "merge_on_green only merges the worker's own PR"): FF Factory
+  merges on green only the worker's own pull request, read from GitHub, never from the worker's word. When it arms,
+  blocked_on reads the pull request (the same health read, now with `headRefName`, `headRepository`,
+  `headRepositoryOwner` and `isCrossRepository`) and refuses, saying why and recording nothing, unless its head is a branch
+  of the pull request's own repository (not a fork) that is the worker's sandbox branch (in the game repo:
+  `workerBranch`, or the sandbox's record), the request's own branch (`WorkItem.source.branch`, an intake request's
+  `ffbox/...`), or a branch named for the request (`wNNNN` as a whole word: `w5549-merge-owner`, not `w55490`). A shared
+  branch (develop, master, main, release/...) and a pull request FF Factory cannot read are refused
+  (server/mergeOwner.ts mergeOwnerProblem, Orchestrators.mergeOnGreenAsk). The gate records the head branch it passed
+  (`mergeOnGreen.headRef`); at the merge the blocker watch reads the pull request again and does not merge it if its head
+  is now another branch or repository (BlockerWatch.ownedAtMerge, mergeTimeProblem): the worker is resumed as on any
+  refused merge. A gate armed before this check, with no headRef, is not merged either; its worker merges it.
+  `ff-pr merge` (machine/prFlow.ts notOwnPr) refuses a fork's pull request and, given `--pr`, one whose head is not the
+  checkout's branch; it runs in the worker's shell on its own token, so that check is advisory. A raw `gh pr merge` in a
+  worker's shell is not checked for ownership: a person may ask a worker to merge another's pull request, which the shell
+  guard (server/guard.ts) cannot tell apart.
 - With the report left, the gate keeps it (`WorkBlocker.mergeOnGreen`: head, report, session) and the worker ends its turn with
   only its still-open line. A DONE in that turn is held: it is the report's (doneMarkers).
 - When the checks finish all green (`CiState.green`: every check or workflow run passed or skipped, or GitHub's merge state

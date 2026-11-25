@@ -114,6 +114,10 @@ test('w913: a save copy named with the session\'s own tag may go; any other save
   refused(`rm -f "/home/b/ffw/gamedata/UserData/saves/MyBigBase.zip"`);
   refused(`rm -f "/home/b/ffw/gamedata/UserData/saves/ffa-0000aaaa-a.zip"`);
   refused(`rm -f "/home/b/ffw/gamedata/UserData/settings.json"`);
+  // w5557: a sandbox's own data root inside it (gameData.ts sandboxGameDataDir).
+  ok(`rm -f "V:/ffw/gamedata/sandboxes/slot3/UserData/saves/ffa-ee5b82dc-w5557.zip"`);
+  refused(`rm -f "V:/ffw/gamedata/sandboxes/slot3/UserData/saves/MyBigBase.zip"`);
+  refused(`rm -f "V:/ffw/gamedata/sandboxes/slot3/UserData/settings.json"`);
   // The game's UserData layout (GameDataPaths.Saves = UserData/saves) is the same folder for this rule.
   ok(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/saves/ffa-ee5b82dc-a.zip"`);
   refused(`rm -f "/c/Users/rydin/AppData/LocalLow/Never Games/finalfactory/UserData/saves/MyBigBase.zip"`);

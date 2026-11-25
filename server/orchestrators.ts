@@ -9,7 +9,8 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -87,6 +88,7 @@ import { permissionAccess, permissionWhat, type PermissionAccess } from '../shar
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
+import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
@@ -5883,7 +5885,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return out;
   }
 
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; disk?: boolean; what: string; head?: string; mergeOnGreen?: string }): string {
+  workerBlocked(
+    sessionId: string,
+    a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; disk?: boolean; what: string; head?: string; mergeOnGreen?: string; prHeads?: ReadonlyMap<string, PrHealth | undefined> },
+  ): string {
     const w = this.workerRequest(sessionId, a.request, 'blocked_on', { reopen: true });
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
@@ -5927,7 +5932,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const gates = asked.map((b) => this.makeGate(b, now.toISOString(), `worker ${sessionId}`)).filter((g, i, all) => all.findIndex((x) => sameGate(x, g)) === i);
     const before = gatesOf(w);
     if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
-    const pilot = this.mergeOnGreenAsk(w, sessionId, gates, a.head, a.mergeOnGreen);
+    const pilot = this.mergeOnGreenAsk(w, sessionId, gates, a.head, a.mergeOnGreen, a.prHeads);
     // w2153: this worker's wait replaces its own gates and the dispatcher's, never another worker's on the same request.
     const kept = othersGates(w, sessionId).filter((k) => !gates.some((g) => sameGate(g, k)));
     const all = [...kept, ...gates];
@@ -6283,7 +6288,14 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * that does not fit (out of the arm, other gates, no head, no DONE line for this request), the wait is set without it and
    * the worker hears why. The report's DONE is checked when it is filed (doneMarkers), as any report's is.
    */
-  private mergeOnGreenAsk(w: WorkItem, sessionId: string, gates: WorkBlocker[], head: string | undefined, report: string | undefined): { merge?: true; rearmed?: true; note?: string } {
+  private mergeOnGreenAsk(
+    w: WorkItem,
+    sessionId: string,
+    gates: WorkBlocker[],
+    head: string | undefined,
+    report: string | undefined,
+    prHeads?: ReadonlyMap<string, PrHealth | undefined>,
+  ): { merge?: true; rearmed?: true; note?: string } {
     const inArm = this.d.mergeOnGreenPilot?.(w.id) === true;
     const ciOnly = gates.length === 1 && gates[0].kind === 'ci';
     // w3906: a report kept from a merge GitHub refused as not mergeable re-arms the same pull request's merge when none is given.
@@ -6309,10 +6321,27 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
             ? `the report has no "DONE: ${w.id}" line, nor "LEG DONE: ${w.id} <your leg>" for one leg of it (work left after the merge: leave out merge_on_green)`
             : undefined;
     if (why) return { note: `merge_on_green ignored: ${why}; you are resumed when CI finishes, as usual.` };
-    gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId };
+    // w5549: only the worker's own pull request, by its head as GitHub reads it (Agents.declareBlocked), never the worker's word.
+    const ref = gates[0].ref!;
+    const pr = prHeads?.get(ref);
+    const notOwn = mergeOwnerProblem(ref, pr, this.mergeOwnerOf(w, sessionId));
+    if (notOwn) throw new Error(mergeOwnerRefusal(ref, notOwn));
+    gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId, headRef: pr!.headRef! };
     w.keptMergeReport = undefined;
     this.stamp(w, `${MERGE_ON_GREEN_MARK}: worker ${sessionId} ${kept ? `re-armed with the report kept from the refused merge at ${kept.head.slice(0, 12)} (w3906)` : 'left its after-merge report'} (${clip(firstLine(text), 160)}); FF Factory merges ${gates[0].ref} on green at ${head!.trim().slice(0, 12)}`);
     return { merge: true, ...(kept ? { rearmed: true as const } : {}) };
+  }
+
+  /** w5549: what FF Factory's own records say is the worker's: its sandbox's branch, the request's own branch, the game repo. */
+  private mergeOwnerOf(w: WorkItem, sessionId: string): MergeOwner {
+    const i = this.store.sessions.get(sessionId);
+    const sb = i?.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox) : undefined;
+    return {
+      request: w.id,
+      sandboxBranches: i ? [workerBranch(i, sb), sb?.branch] : [],
+      ...(repoSlug(this.d.cfg.repo.url) ? { gameRepo: repoSlug(this.d.cfg.repo.url)! } : {}),
+      ...(w.source?.branch ? { sourceBranch: w.source.branch } : {}),
+    };
   }
 
   /**

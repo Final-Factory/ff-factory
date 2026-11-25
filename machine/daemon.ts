@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { ghConfigDirFor, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, labelLow, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -98,7 +98,7 @@ import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TestHistorySpool } from './testHistorySpool.ts';
 import { TimedRunner, timedRunEnv } from './timedRunner.ts';
-import { GAME_DATA_VARIABLE, PLAYER_HOME_VARIABLE, workerGameDataDir, workerPlayerHomeDir } from './gameData.ts';
+import { GAME_DATA_VARIABLE, PLAYER_HOME_VARIABLE, legacyGameDataRoot, sandboxGameDataDirs, sandboxGameDataEnv, workerGameDataDir, workerPlayerHomeDir } from './gameData.ts';
 import { findFixtures, listFixtures, offeredDir, sendFixture } from './labFixtures.ts';
 import { timedRunFromMachine } from './timedRunPack.ts';
 import { readBenchState } from './benchState.ts';
@@ -158,6 +158,13 @@ export interface DaemonConfig {
    * labelled alone; anything else as a folder. Example: the Unity slots mailbox when it is not in the root.
    */
   workerIntegrityAllow?: string[];
+  /**
+   * w5557: with the fence on, also keep the owner's own Final Factory folder (AppData\LocalLow\Never Games\finalfactory,
+   * their saves and settings) Medium, so a Low worker's write there is refused (no-write-up). Opt-in per machine because it
+   * changes a label on the owner's C: drive: LothDesktop's rule keeps workers and the daemon off C:, so it is set only
+   * where the owner asked (BEAST). Workers' own games write to their sandbox's folder in the root (gameData.ts).
+   */
+  workerIntegrityLockGameData?: boolean;
   /**
    * w5540: false keeps sandbox editors unfenced (Medium) while agents are fenced. Unset or true: with the Windows fence on,
    * the daemon starts each sandbox editor at Low integrity too (machine/unity.ts EditorFence), so C# a worker writes, and
@@ -1050,7 +1057,8 @@ export class Daemon {
         const roots = this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined;
         // w5281: old runs in the shared determinism audit folder (<root>/cache/determinism-audit) age out.
         // w5306: playtest sessions in the worker's game data root (<root>/gamedata/PlaytestSessions) age out as in the old folder.
-        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root)] : [] }, DEFAULT_CLEANUP), roots, HOME);
+        // w5557: and in each sandbox's own (<root>/gamedata/sandboxes/<id>/PlaytestSessions).
+        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
         // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
         if (!opts.dryRun) void this.mediumUvPruner?.maybe(low);
@@ -2163,10 +2171,11 @@ export class Daemon {
   /**
    * What an agent's processes need to take Unity slots (docs/unity-lifecycle.md, "Unity slots"): the mailbox, who they
    * hold for (their sandbox; a standing agent holds for itself, w536), and `unity-slot` first on their PATH. Exported
-   * through the class for tests.
+   * through the class for tests. w5557: and a sandbox agent's own game data root (sandboxGameDataEnv), the one its editor
+   * has, so the players and batch runs it starts keep their saves in that sandbox's folder.
    */
-  slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>): Record<string, string> {
-    const env: Record<string, string> = { FF_UNITY_SLOTS: this.slotMailbox };
+  slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>, env0: NodeJS.ProcessEnv = process.env): Record<string, string> {
+    const env: Record<string, string> = { FF_UNITY_SLOTS: this.slotMailbox, ...sandboxGameDataEnv(env0, spec.sandbox) };
     if (spec.sandbox) env.FF_UNITY_HOLDER = `sandbox:${spec.sandbox}`;
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
@@ -3013,11 +3022,15 @@ export class Daemon {
         files: allow.filter(isFile),
         allowInAppDir: allow,
       });
+      // w5557: the owner's own game folder inherits Low from LocalLow; an explicit Medium label refuses a Low worker's write.
+      const ownerGameData = this.cfg.workerIntegrityLockGameData ? legacyGameDataRoot('win32') : undefined;
+      if (ownerGameData) targets.medium.push(ownerGameData);
       if (!(await labelLow(targets, exec, say))) {
         log('worker integrity: not every folder could be labelled Low; agents run unfenced');
         return;
       }
       // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
+      if (ownerGameData) log(await ownerGameDataLock(ownerGameData, exec));
       for (const exe of await lowRunners(root, exec)) log(`worker integrity: CI runner job exe ${exe} is still labelled Low, so its jobs start at Low and Git Bash dies (0xC0000022); label its folder Medium`);
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
