@@ -88,7 +88,7 @@ export function editorTempEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform 
  * the Windows Low-integrity fence cannot write: a `cargo fetch` of a crate not yet downloaded failed with "Access is denied
  * (os error 5)" (measured 2026-11-24, w5499). `cache` is a root child, so every fence lets a worker write it: Windows labels
  * it Low with (OI)(CI) and what is made in it inherits Low (lowIntegrity.ts lowTargets), and Seatbelt and Landlock open
- * the whole root except `daemon` and `secrets`.
+ * it with the other WORKER_CHILDREN (lowIntegrity.ts openChildren, w5569).
  */
 export const workerCargoHomeDir = (root: string) => path.join(sharedCacheDir(root), 'cargo');
 /** Root children a cargo home already set there may not stay in: the daemon's and the secrets (no worker writes them) and the CI runners' (Medium on Windows, lowIntegrity.ts CI_CHILDREN). */

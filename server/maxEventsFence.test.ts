@@ -38,16 +38,16 @@ test('with a worker root the events file is in the daemon\'s folder, whatever da
 });
 
 test('every fence keeps the daemon\'s folder, and so the events file, out of a worker\'s writes', () => {
-  // Linux: Landlock grants the root's children except the daemon's, and no rule names the events file.
+  // Linux: Landlock grants only the root folders workers write (w5569), never the daemon's, and no rule names the events file.
   const ll = writeLockArgs({ root: '/r', appDir: '/r/daemon' });
   assert.ok(LOCKED_CHILDREN.includes('daemon'));
-  assert.ok(ll.join(' ').includes('--except daemon'));
+  assert.ok(!ll.includes(path.join('/r', 'daemon')) && !ll.includes('--rw-children'));
   assert.ok(!ll.some((a) => a.includes('max-events')));
-  // macOS: Seatbelt denies writes under <root>/daemon after allowing the root.
+  // macOS: Seatbelt denies writes under <root>/daemon after allowing the root's open folders.
   assert.ok(READ_ONLY_IN_ROOT.subpaths.includes('daemon'));
   const profile = seatbeltProfile({ root: '/r', home: '/Users/u', darwinTemp: '/private/var/folders/x/T', darwinCache: '/private/var/folders/x/C', extraWritable: [] } as never);
   const daemonRule = `(subpath ${JSON.stringify(path.join('/r', 'daemon'))})`;
-  assert.ok(profile.indexOf(daemonRule) > profile.lastIndexOf('(allow file-write* (subpath'), "the daemon's folder is denied after the root is allowed");
+  assert.ok(profile.indexOf(daemonRule) > profile.lastIndexOf('(allow file-write* (subpath') && profile.indexOf(daemonRule) > profile.indexOf(`(subpath ${JSON.stringify(path.join('/r', 'tmp'))})`), "the daemon's folder is denied after the root's folders are allowed");
   assert.ok(!profile.includes('max-events'));
   // Windows: the daemon's folder is never labelled Low, nor anything in it but what workerIntegrityAllow names.
   const t = lowTargets({ root: path.resolve('/r'), appDir: path.resolve('/r/daemon'), children: [{ name: 'daemon', dir: true }, { name: 'sandboxes', dir: true }], exists: () => false });
