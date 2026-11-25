@@ -55,6 +55,9 @@ export const SETTABLE_KEYS = [
   // and whether a member's login from a new browser waits for an owner's approval ("off" or "members").
   'trustProxy',
   'deviceApproval',
+  // New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"), the owner's only: "off",
+  // "advisory" (the default: let in, but logged as enforce would hold it) or "enforce"; null puts back the default.
+  'ownerDeviceApproval',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
@@ -193,7 +196,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'privacyGuards']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -572,6 +575,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null || value === 'off') return value === 'off' ? 'off' : undefined;
       if (value === 'members') return 'members';
       throw new Error(`deviceApproval is "members" (a member's login from a new browser waits for an owner's approval in the portal) or "off"`);
+    }
+    case 'ownerDeviceApproval': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'off' || value === 'advisory' || value === 'enforce') return value;
+      throw new Error(`ownerDeviceApproval is "advisory" (the default: an owner's login from a new browser outside the tailnet is let in and logged as one enforce would hold), "enforce" (it waits for another owner's approval in the portal; tailnet logins never wait), "off", or null for the default`);
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1036,6 +1044,10 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
   else if (key === 'trustProxy') cfg.trustProxy = v as boolean;
   else if (key === 'deviceApproval') cfg.deviceApproval = v as 'off' | 'members' | undefined;
+  else if (key === 'ownerDeviceApproval') {
+    if (v === undefined) delete cfg.ownerDeviceApproval;
+    else cfg.ownerDeviceApproval = v as 'off' | 'advisory' | 'enforce';
+  }
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;

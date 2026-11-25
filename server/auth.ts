@@ -4,7 +4,7 @@ import type http from 'node:http';
 import { createHash, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import type { UserInfo, UserRole } from '../shared/types.ts';
 import { checkArray, checkObject, isObject, readJsonDurable, writeJsonDurable, type Check } from './durable.ts';
-import { Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type DeviceRecord, type DeviceView } from './devices.ts';
+import { DeviceLog, Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type DeviceLogEntry, type DeviceRecord, type DeviceView, type OwnerDeviceApproval } from './devices.ts';
 
 /**
  * Username/password login. This page can drive agents that run shell commands on the host, so it
@@ -23,7 +23,10 @@ import { Devices, deviceCookie, deviceId, newDeviceId, type DeviceApproval, type
  *     wrong guesses count as failed logins;
  *   - device approval (config deviceApproval, server/devices.ts): with "members", a member's right password on a browser no
  *     owner approved for them opens no session but a request an owner answers in the portal; the browser that redeems a
- *     set-password link is approved by it.
+ *     set-password link is approved by it;
+ *   - owner device approval (w5524, config ownerDeviceApproval, default "advisory"): an owner's login from outside the
+ *     tailnet on a browser no owner approved for them is let in but logged as one enforce would hold ("advisory"), or held
+ *     for another owner's approval ("enforce"); over the tailnet it is never held and approves its browser.
  */
 
 const sha = (s: string) => createHash('sha256').update(s).digest('hex');
@@ -124,17 +127,27 @@ export class Auth {
   private readonly trustProxyOpt: boolean | (() => boolean);
   private readonly deviceApproval: () => DeviceApproval;
   readonly devices: Devices;
+  readonly deviceLog: DeviceLog;
+  private readonly ownerDeviceApproval: () => OwnerDeviceApproval;
+  private readonly onTailnet: (req: http.IncomingMessage) => boolean;
   /** Told when a member's login from a new browser starts waiting for an owner (index.ts: a push to the owners). */
   onDevicePending?: (d: DeviceView) => void;
 
-  /** opts: trustProxy and deviceApproval as config has them now (a function reads it live). */
-  constructor(dataDir: string, opts: { trustProxy: boolean | (() => boolean); deviceApproval?: () => DeviceApproval }) {
+  /**
+   * opts: trustProxy, deviceApproval and ownerDeviceApproval as config has them now (a function reads it live); onTailnet,
+   * whether a request came over the tailnet rather than through Funnel (index.ts: remoteChat.ts tailnetOnly). Without them
+   * (the CLIs) both approvals are off and no request is on the tailnet.
+   */
+  constructor(dataDir: string, opts: { trustProxy: boolean | (() => boolean); deviceApproval?: () => DeviceApproval; ownerDeviceApproval?: () => OwnerDeviceApproval; onTailnet?: (req: http.IncomingMessage) => boolean }) {
     this.usersFile = path.join(dataDir, 'users.json');
     this.sessionsFile = path.join(dataDir, 'auth-sessions.json');
     this.linksFile = path.join(dataDir, 'password-links.json');
     this.trustProxyOpt = opts.trustProxy;
     this.deviceApproval = opts.deviceApproval ?? (() => 'off');
     this.devices = new Devices(dataDir);
+    this.deviceLog = new DeviceLog(dataDir);
+    this.ownerDeviceApproval = opts.ownerDeviceApproval ?? (() => 'off');
+    this.onTailnet = opts.onTailnet ?? (() => false);
     const raw = readJsonDurable<Record<string, SessionRecord>>(this.sessionsFile, { check: checkObject });
     const now = Date.now();
     for (const [id, s] of Object.entries(raw ?? {})) if (s.expires > now) this.sessions.set(id, s);
@@ -203,6 +216,7 @@ export class Auth {
     if (sessions) this.persistSessions();
     // Its device records too, or a deleted member's pending request would stay in the owners' bar (w10).
     const devices = this.devices.removeUser(username);
+    this.deviceLog.removeUser(username);
     return { keys: theirs, sessions, devices };
   }
 
@@ -343,9 +357,62 @@ export class Auth {
       console.log(`login ok for "${username}" from ${ip} on approved device ${known.id}`);
       return { ok: true, cookie: this.newSession(req, username, sha(dev)) };
     }
+    if ((user.role ?? 'owner') === 'owner') {
+      const held = this.ownerDevice(req, username, ip);
+      if (held) return held;
+    }
     console.log(`login ok for "${username}" from ${ip}`);
     const dev = deviceId(req);
     return { ok: true, cookie: this.newSession(req, username, dev && sha(dev)) };
+  }
+
+  /**
+   * Owner device approval (w5524) for an owner's right password, or undefined when ownerDeviceApproval is off. An approved
+   * browser signs in; over the tailnet the browser is approved by the login ("tailnet login"), so there is always a way in;
+   * otherwise "advisory" lets the login in but keeps a pending request for the owners and writes the device log line
+   * enforce would have meant, and "enforce" holds it (202) for another owner's approval, or refuses a denied browser (403).
+   */
+  private ownerDevice(req: http.IncomingMessage, username: string, ip: string): LoginResult | undefined {
+    const mode = this.ownerDeviceApproval();
+    if (mode === 'off') return undefined;
+    const given = deviceId(req);
+    const dev = given ?? newDeviceId();
+    const setDevice = given ? {} : { deviceCookie: deviceCookie(dev, this.isHttps(req)) };
+    const known = this.devices.find(username, sha(dev));
+    if (known?.status === 'approved' || this.onTailnet(req)) {
+      const d = this.devices.upsert(username, sha(dev), req, ip, 'approved', 'tailnet login');
+      console.log(`login ok for owner "${username}" from ${ip} on ${known?.status === 'approved' ? 'approved' : 'tailnet-approved'} device ${d.id}`);
+      return { ok: true, cookie: this.newSession(req, username, sha(dev)), ...setDevice };
+    }
+    const refused = known?.status === 'denied';
+    const d = this.devices.upsert(username, sha(dev), req, ip, 'pending', undefined, mode === 'advisory');
+    const line = { username, device: d.id, label: d.label, ip, userAgent: d.userAgent, mode };
+    if (mode === 'advisory') {
+      this.deviceLog.add({ ...line, outcome: refused ? 'would-be-refused' : 'would-need-approval' });
+      console.warn(`owner login for "${username}" from ${ip} would need approval: device ${d.id} (${d.label}) ${refused ? 'was refused' : 'is not approved'}; let in (ownerDeviceApproval advisory, enforce would ${refused ? 'refuse' : 'hold'} it)`);
+      return { ok: true, cookie: this.newSession(req, username, sha(dev)), ...setDevice };
+    }
+    if (refused) {
+      this.deviceLog.add({ ...line, outcome: 'refused' });
+      console.warn(`owner login for "${username}" from ${ip}: device ${d.id} was refused`);
+      return { ok: false, status: 403, error: 'An owner refused this device. Ask another owner to approve it in FF Factory, or sign in over the tailnet.' };
+    }
+    this.deviceLog.add({ ...line, outcome: 'held' });
+    console.log(`owner login for "${username}" from ${ip} waits for another owner to approve device ${d.id} (${d.label})`);
+    if (!known) this.onDevicePending?.(this.view(d));
+    return { ok: false, status: 202, pending: true, error: 'This device is new: another owner must approve it in FF Factory, or sign in once over the tailnet. This page signs you in once they do.', ...setDevice };
+  }
+
+  /** What owner device approval held or would have held, newest first (the owners' Devices list). */
+  deviceLogList(): DeviceLogEntry[] {
+    return this.deviceLog.list().reverse();
+  }
+
+  /** The device record id of the browser making `req` for its login, if it has one (the Devices list marks "this device"). */
+  currentDevice(req: http.IncomingMessage): string | undefined {
+    const username = this.user(req);
+    const dev = deviceId(req);
+    return username && dev ? this.devices.find(username, sha(dev))?.id : undefined;
   }
 
   /** Whether `user`'s logins need an owner's approval for each new browser: config deviceApproval "members", and a member. */

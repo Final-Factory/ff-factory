@@ -304,6 +304,12 @@ export interface Config {
    */
   deviceApproval?: 'off' | 'members';
   /**
+   * New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"): "advisory" (the default, unset),
+   * an owner's login from outside the tailnet on a browser no owner approved is let in but logged as one enforce would hold;
+   * "enforce", it waits for another owner's approval; "off", a right password is enough. Tailnet logins are never held.
+   */
+  ownerDeviceApproval?: 'off' | 'advisory' | 'enforce';
+  /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.
    */
