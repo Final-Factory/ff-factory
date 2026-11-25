@@ -150,17 +150,57 @@ export const USAGE = `usage: ff-pr push [--base <branch>] [--title <t> --body-fi
 Exit: 0 done, 1 you must act (conflict, red, push not landed, Evidence check failed), 2 usage, 3 CI still running.
 `;
 
-const PR_FIELDS = 'number,url,headRefOid,mergeable,state,baseRefName,baseRefOid,headRefName,isCrossRepository';
+// w5836: gh 2.46.0 (Ubuntu's apt gh, on biscuit) has no baseRefOid among `gh pr view --json` fields and refuses the whole
+// call with `Unknown JSON field: "baseRefOid"`, so ff-pr said "no PR" for every PR there. The fields ff-pr cannot do
+// without come first; the rest are asked only of a gh that has them, and baseRefOid then comes from the REST API.
+const PR_NEEDED = ['number', 'url', 'headRefOid', 'mergeable', 'state', 'baseRefName'];
+const PR_FIELDS = [...PR_NEEDED, 'baseRefOid', 'headRefName', 'isCrossRepository'];
 
-function prView(d: PrDeps, pr?: string): Pr | undefined {
-  const r = d.run('gh', ['pr', 'view', ...(pr ? [pr] : []), '--json', PR_FIELDS]);
-  if (r.code !== 0) return undefined;
-  try {
-    return JSON.parse(r.out) as Pr;
-  } catch {
-    return undefined;
+/** The fields gh lists after `Unknown JSON field: "x"` / `Available fields:`, or undefined when it said something else. */
+export function ghAvailableFields(said: string): Set<string> | undefined {
+  const m = /Unknown JSON field[\s\S]*?Available fields:\s*([\s\S]*)$/i.exec(said);
+  if (!m) return undefined;
+  const names = m[1].split(/\s+/).filter((w) => /^[A-Za-z][A-Za-z0-9]*$/.test(w));
+  return names.length ? new Set(names) : undefined;
+}
+
+/** What gh said when it failed, short enough for one ff-pr line and never empty. */
+function ghSaid(r: Ran, what: string): string {
+  const s = (r.err || r.out).trim().split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 4).join(' / ');
+  return s ? s.slice(0, 600) : `${what} exited ${r.code} and said nothing`;
+}
+
+/** The PR (of this branch, or number `pr`), or gh's own words for why it could not be read (w5836: never hidden). */
+function prView(d: Pick<PrDeps, 'run'>, pr?: string): { pr?: Pr; err?: string } {
+  let fields = PR_FIELDS;
+  for (;;) {
+    const r = d.run('gh', ['pr', 'view', ...(pr ? [pr] : []), '--json', fields.join(',')]);
+    if (r.code !== 0) {
+      const said = ghSaid(r, 'gh pr view');
+      const has = ghAvailableFields(`${r.err}\n${r.out}`);
+      const kept = has ? fields.filter((f) => has.has(f)) : fields;
+      if (has && kept.length < fields.length && PR_NEEDED.every((f) => kept.includes(f))) {
+        fields = kept;
+        continue;
+      }
+      return { err: said };
+    }
+    let got: Pr;
+    try {
+      got = JSON.parse(r.out) as Pr;
+    } catch {
+      return { err: `gh pr view answered no JSON: ${r.out.trim().slice(0, 200)}` };
+    }
+    if (!fields.includes('baseRefOid') && got.url && got.number) {
+      const b = d.run('gh', ['api', `repos/${repoOf(got.url)}/pulls/${got.number}`, '--jq', '.base.sha']);
+      if (b.code === 0 && /^[0-9a-f]{40}$/.test(b.out.trim())) got.baseRefOid = b.out.trim();
+    }
+    return { pr: got };
   }
 }
+
+/** gh pr view's "this branch has none", as opposed to gh failing (w5836). */
+const NO_PR_FOR_BRANCH = /no (?:open )?pull requests? found/i;
 
 function repoOf(url: string): string {
   return /github\.com\/([^/]+\/[^/]+)\/pull\//.exec(url)?.[1] ?? '<owner/repo>';
@@ -306,7 +346,13 @@ export function push(d: PrDeps, o: Opts): number {
     d.write(`ff-pr: you are on ${branch}, which takes changes only through a pull request: commit on your own branch\n`);
     return 1;
   }
-  let pr = prView(d);
+  const first = prView(d);
+  // w5836: gh failing is not "this branch has no PR": say gh's words before anything is pushed.
+  if (first.err && !NO_PR_FOR_BRANCH.test(first.err)) {
+    d.write(`ff-pr: gh pr view failed, so nothing is pushed: ${first.err}\n`);
+    return 1;
+  }
+  let pr = first.pr;
   const base = o.base ?? pr?.baseRefName ?? defaultBase(d);
   if (base === branch) {
     d.write(`ff-pr: the base (${base}) is the branch itself\n`);
@@ -358,13 +404,14 @@ export function push(d: PrDeps, o: Opts): number {
   }
   // w907: the push must show as the PR's head, and the PR must not conflict, before a CI wait means anything. GitHub
   // takes a few seconds to move the head and work out mergeable (UNKNOWN until then).
+  let viewErr: string | undefined;
   for (let i = 0; i < 12; i++) {
-    pr = prView(d);
+    ({ pr, err: viewErr } = prView(d));
     if (pr && pr.headRefOid === sha && pr.mergeable !== 'UNKNOWN') break;
     d.sleep(5_000);
   }
   if (!pr) {
-    d.write('ff-pr: pushed, but gh pr view finds no PR for this branch\n');
+    d.write(`ff-pr: pushed, but gh pr view finds no PR for this branch: ${viewErr ?? 'no answer'}\n`);
     return 1;
   }
   if (pr.headRefOid !== sha) {
@@ -423,9 +470,9 @@ function evidenceWarning(d: PrDeps, pr: Pr): void {
 }
 
 function prAndCi(d: PrDeps, o: Opts): { pr: Pr; v: CiVerdict } | number {
-  const pr = prView(d, o.pr);
+  const { pr, err } = prView(d, o.pr);
   if (!pr) {
-    d.write(`ff-pr: no PR ${o.pr ? o.pr : 'for this branch'} (gh pr view failed)\n`);
+    d.write(`ff-pr: no PR ${o.pr ? o.pr : 'for this branch'}: gh pr view failed: ${err ?? 'no answer'}\n`);
     return 1;
   }
   const runs = headRuns(d, pr.headRefOid, repoOf(pr.url));
@@ -522,7 +569,7 @@ export function merge(d: PrDeps, o: Opts): number {
     d.write(`ff-pr: gh pr merge refused:\n${(m.err || m.out).trim()}\n`);
     return 1;
   }
-  const after = prView(d, String(pr.number));
+  const after = prView(d, String(pr.number)).pr;
   d.write(`ff-pr: ${pr.url} ${after?.state === 'MERGED' ? 'merged' : `merge asked (state ${after?.state ?? 'unknown'})`} at head ${pr.headRefOid.slice(0, 10)}\n`);
   return 0;
 }
