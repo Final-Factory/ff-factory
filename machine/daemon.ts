@@ -26,7 +26,7 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
-import { FF_LANDLOCK, writeLockArgs } from './writeLock.ts';
+import { FF_LANDLOCK, makeOpenRootChildren, writeLockArgs } from './writeLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -2080,7 +2080,7 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
-      ...(this.cfg.root ? { steamUpload: true } : {}),
+      ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
@@ -3009,6 +3009,11 @@ export class Daemon {
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
+    // w5676: ff-landlock.py skips an open root folder that does not exist yet, and the locked worker cannot make it.
+    if (lockArgs && this.cfg.root) {
+      const made = makeOpenRootChildren(this.cfg.root, lockArgs, appDirOfConfig(this.cfg), [this.sandboxRoot()]);
+      if (made.length) log(`write lock: made the open root folders ${made.map((m) => path.basename(m)).join(', ')} before a locked worker starts (w5676)`);
+    }
     const lock = lockArgs ? { writeLock: lockArgs } : {};
     const fence = spec.sandbox ? this.workerFence : undefined;
     const low = spec.sandbox ? this.low : undefined;

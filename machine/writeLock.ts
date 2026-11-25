@@ -59,7 +59,8 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // /dev: null, tty, shm, the GPU. /proc: a process's own oom_score_adj (Unity sets it); file modes still decide the rest.
   const args = ['--rw', '/dev', '--rw', '/proc'];
   // Only the root's folders workers write (w5569, as Windows since w5539): a portal, an instances folder or any new root
-  // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only).
+  // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only), so
+  // the daemon makes the missing ones before each locked worker starts (makeOpenRootChildren, w5676).
   for (const c of openChildren(root, p.workFolders ?? [], except)) args.push('--rw', path.join(root, c));
   for (const r of p.extraRoots ?? []) args.push('--rw', r);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
@@ -107,6 +108,35 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
       stdio: ['pipe', 'pipe', 'ignore'],
     });
   };
+}
+
+/**
+ * Makes each root folder the lock opens (a `--rw` rule directly in the root) that does not exist yet, and answers the
+ * ones it made (w5676). ff-landlock.py skips a rule whose folder is missing, and a locked worker cannot make it, since
+ * the root itself is read-only: on a fresh root a worker folder never made (voice, agents, gamedata-home, ...) stayed
+ * unwritable. Never LOCKED_CHILDREN or the daemon's folder, nothing outside the root, and never a folder in `absent`: the
+ * sandboxes folder, whose absence is how the host guard sees a sandbox drive gone (hostHealth.ts blockReason), and an
+ * empty folder made there would hide a drive that failed to mount. Run by the daemon, unlocked, before each locked worker
+ * starts. A folder it cannot make stays read-only, as before.
+ */
+export function makeOpenRootChildren(root: string, args: string[], appDir?: string, absent: (string | undefined)[] = []): string[] {
+  const r = path.resolve(root);
+  const shut = new Set<string>(LOCKED_CHILDREN);
+  if (appDir && path.dirname(path.resolve(appDir)) === r) shut.add(path.basename(path.resolve(appDir)));
+  for (const a of absent) if (a && path.dirname(path.resolve(a)) === r) shut.add(path.basename(path.resolve(a)));
+  const made: string[] = [];
+  for (let i = 0; i < args.length - 1; i++) {
+    if (args[i] !== '--rw') continue;
+    const p = path.resolve(args[i + 1]);
+    if (path.dirname(p) !== r || shut.has(path.basename(p)) || fs.existsSync(p)) continue;
+    try {
+      fs.mkdirSync(p);
+      made.push(p);
+    } catch {
+      /* a dangling link or no room: the rule is skipped and the worker's write refused, as before */
+    }
+  }
+  return made;
 }
 
 /** /tmp/.dotnet and its shm, world-writable and sticky like the .NET runtime makes them (pal/src/sharedmemory). */
