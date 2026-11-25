@@ -280,14 +280,16 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
 - **Git never uses the Keychain for github.com**: launch.ts `githubCredentialEnv` clears the system `osxkeychain` helper
   and sets the app helper (a traced `git credential fill` ran only ghApp.ts's helper), and the Claude CLI gets its token as
   `CLAUDE_CODE_OAUTH_TOKEN`, so neither needs the Keychain.
-- **Warn stage, not closed yet (w5749, from w5733's review)**: `~/.netrc`, `~/.git-credentials`, git's
+- **Also closed (w5749, from w5733's review)**: `~/.netrc`, `~/.git-credentials`, git's
   `$XDG_CONFIG_HOME/git/credentials` and `~/.config/git/credentials`; gh's other config folders (`~/.config/gh` when the
   daemon has `GH_CONFIG_DIR` or `XDG_CONFIG_HOME` set elsewhere: gh reads one folder, but a worker can point
-  `GH_CONFIG_DIR` at any); on Linux the flatpak browsers' homes (`~/.var/app/<id>`), snap Brave, and `~/.config`'s browsers
-  when `XDG_CONFIG_HOME` points elsewhere (ownerSecrets.ts `ownerSecretPathsWarn`). In `warn` and `on` the probe logs
-  `owner secrets (<mode>, w5749): warn stage only ...` with the ones that exist on the machine. A separate enforce PR adds
-  them to `ownerReadDenied`, after the warn data shows no worker tool needs them (uv and curl read `~/.netrc`; git's
-  `store` helper reads `~/.git-credentials`).
+  `GH_CONFIG_DIR` at any; open, as the gh folder is, to a run with no GitHub token); on Linux the flatpak browsers' homes
+  (`~/.var/app/<id>`), snap Brave, and `~/.config`'s browsers when `XDG_CONFIG_HOME` points elsewhere
+  (ownerSecrets.ts `ownerSecretPathsMore`, `ownerReadMore`, part of `ownerReadDenied`). They had a warn stage of their
+  own first (#1248); since the enforce PR they are owner rules like the rest, so they act only in `on`, and in `warn`
+  the probe's `owner-secret rules would close` line lists them. That line is the per-machine check before `on`: uv and
+  curl read `~/.netrc` and git's `store` helper reads `~/.git-credentials`, so a machine whose worker tools need one is
+  found in `warn`, not by a failed run.
 - **Windows: none of this, and no env or wrapper route closes it** (w5749, measured on LothDesktop 2026-11-25). Every
   owner path is in the profile on the system drive, where the fence writes no label ("Never touch C: on Windows"). There
   `lowEnv` moves gh's `APPDATA` into the root, so a Low worker's gh finds no login, and the login's folder is passed

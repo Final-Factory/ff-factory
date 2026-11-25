@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { ghConfigFolder, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadWarn, ownerRunWiring, ownerSecretPaths, ownerSecretPathsWarn, ownerToolLegs, sayOwnerRules, sayOwnerWarnStage, type TokenRun } from '../machine/ownerSecrets.ts';
+import { ghConfigFolder, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
 
@@ -83,66 +83,70 @@ test('KEYCHAIN_MACH_SERVICES: authd and SecurityServer together, as probe 4 meas
   assert.deepEqual([...KEYCHAIN_MACH_SERVICES].sort(), ['com.apple.SecurityServer', 'com.apple.authd']);
 });
 
-test('ownerSecretPathsWarn (w5749): ~/.netrc, git credentials and the other gh folders, warn stage only', () => {
+test('ownerSecretPathsMore (w5749): ~/.netrc, git credentials and the other gh folders, closed with the owner rules', () => {
   const env = { GH_CONFIG_DIR: '/srv/gh', XDG_CONFIG_HOME: '/x/cfg' };
-  const mac = ownerSecretPathsWarn({ platform: 'darwin', home: '/Users/p', env }).map((s) => s.path);
+  const mac = ownerSecretPathsMore({ platform: 'darwin', home: '/Users/p', env }).map((s) => s.path);
   for (const p of ['/Users/p/.netrc', '/Users/p/.git-credentials', '/x/cfg/git/credentials', '/Users/p/.config/git/credentials', '/x/cfg/gh', '/Users/p/.config/gh'])
-    assert.ok(mac.includes(p), `${p} is in the warn stage`);
-  // The gh folder in use is the enforced one, never listed twice.
+    assert.ok(mac.includes(p), `${p} is listed`);
+  // The gh folder in use is ownerSecretPaths' own, never listed twice.
   assert.ok(!mac.includes('/srv/gh'));
-  // None of them is enforced yet: separate PRs for warn and enforce (lothsahn's lockout rule).
+  // The enforce PR: every one is in ownerReadDenied now, once each.
   const denied = ownerReadDenied({ platform: 'darwin', home: '/Users/p', env, hasToken: true });
-  for (const p of mac) assert.ok(!denied.includes(p), `${p} is not enforced in the warn PR`);
-  // With no GH_CONFIG_DIR or XDG_CONFIG_HOME, ~/.config/gh is the enforced folder, not a warn-stage one.
-  assert.ok(!ownerSecretPathsWarn({ platform: 'darwin', home: '/Users/p', env: {} }).some((s) => s.path === '/Users/p/.config/gh'));
+  for (const p of mac) assert.ok(denied.includes(p), `${p} is closed`);
+  assert.equal(new Set(denied).size, denied.length, 'no path twice');
+  assert.ok(denied.includes('/srv/gh') && denied.includes('/Users/p/.ssh'), 'the earlier rules stay');
+  // With no GH_CONFIG_DIR or XDG_CONFIG_HOME, ~/.config/gh is ownerSecretPaths' gh folder, not one of these.
+  assert.ok(!ownerSecretPathsMore({ platform: 'darwin', home: '/Users/p', env: {} }).some((s) => s.path === '/Users/p/.config/gh'));
 });
 
-test('ownerSecretPathsWarn (w5749): Linux flatpak and snap browsers, and ~/.config browsers when XDG_CONFIG_HOME moved', () => {
-  const lin = ownerSecretPathsWarn({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: '/home/p/cfg' } }).map((s) => s.path);
+test('ownerSecretPathsMore (w5749): Linux flatpak and snap browsers, and ~/.config browsers when XDG_CONFIG_HOME moved', () => {
+  const lin = ownerSecretPathsMore({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: '/home/p/cfg' } }).map((s) => s.path);
   for (const p of ['/home/p/.var/app/org.mozilla.firefox', '/home/p/.var/app/com.google.Chrome', '/home/p/.var/app/org.chromium.Chromium', '/home/p/snap/brave', '/home/p/.config/google-chrome', '/home/p/.config/gh'])
     assert.ok(lin.includes(p), p);
-  const plain = ownerSecretPathsWarn({ platform: 'linux', home: '/home/p', env: {} }).map((s) => s.path);
-  assert.ok(!plain.includes('/home/p/.config/google-chrome'), 'already enforced when XDG_CONFIG_HOME is unset');
-  assert.ok(!plain.some((p) => p === '/home/p' || p.startsWith('/home/p/ffw')), 'never the worker root');
+  const denied = ownerReadDenied({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: '/home/p/cfg' }, hasToken: true });
+  for (const p of lin) assert.ok(denied.includes(p), `${p} is closed`);
+  const plain = ownerSecretPathsMore({ platform: 'linux', home: '/home/p', env: {} }).map((s) => s.path);
+  assert.ok(!plain.includes('/home/p/.config/google-chrome'), 'already ownerSecretPaths\' when XDG_CONFIG_HOME is unset');
+  assert.ok(!ownerReadDenied({ platform: 'linux', home: '/home/p', env: {}, hasToken: true }).some((p) => p === '/home/p' || p.startsWith('/home/p/ffw')), 'never the home or the worker root');
 });
 
-test('ownerSecretPathsWarn (w5749): Windows gets none (the system drive is never labelled without a person)', () => {
-  assert.deepEqual(ownerSecretPathsWarn({ platform: 'win32', home: String.raw`C:\Users\p`, env: { APPDATA: String.raw`C:\Users\p\AppData\Roaming` } }), []);
-  assert.equal(sayOwnerWarnStage({ platform: 'win32', home: String.raw`C:\Users\p`, env: {}, mode: 'warn', exists: () => true }), undefined);
+test('ownerSecretPathsMore (w5749): Windows gets none (the system drive is never labelled without a person)', () => {
+  assert.deepEqual(ownerSecretPathsMore({ platform: 'win32', home: String.raw`C:\Users\p`, env: { APPDATA: String.raw`C:\Users\p\AppData\Roaming` } }), []);
 });
 
-test('owner secrets warn stage (w5749): on Windows it touches no file at all, not even to resolve a link', (t) => {
+test('owner secrets (w5749): on Windows ownerReadDenied and ownerReadMore touch no file at all, not even to resolve a link', (t) => {
   const real = t.mock.method(fs, 'realpathSync', (p: string) => p);
   const ex = t.mock.method(fs, 'existsSync', () => true);
   const env = { APPDATA: String.raw`C:\Users\p\AppData\Roaming`, GH_CONFIG_DIR: String.raw`C:\Users\p\AppData\Roaming\GitHub CLI` };
   const home = String.raw`C:\Users\p`;
-  assert.deepEqual(ownerReadWarn({ platform: 'win32', home, env, hasToken: true }), []);
-  assert.equal(sayOwnerWarnStage({ platform: 'win32', home, env, mode: 'on' }), undefined);
+  assert.deepEqual(ownerReadMore({ platform: 'win32', home, env, hasToken: true }), []);
+  assert.deepEqual(ownerReadDenied({ platform: 'win32', home, env, hasToken: true }), []);
   assert.equal(real.mock.callCount(), 0);
   assert.equal(ex.mock.callCount(), 0);
 });
 
-test('ownerSecretPathsWarn (w5749): XDG_CONFIG_HOME at ~/.config (with or without a slash) adds no ~/.config browsers', () => {
+test('ownerSecretPathsMore (w5749): XDG_CONFIG_HOME at ~/.config (with or without a slash) adds no ~/.config browsers', () => {
   for (const x of ['/home/p/.config', '/home/p/.config/']) {
-    const l = ownerSecretPathsWarn({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: x } }).map((s) => s.path);
+    const l = ownerSecretPathsMore({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: x } }).map((s) => s.path);
     assert.ok(!l.includes('/home/p/.config/google-chrome'), x);
   }
 });
 
-test('ownerReadWarn (w5749): the other gh folders stay open to a run with no GitHub token, as the gh folder does', () => {
+test('ownerReadDenied (w5749): the other gh folders stay open to a run with no GitHub token, as the gh folder does; ~/.netrc never', () => {
   const env = { GH_CONFIG_DIR: '/srv/gh' };
-  const withTok = ownerReadWarn({ platform: 'linux', home: '/home/p', env, hasToken: true });
-  const noTok = ownerReadWarn({ platform: 'linux', home: '/home/p', env, hasToken: false });
+  const withTok = ownerReadDenied({ platform: 'linux', home: '/home/p', env, hasToken: true });
+  const noTok = ownerReadDenied({ platform: 'linux', home: '/home/p', env, hasToken: false });
   assert.ok(withTok.includes('/home/p/.config/gh'));
-  assert.ok(!noTok.includes('/home/p/.config/gh'));
-  assert.ok(noTok.includes('/home/p/.netrc'));
+  assert.ok(!noTok.includes('/home/p/.config/gh') && !noTok.includes('/srv/gh'));
+  assert.ok(noTok.includes('/home/p/.netrc') && noTok.includes('/home/p/.git-credentials'));
 });
 
-test('sayOwnerWarnStage (w5749): names only the paths that exist, and nothing when none does', () => {
-  const line = sayOwnerWarnStage({ platform: 'darwin', home: '/Users/p', env: {}, mode: 'warn', exists: (p) => p === '/Users/p/.netrc' });
-  assert.match(line ?? '', /\/Users\/p\/\.netrc exist here/);
-  assert.doesNotMatch(line ?? '', /git-credentials/);
-  assert.equal(sayOwnerWarnStage({ platform: 'darwin', home: '/Users/p', env: {}, mode: 'warn', exists: () => false }), undefined);
+test('sayOwnerRules (w5749): warn lists the new paths among what on would close, before any machine closes them', () => {
+  const owner = ownerReadDenied({ platform: 'darwin', home: '/Users/p', env: {}, hasToken: true });
+  const line = sayOwnerRules('warn', 'darwin', owner);
+  assert.match(line, /would close \(warn only/);
+  assert.match(line, /\/Users\/p\/\.netrc/);
+  assert.match(line, /\/Users\/p\/\.git-credentials/);
 });
 
 // w5747 (w5733's review of #1232): the daemon's per-run wiring (machine/daemon.ts launchSpecFor uses ownerRunWiring).
