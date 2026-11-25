@@ -115,16 +115,24 @@ export function agentNodePathDir(root: string | undefined, platform: NodeJS.Plat
   return exists(agentNodeExe(root)) ? agentNodeDir(root) : undefined;
 }
 
+/** How Windows Firewall shows firewall.ps1's tailnet ($Tailnet: 100.64.0.0/10, fd7a:115c:a1e0::/48) in a rule's RemoteAddress. */
+export const TAILNET_FORMS = ['100.64.0.0/255.192.0.0', '100.64.0.0/10', 'fd7a:115c:a1e0::/48'];
+
 /**
  * The PowerShell that reads, with no administrator rights, whether Windows Firewall lets each program listen without a
  * prompt (w1742): "ok <path>" when an enabled inbound Allow rule names that exact path and no enabled Block does, else
- * "missing <path>"; then "wide <path>" for each path in `tailnetOnly` that an enabled inbound Allow rule lets in from any
- * address (w5581: the agents' node and ffu-server take connections from the tailnet only, and a rule from before that,
- * or one a prompt made, is made again by scripts/worker/firewall.ps1); then "stale=<n>", the inbound rules earlier
- * prompts left for programs under `tmp` (outside the install's own "Final Factory ..." groups), which firewall.ps1
- * -StaleUnder deletes. Three bulk reads (every application filter, every address filter, every inbound rule) joined on
- * the rule's id: one Get-NetFirewallApplicationFilter per path took about 2.5 s each on lothdesktop's 696 rules
- * (player_slots.py firewall, measured).
+ * "missing <path>"; then "stale=<n>", the inbound rules earlier prompts left for programs under `tmp` (outside the
+ * install's own "Final Factory ..." groups), which firewall.ps1 -StaleUnder deletes. Three bulk reads (every application
+ * filter, every address filter, every inbound rule) joined on the rule's id: one Get-NetFirewallApplicationFilter per
+ * path took about 2.5 s each on lothdesktop's 696 rules (player_slots.py firewall, measured).
+ *
+ * For each path in `tailnetOnly` (w5581: the agents' node and ffu-server take connections from the tailnet only):
+ * "from <path> <addresses>" for each enabled Allow rule naming it, and "wide <path>" unless every such rule's
+ * RemoteAddress is the tailnet only (TAILNET_FORMS). A rule is narrow only when its addresses are read and positively
+ * tailnet: BEAST's node rule allowed Any (the ops worker's elevated read, 2026-11-25) while the earlier check, which
+ * looked for 'Any' in the bulk read, printed "tailnet only" on every tools run. A rule the bulk read has no address
+ * filter for is read again on its own. Then "peer <path> <address>" for each connection that path's running process
+ * has from outside loopback and the tailnet: what narrowing the rule would cut off. "read ..." gives the counts read.
  */
 export function firewallCheckScript(exes: string[], tmp: string, tailnetOnly: string[] = []): string {
   const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
@@ -132,21 +140,52 @@ export function firewallCheckScript(exes: string[], tmp: string, tailnetOnly: st
   const narrow = tailnetOnly.length ? `@(${tailnetOnly.map(q).join(', ')})` : '@()';
   return `$ErrorActionPreference = 'Stop'
 $progs = @{}
-foreach ($f in @(Get-NetFirewallApplicationFilter)) { if ($f.Program) { $progs[[string]$f.InstanceID] = ([string]$f.Program).ToLowerInvariant() } }
-$anyFrom = @{}
-foreach ($a in @(Get-NetFirewallAddressFilter)) { if (@($a.RemoteAddress) -contains 'Any') { $anyFrom[[string]$a.InstanceID] = 1 } }
-$allow = @{}; $block = @{}; $wide = @{}; $stale = 0
-foreach ($r in @(Get-NetFirewallRule -Direction Inbound)) {
+$apps = @(Get-NetFirewallApplicationFilter)
+foreach ($f in $apps) { if ($f.Program) { $progs[[string]$f.InstanceID] = ([string]$f.Program).ToLowerInvariant() } }
+$from = @{}
+$addrs = @(Get-NetFirewallAddressFilter)
+foreach ($a in $addrs) { $from[[string]$a.InstanceID] = @($a.RemoteAddress | ForEach-Object { [string]$_ }) }
+$allow = @{}; $block = @{}; $rules = @{}; $stale = 0
+$inbound = @(Get-NetFirewallRule -Direction Inbound)
+foreach ($r in $inbound) {
   $p = $progs[[string]$r.Name]
   if (-not $p) { continue }
-  if ([string]$r.Enabled -eq 'True') { if ([string]$r.Action -eq 'Allow') { $allow[$p] = 1; if ($anyFrom[[string]$r.Name]) { $wide[$p] = 1 } } elseif ([string]$r.Action -eq 'Block') { $block[$p] = 1 } }
+  if ([string]$r.Enabled -eq 'True') { if ([string]$r.Action -eq 'Allow') { $allow[$p] = 1; $rules[$p] = @($rules[$p]) + [string]$r.Name } elseif ([string]$r.Action -eq 'Block') { $block[$p] = 1 } }
   if ($p.StartsWith(${q(under)}) -and ([string]$r.Group) -notlike 'Final Factory*') { $stale++ }
 }
+"read apps=$($apps.Count) addrs=$($addrs.Count) inbound=$($inbound.Count)"
 foreach ($e in @(${exes.map(q).join(', ')})) {
   $k = $e.ToLowerInvariant()
   if ($allow[$k] -and -not $block[$k]) { "ok $e" } else { "missing $e" }
 }
-foreach ($e in ${narrow}) { if ($wide[$e.ToLowerInvariant()]) { "wide $e" } }
+$tailnet = @(${TAILNET_FORMS.map(q).join(', ')})
+foreach ($e in ${narrow}) {
+  $k = $e.ToLowerInvariant()
+  $isWide = $false
+  foreach ($n in @($rules[$k] | Where-Object { $_ })) {
+    $ra = $from[$n]
+    if ($null -eq $ra) { $ra = @(Get-NetFirewallRule -Name $n | Get-NetFirewallAddressFilter | ForEach-Object { $_.RemoteAddress } | ForEach-Object { [string]$_ }) }
+    "from $e $(@($ra) -join ',')"
+    if (-not @($ra).Count -or @($ra | Where-Object { $tailnet -notcontains $_ }).Count) { $isWide = $true }
+  }
+  if ($isWide) { "wide $e" }
+  try {
+    $ids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLowerInvariant() -eq $k } | ForEach-Object { $_.Id })
+    if ($ids.Count) {
+      $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $ids -ErrorAction SilentlyContinue | ForEach-Object { $_.LocalPort })
+      foreach ($c in @(Get-NetTCPConnection -State Established -OwningProcess $ids -ErrorAction SilentlyContinue)) {
+        $ra = [string]$c.RemoteAddress
+        if ($ports -notcontains $c.LocalPort) { continue }
+        if ($ra -eq '::1' -or $ra.StartsWith('127.') -or $ra.StartsWith('::ffff:127.')) { continue }
+        $v4 = $ra -replace '^::ffff:', ''
+        $o = $v4.Split('.')
+        if ($o.Count -eq 4 -and [int]$o[0] -eq 100 -and [int]$o[1] -ge 64 -and [int]$o[1] -le 127) { continue }
+        if ($ra.ToLowerInvariant().StartsWith('fd7a:115c:a1e0:')) { continue }
+        "peer $e $($ra):$($c.LocalPort)"
+      }
+    }
+  } catch { "peers unread $e" }
+}
 "stale=$stale"
 `;
 }
@@ -155,10 +194,11 @@ foreach ($e in ${narrow}) { if ($wide[$e.ToLowerInvariant()]) { "wide $e" } }
  * firewallCheckScript's answer: the paths without an allow rule, the tailnet-only paths an allow rule opens to any
  * address (w5581), and the count of stale temp rules; undefined when unreadable.
  */
-export function parseFirewallCheck(out: string): { missing: string[]; wide: string[]; stale: number } | undefined {
+export function parseFirewallCheck(out: string): { missing: string[]; wide: string[]; stale: number; from: string[]; peers: string[]; read?: string } | undefined {
   const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
   const stale = lines.map((l) => /^stale=(\d+)$/.exec(l)).find(Boolean);
   if (!stale) return undefined;
   const after = (word: string) => lines.filter((l) => l.startsWith(`${word} `)).map((l) => l.slice(word.length + 1));
-  return { missing: after('missing'), wide: after('wide'), stale: Number(stale[1]) };
+  const read = lines.find((l) => l.startsWith('read '))?.slice(5);
+  return { missing: after('missing'), wide: after('wide'), stale: Number(stale[1]), from: after('from'), peers: after('peer'), ...(read ? { read } : {}) };
 }

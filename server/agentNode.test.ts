@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, ensureAgentNode, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
@@ -99,29 +100,66 @@ test('w1742: the firewall read names each path, quoted, and the temp folder in l
 
 test('w1742: the firewall answer (as lothdesktop gave it after #517: node and a tenth slot missing, six temp-node rules)', () => {
   const out = 'ok V:\\ffw\\players\\slot1-0\\player\\finalfactory.exe\r\nmissing V:\\ffw\\tools\\node\\node.exe\r\nmissing V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe\r\nstale=6\r\n';
-  assert.deepEqual(parseFirewallCheck(out), { wide: [], missing: ['V:\\ffw\\tools\\node\\node.exe', 'V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe'], stale: 6 });
-  assert.deepEqual(parseFirewallCheck('ok A\nstale=0'), { missing: [], wide: [], stale: 0 });
+  assert.deepEqual(parseFirewallCheck(out), { wide: [], missing: ['V:\\ffw\\tools\\node\\node.exe', 'V:\\ffw\\players\\slot9-0\\player\\finalfactory.exe'], stale: 6, from: [], peers: [] });
+  assert.deepEqual(parseFirewallCheck('ok A\nstale=0'), { missing: [], wide: [], stale: 0, from: [], peers: [] });
   assert.equal(parseFirewallCheck('reading the firewall rules failed: Access is denied'), undefined, 'an unreadable answer is not "all there"');
 });
 
-test('w5581: the firewall read lists the tailnet-only paths an allow rule opens to any address', () => {
+test('w5581: the firewall read lists the tailnet-only paths an allow rule does not keep to the tailnet', () => {
   const node = 'F:\\ffw\\tools\\node\\node.exe';
   const s = firewallCheckScript([node], 'F:\\ffw\\tmp', [node]);
   assert.ok(s.includes('Get-NetFirewallAddressFilter'), 'reads every address filter in one bulk read');
-  assert.ok(s.includes("-contains 'Any'"), 'a rule from any address is wide');
-  assert.ok(s.includes("foreach ($e in @('F:\\ffw\\tools\\node\\node.exe')) { if ($wide"), s);
+  assert.ok(s.includes("$tailnet = @('100.64.0.0/255.192.0.0', '100.64.0.0/10', 'fd7a:115c:a1e0::/48')"), s);
+  assert.ok(s.includes("foreach ($e in @('F:\\ffw\\tools\\node\\node.exe')) {"), s);
   assert.ok(firewallCheckScript([node], 'F:\\ffw\\tmp').includes('foreach ($e in @()) {'), 'no tailnet-only paths: nothing is wide');
   // BEAST before w5581 (the ops worker's read, 2026-11-25): the node's rule allowed every address.
-  const out = `ok ${node}\r\nwide ${node}\r\nstale=0\r\n`;
-  assert.deepEqual(parseFirewallCheck(out), { missing: [], wide: [node], stale: 0 });
-  assert.deepEqual(parseFirewallCheck(`ok ${node}\nstale=0`), { missing: [], wide: [], stale: 0 });
+  const out = `read apps=858 addrs=858 inbound=549\r\nok ${node}\r\nfrom ${node} Any\r\nwide ${node}\r\npeer ${node} 192.168.1.20:8891\r\nstale=0\r\n`;
+  assert.deepEqual(parseFirewallCheck(out), { missing: [], wide: [node], stale: 0, from: [`${node} Any`], peers: [`${node} 192.168.1.20:8891`], read: 'apps=858 addrs=858 inbound=549' });
+  assert.deepEqual(parseFirewallCheck(`ok ${node}\nstale=0`), { missing: [], wide: [], stale: 0, from: [], peers: [] });
 });
 
-test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, any protocol, and firewallRepair repairs a wide one', () => {
+/**
+ * Runs firewallCheckScript in Windows PowerShell against stand-ins for the NetSecurity and network cmdlets, returning the
+ * values BEAST's real ones gave (the ops worker's elevated read, 2026-11-25: RemoteAddress the string 'Any'). The earlier
+ * tests only matched the script's text, and the check it held said "tailnet only" for BEAST's wide rule on every run.
+ */
+function runCheck(node: string, remote: string[], opts: { inBulk?: boolean; peers?: string[] } = {}): string {
+  const rule = '{a7aa1dbe-357d-42e0-9480-e0ae525264e7}';
+  const arr = (xs: string[]) => `@(${xs.map((x) => `'${x}'`).join(',')})`;
+  const mocks = `
+function Get-NetFirewallApplicationFilter { @([pscustomobject]@{ InstanceID = '${rule}'; Program = '${node}' }, [pscustomobject]@{ InstanceID = 'other'; Program = 'C:/other.exe' }) }
+function Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline = $true)] $InputObject) process { if ($InputObject) { [pscustomobject]@{ InstanceID = '${rule}'; RemoteAddress = ${remote.length === 1 ? `'${remote[0]}'` : arr(remote)} } } } end { if (-not $InputObject) { ${opts.inBulk === false ? '' : `[pscustomobject]@{ InstanceID = '${rule}'; RemoteAddress = ${remote.length === 1 ? `'${remote[0]}'` : arr(remote)} };`} [pscustomobject]@{ InstanceID = 'other'; RemoteAddress = 'Any' } } } }
+function Get-NetFirewallRule { param($Direction, $Name) [pscustomobject]@{ Name = '${rule}'; Enabled = 'True'; Action = 'Allow'; Group = 'Final Factory agent node' } }
+function Get-Process { param($ErrorAction) [pscustomobject]@{ Id = 42; Path = '${node}' } }
+function Get-NetTCPConnection { param($State, $OwningProcess, $ErrorAction) if ($State -eq 'Listen') { [pscustomobject]@{ LocalPort = 8891 } } else { foreach ($p in ${arr(opts.peers ?? ['127.0.0.1', '100.86.157.116'])}) { [pscustomobject]@{ LocalPort = 8891; RemoteAddress = $p } }; [pscustomobject]@{ LocalPort = 50000; RemoteAddress = '8.8.8.8' } } }
+`;
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fwcheck-')), 'check.ps1');
+  fs.writeFileSync(file, mocks + firewallCheckScript([node], 'F:\\ffw\\tmp', [node]));
+  const r = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8' });
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+}
+
+test('w5581: the firewall read, run, finds BEAST\'s wide node rule and passes a tailnet one', { skip: process.platform !== 'win32' && 'needs Windows PowerShell' }, () => {
+  const node = 'F:\\ffw\\tools\\node\\node.exe';
+  const wide = parseFirewallCheck(runCheck(node, ['Any']));
+  assert.deepEqual(wide?.wide, [node], 'BEAST: RemoteAddress Any is wide');
+  assert.deepEqual(wide?.missing, []);
+  assert.deepEqual(wide?.peers, [], 'loopback and tailnet peers, and connections to other ports, are not counted');
+  assert.equal(wide?.read, 'apps=2 addrs=2 inbound=1');
+  assert.deepEqual(parseFirewallCheck(runCheck(node, ['100.64.0.0/255.192.0.0', 'fd7a:115c:a1e0::/48']))?.wide, [], 'tailnet only');
+  assert.deepEqual(parseFirewallCheck(runCheck(node, ['100.64.0.0/255.192.0.0', 'LocalSubnet']))?.wide, [node], 'anything beside the tailnet is wide');
+  assert.deepEqual(parseFirewallCheck(runCheck(node, ['Any'], { inBulk: false }))?.wide, [node], 'a rule missing from the bulk read is read on its own');
+  assert.deepEqual(parseFirewallCheck(runCheck(node, ['Any'], { peers: ['192.168.1.20', '::ffff:100.70.1.1', '::1'] }))?.peers, [`${node} 192.168.1.20:8891`], 'a LAN peer is one narrowing would cut off');
+});
+
+test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, any protocol, and firewallRepair warns of a wide one', () => {
   const ps = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'firewall.ps1'), 'utf8');
   assert.match(ps, /Add-Allow \$AgentNode 'Final Factory agent node' \$NodeGroup "[^"]*" -Tailnet -Protocol Any/, 'the node: tailnet only, any protocol');
   assert.match(ps, /-Program \$exe -Protocol \$Protocol `\s*-RemoteAddress \$script:Tailnet/, 'the tailnet branch passes the protocol');
   assert.match(ps, /Set-NetFirewallRule -RemoteAddress Any/, 'the header documents the revert');
   const worker = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'worker.ts'), 'utf8');
-  assert.match(worker, /!seen\.wide\.length/, 'a wide rule is not "all there"');
+  assert.match(worker, /WARNING: tailnet-only rule \(w5581, warn only\)/, 'a wide rule is warned of');
+  assert.doesNotMatch(worker.match(/WARNING: tailnet-only rule[^`]*`/)![0], /Windows Firewall/, 'the warn stage leaves out the words that make the rollout rerun the tools elevated (machineRollout.publishTools)');
 });
