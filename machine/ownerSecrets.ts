@@ -301,3 +301,49 @@ export function sayOwnerRules(mode: string, platform: NodeJS.Platform, owner: re
   const mac = platform === 'darwin' ? `, deny mach-lookup of ${KEYCHAIN_MACH_SERVICES.join(' and ')}, and deny preference writes` : '';
   return `read fence (${mode}): owner-secret rules ${verb}: reads of ${owner.length ? owner.join(', ') : 'no owner path'}${mac}`;
 }
+
+/**
+ * The owner's UNIX sockets that hand out a secret with no file read (w5748, from w5733's review of #1232): the session
+ * bus (the Secret Service, org.freedesktop.secrets, where a desktop Linux gh login is kept "(keyring)", and the browsers'
+ * Safe Storage keys), GNOME keyring's own folder, and the ssh and gpg agents, which sign with the owner's keys though
+ * ~/.ssh is closed. Landlock refuses connect() to them only from ABI 9 (Linux 7.1, LANDLOCK_ACCESS_FS_RESOLVE_UNIX);
+ * measured on biscuit (Linux 7.0, ABI 8, 2026-11-25): every one answered a locked worker. A folder stands for the
+ * sockets in it. `SSH_AUTH_SOCK` is the daemon's own (a worker's env may point elsewhere, but the agent is this one).
+ */
+export function ownerSocketPaths(o: { runtimeDir?: string; env: NodeJS.ProcessEnv }): string[] {
+  const out: string[] = [];
+  if (o.runtimeDir) {
+    const r = (...s: string[]) => path.posix.join(o.runtimeDir!, ...s);
+    out.push(r('bus'), r('keyring'), r('gcr'), r('gnupg'), r('openssh_agent'));
+  }
+  if (o.env.SSH_AUTH_SOCK) out.push(path.posix.resolve(o.env.SSH_AUTH_SOCK));
+  return [...new Set(out)];
+}
+
+/**
+ * What the socket probe connects to (w5748): each path that is a socket, and the sockets directly inside each folder.
+ * Existing ones only; the daemon lists folders (it is not fenced) and sends nothing on a socket.
+ */
+export function ownerSocketProbeTargets(paths: readonly string[], stat: (p: string) => fs.Stats | undefined = statOr): string[] {
+  const out: string[] = [];
+  for (const p of paths) {
+    const s = stat(p);
+    if (s?.isSocket()) out.push(p);
+    else if (s?.isDirectory()) {
+      try {
+        for (const e of fs.readdirSync(p).sort()) if (stat(path.join(p, e))?.isSocket()) out.push(path.join(p, e));
+      } catch {
+        /* an unreadable folder: nothing to probe in it */
+      }
+    }
+  }
+  return [...new Set(out)];
+}
+
+function statOr(p: string): fs.Stats | undefined {
+  try {
+    return fs.statSync(p);
+  } catch {
+    return undefined;
+  }
+}

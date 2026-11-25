@@ -27,7 +27,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayOwnerSocketProbe, sayReadProbe, secretsDirs, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
@@ -86,7 +86,7 @@ import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { trustedGh } from './evidenceGate.ts';
-import { judgeToolLeg, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
+import { hasOwnGithub, judgeToolLeg, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -707,7 +707,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence());
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root);
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -3444,6 +3444,7 @@ export class Daemon {
       log(sayReadProbe(mode, process.platform, v, t));
       const tools = await this.probeOwnerTools(fenced, ownerFence ? fenceEnv(ownerFence) : {});
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
+      if (process.platform === 'linux' && lock) await this.probeOwnerSockets(mode, lock);
       if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
@@ -3480,6 +3481,21 @@ export class Daemon {
     const blocks = said.some((s) => !s.ok) || skipped.length > 0;
     log(`read fence probe, tools under the owner rules (w5747): ${[...said.map((s) => `${s.name} ${s.ok ? '' : 'FAILED '}${s.said}`), ...skipped.map((s) => `not run: ${s}`)].join('; ') || 'none here'}${blocks ? '; on mode would not enforce' : ''}`);
     return { blocks };
+  }
+
+  /**
+   * w5748: whether a fenced run reaches the Secret Service (the gh keyring login) and the ssh and gpg agents: a child of the
+   * daemon's own, under the run's lock and read rules, connects to each owner socket and closes it, sending nothing. Logged
+   * in warn and on modes; a failure to run it is logged and changes nothing.
+   */
+  private async probeOwnerSockets(mode: ReadFenceMode, lock: string[]): Promise<void> {
+    try {
+      const socks = ownerSocketProbeTargets(ownerSocketPaths({ runtimeDir: process.env.XDG_RUNTIME_DIR, env: process.env }));
+      const r = await run('python3', [FF_LANDLOCK, ...lock, ...this.readLock, '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { timeoutMs: 60_000 });
+      log(sayOwnerSocketProbe(mode, socks, r.stdout).line);
+    } catch (e) {
+      log(`read fence (${mode}, linux) owner sockets: the probe could not run (${(e as Error).message})`);
+    }
   }
 
   /**

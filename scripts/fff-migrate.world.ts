@@ -196,6 +196,8 @@ export async function world(t: { after: (fn: () => unknown) => void }): Promise<
     port: beastPort,
     host: '127.0.0.1',
     trustProxy: false,
+    // The daemon dials the VM at this runner's LAN address, not a tailnet one, and the copy carries this config there.
+    machineLinkTailnet: 'off',
     publicUrl: `http://127.0.0.1:${beastPort}`,
     ownerName: 'Ben',
     dataDir: beastData,
@@ -256,6 +258,7 @@ for ($i = 0; $i -lt 120; $i++) { try { $null = Invoke-WebRequest -UseBasicParsin
   const vmCfg = {
     ...template,
     port: vmPort,
+    machineLinkTailnet: 'off', // as BEAST's above: the test's daemon dials a LAN address (w5575)
     publicUrl,
     ownerName: 'Lothsahn',
     dataDir: path.join(vm, 'data'),
