@@ -271,7 +271,7 @@ session and priority it wrote. Now:
 **Where it shows.** `list_sandboxes` (the machine's header and its Capacity line), `system_status` (each machine's
 line), the dashboard's group header (`4/3 editors`) and `unity status` all say "editors 4 of 3: 1 interactive, 3 batch",
 with what waits, the RAM line and the game players. A machine with no `max_unity` (no sandbox root) is counted and never
-held up. Tests: `server/unitySlots.test.ts`, the w469 tests in `server/machineSandboxes.test.ts` and
+held up. Tests: `server/unitySlots.test.ts`, the w469 tests in `server/machineSandboxes*.test.ts` and
 `server/beastMachine.test.ts`.
 
 ## The bench queue: no build or boot beside a timed run (w1615)
@@ -541,7 +541,7 @@ machine (one exclusive ticket, then the waiting shared group, within a priority;
 `scripts/tests/test_bench_queue_order.py`), and the editors closed for one ticket come back in the shared turn after it, so a long A/B of many short tickets interleaves with the others' work.
 
 Tests: `server/benchTurn.test.ts`, `server/benchBuilds.test.ts` (w1860), the w1829 cases in
-`server/machineSandboxes.test.ts` and `server/macUnity.test.ts`.
+`server/machineSandboxes*.test.ts` and `server/macUnity.test.ts`.
 
 ## CI runners on a loaded machine (w3305)
 
@@ -706,7 +706,7 @@ action for a start of the editor. Tests: `server/unityReaper.test.ts` (the two c
 a non-sandbox project, an alive and progressing owner, a busy-but-silent build, a young build and a progressing orphan stay;
 the w1874 biscuit case: an orphaned wrapper's build, idle with a 2.5 s burst, ends at 10 min with its wrapper; its owner ends
 it at once, another session cannot; an owned busy build stays to 20 min, an owned idle one goes at 10), and
-`machineSandboxes.test.ts` (the tool reaches the daemon).
+`machineSandboxes*.test.ts` (the tool reaches the daemon).
 
 ## Each sandbox's Unity MCP reaches only its editor
 

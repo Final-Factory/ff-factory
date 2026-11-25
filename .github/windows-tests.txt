@@ -11,7 +11,9 @@ server/machineDeployWin.test.ts | server/machineDeployWin.ts, server/machineDepl
 server/machineDialogs.test.ts | server/watchdog.ts, scripts/unity-windows.ps1 | real WinForms windows listed and closed
 server/republish.test.ts | scripts/republish-public.ps1, scripts/common.ps1 | Windows PowerShell 5.1 with Win32_Process (Get-Supervisor) and .cmd shims
 server/updateSteps.test.ts | scripts/update-steps.ps1 | the portal host's updater under Windows PowerShell 5.1 with the real npm.cmd (Linux runs it under pwsh 7)
-server/machineSandboxes.test.ts | server/proc.ts, machine/sandboxes.ts | git worktrees copied with robocopy and removed with rd on NTFS
+server/machineSandboxesEditors.test.ts | server/proc.ts, machine/sandboxes.ts | git worktrees copied with robocopy and removed with rd on NTFS
+server/machineSandboxesLife.test.ts | server/proc.ts, machine/sandboxes.ts | git worktrees copied with robocopy and removed with rd on NTFS
+server/machineSandboxesTrim.test.ts | server/proc.ts, machine/sandboxes.ts | git worktrees copied with robocopy and removed with rd on NTFS
 server/copyTree.test.ts | server/proc.ts | copyTree's robocopy /XD and Copy-Item branches
 server/hostWatch.test.ts | machine/hostWatch.ts | taskkill /T /F, and Windows locking a live process's folder
 server/workerCaps.test.ts | machine/workerCaps.ts, machine/winJob.cs | the worker caps' job object for real (w5554): the helper built with Add-Type, a fork bomb refused past its active-process limit and a commit past its memory limit, and its tools ended while the host and its claude go on

@@ -96,6 +96,8 @@ const KNOWN: Record<string, [number, string]> = {
   'server/standingGuard.ts': [1, 'guard: path lists only'],
   'server/testHistoryCi.ts': [1, 'the portal\'s own scratch'],
   'server/testMachine.ts': [2, 'the portal\'s test machine'],
+  'server/machineSandboxesTestKit.ts': [1, 'the machine sandbox tests\' repos (w5826)'],
+  'server/orchestratorsTestKit.ts': [1, 'the orchestrator tests\' data folder (w5826)'],
   'server/testPorts.ts': [1, 'the portal\'s test ports'],
   'server/unityHang.ts': [2, 'reads Unity\'s default log'],
   'server/unityMcp.ts': [1, 'reads ~/.unity-mcp'],

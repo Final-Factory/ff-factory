@@ -1183,7 +1183,7 @@ Stage 1 of the per-slot isolation design w5544 (report r384, lothsahn). With `sl
 git repository** whose `.git` is a folder, not a worktree pointer. Its `.git/objects/info/alternates` names the main
 clone's `objects` folder, so it borrows every object the clone has and copies none (`git count-objects` reads 0 in a
 new one). A commit, a branch, a stash, a `git config` or a hook in a sandbox writes only into that sandbox's `.git`:
-nothing in the clone (`machine/slotRepo.ts`; the w5614 tests in `server/machineSandboxes.test.ts` check that the
+nothing in the clone (`machine/slotRepo.ts`; the w5614 tests in `server/machineSandboxes*.test.ts` check that the
 clone's object count and branches are unchanged after a commit). Setting it: `add_machine` with `slot_repos`; an
 older daemon ignores it and keeps making worktrees.
 
@@ -2239,7 +2239,7 @@ LothDesktop and Beast, not just when BEAST is full").
     a spent run, `retry: true` and `avoid`; w2057: joining an open run of the PR, the finished-run answer, the result reaching a
     worker that filed nothing and one gated on its run, `pair_legs 0` and a repeat closed as done, the pair-wait nudge),
     `server/pairRuns.test.ts` (w2057: the PR, commit and wait-line matchers), `server/ledgerSweep.test.ts` (w2041: a DONE leg is told once), and in
-    `server/machineSandboxes.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
+    `server/machineSandboxes*.test.ts` the asking worker stopped and its sandbox released FREE by the release pass.
 - **The rule** (the dispatcher's prompt): new game-repo work (code, tests, Unity, built players) goes where the
   Capacity block's last line says, even when a sandbox on the other computer is free. Discord posting as Max pins no
   computer: any worker posts with `post_as_max` and FFBox posts (w901, [ffbox.md](ffbox.md#posting-as-max-w901)). A computer that is avoided or not next keeps only what needs it: `F:\ffsb\_review`, ssh to the M5 from BEAST, a brief that pins it

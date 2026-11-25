@@ -559,7 +559,7 @@ the portal too (`data/cleanup/<machine>/cleanup-log.jsonl`); `cleanup_log` shows
 `set_app_config`, applied at once: `mode` (`on` default, `dry-run`: measured and reported, nothing removed, or
 `off`), `everyHours` (24), `untouchedHours` (24), `shaBuildDays` (2), `runRetentionDays` (14), `logRetentionDays`
 (14), `tempHours` (6), `nightlyKeep` (2), `nightlyRoots`. Tests: `server/staleOutput.test.ts` (each keep and delete
-rule), `server/machineSandboxes.test.ts` (a dry run through a daemon).
+rule), `server/machineSandboxes*.test.ts` (a dry run through a daemon).
 
 ### FF Factory's own leftovers (w626)
 
@@ -762,7 +762,7 @@ them; the rule lets a worker remove exactly the files named `<its temp folder's 
 **Tests**: `server/tempDelete.test.ts` (the w901, w907 and w883 commands allowed, every escape refused, a real junction),
 `server/agentSession.test.ts` (the session answers an in-folder delete, asks for an outside one), `server/sessionSweep.test.ts`
 (the two steps, the grace, a returning session, a process that names the folder, a live session, a clone with local work),
-`server/releaseSweep.test.ts` and `server/machineSandboxes.test.ts` (the release sweep inside `cleanup`, a failing one),
+`server/releaseSweep.test.ts` and `server/machineSandboxes*.test.ts` (the release sweep inside `cleanup`, a failing one),
 `server/evidenceRules.test.ts` (the brief says leave it). **Measuring**: `node scripts/cleanup-approvals.ts <dataDir>
 --since 2026-10-03 --split <deploy date>` prints, per day, the prompts a person answered and the clean-up ones by kind
 (the session's own answer leaves no event, so a drop is real).
