@@ -53,8 +53,10 @@ case "${1:-}" in
       [ -d "$src" ] || install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$src"
       install -d -m 0700 -o root -g root "$VIEWS/$name"
       mountpoint -q "$VIEWS/$name" && continue
-      # u:<in the view>:<on disk>:1, util-linux mount(8) X-mount.idmap (2.39 and newer: noble and resolute).
-      mount --bind -o "X-mount.idmap=u:$agent_uid:$fff_uid:1 g:$agent_gid:$fff_gid:1" "$src" "$VIEWS/$name" ||
+      # u:<on disk>:<in the view>:1, util-linux mount(8) X-mount.idmap (2.39 and newer: noble and resolute). The map is a
+      # user namespace's, inside then outside, and the kernel takes the disk's id as the inside one: the other way round
+      # fff is unmapped and every file shows as nobody's (measured in CI, w5598).
+      mount --bind -o "X-mount.idmap=u:$fff_uid:$agent_uid:1 g:$fff_gid:$agent_gid:1" "$src" "$VIEWS/$name" ||
         die "fff-agent-views: cannot mount the idmapped view of $src (kernel 5.12+ and util-linux 2.39+ do)"
       mount -o "remount,bind,nosuid,nodev,$mode" "$VIEWS/$name" || die "fff-agent-views: cannot make $VIEWS/$name $mode"
     done < <(views)
