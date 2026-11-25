@@ -264,7 +264,7 @@ const agoMin = (ms: number) => `${Math.max(0, Math.round(ms / 60_000))} min`;
  * 1.9 GB each there, kept as "not provably build output". It counts when the checkout's .gitignore ignores /target (so no
  * worker's tracked work lies in it) and a folder right inside it carries cargo's tag.
  */
-function strayCargoOutput(slot: string): boolean {
+export function strayCargoOutput(slot: string): boolean {
   const target = path.join(slot, 'ffu', 'target');
   try {
     const ignore = fs.readFileSync(path.join(slot, 'ffu', '.gitignore'), 'utf8');
@@ -314,6 +314,13 @@ export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, 
     const last = await newestTopWrite(path.join(target, 'debug', 'incremental'));
     if (last > now - settleMs) return row('keep', `${what}: its incremental cache was written ${agoMin(now - last)} ago, within the settle time (a build may be running)`);
     return row('delete', `the debug/incremental cache of ${what}: worker ${holder} is stopped (a request of it is not closed), no running process names the slot, nothing written for ${agoMin(settleMs)}; its warm units stay and the next edit rebuilds this cache (rebuildable, w5240)`);
+  }
+  // w5796: a stray ffu/target goes from a held slot too once nothing in it was written for ffuSlotKeepHours, as the daemon's rule
+  // takes it (installLeftovers.ts, strayInTreeTarget): it is a build that missed the slot's own target, not its warm cache.
+  if (up && stray && ctx?.procs && !ctx.procs.some((c) => mentions(c, target))) {
+    const keepH = INSTALL_LEFTOVER_DEFAULTS.ffuSlotKeepHours;
+    const last = await newestTopWrite(target);
+    if (keepH > 0 && last <= now - keepH * 3_600_000) return row('delete', `${what}, in a slot held by worker ${holder}: no running process names it and nothing in it was written for ${agoMin(now - last)}, over ffuSlotKeepHours (${keepH} h); the slot's own target stays warm (rule ffu-slot-target, w5796)`);
   }
   if (up) return row('keep', `${what}: the slot is held by worker ${holder}, which runs or has a request not closed (ffu-slot list); its warm target saves the next build minutes`);
   if (!ctx?.procs) return row('keep', `${what}: the running processes could not be read to see that nothing builds in or runs from the slot`);
