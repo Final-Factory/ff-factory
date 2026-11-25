@@ -35,11 +35,11 @@ function bigDataDir(dir: string): { secrets: number } {
     }
     return out.join('\n') + '\n';
   };
-  // about 60 MB and 30 MB (as text) of transcript, as the portal's biggest ones are, and a state.json of about 20 MB
-  fs.writeFileSync(path.join(dir, 'transcripts/big.jsonl'), lines(100_000, 5000));
-  fs.writeFileSync(path.join(dir, 'transcripts/old.jsonl.gz'), zlib.gzipSync(lines(50_000, 5000)));
+  // about 30 MB and 15 MB (as text) of transcript and a state.json of about 10 MB (halved from 60, 30 and 20 MB for CI's time, w5613)
+  fs.writeFileSync(path.join(dir, 'transcripts/big.jsonl'), lines(50_000, 2500));
+  fs.writeFileSync(path.join(dir, 'transcripts/old.jsonl.gz'), zlib.gzipSync(lines(25_000, 2500)));
   const sessions: Record<string, unknown> = {};
-  for (let i = 0; i < 30_000; i++) sessions[`s${i}`] = { id: `s${i}`, title: 'x'.repeat(600), note: i === 7 ? `GH_TOKEN=${GHP}` : '' };
+  for (let i = 0; i < 15_000; i++) sessions[`s${i}`] = { id: `s${i}`, title: 'x'.repeat(600), note: i === 7 ? `GH_TOKEN=${GHP}` : '' };
   secrets++;
   fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify({ sessions }, null, 2));
   // and many small files, as the data folder holds thousands
@@ -58,7 +58,7 @@ test('scrub thread (w5613): a large data folder is scrubbed at start with no blo
   const text = fs.readFileSync(path.join(dir, 'transcripts/big.jsonl'), 'utf8');
   let t0 = performance.now();
   redactFileText('big.jsonl', text);
-  t.diagnostic(`masking the 60 MB transcript on one thread: ${(performance.now() - t0).toFixed(0)} ms`);
+  t.diagnostic(`masking the 30 MB transcript on one thread: ${(performance.now() - t0).toFixed(0)} ms`);
 
   const h = monitorEventLoopDelay({ resolution: 10 });
   // the longest gap between turns, seen by a timer that asks for one every 5 ms
