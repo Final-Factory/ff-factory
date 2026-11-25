@@ -175,7 +175,7 @@ done
 # ---------------------------------------------------------------- 3. packages
 log "3/12 packages"
 # ubuntu-keyring holds /usr/share/keyrings/ubuntu-cloudimage-keyring.gpg (ubuntu-cloudimage-keyring is a dummy since noble).
-pkgs=(qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils ubuntu-keyring gpgv nftables jq curl)
+pkgs=(qemu-system-x86 qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils ubuntu-keyring gpgv nftables jq curl age)
 missing=()
 for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
 libvirt_was_installed=yes

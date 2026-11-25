@@ -31,6 +31,27 @@ run_cmd() {
   fi
 }
 
+# key_primary_fprs FILE: the fingerprint of every primary key in an OpenPGP key file (armored or not), one per line.
+# Subkeys' fingerprints are left out: a vendor pins its primary keys.
+key_primary_fprs() {
+  gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }'
+}
+
+# verify_key_fprs FILE FPR...: dies unless FILE holds at least one key and every primary key in it is one of the pinned
+# fingerprints (w5530: an apt signing key fetched over the network is trusted only by its fingerprint). An unlisted key,
+# an extra key in the file, an unreadable file and a wrong fingerprint all fail, naming what was found.
+verify_key_fprs() {
+  local file=$1 found f p ok
+  shift
+  found=$(key_primary_fprs "$file")
+  [ -n "$found" ] || die "apt key check FAILED: $file holds no readable OpenPGP key"
+  for f in $found; do
+    ok=0
+    for p in "$@"; do [ "$f" = "$p" ] && ok=1; done
+    [ "$ok" = 1 ] || die "apt key check FAILED: $file has the key $f, expected one of: $* (the vendor's key changed, or the download was tampered with; nothing was installed)"
+  done
+}
+
 # write_file PATH MODE [OWNER]: stdin to PATH when it differs; prints "changed" when it wrote (or would).
 write_file() {
   local path=$1 mode=$2 owner=${3:-root:root} tmp
@@ -54,7 +75,7 @@ install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
   for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-watchdog fff-backup fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-watchdog fff-backup fff-backup-drill fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
   # The orchestration worker's PATH (w597): its ssh and fffctl, each one sudo call to a wrapper above; its scp and sftp
   # (w612), /usr/bin/scp and sftp as itself over fff-ops-scp-ssh; its fff-machine-ssh (w676), through fff-ops-priv.
   for f in ssh fffctl scp sftp fff-machine-ssh; do [ -z "$(write_file "$FFF_LIB/ops-bin/$f" 0755 <"$src/ops-bin/$f")" ] || c+=" ops-bin/$f"; done
@@ -394,4 +415,50 @@ own_app() {
       rm -rf "$e"
     fi
   done
+}
+
+# ---------------------------------------------------------------- backups (fff-backup, fff-backup-drill; w5529)
+# What the backup and the drill wrote last, read by fffctl status and the portal's system_status (server/backupStatus.ts):
+# root-owned, world-readable, no secrets in them.
+FFF_STATE_DIR=${FFF_STATE_DIR:-/var/lib/fff}
+# The backup target's pinned host key: root:root, not group- or other-writable, one line "fff-backup-target <type> <key>"
+# (fffctl backup-config --host-key). ssh checks the target against it under that alias and nothing else; a changed key
+# fails the backup loudly and is never re-trusted by itself.
+FFF_BACKUP_KNOWN_HOSTS=${FFF_BACKUP_KNOWN_HOSTS:-/etc/fff/backup_known_hosts}
+FFF_BACKUP_HOST_ALIAS=fff-backup-target
+
+# backup_pin_problem: why the pinned host key cannot be used (one line), or nothing when it can.
+backup_pin_problem() {
+  local kh=$FFF_BACKUP_KNOWN_HOSTS perm
+  if [ ! -f "$kh" ]; then echo "no pinned host key for the backup target ($kh is missing; sudo fffctl backup-config --host-key FILE)"; return; fi
+  if [ "${FFF_TEST_NOROOT:-}" != 1 ] && [ "$(stat -c %u "$kh")" != 0 ]; then echo "$kh is not owned by root"; return; fi
+  perm=$(stat -c %a "$kh")
+  if (((8#$perm & 8#022) != 0)); then echo "$kh can be written by others than root (mode $perm)"; return; fi
+  grep -q "^$FFF_BACKUP_HOST_ALIAS " "$kh" || echo "no pinned host key for the backup target in $kh (sudo fffctl backup-config --host-key FILE)"
+}
+
+# backup_sftp BATCH ERR: one sftp batch file to BACKUP_SSH_TARGET, checked only against the pinned key; stderr to ERR.
+backup_sftp() {
+  sftp -q -b "$1" -i "$BACKUP_SSH_KEY" -o BatchMode=yes -o HostKeyAlias="$FFF_BACKUP_HOST_ALIAS" \
+    -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o CheckHostIP=no \
+    -o UserKnownHostsFile="$FFF_BACKUP_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null "$BACKUP_SSH_TARGET" 2>"$2"
+}
+
+# backup_sftp_why ERR: one line saying why an sftp batch failed; a host key that changed is said so plainly.
+backup_sftp_why() {
+  if grep -qE 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|No [A-Za-z0-9-]+ host key is known' "$1" 2>/dev/null; then
+    echo "the backup target's host key does not match the pinned one in $FFF_BACKUP_KNOWN_HOSTS: check the target's key out of band and re-pin it (sudo fffctl backup-config --host-key FILE); it is never re-trusted by itself"
+  else
+    echo "sftp to $BACKUP_SSH_TARGET failed: $(grep -v '^sftp>' "$1" 2>/dev/null | tail -n 1 | cut -c1-200)"
+  fi
+}
+
+# state_write NAME: stdin (JSON) to $FFF_STATE_DIR/NAME, whole, 0644 root.
+state_write() {
+  local tmp
+  install -d -m 0755 "$FFF_STATE_DIR"
+  tmp=$(mktemp "$FFF_STATE_DIR/.$1.XXXXXX")
+  cat >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$FFF_STATE_DIR/$1"
 }
