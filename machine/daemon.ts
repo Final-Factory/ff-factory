@@ -44,8 +44,8 @@ import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
-import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
-import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, type StdioServer } from './unityMcp.ts';
+import { UnitySlots, editorInstancePid, gamePlayers, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
@@ -1428,7 +1428,7 @@ export class Daemon {
         return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
       }
     };
-    const places = this.pool.list().map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) }));
+    const places = mcpPlaces(this.pool.list(), alive, editorInstancePid);
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
   }
 
@@ -1642,6 +1642,16 @@ export class Daemon {
           if (m) log(m);
         }
       })();
+    }
+    // w5746: the status folder of the editors workers start (slotEnv FF_UNITY_MCP_EDITOR_STATUS_DIR) is read from the start.
+    if (this.cfg.root) {
+      const editors = workerEditorStatusDir(this.cfg.root);
+      try {
+        fs.mkdirSync(editors, { recursive: true });
+      } catch (e) {
+        log(`unity mcp: the status folder of workers' editors ${editors}: ${(e as Error).message}`);
+      }
+      addMcpStatusDir(editors);
     }
     this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
     this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
@@ -2275,6 +2285,9 @@ export class Daemon {
     // w5650: the shell's bridge (the game repo's scripts/unity-bridge.py, which reads UNITY_MCP_STATUS_DIR, else
     // ~/.unity-mcp) finds its sandbox's editor in the same synced folder its MCP server reads, fenced or not.
     if (spec.sandbox) env.UNITY_MCP_STATUS_DIR = mcpStatusDir(appDirOfConfig(this.cfg), spec.sandbox);
+    // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
+    // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
+    if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);

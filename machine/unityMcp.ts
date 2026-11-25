@@ -25,6 +25,38 @@ export const mcpStatusDir = (appDir: string, place: string) => path.join(appDir,
  */
 export const mcpHomeStatusDir = (appDir: string, place: string) => path.join(mcpStatusDir(appDir, place), '.unity-mcp');
 
+/**
+ * w5746: where an editor a sandbox worker starts itself (`unity-slot run` of a `-batchmode` editor, a second editor of a
+ * peer run) writes its bridge status. The worker's own UNITY_MCP_STATUS_DIR is its place's synced folder in the daemon's
+ * folder (mcpStatusDir), which the worker fences keep read-only, so such an editor's heartbeat
+ * (MCP for Unity StdioBridgeHost.WriteHeartbeat, which swallows the error) wrote nothing and the worker's server answered
+ * "No Unity instances are currently connected" (measured on m5, w5693). This folder is one every worker fence already
+ * lets a worker write, and the daemon reads it (server/unityHang.ts addMcpStatusDir) and copies the editor's file into the
+ * place's folder (McpScopes, from the pid in the project's Library/EditorInstance.json):
+ * - macOS: `~/.unity-mcp`, a named exception of the Seatbelt fence (server/workerFence.ts), where the daemon's own
+ *   editors write too, so the server's preflight (it reads only Path.home()/.unity-mcp there) finds the editor's own file;
+ * - Linux and Windows: `<root>/home/.unity-mcp`, inside a root child every fence opens (lowIntegrity.ts WORKER_CHILDREN:
+ *   the Landlock lock does not open ~/.unity-mcp, a Low worker cannot write ~/.unity-mcp on C:), where the daemon's
+ *   fenced Windows editors write already (w5540).
+ */
+export function workerEditorStatusDir(root: string, platform: NodeJS.Platform = process.platform, home = os.homedir()): string {
+  return platform === 'darwin' ? path.join(home, '.unity-mcp') : path.join(root, 'home', '.unity-mcp');
+}
+
+/**
+ * The places McpScopes keeps, with the pid of the editor each one's folder follows: the daemon's own editor of the sandbox,
+ * else (w5746) the editor a worker started itself in the sandbox's project (a -batchmode `unity-slot run`), by the pid Unity
+ * wrote to its Library/EditorInstance.json at boot (`instancePid`). Its status file then counts only if written since that
+ * pid was first seen, as for the daemon's own, so a file a dead editor left is never copied. `alive`: the pid while it runs.
+ */
+export function mcpPlaces(
+  sandboxes: { id: string; path: string; unity: { pid?: number } }[],
+  alive: (pid?: number) => number | undefined,
+  instancePid: (project: string) => number | undefined,
+): { place: string; project: string; pid?: number }[] {
+  return sandboxes.map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) ?? alive(instancePid(sb.path)) }));
+}
+
 const asServer = (x: unknown): StdioServer | undefined => {
   const s = x as { type?: string; command?: unknown; args?: unknown; env?: unknown } | undefined;
   if (!s || typeof s.command !== 'string' || !s.command || (s.type && s.type !== 'stdio')) return undefined;
