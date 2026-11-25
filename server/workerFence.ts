@@ -13,9 +13,10 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
+import { openChildren } from '../machine/lowIntegrity.ts';
 import { projectSlug } from './claudeHome.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -40,6 +41,8 @@ export interface WorkerFence {
   readOff?: boolean;
   /** Secrets folders outside `<root>/secrets` (a Dev Drive install's host folder, readFence.ts secretsDirs): read-denied too. */
   secretsDirs?: string[];
+  /** The root children workers write (lowIntegrity.ts openChildren, w5569); absent: openChildren(root). */
+  open?: string[];
 }
 
 /** An SBPL string literal. */
@@ -51,7 +54,7 @@ const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
  * main clone: a sandbox is a git worktree whose git data (index, objects, refs) lives in it, so a fenced commit there
  * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
  */
-export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN], files: ['root.json'] };
+export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN, ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
 
 /**
  * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the same three are closed to reads as
@@ -110,7 +113,10 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     '(allow default)',
     ';; Every file write is refused, except below. Later rules win.',
     '(deny file-write*)',
-    `(allow file-write* (subpath ${lit(f.root)}))`,
+    ';; only the root folders workers write (w5569): a portal, an instances folder or a new root folder stays read-only',
+    '(allow file-write*',
+    ...(f.open ?? openChildren(f.root)).map((c) => `  (subpath ${lit(path.join(f.root, c))})`),
+    ')',
     ';; device nodes every shell writes to',
     '(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx")',
     '  (literal "/dev/dtracehelper") (literal "/dev/random") (literal "/dev/urandom")',
@@ -183,13 +189,14 @@ const confstr = (name: string) => execFileSync('/usr/bin/getconf', [name], { enc
  * The fence for this daemon's agents, or undefined when it is off: daemon.json `workerFence` is not "seatbelt", the
  * machine is not a Mac, it has no worker root, or sandbox-exec is missing.
  */
-export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
+export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
   if (o.setting !== 'seatbelt' || (o.platform ?? process.platform) !== 'darwin' || !o.root) return undefined;
   if (!(o.exists ?? fs.existsSync)(SANDBOX_EXEC)) return undefined;
   const get = o.getconf ?? confstr;
   return {
     kind: 'seatbelt',
     root: real(o.root),
+    open: openChildren(o.root, o.workFolders, READ_ONLY_IN_ROOT.subpaths),
     home: real(o.home),
     darwinTemp: real(get('DARWIN_USER_TEMP_DIR')),
     darwinCache: real(get('DARWIN_USER_CACHE_DIR')),

@@ -18,6 +18,10 @@ readable by this run; one made below a granted sibling is.
 
   ff-landlock.py ... --no-read <root>/secrets --no-read <root>/root.json --read <root>/<closed>/logs -- cmd
 
+--create PATH (w5561): beneath PATH, only make regular files and sockets and remove files. No write, truncate, folder,
+link, FIFO or device: the person's own files there cannot be changed, only removed or renamed within a folder. Unity's
+/tmp sockets and its shader compiler's lock (opened O_RDONLY|O_CREAT, then flock) need no more.
+
 Signals (w5562, ABI 6+): the command and its children may signal only processes of their own Landlock domain (or one
 nested in it), so a careless `pkill -f` cannot end the daemon, a Unity editor, another worker or the desktop. Signals
 sent to them from outside are not affected.
@@ -123,12 +127,12 @@ def die(msg):
 
 def main(argv):
     if '--' not in argv:
-        die('usage: ff-landlock.py [--rw PATH]... [--rw-children DIR [--except NAME]...]... -- CMD [ARGS]')
+        die('usage: ff-landlock.py [--rw PATH]... [--rw-children DIR [--except NAME]...]... [--sock DIR]... [--create DIR]... -- CMD [ARGS]')
     i = argv.index('--')
     opts, cmd = argv[:i], argv[i + 1:]
     if not cmd:
         die('no command')
-    rw, socks, children, cur, log, deny_unix, no_read, back = [], [], [], None, False, [], [], []
+    rw, socks, creates, children, cur, log, deny_unix, no_read, back = [], [], [], [], None, False, [], [], []
     it = iter(opts)
     for a in it:
         if a == '--rw':
@@ -136,6 +140,8 @@ def main(argv):
         elif a == '--rw-children':
             cur = [next(it), set()]
             children.append(cur)
+        elif a == '--create':
+            creates.append(next(it))
         elif a == '--sock':
             socks.append(next(it))  # only make and remove sockets there (Claude Code's $XDG_RUNTIME_DIR/cc-socks)
         elif a == '--no-read':
@@ -178,7 +184,7 @@ def main(argv):
     rfd = libc.syscall(SYS_CREATE, ctypes.byref(attr), ctypes.sizeof(attr), 0)
     if rfd < 0:
         die(f'create_ruleset failed (errno {ctypes.get_errno()})')
-    for p, kind in [(p, 'rw') for p in rw] + [(p, 'sock') for p in socks] + [(p, 'unix') for p in unix]:
+    for p, kind in [(p, 'rw') for p in rw] + [(p, 'sock') for p in socks] + [(p, 'create') for p in creates] + [(p, 'unix') for p in unix]:
         try:
             fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
         except (FileNotFoundError, PermissionError):
@@ -187,6 +193,8 @@ def main(argv):
             allowed = RESOLVE_UNIX
         elif kind == 'sock':
             allowed = MAKE_SOCK | REMOVE_FILE
+        elif kind == 'create':
+            allowed = MAKE_SOCK | MAKE_REG | REMOVE_FILE
         else:
             allowed = write_rights if os.path.isdir(p) else write_rights & (FILE_ONLY | RESOLVE_UNIX)
         add_rule(rfd, fd, allowed, f'{p} ({kind})')

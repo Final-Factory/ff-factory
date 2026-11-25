@@ -29,7 +29,7 @@ import { idleClosedPart } from './liveIdle.ts';
 import { topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, keepWhy, moveBranchOf, occupies, releasedOn, workerBranch, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
-import { otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
+import { GAME_REPO, otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { applyPairRaises, type PairState } from './pairRaise.ts';
 import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
@@ -39,7 +39,7 @@ import { inlineReviewMedia, MEDIA_FILE, outsideReview, publishedCopy, reviewRoot
 import { visualAskCheck } from './visualAsk.ts';
 import { ciPushHold } from './savePushHold.ts';
 import { BLOCKER_KIND_HELP, conflictText, FULL_SHA, gateSetter, gatesName, gatesOf, isWith, latestWorker, newestFirst, prLabel, prRefOf, type PrHealth } from '../shared/blockers.ts';
-import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, withPool } from './vault.ts';
+import { isSamePerson, personForWork, poolOwnerOf, tokenPersonForWork, vaultContext, withPool } from './vault.ts';
 import { ghRunner, githubFromVault, githubPersonOf, githubTokens } from './githubTokens.ts';
 import { clashLine, expectedFiles, type FfuClash, ffuStartClashes, FfuPrReads, peerFilesNote, sharedFilesNote } from './ffuOverlap.ts';
 import { namedIds, READ_LIST_MAX, READ_MAX_CHARS, readWork, type ReadWorkArgs } from './workRead.ts';
@@ -119,6 +119,7 @@ import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
 import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { SymbolOwners } from './symbolOwners.ts';
+import { SteamJobs, branchOf, describeJob, parseAsk, readClaim, refuseUpload } from './steamUpload.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
 import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
@@ -360,6 +361,8 @@ const FFBOX_LIST_TOOL = `See what FFBox (Lothsahn's build server) holds for a cr
 /** file_ffbox_symbols' description (w1639; docs/ffbox.md, "Symbols of an urgent-lane build"). */
 export const TIMED_RUN_TOOL = `Time players on another computer (w1946, w1996): a play-only computer (no editor, it only plays the game) or a worker computer of at most 4 agent slots that takes timed runs (server/timedAsk.ts SMALL_TIMED_MAX_AGENTS; a bigger one only by its BIG_TIMED_RUNS entry, w2442), under that computer's exclusive bench ticket, so your A/B is measured away from your own computer's editors and builds and its turn idles few slots. On a large or xlarge computer (4 or more agent slots) this is how a player A/B is timed: timed_place names the computer. Build the players where you are (the build before your change and the build with it; a Windows player folder each), copy the save into your temp folder, then call this with builds [{ name, path, args? }] and save. Your computer sends the pieces of the builds the portal lacks (a later run sends only what changed), and the timing machine plays the game repo's interleaved A/B legs (scripts/bench/probe_ab_win.sh: solo, the save, the perf probe after the settle, the order flipped on even rounds) and sends the logs back. It answers once the pieces are sent, with the run id and its bound: end your turn with a wake_me check-in of that bound; FF Factory messages you with the table and the logs (a .tar.gz in your Inbox, probe_ab_win.sh's layout) when it ends. Compare its numbers only with the same machine's own (machine: the computer an earlier run used). args: -ff switches, and Unity's -force-device-index N to pick the GPU (w2456: e.g. a laptop's integrated GPU beside its discrete one; Player.log's "Direct3D:" Renderer line names the GPU a leg used). Refused when no computer takes a timed run: then ask timed_place.`;
 const FFBOX_FILE_SYMBOLS_TOOL = `Put an urgent-lane release's symbols into FFBox's symbol store, where list_ffbox_files and fetch_ffbox_symbols find them and FFBox's crash and desync diagnosis reads them. Only for a release built on BEAST or LothDesktop (the game repo's scripts/release/urgent_release.py packs the archives and prints this step); FFBox files only a version the urgent lane claimed, never over symbols it filed itself. Only the request that built the version may file it (w5550): its builder's switch_branch onto urgent/<v> records the build for that request, and symbols one request filed are never replaced by another's call; anything else is refused with the reason. First publish_attachment each archive the run lists, then call this with version and entries: one per app and platform, { app: main|demo, platform: WindowsPlayer|OSXPlayer|LinuxPlayer, attachment: its att_ id } (an archive shared by main and the demo is one attachment, named in both). It sends each archive to FFBox in checked parts over FFBox's own link to this portal and asks FFBox to file each build; it answers within about 40 s with how far it got. Call it again with just the version until every build says filed (a release takes minutes), then check list_ffbox_files what "symbols" with the version.`;
+/** steam_upload's description (w5551, docs/steam-upload.md). */
+const STEAM_UPLOAD_TOOL = `The urgent release lane's Steam step, run by this computer's daemon with the Steam build account's credential, which no worker holds or reads (w5551: no FFSTEAM_PASSWORD in your environment, and the steamcmd folder is closed to you). action check: whether this computer logs in to Steam (at most once every 10 minutes; with guard_code, the code from Steam Guard's email, now), and the depots each app has (a linux depot means runs needs linux). action upload: version, app (main or demo), sha (the full bump commit you built), runs { windows, mac, linux? } (each platform's run folder, inside your sandbox or temp folder: release.json, build.log, release/player), live (only the branch the release names: development for a master main release, none for pre-1.0 or the demo) and preview (true: steamcmd --preview, nothing uploaded or set live). An upload is refused unless it is your own release: you started its build_plan on this computer, and the bump's cicd/release-lane.json names this version, this computer and one of your requests; the commit is on master or pre-1.0; and a version's app is uploaded once. A preview skips those checks. The daemon copies the players into its own folder, checks them again with ffbox ffrelease-check.py and runs ffbox ffsteam.py. It answers within about 40 s; call it again with the same arguments, or action status, until it says done or failed. The default and every other Steam branch are a person's, on the partner site.`;
 /** fetch_lab_fixture's description, the same on every worker (server/labFixtures.ts, w3939). */
 const LAB_FIXTURE_TOOL = `Fetch a nightly e2e lab fixture (a players' save a scenario names as "save": "lab:<file>") into ${INBOX_DIR}/ in your working folder by its SHA-256, which the scenario's \`source\` text gives. The lab's fixtures live in <root>/nightly-history/fixtures of the computer that runs the night (lothdesktop); this takes the file from there, or from the portal's copy when that computer is off, whichever computer you are on. Read-only on the holder, SHA-256 checked. Then copy it to $FF_WORKER_ROOT/nightly-history/fixtures/<name> so scripts/nightly/ffnightly.py finds lab:<name>. With no holder online and no copy, the answer says so: wake_me 30 and call again; never ask a person to bring a computer online.`;
 /** fetch_ffbox_symbols' description, the same on every worker (docs/ffbox.md, "Release symbols and diagnosis files", w1542). */
@@ -1266,6 +1269,7 @@ export class Agents {
             fetch_ffbox_symbols: async (a) => this.ffboxSymbolsForMachine(m.id, info.id, a),
             fetch_lab_fixture: async (a) => this.labFixtureForMachine(m.id, a),
             file_ffbox_symbols: async (a) => this.fileFfboxSymbols(info, a),
+            steam_upload: async (a) => this.steamUploadTool(info, m.id, sb, a),
             post_as_max: async (a) => this.postAsMaxFor(m.id, info.id, a),
             publish_review: async (a) => this.reviewPlan(m.id, info, a),
             fetch_review: async (a) => this.reviewFetch(m.id, info, a),
@@ -2591,6 +2595,99 @@ export class Agents {
 
   private symbolUploads?: FfboxSymbolUploads;
   static FILE_SYMBOLS_WAIT_MS = 40_000;
+
+  /** steam_upload's jobs (w5551, server/steamUpload.ts); the daemons' word reaches them through wireSteamUploads. */
+  readonly steamJobs = new SteamJobs();
+
+  /** Set up by server/index.ts: a daemon's word on a Steam job, and a dropped link ending its running jobs. */
+  wireSteamUploads() {
+    this.machines.steamUploadReport = (_id, msg) => {
+      this.steamJobs.update(msg.id, { state: msg.state, phase: msg.phase, said: msg.said === undefined ? undefined : redactSecrets(msg.said), result: msg.result, error: msg.error === undefined ? undefined : redactSecrets(msg.error) });
+    };
+    this.machines.steamUploadLost = (id, why) => this.steamJobs.lost(id, why);
+  }
+
+  /**
+   * steam_upload (w5551, docs/steam-upload.md): the urgent lane's Steam login check and upload, run by this computer's
+   * daemon with the build account's credential, which no worker holds. An upload goes only for the caller's own release
+   * (refuseUpload: its started build plan, the claim in the bump naming this version, this computer and one of its
+   * requests), only to the Steam branch that release names, and once per version and app. Waits up to
+   * STEAM_WAIT_MS (inside the daemon's 60 s for one call), then says how the job stands; asked again, it follows it.
+   */
+  private async steamUploadTool(info: SessionInfo, machineId: string, sandbox: string, a: Record<string, unknown>): Promise<string> {
+    const action = String(a.action ?? 'status');
+    const running = this.steamJobs.runningOn(machineId);
+    const wait = async (j: { done: Promise<void> }) => {
+      await Promise.race([j.done, new Promise((r) => setTimeout(r, Agents.STEAM_WAIT_MS).unref())]);
+    };
+    if (action === 'status') {
+      const j = (typeof a.job === 'string' && this.steamJobs.byId(a.job)) || running;
+      if (!j) return `No Steam job on ${machineId} since this portal started.`;
+      await wait(j);
+      return describeJob(j);
+    }
+    if (action !== 'check' && action !== 'upload') return `action is check, upload or status, not ${JSON.stringify(action)}.`;
+    if (!this.machines.canSteamUpload(machineId)) return `${machineId}'s daemon does not run Steam jobs (offline, or it needs a daemon update with w5551).`;
+    const guardCode = typeof a.guard_code === 'string' && /^[A-Za-z0-9]{5}$/.test(a.guard_code.trim()) ? a.guard_code.trim().toUpperCase() : undefined;
+    if (a.guard_code !== undefined && !guardCode) return 'guard_code is the five letters and digits of the Steam Guard email.';
+
+    let key: string;
+    let up: Exclude<ReturnType<typeof parseAsk>, string> | undefined;
+    let request: string | undefined;
+    if (action === 'check') {
+      key = SteamJobs.keyOf(machineId, 'check');
+      const same = this.steamJobs.get(key);
+      if (same?.state === 'running') {
+        await wait(same);
+        return describeJob(same);
+      }
+      const left = this.steamJobs.checkWait(machineId, !!guardCode);
+      if (left > 0) return `${same ? `${describeJob(same)}
+
+` : ''}A Steam login check runs once every ${SteamJobs.CHECK_EVERY_MS / 60_000} minutes on a computer (a loop of logins would lock the build account): the next in ${Math.ceil(left / 60_000)} min, or now with guard_code.`;
+    } else {
+      const ask = parseAsk(a);
+      if (typeof ask === 'string') return `Refused: ${ask}`;
+      up = ask;
+      key = SteamJobs.keyOf(machineId, 'upload', ask.version, ask.app, ask.preview);
+      const same = this.steamJobs.get(key);
+      if (same?.state === 'running') {
+        await wait(same);
+        return describeJob(same);
+      }
+      const requests = this.openWorkOf(info).map((w) => w.id);
+      const gh = ghRunner(undefined, 'the release claim of a Steam upload');
+      const [{ claim, error: claimError }, branch] = ask.preview ? [{}, undefined] : await Promise.all([readClaim(gh, GAME_REPO, ask.sha), branchOf(gh, GAME_REPO, ask.sha)]);
+      const uploaded = !ask.preview && this.steamJobs.get(key)?.state === 'done';
+      const why = refuseUpload(ask, { machine: machineId, requests, building: this.builds.building(machineId, info.id), claim, claimError, branch, uploaded });
+      if (why) return `Refused: ${why}`;
+      request = typeof claim?.request === 'string' ? claim.request : undefined;
+    }
+    if (running) return `Refused: ${machineId} runs one Steam job at a time (one steamcmd session per account), and this one runs now:
+${describeJob(running)}`;
+    refuseInDryRun('steam_upload');
+    const secrets = vaultContext()?.vault.releaseSecrets(machineId) ?? { env: {}, problems: ['the vault is not wired into this server'] };
+    if (!secrets.env.FFSTEAM_PASSWORD && up && !up.preview) {
+      // A cached login still uploads (ffsteam.py); say why a stopped login cannot log in again by itself.
+      secrets.problems.push(`no FFSTEAM_PASSWORD vault entry for ${machineId} (role releases): only a cached steamcmd login works`);
+    }
+    const id = `steam-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const job = this.steamJobs.start({ id, machine: machineId, key, action: action as 'check' | 'upload', by: info.id, ...(up ? { version: up.version, app: up.app, preview: up.preview, sha: up.sha, ...(up.live ? { live: up.live } : {}) } : {}), ...(request ? { request } : {}) });
+    try {
+      this.machines.steamUpload(machineId, {
+        type: 'steam_upload', id, action: action as 'check' | 'upload', session: info.id, sandbox, secrets: secrets.env,
+        ...(guardCode ? { guardCode } : {}),
+        ...(up ? { version: up.version, app: up.app, runs: up.runs, preview: up.preview, ...(up.live ? { live: up.live } : {}) } : {}),
+        ...(() => { const t = this.githubTokenFor(machineId, info.id, 'ffbox for a Steam upload'); return t ? { githubToken: t } : {}; })(),
+      });
+    } catch (e) {
+      this.steamJobs.update(id, { state: 'failed', error: (e as Error).message });
+    }
+    await wait(job);
+    return `${describeJob(job)}${secrets.problems.length ? `
+Note: ${secrets.problems.join('; ')}` : ''}`;
+  }
+  static STEAM_WAIT_MS = 40_000;
 
   /** fetch_ffbox_report on a machine: the records for its daemon to fetch into the agent's Inbox (machine/daemon.ts). */
   private async ffboxReportForMachine(machineId: string, sessionId: string, a: Record<string, unknown>): Promise<string> {
@@ -5418,6 +5515,7 @@ A report is for a person who asked for one, and people want very few. File one w
           fetch_ffbox_symbols: FFBOX_SYMBOLS_TOOL,
           fetch_lab_fixture: LAB_FIXTURE_TOOL,
           file_ffbox_symbols: FFBOX_FILE_SYMBOLS_TOOL,
+          steam_upload: STEAM_UPLOAD_TOOL,
           post_as_max: POST_AS_MAX_TOOL,
           publish_review: this.reviewToolText(),
           fetch_review: FETCH_REVIEW_TOOL,

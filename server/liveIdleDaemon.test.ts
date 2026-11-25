@@ -77,6 +77,9 @@ test('w1746: a watched view keeps its editor; idle 15 min it is saved and closed
   let ahead = 0;
   const logs: string[] = [];
   const woke: { id: string; text: string }[] = [];
+  // The closer's idle closes, answered or not. w5619: the test ended before the second one's answer, and its 60 s timer
+  // kept this file's process up 59 s on CI.
+  const closes: Promise<string>[] = [];
   const sbOf = () => store.machines.get('pc')?.sandboxes?.find((x) => x.id === 'alpha');
   const closer = new LiveIdleCloser({
     minutes: () => 15,
@@ -85,7 +88,11 @@ test('w1746: a watched view keeps its editor; idle 15 min it is saved and closed
     session: (id) => (id === 'w1' ? info : undefined),
     wakePending: () => false,
     canClose: (m) => machines.canLiveIdleClose(m),
-    close: (v, minutes) => machines.live(v.machineId, { op: 'idleClose', liveId: v.liveId, sessionId: v.sessionId, sandbox: v.sandbox, minutes }, 60_000),
+    close: (v, minutes) => {
+      const p = machines.live(v.machineId, { op: 'idleClose', liveId: v.liveId, sessionId: v.sessionId, sandbox: v.sandbox, minutes }, 60_000);
+      closes.push(p.then((text) => text, (e: Error) => `failed: ${e.message}`));
+      return p;
+    },
     send: (id, text) => void woke.push({ id, text }),
     log: (l) => logs.push(l),
     now: () => Date.now() + ahead,
@@ -163,4 +170,5 @@ test('w1746: a watched view keeps its editor; idle 15 min it is saved and closed
   assert.equal(await hub.tool(info, { action: 'stop' }), 'Live view stopped.');
   await until('the mark goes with the last view', () => !sbOf()?.idleClosed, 30_000);
   assert.ok(!alphaUp(), 'and the editor stays closed');
+  assert.deepEqual((await Promise.all(closes)).map((x) => x.split(' ')[0]), ['closed', 'closed'], 'both closes were answered');
 });
