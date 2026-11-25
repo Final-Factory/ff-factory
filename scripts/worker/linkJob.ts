@@ -188,6 +188,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     // From the wire: anything but on or off would otherwise count as off.
     ...(f.workerFence === 'on' || f.workerFence === 'off' ? { workerFence: f.workerFence } : {}),
+    ...(f.workerCaps === 'off' || f.workerCaps === 'warn' || f.workerCaps === 'enforce' ? { workerCaps: f.workerCaps } : {}),
   };
 }
 

@@ -30,6 +30,7 @@ import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from '
 import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts';
@@ -43,7 +44,7 @@ import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, gamePlayers, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
-import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, type StdioServer } from './unityMcp.ts';
+import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
@@ -154,6 +155,12 @@ export interface DaemonConfig {
    */
   workerFence?: 'seatbelt';
   /**
+   * The per-worker memory, process and temp-disk caps' mode (w5554, docs/worker-caps.md): "warn" (also when unset) measures and
+   * reports and never limits or kills, "enforce" limits and ends a runaway's tools, "off" does nothing. Handed to each worker's
+   * agent host in its start record; set remotely by `ops_worker machine_update worker_caps`.
+   */
+  workerCaps?: 'off' | 'warn' | 'enforce';
+  /**
    * The Windows worker fence (w5377, docs/worker-root.md 4.1): "low" runs each sandbox agent's claude, and all it starts,
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
    */
@@ -231,6 +238,12 @@ export interface DaemonConfig {
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
    */
   unityMcpServer?: StdioServer;
+  /**
+   * w5650: false runs each agent's Unity MCP server with the person's own home, as before w5650. Unset or true: its home
+   * is its sandbox's status folder (machine/unityMcp.ts mcpHomeStatusDir), so the server's preflight reads only its own
+   * editor's status, wherever that editor writes it (a fenced editor: <root>/home/.unity-mcp).
+   */
+  unityMcpScopedHome?: boolean;
   /** Clean-up settings until the portal sends its own (the portal's own host: 0/0, it never cleans by itself). */
   cleanup?: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown };
   /**
@@ -1384,9 +1397,9 @@ export class Daemon {
     if (!server) return undefined;
     const appDir = appDirOfConfig(this.cfg);
     const place = spec.sandbox;
-    fs.mkdirSync(mcpStatusDir(appDir, place), { recursive: true });
+    fs.mkdirSync(mcpHomeStatusDir(appDir, place), { recursive: true });
     this.syncMcpScopes();
-    return { UnityMCP: scopedUnityMcp(server, appDir, place) };
+    return { UnityMCP: scopedUnityMcp(server, appDir, place, this.cfg.unityMcpScopedHome !== false) };
   }
 
   /** Bring every place's Unity MCP status folder up to date, from the editor pids the watches know. */
@@ -2244,6 +2257,9 @@ export class Daemon {
   slotEnv(spec: Pick<LaunchSpec, 'sandbox' | 'cwd'>, env0: NodeJS.ProcessEnv = process.env): Record<string, string> {
     const env: Record<string, string> = { FF_UNITY_SLOTS: this.slotMailbox, ...sandboxGameDataEnv(env0, spec.sandbox) };
     if (spec.sandbox) env.FF_UNITY_HOLDER = `sandbox:${spec.sandbox}`;
+    // w5650: the shell's bridge (the game repo's scripts/unity-bridge.py, which reads UNITY_MCP_STATUS_DIR, else
+    // ~/.unity-mcp) finds its sandbox's editor in the same synced folder its MCP server reads, fenced or not.
+    if (spec.sandbox) env.UNITY_MCP_STATUS_DIR = mcpStatusDir(appDirOfConfig(this.cfg), spec.sandbox);
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
@@ -3536,6 +3552,7 @@ export class Daemon {
       },
       changed: () => this.awake(),
       log: (line) => log(line),
+      capsMode: () => capsModeOf(this.cfg.workerCaps),
       toolsCpu: (pid) => this.toolsCpu(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {

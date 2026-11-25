@@ -39,6 +39,15 @@ export interface ReportsInput {
   session?: string;
   limit?: number;
   offset?: number;
+  /** Whose reports: ff (FF1's, the default) or ffu (FFU's, filed under ffintake's ffu folder; w5678). */
+  game?: string;
+}
+
+/** FFBox's `game` arg for ff or ffu (w5678): sent only for ffu, so an FFBox without it still answers FF1's queries. */
+function gameArg(game: string | undefined): { game?: 'ffu' } | { error: string } {
+  if (game === undefined || game === '' || game === 'ff') return {};
+  if (game === 'ffu') return { game: 'ffu' };
+  return { error: `game: ff (Final Factory, the default) or ffu (Final Factory Universe); got ${JSON.stringify(clean(game, 20))}.` };
 }
 
 /** What ffbox_activity takes for show: "reports", as FFBox's `reports` query wants it, checked here first. */
@@ -66,7 +75,9 @@ export function ffboxReportsArgs(input: ReportsInput): { args: Record<string, nu
     if (v.length > max || /[\u0000-\u001f\u007f]/.test(v)) return { error: `${k}: at most ${max} printable characters.` };
     args[k] = v;
   }
-  return { args };
+  const g = gameArg(input.game);
+  if ('error' in g) return g;
+  return { args: { ...args, ...g } };
 }
 
 interface ReportView {
@@ -216,13 +227,15 @@ export interface FetchedReport {
  * `<id>.manifest.json` (FFBox's view of the report and ffintake's manifest, redacted there). Throws an Error with a plain
  * sentence when it cannot: a bad id, FFBox offline or refusing, a transfer cut off or whose SHA-256 differs.
  */
-export async function fetchFfboxReport(providers: ProviderManager, store: AttachmentStore, input: { id: string; file?: string }, uploadedBy?: string): Promise<FetchedReport> {
+export async function fetchFfboxReport(providers: ProviderManager, store: AttachmentStore, input: { id: string; file?: string; game?: string }, uploadedBy?: string): Promise<FetchedReport> {
   const id = String(input.id ?? '').trim();
   if (!REPORT_ID.test(id)) throw new Error(`id: an FFBox report id, e.g. 20261003T101500Z-crash-3a9f01c2d4 (ffbox_activity show "reports" lists them; got ${JSON.stringify(clean(id, 70))})`);
   const file = input.file ?? '';
   if (file.length > 260 || /[\u0000-\u001f\u007f]/.test(file)) throw new Error('file: a name inside the zip, exactly as the report\'s file list gives it (at most 260 printable characters)');
+  const g = gameArg(input.game);
+  if ('error' in g) throw new Error(g.error);
   const sink = new StoreSink(store, uploadedBy);
-  const r = await providers.queryTransfer('report', file ? { id, file } : { id }, sink);
+  const r = await providers.queryTransfer('report', { id, ...(file ? { file } : {}), ...g }, sink);
   if (!r.answer.live || !r.answer.data) {
     const words = [r.answer.reason, r.answer.hint, r.answer.detail].filter(Boolean).join('; ');
     throw new Error(`FFBox could not hand over ${id}: ${r.answer.error ?? 'no answer'}${words ? ` (${clean(words, 300)})` : ''}`);

@@ -163,6 +163,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w5554 (no bump): signal `workerCap`, a worker's host hit a cap and ended its tools; an older portal re-emits it with no
 // listener, as it does `tempSize`, and an older daemon or host never sends it.
 // w5546 merged with w5551 too.
+// w5554 (no bump): `LinkUpdateFlags.workerCaps` (off, warn or enforce), the worker caps' mode; an older daemon ignores the
+// field and keeps its own (it has no caps at all before w5554), and an older portal never sends it. The signal's arg gained
+// the optional `warn` and `kernel` flags: an older portal reads neither.
 // w5551 (no bump): `steamUpload` in the hello, `steam_upload` and its answer `steam_upload_state`; the portal sends a job only
 // to a daemon whose hello offered it, so an older daemon never gets one (the tool says that computer cannot upload yet), and
 // an older portal never sends one and drops the hello field.

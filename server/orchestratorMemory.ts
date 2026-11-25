@@ -213,6 +213,16 @@ export function looksDamaged(file: string): string | undefined {
   return buf.some((b) => b !== 0) ? `partly written (zero bytes from byte ${zero} of ${buf.length})` : `all zero bytes (${buf.length} bytes)`;
 }
 
+const NS_PER_SECOND = 1_000_000_000n;
+
+/**
+ * The time to stamp a copy with, in seconds: the original's, cut down to the millisecond. Never Stats.mtime: that Date is
+ * rounded to the nearest millisecond, so an original written in the last 0.5 ms of a second gave a copy dated in the next
+ * second, and the backup's change check (fingerprint) saw a change that never happened (w5607, CI run 45567844642). Cut
+ * down, a copy always keeps the original's second (at most .999 s, far from the next second even as a double).
+ */
+const copyTime = (ns: bigint) => Number(ns / 1_000_000n) / 1000;
+
 /** A copy that is on disk when this returns, with the original's modification time (it dates the copy). */
 function copyDurable(from: string, to: string) {
   fs.mkdirSync(path.dirname(to), { recursive: true });
@@ -223,8 +233,8 @@ function copyDurable(from: string, to: string) {
   } finally {
     fs.closeSync(fd);
   }
-  const st = fs.statSync(from);
-  fs.utimesSync(to, st.atime, st.mtime);
+  const st = fs.statSync(from, { bigint: true });
+  fs.utimesSync(to, copyTime(st.atimeNs), copyTime(st.mtimeNs));
 }
 
 /** The newest good copy of `rel` in the backups, if any. */
@@ -277,8 +287,8 @@ async function copyDurableAsync(from: string, to: string) {
   } finally {
     await h.close();
   }
-  const st = await fs.promises.stat(from);
-  await fs.promises.utimes(to, st.atime, st.mtime);
+  const st = await fs.promises.stat(from, { bigint: true });
+  await fs.promises.utimes(to, copyTime(st.atimeNs), copyTime(st.mtimeNs));
 }
 
 /** The newest good copy of `rel` in the backups, if any. */
@@ -304,12 +314,15 @@ async function planBackup(root: string, backups: string): Promise<Map<string, st
   return plan;
 }
 
-/** Names, sizes and modification times (to the second): a backup is taken only when this changes. */
+/**
+ * Names, sizes and modification times (to the second, from the exact nanoseconds: mtimeMs / 1000 can round up into the
+ * next second): a backup is taken only when this changes.
+ */
 async function fingerprint(plan: Map<string, string>): Promise<string> {
   const out: [string, number, number][] = [];
   for (const [r, src] of plan) {
-    const st = await fs.promises.stat(src);
-    out.push([r, st.size, Math.floor(st.mtimeMs / 1000)]);
+    const st = await fs.promises.stat(src, { bigint: true });
+    out.push([r, Number(st.size), Number(st.mtimeNs / NS_PER_SECOND)]);
   }
   return JSON.stringify(out);
 }
