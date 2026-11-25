@@ -1,9 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, legacyToolsCheckout, prependPath, publishAgentTools, readableToolsCheckout, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
+import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, legacyToolsCheckout, prependPath, publishAgentTools, REPAIR_AFTER, checkoutBackup, repairStateFile, readableToolsCheckout, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
 import { toolsResult } from './machineRollout.ts';
 
 /** The agent tools publish on a machine (w1476, server/agentTools.ts; docs/worker-install.md "The agent tools"). */
@@ -47,6 +48,8 @@ interface Machine {
   /** w5543: the Medium agents' folder the run also installs into; registerAgents.sh fails there with this code. */
   medium?: boolean;
   mediumShCode?: number;
+  /** w5776: the faults above hold only while the checkout carries the planted mark (.git/PLANTED); a clone has none. */
+  plantedOnly?: boolean;
 }
 
 function machine(o: Machine = {}) {
@@ -76,6 +79,7 @@ function machine(o: Machine = {}) {
   const ok = (stdout = ''): Ran => ({ code: 0, stdout, stderr: '' });
   const exec = async (cmd: string, args: string[], x: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<Ran> => {
     calls.push({ cmd, args, cwd: x.cwd, env: x.env });
+    const planted = !o.plantedOnly || fs.existsSync(path.join(x.cwd ?? co, '.git', 'PLANTED'));
     if (cmd === 'git') {
       const a = args.filter((s, i) => !(s === '-c' || args[i - 1] === '-c'));
       if (a[0] === 'clone') {
@@ -85,12 +89,12 @@ function machine(o: Machine = {}) {
         return ok();
       }
       if (a[0] === '-C' && a.slice(2).join(' ') === 'rev-parse HEAD') return ok(`${SHA}\n`);
-      if (a[0] === 'status') return ok(o.porcelain ?? '');
-      if (a.join(' ') === 'rev-parse --abbrev-ref HEAD') return ok(`${o.branch ?? 'master'}\n`);
-      if (a[0] === 'config') return ok(`${o.origin ?? 'https://github.com/Final-Factory/final-factory-agents.git'}\n`);
-      if (a[0] === 'fetch') return { code: o.fetchCode ?? 0, stdout: '', stderr: o.fetchCode ? 'fatal: unable to access' : '' };
+      if (a[0] === 'status') return ok((planted && o.porcelain) || '');
+      if (a.join(' ') === 'rev-parse --abbrev-ref HEAD') return ok(`${(planted && o.branch) || 'master'}\n`);
+      if (a[0] === 'config') return ok(`${(planted && o.origin) || 'https://github.com/Final-Factory/final-factory-agents.git'}\n`);
+      if (a[0] === 'fetch') return { code: (planted && o.fetchCode) || 0, stdout: '', stderr: planted && o.fetchCode ? 'fatal: unable to access' : '' };
       if (a[0] === 'merge') {
-        if (o.mergeCode) return { code: o.mergeCode, stdout: '', stderr: 'fatal: Not possible to fast-forward, aborting.' };
+        if (planted && o.mergeCode) return { code: o.mergeCode, stdout: '', stderr: 'fatal: Not possible to fast-forward, aborting.' };
         writeCheckout(LATEST);
         return ok();
       }
@@ -174,23 +178,103 @@ test('w5597: its checkout dirty, on another branch, from another repo or diverge
   }
 });
 
-test('a folder in the way that is not a checkout is left alone', async () => {
+test('w5776: a folder in the way that is not a checkout is moved aside at once, kept, and the checkout cloned again', async () => {
   const m = machine();
   fs.mkdirSync(m.co, { recursive: true });
   fs.writeFileSync(path.join(m.co, 'keep.txt'), 'x');
-  assert.equal(await m.run(), EXIT.ok, 'w5597: the publish goes on from the fresh clone');
-  assert.equal(fs.readFileSync(path.join(m.co, 'keep.txt'), 'utf8'), 'x');
-  assert.equal(ran(m, 'clone').filter((c) => c.args.includes(m.co)).length, 0);
-  assert.ok(m.lines.some((l) => l.startsWith(`WARNING: ${m.co} holds files but no git checkout; it is left as it is`)));
-  assert.ok(m.lines.some((l) => l.startsWith('Agent tools checkout: none (')));
-  assert.equal(m.marker(), undefined, "no marker naming the run's temp folder, which is gone");
+  assert.equal(await m.run(), EXIT.ok);
+  assert.equal(fs.readFileSync(path.join(checkoutBackup(m.root), 'keep.txt'), 'utf8'), 'x', 'the one backup keeps what was there');
+  assert.equal(ran(m, 'clone').filter((c) => c.args.includes(m.co)).length, 1);
+  assert.ok(m.lines.includes(`WARNING: ${m.co} holds files but no git checkout; it was moved to ${checkoutBackup(m.root)} (the one backup kept) and is cloned again.`));
+  assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
+  assert.equal(m.marker(), `${m.co}\n`);
+});
+
+test('w5776: each broken state is repaired after the same WARNING on REPAIR_AFTER publishes in a row, and the next publish finds a clean checkout', async () => {
+  for (const [o, why] of [
+    [{ porcelain: ' M plugins/ff-agents/skills/x/SKILL.md\n' }, /has uncommitted changes \(1 path\)/],
+    [{ branch: 'w1258-ab-leg' }, /is on w1258-ab-leg, not master/],
+    [{ origin: 'https://github.com/someone/fork.git' }, /has origin https:\/\/github\.com\/someone\/fork\.git, not/],
+    [{ mergeCode: 128 }, /has commits origin\/master does not \(it cannot fast-forward\)/],
+    [{ fetchCode: 128 }, /could not be fetched from final-factory-agents \(fatal: unable to access\)/],
+  ] as [Machine, RegExp][]) {
+    const m = machine({ existing: true, plantedOnly: true, ...o });
+    fs.writeFileSync(path.join(m.co, '.git', 'PLANTED'), '');
+    for (let i = 1; i < REPAIR_AFTER; i++) {
+      m.lines.length = 0;
+      assert.equal(await m.run(), EXIT.ok);
+      const w = m.lines.filter((l) => l.startsWith('WARNING:'));
+      assert.equal(w.length, 1);
+      assert.match(w[0], why);
+      assert.ok(w[0].endsWith(`(${i} of ${REPAIR_AFTER} publishes in a row before it is moved aside and cloned again).`), w[0]);
+      assert.ok(fs.existsSync(path.join(m.co, '.git', 'PLANTED')), 'nothing is moved before the last');
+    }
+    m.lines.length = 0;
+    assert.equal(await m.run(), EXIT.ok);
+    const w = m.lines.filter((l) => l.startsWith('WARNING:'));
+    assert.equal(w.length, 1, w.join(' / '));
+    assert.match(w[0], why);
+    assert.ok(w[0].endsWith(` for ${REPAIR_AFTER} publishes in a row; it was moved to ${checkoutBackup(m.root)} (the one backup kept) and is cloned again.`), w[0]);
+    assert.ok(fs.existsSync(path.join(checkoutBackup(m.root), '.git', 'PLANTED')), 'the broken one is the backup');
+    assert.ok(m.lines.includes(`Repaired FF Factory's checkout: cloned final-factory-agents into ${m.co} again.`));
+    assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
+    assert.equal(fs.existsSync(repairStateFile(m.root)), false);
+    // The next publish: a clean checkout, taken forward, no WARNING.
+    m.lines.length = 0;
+    assert.equal(await m.run(), EXIT.ok);
+    assert.deepEqual(m.lines.filter((l) => l.startsWith('WARNING:')), []);
+    assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
+    assert.equal(ran(m, 'reset').length + ran(m, 'stash').length + ran(m, 'checkout').length + ran(m, 'clean').length, 0, 'never a reset over what is there');
+  }
+});
+
+test('w5776: a different fault, or a clean run, starts the count again', async () => {
+  const m = machine({ existing: true, plantedOnly: true, branch: 'leg' });
+  fs.writeFileSync(path.join(m.co, '.git', 'PLANTED'), '');
+  for (let i = 1; i < REPAIR_AFTER; i++) await m.run();
+  assert.deepEqual(JSON.parse(fs.readFileSync(repairStateFile(m.root), 'utf8')), { kind: 'is on leg, not master', count: REPAIR_AFTER - 1 });
+  fs.rmSync(path.join(m.co, '.git', 'PLANTED'));
+  m.lines.length = 0;
+  await m.run();
+  assert.deepEqual(m.lines.filter((l) => l.startsWith('WARNING:')), []);
+  assert.equal(fs.existsSync(repairStateFile(m.root)), false, 'a clean run clears the count');
+  fs.writeFileSync(path.join(m.co, '.git', 'PLANTED'), '');
+  m.lines.length = 0;
+  await m.run();
+  assert.ok(m.lines.some((l) => l.endsWith(`(1 of ${REPAIR_AFTER} publishes in a row before it is moved aside and cloned again).`)));
+});
+
+test('w5776: on the real file system (NTFS on Windows) a real git checkout is moved aside, and an older backup with read-only git objects is removed', async () => {
+  const m = machine({ plantedOnly: true, porcelain: '?? x\n' });
+  const real = (dir: string) => {
+    fs.mkdirSync(dir, { recursive: true });
+    const g = (...a: string[]) => {
+      const r = spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'core.hooksPath=', '-C', dir, ...a], { encoding: 'utf8' });
+      assert.equal(r.status, 0, r.stderr);
+    };
+    g('init', '-q');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'a');
+    g('add', 'a.txt');
+    g('commit', '-q', '-m', 'a');
+    fs.writeFileSync(path.join(dir, '.git', 'PLANTED'), '');
+  };
+  real(m.co);
+  real(checkoutBackup(m.root));
+  fs.writeFileSync(path.join(checkoutBackup(m.root), 'older.txt'), 'x');
+  const objects = (dir: string) => fs.readdirSync(path.join(dir, '.git', 'objects'), { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).length;
+  assert.ok(objects(checkoutBackup(m.root)) >= 3);
+  for (let i = 0; i < REPAIR_AFTER; i++) assert.equal(await m.run(), EXIT.ok);
+  assert.equal(fs.existsSync(path.join(checkoutBackup(m.root), 'older.txt')), false, 'the older backup is gone');
+  assert.ok(fs.existsSync(path.join(checkoutBackup(m.root), '.git', 'PLANTED')), 'the newer broken checkout is the backup');
+  assert.equal(fs.existsSync(path.join(m.co, '.git', 'PLANTED')), false, 'cloned again');
+  assert.ok(m.lines.includes(`Agent tools checkout: ${m.co} at a8449abd8457`));
 });
 
 test('a fetch or registerAgents.sh failure, or a plugin left behind master, fails and says which', async () => {
   // w5597: the lasting checkout's fetch is a warning; the fresh clone the plugins come from decides.
   const f = machine({ existing: true, fetchCode: 128 });
   assert.equal(await f.run(), EXIT.ok);
-  assert.ok(f.lines.some((l) => /^WARNING: could not fetch final-factory-agents into .* \(fatal: unable to access\); this run publishes from a fresh clone/.test(l)));
+  assert.ok(f.lines.some((l) => /^WARNING: .* could not be fetched from final-factory-agents \(fatal: unable to access\); this run publishes from a fresh clone \(1 of 3 /.test(l)));
   const s = machine({ shCode: 1, installs: { 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2' } });
   assert.equal(await s.run(), EXIT.failed);
   assert.match(s.lines.at(-1)!, /^FAILED: registerAgents\.sh exited 1: claude CLI not on PATH/);
