@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ownerSocketPaths, ownerSocketProbeTargets } from '../machine/ownerSecrets.ts';
+import { ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets } from '../machine/ownerSecrets.ts';
 import { SOCKET_PROBE_SCRIPT, sayOwnerSocketProbe } from '../machine/readFence.ts';
 import { FF_LANDLOCK } from '../machine/writeLock.ts';
 
@@ -66,4 +66,28 @@ test('live w5748: the probe connects to listening sockets only, sending nothing,
   assert.deepEqual(lines.slice(1).sort(), ['0 ok', '1 ok', '2 ENOENT']);
   spawnSync('sleep', ['0.3']);
   assert.ok(got.every((g) => g.trim() === "b''"), `the servers read nothing but the close: ${got.join(' ')}`);
+});
+
+test('w5748 enforce: a run in on mode denies the owner sockets in the runtime folder, never an agent elsewhere', () => {
+  assert.deepEqual(ownerSocketDenyArgs('/run/user/1000'), ['--deny-unix', '/run/user/1000/bus', '--deny-unix', '/run/user/1000/keyring', '--deny-unix', '/run/user/1000/gcr', '--deny-unix', '/run/user/1000/gnupg', '--deny-unix', '/run/user/1000/openssh_agent']);
+  assert.deepEqual(ownerSocketDenyArgs(undefined), []);
+});
+
+const abi = landlock ? Number(spawnSync('python3', [FF_LANDLOCK, '--', 'printenv', 'FF_LANDLOCK_ABI'], { encoding: 'utf8' }).stdout.trim()) : 0;
+
+test('live w5748 enforce: the owner-socket denies refuse the bus, keyring and agents, and only those', { skip: (abi < 9 && `needs Landlock ABI 9 (RESOLVE_UNIX); this kernel has ${abi}`) || false }, (t) => {
+  const run = fs.mkdtempSync(path.join(os.tmpdir(), 'w5748e-'));
+  const servers: ReturnType<typeof spawn>[] = [];
+  t.after(() => {
+    for (const s of servers) s.kill('SIGKILL');
+    fs.rmSync(run, { recursive: true, force: true });
+  });
+  for (const d of ['keyring', 'gcr', 'gnupg']) fs.mkdirSync(path.join(run, d));
+  const socks = ['bus', 'keyring/control', 'gcr/ssh', 'gnupg/S.gpg-agent', 'openssh_agent', 'pipewire-0'].map((s) => path.join(run, s));
+  for (const p of socks) servers.push(spawn('python3', ['-c', `import socket,time;s=socket.socket(socket.AF_UNIX);s.bind(${JSON.stringify(p)});s.listen();time.sleep(60)`], { stdio: 'ignore' }));
+  const until = Date.now() + 5000;
+  while (!socks.every((p) => fs.existsSync(p)) && Date.now() < until) spawnSync('sleep', ['0.1']);
+  const r = spawnSync('python3', [FF_LANDLOCK, '--rw', run, ...ownerSocketDenyArgs(run), '--', process.execPath, '-e', SOCKET_PROBE_SCRIPT, ...socks], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split('\n').slice(1).sort(), ['0 refused', '1 refused', '2 refused', '3 refused', '4 refused', '5 ok'], 'a socket workers use (audio) stays reachable');
 });
