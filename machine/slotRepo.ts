@@ -79,7 +79,15 @@ export function gitPathForm(p: string): string {
 }
 
 function samePath(a: string, b: string): boolean {
-  const k = (p: string) => path.resolve(p).replace(/[\\/]+$/, '');
+  // The real path: a Windows 8.3 short name (C:\Users\RUNNER~1, the CI runner's TEMP) and git's long form are one folder.
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync.native(p);
+    } catch {
+      return path.resolve(p);
+    }
+  };
+  const k = (p: string) => real(p).replace(/[\\/]+$/, '');
   return process.platform === 'win32' || process.platform === 'darwin' ? k(a).toLowerCase() === k(b).toLowerCase() : k(a) === k(b);
 }
 
