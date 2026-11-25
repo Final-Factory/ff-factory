@@ -65,6 +65,7 @@ import { AutoCompactor, LONG_WAIT_MS, withEarlyCompactMark, workerAutoCompactWin
 import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { tempSizeLedgerLine } from './tempSizeHook.ts';
+import { capLedgerLine } from '../machine/workerCaps.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -1325,6 +1326,7 @@ export class Agents {
     sessions.events.on('permission', (s: SessionHandle, p: { toolName: string; input: unknown }) => this.onWorkerPermission(s, p));
     // w3686: a worker's temp folder is over its threshold: one line in each open request it serves (the worker was told by its own hook).
     sessions.events.on('tempSize', (s: SessionHandle, arg?: unknown) => this.onWorkerTempSize(s, arg));
+    sessions.events.on('workerCap', (s: SessionHandle, arg?: unknown) => this.onWorkerCap(s, arg));
   }
 
   /**
@@ -3389,6 +3391,16 @@ export class Agents {
     if (!open.length) return console.warn(`${line} (no open request)`);
     // A note (quiet): it is no activity on the request.
     for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined, true);
+  }
+
+  /** w5554: a worker's host hit one of its caps and ended its tools (machine/workerCaps.ts): its requests' ledgers say so. */
+  private onWorkerCap(s: SessionHandle, arg: unknown) {
+    const line = capLedgerLine(s.info.id, arg);
+    if (!line) return;
+    console.warn(line);
+    const open = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(s.info.id));
+    // Not quiet: a person should see a runaway was stopped.
+    for (const w of open) this.orchestrators.ledgerEdit(w.id, line, () => undefined);
   }
 
   private onWorkerPermission(s: SessionHandle, arg: { toolName: string; input: unknown; reason?: string } | undefined) {

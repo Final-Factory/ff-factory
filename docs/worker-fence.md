@@ -37,6 +37,9 @@ LothDesktop):
 | Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
+**Resource caps** are not a fence, but they bound what one worker can use: memory, processes and temp disk per worker
+(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them).
+
 **Fixes, by state** (a fix is "merged" only when its PR has merged; everything else is in progress):
 
 - Merged: standing-agent shell guard refuses the w5452 bypass forms (w5504, #1150); standing agents' git ignores repo-config
