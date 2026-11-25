@@ -18,7 +18,10 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   const daemonDir = path.join(w.base, 'daemon');
   fs.mkdirSync(daemonDir);
   const configFile = path.join(daemonDir, 'daemon.json');
-  const dc: DaemonConfig = { portalUrl: `http://127.0.0.1:${w.beastPortal.port}`, id: 'beast', token: w.machineToken, repoPath: w.beastBase, appDir: daemonDir, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null };
+  const dc: DaemonConfig = { portalUrl: `http://127.0.0.1:${w.beastPortal.port}`, id: 'beast', token: w.machineToken, repoPath: w.beastBase, appDir: daemonDir, claude: 'no-such-claude', maxSessions: 2, maxEventsFile: null,
+    // w5715 enforce mode: a daemon follows a relocate only to a pinned host; the test VM's address is this runner's own,
+    // so it is pinned here as a person pins a new portal host before a cut-over (docs/portal-pin.md).
+    pinnedPortalHosts: [new URL(w.publicUrl).hostname] };
   fs.writeFileSync(configFile, JSON.stringify(dc, null, 2));
   const daemon = new Daemon({ ...dc, configFile, agentHosts: false }, undefined, PROBES);
   t.after(() => daemon.shutdown());
