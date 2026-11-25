@@ -392,7 +392,7 @@ test("w3572: a pr gate on another request's PR stays open while that PR conflict
 
 test('w907: gh pr view is read for the head, the base and GitHub\'s mergeability; UNKNOWN is no conflict', async () => {
   const ref = 'Final-Factory/ff-factory#283';
-  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName,body,isDraft$/, out }]);
+  const view = (out: unknown) => fakeGh([{ match: /--json state,mergeable,baseRefName,headRefOid,headRefName,body,isDraft,headRepository,headRepositoryOwner,isCrossRepository$/, out }]);
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'CONFLICTING', baseRefName: 'main', headRefOid: 'abc', headRefName: 'w890' }).run), { state: 'open', conflict: { base: 'main' }, head: 'abc', headRef: 'w890' });
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'UNKNOWN', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });
   assert.deepEqual(await ghPrHealth(ref, view({ state: 'OPEN', mergeable: 'MERGEABLE', baseRefName: 'main', headRefOid: 'abc' }).run), { state: 'open', head: 'abc' });

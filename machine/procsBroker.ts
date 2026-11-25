@@ -7,21 +7,36 @@
 // shells and tails are what ff-leftovers is for. The profile cannot allow a setuid exec either. The daemon runs outside
 // the fence as the same user, so it reads them, and the worker asks it through a file mailbox beside the Unity slots one
 // (FF_UNITY_SLOTS/procs, which the fence lets a worker write):
-//   the worker writes ask-<id>.json  {op: "procs" | "env" | "inspect", pids?: number[]}
+//   the worker writes ask-<id>.json  {op: "procs" | "env" | "inspect" | "census", pids?: number[], who: {session, pid}}
 //   the daemon answers ans-<id>.json {ok: true, result} or {ok: false, error}, and removes the ask
 //   the worker reads the answer and removes it.
-// Only these three fixed reads are answered: the process list (pid, ppid, command), the FF_* variables ff-leftovers
-// reads (ProcEnv), and start time and CPU. Nothing is run or ended for a worker here: ff-leftovers still ends its own
-// processes with kill(2), which the fence allows. An unfenced worker never asks: its own `ps` runs and the result is the
-// same as before.
+// Only these fixed reads are answered: the process list (pid, ppid, command), the FF_* variables ff-leftovers reads
+// (ProcEnv), start time and CPU, and the clean-up's census. Nothing is run or ended for a worker here: ff-leftovers still
+// ends its own processes with kill(2), which the fence allows. An unfenced worker never asks: its own `ps` runs and the
+// result is the same as before.
+// w5558 (the rogue-worker audit w5451, item 32): each answer covers only the asking worker's own processes. `who` names
+// the session and the asking pid; the daemon refuses the ask unless that pid is alive and the nearest process on its
+// parent chain that carries a session carries that one. procs, env and inspect then cover the session's processes (by
+// FF_SESSION_ID or its shells' process groups), everything under them that carries no other session, and their parents
+// (no environment); no other process's environment is ever answered. census, for the clean-up's KEEP checks
+// (ff-leftovers folders, check, remove, remove-slot: is a slot, sandbox or runner folder in use by anyone?), gives the
+// command lines that name the install folder or an agent host, with no environment. The check is not proof against a
+// worker that sets out to lie: it can name another live worker's pid and session (same user, it can read a node
+// process's environment itself). It keeps the broker from handing every worker the whole machine.
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
-export type ProcsOp = 'procs' | 'env' | 'inspect';
+export type ProcsOp = 'procs' | 'env' | 'inspect' | 'census';
+/** Who asks (w5558): the worker's session (FF_SESSION_ID) and the asking process. */
+export interface ProcsWho {
+  session: string;
+  pid: number;
+}
 export interface ProcsAsk {
   op: ProcsOp;
   pids?: number[];
+  who?: ProcsWho;
 }
 export type ProcsAnswer = { ok: true; result: unknown } | { ok: false; error: string };
 
@@ -57,7 +72,10 @@ const rm = (f: string) => {
   }
 };
 
-/** A worker's ask, sanitized: a known op and whole positive pids only. */
+/** A session id as the daemon names them (FF_SESSION_ID). */
+const SESSION = /^[\w.-]{1,80}$/;
+
+/** A worker's ask, sanitized: a known op, who asks (w5558), and whole positive pids only. */
 export function parseAsk(text: string): ProcsAsk | undefined {
   let j: unknown;
   try {
@@ -65,12 +83,15 @@ export function parseAsk(text: string): ProcsAsk | undefined {
   } catch {
     return undefined;
   }
-  const o = j as { op?: unknown; pids?: unknown };
-  if (o.op !== 'procs' && o.op !== 'env' && o.op !== 'inspect') return undefined;
-  if (o.op === 'procs') return { op: 'procs' };
+  const o = j as { op?: unknown; pids?: unknown; who?: { session?: unknown; pid?: unknown } | null };
+  if (o.op !== 'procs' && o.op !== 'env' && o.op !== 'inspect' && o.op !== 'census') return undefined;
+  const w = o.who;
+  if (!w || typeof w.session !== 'string' || !SESSION.test(w.session) || !Number.isInteger(w.pid) || (w.pid as number) <= 0) return undefined;
+  const who = { session: w.session, pid: w.pid as number };
+  if (o.op === 'procs' || o.op === 'census') return { op: o.op, who };
   if (!Array.isArray(o.pids) || o.pids.length > MAX_PIDS) return undefined;
   const pids = [...new Set(o.pids.filter((p): p is number => Number.isInteger(p) && p > 0))];
-  return { op: o.op, pids };
+  return { op: o.op, pids, who };
 }
 
 export interface BrokerDeps {
@@ -124,7 +145,7 @@ export class ProcsBroker {
         if (age > STALE_MS) continue;
         const ask = parseAsk(text);
         let out: ProcsAnswer;
-        if (!ask) out = { ok: false, error: 'not an ask this mailbox answers (op procs, env or inspect, with pids)' };
+        if (!ask) out = { ok: false, error: 'not an ask this mailbox answers (op procs, env, inspect or census, with who: {session, pid}, and pids for env and inspect)' };
         else {
           try {
             out = { ok: true, result: await this.d.answer(ask) };
