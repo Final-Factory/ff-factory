@@ -12,7 +12,7 @@ test("a locked worker writes every folder of the root but the daemon, secrets an
   const a = writeLockArgs({ root: '/home/u/ffw', appDir: '/home/u/ffw/daemon', maxEventsFile: '/home/u/ffw/daemon/max-events.jsonl', unitySlots: '/home/u/.ff-factory/unity-slots', runtimeDir: '/run/user/1000', home: '/home/u' });
   assert.deepEqual(a, [
     '--rw', '/dev', '--rw', '/proc',
-    '--rw-children', '/home/u/ffw', '--except', 'cache-medium', '--except', 'claude-medium', '--except', 'daemon', '--except', 'secrets',
+    '--rw-children', '/home/u/ffw', '--except', 'cache-medium', '--except', 'claude-medium', '--except', 'daemon', '--except', 'secrets', '--except', 'steam',
     '--rw', '/home/u/ffw/daemon/max-events.jsonl',
     '--rw', '/home/u/.ff-factory/unity-slots',
     '--sock', '/run/user/1000/cc-socks',

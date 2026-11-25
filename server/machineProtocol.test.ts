@@ -151,7 +151,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // daemon.json has `writeLock` (off by default), and a launch that lacks it starts claude unlocked as before.
 // w5333 (no bump): `LaunchSpec.fence`, the Mac worker write fence. The daemon sets it for its own agent host; the portal
 // never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
-const DECIDED = { protocol: 9, fingerprint: '8e3debe94a3561ac' };
+// w5551 (no bump): `steamUpload` in the hello, `steam_upload` and its answer `steam_upload_state`; the portal sends a job only
+// to a daemon whose hello offered it, so an older daemon never gets one (the tool says that computer cannot upload yet), and
+// an older portal never sends one and drops the hello field.
+const DECIDED = { protocol: 9, fingerprint: 'e78abaeb0b61364e' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
