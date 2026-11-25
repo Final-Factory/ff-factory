@@ -134,6 +134,8 @@ export interface ToolsOutcome {
   latest?: Versions;
   /** The final-factory-agents commit the run installed from. */
   latestSha?: string;
+  /** w5597: FF Factory's lasting checkout on the machine as the run left it ("<path> at <sha>", or "none (...)"). */
+  checkout?: string;
   note?: string;
   summary?: string[];
   /** A run that published but said WARNING (w1742: a firewall rule missing on a computer the run could not fix). */
@@ -797,6 +799,7 @@ export function toolsResult(code: number, out: string): Omit<ToolsOutcome, 'at'>
   const after = last(LINE.after);
   // "Agent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ..."
   const latest = /^\S+ ([0-9a-f]{7,40}): (.*)$/i.exec(last(LINE.latest)?.slice(LINE.latest.length).trim() ?? '');
+  const checkout = last(LINE.checkout)?.slice(LINE.checkout.length).trim();
   const why = lines.find((l) => /^(NOT PUBLISHED|FAILED|ERROR):/.test(l))?.replace(/^(NOT PUBLISHED|FAILED|ERROR):\s*/, '');
   const failed = code !== EXIT.ok;
   return {
@@ -804,6 +807,7 @@ export function toolsResult(code: number, out: string): Omit<ToolsOutcome, 'at'>
     ...(before ? { before: parseVersions(before.slice(LINE.before.length)) } : {}),
     ...(after ? { after: parseVersions(after.slice(LINE.after.length)) } : {}),
     ...(latest ? { latest: parseVersions(latest[2]), latestSha: latest[1] } : {}),
+    ...(checkout ? { checkout: clip(checkout, 240) } : {}),
     ...(failed ? { note: clip(why ?? `the installer's tools run exited ${code}`, 300), summary: toolsSummary(lines) } : {}),
     ...(!failed && lines.some((l) => l.startsWith('WARNING')) ? { warnings: lines.filter((l) => l.startsWith('WARNING')).slice(-4).map((l) => clip(l, 300)) } : {}),
   };
@@ -820,7 +824,7 @@ export function toolsLine(t: ToolsOutcome | undefined): string {
           return b === a ? `${p} ${a}` : `${p} ${b} → ${a}`;
         }).join(', ')
       : 'plugin versions unknown';
-  const master = t.latestSha ? ` (final-factory-agents ${t.latestSha.slice(0, 9)})` : '';
+  const master = t.latestSha ? ` (final-factory-agents ${t.latestSha.slice(0, 9)}${t.checkout ? `; checkout ${t.checkout}` : ''})` : '';
   const note = (t.note ?? '').replace(/\.+$/, '');
   switch (t.status) {
     case 'ok':

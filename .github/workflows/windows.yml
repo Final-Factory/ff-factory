@@ -107,7 +107,7 @@ jobs:
         env:
           ALL: ${{ github.event_name == 'schedule' || inputs.all }}
         run: |
-          if [ "$ALL" = true ]; then files=(server/*.test.ts scripts/*.test.ts); else
+          if [ "$ALL" = true ]; then files=(server/*.test.ts scripts/*.test.ts machine/*.test.ts); else
             mapfile -t files < <(grep -vE '^\s*(#|$)' .github/windows-tests.txt | cut -d'|' -f1 | tr -d ' ')
           fi
           echo "${#files[@]} test files"

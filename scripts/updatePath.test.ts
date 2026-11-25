@@ -4,7 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { checkoutFromBundle, checkPublished } from '../machine/selfUpdate.ts';
-import { MARKETPLACE, marketplaceVersions, publishAgentTools, toolsCheckout } from '../server/agentTools.ts';
+import { execFileSync } from 'node:child_process';
+import { AGENTS_REPO_URL, BRANCH, legacyToolsCheckout, MARKETPLACE, marketplaceVersions, publishAgentTools, toolsCheckout } from '../server/agentTools.ts';
+import { toolsResult } from '../server/machineRollout.ts';
 import { gitExecFileSync } from '../server/safeGit.ts';
 import { exec } from './worker/worker.ts';
 
@@ -96,6 +98,76 @@ test('w5573: worker.ts tools clones, then fast-forwards, the tools checkout and 
       assert.ok(path.resolve(r.cwd).startsWith(path.resolve(tmp)), `it ran from a fresh clone, not the tools checkout: ${r.cwd}`);
     }
     assert.deepEqual(fs.readdirSync(tmp), [], 'the fresh clones are removed');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("w5597: an old-layout machine publishes from the new checkout; hooks and scripts planted where workers write never run, and the new checkout's own hooks are off", { skip: !online && 'reaches github.com: CI or FF_NETWORK_TESTS=1', timeout: 10 * 60_000 }, async () => {
+  const dir = scratch();
+  try {
+    const home = path.join(dir, 'home');
+    const claudeDir = path.join(home, '.claude');
+    const root = path.join(dir, 'root');
+    const planted = path.join(dir, 'planted');
+    const hook = `#!/bin/sh\necho "$0" >> "${planted.split(path.sep).join('/')}"\n`;
+    const plant = (gitDir: string) => {
+      for (const h of ['post-checkout', 'post-merge', 'reference-transaction', 'pre-auto-gc', 'post-rewrite']) {
+        fs.mkdirSync(path.join(gitDir, 'hooks'), { recursive: true });
+        fs.writeFileSync(path.join(gitDir, 'hooks', h), hook, { mode: 0o755 });
+      }
+    };
+    // The machine before w5597: FF Factory's checkout in <root>/tools, which a worker can write, and the marker naming it.
+    const legacy = legacyToolsCheckout(root);
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    gitExecFileSync(['clone', '--quiet', '--depth', '1', '--branch', BRANCH, AGENTS_REPO_URL, legacy], { env, windowsHide: true });
+    plant(path.join(legacy, '.git'));
+    fs.writeFileSync(path.join(legacy, 'registerAgents.sh'), hook, { mode: 0o755 });
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, `${MARKETPLACE}-checkout`), `${legacy}\n`);
+    const runs: string[] = [];
+    const lines: string[] = [];
+    const d = {
+      exec: async (cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}) => {
+        if (cmd === 'git') return exec(cmd, args, o);
+        const cwd = o.cwd ?? '';
+        runs.push(cwd);
+        const latest = marketplaceVersions(JSON.parse(fs.readFileSync(path.join(cwd, '.claude-plugin', 'marketplace.json'), 'utf8')));
+        const plugins = Object.fromEntries(['ff-agents', 'ff-speckit'].map((p) => [`${p}@${MARKETPLACE}`, [{ scope: 'user', version: latest[p] }]]));
+        fs.mkdirSync(path.join(claudeDir, 'plugins'), { recursive: true });
+        fs.writeFileSync(path.join(claudeDir, 'plugins', 'installed_plugins.json'), JSON.stringify({ version: 2, plugins }));
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      say: (l: string) => lines.push(l),
+      env: { ...process.env, HOME: home, CLAUDE_CONFIG_DIR: claudeDir },
+      home,
+      // No tmpdir, as the daemon runs it: the run's folder is made beside the new checkout.
+      platform: process.platform,
+    };
+    const co = toolsCheckout(root);
+    assert.equal(await publishAgentTools(root, d), 0, lines.join('\n'));
+    assert.ok(fs.existsSync(path.join(co, '.git')), 'the new checkout is cloned');
+    assert.equal(fs.existsSync(planted), false, `nothing planted in the old checkout ran: ${fs.existsSync(planted) ? fs.readFileSync(planted, 'utf8') : ''}`);
+    assert.equal(fs.readFileSync(path.join(legacy, 'registerAgents.sh'), 'utf8'), hook, 'the old checkout is left as it is');
+    assert.equal(fs.readFileSync(path.join(claudeDir, `${MARKETPLACE}-checkout`), 'utf8'), `${co}\n`, "publish-skills' marker moved");
+    assert.equal(runs.length, 1);
+    assert.ok(path.resolve(runs[0]).startsWith(path.resolve(path.dirname(co))), `the script ran from a fresh clone in ${path.dirname(co)}: ${runs[0]}`);
+    assert.deepEqual(fs.readdirSync(path.dirname(co)), [MARKETPLACE], 'the run folder is removed');
+    const t = toolsResult(0, lines.join('\n'));
+    assert.equal(t.status, 'ok');
+    assert.ok(t.before && t.after && t.latest && t.latestSha, `the rollout reads it: ${JSON.stringify(t)}`);
+    assert.ok(t.checkout?.startsWith(`${co} at `) && /^[0-9a-f]{12}$/.test(t.checkout.slice(co.length + 4)), `checkout line: ${t.checkout}`);
+
+    // The new checkout's own hooks: live for a plain git (the control), off for the publish's.
+    const head = plain(co, 'rev-parse', 'HEAD');
+    plant(path.join(co, '.git'));
+    execFileSync('git', ['-C', co, 'reset', '--quiet', '--hard', 'HEAD~1'], { env, windowsHide: true });
+    assert.ok(fs.existsSync(planted), 'control: a plain git runs the planted hook');
+    fs.rmSync(planted);
+    lines.length = 0;
+    assert.equal(await publishAgentTools(root, d), 0, lines.join('\n'));
+    assert.equal(plain(co, 'rev-parse', 'HEAD'), head, `fast-forwarded: ${lines.join('\n')}`);
+    assert.equal(fs.existsSync(planted), false, `no hook ran in the publish's fetch and merge: ${fs.existsSync(planted) ? fs.readFileSync(planted, 'utf8') : ''}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
