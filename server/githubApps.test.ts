@@ -338,7 +338,7 @@ test('the daemon side: the tokens file round trip (0600), the run environment on
   assert.deepEqual(ghAppRunEnv({ GH_TOKEN: LOTH }, setup, 'PATH', '/usr/bin'), {});
   assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a' }, setup, 'PATH', '/usr/bin'), {}, 'no vault GitHub token: nothing');
   assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x'), {}, 'no session file: nothing (w5547)');
-  const own = path.join(dir, 'gh-app', 'sessions', 's1.json');
+  const own = path.join(dir, 'gh-app', 'sessions', 's1', 'tokens.json');
   assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x', own), { FF_GH_APP_SESSION_FILE: own, FF_GH_APP_HELPER: '!helper credential', Path: [setup.bin, 'C:\\x'].join(path.delimiter) });
   assert.ok(!Object.values(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'PATH', '', own)).includes(file), 'the machine file is never in a run environment (w5547)');
   // gh: the first one on PATH that is not in the shim's folder.
@@ -362,7 +362,7 @@ test('w5547: a run gets its own file with only the apps its spec named; naming a
   assert.equal(sessionTokensFile(sessions, '..'), undefined);
   assert.equal(ghAppSessionSetup({ setup, sessions, sessionId: 's0', specEnv: { GH_TOKEN: LOTH } }), undefined, 'no apps: no file');
   const own = ghAppSessionSetup({ setup, sessions, sessionId: 's1', specEnv: { FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH } });
-  assert.equal(own, path.join(sessions, 's1.json'));
+  assert.equal(own, path.join(sessions, 's1', 'tokens.json'), 'in a folder of its own, which the run is granted (a rename in it stays readable)');
   if (process.platform !== 'win32') assert.equal(fs.statSync(own!).mode & 0o777, 0o600);
   const held = readGhAppTokens(own);
   assert.deepEqual(held.map((h) => h.app), ['app-gherik'], 'only the app the spec named');
@@ -376,13 +376,18 @@ test('w5547: a run gets its own file with only the apps its spec named; naming a
   assert.equal(credentialAnswer('get', 'protocol=https\nhost=github.com\npath=Gherik1/ItemCannon.git\n', both, held, NOW), `username=x-access-token\npassword=${ghs('a')}\n`, 'its own app still works');
   // New tokens: each live run's file is written again with its own apps; a day-old file of a gone run is removed.
   const fresh = HELD.map((h) => ({ ...h, token: `${h.token}x` }));
-  const gone = path.join(sessions, 'gone.json');
+  const gone = path.join(sessions, 'gone', 'tokens.json');
   writeSessionTokens(gone, ['other-app'], HELD);
+  const young = path.join(sessions, 'young', 'tokens.json');
+  writeSessionTokens(young, ['other-app'], HELD);
   const old = (Date.now() - 2 * 24 * 3_600_000) / 1000;
-  fs.utimesSync(gone, old, old);
-  refreshSessionTokens(sessions, fresh, (id) => id === 's1');
+  fs.utimesSync(path.dirname(gone), old, old);
+  fs.mkdirSync(path.join(sessions, 'empty'));
+  refreshSessionTokens(sessions, fresh, (id) => id === 's1' || id === 'empty');
   assert.deepEqual(readGhAppTokens(own), [fresh[0]]);
-  assert.equal(fs.existsSync(gone), false);
+  assert.equal(fs.existsSync(path.dirname(gone)), false, 'the folder of a run gone over a day is removed');
+  assert.deepEqual(readGhAppTokens(young), [HELD[1]], 'the folder of a run gone under a day is left as it was');
+  assert.equal(fs.existsSync(path.join(sessions, 'empty', 'tokens.json')), false, 'a live run without a file gets none made');
 });
 
 test('git config: with apps the helper is the daemon\'s and git sends the path (useHttpPath); without, the GH_TOKEN helper as before', () => {
@@ -402,7 +407,7 @@ test('real git: `git credential fill` through the installed helper answers the a
   if (spawnSync('git', ['--version']).status !== 0) return t.skip('no git');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-git-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const file = path.join(dir, 'sessions', 's1.json');
+  const file = path.join(dir, 'sessions', 's1', 'tokens.json');
   writeSessionTokens(file, ['app-gherik'], [{ ...HELD[0], expiresAt: iso(Date.now() + 3_600_000) }]);
   const helper = installGhAppShims(path.join(dir, 'bin'));
   const env = { ...process.env, ...githubCredentialEnv({ FF_GH_APP_HELPER: helper }), FF_GH_APP_SESSION_FILE: file, FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };

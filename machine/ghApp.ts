@@ -31,8 +31,19 @@ export const ghAppPaths = (appDir: string) => ({
   sessions: path.join(appDir, GH_APP_DIR, 'sessions'),
 });
 
-/** A run's own tokens file (w5547), or undefined for an id that is not a plain name. */
-export const sessionTokensFile = (sessions: string, sessionId: string) => (/^[A-Za-z0-9._-]{1,128}$/.test(sessionId) && !/^\.+$/.test(sessionId) ? path.join(sessions, `${sessionId}.json`) : undefined);
+/**
+ * A run's own folder (w5547), or undefined for an id that is not a plain name. The tokens file is inside it, not beside the
+ * other runs' (lockout review of #1193): the fences give the run this folder, so a rewrite of the file (a temporary file,
+ * then a rename) stays readable to it. A grant on the file itself is lost at the first rewrite under Landlock (granted by
+ * inode) and on Windows (the new file takes its folder's label).
+ */
+export const sessionTokensDir = (sessions: string, sessionId: string) => (/^[A-Za-z0-9._-]{1,128}$/.test(sessionId) && !/^\.+$/.test(sessionId) ? path.join(sessions, sessionId) : undefined);
+
+/** A run's own tokens file (w5547), `<sessions>/<id>/tokens.json`, or undefined for an id that is not a plain name. */
+export const sessionTokensFile = (sessions: string, sessionId: string) => {
+  const d = sessionTokensDir(sessions, sessionId);
+  return d ? path.join(d, 'tokens.json') : undefined;
+};
 
 /**
  * A run's own file (w5547): the apps its spec names and only their tokens. Written whole, 0600, like the machine's file.
@@ -63,17 +74,19 @@ export function sessionApps(file: string): string[] {
 export function refreshSessionTokens(sessions: string, tokens: readonly GhAppToken[], live: (sessionId: string) => boolean, say: (line: string) => void = () => {}, now = Date.now()) {
   let names: string[];
   try {
-    names = fs.readdirSync(sessions).filter((n) => n.endsWith('.json'));
+    names = fs.readdirSync(sessions, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch {
     return;
   }
   for (const n of names) {
-    const file = path.join(sessions, n);
+    const dir = path.join(sessions, n);
+    const file = path.join(dir, 'tokens.json');
     try {
-      if (!live(n.slice(0, -5))) {
-        if (now - fs.statSync(file).mtimeMs > 24 * 3_600_000) fs.rmSync(file, { force: true });
+      if (!live(n)) {
+        if (now - fs.statSync(dir).mtimeMs > 24 * 3_600_000) fs.rmSync(dir, { recursive: true, force: true });
         continue;
       }
+      if (!fs.existsSync(file)) continue;
       writeSessionTokens(file, sessionApps(file), tokens);
     } catch (e) {
       say(`github apps: could not write ${n}: ${(e as Error).message}`);

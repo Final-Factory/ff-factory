@@ -25,6 +25,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, readLockArgs, writeLockArgs } from './writeLock.ts';
+import { ensureReadBackDirs, readFenceOff, readFenceOffFile, writeInPlace } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -79,7 +80,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensFile, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
+import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { postImagesFromFiles, postTextFromFile } from '../server/ffboxPostFile.ts';
@@ -629,6 +630,7 @@ export class Daemon {
       log: (...a) => log(...a),
       nodeArgs: hostNodeArgs(),
       published: () => publishedOrigin(this.cfg.configFile) ?? this.cfg.updateOrigin,
+      readFence: (off) => this.setReadFence(off),
     });
     this.pause = new PauseKeeper({
       file: pauseFile(appDirOfConfig(cfg)),
@@ -1266,8 +1268,9 @@ export class Daemon {
     const file = cleanupFactsFile(appDirOfConfig(this.cfg));
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(`${file}.tmp`, JSON.stringify(this.cleanupFacts()));
-      fs.renameSync(`${file}.tmp`, file);
+      // In place, not by rename (w5546 lockout review): a fenced worker's grant on this file (Landlock, by inode) and its
+      // Windows read label stay on the file a rename would replace.
+      writeInPlace(file, JSON.stringify(this.cleanupFacts()));
     } catch (e) {
       log(`clean-up facts: could not write ${file}: ${(e as Error).message}`);
     }
@@ -1943,6 +1946,8 @@ export class Daemon {
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
       ...(selfUpdate ? { selfUpdate: SELF_UPDATE_VERSION } : {}),
+      // w5546: it takes daemon_control read-fence-off / read-fence-on (an older daemon would read any other action as uninstall).
+      readFenceSwitch: true,
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null, ...installSshOf(this.cfg.root) } }
@@ -2865,9 +2870,12 @@ export class Daemon {
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey], own);
     // w5546: the fences close the daemon's folder, secrets and root.json to reads; the run's own tokens file is given back.
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
-    const lock = lockArgs ? { writeLock: own ? [...lockArgs, '--read', own] : lockArgs } : {};
+    // Its own folder, not the file: a rewrite of the file keeps the grant (lockout review of #1193).
+    const ownDir = own ? path.dirname(own) : undefined;
+    const readOff = readFenceOff(appDirOfConfig(this.cfg));
+    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...(ownDir ? ['--read', ownDir] : [])] } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
-    const fence = baseFence && own ? { ...baseFence, readAllowed: [...(baseFence.readAllowed ?? []), own] } : baseFence;
+    const fence = baseFence && readOff ? { ...baseFence, readOff: true } : baseFence && ownDir ? { ...baseFence, readAllowed: [...(baseFence.readAllowed ?? []), ownDir] } : baseFence;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
@@ -2959,7 +2967,9 @@ export class Daemon {
         const sessions = ghAppPaths(appDir).sessions;
         fs.mkdirSync(sessions, { recursive: true });
         // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
-        if (!(await labelNoReadUp(noReadUpTargets({ root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [sessions] }), exec, say))) log('worker integrity: not every read label could be set; Low workers may still read there');
+        ensureReadBackDirs(appDir);
+        if (readFenceOff(appDir)) log('worker integrity: the read fence is off (daemon_control read-fence-off); no No-Read-Up labels set');
+        else if (!(await labelNoReadUp(noReadUpTargets({ root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [sessions] }), exec, say))) log('worker integrity: not every read label could be set; Low workers may still read there');
       } catch (e) {
         log(`worker integrity: read labels: ${(e as Error).message}`);
       }
@@ -3052,6 +3062,30 @@ export class Daemon {
     }
   }
 
+  /** w5546: the Linux lock's read half (the daemon's folder, secrets, root.json closed; what workers read there given back). */
+  private get readLock(): string[] {
+    return this.cfg.root ? readLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg) }) : [];
+  }
+
+  /**
+   * The live off switch of the read fence (w5546 lockout review, lothsahn: "If we get that wrong we may be unable to update
+   * workers and have to manually reinstall"): the portal's `daemon_control` `read-fence-off` / `read-fence-on`, with nobody
+   * at the machine and no restart. Off: runs started from now on get no read rules (macOS, Linux), and on Windows the No-Read-Up
+   * labels are replaced by plain No-Write-Up ones. The marker file keeps the choice across restarts and updates.
+   */
+  async setReadFence(off: boolean): Promise<void> {
+    const appDir = appDirOfConfig(this.cfg);
+    if (off) fs.writeFileSync(readFenceOffFile(appDir), `${new Date().toISOString()}\n`);
+    else fs.rmSync(readFenceOffFile(appDir), { force: true });
+    log(`read fence: ${off ? 'off' : 'on'} for runs started from now on (daemon_control)`);
+    if (process.platform === 'win32' && this.cfg.workerIntegrity === 'low' && this.cfg.root) {
+      const exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000 });
+      const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions] });
+      const ok = await labelNoReadUp(off ? t.map((x) => ({ ...x, sddl: x.sddl.replace('NWNR', 'NW') })) : t, exec, (l) => log(l));
+      if (!ok) throw new Error(`not every label could be ${off ? 'opened' : 'closed'}; the daemon log says which`);
+    }
+  }
+
   private lockMemo?: { args?: string[] };
   /**
    * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
@@ -3064,10 +3098,11 @@ export class Daemon {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
           args = [
             ...writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: this.maxEventsFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra }),
-            // w5546: and the read half (the daemon's folder, secrets, root.json closed; what workers read there given back).
-            ...readLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg) }),
           ];
-          const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
+          // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
+          ensureReadBackDirs(appDirOfConfig(this.cfg));
+          // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
+          const probe = probeFence(['python3', FF_LANDLOCK, ...args, ...this.readLock, '--', '/bin/true']);
           if (probe.ok) log('write lock: landlock is on for sandbox agents');
           else {
             log(`write lock: landlock could not run a no-op (${probe.why}); agents run unlocked`);
@@ -3679,8 +3714,8 @@ export class Daemon {
         this.entries.delete(msg.sessionId);
         this.awake();
         // Its own GitHub App tokens file goes too (w5547).
-        const own = sessionTokensFile(ghAppPaths(appDirOfConfig(this.cfg)).sessions, msg.sessionId);
-        if (own) fs.rmSync(own, { force: true });
+        const own = sessionTokensDir(ghAppPaths(appDirOfConfig(this.cfg)).sessions, msg.sessionId);
+        if (own) fs.rmSync(own, { recursive: true, force: true });
         // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene"), unless it became Git Bash's /tmp (w603).
         // /tmp is looked up again first: it moves to the first bash's TMP whenever the user's MSYS processes all ended, and a
         // value up to 5 minutes old removed a folder that had just become /tmp (w3559: every bash on LothDesktop, ffu's CI

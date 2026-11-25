@@ -36,7 +36,7 @@ add".
   git was given.
 - **Each run gets only its own apps' tokens** (w5547, lothsahn: workers never choose their App tokens). The daemon keeps every
   app's tokens in `gh-app/tokens.json`, which no worker reads (docs/worker-fence.md, "Reads"). At a run's start it writes the
-  run's own file, `gh-app/sessions/<session>.json` (0600), with only the apps the portal named in that run's spec
+  run's own file, `gh-app/sessions/<session>/tokens.json` (0600), with only the apps the portal named in that run's spec
   (`FF_GH_APP_NAMES` as the spec carried it), and rewrites it when new tokens come; the file goes when the session is
   removed, and a gone session's file after a day. The run's environment points at it (`FF_GH_APP_SESSION_FILE`); there is
   no `FF_GH_APP_FILE` any more. The helper and the shim still narrow to `FF_GH_APP_NAMES`, but a worker that sets it to

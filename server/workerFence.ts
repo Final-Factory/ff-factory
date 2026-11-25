@@ -33,8 +33,10 @@ export interface WorkerFence {
   appDir?: string;
   /** Per run, more paths no worker may read (resolved; a folder covers all below it): w5548's gh login, for example. */
   readDenied?: string[];
-  /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens file, w5547). */
+  /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens folder, w5547); a folder covers all below it. */
   readAllowed?: string[];
+  /** The read fence is switched off on this machine (daemon_control read-fence-off, w5546): no read rules, writes as before. */
+  readOff?: boolean;
 }
 
 /** An SBPL string literal. */
@@ -93,7 +95,7 @@ export function seatbeltProfile(f: WorkerFence): string {
     ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
     ...(f.appDir && f.appDir !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
     ')',
-    ...readRules(f),
+    ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
   ].join('\n');
 }
 
@@ -115,7 +117,7 @@ function readRules(f: WorkerFence): string[] {
     '(allow file-read-data',
     `  (literal ${lit(daemon)})`,
     ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
-    ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (literal ${lit(p)})`),
+    ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
     ')',
   ];
 }

@@ -92,13 +92,32 @@ also refuse its reads of `<root>/secrets`, `<root>/root.json` and the daemon's f
 `app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
 given back: `daemon.json`, `hosts` (other sessions' specs and environments), `gh-app/tokens.json` (every app's tokens),
 `root.json` and `root-backup.json` (dropped from the guard's list too). A run's own GitHub App tokens file
-(`gh-app/sessions/<session>.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux).
+(`gh-app/sessions/<session>/tokens.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux), as a folder, so its rewrite by rename stays readable.
 
 | OS | How | Where |
 |---|---|---|
 | macOS | `(deny file-read-data ...)` on the closed paths, then `(allow file-read-data ...)` on the given-back ones (later rules win). Only contents: stat and realpath of a closed path still work. | `seatbeltProfile` `readRules` (server/workerFence.ts); per run `readAllowed` |
 | Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents list names only) and the given-back ones. Symbolic links are not followed. | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
 | Windows | A Medium mandatory label with No-Read-Up, `S:(ML;OICI;NWNR;;;ME)` on folders (`S:(ML;;NWNR;;;ME)` on files), set with `SetNamedSecurityInfoW` (icacls cannot set NR); the given-back paths get an explicit `S:(ML;OICI;NW;;;ME)`, which overrides the inherited one. Set at every daemon start when `workerIntegrity` is `low` (a self-update's new `app` folder inherits NR), skipping a label already in place. Never on the system drive: a target on C:, or a junction into it, is skipped and logged. | `noReadUpTargets`, `labelNoReadUp` (machine/lowIntegrity.ts), `lowSetup` (machine/daemon.ts) |
+
+Kept working through the daemon's own writes (lockout review of #1193):
+
+- A file workers read that the daemon rewrites (`cleanup-facts.json`, `person-play.json`) is written in place
+  (`writeInPlace`, machine/readFence.ts), never by rename: a renamed-in file is a new inode, which a Landlock grant does not
+  cover, and on Windows it takes the daemon folder's No-Read-Up label.
+- The given-back folders the daemon makes later (`logs`, `unity-mcp`, `unity-slots`, `gh-app/bin`, `gh-app/sessions`) are
+  made before the fences are set (`ensureReadBackDirs`), since Landlock skips a path that is not there.
+- The fence never stands between the daemon and its updates: only the claude runs it starts are fenced
+  (server/launch.ts `fenceSpawner`, `writeLockSpawner`); the daemon, its self-update check (machine/selfUpdate.ts
+  `checkPublished`) and the update job (machine/osJob.ts) run unfenced with the daemon's own environment, and the installer
+  clones and fetches anonymously. The gh-app helper is only ever in a run's environment (server/launch.ts, GIT_CONFIG_*).
+
+**Live off switch**, for a machine nobody is at: `machine_daemon` with action `read-fence-off` (or `POST
+/api/machines/<id>/daemon` `{"action":"read-fence-off"}`) writes `read-fence.off` in the daemon's folder: runs started after it
+get no read rules on any OS, and on Windows the closed paths' labels go back to No-Write-Up only. No restart, nothing else
+changes; the write fence stays. `read-fence-on` removes the marker and sets the labels again. Runs already going keep the
+fence they started with. Only a daemon whose hello offers `readFenceSwitch` is sent it: a daemon from before w5546 took any
+action but `restart` as an unload.
 
 Limits:
 

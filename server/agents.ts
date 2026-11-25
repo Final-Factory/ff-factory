@@ -7624,7 +7624,7 @@ ${w.repo ?? ''}
         "Start, stop or restart a machine's FF Factory daemon over ssh (its LaunchAgent on a Mac, its scheduled task on a Windows PC, its systemd user service on a Linux PC). Stop and restart end the agents running there, so they are refused while any run unless forced. A stopped daemon stays down (no automatic redeploy) until started, redeployed, or the machine's user logs in again. Only when the user asked for it, or to recover a daemon that is stuck.",
         {
           machine: z.string(),
-          action: z.enum(['start', 'stop', 'restart']),
+          action: z.enum(['start', 'stop', 'restart', 'read-fence-off', 'read-fence-on']).describe("read-fence-off / read-fence-on: the worker read fence's live off switch (w5546), over the daemon's link, no restart: runs started afterwards get no read rules, Windows labels opened."),
           force: z.boolean().optional().describe('Stop or restart even though agents are running there (they stop).'),
         },
         wrap(async ({ machine, action, force }) => mm.controlDaemon(machine, action, !!force)),

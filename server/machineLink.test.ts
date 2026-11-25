@@ -499,3 +499,26 @@ test('w1641: the portal logs each update bundle it serves, finished or cut', () 
     'machine beast: the update bundle was cut from byte 6962988 after 7962988 of 18595141 bytes in 312.0 s (3 KB/s)',
   );
 });
+
+test('w5546: the read fence goes off and on again over the link with nobody at the machine; an older daemon is never sent it; an unknown action is refused, never taken as an unload', async (t) => {
+  const s = await setup(t);
+  await until('online', () => s.mm.canLink('mx'));
+  const marker = path.join(s.appDir, 'read-fence.off');
+  await s.mm.controlDaemon('mx', 'read-fence-off');
+  assert.equal(fs.existsSync(marker), true, 'off: the marker is there, so runs start with no read rules');
+  assert.equal(s.exits.length, 0, 'no restart');
+  await s.mm.controlDaemon('mx', 'read-fence-on');
+  assert.equal(fs.existsSync(marker), false);
+  // A daemon from before the switch said no readFenceSwitch in its hello: its onControl took any other action as an unload.
+  (s.mm as unknown as { hellos: Map<string, { readFenceSwitch?: boolean }> }).hellos.get('mx')!.readFenceSwitch = undefined;
+  await assert.rejects(s.mm.linkControl('mx', 'read-fence-off'), /no read fence switch|before the read fence switch/);
+  assert.equal(s.launched.length, 0, 'nothing was unloaded');
+  // This daemon's own answer to an action it does not know.
+  const sent: { ok: boolean; error?: string }[] = [];
+  const u = new SelfUpdater({ appDir: fs.mkdtempSync(path.join(os.tmpdir(), 'ffrf-')), portalUrl: () => 'http://127.0.0.1:1', token: 'tok', send: (m) => (sent.push(m as { ok: boolean }), true), exit: () => assert.fail('no exit'), log: () => undefined });
+  await u.onControl({ type: 'daemon_control', id: 'c1', action: 'something-new' as 'restart' });
+  await u.onControl({ type: 'daemon_control', id: 'c2', action: 'read-fence-off' });
+  assert.deepEqual(sent.map((m) => m.ok), [false, false]);
+  assert.match(sent[0].error ?? '', /unknown action something-new/);
+  assert.match(sent[1].error ?? '', /no read fence switch/);
+});
