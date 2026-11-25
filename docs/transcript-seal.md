@@ -51,12 +51,46 @@ spawner reports no pid, so its seals are never final: a line appended after it e
 
 ## What it does not cover yet
 
-- **Linux and Windows per-conversation access**: there the fence still lets a worker write any transcript in `<root>/claude`;
-  the seal makes an edited one fail to resume, but the write itself is not refused. Landlock rights are inherited by every
-  path beneath a rule, so `projects` must leave the folders a worker may create in (a `projects` link into a folder outside
-  `--rw-children`, with per-conversation `--rw` rules); on Windows, `projects` labelled Medium with each conversation's
-  file and folder labelled Low. Handed up as follow-ups.
+- **Linux per-conversation access**: there the write lock still lets a worker write any transcript in `<root>/claude`; the
+  seal makes an edited one fail to resume, but the write itself is not refused. Landlock rights are inherited by every path
+  beneath a rule, so `projects` must leave the folders a worker may create in (a `projects` link into a folder outside
+  `--rw-children`, with per-conversation `--rw` rules). Handed up as a follow-up.
+- **Windows, while a conversation runs**: with `workerTranscriptLabels` on (below), another *live* conversation's own file
+  and folder are Low, and every worker is the same user at the same level, so a Low worker can write them until that
+  claude exits; the seal fails such an edit at its next resume. With the switch off (the default), every transcript in
+  `<root>\claude` is open to every Low worker, as on Linux.
 - **A live conversation's own worker** can still edit its own transcript (it must write it). An edit to what was already
   hashed fails the next resume; an edit to the tail between the CLI's write and the turn's seal is sealed as written.
 - **Medium and standing agents** run on their own Claude home, `<root>/claude-medium`, read-only to workers on every OS
   (w5543/w5565); the seal covers them as well.
+
+## Windows: transcript labels (w5703)
+
+`daemon.json` `workerTranscriptLabels: true`, with the Low fence on (`workerIntegrity: "low"`), labels
+`<CLAUDE_CONFIG_DIR>\projects` Medium (no-write-up). Every project folder, transcript and conversation folder in it inherits
+that label. A Low worker is then refused when it writes, plants, renames or deletes a transcript there, makes a new folder
+in a project folder, or moves `projects` itself aside (its parent `claude` is Low). Code: `server/transcriptLabels.ts`.
+
+- **The daemon** (`lowTranscripts` in `machine/daemon.ts`, once per start): if `projects` has no explicit Medium label yet,
+  it first labels Low every transcript and conversation folder written in the last 3 days. Agents outlive the daemon
+  (w605), so a conversation running at that moment keeps appending. It then labels `projects` `(OI)(CI)medium`. A Low copy
+  of node tries to make a file in `projects` and in a project folder. The expected result is a refusal ("transcript labels:
+  self-test at Low"). A write that went through is logged as a `WARNING` and changes nothing else (warn-only).
+- **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
+  claude starts, it makes the conversation's `<id>\` folder and labels it `(OI)(CI)low`. On a resume it also labels the
+  existing `<id>.jsonl` (found in any project folder) `low`. When the last process of that conversation exits, both go back
+  to Medium. A label that fails is logged, and the process still starts.
+- **A new conversation's file**: Claude Code refuses `--session-id <id>` when `<id>.jsonl` already exists ("Session ID ...
+  is already in use"). It also refuses an empty or stub file for `--resume` ("No conversation found"). So the file cannot be
+  made ahead. The spawner passes the SDK's control lines through and holds the first user message until the CLI has
+  answered `initialize`, by which point the start-up check is done. It then makes the empty file, labels it Low and passes
+  the message on; the CLI appends to that file. If no answer comes in 60 s, it makes the file anyway and logs that.
+  Measured on BEAST with Claude Code 2.1.x against a mock API, with the project folder refusing new files and folders,
+  these all ran: a new conversation, a planted file (refused), a resume, a real /compact (the first bytes unchanged), and a
+  resume after it. `memory\` was not made, and nothing failed because of it.
+- **The way back** needs nobody at the machine: set `workerTranscriptLabels` to false (or remove it) and restart the
+  daemon. At start, if `projects` still has the explicit Medium label, the daemon labels it `(OI)(CI)low` along with every
+  project folder and every file and folder in them ("transcript labels: off; labelled ... Low again").
+- **A host that dies before its claude** leaves that conversation Low until its next process ends.
+- **Tests**: `server/transcriptLabels.test.ts`. Its real-label leg runs on the Windows CI runner (`.github/windows-tests.txt`)
+  and is skipped where the test process itself runs at Low, since a fenced worker cannot set a Medium label.
