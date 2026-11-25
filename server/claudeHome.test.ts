@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, LEGACY_VAR, loginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR } from './claudeHome.ts';
+import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, claudeLoginFiles, LEGACY_VAR, loginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR, withoutLoginPaths } from './claudeHome.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 import { resolveUnityMcpServer } from '../machine/unityMcp.ts';
 
@@ -151,4 +151,16 @@ test("the Unity MCP entry is read from the daemon's own config first, then the p
   fs.writeFileSync(path.join(w.dir, '.claude.json'), JSON.stringify({ mcpServers: { UnityMCP: { command: 'own' } } }));
   assert.equal(resolveUnityMcpServer(undefined, '/repo', files).server?.command, 'own');
   assert.match(resolveUnityMcpServer(undefined, '/repo', [path.join(w.base, 'none.json')]).source, /^no /);
+});
+
+test('w5559: withoutLoginPaths drops the legacy folder; claudeLoginFiles names every .credentials.json a worker could reach', () => {
+  const w = world();
+  const env: Record<string, string | undefined> = {};
+  moveClaudeHome(env, w.root, w.home);
+  const agent = withoutLoginPaths(env);
+  assert.equal(agent[LEGACY_VAR], undefined);
+  assert.equal(agent.CLAUDE_CONFIG_DIR, w.dir, 'the worker folder stays');
+  assert.equal(env[LEGACY_VAR], w.legacy, 'the input is not changed');
+  assert.deepEqual(claudeLoginFiles(env, w.home), [path.join(w.legacy, '.credentials.json'), path.join(w.dir, '.credentials.json')]);
+  assert.deepEqual(claudeLoginFiles({}, w.home), [path.join(w.legacy, '.credentials.json')], 'no repeats when the legacy folder is ~/.claude');
 });

@@ -48,6 +48,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $script:InstallUrl = 'https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1'
+# The portal writes its own full commit here (w5516): the installer is fetched at it and checks exactly it out (-Ref), so
+# this PC installs the code the portal runs, never whatever main's head is then. Unset (run from a clone): main.
+$script:PortalCommit = '__FF_PORTAL_COMMIT__'
+$script:RefArgs = @()
+if ($script:PortalCommit -cmatch '^[0-9a-f]{40}$') {
+    $script:InstallUrl = "https://raw.githubusercontent.com/Final-Factory/ff-factory/$($script:PortalCommit)/scripts/worker/install.ps1"
+    $script:RefArgs = @('-Ref', $script:PortalCommit)
+}
 $script:OnWindows = ($PSVersionTable.PSEdition -eq 'Desktop') -or $IsWindows
 
 # The run's log (w1603): every line this script and the installer print, never the code or the credential (neither is
@@ -363,7 +371,7 @@ function Invoke-Update([string]$root, [string]$tsExe, $self, [string]$work) {
         if (-not (Install-Tools)) { return 2 }
         Show-Unity
     }
-    $a = @('-Update', '-Root', $root)
+    $a = @('-Update', '-Root', $root) + $script:RefArgs
     if ($MaxSandboxes) { $a += @('-MaxSandboxes', $MaxSandboxes) }
     if ($MaxAgentsPerSandbox) { $a += @('-MaxAgentsPerSandbox', $MaxAgentsPerSandbox) }
     if ($MaxUnity) { $a += @('-MaxUnity', $MaxUnity) }
@@ -427,7 +435,7 @@ function Invoke-NewJoin([string]$tsExe, $self, [string]$work) {
     if ($ghToken) { Say 'The portal also sent a GitHub token for the game repo''s clone (used by the installer only, not kept).' }
 
     Step 'Installing (install.ps1)'
-    $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile, '-NoSsh')
+    $a = @('-Root', $root, '-PortalUrl', $script:Portal, '-MaxSandboxes', $limits.maxSandboxes, '-MaxAgentsPerSandbox', $limits.maxAgentsPerSandbox, '-MaxUnity', $limits.maxUnity, '-CredentialFile', $credFile, '-NoSsh') + $script:RefArgs
     if ($script:Owner) { $a += @('-Owner', $script:Owner) }
     if ($playOnly) { $a += @('-NoDevDrive', '-PlayOnly') }
     try {
