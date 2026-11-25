@@ -47,9 +47,37 @@ LothDesktop):
   processes, and the Linux lock refuses the systemd user bus (w5562, #1168); the evidence check runs only a
   `pr_evidence.py` workers cannot have written (w5542, #1171); no process the portal starts can read the vault key
   (w5506, #1154).
+- Players the daemon starts run fenced on Linux and macOS (w5564, below).
 - In progress, no PR yet: workers cannot read the secrets and daemon folders on any OS (w5546); the fence fails closed with a
   portal alert (w5555); the gh-config and Keychain read deny (w5548). Until they land, treat every item in the "does not
   cover" column as open.
+
+## Players the daemon starts (w5564, w5451 item 33)
+
+A timed run's player (`machine/timedRunner.ts`, `leg()`) is a file in a folder fenced workers write (`players/slotK-n/player`,
+`timing/builds`), and the daemon starts it. Before w5564 it ran as the daemon's plain child, so a swapped player wrote
+anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macOS, whatever the worker fence setting:
+
+- **Writable**: the leg's run folder, the player's own build folder, the game's data root (`FF_GAME_DATA_DIR`, saves) and the
+  player home (`FF_PLAYER_HOME`), each only if it lies inside the worker root, is not the root itself and is not under
+  `daemon` or `secrets` (`playerWritable`). Nothing else: not `/tmp`, not the home folder, not other slots or sandboxes.
+- **Linux**: `ff-landlock.py --rw /dev --rw /proc --rw <each>` (files only; the network is untouched, so pair runs work).
+  `/dev` stays writable for the GPU and `/dev/shm` (tmpfs, gone at reboot).
+- **macOS**: `sandbox-exec -p` with `(allow default) (deny file-write*)`, then the device nodes, the user's Darwin temp and
+  cache folders (`getconf DARWIN_USER_TEMP_DIR`/`DARWIN_USER_CACHE_DIR`) and each writable folder.
+- **Fails closed**: the fence is probed once (a no-op inside it, `fenceProbe.ts`); if the wrapper is missing or the no-op
+  fails, every leg is refused with the reason and no player starts. Windows players are unchanged (Low integrity comes
+  from the folder labels, w5539). `launch.txt` in each leg's folder names the fence it ran under.
+- **Measured on biscuit, 2026-11-25** (Linux, 1280x720 under Xvfb, w1440 life save, 2 interleaved rounds per side, both
+  sides already under the worker's Landlock, so the delta is the player's own layer): fenced 117.1 and 109.5 fps, unfenced
+  113.1 and 117.1 fps; frame average 8.54/9.13 ms against 8.83/8.53 ms. The spread between rounds of one side (7.6 fps)
+  is wider than the gap between the sides (1.9 fps): no cost seen. The save loaded in every leg. A write to `/tmp` (which the
+  worker shell itself could write), the home folder, `ffw/tmp`, `ffw/sandboxes/slot1` and another player slot was refused.
+- The player writes `.ff-local-automation-status.json` (and `.tmp<guid>` copies) beside its own exe on every leg. w5574's
+  per-leg check (`buildProblem`) refused any file that is not the build's, so every leg after the first was refused; the
+  runner now drops those status files before the check (`dropPlayerStatus`), and any other extra file is still refused.
+- Pair runs' players are started by workers (`player_slots.py launch`), so they already run inside the worker's fence;
+  the daemon starts no pair player (`server/pairRuns.ts` spawns nothing).
 
 ## How it works
 
