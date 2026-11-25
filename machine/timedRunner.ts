@@ -7,7 +7,7 @@
 // only the build's own finalfactory.exe, one leg at a time, each within its time bound.
 //
 // The ticket: a play-only machine has no game checkout and no python, so the daemon writes its ticket in the queue's own
-// format (<root>/tmp/bench.queue/tNNNNNNNN, bench.lock/owner; machine/benchQueue.ts reads it), the holder being the daemon
+// format (<root>/daemon/bench.queue/tNNNNNNNN, bench.lock/owner; machine/benchQueue.ts reads it), the holder being the daemon
 // itself. Only it takes tickets there; it still waits while a live ticket of anyone else's is in the queue, or a person plays.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
