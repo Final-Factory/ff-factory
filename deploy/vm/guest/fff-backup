@@ -1,58 +1,125 @@
 #!/usr/bin/env bash
 # fff-backup: the portal's encrypted backup, off the FFBox host (fff-backup.timer, daily; root).
 #
-# config, data, agents, home (ssh keys, gh and ffdiscord settings) and secrets (the subscription token), optionally review media, as
-# one tar.gz encrypted with age to BACKUP_RECIPIENTS_FILE's public keys, whose private keys are kept off the FFBox
-# host: neither the host nor this VM can open a backup. Sent with sftp to BACKUP_SSH_TARGET (e.g. an account on BEAST
-# over the tailnet) with its own key, BACKUP_KEEP newest kept there.
+# config, data (the vault's data/vault.json included, w5529), agents, home (ssh keys, gh and ffdiscord settings) and
+# secrets (the subscription token), optionally review media, as one tar.gz encrypted with age to BACKUP_RECIPIENTS_FILE's
+# public keys, whose private keys are kept off the FFBox host: neither the host nor this VM can open a backup. The vault
+# key ($FFF_VAULT_KEY, /etc/fff/vault.key) is never in it: it lives outside /srv/fff, and the backup refuses to run if a
+# file named like it is inside what it archives. A backup holds the vault's sealed values; the key that opens them is kept
+# apart (docs/vault.md, section 8).
 #
-# Restore, with the portal stopped (fffctl prepare-shutdown):
-#   age -d -i key.txt fff-<host>-<time>.tar.gz.age | tar -xz -C /srv/fff && chown -R fff:fff /srv/fff
+# Sent with sftp to BACKUP_SSH_TARGET (e.g. an account on BEAST over the tailnet) with its own key. The target's host key is
+# pinned (FFF_BACKUP_KNOWN_HOSTS, StrictHostKeyChecking=yes; fffctl backup-config --host-key): a changed key fails the
+# backup loudly and is never re-trusted by itself. The archive goes up as <name>.part, its size on the target is checked,
+# then (BACKUP_VERIFY=hash) it is read back and its sha256 compared, and only then renamed into place. BACKUP_KEEP newest
+# are kept there. What happened is written to $FFF_STATE_DIR/backup.json (fffctl status, the portal's system_status).
+#
+# Restore, with the portal stopped (fffctl prepare-shutdown), on a computer that holds one of the age private keys:
+#   age -d -i key.agekey fff-<host>-<time>.tar.gz.age | tar -xz -C /srv/fff && chown -R fff:fff /srv/fff
+# The vault then needs its key back in /etc/fff/vault.key (from the FFBox host's spare copy, docs/vault.md section 8).
 set -o errexit -o nounset -o pipefail
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
 load_conf
+BACKUP_VERIFY=${BACKUP_VERIFY:-hash}
 
+started=$(date -u +%FT%TZ)
+name="" size=0 sha=""
+status() { # result why verified
+  jq -n --arg at "$started" --arg finished "$(date -u +%FT%TZ)" --arg result "$1" --arg why "$2" --arg verified "$3" \
+    --arg target "$BACKUP_SSH_TARGET" --arg dir "$BACKUP_REMOTE_DIR" --arg name "$name" --argjson size "${size:-0}" --arg sha256 "$sha" \
+    '{at: $at, finished: $finished, result: $result, why: $why, verified: $verified, target: $target, dir: $dir, name: $name, size: $size, sha256: $sha256}' |
+    state_write backup.json || warn "could not write $FFF_STATE_DIR/backup.json"
+}
+work=""
+cleanup() { [ -z "$work" ] || rm -rf "$work"; }
+trap cleanup EXIT
 fail() {
   log "backup FAILED: $1"
-  tell_dispatcher "[backup] The portal's daily backup failed: $1. (journalctl -u fff-backup in the VM)"
+  status failed "$1" none
+  tell_dispatcher "[backup] The portal's daily backup failed: $1. (journalctl -u fff-backup in the VM; fffctl status)"
   exit 1
 }
-if [ -z "$BACKUP_SSH_TARGET" ]; then log "backups are off (BACKUP_SSH_TARGET is empty in $FFF_CONF)"; exit 0; fi
-[ -s "$BACKUP_RECIPIENTS_FILE" ] || fail "no age public keys in $BACKUP_RECIPIENTS_FILE"
+if [ -z "$BACKUP_SSH_TARGET" ]; then
+  log "backups are off (BACKUP_SSH_TARGET is empty in $FFF_CONF)"
+  status off "BACKUP_SSH_TARGET is empty in $FFF_CONF" none
+  exit 0
+fi
+grep -q '^age1' "$BACKUP_RECIPIENTS_FILE" 2>/dev/null || fail "no age public keys in $BACKUP_RECIPIENTS_FILE"
 [ -r "$BACKUP_SSH_KEY" ] || fail "no ssh key $BACKUP_SSH_KEY"
+pin=$(backup_pin_problem)
+[ -z "$pin" ] || fail "$pin"
 
-name="fff-$(hostname -s)-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.age"
-stage=$FFF_ROOT/backup
-install -d -m 0700 "$stage"
-out=$stage/$name
 parts=(config data agents home secrets)
 [ "$BACKUP_INCLUDE_REVIEW" != yes ] || parts+=(review)
 existing=()
 for p in "${parts[@]}"; do [ ! -e "$FFF_ROOT/$p" ] || existing+=("$p"); done
+# The vault key never rides along with the vault (w5529): not as the configured file, not as a copy of it.
+case "$(readlink -f "$FFF_VAULT_KEY" 2>/dev/null || echo "$FFF_VAULT_KEY")" in
+  "$(readlink -f "$FFF_ROOT")"/*) fail "the vault key $FFF_VAULT_KEY is inside $FFF_ROOT, which the backup archives; move it out first" ;;
+esac
+leak=$( (cd "$FFF_ROOT" && find "${existing[@]}" \( -name 'vault.key*' -o -name 'vault-key*' \) -print -quit 2>/dev/null) || true)
+[ -z "$leak" ] || fail "$FFF_ROOT/$leak looks like a copy of the vault key; the backup never holds the key with the vault"
+
+name="fff-$(hostname -s)-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.age"
+stage=$FFF_ROOT/backup
+install -d -m 0700 "$stage"
+work=$(mktemp -d "$stage/.run.XXXXXX")
+out=$work/$name
 log "archiving ${existing[*]} to $out"
 set +o pipefail
-tar -C "$FFF_ROOT" --warning=no-file-changed --exclude='data/vault.json*' --exclude=home/.cache --exclude=home/.npm --exclude=home/.local/share/claude/versions \
+tar -C "$FFF_ROOT" --warning=no-file-changed --exclude='data/vault.json.*' --exclude=home/.cache --exclude=home/.npm --exclude=home/.local/share/claude/versions \
   -czf - "${existing[@]}" | age -R "$BACKUP_RECIPIENTS_FILE" -o "$out"
 codes=("${PIPESTATUS[@]}")
 set -o pipefail
 # GNU tar exits 1 when a file changed while it was read (a live server's data): still a usable backup.
-if [ "${codes[0]}" -gt 1 ] || [ "${codes[1]}" -ne 0 ]; then
-  rm -f "$out"
-  fail "tar exited ${codes[0]}, age ${codes[1]}"
-fi
-size=$(du -h "$out" | cut -f1)
+if [ "${codes[0]}" -gt 1 ] || [ "${codes[1]}" -ne 0 ]; then fail "tar exited ${codes[0]}, age ${codes[1]}"; fi
+size=$(stat -c %s "$out")
+sha=$(sha256sum "$out" | cut -d' ' -f1)
+[ "$size" -gt 0 ] || fail "the archive is empty"
 
-sftp_b() { sftp -q -b - -i "$BACKUP_SSH_KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/etc/fff/backup_known_hosts "$BACKUP_SSH_TARGET"; }
-printf -- '-mkdir %s\nput %s %s/%s.part\nrename %s/%s.part %s/%s\n' "$BACKUP_REMOTE_DIR" "$out" "$BACKUP_REMOTE_DIR" "$name" \
-  "$BACKUP_REMOTE_DIR" "$name" "$BACKUP_REMOTE_DIR" "$name" | sftp_b >/dev/null || { rm -f "$out"; fail "sftp upload to $BACKUP_SSH_TARGET failed"; }
-rm -f "$out"
-log "sent $name ($size) to $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR"
+d=$BACKUP_REMOTE_DIR
+part="$d/$name.part"
+printf -- '-mkdir %s\nput %s %s\n' "$d" "$out" "$part" >"$work/put"
+backup_sftp "$work/put" "$work/err" >/dev/null || fail "upload: $(backup_sftp_why "$work/err")"
+
+# The size the target holds, then (hash) the bytes it holds.
+printf 'ls -ln %s\n' "$part" >"$work/ls"
+there=$(backup_sftp "$work/ls" "$work/err" | awk -v n="$name.part" '$NF ~ n"$" {print $5; exit}') || true
+if [ "$there" != "$size" ]; then
+  printf 'rm %s\n' "$part" >"$work/rm"
+  backup_sftp "$work/rm" "$work/err2" >/dev/null || true
+  fail "upload check: the target holds ${there:-no file of} bytes for $name, sent $size; removed the partial copy"
+fi
+verified=size
+if [ "$BACKUP_VERIFY" = hash ]; then
+  printf 'get %s %s\n' "$part" "$work/back" >"$work/get"
+  backup_sftp "$work/get" "$work/err" >/dev/null || fail "upload check: reading $name back: $(backup_sftp_why "$work/err")"
+  back=$(sha256sum "$work/back" | cut -d' ' -f1)
+  rm -f "$work/back"
+  if [ "$back" != "$sha" ]; then
+    printf 'rm %s\n' "$part" >"$work/rm"
+    backup_sftp "$work/rm" "$work/err2" >/dev/null || true
+    fail "upload check: the copy on the target has sha256 $back, sent $sha; removed it"
+  fi
+  verified=sha256
+fi
+printf 'rename %s %s/%s\n' "$part" "$d" "$name" >"$work/mv"
+backup_sftp "$work/mv" "$work/err" >/dev/null || fail "rename into place: $(backup_sftp_why "$work/err")"
+log "sent $name ($(numfmt --to=iec "$size"), sha256 $sha, checked: $verified) to $BACKUP_SSH_TARGET:$d"
 
 # Keep the newest BACKUP_KEEP.
-old=$(printf 'ls -1 %s\n' "$BACKUP_REMOTE_DIR" | sftp_b 2>/dev/null | sed 's:.*/::' | grep -E '^fff-.*\.tar\.gz\.age$' | sort | head -n "-$BACKUP_KEEP" || true)
+printf 'ls -1 %s\n' "$d" >"$work/ls1"
+old=$(backup_sftp "$work/ls1" "$work/err" | sed 's:.*/::' | grep -E '^fff-.*\.tar\.gz\.age$' | sort | head -n "-$BACKUP_KEEP" || true)
+pruned=""
 if [ -n "$old" ]; then
-  printf '%s\n' "$old" | sed "s:^:rm $BACKUP_REMOTE_DIR/:" | sftp_b >/dev/null || warn "pruning old backups failed"
-  log "removed $(printf '%s\n' "$old" | wc -l) old backup(s) there"
+  printf '%s\n' "$old" | sed "s:^:rm $d/:" >"$work/prune"
+  if backup_sftp "$work/prune" "$work/err" >/dev/null; then
+    log "removed $(printf '%s\n' "$old" | wc -l) old backup(s) there"
+  else
+    pruned="; pruning old backups failed: $(backup_sftp_why "$work/err")"
+    warn "${pruned#; }"
+  fi
 fi
+status ok "sent and checked${pruned}" "$verified"

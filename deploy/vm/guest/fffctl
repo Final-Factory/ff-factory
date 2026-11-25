@@ -38,6 +38,12 @@
 #                                       where the backups go (BACKUP_SSH_TARGET in /etc/fff/fff.conf) and the age public
 #                                       keys they are encrypted to (/etc/fff/backup-recipients.txt); --target "" turns
 #                                       them off
+#   fffctl backup-config --host-key FILE
+#                                       pin the backup target's ssh host key (one "<type> <key>" line, as ssh-keyscan or the
+#                                       target's /etc/ssh/ssh_host_*_key.pub prints it; check its fingerprint out of band)
+#   fffctl backup-fetch [NAME]          the newest backup on the target (or NAME), still encrypted, to stdout (the drill)
+#   fffctl backup-drill [--name NAME]   the restore drill's checks on a DECRYPTED backup read from stdin (fff-backup-drill;
+#                                       the key holder decrypts outside the VM: docs/portal-on-ffbox-host.md, 2.2)
 #   fffctl configure [--owner-name NAME] [--public-url URL] [--voice MODEL|off]
 #                                       set config.json's ownerName and publicUrl; the portal restarts when it changed. --voice MODEL: local Whisper dictation on this
 #                                       VM's CPU (voice.enabled, model, device cpu, cpuThreads = nproc, autoInstall; no
@@ -269,7 +275,7 @@ cmd_status() {
   echo "units (the watchdog in fff-health restarts a failed or stopped one every 30 s):"
   print_units
   echo "base clone: $([ -d "$BASE_PATH/.git" ] && as_fff git -C "$BASE_PATH" log -1 --format='%h %cr' || echo 'none (fffctl base-clone)')"
-  echo "backups: $([ -n "$BACKUP_SSH_TARGET" ] && echo "to $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR" || echo off); last: $(journalctl -u fff-backup.service -n 1 --no-pager -o cat 2>/dev/null || true)"
+  backup_status_lines
   systemctl list-timers --no-pager 'fff-*' 2>/dev/null | head -n 6
 }
 
@@ -612,10 +618,10 @@ cmd_state() {
     --argjson base "$([ -d "$BASE_PATH/.git" ] && echo true || echo false)" \
     --argjson config "$(jq -c '{ownerName: (.ownerName // ""), publicUrl: (.publicUrl // "")}' "$cfg" 2>/dev/null || echo '{}')" \
     --arg target "$BACKUP_SSH_TARGET" \
-    --argjson recipients "${nkeys:-0}" \
+    --argjson recipients "${nkeys:-0}"     --argjson pinned "$([ -z "$(backup_pin_problem)" ] && echo true || echo false)"     --argjson last "$(jq -c '{at, result, why, verified, name, size}' "$FFF_STATE_DIR/backup.json" 2>/dev/null || echo null)"     --argjson drill "$(jq -c '{at, result, source, problems}' "$FFF_STATE_DIR/backup-drill.json" 2>/dev/null || echo null)" \
     '{installed: $installed, portal: {active: $active, healthy: $healthy}, vaultKey: $vaultKey,
       tailscale: {joined: $joined, ip: $ip, funnelUrl: $funnel}, github: $gh, baseClone: $base, config: $config,
-      backup: {target: $target, recipients: $recipients}}'
+      backup: {target: $target, recipients: $recipients, pinned: $pinned, last: $last, drill: $drill}}'
 }
 
 # config.json's ownerName and publicUrl, set by the host's install.sh; restarts if it changed.
@@ -687,6 +693,7 @@ conf_when() {
 }
 declare -A CONF_REFUSED=(
   [BACKUP_SSH_KEY]="a key"
+  [BACKUP_VERIFY]="the backup's upload check"
   [BACKUP_RECIPIENTS_FILE]="the keys the backups are encrypted to"
   [BACKUP_SSH_TARGET]="where the backups go: the account the backup key logs in to"
   [FFF_REPO_URL]="the code the deploy builds and runs as root"
@@ -1020,13 +1027,71 @@ cmd_disk_usage() {
   done
 }
 
+# The backup lines of fffctl status: where they go, the last run and its upload check, the last restore drill.
+backup_status_lines() {
+  local b="$FFF_STATE_DIR/backup.json" d="$FFF_STATE_DIR/backup-drill.json" pin
+  echo "backups: $([ -n "$BACKUP_SSH_TARGET" ] && echo "to $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR" || echo off), $(grep -c '^age1' "$BACKUP_RECIPIENTS_FILE" 2>/dev/null || echo 0) age key(s)"
+  pin=$(backup_pin_problem)
+  echo "  host key: $([ -z "$pin" ] && echo "pinned ($(ssh-keygen -l -f "$FFF_BACKUP_KNOWN_HOSTS" 2>/dev/null | awk '{print $2; exit}'))" || echo "NOT pinned: $pin")"
+  if [ -f "$b" ]; then
+    jq -r '"  last: \(.result | ascii_upcase) at \(.at)" + (if .result == "ok" then ", \(.name), \(.size) bytes, checked by \(.verified)" else "" end) + (if .why != "" and .result != "ok" then ": \(.why)" else "" end)' "$b" 2>/dev/null || echo "  last: $b does not parse"
+  else
+    echo "  last: none recorded ($b; journalctl -u fff-backup)"
+  fi
+  if [ -f "$d" ]; then
+    jq -r '"  restore drill: \(.result | ascii_upcase) at \(.at) (\(.source))" + (if (.problems | length) > 0 then ": \(.problems | join("; "))" else "" end)' "$d" 2>/dev/null || echo "  restore drill: $d does not parse"
+    if [ "$(($(date +%s) - $(date -d "$(jq -r .at "$d" 2>/dev/null)" +%s 2>/dev/null || echo 0)))" -gt $((31 * 86400)) ]; then echo "  restore drill: DUE (monthly; the last is over 31 days old)"; fi
+  else
+    echo "  restore drill: never run (monthly: docs/portal-on-ffbox-host.md, 2.2)"
+  fi
+}
+
+# The newest backup on the target (or NAME), still encrypted, to stdout: what a restore drill decrypts outside the VM.
+cmd_backup_fetch() {
+  local name=${1:-} work pin
+  [ -n "$BACKUP_SSH_TARGET" ] || die "backups are off (BACKUP_SSH_TARGET is empty)"
+  pin=$(backup_pin_problem)
+  [ -z "$pin" ] || die "$pin"
+  work=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$work'" EXIT
+  if [ -z "$name" ]; then
+    printf 'ls -1 %s
+' "$BACKUP_REMOTE_DIR" >"$work/ls"
+    name=$(backup_sftp "$work/ls" "$work/err" | sed 's:.*/::' | grep -E '^fff-.*\.tar\.gz\.age$' | sort | tail -n 1) || true
+    [ -n "$name" ] || die "no backup on $BACKUP_SSH_TARGET:$BACKUP_REMOTE_DIR ($(backup_sftp_why "$work/err"))"
+  fi
+  case "$name" in fff-*.tar.gz.age) ;; *) die "not a backup's name: $name" ;; esac
+  case "$name" in */* | *[!A-Za-z0-9._-]*) die "not a backup's name: $name" ;; esac
+  printf 'get %s/%s %s
+' "$BACKUP_REMOTE_DIR" "$name" "$work/a" >"$work/get"
+  backup_sftp "$work/get" "$work/err" >/dev/null || die "fetching $name: $(backup_sftp_why "$work/err")"
+  log "fetched $name ($(stat -c %s "$work/a") bytes, sha256 $(sha256sum "$work/a" | cut -d' ' -f1))"
+  cat "$work/a"
+}
+
 # Where the backups go and who can open them.
 cmd_backup_config() {
-  local target="" rf="" set_target=0 tmp
+  local target="" rf="" set_target=0 tmp hk="" line
   while [ $# -gt 0 ]; do
-    case "$1" in --target) target=$2; set_target=1; shift ;; --recipients-file) rf=$2; shift ;; *) die "unknown option $1" ;; esac
+    case "$1" in --target) target=$2; set_target=1; shift ;; --recipients-file) rf=$2; shift ;; --host-key) hk=$2; shift ;; *) die "unknown option $1" ;; esac
     shift
   done
+  if [ -n "$hk" ]; then
+    [ -r "$hk" ] || die "--host-key $hk: not readable"
+    # One key: "<type> <base64>", or a known_hosts / ssh-keyscan line "<host> <type> <base64>"; comments and blanks skipped.
+    line=$(grep -Ev '^\s*(#|$)' "$hk" | awk '$1 ~ /^(ssh-|ecdsa-)/ {print $1, $2; exit} $2 ~ /^(ssh-|ecdsa-)/ {print $2, $3; exit}')
+    [ -n "$line" ] || die "$hk holds no ssh host key (<type> <key>)"
+    printf '%s
+' "$line" >"$hk.check.$$"
+    ssh-keygen -l -f "$hk.check.$$" >/dev/null 2>&1 || { rm -f "$hk.check.$$"; die "$hk: ssh-keygen cannot read that key"; }
+    rm -f "$hk.check.$$"
+    printf '%s %s
+' "$FFF_BACKUP_HOST_ALIAS" "$line" | write_file "$FFF_BACKUP_KNOWN_HOSTS" 0644 >/dev/null
+    [ "${FFF_TEST_NOROOT:-}" = 1 ] || chown root:root "$FFF_BACKUP_KNOWN_HOSTS"
+    echo "backup target host key pinned: $(ssh-keygen -l -f "$FFF_BACKUP_KNOWN_HOSTS" | awk '{print $1, $2, $NF}') in $FFF_BACKUP_KNOWN_HOSTS"
+    echo "  compare that fingerprint with the target's own (ssh-keygen -l -f its host key .pub file) before the next backup"
+  fi
   if [ -n "$rf" ]; then
     [ -r "$rf" ] || die "--recipients-file $rf: not readable"
     grep -Eq '^age1[0-9a-z]{58}$' "$rf" || die "$rf holds no age public key (age1...)"
@@ -1058,6 +1123,8 @@ case "${1:-status}" in
   base-clone) cmd_base_clone ;;
   backup) exec systemctl start --wait fff-backup.service ;;
   backup-config) shift; cmd_backup_config "$@" ;;
+  backup-fetch) shift; cmd_backup_fetch "$@" ;;
+  backup-drill) shift; exec "$FFF_LIB/fff-backup-drill" "$@" ;;
   configure) shift; cmd_configure "$@" ;;
   config) shift; cmd_config "$@" ;;
   conf) shift; cmd_conf "$@" ;;
