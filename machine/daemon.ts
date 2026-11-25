@@ -15,11 +15,12 @@ import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFac
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
+import { maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { ghConfigDirFor, labelLow, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
-import { agentGitPathDir } from '../server/agentGit.ts';
+import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
@@ -201,10 +202,11 @@ export interface DaemonConfig {
   leftovers?: boolean;
   /** Scratch folder for agents: their TMP, TEMP and TMPDIR. */
   tempDir?: string;
-  /** The Max events file agents here append to (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. */
+  /**
+   * The Max events file this daemon tails (docs/max.md); default ~/.config/ff-factory/max-events.jsonl, null: none. With a
+   * worker root it is always `<appDir>/max/max-events.jsonl` (w5552): a folder no fenced worker writes.
+   */
   maxEventsFile?: string | null;
-  /** w5377: where a worker root kept the events file before (`<app_dir>/max-events.jsonl`); the daemon reads what agents still append there. Set by withRootDefaults. */
-  maxEventsLegacy?: string;
   /**
    * w5333 trial, Linux only, off by default: start every agent's claude under machine/ff-landlock.py, so it and all it
    * starts write only inside the root (not its daemon or secrets folders) and the few paths machine/writeLock.ts names.
@@ -318,16 +320,26 @@ const BUSY = new Set(['running', 'starting', 'waiting_permission']);
 /**
  * A worker root install's defaults (w513): what daemon.json leaves out comes from the root, so a redeploy that writes
  * only `root` (server/machineDeploy.ts daemonConfig) keeps every folder in it. w5377 (lothsahn, w5297: "under no
- * circumstances should workers write outside of ffw"): the two things workers write for the daemon, the Unity slots
- * mailbox and the Max events file, are root children too (`unity-slots`, `max`), so every fence (Landlock, Seatbelt,
- * Windows Low) covers them with no exception. The events file's old default is kept in `maxEventsLegacy`, which the
- * daemon drains; an agent started before the move that still names the old mailbox runs its Unity launch ungated
- * (machine/unitySlots.ts acquire: no fresh arbiter there). Exported for tests.
+ * circumstances should workers write outside of ffw"): the Unity slots mailbox workers write for the daemon is a root
+ * child too (`unity-slots`), so every fence (Landlock, Seatbelt, Windows Low) covers it with no exception; an agent
+ * started before the move that still names the old mailbox runs its Unity launch ungated (machine/unitySlots.ts
+ * acquire: no fresh arbiter there). w5552 (lothsahn: "Max events go in a folder workers can't write"): the Max events
+ * file is the daemon's own, `<appDir>/max/max-events.jsonl`, whatever daemon.json says (null still turns it off). The
+ * portal marks intake threads replied or closed from its lines (server/intake.ts onMaxEvent), so a line a fenced worker
+ * could write would let it drop a player's report quietly. Sandbox agents get no FF_MAX_EVENTS (runSpec); they post as
+ * Max with post_as_max, which the daemon sends to the portal with the calling session. Exported for tests.
  */
 /** A worker root's Unity slots mailbox (w5377). */
 export const workerSlotsDir = (root: string) => path.join(root, 'unity-slots');
-/** A worker root's Max events file (w5377). */
-export const workerMaxEventsFile = (root: string) => path.join(root, 'max', 'max-events.jsonl');
+/** The Max events file of a daemon with a worker root (w5552): in the daemon's own folder, which no fence lets a worker write. */
+export const daemonMaxEventsFile = (appDir: string) => path.join(appDir, 'max', 'max-events.jsonl');
+
+/** A sandbox agent's environment without FF_MAX_EVENTS (w5552): whatever named it, the agent writes no Max events file. Exported for tests. */
+export const withoutMaxEvents = (env: Record<string, string> | undefined, sandbox: boolean): Record<string, string> | undefined => {
+  if (!sandbox || !env || !('FF_MAX_EVENTS' in env)) return env;
+  const { FF_MAX_EVENTS: _m, ...rest } = env;
+  return rest;
+};
 
 export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
   if (!cfg.root) return cfg;
@@ -337,8 +349,7 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
     appDir,
     tempDir: cfg.tempDir || path.join(cfg.root, 'tmp'),
     tokenFile: cfg.tokenFile || path.join(cfg.root, 'secrets', 'machine-token'),
-    maxEventsFile: cfg.maxEventsFile === undefined ? workerMaxEventsFile(cfg.root) : cfg.maxEventsFile,
-    maxEventsLegacy: cfg.maxEventsFile === undefined ? path.join(appDir, 'max-events.jsonl') : cfg.maxEventsLegacy,
+    maxEventsFile: cfg.maxEventsFile === null ? null : daemonMaxEventsFile(appDir),
     unitySlotsDir: cfg.unitySlotsDir || workerSlotsDir(cfg.root),
   };
 }
@@ -1024,7 +1035,7 @@ export class Daemon {
       });
     }
     if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
-    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize'] as SignalName[]) {
+    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown, meta?: { compaction?: CompactionTrigger }) => {
         this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg, ...(meta?.compaction ? { meta: { compaction: meta.compaction } } : {}) });
         this.awake();
@@ -1638,13 +1649,18 @@ export class Daemon {
       void this.ensureBashTmp();
       this.timers.push(setInterval(() => void this.ensureBashTmp(), 5 * 60_000));
     }
-    // What agents here did as Max (the ffdiscord CLI's lines): forwarded, and queued while the link is down.
-    // w5377: also the file a worker root used before it moved inside the root, while it is there (agents started before
-    // the move still append to it); each keeps its own offset.
+    // What agents here did as Max (the ffdiscord CLI's lines of the agents that are not fenced): forwarded, and queued while
+    // the link is down. w5552: only this one file, in the daemon's folder; the root's `max` folder and the daemon folder's
+    // old `max-events.jsonl` (w5377) are no longer read, since a fenced worker could write the first.
     const maxFile = this.maxEventsFile;
-    const legacy = this.cfg.maxEventsLegacy;
-    const maxFiles = [maxFile, legacy && maxFile && path.resolve(legacy) !== path.resolve(maxFile) && fs.existsSync(legacy) ? legacy : undefined];
-    for (const file of maxFiles) {
+    if (maxFile) {
+      try {
+        fs.mkdirSync(path.dirname(maxFile), { recursive: true });
+      } catch (e) {
+        log(`max events: could not make ${path.dirname(maxFile)}: ${(e as Error).message}`);
+      }
+    }
+    for (const file of [maxFile]) {
       if (!file) continue;
       const offsetFile = `${file}.daemon-offset`;
       let offset: number | undefined;
@@ -2968,7 +2984,8 @@ export class Daemon {
   /**
    * The spec as this machine runs it: its Unity MCP server, its own claude, and in the environment the session's temp
    * folder (TMP, TEMP and TMPDIR, removed once the session is gone), FF_MAX_EVENTS (where the ffdiscord CLI reports what
-   * the agent did as Max: this machine's file, tailed above) and the Unity slots commands.
+   * the agent did as Max: this machine's file, tailed above; never a sandbox agent's, w5552: its fence refuses the file,
+   * and it posts as Max with post_as_max) and the Unity slots commands.
    */
   private runSpec(info: Pick<SessionInfo, 'id'>, spec: LaunchSpec): LaunchSpec {
     // w5555: a sandbox agent never gets a spec without its fence while the fence is wanted but not on (setting up or
@@ -2977,7 +2994,7 @@ export class Daemon {
       const g = this.fence.startGate(true);
       throw new Error('refuse' in g ? g.refuse : `the worker fence on ${this.cfg.id} is still being set up; try again shortly (w5555)`);
     }
-    const maxFile = this.maxEventsFile;
+    const maxFile = spec.sandbox ? undefined : this.maxEventsFile;
     const slot = this.slotEnv(spec);
     // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
@@ -2992,7 +3009,24 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...spec.env, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+  }
+
+  /**
+   * w5552: that `fence` refuses a worker's write to the Max events file, checked once with `argv` (machine/maxEventsFence.ts)
+   * and said in the log. The file is made first, by the daemon, so the check opens the file itself.
+   */
+  private checkMaxEventsFence(fence: string, argv: (file: string) => string[]) {
+    const file = this.maxEventsFile;
+    if (!file) return;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.appendFileSync(file, '');
+    } catch (e) {
+      log(`max events: could not make ${file}: ${(e as Error).message}`);
+      return;
+    }
+    log(probeMaxEvents(fence, argv(file), file).line);
   }
 
   private fenceMemo?: { fence?: WorkerFence; why?: string };
@@ -3010,7 +3044,11 @@ export class Daemon {
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
-          if (probe.ok) log('worker fence: seatbelt is on for sandbox agents');
+          if (probe.ok) {
+            log('worker fence: seatbelt is on for sandbox agents');
+            const f = fence;
+            this.checkMaxEventsFence('seatbelt', (file) => fencedArgv(f, '/bin/sh', maxProbeArgv('/bin/sh', file).slice(1)));
+          }
           else {
             why = `seatbelt could not run a no-op (${probe.why})`;
             fence = undefined;
@@ -3094,8 +3132,8 @@ export class Daemon {
           return false;
         }
       };
-      // w5377: the folders workers write for the daemon exist before the root's children are listed, so they are labelled.
-      for (const d of [this.slotMailbox, this.maxEventsFile && path.dirname(this.maxEventsFile)]) if (d) fs.mkdirSync(d, { recursive: true });
+      // w5377: the Unity slots mailbox workers write exists before the root's children are listed, so it is labelled.
+      fs.mkdirSync(this.slotMailbox, { recursive: true });
       const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
       const targets = lowTargets({
         root,
@@ -3147,6 +3185,7 @@ export class Daemon {
       this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}) };
       log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'}); sandbox editors ${editor ? `start at Low too (launcher ${editor.launcher}), from their next start` : this.cfg.editorFence === false ? 'stay Medium (editorFence false)' : 'stay Medium (no Low launcher or no Unity junction)'}`);
       await this.lowGhSelfTest(root, gh, exec, say);
+      if (git) this.checkMaxEventsFence('Low integrity', (file) => maxProbeArgv(agentGitBash(root), file));
       // w5402: Low agents run the Unity MCP server under the root's APPDATA (lowEnv), where uv resolves it again; fill
       // the cache for that too, or they get no bridge (BEAST: Python 3.10 from PATH needed packages the cache lacked).
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
@@ -3232,9 +3271,13 @@ export class Daemon {
       let why: string | undefined;
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: this.maxEventsFile, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra });
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra });
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
-          if (probe.ok) log('write lock: landlock is on for sandbox agents');
+          if (probe.ok) {
+            log('write lock: landlock is on for sandbox agents');
+            const a = args;
+            this.checkMaxEventsFence('landlock', (file) => ['python3', FF_LANDLOCK, ...a, '--', ...maxProbeArgv('/bin/sh', file)]);
+          }
           else {
             why = `landlock could not run a no-op (${probe.why})`;
             args = undefined;

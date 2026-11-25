@@ -155,7 +155,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // it (the fence then holds workers without the alert); an older daemon never sends it.
 // w5576 (no bump): `portalPin` in the hello, the portal hosts the daemon follows and what pinning would refuse; an older
 // portal ignores it, and an older daemon sends none (list_machines says so).
-const DECIDED = { protocol: 9, fingerprint: '362468346fce0835' };
+// w5554 (no bump): signal `workerCap`, a worker's host hit a cap and ended its tools; an older portal re-emits it with no
+// listener, as it does `tempSize`, and an older daemon or host never sends it.
+const DECIDED = { protocol: 9, fingerprint: 'f2c36d679cf53ac1' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
