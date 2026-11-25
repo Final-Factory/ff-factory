@@ -189,7 +189,10 @@ export class BenchTicket {
     if (this.o.reason) args.push('--reason', this.o.reason);
     if (this.o.place !== undefined && this.o.mode === 'exclusive') args.push('--place', String(this.o.place));
     try {
-      this.child = spawn(this.o.python ?? pythonExe(this.o.env), args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env: { ...(this.o.env ?? process.env) } });
+      // w5545: a helper this process starts holds the ticket itself (the daemon's own, or a worker's without the RPC): with
+      // the daemon's token it would ask the daemon again (the game repo's bench_queue.py proxies whenever both are set).
+      const { FF_DAEMON_RPC: _r, FF_DAEMON_TOKEN: _t, ...env } = this.o.env ?? process.env;
+      this.child = spawn(this.o.python ?? pythonExe(this.o.env), args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env });
     } catch (e) {
       this.exited = (e as Error).message;
       return this;
