@@ -79,7 +79,7 @@ import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
 import { clock, firstFree, outOfPool, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
-import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
+import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, takeOpenedKey, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, githubTokens, setGithubTokens } from './githubTokens.ts';
 import { GithubApps } from './githubApps.ts';
 import { startGhCallLog } from './ghBudget.ts';
@@ -106,6 +106,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
 import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -119,6 +120,9 @@ import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
+// The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
+// process starts anything that could inherit it.
+const openedKey = takeOpenedKey();
 const WEB = path.join(ROOT, 'web', 'dist');
 
 /** The server's version plus the web UI build it serves now (server/webStatic.ts): an open page reloads when that changes. */
@@ -245,12 +249,14 @@ guardMemory('backup');
 setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 // The token vault (docs/vault.md, w512): data/vault.json, sealed with a key outside data/. Loaded first, so redaction knows
 // its values (registerSecretValues) before any transcript is written or scrubbed.
-// systemd's credentials folder (the VM: the vault key) is kept here and taken out of the environment every agent inherits.
+// systemd's credentials folder (LoadCredential, before w5506) is kept here and taken out of the environment every agent inherits.
 const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
 // The portal's own secrets in its environment (w1688: a password, a bot token, a key), masked by value like the vault's.
 addSecretEnv(process.env);
-const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => openedKey ?? keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+// Where the key came from, never the key (deploy/vm/test/ci-vm-e2e.sh reads this line).
+if (openedKey) console.log(`vault key: ${openedKey.key ? `from ${openedKey.file}` : `not loaded: ${openedKey.why}`}`);
 // The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
 // The vault's GitHub Apps (w1519, docs/github-apps.md): installation tokens for the repositories an allowed account installed
 // them on (a modder's private repositories); started once the machines are there, which get the tokens.
@@ -2356,6 +2362,10 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
+    // The daemon link's HTTP routes from the tailnet only (w5575; machineLinkTailnet: warn logs, enforce refuses, off skips).
+    if (isMachineLinkPath(url.pathname) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), `HTTP ${url.pathname.split('/').slice(0, 3).join('/')}`).refuse) {
+      return send(res, 403, { error: 'the daemon link is tailnet-only' });
+    }
     if (url.pathname === '/mcp' || url.pathname === '/mcp/upload') {
       return await routeMcp({ agents, auth, identity, attachments, send, readJson }, req, res, url);
     }
@@ -2549,6 +2559,13 @@ server.on('upgrade', (req, socket, head) => {
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
     providers.upgrade(req, socket, head, clientAddress(req));
+    return;
+  }
+  const upgradePath = parseUrl(req.url)?.pathname ?? '';
+  if (isMachineLinkPath(upgradePath) && checkMachineLink(req, machineLinkMode(cfg.machineLinkTailnet), upgradePath === '/machine' ? 'link /machine' : 'link /machine/live').refuse) {
+    // The daemon link from the tailnet only (w5575), before its token is even read.
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
