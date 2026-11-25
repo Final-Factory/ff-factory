@@ -214,6 +214,17 @@ test('w5598: resultWatcher reads each turn\'s result from the head of its line, 
   assert.deepEqual(got, [true, false, true]);
 });
 
+test('w5598: resultWatcher finds a result whose "type" comes after its usage (Claude Code 0.3.323), and nothing nested', () => {
+  const got: boolean[] = [];
+  const w = resultWatcher((ok) => got.push(ok));
+  // The shape the e2e's Claude Code wrote: the turn ended well, but a head-of-line check saw no result and called it a failure.
+  w(Buffer.from('{"duration_api_ms":80,"stop_reason":"end_turn","usage":{"input_tokens":30},"type":"result","sub'));
+  w(Buffer.from('type":"success","is_error":false,"result":"ci-turn-done"}\n'));
+  w(Buffer.from('{"type":"user","message":{"content":[{"type":"result","text":"a nested one is no result"}]}}\n'));
+  w(Buffer.from('{"is_error":true,"subtype":"error_during_execution","type":"result"}\n'));
+  assert.deepEqual(got, [true, false]);
+});
+
 test('w5598: the breaker: two failed agents through the socket within the window, none succeeding since, start agents as before', () => {
   const alerts: string[] = [];
   configureAgentAccount({ setting: () => undefined, alert: (t) => alerts.push(t) });

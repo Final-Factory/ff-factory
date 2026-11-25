@@ -134,27 +134,39 @@ export function agentRunEnded(ok: boolean, why: string, now = Date.now()): void 
   );
 }
 
+/** A line longer than this is no result (a result is a few kB); it is skipped, not kept. */
+const RESULT_LINE_MAX = 4 * 1024 * 1024;
+
 /**
- * Watches an agent's output through the socket for its turns' results: the head of each line is enough (stream-json puts
- * "type" and "is_error" first), so a long line costs nothing.
+ * Watches an agent's output through the socket for its turns' results: each line whose top-level "type" is "result",
+ * wherever in the line that key falls.
  */
 export function resultWatcher(onResult: (ok: boolean) => void): (chunk: Buffer) => void {
-  let head = '';
-  let full = false;
+  // The whole line, parsed: Claude Code 0.3.323 writes a result's "type" after its usage, not first (the w5598 e2e).
+  let line: Buffer[] = [];
+  let size = 0;
   return (chunk: Buffer) => {
     let from = 0;
     for (;;) {
       const nl = chunk.indexOf(10, from);
       const part = chunk.subarray(from, nl < 0 ? chunk.length : nl);
-      if (!full) {
-        head += part.subarray(0, 256 - head.length).toString('utf8');
-        full = head.length >= 256;
-      }
+      if (size <= RESULT_LINE_MAX) line.push(part);
+      size += part.length;
       if (nl < 0) return;
-      // A turn's own limits (max turns, max budget) are not the account's failures.
-      if (head.startsWith('{"type":"result"')) onResult(!/"is_error":true|"subtype":"error/.test(head) || /"subtype":"error_max_/.test(head));
-      head = '';
-      full = false;
+      const text = size <= RESULT_LINE_MAX ? Buffer.concat(line).toString('utf8') : '';
+      if (text.includes('"result"')) {
+        let m: { type?: unknown; subtype?: unknown; is_error?: unknown } | undefined;
+        try {
+          m = JSON.parse(text);
+        } catch {
+          m = undefined;
+        }
+        const sub = typeof m?.subtype === 'string' ? m.subtype : '';
+        // A turn's own limits (max turns, max budget) are not the account's failures.
+        if (m?.type === 'result') onResult((m.is_error !== true && !sub.startsWith('error')) || sub.startsWith('error_max_'));
+      }
+      line = [];
+      size = 0;
       from = nl + 1;
     }
   };
