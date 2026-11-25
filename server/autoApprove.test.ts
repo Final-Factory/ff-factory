@@ -16,7 +16,7 @@ import type { DelegationRequest, Machine, Requester, SessionInfo, WorkItem } fro
  * Standing agents' delegations (w527, docs/standing-agents.md "Delegations"): the auto-approve rules and the
  * person-only gate decide whether one needs a click; approved, it is filed in the ledger for the agent's owner and the
  * dispatcher takes it from there. Nothing here picks a sandbox, starts a worker or expires. The ledger is faked: the
- * flow through the real one, the dispatcher and a worker is in orchestrators.test.ts.
+ * flow through the real one, the dispatcher and a worker is in orchestrators*.test.ts.
  */
 
 const now0 = new Date('2026-09-24T03:00:00');

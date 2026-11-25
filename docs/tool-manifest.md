@@ -169,7 +169,7 @@ little less and carrying pays even less. Workers carry none.
   numbers), each coordinator tool's `_meta` says `alwaysLoad` only when the manifest does, every tool carries its group
   hint, and a kind with deferred tools has `ToolSearch` while one without it (ops) carries all of its tools.
 
-The worker spec (`orchestrators.test.ts`) and the standing spec (`standing.test.ts`) are checked against the manifest
+The worker spec (`orchestrators*.test.ts`) and the standing spec (`standing.test.ts`) are checked against the manifest
 too. `server/coordinatorContext.test.ts` keeps w1158's size budget (always-carried tools at most 24,000 characters; the dispatcher's are 23,436).
 
 ## Changing it

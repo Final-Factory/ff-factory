@@ -471,7 +471,7 @@ test("w846: a worker waiting on CI with its editor stopped gives up its sandbox 
 
 // ---------------------------------------------------------------- w890: a worker waiting on a deploy or a person gives up its sandbox at once
 
-// What Agents.waitOn says for each kind of wait (server/orchestrators.test.ts builds them from the ledger).
+// What Agents.waitOn says for each kind of wait (server/orchestrators*.test.ts builds them from the ledger).
 const WAITS = {
   deploy: 'it waits on w889: a portal deploy, after the merge',
   person: 'it waits on w889: Ben to act',

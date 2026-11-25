@@ -373,7 +373,7 @@ when the calling session serves no open request, when no build of the version is
 other requests only, or when another request already filed its symbols (the first request whose call sent them owns them;
 the same request may call again). Asking how an upload stands (`file_ffbox_symbols {version}`) stays open to any worker.
 FFBox's own release lane files its symbols on FFBox and never comes through this tool. Tests: `server/symbolOwners.test.ts`
-and `server/machineSandboxes.test.ts` ("w5550").
+and `server/machineSandboxes*.test.ts` ("w5550").
 
 FFBox's side and its guards are in ffbox's README, "Symbols of an urgent-lane build"; its tests are `test/test_urgent_symbols.py`.
 The portal's are `server/ffboxUrgentSymbols.test.ts`. Measured on the way out, FFBox to the portal: 40.6 MB in 69 s (600.7

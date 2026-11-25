@@ -3,7 +3,7 @@
 // and 1488 and sends the results to worker c6e1d6f2; workers don't have those tools"; the ledger read "Merged, follow-up
 // pending" and nobody was told until a sweep timer noticed at 07:57. It now reads Waiting on input on the requester's
 // orchestrator (shared/workState.ts orchestratorAskIn, workLive), and that orchestrator is sent [orchestrator step] once
-// (Orchestrators.orchestratorStep; its message flow is in orchestrators.test.ts).
+// (Orchestrators.orchestratorStep; its message flow is in orchestrators*.test.ts).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { orchestratorAskIn, workLive } from '../shared/workState.ts';
