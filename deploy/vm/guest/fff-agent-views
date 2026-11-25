@@ -47,12 +47,10 @@ case "${1:-}" in
   start)
     install -d -m 0700 -o root -g root "$VIEWS"
     while read -r name src mode; do
-      # Only a written folder is made, and only when missing: an existing one keeps its owner and mode (the app folder is
-      # root's, 0755, so that fff cannot change the portal's code).
-      if [ ! -d "$src" ]; then
-        [ "$mode" = rw ] || die "fff-agent-views: $src is missing (install.sh makes it)"
-        install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$src"
-      fi
+      # A folder is made only when missing, as fff's (the base clone comes later, fffctl base-clone, and git clones into
+      # an empty folder); an existing one keeps its owner and mode (the app folder is root's, 0755, so that fff cannot
+      # change the portal's code).
+      [ -d "$src" ] || install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$src"
       install -d -m 0700 -o root -g root "$VIEWS/$name"
       mountpoint -q "$VIEWS/$name" && continue
       # u:<in the view>:<on disk>:1, util-linux mount(8) X-mount.idmap (2.39 and newer: noble and resolute).
