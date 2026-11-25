@@ -3,7 +3,7 @@ import path from 'node:path';
 import { hasLocalWork, localWorkWhy, neverDelete, unpushedWorkWhy, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions } from './ownLeftovers.ts';
-import { gitIgnores } from './cleanupFolders.ts';
+import { gitIgnores, strayCargoOutput } from './cleanupFolders.ts';
 import { isPublished, type PublishedRecord } from './published.ts';
 import { gitExecFile } from './safeGit.ts';
 import { benchQueueDir } from '../machine/benchQueue.ts';
@@ -1211,9 +1211,34 @@ export async function planInstallLeftovers(o: {
     const ffuState = fs.existsSync(ffuBase) ? readSlotState(root) : { slots: [] };
     const holderUp = (holder: string | undefined) =>
       !!holder && [...o.guard.inUse, ...(o.guard.resumable ?? [])].some((k) => !!k && path.basename(k).toLowerCase() === `ffa-${holder}`.toLowerCase());
+    // w5796: a cargo target inside a slot's checkout (ffu/target) is a build that missed the slot's own target: a build run with
+    // its working folder outside the slot (cargo reads .cargo/config.toml from the working folder up, not from the manifest's),
+    // or a script that named $repo/target/<dir> itself (ffu's check_snapshot_compat.sh, rolling_deploy.sh and sim_switch.sh
+    // before ffu PR #1154). LothDesktop, 2026-11-25: 828 MB to 1.9 GB in three held slots, two of them untouched for 9 days,
+    // which no rule took (ff-leftovers check judged it, the daemon never looked). It goes whole once no build runs in it and
+    // nothing in it was written for ffuSlotKeepHours, held slot or not (the next such build rebuilds it), or after the settle
+    // time in a slot no running or resumable worker holds.
+    const strayInTreeTarget = async (slot: string, id: string) => {
+      const stray = path.join(slot, 'ffu', 'target');
+      if (items.has(stray) || !fs.existsSync(stray) || !(isCargoTarget(stray) || strayCargoOutput(slot))) return;
+      const runners = cargoTargetRunners(stray, o.procs);
+      if (runners.length || (await cargoTargetBusy(stray, path.join(slot, 'ffu'), o.procs, Infinity, now, runners)) || neverDelete(stray, o.guard)) return;
+      const newest = await newestTopWrite(stray);
+      const held = holderUp(ffuState.slots.find((x) => x.id === id)?.holder);
+      const keepMs = held ? s.ffuSlotKeepHours * HOUR : settleMs;
+      if (!s.ffuSlotKeepHours || newest > now - keepMs) return;
+      const bytes = await sizeOf(stray);
+      items.set(stray, {
+        path: stray,
+        rule: 'ffu-slot-target',
+        why: `a cargo target inside ffu ${id}'s checkout (ffu/target, ${(bytes / GB).toFixed(1)} GB), a build that missed the slot's own target; no build runs in it and nothing in it was written for ${agoText(now - newest)}${held ? ` (over ffuSlotKeepHours, ${s.ffuSlotKeepHours} h, in a held slot)` : ', in a slot no running or resumable worker holds'}; rebuildable (w5796)`,
+        base: slot,
+      });
+    };
     for (const e of await children(ffuBase)) {
       if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
       const slot = path.join(ffuBase, e.name);
+      await strayInTreeTarget(slot, e.name);
       const target = path.join(slot, 'target');
       if (items.has(target) || !isCargoTarget(target)) continue;
       const gbs = (b: number) => `${(b / GB).toFixed(1)} GB`;

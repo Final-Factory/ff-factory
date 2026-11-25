@@ -73,11 +73,11 @@ test("w5746: a sandbox with no daemon editor follows the editor a worker started
   // The daemon's own editor wins while it runs.
   live.add(10);
   instance = 10;
-  assert.deepEqual(places(10), [{ place: 'slot2', project, pid: 10 }]);
-  assert.deepEqual(places(), [{ place: 'slot2', project, pid: 10, fromInstance: true }]);
+  assert.deepEqual(places(10), [{ place: 'slot2', project, pid: 10, clones: [] }]);
+  assert.deepEqual(places(), [{ place: 'slot2', project, pid: 10, fromInstance: true, clones: [] }]);
   // A dead daemon editor and a stale EditorInstance.json: none.
   live.delete(10);
-  assert.deepEqual(places(10), [{ place: 'slot2', project, pid: undefined }]);
+  assert.deepEqual(places(10), [{ place: 'slot2', project, pid: undefined, clones: [] }]);
   // A batch editor the worker started (pid 20, seen first now) boots, then its bridge writes: copied.
   live.add(20);
   instance = 20;
@@ -160,9 +160,9 @@ test('w5746: an EditorInstance.json pid counts only while it is a Unity editor o
   };
   const sbs = [{ id: 'slot2', path: project, unity: {} }];
   const port = () => JSON.parse(fs.readFileSync(path.join(mcpStatusDir(app, 'slot2'), 'unity-mcp-port.json'), 'utf8')).unity_port;
-  assert.deepEqual(mcpPlaces(sbs, (pid) => pid, () => 500, undefined), [{ place: 'slot2', project, pid: undefined }], 'no process list yet: none');
-  assert.deepEqual(mcpPlaces(sbs, (pid) => pid, () => 500, [{ pid: 500, project: other }]), [{ place: 'slot2', project, pid: undefined }], "another project's editor: none");
-  assert.deepEqual(mcpPlaces(sbs, (pid) => pid, () => 500, [{ pid: 500, project: `${project}/` }]), [{ place: 'slot2', project, pid: 500, fromInstance: true }]);
+  assert.deepEqual(mcpPlaces(sbs, (pid) => pid, () => 500, undefined), [{ place: 'slot2', project, pid: undefined, clones: [] }], 'no process list yet: none');
+  assert.deepEqual(mcpPlaces(sbs, (pid) => pid, () => 500, [{ pid: 500, project: other }]), [{ place: 'slot2', project, pid: undefined, clones: [] }], "another project's editor: none");
+  assert.deepEqual(mcpPlaces(sbs, (pid) => pid, () => 500, [{ pid: 500, project: `${project}/` }]), [{ place: 'slot2', project, pid: 500, fromInstance: true, clones: [] }]);
   const scopes = new McpScopes(editors);
   // The batch editor (pid 500) runs and heartbeats: copied.
   scopes.sync(app, mcpPlaces(sbs, (pid) => pid, () => 500, [{ pid: 500, project }]), T);

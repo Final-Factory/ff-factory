@@ -195,3 +195,28 @@ test('w5499: a stray ffu/target whose only CACHEDIR.TAG is in a folder an ffu sc
   assert.equal(unignored.verdict, 'keep');
   assert.match(unignored.why, /not provably build output/);
 });
+
+test('w5796: a stray ffu/target in a held slot is DELETE once nothing in it was written for ffuSlotKeepHours; recent or named by a process it is KEEP', async (t) => {
+  const { base, facts, ctx, target } = world(t, [{ id: 'slot1', holder: 'a1a1a1a1' }, { id: 'slot2', holder: 'a1a1a1a1' }]);
+  const age = (dir: string, h: number) => {
+    const at = (Date.now() - h * HOUR) / 1000;
+    const walk = (p: string) => {
+      if (fs.statSync(p).isDirectory()) for (const e of fs.readdirSync(p)) walk(path.join(p, e));
+      fs.utimesSync(p, at, at);
+    };
+    walk(dir);
+  };
+  for (const id of ['slot1', 'slot2']) {
+    target(path.join(base, id, 'ffu', 'target', 'compat-base'));
+    fs.writeFileSync(path.join(base, id, 'ffu', '.gitignore'), '/target\n');
+  }
+  age(path.join(base, 'slot1', 'ffu', 'target'), 9 * 24);
+  age(path.join(base, 'slot2', 'ffu', 'target'), 20);
+  const at = (rel: string, procs: string[] = []) => judgeWithGit(path.join(base, rel), facts, Date.now(), ctx(procs));
+  const idle = await at('slot1/ffu/target');
+  assert.equal(idle.verdict, 'delete', idle.why);
+  assert.equal((await at('slot2/ffu/target')).verdict, 'keep', 'written 20 h ago, inside 48 h');
+  const named = await at('slot1/ffu/target', [`cargo build --target-dir ${path.join(base, 'slot1', 'ffu', 'target', 'compat-base')}`]);
+  assert.equal(named.verdict, 'keep', named.why);
+  assert.equal((await at('slot1/target')).verdict, 'keep', "the held slot's own target stays warm");
+});

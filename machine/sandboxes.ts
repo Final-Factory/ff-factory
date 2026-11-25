@@ -18,6 +18,7 @@ import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
 import { checkArray, readJsonDurable, writeJsonDurable } from '../server/durable.ts';
 import { armScriptReimport } from './scriptReimport.ts';
+import { daemonGit } from './storeLock.ts';
 import { borrowsFrom, convertToSlotRepo, finishConversion, guardStorePrune, isSlotRepo, isWorktree, keepSlotBranches, makeSlotRepo, storeGitDir, takeStoreBranch } from './slotRepo.ts';
 import { MacUnity, MacUnityWatch, realDeps, type EditorFence, type Proc, type UnityDeps, type UnityLocation } from './unity.ts';
 import type { DaemonSandbox } from '../server/machineProtocol.ts';
@@ -121,6 +122,8 @@ export interface PoolOptions {
   activity(id: string): { busy: boolean; lastActivityMs: number };
   /** Something changed: send the portal a snapshot. */
   onChange(): void;
+  /** w5614: the store lock holds (machine/storeLock.ts): new sandboxes are slot repos even with slot_repos off. */
+  storeLocked?: () => boolean;
   /** For the orchestrator: an editor restarted or given up on, the disk guard, an idle editor stopped. */
   onEvent(e: { text: string; sandbox?: string; restarted?: boolean; unity?: boolean; checkpoint?: boolean }): void;
   idleStopMinutes?: number;
@@ -320,7 +323,8 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
   };
   const shared: UnityDeps = { ...base, procs };
   return {
-    git: (args, opts = {}) => run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV }),
+    // w5614: daemonGit marks the daemon's own git calls, which the store lock's warning leaves out (machine/storeLock.ts).
+    git: (args, opts = {}) => daemonGit(run('git', ['-C', repoPath, ...args], { timeoutMs: opts.timeoutMs ?? 120_000, signal: opts.signal, env: ENV })),
     copyTree: (src, dst, signal, mode, exclude) => copyTree(src, dst, { signal, mode, exclude }),
     libraryCopyBytes: async (src, mode) => (platform === 'win32' && mode !== 'clone' ? treeBytes(src) : undefined),
     removeTree,
@@ -403,6 +407,11 @@ export class SandboxPool {
     this.settings = o.settings ?? undefined;
     this.settled = !o.awaitConfigure;
     this.load();
+  }
+
+  /** w5614: new sandboxes are slot repos: the pool setting, or the store lock holding (a worktree could not commit then). */
+  private slotMode(): 'new' | 'all' | undefined {
+    return this.settings?.slotRepos ?? (this.o.storeLocked?.() ? 'new' : undefined);
   }
 
   /** The pool settings (the portal's welcome, or daemon.json until then); null: this machine has no sandboxes. */
@@ -695,7 +704,7 @@ export class SandboxPool {
     if (problem) throw new Error(problem);
     if (req.base.startsWith('-') || /[\s\x00-\x1f\x7f]/.test(req.base)) throw new Error(`base "${req.base}" is not a usable ref`);
     if (this.disk.level !== 'ok') throw new Error(`disk space is ${this.disk.level} on ${s.root} (${((this.disk.freeBytes ?? 0) / GB).toFixed(0)} GB free); new sandboxes wait until space is freed`);
-    const holder = this.settings?.slotRepos ? this.slotBranchHolder(id, req.branch, true) : undefined;
+    const holder = this.slotMode() ? this.slotBranchHolder(id, req.branch, true) : undefined;
     if (holder) throw new Error(`branch ${req.branch} is checked out in sandbox ${holder}: one sandbox holds a branch at a time`);
     if (this.recs.has(id)) throw new Error(`sandbox "${id}" already exists on this machine`); // raced another create
     const r: Rec = { id, branch: req.branch, base: req.base, path: dir, createdAt: new Date(this.d.now()).toISOString(), status: 'creating', statusDetail: 'queued' };
@@ -757,7 +766,7 @@ export class SandboxPool {
           fs.rmSync(into, { recursive: true, force: true });
         }
         if (added) return;
-        if (this.settings?.slotRepos) {
+        if (this.slotMode()) {
           // w5614: its own repo, borrowing the clone's objects (machine/slotRepo.ts); the checkout below is the same.
           step(`making a slot repo on ${r.branch}`);
           const note = await guardStorePrune(this.d.git, signal);

@@ -193,6 +193,9 @@ export function sandboxGuard(opts: {
   const cloneSpellings = cloneGrant ? pathSpellings(normPath(cloneGrant.path), home) : [];
   const cloneNames = cloneGrant ? spellingsRegex(cloneSpellings) : undefined;
   const unityPrefix = `${opts.sandboxId.toLowerCase()}@`;
+  // w5799: the second editor of a peer run, on a ParrelSync clone of the sandbox (`<sandbox>_clone_<n>`), is the sandbox's too.
+  const clonePrefix = `${opts.sandboxId.toLowerCase()}_clone_`;
+  const isUnityClone = (t: string) => t.startsWith(clonePrefix) && /^\d+@/.test(t.slice(clonePrefix.length));
   // w1505: the session's save copies are named after its own temp folder (`ffa-<session>`, TMPDIR of its shell).
   const tmpName = path.basename((opts.env?.TMPDIR ?? '').replace(/\\/g, '/').replace(/\/+$/, ''));
   const saveTag = /^ffa-./i.test(tmpName) ? tmpName : undefined;
@@ -311,12 +314,13 @@ export function sandboxGuard(opts: {
       const explain =
         `This sandbox's Unity editor is the instance named "${opts.sandboxId}@<hash>" (project path ${opts.sandboxPath}). ` +
         `Other editors on this machine belong to other sandboxes or to the live co-op game — never target them. ` +
-        `Read mcpforunity://instances, then call set_active_instance with the full "Name@hash" whose name starts with "${opts.sandboxId}@".`;
+        `Read mcpforunity://instances, then call set_active_instance with the full "Name@hash" whose name starts with "${opts.sandboxId}@" ` +
+        `(a peer run's second editor, on the ParrelSync clone ${opts.sandboxId}_clone_<n>: "${opts.sandboxId}_clone_<n>@").`;
       const isPin = tool.endsWith('__set_active_instance');
       const target = isPin ? args.instance : args.unity_instance;
       if (typeof target === 'string' && target) {
         // Name@hash only: a bare hash prefix or port number cannot be checked against the sandbox.
-        if (!target.toLowerCase().startsWith(unityPrefix)) return deny(explain);
+        if (!target.toLowerCase().startsWith(unityPrefix) && !isUnityClone(target.toLowerCase())) return deny(explain);
         if (isPin) pinned = true;
       } else if (!pinned) {
         // Unpinned, the bridge routes to whichever editor happens to be the only one connected —

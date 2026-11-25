@@ -402,6 +402,21 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
   the portal VM's `/tmp` is a tmpfs of half its RAM, and as "the disk" it read 1.9 GB free while the disk had 101 GB).
 - The critical level, a sandbox drive waiting for space, `host_recovery cleanup` and `machine_cleanup` run
   a pass at once, with every rule.
+- **A pass removes nothing until its whole plan is made, so a pass that a restart cuts off is lost** (w5795). On
+  LothDesktop on 2026-11-25 the daemon started 14 times in 13 hours, and its low passes finished 67 and 78 minutes after
+  a start (cleanup-log.jsonl against the supervisor log). No pass finished from 10:35 to 14:49 UTC or after 14:49, while V:
+  went from 107 to 14 GB free, almost all of it FFU cargo output. Each pass is now visible, report-only:
+  - The daemon logs `clean-up (<trigger>): pass started` when a pass begins.
+  - It writes `cleanup-pass.json` beside `cleanup-state.json` while a pass runs (`passMarkerFile`). A start that finds
+    the file logs `clean-up: the previous <trigger> pass, started <time>, was cut off N min later ...`, and the
+    clean-up log gets a `cutOff: true` entry.
+  - The summary and the log carry `passMs` and `phasesMs`, which time each step: `regular`, `stale` or `cap`, `own`,
+    `listed` (sizing what is kept for a person), `remove` and `ownRemove`.
+  - A low pass first plans the quick scope: the cargo-target cap with the low-space rules
+    (`planInstallLeftovers` scope `cargo-cap`, `low: true`), which covers unheld FFU slot targets and closed workers'
+    cargo. It reports what that would free and how long it took to plan, as `quick` in the summary and the
+    `clean-up (...)` log line. It removes nothing yet. Removing the quick scope first comes in a later change, once the
+    data shows it is safe (docs/worker-fence.md's lockout rule: warn-only first).
 
 **The rules**: each is an allowlisted folder and an age; an entry goes only when nothing anywhere inside it
 changed for that long (a bounded walk, so a folder something still writes to stays).

@@ -1012,6 +1012,21 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.ok(tlLin.text.includes(`--worker-fence on --transcript-lock on'`), tlLin.text);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off'), ['--worker-caps warn', '--transcript-lock off']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its lock');
+  // w5614: the store lock's mode: off, warn or on and nothing else, on every OS (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', storeLock: 'maybe' as never }), /store_lock: off, warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', storeLock: '' as never }), /store_lock: off, warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', storeLock: 'enforce' as never }), /store_lock: off, warn or on/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', storeLock: 'warn' });
+  await new Promise((r) => setTimeout(r, 300));
+  const slLin = store.readTranscript(OPS_ID, 180).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(slLin.text.includes(`--worker-fence on --store-lock warn'`), slLin.text);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', storeLock: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const slWin = store.readTranscript(OPS_ID, 200).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(slWin.text.includes(`-StoreLock on"'`), slWin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, 'off'), ['-StoreLock off']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, 'on'), ['--store-lock on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn']);
   ops.close();
 });
 

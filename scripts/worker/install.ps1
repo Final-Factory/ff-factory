@@ -46,6 +46,11 @@
   With -Update (w5554, docs/worker-caps.md): set the per-worker memory, process and temp-disk caps' mode in daemon.json
   (workerCaps), as ops_worker machine_update worker_caps does: warn (the default when absent: measure and report only),
   enforce (limits and kills) or off (nothing). Left out: the install keeps what it has.
+.PARAMETER StoreLock
+  With -Update (w5614, docs/machines.md "Slot repos"): set the store lock in daemon.json (storeLock), as ops_worker
+  machine_update store_lock does: on makes the main clone read-only to the Low integrity workers once every sandbox is a
+  slot repo (held off until then), warn refuses nothing and logs each write the daemon did not make, off opens it again.
+  Left out: the install keeps what it has.
 .PARAMETER PlayOnly
   A play-only computer (w1946, w2004): no game repo clone, no sandboxes and no Dev Drive; the daemon, its tray app and one
   player-slot pair as on any computer. join.ps1 passes it when the join code is a play-only one.
@@ -101,6 +106,7 @@ param(
     [string]$VoiceWhisper = '',
     [ValidateSet('on', 'off')][string]$WorkerFence,
     [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
+    [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -267,6 +273,7 @@ if ($Update) {
     if ($VoiceWhisper) { $argv += @('--voice-whisper', $VoiceWhisper) }
     if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
     if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
+    if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
