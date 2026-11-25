@@ -123,14 +123,14 @@ test('w5581: the firewall read lists the tailnet-only paths an allow rule does n
  * values BEAST's real ones gave (the ops worker's elevated read, 2026-11-25: RemoteAddress the string 'Any'). The earlier
  * tests only matched the script's text, and the check it held said "tailnet only" for BEAST's wide rule on every run.
  */
-function runCheck(node: string, remote: string[], opts: { inBulk?: boolean; peers?: string[]; running?: boolean } = {}): string {
+function runCheck(node: string, remote: string[], opts: { inBulk?: boolean; peers?: string[]; running?: boolean; procsThrow?: boolean; reReadThrows?: boolean } = {}): string {
   const rule = '{a7aa1dbe-357d-42e0-9480-e0ae525264e7}';
   const arr = (xs: string[]) => `@(${xs.map((x) => `'${x}'`).join(',')})`;
   const mocks = `
 function Get-NetFirewallApplicationFilter { @([pscustomobject]@{ InstanceID = '${rule}'; Program = '${node}' }, [pscustomobject]@{ InstanceID = 'other'; Program = 'C:/other.exe' }) }
 function Get-NetFirewallAddressFilter { param([Parameter(ValueFromPipeline = $true)] $InputObject) process { if ($InputObject) { [pscustomobject]@{ InstanceID = '${rule}'; RemoteAddress = ${remote.length === 1 ? `'${remote[0]}'` : arr(remote)} } } } end { if (-not $InputObject) { ${opts.inBulk === false ? '' : `[pscustomobject]@{ InstanceID = '${rule}'; RemoteAddress = ${remote.length === 1 ? `'${remote[0]}'` : arr(remote)} };`} [pscustomobject]@{ InstanceID = 'other'; RemoteAddress = 'Any' } } } }
 function Get-NetFirewallRule { param($Direction, $Name) [pscustomobject]@{ Name = '${rule}'; Enabled = 'True'; Action = 'Allow'; Group = 'Final Factory agent node' } }
-function Get-Process { param($ErrorAction) ${opts.running === false ? '' : `[pscustomobject]@{ Id = 42; Path = '${node}' };`} [pscustomobject]@{ Id = 4; Path = $null } }
+function Get-Process { param($ErrorAction) ${opts.procsThrow ? "throw 'Access is denied';" : ''} ${opts.running === false ? '' : `[pscustomobject]@{ Id = 42; Path = '${node}' };`} [pscustomobject]@{ Id = 4; Path = $null } }
 function Get-NetTCPConnection { param($State, $OwningProcess, $ErrorAction) if ($State -eq 'Listen') { [pscustomobject]@{ LocalPort = 8891 } } else { foreach ($p in ${arr(opts.peers ?? ['127.0.0.1', '100.86.157.116'])}) { [pscustomobject]@{ LocalPort = 8891; RemoteAddress = $p } }; [pscustomobject]@{ LocalPort = 50000; RemoteAddress = '8.8.8.8' } } }
 `;
   const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'fwcheck-')), 'check.ps1');
@@ -155,6 +155,10 @@ test('w5581: the firewall read, run, finds BEAST\'s wide node rule and passes a 
   assert.deepEqual(parseFirewallCheck(runCheck(node, ['Any'], { peers: ['::ffff:1.2.3.4.5', '2001:db8::1', '10.0.0.9'] }))?.peers, [`${node} ::ffff:1.2.3.4.5:8891`, `${node} 2001:db8::1:8891`, `${node} 10.0.0.9:8891`], 'an odd address is counted, and the rest after it still are');
   const off = parseFirewallCheck(runCheck(node, ['Any'], { running: false }));
   assert.deepEqual([off?.peers, off?.peersUnknown], [[], [`notrunning ${node}`]], 'a node not seen running is "could not see", never "none" (review of #1265)');
+  // w5581, after the merge: BEAST's daemon logged "could not read the rules" with no reason. A failing process list is
+  // "peers unread", and the read still ends with its stale= line, so the rest of the answer is kept.
+  const noProcs = parseFirewallCheck(runCheck(node, ['Any'], { procsThrow: true }));
+  assert.deepEqual([noProcs?.wide, noProcs?.peersUnknown], [[node], [`unread ${node}`]]);
 });
 
 test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, any protocol, and firewallRepair warns of a wide one', () => {
@@ -174,5 +178,6 @@ test('w5581: firewall.ps1 makes the agent node\'s rule from the tailnet only, an
   assert.match(worker, /const nodeWide = o\.update && fs\.existsSync\(node\) \? await agentNodeRuleWide\(l, node\) : false;/);
   assert.match(worker, /firewallArgs\('add', l, o\.maxSandboxes, editors, o\.firewallSuffix, nodeWide\)/);
   assert.match(worker, /return !seen \|\| seen\.wide\.includes\(node\);/, 'an unread rule is kept as it is, never narrowed');
+  assert.match(worker, /could not read the rules, so they were not checked \(\$\{raw\.trim\(\)/, 'a failed read says why (the error or its last lines)');
   assert.match(worker, /seen\.peersUnknown\.filter\(\(p\) => seen\.wide\.some/, 'only the wide paths\' unseen peers are listed, not every idle ffu-server');
 });
