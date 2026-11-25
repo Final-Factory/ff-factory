@@ -117,6 +117,10 @@ sweep spares the units they run. Otherwise:
 **The bound (w5503).** A released slot's target goes back to its last worker's last hour of builds within an hour of the
 release, and to nothing after `ffuSlotIdleDays`; any slot over the cap is swept down to that slot's 15 min of builds, and
 an unheld one goes whole if it still does not fit. A held slot over the cap after that is named in every pass's kept list.
+The rule runs on every hourly pass (the daemon's `cargo-cap` scope), not only on the daily stale pass or a low one: after
+#1148 deployed, LothDesktop's 05:34 UTC hourly pass on 2026-11-25 never looked at slot2 to slot4 (25 to 35 GB each, 11 to
+21 GB of it idle `debug/incremental`), because the rule ran only in the full plan (`server/installLeftovers.ts`,
+`ffuSlotTargets`).
 The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
 swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
 2026-11-25 04:40 UTC, before w5499 reached it: the slot targets were 4.1, 19.2, 32.1 and 25.6 GB. Of that, 0, 6.5, 19.9

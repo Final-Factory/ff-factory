@@ -94,7 +94,7 @@ import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleContextOf, stal
 import { TASK_NAME, checkElevation } from './elevation.ts';
 import { Drainer, clearPendingRestart, describeUncleanStop, isBusy, mayRecoverUnclean, parseRestartRequest, readAlive, survivesRestart, systemdSupervised, takePendingRestart, takeResumeFile, writeAlive, writePendingRestart, writeResumeFile, writeUpdateWanted, type RestartRequest } from './restart.ts';
 import { UsageTracker, accountLines, buildAccounts, sessionSource } from './usage.ts';
-import { appVersion, formatVersion } from './version.ts';
+import { appVersion, formatVersion, portalCommit } from './version.ts';
 import { VoiceService } from './voice.ts';
 import { startBaseRefresh } from './baseRefresh.ts';
 import { DRY_RUN_BANNER, DRY_RUN_WHY, dryRun } from './dryRun.ts';
@@ -105,6 +105,7 @@ import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller }
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
+import { clientAddress, configureClientAddress } from './clientAddress.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -379,6 +380,7 @@ const joinHttp = machineJoinHttp({
   // w2004: the clone of a new computer with no GitHub login of its own, where machines.githubFromVault is on for it.
   githubToken: (machineId, person) => githubTokens()?.forMachine(machineId, person, `${machineId}'s worker install (the game repo's clone)`),
   script: (kind) => joinHttpScript(kind),
+  commit: () => portalCommit(),
   refused: () => (dryRun() ? DRY_RUN_WHY : undefined),
   report: (text) => machines.report?.(text),
 });
@@ -471,6 +473,8 @@ setInterval(() => {
 }, 30_000);
 // trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
 const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
+// Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
+configureClientAddress({ trustProxy: () => cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
@@ -2477,7 +2481,7 @@ const server = http.createServer(async (req, res) => {
     }
     // Liveness and version, for scripts, monitors and the E2E harness. No login needed: the
     // version of an open-source app is public anyway. loopLagMs: the event loop's worst lag of the last minute (w1377).
-    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
+    if (url.pathname === '/api/health' && req.method === 'GET') return send(res, 200, { ok: true, ...appNow(), ...(portalCommit() ? { commit: portalCommit() } : {}), loopLagMs: loopWatch.lagMs(), pageSockets: pageSockets.health(fromThisMachine(req)), ...(isDryRun ? { dryRun: true } : {}) });
     if (url.pathname === '/api/login' && req.method === 'POST') {
       const { username, password } = await readJson<{ username?: string; password?: string }>(req);
       if (typeof username !== 'string' || typeof password !== 'string') return send(res, 400, { error: 'username and password required' });
@@ -2549,24 +2553,18 @@ server.on('upgrade', (req, socket, head) => {
   // attacker-supplied Origin ("null", garbage) must never be able to throw.
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    providers.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    providers.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
   if (livePath) {
     // A daemon's live frame socket (w1398, docs/live-view.md): the machine token, as /machine.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgradeLive(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer, livePath[1]);
+    machines.upgradeLive(req, socket, head, clientAddress(req), livePath[1]);
     return;
   }
   if (parseUrl(req.url)?.pathname === '/machine') {
     // A machine daemon (docs/machines.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    machines.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const origin = req.headers.origin;

@@ -243,8 +243,8 @@ test('tailnetOnly and tailnetAddress: Funnel header, forwarded address only from
   assert.equal(tailnetOnly(req('::ffff:127.0.0.1', { 'x-forwarded-for': '100.90.1.2' })), undefined);
   assert.match(tailnetOnly(req('127.0.0.1', { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '100.90.1.2' }))!, /Funnel/);
   assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4' }))!, /tailnet/);
-  // The first forwarded address is the client's: Serve sets it, it does not append to what the client sent.
-  assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4, 100.90.1.2' }))!, /tailnet/);
+  // The last forwarded address is the one the proxy added; a tailnet address the client wrote in front of it means nothing (w5535).
+  assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '100.90.1.2, 198.51.100.4' }))!, /tailnet/);
   // A connection that is not from this machine is judged by its own address; a forwarded header it sends means nothing.
   assert.equal(tailnetOnly(req('100.90.1.2', { 'x-forwarded-for': '8.8.8.8' })), undefined);
   assert.match(tailnetOnly(req('203.0.113.7', { 'x-forwarded-for': '100.90.1.2' }))!, /tailnet/);
