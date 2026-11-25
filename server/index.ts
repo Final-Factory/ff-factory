@@ -502,6 +502,10 @@ const auth = new Auth(cfg.dataDir, {
 }
 // Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
 configureClientAddress({ trustProxy: () => cfg.trustProxy });
+// w5721: a hand-edited config.json can still hold this pair (set_app_config refuses it); say so at boot.
+if (cfg.trustProxy === false && machineLinkMode(cfg.machineLinkTailnet) === 'enforce') {
+  console.warn('[machines] trustProxy is false and machineLinkTailnet is enforce: every daemon behind Tailscale Serve will be refused. Set machineLinkTailnet to "warn" (docs/machines.md, "The daemon link is tailnet-only").');
+}
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);

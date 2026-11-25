@@ -181,6 +181,7 @@ test('trustProxy false is refused while machineLinkTailnet is enforce, and enfor
     setAppConfig(file, cfg, 'trustProxy', false);
     assert.equal(cfg.trustProxy, false);
     assert.throws(() => setAppConfig(file, cfg, 'machineLinkTailnet', 'enforce'), /would refuse every daemon/);
+    assert.throws(() => setAppConfig(file, cfg, 'machineLinkTailnet', null), /would refuse every daemon/, 'a reset to the default is enforce');
     assert.equal(cfg.machineLinkTailnet, 'warn');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

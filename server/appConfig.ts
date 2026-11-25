@@ -486,7 +486,11 @@ const TRUST_PROXY_ENFORCE =
 
 /** The value to store for `key`, or throws with what is wrong. `null` removes the key (back to the default). */
 export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config, users?: readonly string[]): unknown {
-  if (value === null || value === undefined) return undefined;
+  if (value === null || value === undefined) {
+    // w5721: a reset to the default is a reset to enforce, so it takes the same lockout-pair check as "enforce".
+    if (key === 'machineLinkTailnet' && cfg?.trustProxy === false) throw new Error(TRUST_PROXY_ENFORCE);
+    return undefined;
+  }
   switch (key) {
     case 'ownerName': {
       if (typeof value !== 'string') throw new Error('ownerName is a string');

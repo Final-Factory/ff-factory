@@ -98,7 +98,8 @@ before redeploying by hand.
   2. **Any worker**, when no such request is open: a pull request that changes the default in `machineLinkMode`
      (`server/machineLinkGate.ts`, `'enforce'` to `'warn'` for an unset value), merged on green CI, deploys by itself
      ([automatic deploys](ops-worker.md#automatic-deploys-w1634), 15 to 60 minutes after the merge). No person's words
-     are needed for this.
+     are needed for this. It works only while some machine still links: workers run on daemon machines, so when every
+     daemon is refused, route 1 is the only one with no person.
   3. A person's own orchestrator (Ben's or Lothsahn's) calls `set_app_config` in a turn of theirs, or has the ops
      worker set `"machineLinkTailnet": "warn"` in the portal's `config.json` and run `fffctl restart`. A typo there
      counts as `warn`.

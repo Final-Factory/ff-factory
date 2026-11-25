@@ -2250,7 +2250,7 @@ export class MachineManager {
       `[machines] ${m.id}'s daemon reached the portal from ${address}, outside the tailnet (${why}), and machineLinkTailnet "enforce" refused it: ` +
         `it is locked out, not offline, and redials about every 30 to 40 s. To let it back in, set machineLinkTailnet to "warn": the dispatcher calls ` +
         `set_app_config machineLinkTailnet "warn" with the work_id of an open request an owner asked for in their own words; with none open, a worker ` +
-        `merges the one-line change of the default to "warn" (server/machineLinkGate.ts machineLinkMode), which deploys by itself. ` +
+        `merges the one-line change of the default to "warn" (server/machineLinkGate.ts machineLinkMode), which deploys by itself (only while some machine still links, since workers run on them). ` +
         `docs/machines.md, "The daemon link is tailnet-only". Nobody needs to go to the machine.`,
     );
     return m.id;
