@@ -17,7 +17,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import { MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
 /** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
@@ -430,7 +430,9 @@ export function noReadUpTargets(o: { root: string; appDir: string; allowBack: re
     if (k && !out.some((t) => t.path.toLowerCase() === p.toLowerCase())) out.push({ path: p, sddl: k === 'dir' ? l.dir : l.file });
   };
   // secrets: every secrets folder (readFence.ts secretsDirs), the Dev Drive host folder's too (B3 of the #1193 lockout review).
-  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
+  // steam (w5639): steamcmd's cached login and the upload config; the daemon runs the uploads at Medium, which NR leaves alone.
+  const daemonOnly = DAEMON_ONLY_CHILDREN.map((c) => path.join(o.root, c));
+  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), ...daemonOnly, path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
   for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(path.isAbsolute(a) ? a : path.join(o.appDir, a), READ_BACK);
   return out;
 }

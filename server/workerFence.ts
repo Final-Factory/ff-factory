@@ -38,6 +38,11 @@ export interface WorkerFence {
   readDenied?: string[];
   /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens folder, w5547); a folder covers all below it. */
   readAllowed?: string[];
+  /**
+   * The owner-secret rules (w5553, w5560): no Keychain mach services (ownerSecrets.ts KEYCHAIN_MACH_SERVICES) and no
+   * preference writes through cfprefsd. Set with the owner paths in readDenied, never alone; off with the read fence.
+   */
+  ownerSecrets?: { mach: string[] };
   /** The read fence is switched off on this machine (daemon_control read-fence-off, w5546): no read rules, writes as before. */
   readOff?: boolean;
   /** Secrets folders outside `<root>/secrets` (a Dev Drive install's host folder, readFence.ts secretsDirs): read-denied too. */
@@ -61,11 +66,12 @@ export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONL
 
 /**
  * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the same three are closed to reads as
- * well, except what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
+ * well, and `steam` (w5639: steamcmd's cached Steam login and the upload config, which only the daemon reads), except
+ * what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
  * `file-read-data` only: a stat of a path, which node's module loader and git make up every parent, stays allowed; the
  * daemon's folder may be listed (names, never contents, as server/daemonReads.ts allows).
  */
-export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets', ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
 
 /**
  * w5563: the one conversation a fenced process may write in its Claude home's transcripts. `projects` is
@@ -164,7 +170,8 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
-    ...(f.prefDeny ? PREF_RULES : []),
+    // One preference rule for both switches: w5659's workerPrefFence, or the owner-secret rules under the read fence (w5560).
+    ...(f.prefDeny || (f.ownerSecrets && !f.readOff) ? PREF_RULES : []),
   ].join('\n');
 }
 
@@ -189,6 +196,15 @@ function readRules(f: WorkerFence): string[] {
     ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
     ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
     ')',
+    ...(f.ownerSecrets ? ownerSecretRules(f.ownerSecrets.mach) : []),
+  ];
+}
+
+/** w5560: the Keychain's mach services, for a run whose owner paths are read-denied (probe 4, m5). Its preference-write deny is PREF_RULES, added once in seatbeltProfile. */
+function ownerSecretRules(mach: string[]): string[] {
+  return [
+    ';; owner secrets (w5553, w5560): no Keychain service (a write would raise a dialog on the person\'s screen)',
+    ...(mach.length ? [`(deny mach-lookup ${mach.map((n) => `(global-name ${lit(n)})`).join(' ')})`] : []),
   ];
 }
 
