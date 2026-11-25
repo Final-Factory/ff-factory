@@ -783,6 +783,18 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   longer make a new folder in `tools`; a tool that needs one makes it from the daemon or `worker.ts tools`. A daemon
   from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
   `server/toolsLabelsWin.test.ts` on the Windows runner.
+  - **A node.exe planted before w5717 deployed is found and replaced** (w5839). `worker.ts tools` keeps a record
+    beside the agents' node, `<root>\tools\node.json`: the version and the SHA-256 of every file in `tools\node`, written
+    from the pinned download it unpacked. Every tools run hashes the folder again (1994 files in about 360 ms on BEAST,
+    measured) and never runs the installed node.exe. The record's node.exe must also be the pinned one
+    (`AGENT_NODE.exeSha256`), so a record a Low worker left in the old Low `tools` cannot vouch for another node. A file
+    that differs, is missing or was added (a DLL beside node.exe), or no record, means a fresh pinned download: a folder
+    whose files all match it is recorded and kept, anything else is swapped in at the same path. The rollout log says
+    `Agent node: node verified: ...`, `Agent node: node reinstalled (<why>): ...`, or
+    `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack or swap
+    failed: the machine is never left without node. Windows lets `tools\node` be renamed aside while a node.exe in it
+    runs but not deleted (EPERM, measured on BEAST), so the old folder stays as `tools\node.old-<ms>` until a later run
+    deletes it.
   - **A test of what a Low worker can do on Windows must drop privileges, not only lower the label.** A GitHub runner's
     token is elevated, and a Low copy of it keeps SeBackupPrivilege and SeRestorePrivilege, which pass any integrity
     label and access list. In run 45641049172 the runner's Low node renamed `tools\node` under a Medium `tools`, and the
