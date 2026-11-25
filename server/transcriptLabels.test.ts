@@ -73,7 +73,9 @@ test('a new conversation: control lines pass, the first message waits for the CL
   const p = lowTranscriptSpawner({ run: f.run, icacls: r.icacls, log: () => {} })({ command: 'claude', args: ['--session-id', SID], cwd, env: { CLAUDE_CONFIG_DIR: home }, signal: new AbortController().signal });
   assert.equal((p as { pid?: number }).pid, 4242);
   assert.ok(fs.statSync(own.dir).isDirectory(), 'its folder is made before the CLI starts');
-  assert.deepEqual(r.calls, [[own.dir, '/setintegritylevel', '(OI)(CI)low']]);
+  const labels = () => r.calls.filter((c) => c[1] === '/setintegritylevel');
+  assert.deepEqual(labels(), [[own.dir, '/setintegritylevel', '(OI)(CI)low', '/T']]);
+  assert.deepEqual(r.calls.filter((c) => c[1] === '/deny').map((c) => c[0]), process.env.USERNAME ? [path.dirname(own.file)] : [], 'a project folder it makes gets delete-child taken back');
   p.stdin.write(INIT + USER.slice(0, 10));
   p.stdin.write(USER.slice(10));
   await tick();
@@ -89,7 +91,7 @@ test('a new conversation: control lines pass, the first message waits for the CL
   await tick();
   assert.equal(f.got(), INIT + USER + USER);
   f.child.emit('exit', 0, null);
-  assert.deepEqual(r.calls.slice(-2), [[own.file, '/setintegritylevel', 'medium'], [own.dir, '/setintegritylevel', '(OI)(CI)medium']]);
+  assert.deepEqual(labels().slice(-2), [[own.file, '/setintegritylevel', 'medium'], [own.dir, '/setintegritylevel', '(OI)(CI)medium', '/T']]);
 });
 
 test('a resume labels its file Low at once and passes stdin straight through; two processes of one conversation share the label', async () => {
@@ -154,10 +156,26 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
   const exec: Exec = async () => ({ code: 0, stdout: label, stderr: '' });
   const r = recorder();
   const said: string[] = [];
-  assert.equal(await lockTranscripts(projects, exec, (l) => said.push(l), { icacls: r.icacls }), true);
-  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), c[2]]).sort(), [['', '(OI)(CI)medium'], [path.join('F--work', 'new'), '(OI)(CI)low'], [path.join('F--work', 'new.jsonl'), 'low']].sort());
-  assert.equal(r.calls.at(-1)![0], projects, 'projects is labelled after the pins');
-  assert.match(said[0], /2 transcripts and folders/);
+  assert.equal(await lockTranscripts(projects, exec, (l) => said.push(l), { icacls: r.icacls, account: 'HOST\\me' }), true);
+  const w = (n: string) => path.join('F--work', n);
+  const byName = (a: string[], b: string[]) => a[0].localeCompare(b[0]);
+  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [
+    // the recent conversations first, a folder with all inside it
+    ...[[w('new'), '/setintegritylevel', '(OI)(CI)low', '/T'], [w('new.jsonl'), '/setintegritylevel', 'low']].sort(byName),
+    ['', '/setintegritylevel', '(OI)(CI)medium'],
+    ['F--work', '/setintegritylevel', '(OI)(CI)medium'],
+    // then everything else, explicitly: an old explicit Low is not overridden by what it inherits
+    ...[
+      [w('memory'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
+      [w('notes.txt'), '/setintegritylevel', 'medium'],
+      [w('old'), '/setintegritylevel', '(OI)(CI)medium', '/T'],
+      [w('old.jsonl'), '/setintegritylevel', 'medium'],
+    ].sort(byName),
+    ['..', '/deny', 'HOST\\me:(DC)'],
+    ['', '/deny', 'HOST\\me:(DC)'],
+    ['F--work', '/deny', 'HOST\\me:(DC)'],
+  ]);
+  assert.match(said[0], /1 project folder and 4 transcripts and folders in them; 2 written/);
   label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
   const again = recorder();
   assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: again.icacls }), true);
@@ -180,8 +198,8 @@ test('unlockTranscripts labels everything Low again only where a lock was set', 
   await unlockTranscripts(projects, async () => ({ code: 0, stdout: 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)', stderr: '' }), () => {}, none.icacls);
   assert.deepEqual(none.calls, []);
   const r = recorder();
-  await unlockTranscripts(projects, async () => ({ code: 0, stdout: 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', stderr: '' }), () => {}, r.icacls);
-  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), c[2]]), [['', '(OI)(CI)low'], ['F--work', '(OI)(CI)low'], [path.join('F--work', SID), '(OI)(CI)low'], [path.join('F--work', `${SID}.jsonl`), 'low']]);
+  await unlockTranscripts(projects, async () => ({ code: 0, stdout: 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', stderr: '' }), () => {}, r.icacls, 'HOST\\me');
+  assert.deepEqual(r.calls.map((c) => [path.relative(projects, c[0]), ...c.slice(1)]), [['..', '/remove:d', 'HOST\\me'], ['', '/remove:d', 'HOST\\me'], ['F--work', '/remove:d', 'HOST\\me'], ['', '/setintegritylevel', '(OI)(CI)low', '/T']]);
 });
 
 /**
@@ -211,6 +229,7 @@ test('Windows: a Low process cannot touch another transcript under the lock, its
   const other = path.join(slug, 'bbbbbbbb-other.jsonl');
   fs.writeFileSync(other, '{"type":"user"}\n');
   fs.mkdirSync(path.join(slug, 'bbbbbbbb-other'));
+  for (const n of ['bbbbbbbb-rename.jsonl', 'bbbbbbbb-delete.jsonl']) fs.writeFileSync(path.join(slug, n), '{}\n');
   setLabelSync(root, '(OI)(CI)low');
   setLabelSync(home, '(OI)(CI)low');
   const lowNode = path.join(root, 'node-low.exe');
@@ -228,7 +247,10 @@ test('Windows: a Low process cannot touch another transcript under the lock, its
   // Before the lock every transcript is open to a Low worker: what the lock is for.
   assert.match(atLow(`${TRY}t('append',()=>fs.appendFileSync(process.argv[1],''));console.log(out.join())`, other), /append WRITTEN/);
 
-  assert.equal(await lockTranscripts(projects, exec, (l) => t.diagnostic(l), { recentMs: 0 }), true);
+  // Not written lately, so the lock labels them Medium rather than keeping them Low for a running conversation.
+  const week = (Date.now() - 7 * 24 * 3600_000) / 1000;
+  for (const n of ['bbbbbbbb-other.jsonl', 'bbbbbbbb-other', 'bbbbbbbb-rename.jsonl', 'bbbbbbbb-delete.jsonl']) fs.utimesSync(path.join(slug, n), week, week);
+  assert.equal(await lockTranscripts(projects, exec, (l) => t.diagnostic(l)), true);
   const own = path.join(slug, `${SID}.jsonl`);
   fs.writeFileSync(own, '');
   fs.mkdirSync(path.join(slug, SID));
@@ -239,10 +261,15 @@ test('Windows: a Low process cannot touch another transcript under the lock, its
 t('append other',()=>fs.appendFileSync(o,'x'));t('truncate other',()=>fs.writeFileSync(o,''));
 t('plant',()=>fs.writeFileSync(path.join(slug,'cccccccc.jsonl'),''));t('mkdir',()=>fs.mkdirSync(path.join(slug,'cccccccc')));
 t('plant in other folder',()=>fs.writeFileSync(path.join(o.slice(0,-6),'x.txt'),''));
-t('rename other',()=>fs.renameSync(o,o+'.bak'));t('delete other',()=>fs.unlinkSync(o));
+t('rename other',()=>fs.renameSync(path.join(slug,'bbbbbbbb-rename.jsonl'),path.join(slug,'bbbbbbbb-renamed.jsonl')));
+t('rename other to its folder',()=>fs.renameSync(o,path.join(o.slice(0,-6),'moved.jsonl')));t('delete other',()=>fs.unlinkSync(path.join(slug,'bbbbbbbb-delete.jsonl')));
+t('delete other folder',()=>fs.rmSync(o.slice(0,-6),{recursive:true}));
 t('new project folder',()=>fs.mkdirSync(path.join(projects,'F--evil')));
 t('append own',()=>fs.appendFileSync(own,'{}\\n'));t('own folder',()=>fs.writeFileSync(path.join(own.slice(0,-6),'t.txt'),'x'));
 t('rename projects',()=>{fs.renameSync(projects,projects+'-moved');fs.renameSync(projects+'-moved',projects)});
+const cp=require('child_process');const ic=(w,a)=>{try{cp.execFileSync('icacls',a,{stdio:'pipe'});out.push(w+' WRITTEN')}catch(e){out.push(w+' EPERM')}};
+const me=process.env.USERDOMAIN+String.fromCharCode(92)+process.env.USERNAME;
+ic('undo deny on projects',[projects,'/remove:d',me]);ic('label projects low',[projects,'/setintegritylevel','(OI)(CI)low']);ic('undo deny on claude',[home,'/remove:d',me]);
 console.log(out.join('; '))`,
     other,
     own,
@@ -251,11 +278,12 @@ console.log(out.join('; '))`,
     home,
   );
   t.diagnostic(`at Low under the lock: ${res}`);
-  for (const w of ['append other', 'truncate other', 'plant', 'mkdir', 'plant in other folder', 'rename other', 'delete other', 'new project folder']) assert.match(res, new RegExp(`${w} E(ACCES|PERM)`), w);
+  for (const w of ['append other', 'truncate other', 'plant', 'mkdir', 'plant in other folder', 'rename other', 'rename other to its folder', 'delete other', 'delete other folder', 'new project folder', 'undo deny on projects', 'label projects low']) assert.match(res, new RegExp(`${w} E(ACCES|PERM)`), w);
   assert.match(res, /append own WRITTEN/);
   assert.match(res, /own folder WRITTEN/);
   assert.match(res, /rename projects E(ACCES|PERM)/, 'a Low worker cannot move the locked folder aside, though its parent is Low');
   assert.equal(fs.readFileSync(other, 'utf8'), '{"type":"user"}\n');
+  assert.ok(fs.existsSync(path.join(slug, 'bbbbbbbb-rename.jsonl')) && fs.existsSync(path.join(slug, 'bbbbbbbb-delete.jsonl')));
   assert.doesNotMatch(probeTranscriptLock(lowNode, projects), /WRITTEN|failed/);
 
   // The spawner end to end, the stand-in CLI at Low: a pre-made file would stop it, the gate makes the file in time.

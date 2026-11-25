@@ -171,7 +171,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // an older portal never sends one and drops the hello field.
 // w5640 (no bump): `steamInstall` in the hello; `steam_upload` takes action `install` and `account`. The portal sends install
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
-const DECIDED = { protocol: 9, fingerprint: 'd6d2d10b8844b287' };
+// w5703 (no bump): LaunchSpec `transcriptLabels`, set by the machine's own daemon for its own agent host; an older host
+// ignores it (the conversation is then not labelled, as with the switch off).
+const DECIDED = { protocol: 9, fingerprint: '12c7c55e9671419a' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

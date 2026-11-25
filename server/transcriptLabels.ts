@@ -46,12 +46,33 @@ const realIcacls: IcaclsSync = (args) => {
  * Sets `label` on `p`. Setting a label needs WRITE_OWNER; where the account has it only through a group ACE icacls answers
  * "Access is denied", and the owner may still grant itself Full first (lowIntegrity.ts labelLow, measured w5402).
  */
-export function setLabelSync(p: string, label: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
-  let r = icacls([p, '/setintegritylevel', label]);
+export function setLabelSync(p: string, label: string, icacls: IcaclsSync = realIcacls, account = currentAccount(), tree = false): void {
+  // Without /T icacls labels only `p`: what is already inside keeps its own label (an explicit Low from the root's labelLow
+  // stays Low; measured on the Windows CI runner, w5703). /T labels every file and folder beneath it as well.
+  const args = [p, '/setintegritylevel', label, ...(tree ? ['/T'] : [])];
+  let r = icacls(args);
   if (r.code !== 0 && account && /access is denied/i.test(r.out)) {
-    if (icacls([p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`]).code === 0) r = icacls([p, '/setintegritylevel', label]);
+    if (icacls([p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`]).code === 0) r = icacls(args);
   }
   if (r.code !== 0) throw new Error(`icacls ${label} on ${p}: ${r.out.trim().slice(-300)}`);
+}
+
+/**
+ * Takes delete-child back from the account on folder `p` (this folder only, not inherited). A Low process that has it on a
+ * folder can move a Medium child aside (the measured way `projects` itself was renamed from inside the Low `claude`, w5703)
+ * and put its own in its place. Its own files still delete and rename through their own DELETE right.
+ */
+export function denyDeleteChildSync(p: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+  if (!account) throw new Error(`no account to deny delete-child on ${p}`);
+  const r = icacls([p, '/deny', `${account}:(DC)`]);
+  if (r.code !== 0) throw new Error(`icacls deny delete-child on ${p}: ${r.out.trim().slice(-300)}`);
+}
+
+/** Removes the deny entries denyDeleteChildSync added. */
+export function undenySync(p: string, icacls: IcaclsSync = realIcacls, account = currentAccount()): void {
+  if (!account) return;
+  const r = icacls([p, '/remove:d', account]);
+  if (r.code !== 0) throw new Error(`icacls remove deny on ${p}: ${r.out.trim().slice(-300)}`);
 }
 
 /** The conversation a claude argv runs and where its files are or go. Undefined when the argv names no safe id. */
@@ -106,9 +127,9 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
   const run = d.run ?? spawn;
   const icacls = d.icacls ?? realIcacls;
   const log = d.log ?? ((l: string) => console.warn(l));
-  const label = (p: string, l: string) => {
+  const label = (p: string, l: string, tree = false) => {
     try {
-      setLabelSync(p, l, icacls);
+      setLabelSync(p, l, icacls, undefined, tree);
       return true;
     } catch (e) {
       log(`transcript labels: ${(e as Error).message}`);
@@ -118,9 +139,17 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
   return (o: SpawnOptions): SpawnedProcess => {
     const own = ownFiles(o);
     if (own) {
-      fs.mkdirSync(path.dirname(own.file), { recursive: true });
+      const folder = path.dirname(own.file);
+      if (!fs.existsSync(folder)) {
+        fs.mkdirSync(folder, { recursive: true });
+        try {
+          denyDeleteChildSync(folder, icacls);
+        } catch (e) {
+          log(`transcript labels: ${(e as Error).message}`);
+        }
+      }
       fs.mkdirSync(own.dir, { recursive: true });
-      label(own.dir, DIR_LOW);
+      label(own.dir, DIR_LOW, true);
       if (own.exists) label(own.file, 'low');
       live.set(own.sid, (live.get(own.sid) ?? 0) + 1);
     }
@@ -134,7 +163,7 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
       if (n > 0) return void live.set(own.sid, n);
       live.delete(own.sid);
       if (fs.existsSync(own.file)) label(own.file, 'medium');
-      if (fs.existsSync(own.dir)) label(own.dir, DIR_MEDIUM);
+      if (fs.existsSync(own.dir)) label(own.dir, DIR_MEDIUM, true);
     };
     child.on('exit', release);
     child.on('error', release);
@@ -237,26 +266,39 @@ function wrap(child: ChildProcess, stdin: Writable, stdout: PassThrough): Spawne
  * machine/agentHost.ts), then labels `projects` Medium, which every project folder and every other transcript inherits.
  * Answers false, with the reason said, when the label could not be set. Never throws.
  */
-export async function lockTranscripts(projects: string, exec: Exec, say: (line: string) => void, o: { now?: number; recentMs?: number; icacls?: IcaclsSync } = {}): Promise<boolean> {
+export async function lockTranscripts(projects: string, exec: Exec, say: (line: string) => void, o: { now?: number; recentMs?: number; icacls?: IcaclsSync; account?: string } = {}): Promise<boolean> {
   try {
     fs.mkdirSync(projects, { recursive: true });
     const now = await exec('icacls', [projects], { timeoutMs: 60_000 });
     if (now.code === 0 && explicitMedium(now.stdout)) return true;
     const since = (o.now ?? Date.now()) - (o.recentMs ?? 3 * 24 * 3600_000);
     let pinned = 0;
-    for (const slug of fs.readdirSync(projects, { withFileTypes: true })) {
-      if (!slug.isDirectory()) continue;
-      const folder = path.join(projects, slug.name);
+    let locked = 0;
+    // Every entry gets its own label: what was there before carries an explicit Low (the root's labelLow /T) that a label
+    // on `projects` alone does not change (measured on the Windows CI runner). Recent conversations first, so none of
+    // their files is Medium for a moment while its claude writes.
+    const slugs = fs.readdirSync(projects, { withFileTypes: true }).filter((s) => s.isDirectory()).map((s) => path.join(projects, s.name));
+    const rest: [string, boolean][] = [];
+    for (const folder of slugs) {
       for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
         const p = path.join(folder, e.name);
         const isConversation = e.isFile() ? e.name.endsWith('.jsonl') : e.isDirectory() && e.name !== 'memory';
-        if (!isConversation || fs.statSync(p).mtimeMs < since) continue;
-        setLabelSync(p, e.isDirectory() ? DIR_LOW : 'low', o.icacls);
-        pinned++;
+        if (isConversation && fs.statSync(p).mtimeMs >= since) {
+          setLabelSync(p, e.isDirectory() ? DIR_LOW : 'low', o.icacls, undefined, e.isDirectory());
+          pinned++;
+        } else rest.push([p, e.isDirectory()]);
       }
     }
     setLabelSync(projects, DIR_MEDIUM, o.icacls);
-    say(`transcript labels: labelled ${projects} Medium (w5703); ${pinned} transcript${pinned === 1 ? '' : 's'} and folders written in the last ${Math.round((o.recentMs ?? 3 * 24 * 3600_000) / 3600_000)} h kept Low until their conversation's next process ends`);
+    for (const folder of slugs) setLabelSync(folder, DIR_MEDIUM, o.icacls);
+    for (const [p, dir] of rest) {
+      setLabelSync(p, dir ? DIR_MEDIUM : 'medium', o.icacls, undefined, dir);
+      locked++;
+    }
+    // Delete-child: from the Low `claude` a Low process could otherwise move `projects` aside (measured), and on the Medium
+    // folders a Low process may still hold it through the account's Full grant.
+    for (const p of [path.dirname(projects), projects, ...slugs]) denyDeleteChildSync(p, o.icacls, o.account ?? currentAccount());
+    say(`transcript labels: labelled ${projects} Medium (w5703), with ${slugs.length} project folder${slugs.length === 1 ? '' : 's'} and ${locked} transcript${locked === 1 ? '' : 's'} and folders in them; ${pinned} written in the last ${Math.round((o.recentMs ?? 3 * 24 * 3600_000) / 3600_000)} h kept Low until their conversation's next process ends`);
     return true;
   } catch (e) {
     say(`transcript labels: could not label ${projects} Medium: ${(e as Error).message}; workers can still write every transcript there (the seal still refuses an edited one at resume)`);
@@ -269,23 +311,15 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
  * claude can write its transcript wherever an earlier lock left a Medium label. Runs only where `projects` carries the
  * explicit Medium label lockTranscripts set. Never throws.
  */
-export async function unlockTranscripts(projects: string, exec: Exec, say: (line: string) => void, icacls?: IcaclsSync): Promise<void> {
+export async function unlockTranscripts(projects: string, exec: Exec, say: (line: string) => void, icacls?: IcaclsSync, account = currentAccount()): Promise<void> {
   try {
     if (!fs.existsSync(projects)) return;
     const now = await exec('icacls', [projects], { timeoutMs: 60_000 });
     if (now.code !== 0 || !explicitMedium(now.stdout)) return;
-    setLabelSync(projects, DIR_LOW, icacls);
-    let n = 0;
-    for (const slug of fs.readdirSync(projects, { withFileTypes: true })) {
-      if (!slug.isDirectory()) continue;
-      const folder = path.join(projects, slug.name);
-      setLabelSync(folder, DIR_LOW, icacls);
-      for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
-        setLabelSync(path.join(folder, e.name), e.isDirectory() ? DIR_LOW : 'low', icacls);
-        n++;
-      }
-    }
-    say(`transcript labels: off; labelled ${projects} and its ${n} transcripts and folders Low again (w5703)`);
+    const slugs = fs.readdirSync(projects, { withFileTypes: true }).filter((s) => s.isDirectory()).map((s) => path.join(projects, s.name));
+    for (const p of [path.dirname(projects), projects, ...slugs]) undenySync(p, icacls, account);
+    setLabelSync(projects, DIR_LOW, icacls, undefined, true);
+    say(`transcript labels: off; labelled ${projects} and everything in it Low again (w5703)`);
   } catch (e) {
     say(`transcript labels: could not label ${projects} Low again: ${(e as Error).message}`);
   }

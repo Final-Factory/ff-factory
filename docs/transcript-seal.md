@@ -67,17 +67,29 @@ spawner reports no pid, so its seals are never final: a line appended after it e
 ## Windows: transcript labels (w5703)
 
 `daemon.json` `workerTranscriptLabels: true`, with the Low fence on (`workerIntegrity: "low"`), labels
-`<CLAUDE_CONFIG_DIR>\projects` Medium (no-write-up). Every project folder, transcript and conversation folder in it inherits
-that label. A Low worker is then refused when it writes, plants, renames or deletes a transcript there, makes a new folder
-in a project folder, or moves `projects` itself aside (its parent `claude` is Low). Code: `server/transcriptLabels.ts`.
+`<CLAUDE_CONFIG_DIR>\projects` Medium (no-write-up), with each project folder and each transcript and conversation folder in
+them. A Low worker is then refused when it writes, plants, renames or deletes a transcript there, makes a new folder in a
+project folder, or moves `projects` itself aside. Code: `server/transcriptLabels.ts`.
+
+Two things the first CI run on the Windows runner showed (w5703):
+
+- `icacls <folder> /setintegritylevel (OI)(CI)medium` without `/T` labels only that folder. What is already inside keeps
+  its own label, and after the root's `labelLow` that is an explicit Low. So the lock labels every entry itself (folders
+  with `/T`).
+- A Low process renamed the Medium `projects` from inside the Low `claude`: it had delete-child on `claude` through the
+  account's Full grant. The lock adds a deny entry for delete-child (`/deny <account>:(DC)`, this folder only) on `claude`,
+  on `projects` and on each project folder; the agent host adds it to a project folder it makes. Files still delete and
+  rename through their own DELETE right, so Claude Code's own writes in `claude` (its settings file's replace) are not
+  affected.
 
 - **The daemon** (`lowTranscripts` in `machine/daemon.ts`, once per start): if `projects` has no explicit Medium label yet,
   it first labels Low every transcript and conversation folder written in the last 3 days. Agents outlive the daemon
-  (w605), so a conversation running at that moment keeps appending. It then labels `projects` `(OI)(CI)medium`. A Low copy
+  (w605), so a conversation running at that moment keeps appending. It then labels `projects`, each project folder and
+  everything else in them Medium, and denies delete-child as above. A Low copy
   of node tries to make a file in `projects` and in a project folder. The expected result is a refusal ("transcript labels:
   self-test at Low"). A write that went through is logged as a `WARNING` and changes nothing else (warn-only).
 - **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
-  claude starts, it makes the conversation's `<id>\` folder and labels it `(OI)(CI)low`. On a resume it also labels the
+  claude starts, it makes the conversation's `<id>\` folder and labels it and what is in it `(OI)(CI)low` (`/T`). On a resume it also labels the
   existing `<id>.jsonl` (found in any project folder) `low`. When the last process of that conversation exits, both go back
   to Medium. A label that fails is logged, and the process still starts.
 - **A new conversation's file**: Claude Code refuses `--session-id <id>` when `<id>.jsonl` already exists ("Session ID ...
@@ -89,8 +101,8 @@ in a project folder, or moves `projects` itself aside (its parent `claude` is Lo
   these all ran: a new conversation, a planted file (refused), a resume, a real /compact (the first bytes unchanged), and a
   resume after it. `memory\` was not made, and nothing failed because of it.
 - **The way back** needs nobody at the machine: set `workerTranscriptLabels` to false (or remove it) and restart the
-  daemon. At start, if `projects` still has the explicit Medium label, the daemon labels it `(OI)(CI)low` along with every
-  project folder and every file and folder in them ("transcript labels: off; labelled ... Low again").
+  daemon. At start, if `projects` still has the explicit Medium label, the daemon removes the deny entries and labels it
+  and everything in it `(OI)(CI)low` with `/T` ("transcript labels: off; labelled ... Low again").
 - **A host that dies before its claude** leaves that conversation Low until its next process ends.
 - **Tests**: `server/transcriptLabels.test.ts`. Its real-label leg runs on the Windows CI runner (`.github/windows-tests.txt`)
   and is skipped where the test process itself runs at Low, since a fenced worker cannot set a Medium label.
