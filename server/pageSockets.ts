@@ -7,6 +7,9 @@ import type http from 'node:http';
 import { clientAddress, tailnetAddress } from './remoteChat.ts';
 
 /** Who ended a socket: the page (a close frame), the server (its ping went unanswered), or nobody (1006: the network). */
+/** The most a page may send in one message (w5527: ws's default is 100 MiB). The page sends none on /ws; ws closes the socket with 1009 above this, and the page reconnects with its backoff. */
+export const PAGE_MAX_PAYLOAD = 1024 * 1024;
+
 export type ClosedBy = 'page' | 'ping-timeout' | 'network';
 export type Via = 'funnel' | 'tailnet' | 'local' | 'other';
 
