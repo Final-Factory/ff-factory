@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
+import { FF_LANDLOCK, makeDotnetShm, writeLockArgs } from '../machine/writeLock.ts';
 
 // w5333: the Linux write lock's rules (machine/writeLock.ts) and, where the kernel has Landlock, that the launcher refuses.
 
@@ -18,7 +18,7 @@ test("a locked worker writes every folder of the root but the daemon, secrets an
     '--sock', '/run/user/1000/cc-socks',
     '--deny-unix', '/run/user/1000/bus', '--deny-unix', '/run/user/1000/systemd',
     '--rw', '/home/u/.config/unity3d', '--rw', '/home/u/.local/share/unity3d',
-    '--rw', '/tmp',
+    '--create', '/tmp', '--rw', '/tmp/.dotnet',
   ]);
 });
 
@@ -59,6 +59,41 @@ test('ff-landlock.py refuses writes outside the granted folders, in the locked c
     assert.deepEqual(r.stdout.trim().split('\n'), [
       'tmp ok', 'outside refused', 'daemon refused', 'secrets refused', 'claude ok', 'claude-medium refused', 'claude-medium-rename refused', 'uv-medium refused', 'uv-workers ok', 'newtop refused', 'rename refused', 'events ok', 'newfile-beside-events refused',
     ]);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+});
+
+// w5561: Unity binds its sockets and makes its shader compiler's lock in /tmp whatever TMPDIR says, so /tmp is
+// create-only: a worker makes files and sockets there and removes them, and never changes a file it did not make.
+test("ff-landlock.py's create-only /tmp: new files, locks and sockets, never a write, a folder or a link; .dotnet writable", { skip: !landlock && 'needs Linux with Landlock' }, () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w5561-'));
+  try {
+    const tmp = path.join(base, 'systmp');
+    fs.mkdirSync(path.join(base, 'root'), { recursive: true });
+    fs.mkdirSync(tmp);
+    fs.writeFileSync(path.join(tmp, 'owners'), 'mine\n');
+    makeDotnetShm(path.join(tmp, '.dotnet'));
+    assert.equal(fs.statSync(path.join(tmp, '.dotnet/shm')).mode & 0o7777, 0o1777);
+    // Unity's two kinds of /tmp file: its shader compiler's lock (O_RDONLY|O_CREAT, flock) and its IPC sockets
+    fs.writeFileSync(path.join(base, 'lock.py'), "import os,sys,fcntl\nf=os.open(sys.argv[1],os.O_RDONLY|os.O_CREAT,0o600)\nfcntl.flock(f,fcntl.LOCK_EX)\nos.unlink(sys.argv[1])\n");
+    fs.writeFileSync(path.join(base, 'sock.py'), "import os,sys,socket\ns=socket.socket(socket.AF_UNIX)\ns.bind(sys.argv[1])\ns.listen()\nos.unlink(sys.argv[1])\n");
+    const script = [
+      'try() { if eval "$2" 2>/dev/null; then echo "$1 ok"; else echo "$1 refused"; fi; }',
+      `try write "echo x > ${tmp}/owners"`,
+      `try append "echo x >> ${tmp}/owners"`,
+      `try truncate "truncate -s 0 ${tmp}/owners"`,
+      `try mkdir "mkdir ${tmp}/d"`,
+      `try symlink "ln -s ${tmp}/owners ${tmp}/l"`,
+      `try lock "python3 ${base}/lock.py ${tmp}/x.lock"`,
+      `try socket "python3 ${base}/sock.py ${tmp}/x.sock"`,
+      `try dotnet "mkdir ${tmp}/.dotnet/shm/session1 && echo x > ${tmp}/.dotnet/shm/session1/f && rm -r ${tmp}/.dotnet/shm/session1"`,
+    ].join('\n');
+    const args = writeLockArgs({ root: path.join(base, 'root'), home: path.join(base, 'home'), tmp });
+    const r = spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'bash', '-c', script], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(r.stdout.trim().split('\n'), ['write refused', 'append refused', 'truncate refused', 'mkdir refused', 'symlink refused', 'lock ok', 'socket ok', 'dotnet ok']);
+    assert.equal(fs.readFileSync(path.join(tmp, 'owners'), 'utf8'), 'mine\n', "the person's file is unchanged");
   } finally {
     fs.rmSync(base, { recursive: true, force: true });
   }
