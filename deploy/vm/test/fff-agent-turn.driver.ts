@@ -89,6 +89,7 @@ const ci = createSdkMcpServer({ name: 'ci', version: '1.0.0', tools: [tool('ping
 const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: process.env.HOME ?? '/tmp', CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-ci-stand-in-not-a-token', ANTHROPIC_BASE_URL: url, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', ...(process.env.CLAUDE_CONFIG_DIR ? { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR } : {}) };
 const run = async (prompt: string, o: { resume?: string; interruptAfterMs?: number; ms?: number } = {}) => {
   const out: SDKMessage[] = [];
+  let said = '';
   const q = query({
     prompt,
     options: {
@@ -100,7 +101,12 @@ const run = async (prompt: string, o: { resume?: string; interruptAfterMs?: numb
       settingSources: [],
       maxTurns: 6,
       canUseTool: async (name, input) => (asked.push(name), { behavior: 'allow', updatedInput: input }),
-      spawnClaudeCodeProcess: agentProcessOptions(process.env).spawnClaudeCodeProcess,
+      spawnClaudeCodeProcess: (so) => {
+        // What Claude Code wrote, kept for a turn that throws: its own error may be on stdout, not in the journal.
+        const p = agentProcessOptions(process.env).spawnClaudeCodeProcess!(so);
+        p.stdout.on('data', (d: Buffer) => (said = (said + d.toString()).slice(-4000)));
+        return p;
+      },
       stderr: (d) => process.stderr.write(d),
     },
   });
@@ -112,6 +118,7 @@ const run = async (prompt: string, o: { resume?: string; interruptAfterMs?: numb
     for await (const m of q) out.push(m);
   } catch (e) {
     threw = String((e as Error)?.message ?? e).split('\n')[0].slice(0, 300);
+    for (const l of said.split('\n').filter(Boolean).slice(-15)) console.log(`FAIL: its stdout: ${l.slice(0, 400)}`);
   }
   clearTimeout(guard);
   const result = out.find((m) => m.type === 'result') as (SDKMessage & { subtype: string; result?: string; session_id: string }) | undefined;

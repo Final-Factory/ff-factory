@@ -318,7 +318,12 @@ agent_running() { [ "$(instances)" -ge 1 ]; }
 no_agent() { [ "$(instances)" = 0 ]; }
 turn() { g "$as_portal node $drv turn $cimem /srv/fff/base 2>&1" | grep -E '^(mode|ok|FAIL|alert|session|agent account)' || true; }
 # What Claude Code said as fff-agent: its stderr goes to the journal, not to the portal (CI's token is a stand-in).
-agent_journal() { echo "---- fff-agent's journal (last 60 lines)"; g "sudo journalctl -t fff-agent -u 'fff-agent@*' --no-pager -n 60 -o cat" || true; }
+agent_journal() {
+  echo "---- fff-agent's journal (last 60 lines)"
+  g "sudo journalctl -t fff-agent -u 'fff-agent@*' --no-pager -n 60 -o cat" || true
+  echo "---- Claude Code's folder, on disk and as fff-agent's view"
+  g "sudo ls -la /srv/fff/home/.claude /run/fff-agent-views/claude /srv/fff-agent/home" || true
+}
 turn_ok() { # OUT WHAT
   [ "$(printf '%s\n' "$1" | grep -c '^ok: ')" = 3 ] || { agent_journal; fail "$2: not a turn, a resume and an interrupt: $1"; }
   if printf '%s\n' "$1" | matches -E '^(FAIL|alert):'; then agent_journal; fail "$2: $1"; fi
