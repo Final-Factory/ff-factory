@@ -27,6 +27,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, writeLockArgs } from './writeLock.ts';
+import { TRANSCRIPTS, linkTranscripts } from './transcriptLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -223,6 +224,12 @@ export interface DaemonConfig {
   writeLock?: boolean;
   /** More folders a locked worker may write, each one a measured need (docs/worker-root.md lists them). */
   writeLockExtra?: string[];
+  /**
+   * w5702, with writeLock: "on" lets each locked claude write only its own conversation's transcript (machine/transcriptLock.ts,
+   * docs/transcript-seal.md): `<root>/claude/projects` becomes a link to `<root>/transcripts`, which the lock keeps shut.
+   * Off when unset; set remotely by `ops_worker machine_update transcript_lock`, and `worker_fence off` lifts it with the lock.
+   */
+  transcriptLock?: 'on' | 'off';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -3023,7 +3030,7 @@ export class Daemon {
       const made = makeOpenRootChildren(this.cfg.root, lockArgs, appDirOfConfig(this.cfg), [this.sandboxRoot()]);
       if (made.length) log(`write lock: made the open root folders ${made.map((m) => path.basename(m)).join(', ')} before a locked worker starts (w5676)`);
     }
-    const lock = lockArgs ? { writeLock: lockArgs } : {};
+    const lock = lockArgs ? { writeLock: lockArgs, ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
     const fence = spec.sandbox ? this.workerFence : undefined;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
@@ -3295,7 +3302,7 @@ export class Daemon {
     }
   }
 
-  private lockMemo?: { args?: string[]; why?: string };
+  private lockMemo?: { args?: string[]; why?: string; transcripts?: string };
   /**
    * The Linux write lock's ff-landlock.py arguments for sandbox agents, or undefined when daemon.json leaves it off.
    * Probed once like the fence above (w5377): a kernel without Landlock or a missing python3 fails it, with why in
@@ -3305,9 +3312,11 @@ export class Daemon {
     if (!this.lockMemo) {
       let args: string[] | undefined;
       let why: string | undefined;
+      let transcripts: string | undefined;
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()] });
+          transcripts = this.cfg.transcriptLock === 'on' ? this.lockTranscripts(this.cfg.root) : undefined;
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts });
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
           if (probe.ok) {
             log(`write lock: landlock is on for sandbox agents; root folders kept read-only: ${this.closedRootChildren(args.flatMap((x, i) => (args![i - 1] === '--rw' && path.dirname(x) === path.resolve(this.cfg.root!) ? [path.basename(x)] : []))).join(', ') || 'none'}`);
@@ -3324,9 +3333,31 @@ export class Daemon {
         args = undefined;
       }
       if (why) log(`write lock: ${why}; sandbox workers are held (w5555)`);
-      this.lockMemo = { args, ...(why ? { why } : {}) };
+      this.lockMemo = { args, ...(why ? { why } : {}), ...(args && transcripts ? { transcripts } : {}) };
     }
     return this.lockMemo.args;
+  }
+
+  /**
+   * w5702: moves the agents' transcripts out of their Claude home (machine/transcriptLock.ts linkTranscripts) and answers
+   * the transcripts folder, or undefined (logged) when the Claude home is not the root's or the move fails: the lock then
+   * opens the transcripts as before, never shuts a worker out of its own.
+   */
+  private lockTranscripts(root: string): string | undefined {
+    const home = process.env.CLAUDE_CONFIG_DIR;
+    const r = path.resolve(root);
+    if (!home || path.resolve(path.dirname(home)) !== r) {
+      log(`transcript lock: the agents' Claude home (${home ?? 'unset'}) is not in the root ${r}; transcripts stay open to workers`);
+      return undefined;
+    }
+    try {
+      const did = linkTranscripts(r, home);
+      log(`transcript lock: on, each locked claude writes only its own conversation's transcript${did ? `; ${did}` : ''}`);
+      return path.join(r, TRANSCRIPTS);
+    } catch (e) {
+      log(`transcript lock: could not move the transcripts out of ${home} (${(e as Error).message}); they stay open to workers`);
+      return undefined;
+    }
   }
 
   /**

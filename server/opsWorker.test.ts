@@ -1002,6 +1002,16 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, 'warn'), ['-WorkerCaps warn']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, 'enforce'), ['--worker-caps enforce']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined), [], 'unset: no flag, the install keeps its mode');
+  // w5702: the transcript lock's switch: on or off and nothing else, Linux only (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', transcriptLock: 'maybe' as never }), /transcript_lock: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', transcriptLock: '' as never }), /transcript_lock: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', transcriptLock: 'on' }), /transcript_lock: Linux only \(the macOS fence already does this; docs\/transcript-seal\.md\)/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', transcriptLock: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const tlLin = store.readTranscript(OPS_ID, 160).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(tlLin.text.includes(`--worker-fence on --transcript-lock on'`), tlLin.text);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off'), ['--worker-caps warn', '--transcript-lock off']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its lock');
   ops.close();
 });
 
@@ -1022,7 +1032,7 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
     file: path.join(dir, 'ops-worker.json'),
     workProblem: () => undefined,
     // No ssh target it could use: the link is the way in.
-    machine: (id) => (id === 'coosego' ? { id, root: 'D:\\ffw', platform: 'win32', target: 'not an ssh target' } : undefined),
+    machine: (id) => (id === 'coosego' ? { id, root: 'D:\\ffw', platform: 'win32', target: 'not an ssh target' } : id === 'penguin' ? { id, root: '/home/p/ffw', platform: 'linux', target: 'not an ssh target' } : undefined),
     ownRequestProblem: () => undefined,
     linkUpdate: (id, flags) => {
       asked.push({ id, flags });
@@ -1072,6 +1082,13 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'on' as never }), /worker_caps: off, warn or enforce/);
   assert.equal(asked.length, beforeCaps, 'a refused value asks nothing');
   assert.equal(recorded.length, 0, 'the caps switch is no limit: the record is left alone');
+  // w5702: the transcript lock alone is a valid update over the link; a value off the list, or a machine that is not Linux, never goes.
+  ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'off' });
+  assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { transcriptLock: 'off' } });
+  const beforeTl = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'warn' as never }), /transcript_lock: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', transcriptLock: 'on' }), /transcript_lock: Linux only/);
+  assert.equal(asked.length, beforeTl, 'a refused value asks nothing');
   await new Promise((r) => setTimeout(r, 50));
   ops.close();
 

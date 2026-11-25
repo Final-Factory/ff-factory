@@ -7081,8 +7081,9 @@ ${w.repo ?? ''}
             words: OWN_WORDS,
             worker_fence: z.enum(['on', 'off']).optional().describe("action machine_update: turn this machine's worker write fence on or off (w5377): Landlock on Linux, Seatbelt on macOS, Low integrity on Windows; unset leaves it as it is. Off is the emergency switch when a fence breaks work."),
             worker_caps: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: set this machine's per-worker memory, process and temp-disk caps (w5554, docs/worker-caps.md): warn (the default: measures and reports, never limits or kills), enforce (the kernel limit and the tool kill) or off (nothing). Unset leaves it as it is. Off is the recovery switch when a cap breaks work; it holds for each worker started after the update."),
+            transcript_lock: z.enum(['on', 'off']).optional().describe("action machine_update, a Linux machine with the worker fence on: let each locked worker write only its own conversation's transcript (w5702, docs/transcript-seal.md): on moves <root>/claude/projects to <root>/transcripts behind a link and gives each claude rules for its own conversation; off opens the transcripts folder to workers again. Unset leaves it as it is. Off is the recovery switch, and worker_fence off lifts it with the whole lock."),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7090,7 +7091,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);

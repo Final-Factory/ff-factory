@@ -160,12 +160,14 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w5554 (no bump): `LinkUpdateFlags.workerCaps` (off, warn or enforce), the worker caps' mode; an older daemon ignores the
 // field and keeps its own (it has no caps at all before w5554), and an older portal never sends it. The signal's arg gained
 // the optional `warn` and `kernel` flags: an older portal reads neither.
+// w5702 (no bump): `LinkUpdateFlags.transcriptLock` (on or off), the Linux transcript lock's switch; an older daemon ignores
+// the field and an older portal never sends it. The same fingerprint also covers LaunchSpec.writeLockTranscripts (w5702, optional).
 // w5551 (no bump): `steamUpload` in the hello, `steam_upload` and its answer `steam_upload_state`; the portal sends a job only
 // to a daemon whose hello offered it, so an older daemon never gets one (the tool says that computer cannot upload yet), and
 // an older portal never sends one and drops the hello field.
 // w5640 (no bump): `steamInstall` in the hello; `steam_upload` takes action `install` and `account`. The portal sends install
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
-const DECIDED = { protocol: 9, fingerprint: '9c1bba0eef275f8b' };
+const DECIDED = { protocol: 9, fingerprint: 'b98e13cc58922cf7' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

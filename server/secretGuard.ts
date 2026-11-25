@@ -229,6 +229,16 @@ export function secretReadGuard(rules: SecretRules, cwd: string, platform: NodeJ
   };
 }
 
+/** w5702: the folder a Claude home's `projects` links to (a locked Linux worker's `<root>/transcripts`), so a read there is one inside the home. */
+function linkedProjects(home: string): string[] {
+  try {
+    const p = path.join(home, 'projects');
+    return fs.lstatSync(p).isSymbolicLink() ? [fs.realpathSync(p)] : [];
+  } catch {
+    return [];
+  }
+}
+
 /** Where an agent's own Claude, ssh and gh credentials are, as rules ("~" is expanded where the agent runs). */
 export function homeSecrets(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string[] {
   return [
@@ -237,7 +247,7 @@ export function homeSecrets(env: NodeJS.ProcessEnv = process.env, platform: Node
     '~/.claude.json*',
     '~/.config/gh',
     '~/.git-credentials',
-    ...(env.CLAUDE_CONFIG_DIR ? [env.CLAUDE_CONFIG_DIR] : []),
+    ...(env.CLAUDE_CONFIG_DIR ? [env.CLAUDE_CONFIG_DIR, ...linkedProjects(env.CLAUDE_CONFIG_DIR)] : []),
     ...(platform === 'win32' && env.APPDATA ? [path.win32.join(env.APPDATA, 'GitHub CLI')] : []),
   ];
 }
