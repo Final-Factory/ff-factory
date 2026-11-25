@@ -63,20 +63,27 @@ before redeploying by hand.
   address (`clientAddress`, `server/clientAddress.ts`: the last X-Forwarded-For entry, believed only from a proxy on this
   machine such as Tailscale Serve; any other peer by its own socket address) must be loopback, `100.64.0.0/10` or
   `fd7a:115c:a1e0::/48`. The owner's setting `machineLinkTailnet` picks what happens, read live (no restart):
-  - `warn` (the default while unset): every connection is let in as before, and one that would be refused is logged
-    `machine link: WOULD REFUSE <route> from <address> ... : <why>` (once per address, route and reason an hour);
-  - `enforce`: it is answered 403 and closed, before its token is read, and logged `machine link: refused ...`;
+  - `enforce` (the default while unset, since PR 2 of w5575): it is answered 403 and closed, before its token is read,
+    and logged `machine link: refused ...`;
+  - `warn`: every connection is let in as before, and one that would be refused is logged
+    `machine link: WOULD REFUSE <route> from <address> ... : <why>` (once per address, route and reason an hour). An
+    unknown value (a typo in a hand-edited `config.json`) counts as `warn`, so it never refuses;
   - `off`: no check and no log.
 
   Each daemon link that opens is logged `machine <id>: link from <address>`, so the portal's journal lists the address
-  every machine connects from: `portal_logs` source `portal`, grep `link from` and grep `WOULD REFUSE`. Enforce is turned
-  on only once those show every machine on a tailnet address and no would-be refusal of a daemon.
+  every machine connects from: `portal_logs` source `portal`, grep `link from` and grep `WOULD REFUSE`. Enforce was turned
+  on only once those showed every machine on a tailnet address and no would-be refusal of a daemon (the warn-only
+  deploy of 2026-11-25: LothDesktop `100.74.97.12`, BEAST `100.86.157.116`, biscuit `100.98.100.42`, m5 `100.80.111.95`,
+  then m3 and LothLaptop; FFBox's connector uses `/provider`, which the check leaves out). Enforce also needs
+  `trustProxy` on (its default): with it off, a daemon that comes in through Tailscale Serve is a loopback
+  connection carrying a header the portal may not believe (`untrustedProxied`, `server/clientAddress.ts`), and is
+  refused (the w5595 review measured this).
 
   **Recovery, with no person at any machine:** if enforce cuts a daemon off (its link drops and `machine link: refused`
   lines carry its address), Ben's or Lothsahn's orchestrator calls `set_app_config` with `machineLinkTailnet` `"off"`
   (or `"warn"`). The portal VM runs the orchestrators, so this needs no daemon; it applies at once, and a refused daemon
-  gets in on its next redial (a daemon redials forever after a refusal, at most 30 s apart: `reconnectDelayMs`,
-  `machine/daemon.ts`). Without an orchestrator: the ops worker (on the portal VM) or anyone with
+  gets in on its next redial (a daemon redials forever after a refusal, at most about 37.5 s apart: 30 s with up to 25% jitter,
+  `reconnectDelayMs`, `machine/daemon.ts`). Without an orchestrator: the ops worker (on the portal VM) or anyone with
   the VM's shell sets `"machineLinkTailnet": "off"` in the portal's `config.json` and runs `fffctl restart`; or a revert
   of the enforcing commit merged on GitHub deploys by itself.
 - **Sessions.** The portal creates the session record and tells the daemon what to launch (a

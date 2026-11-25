@@ -587,7 +587,7 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     case 'machineLinkTailnet': {
       if (value === undefined || value === null) return undefined;
       if (value === 'off' || value === 'warn' || value === 'enforce') return value;
-      throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back "warn"');
+      throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back the default, "enforce"');
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;

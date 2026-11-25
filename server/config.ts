@@ -310,8 +310,8 @@ export interface Config {
    */
   ownerDeviceApproval?: 'off' | 'advisory';
   /**
-   * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "warn" (unset) logs what would be
-   * refused and lets it in, "enforce" refuses it, "off" skips the check (the recovery switch, docs/machines.md).
+   * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "enforce" (unset) refuses it,
+   * "warn" logs what would be refused and lets it in, "off" skips the check (the recovery switch, docs/machines.md).
    */
   machineLinkTailnet?: 'off' | 'warn' | 'enforce';
   /**
