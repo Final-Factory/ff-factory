@@ -509,7 +509,7 @@ const liveHub = new LiveHub({
   changed: () => pushLive(),
   // The switch is in AppState.config (w1417): a page shows the Live view button and route only while it is on.
   switched: () => {
-    for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+    for (const [c, user] of openPages()) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   },
   viewerOpened: (info, who) => liveIdle.viewerOpened(info, who),
   restageFailed: (info, detail) => liveIdle.restageFailed(info, detail),
@@ -668,10 +668,14 @@ agents.onReport = (report) => broadcast({ type: 'report', report });
 // w4613: and the packed players open pair runs name, kept while the run waits for room (w4622).
 attachments.keep = () => [...reports.attachmentIds(), ...pairPlayerIds(store.work.values(), isOpen)];
 
-/** The signed-in person making this request, as work records them (a route only runs for a signed-in user). */
+/**
+ * The signed-in person making this request, as work records them (a route only runs for a signed-in user). A session
+ * whose login is gone is refused, never read as the owner's (w5533; auth.user already ends such a session).
+ */
 function requesterOf(req: http.IncomingMessage) {
   const u = auth.userInfo(auth.user(req));
-  return u ? asRequester(u) : identity.owner();
+  if (!u) throw new HttpError(401, 'login required');
+  return asRequester(u);
 }
 
 /**
@@ -1122,8 +1126,9 @@ function poolPeople(): PoolPerson[] {
 
 /** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
 function appState(user: string | undefined): AppState {
-  const u = auth.userInfo(user);
-  const me = u ?? { ...identity.owner(), role: 'owner' as const };
+  // w5533: only a signed-in login gets a state; a page whose login is gone is closed before it gets here (openPages).
+  const me = auth.userInfo(user);
+  if (!me) throw new HttpError(401, 'login required');
   const mine = agents.orchestrators.personalFor(me);
   return {
     app: appNow(),
@@ -1975,7 +1980,7 @@ route('POST', '/api/orchestrator/reset', async (req) => {
   // A fresh conversation keeps its standing timers (server/timers.ts): they are the person's jobs, not the transcript's.
   if (was) agents.timers.rehome(was, id);
   // Each page has its own home chat, so each gets its own state.
-  for (const [c, user] of clients) if (c.readyState === c.OPEN) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
+  for (const [c, user] of openPages()) c.send(JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent));
   return { id };
 });
 
@@ -2509,6 +2514,14 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
+/** The open pages, each with its login; a page whose login no longer exists is closed instead (w5533). */
+function* openPages(): Generator<[WebSocket, string]> {
+  for (const [c, user] of clients) {
+    if (c.readyState !== c.OPEN) continue;
+    if (auth.userInfo(user)) yield [c, user];
+    else c.close(4401, 'login gone');
+  }
+}
 /** One log line per page socket opening and closing, and each person's drops for /api/health (w4723, server/pageSockets.ts). */
 const pageSockets = new PageSockets<WebSocket>();
 /** Pages watching a live view (w1398): binary JPEG frames, never compressed (they do not compress). */
@@ -2519,7 +2532,8 @@ function pushLive() {
   for (const [c, user] of clients) {
     if (c.readyState !== c.OPEN) continue;
     const u = auth.userInfo(user);
-    c.send(JSON.stringify({ type: 'live', views: liveHub.viewsFor(u?.userId ?? identity.owner().userId) } satisfies ServerEvent));
+    if (!u) continue;
+    c.send(JSON.stringify({ type: 'live', views: liveHub.viewsFor(u.userId) } satisfies ServerEvent));
   }
 }
 
