@@ -3765,9 +3765,11 @@ export class Daemon {
     const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
     const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
     if (mode === 'on') {
-      const m = await ghLoginToFile(realGhRun);
+      // The note is written before gh's login call (w5849's review of #1281), so a daemon that dies mid-move still moves it
+      // back in warn or off; a note left by a move that did not happen is harmless (the way back finds the login in the keyring).
+      const writeNote = () => fs.writeFileSync(note, JSON.stringify({ movedAt: new Date().toISOString(), why: 'w5749: the read fence moved the gh login out of Credential Manager; off or warn moves it back' }));
+      const m = await ghLoginToFile(realGhRun, writeNote);
       tell(m.line);
-      if (m.moved) fs.writeFileSync(note, JSON.stringify({ movedAt: new Date().toISOString(), why: 'w5749: the read fence moved the gh login out of Credential Manager; off or warn moves it back' }));
       if (m.ok && m.deleteFrom?.length) {
         const d = await deleteGenericCreds(m.deleteFrom, exec);
         tell(`Credential Manager: ${d.deleted.length ? `deleted ${d.deleted.join(', ')}` : 'no gh entry left'}${d.failed.length ? `; could NOT delete ${d.failed.join(', ')}, which a Low worker can still read` : ''}`);

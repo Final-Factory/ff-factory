@@ -336,12 +336,15 @@ test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and wh
 });
 
 /** A fake gh for the w5749 move: keeps where the login is and its token, and answers status, token and login as gh does. */
-function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: string[]; loginFails?: boolean; loginLies?: boolean }) {
+function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: string[]; loginFails?: boolean; loginLies?: boolean; status?: 'unread' | 'failed' }) {
   const st = { storage: start.storage, token: start.token ?? 'gho_abcdefghijklmnopqrstuvwxyz0123', users: start.users ?? ['lothsahn'] };
   const calls: string[][] = [];
   const gh: GhRun = async (args, o = {}) => {
     calls.push(args);
     if (args[1] === 'status') {
+      // w5849: gh that cannot answer (unread), or cannot check the token (failed: an invalid token, a network outage).
+      if (start.status === 'unread') return { code: 1, stdout: '', stderr: 'error connecting to api.github.com' };
+      if (start.status === 'failed' && st.storage) return { code: 1, stdout: '', stderr: `github.com\n  X Failed to log in to github.com account ${st.users[0]} (${st.storage === 'keyring' ? 'keyring' : 'C:\\U\\hosts.yml'})` };
       if (!st.storage) return { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.' };
       const where = st.storage === 'keyring' ? 'keyring' : 'C:\\Users\\o\\AppData\\Roaming\\GitHub CLI\\hosts.yml';
       return { code: 0, stdout: `github.com\n${st.users.map((u) => `  ✓ Logged in to github.com account ${u} (${where})\n  - Token: gho_****`).join('\n')}`, stderr: '' };
@@ -403,4 +406,30 @@ test('w5749: ghLoginAccounts and ghKeyringTargets', () => {
   assert.deepEqual(ghLoginAccounts('  ✓ Logged in to github.com account lothsahn (keyring)\n  ✓ Logged in to github.com account bryding (keyring)'), ['lothsahn', 'bryding']);
   assert.deepEqual(ghKeyringTargets('x'), ['gh:github.com:', 'gh:github.com:x']);
   assert.equal(OWNER_GH_MOVED_NOTE, 'read-fence-gh-moved.json');
+});
+
+test('w5849 review of #1281: an unread gh auth status is never "no login": the way back keeps its note, the move moves nothing', async () => {
+  const back = await ghLoginToKeyring(fakeGh({ storage: 'file', status: 'unread' }).gh);
+  assert.deepEqual([back.ok, back.moved], [false, false], 'ok false: the daemon keeps the note and tries again next start');
+  assert.match(back.line, /could not be read/);
+  const on = await ghLoginToFile(fakeGh({ storage: 'keyring', status: 'unread' }).gh);
+  assert.deepEqual([on.ok, on.moved, on.deleteFrom], [false, false, undefined]);
+  assert.doesNotMatch(on.line, /no gh login/);
+  // gh says "Failed to log in" (it could not check the token): the login is still found where it is and moved back.
+  const f = fakeGh({ storage: 'file', status: 'failed' });
+  const b = await ghLoginToKeyring(f.gh);
+  assert.deepEqual([b.ok, b.moved, f.st.storage], [true, true, 'keyring']);
+  assert.deepEqual(ghLoginAccounts('  X Failed to log in to github.com account lothsahn (keyring)'), ['lothsahn']);
+});
+
+test('w5849 review of #1281: the caller is told before the login call, so its note is down before anything moves', async () => {
+  const f = fakeGh({ storage: 'keyring' });
+  let at = -1;
+  await ghLoginToFile(f.gh, () => { at = f.calls.length; });
+  assert.ok(at >= 0, 'beforeMove was called');
+  assert.ok(!f.calls.slice(0, at).some((a) => a[1] === 'login'), 'no login call before the note');
+  assert.equal(f.calls[at]?.[1], 'login', 'the login call comes right after it');
+  let told = false;
+  await ghLoginToFile(fakeGh({ storage: 'file' }).gh, () => { told = true; });
+  assert.equal(told, false, 'a login already in hosts.yml (no move) writes no note');
 });
