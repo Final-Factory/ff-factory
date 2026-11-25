@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { deniesDeleteChild, explicitMedium, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
+import { deniesDeleteChild, explicitMedium, isLink, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { Exec } from '../machine/lowIntegrity.ts';
 
@@ -443,11 +443,18 @@ console.log(out.join('; '))`,
   p.stdin.write(INIT + USER);
   const done = Date.now() + 30_000;
   while (!out.includes('"result"') && Date.now() < done) await new Promise((r) => setTimeout(r, 50));
+  // The Low CLI's own try: the Windows runner refused it (EPERM, measured: a Low process may point a junction only at a
+  // folder it can write). The labels must not lean on that, so where it was refused a link is put there anyway, as any other
+  // route would (a symlink, a junction made while its target was Low), before the exit relabel walks the folder.
+  const link = path.join(projects, projectSlug(cwd), sid2, 'link');
+  const planted = /"junction":"(\w+)"/.exec(out)?.[1];
+  t.diagnostic(`a junction from the Low CLI to a Medium folder: ${planted}`);
+  assert.match(planted ?? '', /^(made|EPERM|EACCES)$/, out);
+  if (planted !== 'made') fs.symlinkSync(target, link, 'junction');
   p.stdin.end();
   assert.equal(await exited, 0, out);
   assert.match(out, /"other":"refused ok"/);
-  assert.match(out, /"junction":"made"/, 'a Low process can make a junction in its own Low folder');
-  assert.ok(fs.lstatSync(path.join(projects, projectSlug(cwd), sid2, 'link')).isSymbolicLink());
+  assert.ok(isLink(link), 'the junction is still there at the relabels');
   targetStaysMedium('after the spawner labelled the conversation Medium at its exit');
   const file2 = path.join(projects, projectSlug(cwd), `${sid2}.jsonl`);
   assert.equal(fs.readFileSync(file2, 'utf8'), USER);

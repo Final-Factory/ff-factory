@@ -142,8 +142,10 @@ Two things the first CI run on the Windows runner showed (w5703):
   plain folder on LothDesktop, measured), counts it and logs it; `setLabelSync` refuses one. One `<dir>\*` call labels a
   folder's entries when none is a link, else each entry alone. No link can be added while it runs: to Medium it labels a
   folder before reading it, to Low after (contents first, the folder last) and leaves a folder already Low as it is, so
-  every folder it reads is Medium, where no Low process can make an entry. The Windows test makes a junction from the Low
-  stand-in CLI to a Medium folder and checks that folder stays Medium and refuses a Low write after the exit relabel and
+  every folder it reads is Medium, where no Low process can make an entry. Windows itself refused the Low stand-in CLI a
+  junction to a Medium folder on the CI runner (EPERM, measured: a Low process may point a junction only at a folder it can
+  write), but symlinks and other routes remain, so the labels do not lean on it. The Windows test puts a junction there
+  anyway (from the Low CLI where Windows lets it, else from the test) to a Medium folder and checks that folder stays Medium and refuses a Low write after the exit relabel and
   after the way back.
 - **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
   claude starts, it makes the conversation's `<id>\` folder and labels it and what is in it Low (walked). On a resume it also labels the
