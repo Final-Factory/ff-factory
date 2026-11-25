@@ -152,6 +152,13 @@ export interface DaemonConfig {
    */
   workerFence?: 'seatbelt';
   /**
+   * w5659: with the Seatbelt fence on, also refuse workers' preference writes through cfprefsd (`defaults write`,
+   * EditorPrefs, PlayerPrefs), which otherwise land in ~/Library/Preferences outside the root (server/workerFence.ts
+   * PREF_RULES). Off when unset: macOS records no report of a sandbox rule, so there is no warn-only form; true enforces it
+   * from each agent's next start (docs/worker-fence.md "Known limits").
+   */
+  workerPrefFence?: boolean;
+  /**
    * The Windows worker fence (w5377, docs/worker-root.md 4.1): "low" runs each sandbox agent's claude, and all it starts,
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
    */
@@ -3055,7 +3062,7 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       let why: string | undefined;
       try {
-        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()] });
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true });
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
