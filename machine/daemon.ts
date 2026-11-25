@@ -26,7 +26,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, writeLockArgs } from './writeLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
-import { SelfUpdater } from './selfUpdate.ts';
+import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
@@ -222,6 +222,12 @@ export interface DaemonConfig {
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
   configFile?: string;
   /**
+   * w5516: where a commit sent over the link must be published (machine/selfUpdate.ts checkPublished); GitHub's
+   * ff-factory main when absent. Only the link end-to-end test sets it (its own repository). Read from daemon.json at
+   * each update.
+   */
+  updateOrigin?: { url: string; branch: string };
+  /**
    * The Unity slots mailbox (machine/unitySlots.ts). The daemon's entry point defaults it to slotsDir(), the one place
    * scripts look for it; a Daemon built anywhere else (a test) gets `<app_dir>/unity-slots`, so it never answers the
    * machine's real mailbox (a hung relocate test's daemon granted BEAST's slots with no limit for hours, w469).
@@ -271,6 +277,12 @@ export function dialUrl(cfg: Pick<DaemonConfig, 'portalUrl' | 'previousPortalUrl
  * Keep these fields in the daemon.json at `file`, everything else as it is (undefined removes one): fsynced, renamed
  * into place, the last versions kept beside it (server/durable.ts). Exported for tests.
  */
+/** daemon.json's `updateOrigin` (w5516), read fresh: undefined (GitHub's main) when absent or malformed. */
+export function publishedOrigin(configFile: string | undefined): PublishedOrigin | undefined {
+  const o = configFile ? readJsonFile<DaemonConfig>(configFile)?.updateOrigin : undefined;
+  return o && typeof o.url === 'string' && typeof o.branch === 'string' ? { url: o.url, branch: o.branch } : undefined;
+}
+
 export function patchDaemonConfig(file: string, fields: Partial<Pick<DaemonConfig, 'portalUrl' | 'previousPortalUrl' | 'relocatedAt'>>) {
   const text = fs.readFileSync(file, 'utf8');
   const cfg = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as Record<string, unknown>;
@@ -629,6 +641,7 @@ export class Daemon {
       exit: () => this.exitForRestart(),
       log: (...a) => log(...a),
       nodeArgs: hostNodeArgs(),
+      published: () => publishedOrigin(this.cfg.configFile) ?? this.cfg.updateOrigin,
     });
     this.pause = new PauseKeeper({
       file: pauseFile(appDirOfConfig(cfg)),
@@ -1527,7 +1540,7 @@ export class Daemon {
     const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
     log(mcp.server ? `unity mcp: ${mcp.server.command} ${mcp.server.args.join(' ')} (from ${mcp.source})` : `unity mcp: none (${mcp.source}); agents here get no Unity MCP bridge`);
     // Agents run it against the worker install's uv cache, which nothing else fills (w5377).
-    if (mcp.server && this.cfg.root) void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(this.cfg.root), runQuietEnv).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache failed: ${(e as Error).message}`));
+    if (mcp.server && this.cfg.root) void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(this.cfg.root), runQuietEnv, {}, 'agents', { root: this.cfg.root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache failed: ${(e as Error).message}`));
     this.timers.push(setInterval(() => this.syncMcpScopes(), 5_000));
     this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
@@ -3013,7 +3026,7 @@ export class Daemon {
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
       if (mcp.server) {
         const { APPDATA, LOCALAPPDATA } = lowEnv(root, undefined, 'PATH', undefined);
-        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents').then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
+        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
       this.timers.push(setInterval(() => {

@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { trustedGh } from '../machine/evidenceGate.ts';
 import { simpleCommands } from './waitGuard.ts';
 
 /**
@@ -124,7 +125,7 @@ export function runnerStopped(log: string): boolean {
 const FAILED = new Set(['failure', 'timed_out']);
 
 function gh(args: string[], cwd: string | undefined, env?: Record<string, string | undefined>): string {
-  return execFileSync('gh', args, { cwd, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv });
+  return execFileSync(trustedGh(), args, { cwd, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv });
 }
 
 const why = (e: unknown) => {
@@ -156,7 +157,7 @@ export const ghRerunReader: RerunReader = {
     }
   },
   log(repo, job, cwd, env) {
-    return readJobLog(repo, job, (args) => execFileSync('gh', args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv }));
+    return readJobLog(repo, job, (args) => execFileSync(trustedGh(), args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv }));
   },
 };
 
