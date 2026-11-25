@@ -153,9 +153,11 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
 // w5555 (no bump): `worker_fence`, the daemon's worker fence state. An older portal's switch has no case for it and drops
 // it (the fence then holds workers without the alert); an older daemon never sends it.
+// w5576 (no bump): `portalPin` in the hello, the portal hosts the daemon follows and what pinning would refuse; an older
+// portal ignores it, and an older daemon sends none (list_machines says so).
 // w5554 (no bump): signal `workerCap`, a worker's host hit a cap and ended its tools; an older portal re-emits it with no
 // listener, as it does `tempSize`, and an older daemon or host never sends it.
-const DECIDED = { protocol: 9, fingerprint: '97d1f278e8fc4d79' };
+const DECIDED = { protocol: 9, fingerprint: 'f2c36d679cf53ac1' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -273,3 +273,26 @@ test('relocate at the cut-over (w499): a drain-and-hold request with relocate se
   await until('back online, at B', () => mm.isOnline('mx') && !store.machines.get('mx')!.relocatedTo);
   assert.equal(onDisk().portalUrl, b.url);
 });
+
+test('w5576 warn mode: a relocate to a host that is not pinned is followed as before, and logged, kept and reported in the hello', async (t) => {
+  const { tmp, mm, a, daemon, onDisk } = await setup(t);
+  const saved = RELOCATE_FALLBACK_MS.value;
+  RELOCATE_FALLBACK_MS.value = 1500;
+  t.after(() => (RELOCATE_FALLBACK_MS.value = saved));
+  daemon();
+  await until('online at A, its hello read', () => mm.isOnline('mx') && (mm.protocolOf('mx') ?? 0) > 0);
+  assert.deepEqual(mm.portalPinOf('mx')?.warnings, [], 'a loopback portal is pinned: nothing to say');
+  assert.equal(mm.portalPinOf('mx')?.mode, 'warn');
+  // .invalid never resolves (RFC 2606): the daemon follows it in warn mode, then falls back to A after the window.
+  const unpinned = 'http://unpinned-portal.invalid:8790';
+  await mm.relocate('mx', unpinned);
+  assert.equal(onDisk().portalUrl, unpinned, 'warn mode: the relocate went ahead as before');
+  await until('back at A after the window, its hello seen', () => mm.isOnline('mx') && !!mm.portalPinOf('mx')?.warnings.length, 30_000);
+  const pin = mm.portalPinOf('mx')!;
+  assert.equal(pin.pinned, true, 'it dials A again');
+  assert.equal(pin.warnings[0].kind, 'relocate');
+  assert.match(pin.warnings[0].what, /unpinned-portal\.invalid is not a pinned portal host/);
+  const kept = JSON.parse(fs.readFileSync(path.join(tmp, 'portal-pin.json'), 'utf8')) as { warnings: { kind: string }[] };
+  assert.equal(kept.warnings[0].kind, 'relocate', 'kept beside daemon.json');
+  assert.equal(onDisk().portalUrl, a.url);
+});
