@@ -25,11 +25,12 @@ const tmp = (t: { after(fn: () => void): void }, tag: string) => {
 
 test('w5564: a player writes its run and build folders and the data root and player home, only inside the root', () => {
   const env = { FF_GAME_DATA_DIR: '/r/gamedata', FF_PLAYER_HOME: '/r/gamedata-home' };
+  // playerWritable runs on every OS (timedRunner) and answers native resolved paths: V:\r\... on Windows
   assert.deepEqual(playerWritable({ root: '/r', runDir: '/r/timing/runs/tr_1', buildDir: '/r/players/slot1-0/player', env }), [
     '/r/timing/runs/tr_1', '/r/players/slot1-0/player', '/r/gamedata', '/r/gamedata-home',
-  ]);
+  ].map((p) => path.resolve(p)));
   // a data root outside the root (a person's own, an older build's legacy root), the root itself, the daemon and secrets: never
-  assert.deepEqual(playerWritable({ root: '/r', runDir: '/r/timing/runs/tr_1', buildDir: '/r', env: { FF_GAME_DATA_DIR: '/home/u/.config/unity3d/Never Games/finalfactory', FF_PLAYER_HOME: '/r/secrets/x' } }), ['/r/timing/runs/tr_1']);
+  assert.deepEqual(playerWritable({ root: '/r', runDir: '/r/timing/runs/tr_1', buildDir: '/r', env: { FF_GAME_DATA_DIR: '/home/u/.config/unity3d/Never Games/finalfactory', FF_PLAYER_HOME: '/r/secrets/x' } }), [path.resolve('/r/timing/runs/tr_1')]);
   assert.deepEqual(playerWritable({ root: '/r', runDir: '/r/daemon/runs', buildDir: '/r2/player', env: { FF_GAME_DATA_DIR: 'relative' } }), []);
 });
 
@@ -71,7 +72,7 @@ test('w5564: the fence is probed once per kind and missing wrappers or a failed 
   assert.match(JSON.stringify(playerFenceFor({ platform: 'freebsd' })), /no player fence for freebsd/);
   const seen: string[][] = [];
   const mac = playerFenceFor({ platform: 'darwin', exists: () => true, getconf: (n) => (n === 'DARWIN_USER_TEMP_DIR' ? '/nonexistent/T/' : '/nonexistent/C'), probe: (l) => (seen.push([l.cmd, ...l.args]), { ok: true }) });
-  assert.deepEqual(mac, { kind: 'seatbelt', darwinTemp: '/nonexistent/T', darwinCache: '/nonexistent/C' });
+  assert.deepEqual(mac, { kind: 'seatbelt', darwinTemp: path.resolve('/nonexistent/T'), darwinCache: path.resolve('/nonexistent/C') });
   assert.equal(seen[0][0], SANDBOX_EXEC);
   assert.equal(seen[0].at(-1), '/usr/bin/true');
   assert.deepEqual(playerFenceFor({ platform: 'darwin', exists: () => true, getconf: () => '/t', probe: () => ({ ok: false, why: 'exited 65; stderr: sandbox-exec: syntax error' }) }), { kind: 'unavailable', why: 'a no-op inside it failed: exited 65; stderr: sandbox-exec: syntax error' });

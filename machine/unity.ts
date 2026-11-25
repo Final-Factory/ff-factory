@@ -70,7 +70,7 @@ export interface UnityDeps {
 
 /** w5630: Unity's licensing client inside the macOS editor app at `bin` (…/Unity.app/Contents/MacOS/Unity). */
 export const macLicensingClientBin = (bin: string) =>
-  path.join(path.dirname(path.dirname(bin)), 'Helpers', 'UnityLicensingClient.app', 'Contents', 'MacOS', 'Unity.Licensing.Client');
+  path.posix.join(path.posix.dirname(path.posix.dirname(bin)), 'Helpers', 'UnityLicensingClient.app', 'Contents', 'MacOS', 'Unity.Licensing.Client');
 
 const norm = (p: string) => p.replace(/[\\/]+$/, '');
 
@@ -145,11 +145,11 @@ export const isSeatbeltFence = (f: EditorFence | undefined): f is SeatbeltEditor
  * restart or self-update writes its status only there, and without it the new daemon took its bridge for gone (it
  * wrote the agents' port as 0) or pinged a stale port from ~/.unity-mcp (w5712's review of PR #1217).
  */
-export const macEditorStatusDir = (root: string) => path.join(root, 'home', '.unity-mcp');
+export const macEditorStatusDir = (root: string) => path.posix.join(root, 'home', '.unity-mcp');
 
 export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' | 'enforce'): SeatbeltEditorFence | undefined {
   if (!worker) return undefined;
-  const home = path.join(worker.root, 'home');
+  const home = path.posix.join(worker.root, 'home');
   const enforced = seatbeltProfile({ ...worker, extraWritable: [...(worker.extraWritable ?? []), home] });
   return {
     kind: 'seatbelt',
