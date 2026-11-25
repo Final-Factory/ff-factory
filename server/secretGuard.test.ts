@@ -97,8 +97,12 @@ test('w467: in the portal VM, every secret path is refused', () => {
     // The token vault's key (w512): the key file and systemd's copy of it.
     '/etc/fff/vault.key',
     '/run/credentials/fff-portal.service/fff-vault-key',
+    // Other processes' environments and memory (w5506): the portal's, git's and gh's.
+    '/proc/1234/environ',
+    '/proc/1234/mem',
+    '/proc/self/environ',
   ]) assert.match(linuxFile(p) ?? '', /is FF Factory's own/, p);
-  for (const p of ['/', '/srv', '/srv/fff', '/srv/fff/home', '/srv/fff/data', '/srv/fff/config']) assert.ok(linuxSearch(p), p);
+  for (const p of ['/', '/srv', '/srv/fff', '/srv/fff/home', '/srv/fff/data', '/srv/fff/config', '/proc', '/proc/1234']) assert.ok(linuxSearch(p), p);
 });
 
 test('w467: in the portal VM, the base clone, its own memory and the attachments stay readable', () => {

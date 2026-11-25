@@ -333,6 +333,20 @@ restore_inline_hash() {
   log "FFBox's connector hash put back into config.json for $(basename "$1"), a release from before w1078"
 }
 
+# portal_unit_back DIR: a rollback keeps the newer system setup (refresh_scripts), except fff-portal.service, which says
+# how the code gets its vault key: OpenFile= since w5506, LoadCredential= before (docs/vault.md). Code from before w5506
+# under the newer unit would find no key and its vault would hand out nothing, so the older release's own unit goes back.
+portal_unit_back() {
+  local u=$1/deploy/vm/guest/units/fff-portal.service
+  [ -f "$u" ] || return 0
+  cmp -s "$u" /etc/systemd/system/fff-portal.service && return 0
+  if install -m 0644 "$u" /etc/systemd/system/fff-portal.service && systemctl daemon-reload; then
+    log "fff-portal.service from $(basename "$1") put back, so its code gets its vault key the way it expects (w5506)"
+  else
+    warn "putting back fff-portal.service from $(basename "$1") failed: its vault may find no key"
+  fi
+}
+
 cmd_rollback() {
   local why=${1:-asked for by hand} cur prev cur_sha prev_sha
   cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
@@ -345,6 +359,7 @@ cmd_rollback() {
   ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
   restore_inline_hash "$prev"
   refresh_scripts "$prev"
+  portal_unit_back "$prev"
   rm -f "$DATA/update.verifying.json"
   jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \
     '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $a}' | data_write update.result.json

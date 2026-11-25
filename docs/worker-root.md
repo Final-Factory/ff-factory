@@ -169,6 +169,8 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   scratch/                       long-lived scratch (today's _scratch, ffsb-scratch, F:\tmp)
   tmp/ffa-<session>/             agents' TMP/TEMP/TMPDIR (temp_dir)
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
+  claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
+  cache-medium/uv/               the daemon's and Medium agents' UV_CACHE_DIR (the Unity MCP server's uvx, w5565): read-only to workers
   tools/final-factory-agents/    FF Factory's own checkout the agent tools publish runs registerAgents.sh from (w1476)
   home/                          GIT_CONFIG_GLOBAL (.gitconfig), GH_CONFIG_DIR (.config/gh), .ssh/config
   cache/                         UPM_CACHE_ROOT, npm and pip caches
@@ -451,6 +453,35 @@ What stays in `~/.claude`, on purpose:
   `registerAgents.sh:40-41`, `publish-skills/SKILL.md:22`), so `server/agentTools.ts` and `server/strayWrite.ts` keep
   reading them there. Moving them is a change in final-factory-agents first.
 
+**The Medium agents' folder** (w5543, item 6 of the w5451 audit; lothsahn: "File it: separate Claude settings folder for
+Medium agents"). On a machine only a sandbox launch is fenced (`machine/daemon.ts` runSpec); a standing agent runs at
+Medium. Loading settings, hooks and plugins from `<root>/claude`, which every worker can write, let a worker plant a
+hook a Medium agent would run. So an agent with no sandbox gets `CLAUDE_CONFIG_DIR=<root>/claude-medium`
+(`FF_CLAUDE_MEDIUM_DIR`; `server/launch.ts` `buildOptions`, `server/claudeHome.ts` `agentClaudeEnv(..., medium)`), and
+the evidence gate's pr_evidence.py lookup reads its plugins there (`mediumPluginClaudeEnv`). The folder is kept Medium on
+Windows (`machine/lowIntegrity.ts` `MEDIUM_CHILDREN`) and read-only under the Landlock and Seatbelt fences
+(`machine/writeLock.ts` `LOCKED_CHILDREN`, `server/workerFence.ts` `READ_ONLY_IN_ROOT`).
+- **Plugins**: the tools publish (`server/agentTools.ts`) runs registerAgents.sh from its one checkout into both folders,
+  workers' first, in the same run; either failing fails the publish, so the two cannot drift. The Medium run logs
+  `Agent tools before/after (Medium agents, <dir>):`, which the rollout's parser does not read. Until its
+  `installed_plugins.json` lists the plugins, a Medium agent uses `~/.claude` as before w5305, never `<root>/claude`.
+- **Settings** are carried once from `~/.claude` (never from the workers' folder) by the daemon and the tools publish.
+- **Transcripts**: a standing agent resumed after the update has its session copied once from `<root>/claude/projects`
+  (`claudeDirs` order: own, workers', Medium, legacy); the transcript scrubber reads `claude-medium/projects` too.
+- Proven by `server/claudeHome.test.ts` (a live claude run: a SessionStart hook planted in `<root>/claude` writes no
+  marker for a standing spec, the Medium folder's own hook does, and a sandbox spec runs the planted one; RED with the
+  launch.ts change reverted) and the live fence tests in `server/writeLock.test.ts` and `server/workerFence.test.ts`.
+
+**The Medium uv cache** (w5565, item 5 of the w5451 audit; lothsahn: "File it: separate uv cache for the daemon and Medium
+agents"). The daemon and every Medium agent ran uvx (the Unity MCP server) and `uv run --with ...` from `<root>/cache/uv`,
+which fenced workers write. Now the daemon's `UV_CACHE_DIR` is `<root>/cache-medium/uv` (`machine/daemon.ts` `rootEnv`,
+`machine/sharedCaches.ts` `mediumUvCacheDir`; one an older daemon carried over moves, one daemon.json names stays:
+`mediumUvCacheFor`), and a sandbox agent gets the workers' `<root>/cache/uv` back (`runSpec`, `sandboxUvEnv`). The daemon
+fills both with the Unity MCP package at start, Medium first, and prunes each with its own `UvCachePruner`. `cache-medium`
+is in `MEDIUM_ONLY_CHILDREN` (`server/claudeHome.ts`) with `claude-medium`, so all three fences keep it from workers.
+Measured on biscuit under `ff-landlock.py` (w5565): a fenced `uvx` with the Medium cache fails "Failed to initialize
+cache ... Permission denied (os error 13)" and a planted file is refused; the same run on `<root>/cache/uv` installs and runs.
+
 **Checking the switch on a machine** (w5305's rollout). An agent that was already running when its daemon updated is
 adopted with its old environment, so it still writes to and reads skills from `~/.claude`. That proves nothing either
 way. Look at a session that resumed or started after the update instead: `search_transcripts` for `"to resume there
@@ -636,8 +667,8 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
   - It labels Low only the root's folders workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, `lowTargets`,
     `labelLow`; w5539), plus the root child that holds a configured temp or sandboxes folder. Every other child stays
-    Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets` and the daemon's own
-    folder are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
+    Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets`, the daemon's own
+    folder and the Medium-only `claude-medium` (w5543) and `cache-medium` (w5565) are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
     portals, and any folder added later are kept Medium. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
     is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
@@ -685,7 +716,32 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - The root's Git is PortableGit 2.56.1 at `<root>\tools\git`, pinned by SHA-256 (`server/agentGit.ts`). `worker.ts tools`
   installs it on every Windows rollout and runs its first bash login at Medium: run first at Low, it could not make its
   links (measured).
-- The sandbox editors the daemon starts stay Medium. Only what a sandbox agent starts is Low.
+- **The sandbox editors the daemon starts are Low too** (w5540, lothsahn: "run sandbox editors fenced, staged per
+  OS"). Before, they stayed Medium, and an editor compiles and runs whatever C# a worker writes (and `execute_code`), so
+  it was a one-step way out of the fence. `MacUnity.start` (`machine/unity.ts`) now starts a Windows sandbox editor
+  through a Low copy of node in `<root>\tools\low` (`lowEditorFence` in `machine/daemon.ts`, `FENCED_LAUNCH_SCRIPT`),
+  from the version's junction in `<root>\tools\unity-low` (its own Low Roslyn server, w5347), with
+  `-licensingIpc LicenseClient-<user>-low` (w5427) and this environment: APPDATA and LOCALAPPDATA as `lowEnv`,
+  `USERPROFILE=<root>\home`, and `UNITY_MCP_STATUS_DIR=<root>\home\.unity-mcp`. The bridge's status file follows that
+  variable; the daemon reads it and `~/.unity-mcp` (`mcpStatusDirs`, `server/unityHang.ts`), and the newest file for a
+  project answers. An install with no junction for the editor's version starts it unfenced and says so in the start
+  message ("unfenced (no junction ...)"); every start says "at Low integrity (the worker fence)" when fenced.
+  `daemon.json` `editorFence: false` keeps editors Medium while agents stay Low.
+- **The fenced editor, measured** (LothDesktop slot1, 2026-11-25, a GUI editor at Low started from a Low agent the same
+  way):
+  - licensing: the Low licensing client started, the editor resolved its entitlement;
+  - compile: the first load through the junction recompiled every script once (Tundra 193 s, 1791 items; the
+    InitialRefresh 273 s in all), because the compiler's path changed. The asset import cache stayed warm: no cold
+    Library rebuild. Later loads are normal; batch runs already used the junction;
+  - the bridge: its status file in `UNITY_MCP_STATUS_DIR`, `wait-ready` in 3 s; `reload-and-wait` compiled in 56 s;
+    play mode entered and stopped; `SimulationRateConstantsTest` 31 of 31 passed; no "Access is denied" in the log;
+  - a write probe run in the editor: refused (`UnauthorizedAccessException`) for `%USERPROFILE%`, `V:\`,
+    `C:\ProgramData`, `<root>\secrets` and an HKCU key; written in the sandbox's `Temp`.
+  - **Writes outside the root it still makes:** `AppData\LocalLow\Unity` (the GI cache, CrashReports,
+    CoreBusinessMetrics.db) and the game's `persistentDataPath` in LocalLow. That is the LocalLow hole below, shared
+    with every Low worker; Medium editors wrote there before. The port registry (`unity-mcp-port-<hash>.json`) goes to
+    the profile's `.unity-mcp` (`GetFolderPath(UserProfile)` ignores the variable), which a Low editor cannot write: it
+    reuses the port of the file left there and the daemon finds it by the status file, so nothing breaks.
 - Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
   a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
 
@@ -758,7 +814,7 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 
 | Path | Why |
 |---|---|
-| every child folder of the root except `daemon` and `secrets` | the work; the daemon's folder (or `appDir` if it sits in the root under another name) and the secrets stay read-only. `repo` must stay writable: sandbox worktrees keep their git data in it |
+| every child folder of the root except `daemon`, `secrets`, `claude-medium` and `cache-medium` | the work; the Medium agents' Claude folder (w5543, 2.8) and uv cache (w5565), the daemon's folder (or `appDir` if it sits in the root under another name) and the secrets stay read-only. `repo` must stay writable: sandbox worktrees keep their git data in it |
 | `extraRoots` | folders of the install that live outside the root |
 | `maxEventsFile` and the Unity slots mailbox, only where `daemon.json` puts them outside the root | ffdiscord appends Max's events (`FF_MAX_EVENTS`); the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps both inside it (`<root>/max`, `<root>/unity-slots`, w5377), so they need no rule |
 | `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |
@@ -796,6 +852,21 @@ for systemd-executor, or turning the sysctl off for the whole machine.
 - Refused writes leave no log on a machine without auditd. Find them with `strace -f -Z`.
 - Needs Landlock (on in Ubuntu since 22.04). Without it the launcher exits 125 and the agent does not start: leave the
   setting off there.
+
+**Signals and `systemd-run --user` (w5562).** Measured on biscuit before it (w5463): `systemd-run --user` started a
+job outside the lock that wrote to the daemon's folder, and the daemon, Unity, the desktop shell and claude were all
+signalable from a locked worker. Now:
+- `ff-landlock.py` sets `LANDLOCK_SCOPE_SIGNAL` (Landlock ABI 6, Linux 6.12; biscuit has ABI 8): a locked worker signals
+  only processes of its own lock, itself and what it started; each worker's launch is a lock of its own, so not another
+  worker either. Signal 0 to an outside process answers EPERM, which our liveness checks read as alive.
+- `--deny-unix $XDG_RUNTIME_DIR/bus` and `.../systemd` (`writeLockArgs`) refuse `connect()` to the user bus and the
+  systemd user manager's sockets with `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, so `systemd-run --user` and `systemctl --user`
+  cannot reach it. That right is **ABI 9 (Linux 7.1)**: on biscuit's 7.0 kernel (ABI 8) the option is a no-op that says
+  so on stderr, and the escape stays open until the kernel is 7.1 or newer. seccomp cannot tell one socket path from
+  another, and a mount namespace to hide the socket is refused here (Ubuntu's `apparmor_restrict_unprivileged_userns`,
+  above). Other pathname sockets stay reachable: the rule grants each sibling of the denied paths and of their parents
+  (`/`, `/run`, `/run/user`, `/run/user/<uid>`), like `--except`, so a socket an outside server makes later directly in
+  one of those four folders is refused too; sockets the worker's own processes make stay reachable.
 
 ### 4.3 Turning a fence off, and why recovery never runs inside one (w5377, 2026-11-24)
 

@@ -349,6 +349,18 @@ or web route for this.
    lists the build with the sources `master@<commit>` and `urgent/beast@<commit>`, and `list_ffbox_files` and
    `fetch_ffbox_symbols` find it as any release's.
 
+**Only the request that built a version files its symbols** (w5550, the rogue-worker audit w5451 item 18; lothsahn: "File
+it: file_ffbox_symbols only for the worker's own builds"). Before, any worker could call `file_ffbox_symbols` for any
+version FFBox's urgent claim covered, and wrong symbols would mislead crash triage. The portal now records each urgent build
+when its builder's `switch_branch` puts a sandbox on `urgent/<v>` (urgent-release.md, section 3 step 1; the shell guard
+refuses a worker's own `git switch`, so that is the one way onto the branch), with the caller's open requests, in
+`symbol-owners.json` in its data folder (`server/symbolOwners.ts`). A call with `entries` is refused, with the reason,
+when the calling session serves no open request, when no build of the version is recorded, when the version was built for
+other requests only, or when another request already filed its symbols (the first request whose call sent them owns them;
+the same request may call again). Asking how an upload stands (`file_ffbox_symbols {version}`) stays open to any worker.
+FFBox's own release lane files its symbols on FFBox and never comes through this tool. Tests: `server/symbolOwners.test.ts`
+and `server/machineSandboxes.test.ts` ("w5550").
+
 FFBox's side and its guards are in ffbox's README, "Symbols of an urgent-lane build"; its tests are `test/test_urgent_symbols.py`.
 The portal's are `server/ffboxUrgentSymbols.test.ts`. Measured on the way out, FFBox to the portal: 40.6 MB in 69 s (600.7
 KB/s). A development player's Windows archive is 79.0 MB (217.7 MB of 14 files, packed in 8.4 s on BEAST). A release's is

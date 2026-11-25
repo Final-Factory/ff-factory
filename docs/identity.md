@@ -19,6 +19,12 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   hash buckets, so flooding the table with made-up names cannot reset a targeted name's backoff. Every login answer
   (unknown name, wrong or right password, throttled) is held to one time, measured on the machine: the slowest of
   its recent logins plus a tenth and 3 ms (`LoginTimer`), waited on a timer.
+- The client address, for the login throttle and every other caller (join codes, the /provider, /machine and
+  /machine/live sockets, page sockets, the tailnet-only checks, logs), comes from one helper,
+  `server/clientAddress.ts` (w5535): X-Forwarded-For is believed only with `trustProxy` on and only from a connection
+  out of this machine (Tailscale Serve and Funnel) or a configured proxy, and only its last entry, the one the proxy
+  added; the entries before it are whatever the client wrote. The Funnel header is checked before any address, and a
+  proxied request is not taken for this machine when `trustProxy` is off.
 - Roles: `owner` (Ben, who runs the portal) and `member` (a teammate). The first login is the owner and
   later ones are members. A `users.json` written before roles existed reads every login as the owner.
   **Roles are recorded, and enforced in a few places so far:** an owner may close or reopen another person's request
@@ -70,7 +76,10 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key
-  minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a
+  minted before this change, or without `--user`, acts for the owner (by name in `server/mcp.ts`, the only owner default
+  left in a login lookup). A bound key whose login no longer exists (`users.json` edited or restored) is refused with a
+  401, and so is a browser session of such a login, which ends there (w5533, `Auth.bearer` and `Auth.user` in
+  `server/auth.ts`); neither is ever read as the owner's. A key for a member login, written straight into a
   0600 file on a machine and never printed, is the orchestration worker's `fffctl apikey issue` (w1415,
   [ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)); owner logins and Ben's and Lothsahn's stay `apikey.ts`.
 - Deleting a login (w1864): `sudo fffctl user delete <id> --by <your login>` in the VM (`server/userCli.ts`; the

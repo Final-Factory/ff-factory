@@ -27,6 +27,8 @@
 #                                      `--rollback-dry-run` and `--cut-over` change state: a person's
 #   fffctl scrub-secrets --dry-run     how many vault values and token shapes are still on disk (w1584): paths and counts,
 #                                      never a value, then "remaining: N". The scrub itself (no --dry-run) is a person's
+#   fffctl fence-check                 what the portal's own account can open (w5506): refused or OPENED, and credential names
+#                                      counted in its processes' environments, never a value (fffctl fence-check)
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
 #   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
 #                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
@@ -96,11 +98,13 @@ else
   logger -t fff-ops-priv -- "fffctl $*" 2>/dev/null || true
 fi
 
-# The patterns redactSecrets (server/secrets.ts) knows, for log lines.
+# Lines redacted the way portal_logs shows them (w5525): the portal's own redactor (server/redactLogsCli.ts, through
+# server/logRedact.ts), with the vault's values, every shared token shape and the log forms. It masks as it reads, so journal
+# lines written before the portal redacted its output come out masked too. It fails closed: no redactor, nothing printed.
+# Its sed predecessor missed Discord tokens, private keys, JWTs, Bearer headers, passwords in URLs and the vault's values.
 redact() {
-  sed -E -e 's/sk-ant-oat01-[A-Za-z0-9_-]{40,}/sk-ant-oat01-[redacted]/g' -e 's/sk-ant-api[0-9]{2}-[A-Za-z0-9_-]{40,}/sk-ant-api-[redacted]/g' \
-    -e 's/(ffm_[A-Za-z0-9.-]{1,64}_)[A-Za-z0-9_-]{32,}/\1[redacted]/g' -e 's/(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/\1[redacted]/g' \
-    -e 's/ffpv1_[A-Za-z0-9_-]{10,}/ffpv1_[redacted]/g' -e 's/ffsb_[A-Za-z0-9_-]{40,}/ffsb_[redacted]/g' -e 's/tskey-[a-z]+-[A-Za-z0-9-]{16,}/tskey-[redacted]/g'
+  [ -f "$CURRENT/server/redactLogsCli.ts" ] || refuse "the portal's release has no server/redactLogsCli.ts, so nothing is printed: output is only shown redacted"
+  (cd "$CURRENT" && FFF_VAULT_KEY_FILE=${FFF_VAULT_KEY:-/etc/fff/vault.key} FFSB_CONFIG=$FFF_ROOT/config/config.json node server/redactLogsCli.ts)
 }
 
 ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
@@ -242,6 +246,11 @@ case "${1:-help}" in
       --check) [ $# -eq 2 ] || refuse "config --check takes nothing more"; exec "$FFFCTL" config --check ;;
       *) refuse "config | config --check (changing a setting is set_app_config's, through the dispatcher or an owner's orchestrator)" ;;
     esac
+    ;;
+  fence-check)
+    # Read only (w5506): opens as the portal's account and counts credential names; never prints a value. No option.
+    [ $# -eq 1 ] || refuse "fence-check takes nothing more"
+    exec "$FFFCTL" fence-check
     ;;
   disk-usage)
     # Read only (w2267): du, find, df and line counts by program; nothing written, no file's text printed. No option.
