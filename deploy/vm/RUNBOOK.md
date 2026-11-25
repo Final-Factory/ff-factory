@@ -337,7 +337,15 @@ restart: the VM's firewall, systemd units, sshd settings, packages, folders, `ff
 with it, so a change to any of them reaches the VM by `fffctl update` alone. It changes only what differs (apt only for a
 missing package). If it fails, nothing restarts and the running version stays, as with a failed build. "Already up to
 date" runs it too, for the running release. A rollback goes back to the older code and its scripts but keeps the newer
-system setup.
+system setup, except `fff-portal.service`: the older release's own unit goes back with a daemon-reload, because it says
+how that code gets its vault key (`OpenFile=` since w5506, `LoadCredential=` before; [docs/vault.md](../../docs/vault.md)).
+
+### Rollback
+
+`sudo fffctl rollback` (or an update that fails its health check) goes back to the previous release as above. Across
+w5506 that also puts back the older unit, and with it `LoadCredential=`: the key is then again a file the `fff` account
+may read, until the next update brings the newer unit. `fffctl fence-check` says so (`OPENED: systemd's credentials
+folder`).
 
 Once the new release is verified, the portal itself updates every worker-root machine's daemon (w887) and then publishes
 the latest agent tools, final-factory-agents' plugins, on each of them (w1476), and sends one `[machine updates]` report

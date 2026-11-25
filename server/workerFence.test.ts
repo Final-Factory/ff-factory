@@ -84,6 +84,14 @@ test('live: a fenced shell writes in the root and is refused outside it and in t
     assert.match(out.stderr, /Operation not permitted/);
     assert.ok(!fs.existsSync(path.join(outside, 'out')));
     assert.notEqual(sh(`echo no > "${root}/daemon/x"`).status, 0);
+    // w5543: the Medium agents' Claude folder, made or not, is read-only to a fenced worker
+    fs.mkdirSync(path.join(root, 'claude-medium'));
+    assert.notEqual(sh(`echo no > "${root}/claude-medium/settings.json"`).status, 0);
+    assert.notEqual(sh(`mkdir -p "${root}/claude-medium/plugins"`).status, 0);
+    // w5565: the daemon's and Medium agents' uv cache, made or not
+    assert.notEqual(sh(`mkdir -p "${root}/cache-medium/uv"`).status, 0);
+    fs.mkdirSync(path.join(root, 'cache-medium', 'uv'), { recursive: true });
+    assert.notEqual(sh(`echo no > "${root}/cache-medium/uv/x"`).status, 0);
     assert.notEqual(sh(`ln -s "${outside}" "${root}/l" && echo no > "${root}/l/x"`).status, 0, 'a symlink out of the root is still outside');
     assert.ok(!fs.existsSync(path.join(outside, 'x')));
     assert.equal(sh(`cat "${root}/in" > /dev/null`).status, 0, 'reads are unchanged');
