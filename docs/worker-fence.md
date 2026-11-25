@@ -111,6 +111,25 @@ Measured with the generated profile unless noted:
   sandbox use.
 - A person's own editor and the daemon are never fenced.
 
+## Signals and launchd jobs (w5562)
+
+lothsahn (w5562): "probe, then block signals and launchctl/systemd-run escapes on Mac and Linux". From the rogue-worker
+audit w5451, items 22 and 23.
+
+- **Signals.** Before w5562 a fenced worker could signal any process of its user: on m5, 2026-11-25, `kill -0` from
+  inside the fence reached the daemon's agent host and Finder (only launchd, pid 1, answered EPERM). The profile now ends
+  with `(deny signal)` and `(allow signal (target self) (target children) (target same-sandbox))` (`SIGNAL_RULES` in
+  `server/workerFence.ts`): a worker signals itself and what it started, which inherits its sandbox, and nothing else.
+  Signal 0 counts, so a liveness check of an outside process answers EPERM, which our checks read as alive
+  (`isAlive` in `machine/unitySlots.ts`, `bench_queue.py`, `player_slots.py`). What a worker needs ended outside its tree
+  (its editor, a daemon job) goes through the daemon (`mcp__machine__unity`, `unity-slot`), as before.
+- **launchd jobs.** No rule is needed: launchd refuses job submission from a sandboxed caller. Measured on m5 from inside
+  the fence (2026-11-25): `launchctl submit -l <label> -- <cmd>` exits 1 ("Operation not permitted"),
+  `launchctl bootstrap gui/<uid> <plist>` fails "5: Input/output error", and neither job ever ran. That goes over the
+  bootstrap port, not a `mach-lookup` name a profile could deny.
+- Still open: `open`/LaunchServices and Apple events (`osascript` telling Terminal to run a script) start programs
+  outside the fence; untried.
+
 ## Setuid programs: ps, top (w5397)
 
 macOS refuses to exec a setuid program inside the sandbox, whatever the profile says: on m5 (2026-11-24, w5393) a
