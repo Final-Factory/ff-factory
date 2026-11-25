@@ -5,7 +5,7 @@ import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan 
 import { mentions } from './ownLeftovers.ts';
 import { gitIgnores } from './cleanupFolders.ts';
 import { isPublished, type PublishedRecord } from './published.ts';
-import { execFile } from 'node:child_process';
+import { gitExecFile } from './safeGit.ts';
 import { benchQueueDir } from '../machine/benchQueue.ts';
 import { benchLockDir, pidAlive } from '../machine/benchLock.ts';
 import { holdsJob, listenerLog, readListenerLog, runnerCensus } from '../machine/benchRunners.ts';
@@ -586,7 +586,7 @@ export function gitIgnoredEvidence(repo: string, timeoutMs = 60_000): Promise<st
   const skip = ['Library', 'Temp', 'obj', 'Logs', 'node_modules'].map((d) => `:(exclude,glob)**/${d}/**`);
   for (const f of FETCHED_FOLDERS) if (fs.existsSync(path.join(repo, ...f.dir.split('/'), f.marker))) skip.push(`:(exclude,glob)${f.dir}/**`);
   return new Promise((resolve) =>
-    execFile('git', ['--no-optional-locks', '-C', repo, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ...skip], { timeout: timeoutMs, maxBuffer: 256 * 1024 ** 2, windowsHide: true }, (e, out) =>
+    gitExecFile(['--no-optional-locks', '-C', repo, 'ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ...skip], { timeout: timeoutMs, maxBuffer: 256 * 1024 ** 2, windowsHide: true }, (e, out) =>
       resolve(e ? undefined : String(out).split('\0').filter((f) => f && EVIDENCE.test(f)).map((f) => path.join(repo, f))),
     ),
   );

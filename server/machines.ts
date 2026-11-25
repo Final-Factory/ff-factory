@@ -2,7 +2,7 @@ import { noteBench, recentPlayers, type PlayerSeen } from './crashHolds.ts';
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import type { SaveResult } from './saveWork.ts';
 import path from 'node:path';
 import type http from 'node:http';
@@ -3453,7 +3453,7 @@ export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'pl
 /** The commit a checkout is at, or undefined. */
 function gitHead(dir: string): string | undefined {
   try {
-    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
+    return gitExecFileSync(['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
   } catch {
     return undefined;
   }

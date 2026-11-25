@@ -1,0 +1,5 @@
+#!/bin/sh
+# FF Factory's hooks for git it runs in a worker's checkout (w5541, server/safeGit.ts): git-lfs's own post-merge hook and
+# nothing else, so a push still uploads LFS objects while no hook a worker planted runs. No git-lfs: nothing to do.
+command -v git-lfs >/dev/null 2>&1 || exit 0
+exec git lfs post-merge "$@"

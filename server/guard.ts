@@ -1,4 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findPrEvidence, noScriptRefusal, updateLocalPlugin } from '../machine/evidenceGate.ts';
 import { repoIsPublic } from './publicGit.ts';
 import { checkStrayWrite } from './strayWrite.ts';
@@ -881,7 +882,7 @@ export type RemoteResolver = (dir: string) => Map<string, string> | undefined;
 
 export const gitRemotes: RemoteResolver = (dir) => {
   try {
-    const out = execFileSync('git', ['-C', dir, 'remote', '-v'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const out = gitExecFileSync(['-C', dir, 'remote', '-v'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     const m = new Map<string, string>();
     for (const line of out.split('\n')) {
       const [name, url, kind] = line.trim().split(/\s+/);
@@ -982,7 +983,7 @@ export const isNoreplyEmail = (email: string) => /@users\.noreply\.github\.com$/
 export const gitPushedEmails = (dir: string, remote: string, srcs: string[]): string[] | undefined => {
   try {
     const not = /[/:\\]/.test(remote) ? '--remotes' : `--remotes=${remote}`;
-    const out = execFileSync('git', ['-C', dir, 'log', '--format=%ae%n%ce', ...srcs, '--not', not, '--'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+    const out = gitExecFileSync(['-C', dir, 'log', '--format=%ae%n%ce', ...srcs, '--not', not, '--'], { encoding: 'utf8', timeout: 15000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
     return [...new Set(out.split('\n').map((l) => l.trim()).filter(Boolean))];
   } catch {
     return undefined;

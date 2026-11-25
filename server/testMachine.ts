@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import type { AddressInfo } from 'node:net';
 import { Daemon, type Probes, type SessionFactory } from '../machine/daemon.ts';
 import type { LiveDeps } from '../machine/live.ts';
@@ -42,7 +42,7 @@ export interface TestRepos {
   cleanup: () => void;
 }
 
-const gitIn = (dir: string, ...a: string[]) => execFileSync('git', ['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe', windowsHide: true }).toString().trim();
+const gitIn = (dir: string, ...a: string[]) => gitExecFileSync(['-C', dir, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe', windowsHide: true }).toString().trim();
 
 /** The first testRepos of this process, made with git; the others are copies of it (one git call instead of six). */
 let template: string | undefined;
@@ -51,8 +51,8 @@ function repoTemplate(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-msb-template-'));
   const origin = path.join(root, 'origin.git');
   const main = path.join(root, 'FinalFactory');
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'master', origin], { windowsHide: true });
-  execFileSync('git', ['clone', '-q', origin, main], { stdio: 'pipe', windowsHide: true });
+  gitExecFileSync(['init', '-q', '--bare', '-b', 'master', origin], { windowsHide: true });
+  gitExecFileSync(['clone', '-q', origin, main], { stdio: 'pipe', windowsHide: true });
   gitIn(main, 'switch', '-q', '-c', 'master');
   fs.writeFileSync(path.join(main, '.gitignore'), 'Library/\nLogs/\nTemp/\n');
   fs.writeFileSync(path.join(main, 'README.md'), 'game\n');

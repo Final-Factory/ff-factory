@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -17,7 +18,10 @@ import path from 'node:path';
  *   plugins Claude Code loads come from its managed marketplace clone, which `registerAgents.sh` refreshes from GitHub, so
  *   the script only has to run from an up-to-date copy. Its own checkout dirty, on another branch or diverged: nothing is
  *   overwritten, the run stops and says why.
- * - Runs `sh registerAgents.sh --claude` from it: the marketplace refreshed, every plugin the machine remembers updated (a
+ * - Runs `sh registerAgents.sh --claude`, not from that checkout (a worker writes the root, so its script, its hooks and its git
+ *   config could be planted, w5573) but from a fresh shallow clone of origin/master in a new temp folder, made by git with no
+ *   global config, no system config (but on Windows, whose TLS backend lives there) and server/safeGit.ts's fence (w5541),
+ *   and removed after: the marketplace refreshed, every plugin the machine remembers updated (a
  *   bare run keeps the machine's set: ff-agents and ff-speckit everywhere, ff-discord where a person asked for it). Claude
  *   Code fetches the marketplace over HTTPS only, with a longer git timeout (REGISTER_ENV), and a failed run is run once
  *   more (w1895).
@@ -123,6 +127,8 @@ export interface PublishDeps {
   env: NodeJS.ProcessEnv;
   /** The user's home folder (os.homedir()). */
   home: string;
+  /** Where the run's fresh clone goes (os.tmpdir()). */
+  tmpdir?: string;
   platform: NodeJS.Platform;
   /** Windows, an elevated session (BEAST's ssh, w613): hand what the run made to the daemon task's user, so its non-elevated git does not refuse it. */
   giveTo?: (paths: string[]) => Promise<void>;
@@ -226,8 +232,29 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   const markerBefore = readText(marker);
   const sh = await shell(d);
   const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
+  // w5573: the script runs from a clone nothing else wrote, not from the checkout in the worker root.
+  const tmp = fs.mkdtempSync(path.join(d.tmpdir ?? os.tmpdir(), 'ff-agents-run-'));
+  try {
+    return await registerFrom(tmp);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
+  async function registerFrom(tmp: string): Promise<number> {
+  const emptyGlobal = path.join(tmp, 'gitconfig');
+  fs.writeFileSync(emptyGlobal, '');
+  const cleanEnv: NodeJS.ProcessEnv = { ...env, GIT_CONFIG_GLOBAL: emptyGlobal, GIT_NO_REPLACE_OBJECTS: '1', GIT_TEMPLATE_DIR: '', ...(d.platform === 'win32' ? {} : { GIT_CONFIG_NOSYSTEM: '1' }) };
+  const run = path.join(tmp, MARKETPLACE);
+  const c = await d.exec('git', [...anon, 'clone', '--quiet', '--depth', '1', '--single-branch', '--branch', BRANCH, AGENTS_REPO_URL, run], { env: cleanEnv, timeoutMs: 5 * 60_000 });
+  const runHead = c.code === 0 ? (await d.exec('git', ['-C', run, 'rev-parse', 'HEAD'], { env: cleanEnv, timeoutMs: 60_000 })).stdout.trim() : '';
+  if (!/^[0-9a-f]{40,64}$/.test(runHead)) {
+    d.say(`FAILED: could not make a fresh clone of ${AGENTS_REPO_URL} to run registerAgents.sh from (${tail(c)}); the plugins stay as they were.`);
+    return EXIT.failed;
+  }
+  if (runHead.slice(0, 12) !== head) d.say(`registerAgents.sh runs from origin/${BRANCH} ${runHead.slice(0, 12)} (a fresh clone; the checkout is at ${head}).`);
+  const latest = marketplaceVersions(readJson(path.join(run, '.claude-plugin', 'marketplace.json')));
   const register = async () => {
-    const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: co, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
+    const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: run, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
     for (const l of `${x.stdout}\n${x.stderr}`.split(/\r?\n/).filter((y) => y.trim())) d.say(`  ${l.trimEnd()}`);
     return x;
   };
@@ -240,7 +267,10 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   if (markerBefore !== undefined && readText(marker) !== markerBefore) {
     fs.writeFileSync(marker, markerBefore);
     d.say(`publish-skills' checkout marker kept on ${markerBefore.trim()}.`);
-  } else if (markerBefore === undefined && readText(marker) !== undefined) {
+  } else if (markerBefore === undefined) {
+    // The script ran from a temp folder, which it does not record (or did): the marker names the lasting checkout.
+    fs.mkdirSync(path.dirname(marker), { recursive: true });
+    fs.writeFileSync(marker, `${co}\n`);
     d.say(`publish-skills' checkout marker now names ${co} (there was none).`);
   }
   if (d.giveTo) {
@@ -266,4 +296,5 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   }
   d.say('Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.');
   return EXIT.ok;
+  }
 }

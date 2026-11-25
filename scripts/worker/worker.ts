@@ -37,6 +37,7 @@ import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJso
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
 import { publishAgentTools } from '../../server/agentTools.ts';
 import { agentGitDir, ensureAgentGit } from '../../server/agentGit.ts';
+import { gitFence, isGit } from '../../server/safeGit.ts';
 import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
 
@@ -352,9 +353,11 @@ interface Ran {
 }
 
 /** Run a program, its output captured; `live` streams its stderr (git's own progress) instead. */
-export function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; live?: boolean; timeoutMs?: number; onLine?: (line: string) => void } = {}): Promise<Ran> {
+export async function exec(cmd: string, args: string[], o: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string; live?: boolean; timeoutMs?: number; onLine?: (line: string) => void } = {}): Promise<Ran> {
+  // w5541: git runs no program the checkout's own config names (server/safeGit.ts).
+  const f = isGit(cmd) ? await gitFence(args, { cwd: o.cwd, env: o.env }) : { args, env: o.env ?? process.env };
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: o.cwd, env: o.env ?? process.env, windowsHide: true, stdio: ['pipe', 'pipe', o.live ? 'inherit' : 'pipe'] });
+    const child = spawn(cmd, f.args, { cwd: o.cwd, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', o.live ? 'inherit' : 'pipe'] });
     let stdout = '';
     let stderr = '';
     let settled = false;
@@ -828,7 +831,7 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
   const newDir = path.join(l.daemon, 'app.new');
   fs.rmSync(newDir, { recursive: true, force: true });
   fs.mkdirSync(newDir, { recursive: true });
-  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir]);
+  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir], { env: (await gitFence(['-C', l.src, 'archive'])).env });
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   fs.writeFileSync(path.join(newDir, 'machine', 'VERSION'), version + '\n');
   say('npm ci for the daemon...');
@@ -862,7 +865,7 @@ async function installDaemonLinux(o: InstallOptions, l: Layout, id: string, prob
   const newDir = path.join(l.daemon, 'app.new');
   fs.rmSync(newDir, { recursive: true, force: true });
   fs.mkdirSync(newDir, { recursive: true });
-  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir]);
+  await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir], { env: (await gitFence(['-C', l.src, 'archive'])).env });
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   fs.writeFileSync(path.join(newDir, 'machine', 'VERSION'), version + '\n');
   say('npm ci for the daemon...');
