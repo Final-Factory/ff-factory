@@ -85,33 +85,33 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
  * rewritten config.json the new portal starts on (machineLinkTailnet is BEAST's, trustProxy the VM's: HOST_KEYS).
  *
  * Under "enforce" (unset is enforce, server/machineLinkGate.ts machineLinkMode) the portal lets a daemon link in only from
- * loopback or a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48), judged by clientAddress. So it passes when:
+ * loopback or a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48), judged by clientAddress. The daemons are sent to
+ * `publicUrl` (the relocate), so what counts is where that URL takes them. It passes when:
  * - machineLinkTailnet is "warn" or "off" (or a typo, which is "warn"): nothing is refused;
- * - the portal sits behind Tailscale Serve here (`serve`: --tailscale, whose check needs the Funnel on) and trusts it
- *   (trustProxy not false): a daemon on the tailnet comes through Serve with its 100.x address forwarded;
- * - `publicUrl`'s host is itself a Tailscale address: daemons dial it over the tailnet.
- * Anything else (a LAN or public address or name reached without Serve) is refused, before anything is touched.
+ * - `publicUrl`'s host is a Tailscale address or a MagicDNS name (`*.ts.net`): a daemon on the tailnet connects from its
+ *   own 100.x address, straight to the portal or through Tailscale Serve, which forwards that address.
+ * Whether Serve is on here (`serve`: --tailscale, whose check needs the Funnel on) proves nothing about the URL (w5771:
+ * a LAN publicUrl with the Funnel on sends every daemon past Serve, and each is refused), so it only adds one refusal:
+ * with Serve in front, trustProxy off in the VM's config.json (a HOST_KEY) would refuse every daemon Serve forwards.
+ * Anything else (a LAN, loopback or public address or name) is refused, before anything is touched.
  */
 export function machineLinkPreflight(config: Json, publicUrl: string, o: { serve: boolean }): string | undefined {
   const mode = machineLinkMode(config.machineLinkTailnet);
   if (mode !== 'enforce') return undefined;
   const fix =
     "set machineLinkTailnet to \"warn\" in BEAST's config.json first (set_app_config machineLinkTailnet warn; the copy carries it), " +
-    'or cut over through Tailscale Serve (--tailscale with the Funnel on, publicUrl https://<node>.<tailnet>.ts.net); docs/machines.md, "The daemon link is tailnet-only"';
+    'or send the daemons to a tailnet URL (--public-url https://<node>.<tailnet>.ts.net through Tailscale Serve, or the VM\'s 100.x address); docs/machines.md, "The daemon link is tailnet-only"';
   const unset = config.machineLinkTailnet === undefined || config.machineLinkTailnet === null;
   const why = `machineLinkTailnet is ${unset ? 'unset (enforce)' : '"enforce"'}`;
-  if (o.serve) {
-    if (config.trustProxy === false) return `${why} and trustProxy is off, so every daemon that comes in through Tailscale Serve would be refused (the portal may not believe Serve's forwarded address): turn trustProxy on, or ${fix}`;
-    return undefined;
-  }
+  if (o.serve && config.trustProxy === false) return `${why} and trustProxy is off in the VM's config.json, so every daemon that comes in through Tailscale Serve would be refused (the portal may not believe Serve's forwarded address): turn trustProxy on in the VM's config.json (fffctl configure), or ${fix}`;
   let host = '';
   try {
-    host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '');
+    host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase();
   } catch {
-    // an unparsable URL is no Tailscale address
+    // an unparsable URL is no tailnet address
   }
-  if (host && tailnetAddress(host)) return undefined;
-  return `${why} and the daemons would reach the new portal at ${publicUrl || '(no URL)'}, which is not a Tailscale address and not behind Tailscale Serve, so the portal would refuse every daemon: ${fix}`;
+  if (host && (tailnetAddress(host) || /^[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net$/.test(host))) return undefined;
+  return `${why} and the daemons would be sent to ${publicUrl || '(no URL)'}, which is neither a Tailscale address nor a *.ts.net name, so they would not come from the tailnet and the portal would refuse every daemon: ${fix}`;
 }
 
 function pick(o: Json, keys: string[]): Json {

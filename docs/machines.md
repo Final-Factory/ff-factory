@@ -81,9 +81,11 @@ before redeploying by hand.
   `fffctl migrate --cut-over` to such a host, or a test world: `scripts/fff-migrate.world.ts` sets `"off"`) refuses
   them under enforce: set `machineLinkTailnet` to `"warn"` before such a move. `fffctl migrate --cut-over` checks this
   itself (w5716, `machineLinkPreflight` in `server/vmMigration.ts`): on the config the new portal will start on, under
-  enforce, it goes on only behind Tailscale Serve (`--tailscale`, with `trustProxy` on) or to a `publicUrl` whose host
-  is a Tailscale address, and otherwise stops with exit code 4 before the typed confirmation, with BEAST and the VM's
-  portal untouched, saying to set `"warn"` first or to cut over through Serve.
+  enforce, it goes on only when the daemons are sent to a tailnet URL: a `publicUrl` whose host is a Tailscale address
+  or a `*.ts.net` name (and, with Tailscale Serve in front, `trustProxy` on in the VM's config.json). Serve being on is
+  not enough by itself (w5771: a LAN `publicUrl` sends the daemons past it). Otherwise it stops with exit code 4 before
+  the typed confirmation, with BEAST and the VM's portal untouched, saying to set `"warn"` first or to use a tailnet URL;
+  the final copy is checked again after the drain, and a lockout there rolls back.
 
   **A refused machine is named and alerted** (w5575 review): when the check refuses a request whose bearer token is a
   machine's, the portal logs `machine <id>: link refused by machineLinkTailnet (enforce) from <address>: <why>` and,

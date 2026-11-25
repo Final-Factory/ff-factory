@@ -121,7 +121,10 @@ class TestSystem implements System {
   constructor(portal: Portal) {
     this.portal = portal;
   }
+  /** How many times the migration stopped this VM's portal. */
+  stops = 0;
   async stopPortal() {
+    this.stops++;
     await this.portal.stop();
   }
   async startPortal() {

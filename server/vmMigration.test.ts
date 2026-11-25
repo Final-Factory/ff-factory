@@ -258,4 +258,13 @@ test('vmMigration (w5716): the cut-over refuses a move that would lock every dae
   assert.equal(machineLinkPreflight({}, 'https://fff.tail1234.ts.net', { serve: true }), undefined);
   assert.match(machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: true }) ?? '', /trustProxy is off/);
   assert.equal(machineLinkPreflight({ trustProxy: false, machineLinkTailnet: 'warn' }, 'https://fff.tail1234.ts.net', { serve: true }), undefined);
+  // w5771: Serve on proves nothing about where the daemons are sent: a LAN or public publicUrl takes them past it.
+  assert.match(machineLinkPreflight({ trustProxy: true }, lan, { serve: true }) ?? '', /neither a Tailscale address nor a \*\.ts\.net name/);
+  assert.ok(machineLinkPreflight({ trustProxy: true }, 'https://portal.example.com', { serve: true }));
+  assert.ok(machineLinkPreflight({}, 'http://127.0.0.1:8790', { serve: true }), 'loopback: no other machine reaches it');
+  assert.ok(machineLinkPreflight({}, 'https://fff.ts.net.example.com', { serve: true }), 'only a real *.ts.net suffix');
+  // A MagicDNS name without Serve: a tailnet daemon connects straight from its own 100.x address.
+  assert.equal(machineLinkPreflight({}, 'http://FFF.tail1234.ts.net:8790', { serve: false }), undefined);
+  assert.equal(machineLinkPreflight({ trustProxy: false }, 'http://fff.tail1234.ts.net:8790', { serve: false }), undefined);
+  assert.match(machineLinkPreflight({ trustProxy: false }, 'https://fff.tail1234.ts.net', { serve: true }) ?? '', /VM's config\.json/);
 });

@@ -93,6 +93,7 @@ test('fffctl migrate --cut-over (w5716): with machineLinkTailnet on enforce and 
   assert.match(report, /set machineLinkTailnet to "warn"/);
   assert.deepEqual(w.sys.answers, ['CUT OVER'], 'it never asked to go on');
   assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')), "BEAST's task untouched");
+  assert.equal(w.sys.stops, 0, "this VM's portal was never stopped");
   assert.deepEqual(treeHash(w.beastRoot + '/scripts'), beastBefore);
   assert.equal(fs.readFileSync(w.vmCfgFile, 'utf8'), vmCfgBefore, "this portal's config untouched");
 });
@@ -102,11 +103,29 @@ test('fffctl migrate --cut-over (w5716): with enforce on and the portal behind T
   enforceOnBeast(w);
   w.sys.funnelState = async () => 'funnel';
   w.sys.answers = ['no'];
-  const m = migration(w, 'cut-over', { tailscale: true });
+  // The daemons are sent through Serve's own name (w5771: the world's default publicUrl is a LAN address).
+  const m = migration(w, 'cut-over', { tailscale: true, publicUrl: 'https://fff.tail1234.ts.net' });
   const code = await m.cutOver();
   const report = m.report.join('\n');
   assert.equal(code, 3, report);
   assert.doesNotMatch(report, /refused/);
   assert.match(report, /stopped: nothing on BEAST was touched/);
   assert.deepEqual(w.sys.answers, [], 'it asked to go on');
+});
+
+test('fffctl migrate --cut-over (w5771): with enforce on, Serve on is not enough: daemons sent to a LAN address are still refused', { skip, timeout: 300_000 }, async (t) => {
+  const w = await world(t);
+  enforceOnBeast(w);
+  w.sys.funnelState = async () => 'funnel';
+  w.sys.answers = ['CUT OVER'];
+  const lan = 'http://192.168.77.20:8790';
+  const m = migration(w, 'cut-over', { tailscale: true, publicUrl: lan });
+  const code = await m.cutOver();
+  const report = m.report.join('\n');
+  assert.equal(code, 4, report);
+  assert.match(report, /refused, nothing on BEAST or here was touched/);
+  assert.ok(report.includes(lan), report);
+  assert.deepEqual(w.sys.answers, ['CUT OVER'], 'it never asked to go on');
+  assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')), "BEAST's task untouched");
+  assert.equal(w.sys.stops, 0, "this VM's portal was never stopped");
 });

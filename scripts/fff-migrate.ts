@@ -1447,6 +1447,10 @@ export class Migration {
       // 4. The rest of the copy: nothing changes on BEAST any more.
       const last = await this.pullAll();
       const { next } = this.rewrite();
+      // BEAST's machineLinkTailnet may have changed since the first copy (w5771): the config this portal starts on is
+      // checked again, and a lockout now rolls back like any other failure here.
+      const lockoutNow = machineLinkPreflight(readJson(path.join(next, 'config', 'config.json')), publicUrl, { serve: this.o.tailscale });
+      if (lockoutNow) throw new Error(`the final copy would lock the daemons out: ${lockoutNow}`);
       // 5. This portal, for real.
       await this.sys.setDryRun(false);
       await this.install(next, last.moves);
