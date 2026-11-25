@@ -1,0 +1,20 @@
+[Unit]
+Description=FF Factory agents: the portal's door to its agents' account (w5598)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/vault.md
+# No After= or Requires= on any service, on purpose (w698, units/fff-ops.socket): each connection's fff-agent@.service
+# Requires= fff-agent-views.service instead. deploy/vm/test/fff-units.test.sh keeps a socket from ordering after a service.
+
+[Socket]
+# Only the portal's account connects (0600, fff). One connection per agent process: the orchestrators, the dispatcher and
+# the bug-thread judge. A connection over the cap is dropped; the portal then starts that agent as fff and alerts.
+ListenStream=/run/fff-agent/claude.sock
+SocketUser=fff
+SocketGroup=fff
+SocketMode=0600
+DirectoryMode=0755
+Accept=yes
+MaxConnections=64
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
