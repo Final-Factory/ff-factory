@@ -2023,19 +2023,34 @@ route('POST', '/api/delegations/([\\w-]+)/(approve|reject|bump)', async (req, [i
 
 route('GET', '/api/push', async (req) => ({ publicKey: notifier.publicKey, subscriptions: notifier.list(auth.user(req)!) }));
 
+/** An endpoint that is not the caller's own, or does not exist, answers 404 and changes nothing (w5534). */
+const notFoundSubscription = (e: unknown) => (e instanceof Error && e.message === 'no such subscription' ? new HttpError(404, e.message) : e);
+
 route('POST', '/api/push/subscribe', async (req) => {
   const b = await readJson<{ subscription?: { endpoint?: string; keys?: { p256dh?: string; auth?: string } }; prefs?: Partial<NotifyPrefs> }>(req);
-  return { prefs: notifier.subscribe(auth.user(req)!, b.subscription ?? {}, b.prefs, deviceName(String(req.headers['user-agent'] ?? ''))) };
+  try {
+    return { prefs: notifier.subscribe(auth.user(req)!, b.subscription ?? {}, b.prefs, deviceName(String(req.headers['user-agent'] ?? ''))) };
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
 });
 
 route('POST', '/api/push/prefs', async (req) => {
   const b = await readJson<{ endpoint?: string; prefs?: Partial<NotifyPrefs> }>(req);
-  return { prefs: notifier.setPrefs(need(b.endpoint, 'endpoint'), b.prefs ?? {}) };
+  try {
+    return { prefs: notifier.setPrefs(auth.user(req)!, need(b.endpoint, 'endpoint'), b.prefs ?? {}) };
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
 });
 
 route('POST', '/api/push/unsubscribe', async (req) => {
   const b = await readJson<{ endpoint?: string }>(req);
-  notifier.unsubscribe(need(b.endpoint, 'endpoint'));
+  try {
+    notifier.unsubscribe(auth.user(req)!, need(b.endpoint, 'endpoint'));
+  } catch (e) {
+    throw notFoundSubscription(e);
+  }
   return {};
 });
 
@@ -3245,7 +3260,7 @@ setInterval(() => {
           },
           removeSession: (id) => sessions.remove(id),
           pushEndpoints: (u) => notifier.list(u).map((x) => x.endpoint),
-          unsubscribe: (e) => notifier.unsubscribe(e),
+          unsubscribe: (e) => notifier.drop(e),
           memoryRoot,
           memoryDir: (u) => memoryDirFor(cfg, { orchestratorRole: 'personal', requestedBy: { userId: u, displayName: u } }, false),
         },
