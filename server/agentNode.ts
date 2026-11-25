@@ -160,8 +160,13 @@ foreach ($e in @(${exes.map(q).join(', ')})) {
   if ($allow[$k] -and -not $block[$k]) { "ok $e" } else { "missing $e" }
 }
 $tailnet = @(${TAILNET_FORMS.map(q).join(', ')})
+$procs = $null
+if (${narrow}.Count) {
+  try { $procs = @{}; foreach ($pr in @(Get-Process -ErrorAction SilentlyContinue)) { try { $pp = [string]$pr.Path } catch { $pp = '' }; if ($pp) { $pl = $pp.ToLowerInvariant(); $procs[$pl] = @($procs[$pl]) + $pr.Id } } } catch { $procs = $null }
+}
 foreach ($e in ${narrow}) {
   $k = $e.ToLowerInvariant()
+  try {
   $isWide = $false
   foreach ($n in @($rules[$k] | Where-Object { $_ })) {
     $ra = $from[$n]
@@ -171,7 +176,8 @@ foreach ($e in ${narrow}) {
   }
   if ($isWide) { "wide $e" }
   try {
-    $ids = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLowerInvariant() -eq $k } | ForEach-Object { $_.Id })
+    if ($null -eq $procs) { throw 'no process list' }
+    $ids = @($procs[$k] | Where-Object { $_ })
     if (-not $ids.Count) { "peers notrunning $e" } else {
       $ports = @(Get-NetTCPConnection -State Listen -OwningProcess $ids -ErrorAction SilentlyContinue | ForEach-Object { $_.LocalPort })
       foreach ($c in @(Get-NetTCPConnection -State Established -OwningProcess $ids -ErrorAction SilentlyContinue)) {
@@ -186,6 +192,7 @@ foreach ($e in ${narrow}) {
       }
     }
   } catch { "peers unread $e" }
+  } catch { if (-not $isWide) { "wide $e" }; "from $e unread: $($_.Exception.Message -replace '\\s+', ' ')" }
 }
 "stale=$stale"
 `;
