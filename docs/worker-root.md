@@ -171,6 +171,9 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
   claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
   cache-medium/uv/               the daemon's and Medium agents' UV_CACHE_DIR (the Unity MCP server's uvx, w5565): read-only to workers
+  cache-medium/uv-tools/         the daemon's and Medium agents' UV_TOOL_DIR (w5693): read-only to workers
+  cache/uv-tools/                sandbox agents' and editors' UV_TOOL_DIR (uvx's temp files, w5693, w5745)
+  cache/uv-bin/                  sandbox agents' and editors' UV_TOOL_BIN_DIR (`uv tool install`'s commands, w5745)
   steam/                         steamcmd, its config and cached login, FFBox's release scripts: the daemon's alone (w5551, steam-upload.md)
   tools/final-factory-agents/    FF Factory's own checkout the agent tools publish runs registerAgents.sh from (w1476)
   home/                          GIT_CONFIG_GLOBAL (.gitconfig), GH_CONFIG_DIR (.config/gh), .ssh/config
@@ -482,6 +485,37 @@ fills both with the Unity MCP package at start, Medium first, and prunes each wi
 is in `MEDIUM_ONLY_CHILDREN` (`server/claudeHome.ts`) with `claude-medium`, so all three fences keep it from workers.
 Measured on biscuit under `ff-landlock.py` (w5565): a fenced `uvx` with the Medium cache fails "Failed to initialize
 cache ... Permission denied (os error 13)" and a planted file is refused; the same run on `<root>/cache/uv` installs and runs.
+
+**uv's tool folder, split the same way** (w5693). `uvx` takes a temp file in uv's tool folder (`UV_TOOL_DIR`, default
+`~/.local/share/uv/tools`; `%APPDATA%\uv\tools` on Windows) on every run. No fence lets a worker write the person's home, so
+on m5 every Seatbelt-fenced sandbox agent's Unity MCP server exited at start (UnityMCP CONNECTION_CLOSED; by hand: "Could
+not create temporary file ... Operation not permitted (os error 1) at path ~/.local/share/uv/tools/.tmpTV6qWR", uv 0.11.27,
+measured in w5691). Opening the home folder is no fix: the daemon and Medium agents ran uvx from it too. Now sandbox agents
+get `<root>/cache/uv-tools` (`machine/sharedCaches.ts` `workerUvToolDir`, set by `sandboxUvEnv` in `runSpec` for every
+sandbox agent), and the daemon and Medium agents
+`<root>/cache-medium/uv-tools` (`applyMediumUvToolDir` at start; one daemon.json names stays). Fallback: when the daemon
+cannot make the Medium folder it keeps uv's default and logs `uv tool folder: could not make ...`; a sandbox agent's folder
+is inside `cache`, which every fence opens, and uv makes it itself. Same gap elsewhere: Landlock (`machine/writeLock.ts`)
+opens no `~/.local/share/uv`, so Linux workers had it too; Windows Low agents' APPDATA is inside the root (`lowEnv`), so
+theirs worked and now uses `cache/uv-tools` like the rest. Measured on m5 under the fence: with
+`UV_TOOL_DIR=<root>/cache/uv-tools` the server answered MCP `initialize` in 2.6 s.
+
+**One rule for a sandbox's uv folders, its editor too** (w5745, from w5693's review w5709). `sandboxUvEnv` is the one place:
+the Seatbelt `fenceEnv` no longer sets `UV_TOOL_DIR` of its own. The tool and tool bin folders stay only when they are inside
+`<root>/cache`; uv's default in the person's home, the Medium folder and any other folder daemon.json names become the
+workers' ones (workers write only inside the root). The cache keeps its w5565 rule. Sandbox editors get the same
+(`machine/sandboxes.ts` `sandboxEditorEnv`), where they inherited the daemon's Medium cache and tool folder, which a Low or
+fenced editor cannot write; an editor already runs its sandbox's code, which workers write, so this adds no reach.
+`UV_TOOL_BIN_DIR`: `uvx` never writes it; a fenced `uv tool install` did, into `~/.local/bin`, and was refused ("failed to
+symlink file from ~/.local/bin/mcp-for-unity ... Operation not permitted", measured on m5); with `<root>/cache/uv-bin` it
+installs. The daemon and Medium agents keep `~/.local/bin`, which is on their PATH. uv's managed Pythons
+(`UV_PYTHON_INSTALL_DIR`, `~/.local/share/uv/python`) are not moved, on a measurement (m5, a fenced worker, uv 0.11.27):
+`uvx --from mcpforunityserver==10.3.0 mcp-for-unity` (Requires-Python >=3.10) installs no Python; it reads the person's
+uv-managed 3.12 there, which the fence allows (only writes are refused: a fenced `touch` there is "Operation not
+permitted"), and with an empty install folder it took Homebrew's 3.14 from PATH and answered `initialize` in 2.9 s. Moving
+the folder would hide the Pythons a machine already has from workers and from an `--offline` server, and a Python the daemon
+ran from a folder workers can write would run their code at its level (w5542). A worker's uvx needs a download only on a
+machine with no Python 3.10+ at all, which the person's own first uvx fills.
 
 **Checking the switch on a machine** (w5305's rollout). An agent that was already running when its daemon updated is
 adopted with its old environment, so it still writes to and reads skills from `~/.claude`. That proves nothing either
@@ -913,6 +947,9 @@ machine, and what does not".
 | macOS | Seatbelt (`server/workerFence.ts`, docs/worker-fence.md) | `"workerFence": "seatbelt"` | key absent |
 | Linux | Landlock (`machine/writeLock.ts`, 4.2) | `"writeLock": true` (`writeLockExtra` is kept either way) | key absent |
 | Windows | Low integrity (4.1) | `"workerIntegrity": "low"` | key absent |
+
+Each fence also closes the daemon's folder, `secrets` and `root.json` to reads, with what workers read there given back
+(w5546; docs/worker-fence.md, "Reads"). The same setting turns both halves on and off.
 
 **Off from the portal, nobody at the machine (the normal route).** The orchestrator or ops worker runs
 `ops_worker machine_update` with `machine: <id>` and `worker_fence: "off"` (or `"on"`). It goes the machine update's

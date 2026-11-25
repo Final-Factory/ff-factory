@@ -316,10 +316,17 @@ export interface Config {
    */
   ownerDeviceApproval?: 'off' | 'advisory';
   /**
-   * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "warn" (unset) logs what would be
-   * refused and lets it in, "enforce" refuses it, "off" skips the check (the recovery switch, docs/machines.md).
+   * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "enforce" (unset) refuses it,
+   * "warn" logs what would be refused and lets it in, "off" skips the check (the recovery switch, docs/machines.md).
    */
   machineLinkTailnet?: 'off' | 'warn' | 'enforce';
+  /**
+   * The portal VM's agents (orchestrators, the dispatcher, the bug-thread judge) as their own OS account (w5598,
+   * server/agentAccount.ts, docs/vault.md "In the VM"): "on" starts them through fff-agent.socket as fff-agent, "warn"
+   * (unset) starts them as the portal's own account and only checks the socket, "off" as before (the recovery switch).
+   * Read live; the VM's switch file (fffctl agents) wins over it. Only where the VM's unit names the socket.
+   */
+  agentAccount?: 'off' | 'warn' | 'on';
   /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.

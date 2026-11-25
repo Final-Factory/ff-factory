@@ -86,6 +86,23 @@ test('steam_upload: the claim and the branch come from GitHub', async () => {
   assert.equal(await branchOf(err, 'o/r', SHA), undefined);
 });
 
+test('steam_upload: status with no job finds the running check, then the latest job of any action', () => {
+  let now = 1_000;
+  const jobs = new SteamJobs(() => now);
+  assert.equal(jobs.latestOn('beast'), undefined);
+  jobs.start({ id: 'i1', machine: 'beast', key: SteamJobs.keyOf('beast', 'install'), action: 'install', by: 's' });
+  jobs.update('i1', { state: 'done' });
+  now += 1_000;
+  jobs.start({ id: 'c1', machine: 'beast', key: SteamJobs.keyOf('beast', 'check'), action: 'check', by: 's' });
+  jobs.start({ id: 'o1', machine: 'lothdesktop', key: SteamJobs.keyOf('lothdesktop', 'check'), action: 'check', by: 's' });
+  assert.equal(jobs.latestOn('beast')?.id, 'c1', 'the running check');
+  // It ends a second before the caller asks: still that check, not "no job".
+  jobs.update('c1', { state: 'done', result: { exit: 0 } });
+  assert.equal(jobs.latestOn('beast')?.id, 'c1');
+  assert.equal(jobs.latestOn('beast')?.state, 'done');
+  assert.equal(jobs.latestOn('m5'), undefined);
+});
+
 test('steam_upload: one check per computer every 10 minutes, and a lost daemon fails its job', () => {
   let now = 1_000_000;
   const jobs = new SteamJobs(() => now);

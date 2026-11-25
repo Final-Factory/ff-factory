@@ -5,6 +5,51 @@ or disk and take every other worker and editor there with it (item 25 of the rog
 generous per-worker memory, process and temp-disk caps"). The caps are generous on purpose: a normal turn, even the heaviest
 we measured, never reaches them. Code: `machine/workerCaps.ts`, `machine/winJob.cs`, `machine/linuxScope.ts`.
 
+## Modes: off, warn, enforce (default warn)
+
+**Nothing is enforced until the owner says so.** A machine's mode is `workerCaps` in its `daemon.json`: `off`, `warn` or
+`enforce`. The key absent, or a value that is none of the three, means **warn**. The daemon reads it and hands it to each
+worker's agent host in the host's start record (`HostStart.capsMode`), never through the worker's environment, which a worker
+controls. A host keeps the mode it started with, so a change reaches workers started after it.
+
+| Mode | What runs | What the worker and the portal see |
+| --- | --- | --- |
+| `off` | Nothing: no job, no scope limits, no watch, no temp stop. (The 15 GB temp warning of `server/tempSizeHook.ts` is its own hook and stays.) | Nothing. `host.log`: "worker caps: off". |
+| `warn` (default) | Everything is measured, nothing is limited or ended. | A note and a ledger line that say "would have hit ... (warn-only: nothing was stopped)", at most once per cap kind per minute. `host.log` says the mode at start and, when the host stops, the peaks seen (most processes at once, peak memory, peak temp). |
+| `enforce` | The limits and the stop, as "The caps" and "When a cap is hit" below describe, with the safeguards under them. | The note and ledger line of a hit that ended tools. |
+
+How warn measures, by OS:
+
+- **Windows:** the job exists and holds the host, with **no limit flags** (the helper's fourth argument is the mode, and only
+  `enforce` sets limits). The helper answers `stat` on its stdin with `{"event":"stat","active":N,"peak":B}`: the job's
+  active process count and `PeakJobMemoryUsed`. The host asks every 2 s.
+- **Linux:** the scope is launched with no `MemoryMax` or `TasksMax`. The host reads `memory.peak` (older kernels:
+  `memory.current`) and `pids.peak` (`pids.current`) every 2 s. `memory.peak` counts page cache, so it reads higher than the
+  resident memory of the processes.
+- **macOS:** the tree watch of "What is capped", reporting only.
+- **Temp folder:** reported over the cap, never stopped.
+
+Enforce's safeguards (a lock-out costs more than a miss):
+
+- **Never the host or its claude.** Tools are ended only when the process list proves who the host is: an empty list, or one
+  without the host's pid, ends nothing and `host.log` says why (the host's own, and the Windows helper's `kill-tools`). The
+  Windows helper also checks `IsProcessInJob` just before it ends a pid, so a pid reused since the list was read is left alone.
+- **Linux limits only with `OOMPolicy=continue`.** Without it systemd's default (`stop`) ends the whole scope, the host and its
+  claude with it, when the kernel ends one process. Where `oomPolicyUsable()` is false, the scope runs with no limits and
+  `host.log` says so.
+- **Linux does not add a kill of its own.** The host reports the scope's `memory.events.local` `oom_kill` and `pids.events`
+  `max` hits, and ends nothing: the kernel already acted, and a ps-based kill could reach the claude.
+
+**The switch**, for a machine that must be rid of the caps at once, with nobody at it:
+`ops_worker machine_update machine=<id> worker_caps=off` (or `warn`, `enforce`). It rides the machine update path of
+`worker_fence` (docs/worker-root.md): over the daemon's link where it offers it, else the install script's
+`-WorkerCaps <mode>` (Windows) or `--worker-caps <mode>` (Linux, macOS). Updates carry the key through unchanged. On the
+machine itself: `worker update --worker-caps off|warn|enforce`.
+
+**Enforce waits on a week of warn data and the owner's go.** Nothing sets `enforce` by default or by itself. Read the
+`peaks` lines in the workers' `host.log`s and the "would have hit" ledger lines for a week of real work first, and then the
+owner decides.
+
 ## The caps
 
 | Cap | Value | Rests on |
@@ -17,6 +62,8 @@ we measured, never reaches them. Code: `machine/workerCaps.ts`, `machine/winJob.
 `CAP_LIMITS` in `machine/workerCaps.ts` holds them; `capsFor()` works them out for a machine.
 
 ## What is capped, by OS
+
+Enforce mode, as described here; warn measures the same things without the limits (see "Modes").
 
 What a cap holds: the worker's agent host (`machine/agentHost.ts`), its claude, and every tool claude runs. That includes
 shells, builds, background jobs, and a batch Unity under `unity-slot run`. A `--detach` run is covered too: it leaves the
@@ -31,6 +78,11 @@ process tree but not the job or the scope.
     reads the job's process count every 3 s. A Git Bash fork refused by the limit was seen posting no port message.
   - Nested jobs work: node's own and the Task Scheduler's. libuv does not break a detached child away, so detached tools stay
     in the job (measured).
+  - **No mode allows breakaway, warn included.** With `JOB_OBJECT_LIMIT_BREAKAWAY_OK` set, Git Bash (MSYS2/Cygwin) starts
+    every child with `CREATE_BREAKAWAY_FROM_JOB`, so whatever a worker runs through Bash leaves the job and warn's peaks miss
+    it. Measured on lothdesktop after #1223 (which set it in warn): the same job query found the worker's job from PowerShell
+    (flags 0x800) and another job from Bash (flags 0). `server/workerCaps.test.ts`, "what Git Bash starts stays in the job",
+    counts 5 processes with the flag and passes without it.
 - **Linux: the host's systemd scope.** The daemon starts each host in its own scope (`machine/linuxScope.ts`, w2474). A
   worker's scope gets `MemoryMax` and `TasksMax` where the user manager delegates the memory and pids controllers.
   - `probeLimits` checks this by having a test scope read its own `memory.max` and `pids.max` back, because systemd takes the
@@ -53,6 +105,9 @@ process tree but not the job or the scope.
 
 ## When a cap is hit
 
+Enforce mode. In warn mode the steps are the same, except step 1 (nothing is ended) and the wording of 2 and 3 ("would have
+hit", "warn-only: nothing was stopped"). On Linux in enforce mode the kernel is what acted, and the host only reports it.
+
 1. The host ends the worker's tools: every process of the job (Windows), the scope (Linux) or the tree (a Mac), except the
    host and its direct children (its claude, which every OS starts directly or execs in place). The session goes on. If a
    tool claude started (a stdio MCP server among them) was ended with the rest, claude says so on its next use.
@@ -62,7 +117,8 @@ process tree but not the job or the scope.
    (`server/agents.ts` `onWorkerCap`), for example "worker 1a2b3c4d hit its memory cap (51.2 GB for the agent and every tool it
    runs): FF Factory ended 12 of its tool processes (w5554)". The host's `host.log` has a line for every hit.
 
-One cap is reported at most once a minute, and enforced every time.
+One cap is reported at most once a minute, and enforced every time (warn: reported once a minute, and a peak counter again only
+when it rose).
 
 ## Unity editors are not capped
 
@@ -93,7 +149,14 @@ them still can in some ways, until the fences close these:
 
 All runs are inside the test's own process tree.
 
-**`server/workerCaps.test.ts`** has a stand-in host, its "claude", and tools.
+**`server/workerCaps.test.ts`** has a stand-in host, its "claude", and tools. The enforce tests below pass `mode: 'enforce'`.
+The modes have their own tests there: off starts nothing (no helper is even built), warn reports with `warn: true` and ends
+nothing (a temp folder, a process cap on any OS; on Windows the job's `stat` and its no-limit flags, a 700 MB tool under a
+512 MB cap going through), a fake cgroup folder tests Linux's warn reads and enforce's kernel report on any OS, and a process
+list without the host ends nothing. `server/linuxScope.test.ts` has the scope with no limits when `OOMPolicy` is not usable.
+The Windows helper (`winJob.cs`) was compiled with Add-Type and run in warn mode against a `ping`: `stat` answered
+`{"event":"stat","active":1,"peak":1044480}` with no limit flags, and `kill-tools` for a pid the snapshot lacks answered
+`{"event":"killed","n":0,"why":"the host is not in the process snapshot"}`.
 
 On Windows (BEAST, measured):
 - A fork bomb past a cap of 8 was refused and its tools ended.

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, sdkVersion, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -987,6 +987,31 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, 'on'), ['-WorkerFence on']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, 'off'), ['--worker-fence off']);
   assert.deepEqual(workerUpdateFlags('linux', {}), [], 'unset: no flag, the install keeps its fence');
+  // w5554: the worker caps' mode, the recovery switch (`worker_caps off`): off, warn or enforce and nothing else, one flag per platform.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerCaps: 'maybe' as never }), /worker_caps: off, warn or enforce/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerCaps: '' as never }), /worker_caps: off, warn or enforce/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', workerCaps: 'off' });
+  await new Promise((r) => setTimeout(r, 300));
+  const wcWin = store.readTranscript(OPS_ID, 120).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(wcWin.text.includes(`-Update -Ref 3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a -Root C:\\ffw -WorkerCaps off"'`), wcWin.text);
+  assert.match(wcWin.text, /with these settings changed: -WorkerCaps off/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', workerCaps: 'enforce' });
+  await new Promise((r) => setTimeout(r, 300));
+  const wcLin = store.readTranscript(OPS_ID, 140).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(wcLin.text.includes(`--worker-fence on --worker-caps enforce'`), wcLin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, 'warn'), ['-WorkerCaps warn']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, 'enforce'), ['--worker-caps enforce']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined), [], 'unset: no flag, the install keeps its mode');
+  // w5702: the transcript lock's switch: on or off and nothing else, Linux only (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', transcriptLock: 'maybe' as never }), /transcript_lock: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', transcriptLock: '' as never }), /transcript_lock: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', transcriptLock: 'on' }), /transcript_lock: Linux only \(the macOS fence already does this; docs\/transcript-seal\.md\)/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', transcriptLock: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const tlLin = store.readTranscript(OPS_ID, 160).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(tlLin.text.includes(`--worker-fence on --transcript-lock on'`), tlLin.text);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off'), ['--worker-caps warn', '--transcript-lock off']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its lock');
   ops.close();
 });
 
@@ -1007,7 +1032,7 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
     file: path.join(dir, 'ops-worker.json'),
     workProblem: () => undefined,
     // No ssh target it could use: the link is the way in.
-    machine: (id) => (id === 'coosego' ? { id, root: 'D:\\ffw', platform: 'win32', target: 'not an ssh target' } : undefined),
+    machine: (id) => (id === 'coosego' ? { id, root: 'D:\\ffw', platform: 'win32', target: 'not an ssh target' } : id === 'penguin' ? { id, root: '/home/p/ffw', platform: 'linux', target: 'not an ssh target' } : undefined),
     ownRequestProblem: () => undefined,
     linkUpdate: (id, flags) => {
       asked.push({ id, flags });
@@ -1050,6 +1075,20 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerFence: 'maybe' as never }), /worker_fence: on or off/);
   assert.equal(asked.length, before, 'a refused value asks nothing');
   assert.equal(recorded.length, 0, 'the fence switch is no limit: the record is left alone');
+  // w5554: the worker caps' mode alone is a valid update too, carried over the link as named; a value off the list never goes.
+  ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'off' });
+  assert.deepEqual(asked.at(-1), { id: 'coosego', flags: { workerCaps: 'off' } });
+  const beforeCaps = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'on' as never }), /worker_caps: off, warn or enforce/);
+  assert.equal(asked.length, beforeCaps, 'a refused value asks nothing');
+  assert.equal(recorded.length, 0, 'the caps switch is no limit: the record is left alone');
+  // w5702: the transcript lock alone is a valid update over the link; a value off the list, or a machine that is not Linux, never goes.
+  ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'off' });
+  assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { transcriptLock: 'off' } });
+  const beforeTl = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'warn' as never }), /transcript_lock: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', transcriptLock: 'on' }), /transcript_lock: Linux only/);
+  assert.equal(asked.length, beforeTl, 'a refused value asks nothing');
   await new Promise((r) => setTimeout(r, 50));
   ops.close();
 
@@ -1174,4 +1213,15 @@ test('w5516: the installer commands pin a full commit, fetched at it and named t
   assert.equal(installerUrl(c), `https://raw.githubusercontent.com/Final-Factory/ff-factory/${c}/scripts/worker/install.sh`);
   for (const bad of ['main', c.slice(0, 12), c.toUpperCase(), `${c} --ref main`, ''])
     assert.throws(() => workerUpdateRemote({ root: '/x', platform: 'linux' }, bad), /pinned to a full 40-character commit id/, bad);
+});
+
+test("sdkVersion finds the SDK from the portal's own folder, whatever the process's working folder (w5598)", () => {
+  const want = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).version;
+  const was = process.cwd();
+  process.chdir(os.tmpdir());
+  try {
+    assert.equal(sdkVersion(), want);
+  } finally {
+    process.chdir(was);
+  }
 });

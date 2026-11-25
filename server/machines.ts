@@ -169,7 +169,7 @@ export interface SandboxLimits {
 }
 
 /** A machine's pool extras (docs/beast-machine.md): the Library seed, editor priority and the folders never to touch. */
-export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'protectedPaths' | 'noTimedRuns' | 'noPlayers' | 'playOnly'>;
+export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'slotRepos' | 'protectedPaths' | 'noTimedRuns' | 'noPlayers' | 'playOnly'>;
 
 /**
  * The machines that take no timed runs unless their record says otherwise (w1861). lothsahn, 2026-10-23, after Ben's
@@ -230,6 +230,7 @@ export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits &
     ...(m.librarySeedCopy ? { librarySeedCopy: m.librarySeedCopy } : {}),
     ...(m.librarySeedGB !== undefined ? { librarySeedGB: m.librarySeedGB } : {}),
     ...(m.unityBelowNormal ? { belowNormal: true } : {}),
+    ...(m.slotRepos === 'new' || m.slotRepos === 'all' ? { slotRepos: m.slotRepos } : {}),
     ...(m.protectedPaths?.length ? { protectedPaths: m.protectedPaths } : {}),
   };
 }
@@ -696,6 +697,13 @@ export class MachineManager {
    * Called once per failure: on the change to failed, and once more when a failed fence is on or off again.
    */
   fenceAlert?: (machineId: string, title: string, text: string) => void;
+  /**
+   * A known machine's daemon link was refused by the tailnet-only check (w5575; wired by index.ts like offlineAlert: the
+   * orchestrator and a push). Without it a refused machine looks like any offline one, whose alert says to ask nobody.
+   */
+  linkRefusedAlert?: (machineId: string, title: string, text: string) => void;
+  /** When linkRefusedAlert last told about each machine (once an hour per machine). */
+  private linkRefusedAt = new Map<string, number>();
 
   /** Its daemon's worker fence report (w5555, machine/fenceGate.ts): stored on the machine, alerted when it fails. */
   takeFence(id: string, raw: unknown): void {
@@ -1096,7 +1104,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1198,12 +1206,12 @@ export class MachineManager {
     return this.isOnline(id) && this.hellos.has(id);
   }
 
-  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   /** The portal hosts its daemon follows and what pinning would have refused (w5576), from its hello; undefined from an older daemon. */
   portalPinOf(id: string): PortalPinStatus | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.portalPin : undefined;
   }
 
+  /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
   }
@@ -1318,9 +1326,11 @@ export class MachineManager {
   }
 
   /** Restart a machine's daemon over its link (its agents run on), or unload it as removeMachine does over ssh (w1596). */
-  async linkControl(id: string, action: 'restart' | 'uninstall'): Promise<void> {
+  async linkControl(id: string, action: 'restart' | 'uninstall' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on'): Promise<void> {
     refuseInDryRun(`a daemon ${action} of ${id} over its link`);
     if (!this.canLink(id)) throw new Error(`${id}'s daemon does not take a ${action} over its link`);
+    // w5546: an older daemon reads any action but restart as uninstall, so the switch goes only to one that offers it.
+    if (action.startsWith('read-fence') && !this.hellos.get(id)?.readFenceSwitch) throw new Error(`${id}'s daemon has no read fence switch (it runs code from before w5546): nothing was sent`);
     const callId = randomUUID();
     const done = this.linkControls.wait(callId, id, 60_000, `the ${action}`);
     this.post(id, { type: 'daemon_control', id: callId, action });
@@ -1702,6 +1712,7 @@ export class MachineManager {
       librarySeedCopy: opts.librarySeedCopy ?? prev?.librarySeedCopy,
       librarySeedGB: opts.librarySeedGB ?? prev?.librarySeedGB,
       unityBelowNormal: opts.unityBelowNormal ?? prev?.unityBelowNormal,
+      slotRepos: opts.slotRepos ?? prev?.slotRepos,
       noTimedRuns: opts.noTimedRuns ?? prev?.noTimedRuns,
       noPlayers: opts.noPlayers ?? prev?.noPlayers,
       playOnly: opts.playOnly ?? prev?.playOnly,
@@ -1756,6 +1767,7 @@ export class MachineManager {
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+      ...(opts.slotRepos !== undefined ? { slotRepos: opts.slotRepos } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
       ...(opts.noPlayers !== undefined ? { noPlayers: opts.noPlayers } : {}),
       ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
@@ -1800,6 +1812,7 @@ export class MachineManager {
       ...(opts.librarySeed !== undefined ? { librarySeed: opts.librarySeed === '' ? undefined : opts.librarySeed } : {}),
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
+      ...(opts.slotRepos !== undefined ? { slotRepos: opts.slotRepos } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
       ...(opts.noPlayers !== undefined ? { noPlayers: opts.noPlayers } : {}),
       ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
@@ -1954,9 +1967,15 @@ export class MachineManager {
    * while any run unless forced (as a redeploy is). A stopped daemon is left alone by the offline redeploy until
    * it is started (or redeployed) again.
    */
-  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart', force = false): Promise<string> {
+  async controlDaemon(id: string, action: 'start' | 'stop' | 'restart' | 'read-fence-off' | 'read-fence-warn' | 'read-fence-on', force = false): Promise<string> {
     const m = this.require(id);
     refuseInDryRun(`a daemon ${action} on ${m.id}`);
+    // w5546: the worker read fence's live off switch, over the daemon's link only; no restart, its agents run on.
+    if (action === 'read-fence-off' || action === 'read-fence-warn' || action === 'read-fence-on') {
+      await this.linkControl(m.id, action);
+      const mode = action.slice('read-fence-'.length);
+      return `${m.id}: the worker read fence is ${mode} for runs started from now on${mode === 'on' ? ' once its probe passes' : ' (Windows: any No-Read-Up label taken off; macOS and Linux: runs already going keep the read rules they started with until they end)'}; its daemon log says what the probe found.`;
+    }
     if (this.deploying.has(m.id)) throw new Error(`${m.id} is being deployed right now`);
     const live = this.liveCount(m.id);
     // A daemon whose agents run in agent hosts (w605) restarts without stopping them; a stop still ends them.
@@ -2215,6 +2234,32 @@ export class MachineManager {
     return { id, hash: cred!.hash, staged: cred!.staged };
   }
 
+  /**
+   * A /machine request or upgrade the tailnet-only check refused (w5575, server/machineLinkGate.ts): the machine its bearer
+   * token belongs to, if any, so a lockout of a real machine is seen rather than taken for a machine that is offline. The
+   * token only names the machine; the request stays refused and no failure is counted. Logged every time, alerted once an
+   * hour per machine.
+   */
+  linkRefused(req: Pick<http.IncomingMessage, 'headers'>, address: string, why: string, now = Date.now()): string | undefined {
+    const cred = this.credential(req.headers.authorization);
+    const m = cred ? this.store.machines.get(cred.id) : undefined;
+    if (!m) return undefined;
+    console.warn(`machine ${m.id}: link refused by machineLinkTailnet (enforce) from ${address}: ${why}`);
+    const last = this.linkRefusedAt.get(m.id);
+    if (last !== undefined && now - last < 60 * 60_000) return m.id;
+    this.linkRefusedAt.set(m.id, now);
+    this.linkRefusedAlert?.(
+      m.id,
+      `${m.name ?? m.id}: daemon link refused (machineLinkTailnet)`,
+      `[machines] ${m.id}'s daemon reached the portal from ${address}, outside the tailnet (${why}), and machineLinkTailnet "enforce" refused it: ` +
+        `it is locked out, not offline, and redials about every 30 to 40 s. To let it back in, set machineLinkTailnet to "warn": the dispatcher calls ` +
+        `set_app_config machineLinkTailnet "warn" with the work_id of an open request an owner asked for in their own words; with none open, a worker ` +
+        `merges the one-line change of the default to "warn" (server/machineLinkGate.ts machineLinkMode), which deploys by itself (only while some machine still links, since workers run on them). ` +
+        `docs/machines.md, "The daemon link is tailnet-only". Nobody needs to go to the machine.`,
+    );
+    return m.id;
+  }
+
   /** The welcome a daemon gets on connecting, and again when its hello moved its pool (w513). */
   private welcomeOf(m: Machine, sessions = m.sessionIds.filter((sid) => this.store.sessions.has(sid)).map((sid) => ({ id: sid, lastSeq: this.store.lastSeq(sid) }))) {
     // w2313: every session the machine has NOW. The daemon stops each one the welcome does not name, and attach's list is
@@ -2456,7 +2501,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.

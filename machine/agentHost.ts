@@ -27,6 +27,7 @@ import { inspect } from 'node:util';
 import { AgentSession, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
+import { TRANSCRIPTS } from './transcriptLock.ts';
 import { addSecretEnv, redactSecrets, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -34,7 +35,7 @@ import { meterStates } from '../server/meterStates.ts';
 import { sealStore } from '../server/transcriptSeal.ts';
 import { scopeEndCause, scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
-import { capNote, capsFor, startWorkerCaps, type CapHit } from './workerCaps.ts';
+import { capNote, capsFor, capsModeOf, startWorkerCaps, type CapHit, type CapsMode } from './workerCaps.ts';
 import { pushCapNote } from '../server/workerCapNotes.ts';
 
 export { pidAlive };
@@ -211,6 +212,11 @@ export interface HostStart {
   seq: number;
   spec: LaunchSpec;
   editorUp?: boolean;
+  /**
+   * How the worker caps act in this host (w5554, daemon.json `workerCaps`): the daemon's own setting, read by it, and handed
+   * here and not through `spec.env` (a worker's tools cannot change it). Unset (a daemon that predates it): warn.
+   */
+  capsMode?: CapsMode;
 }
 
 /** host.json */
@@ -284,6 +290,8 @@ export interface HostDeps {
   stopping?: (s: HostedSession, on: boolean) => void;
   /** How long a stale host may stay silent before it is stopped (HOST_WATCH.HUNG_MS); tests shorten it. */
   hungMs?: number;
+  /** The worker caps' mode for a host about to start (daemon.json `workerCaps`, w5554); unset: warn. */
+  capsMode?: () => CapsMode;
   /** Why a host's systemd scope ended (machine/linuxScope.ts scopeEndCause, w2884); tests stand in for journalctl. */
   scopeEndCause?: (unit: string) => string | undefined;
   /**
@@ -304,9 +312,11 @@ export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv
   const log = fs.openSync(f.log, 'a');
   try {
     // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
-    // A worker's scope holds its caps (w5554, machine/workerCaps.ts) where the user manager delegates memory and pids.
-    const caps = start.info.kind === 'worker' ? capsFor() : undefined;
+    // A worker's scope holds its caps (w5554, machine/workerCaps.ts) where the user manager delegates memory and pids, and
+    // only in enforce mode: warn and off leave the scope without limits.
+    const caps = start.info.kind === 'worker' && capsModeOf(start.capsMode) === 'enforce' ? capsFor() : undefined;
     const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir], caps ? { limits: { memoryBytes: caps.memoryBytes, tasks: caps.tasks } } : {});
+    if (caps && cmd.unit && !cmd.limited) fs.writeSync(log, `${new Date().toISOString()} worker caps: its scope has no MemoryMax or TasksMax (this user manager does not delegate them or takes no OOMPolicy=continue): the limits are not applied\n`);
     // Its systemd scope's name (w2884): read when the host dies, for why (an OOM kill names itself in that scope's journal).
     if (cmd.unit) fs.writeFileSync(f.scope, cmd.unit);
     const child = spawn(cmd.bin, cmd.args, {
@@ -585,14 +595,14 @@ export class HostedSession implements SessionHandle {
     }
     fs.mkdirSync(f.dir, { recursive: true });
     const spec = this.deps.spec();
-    fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}) }));
+    fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}), ...(spec.writeLock ? { transcriptsHeld: holdsTranscripts(spec.writeLock, spec.writeLockTranscripts) } : {}) }));
     this.creds = credsOf(spec.env);
     fs.writeFileSync(f.creds, this.creds);
     fs.writeFileSync(f.offset, '0');
     this.n = 0;
     this.savedOffset = 0;
     this.sends = [this.command(first) as Extract<HostCommand, { op: 'send' }>];
-    const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp() };
+    const start: HostStart = { hostProtocol: HOST_PROTOCOL, info: { ...this.info, pendingPermissions: [] }, seq: this.seq, spec, editorUp: this.deps.editorUp(), ...(this.deps.capsMode ? { capsMode: this.deps.capsMode() } : {}) };
     this.running = true;
     this.launchedAt = Date.now();
     this.progressAt = this.launchedAt;
@@ -997,20 +1007,40 @@ export function workerTempDir(env: Record<string, string | undefined> | undefine
 }
 
 /** A worker host's caps (w5554), started; never fails the host: without them it runs as before, and says so in host.log. */
-async function workerCapsFor(dir: string, env: Record<string, string | undefined> | undefined, onCap: (h: CapHit) => void): Promise<(() => Promise<void>) | undefined> {
+async function workerCapsFor(dir: string, env: Record<string, string | undefined> | undefined, mode: CapsMode | undefined, onCap: (h: CapHit) => void): Promise<(() => Promise<void>) | undefined> {
   const log = (m: string) => console.log(new Date().toISOString(), m);
   try {
     // <appDir>/hosts/<id>
     const appDir = path.dirname(path.dirname(path.resolve(dir)));
-    return await startWorkerCaps({ caps: capsFor(), tempDir: workerTempDir(env), appDir, onCap, log });
+    return await startWorkerCaps({ caps: capsFor(), mode, tempDir: workerTempDir(env), appDir, onCap, log });
   } catch (e) {
     log(`worker caps: not started: ${(e as Error).message}`);
     return undefined;
   }
 }
 
-/** A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. */
-export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string }>(hostFiles(dir).place);
+/**
+ * A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. `transcriptsHeld`
+ * (w5702), set for a locked run: whether its lock lets it write in `<root>/transcripts` (the whole folder, or its own
+ * conversation's rules), so moving the transcripts there leaves it its own. Missing on a host older than w5702.
+ */
+export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string; transcriptsHeld?: boolean }>(hostFiles(dir).place);
+
+/**
+ * w5702, w5718's review: the running sandbox agents a transcripts move would cut off from their own transcript, by
+ * session id. No mark: a host older than w5702, or an unlocked run; either may be locked without the folder, so it counts.
+ */
+export const hostsWithoutTranscripts = (hostsRoot: string) =>
+  hostFolders(hostsRoot)
+    .filter((h) => h.record && pidAlive(h.record.pid))
+    .filter((h) => {
+      const p = hostPlace(h.dir);
+      return !!p?.sandbox && p.transcriptsHeld !== true;
+    })
+    .map((h) => h.sessionId);
+
+/** w5702: whether a run with these ff-landlock.py arguments keeps its transcript after the transcripts move (hostPlace). */
+export const holdsTranscripts = (lock: string[], transcripts?: string) => !!transcripts || lock.some((a, i) => lock[i - 1] === '--rw' && path.basename(a) === TRANSCRIPTS);
 
 // ------------------------------------------------------------------------------------------------ the host process
 
@@ -1090,7 +1120,7 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
   } as SessionSink;
   // w5554: a worker's caps (machine/workerCaps.ts) hold before its claude starts: on Windows the job is made around this host
   // first, so every process the session starts is in it.
-  const stopCaps = start.info.kind === 'worker' ? await workerCapsFor(dir, spec.env, (h) => {
+  const stopCaps = start.info.kind === 'worker' ? await workerCapsFor(dir, spec.env, start.capsMode, (h) => {
     pushCapNote(capNote(h));
     events.emit('workerCap', s, h);
   }) : undefined;
@@ -1115,8 +1145,8 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
       out({ op: 'closed', consumed });
       clearInterval(beatTimer);
       clearInterval(pollTimer);
-      void stopCaps?.();
-      setTimeout(() => process.exit(0), 200);
+      // The caps log their peaks as they stop (a few seconds at most); then the host goes.
+      void Promise.race([stopCaps?.().catch(() => undefined), new Promise((r) => setTimeout(r, 3000))]).finally(() => setTimeout(() => process.exit(0), 200));
     }, CLOSE_GRACE_MS);
   };
   for (const name of SIGNALS) {

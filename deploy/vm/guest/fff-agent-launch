@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# fff-agent-launch (w5598, docs/vault.md "In the VM"): one of the portal's agents (an orchestrator, the dispatcher, the
+# bug-thread judge), started by fff-agent@.service for one connection to fff-agent.socket, as AGENT_USER, in that unit's
+# namespace: the portal's folders through fff-agent-views, no secrets folder, no vault key, and no fff process's /proc.
+# stdin and stdout are the socket.
+#
+# The portal (server/agentAccount.ts agentSpawner) sends one header line first, fff-ops-launch's plus where to run:
+#   {"v":1,"sdkVersion":"0.3.284","args":[...],"env":{...},"cwd":"/srv/fff/base","configDir":"/srv/fff/home/.claude"}
+# This answers "OK" and becomes claude (exec), or answers "ERR <why>" and exits; on ERR the portal starts that agent as fff
+# as before and alerts. Every check that can fail runs before the OK. The binary is ours (fff-ops-sync's copy of the
+# portal's Agent SDK binary), never one the header names; the environment is built from nothing; the credential goes to
+# claude on fd 3, never into its environment.
+set -o nounset -o pipefail
+umask 077
+export PATH=/usr/bin:/bin
+OPS_LIB=${OPS_LIB:-/usr/local/lib/fff/ops}
+FFF_ROOT=${FFF_ROOT:-/srv/fff}
+AGENT_ROOT=${AGENT_ROOT:-/srv/fff-agent}
+me=$(id -un)
+answer_err() {
+  printf 'ERR %s\n' "$*"
+  echo "fff-agent-launch: refused: $*" >&2
+  exit 1
+}
+
+IFS= read -r -t 30 header || answer_err "no header from the portal within 30 s"
+printf '%s' "$header" | jq -e '.v == 1 and (.args | type) == "array" and (.env | type) == "object" and (.cwd | type) == "string" and (.configDir | type) == "string"' >/dev/null 2>&1 ||
+  answer_err "the header is not FF Factory's agent header (v 1, args, env, cwd, configDir)"
+claude=$OPS_LIB/claude
+[ -x "$claude" ] || answer_err "no Claude Code binary at $claude: fff-ops-sync copies the portal's at its start"
+want=$(printf '%s' "$header" | jq -r '.sdkVersion // ""')
+have=$(cat "$OPS_LIB/claude.version" 2>/dev/null || true)
+if [ -z "$want" ] || [ "$want" != "$have" ]; then
+  answer_err "the agents' Claude Code is ${have:-unknown} but the portal's Agent SDK is ${want:-unknown}: fff-ops-sync updates it when the portal restarts"
+fi
+cwd=$(printf '%s' "$header" | jq -r '.cwd')
+config=$(printf '%s' "$header" | jq -r '.configDir')
+# Only the portal's own folders, which this unit binds through the views; never a path that climbs out of them.
+case "$cwd/" in "$FFF_ROOT"/*) ;; *) answer_err "the agent's folder $cwd is not under $FFF_ROOT" ;; esac
+case "$config/" in "$FFF_ROOT"/*) ;; *) answer_err "Claude Code's folder $config is not under $FFF_ROOT" ;; esac
+case "$cwd/$config/" in *"/../"* | *"/./"*) answer_err "a folder in the header climbs (.. or .)" ;; esac
+
+args=()
+while IFS= read -r -d '' a; do args+=("$a"); done < <(printf '%s' "$header" | jq -j '.args[] | tostring | (. + "\u0000")')
+
+envs=(HOME="$AGENT_ROOT/home" USER="$me" LOGNAME="$me" SHELL=/bin/bash LANG=C.UTF-8
+  PATH=/usr/bin:/bin TMPDIR=/tmp CLAUDE_CONFIG_DIR="$config"
+  DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 DISABLE_ERROR_REPORTING=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
+while IFS= read -r -d '' kv; do
+  name=${kv%%=*}
+  case "$name" in
+    CLAUDE_CODE_OAUTH_TOKEN | ANTHROPIC_API_KEY | ANTHROPIC_AUTH_TOKEN | *_FILE_DESCRIPTOR | CLAUDE_CONFIG_DIR | CLAUDE_CODE_GIT_BASH_PATH) continue ;;
+  esac
+  [[ $name =~ ^(CLAUDE_CODE_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE_AGENT_SDK_[A-Z0-9_]+|MCP_[A-Z0-9_]+|MAX_THINKING_TOKENS)$ ]] || continue
+  envs+=("$kv")
+done < <(printf '%s' "$header" | jq -j '.env | to_entries[] | select(.value | type == "string") | "\(.key)=\(.value)\u0000"')
+
+token=$(printf '%s' "$header" | jq -r '.env.CLAUDE_CODE_OAUTH_TOKEN // ""')
+apikey=$(printf '%s' "$header" | jq -r '.env.ANTHROPIC_API_KEY // ""')
+header=""
+if [ -n "$token" ]; then
+  envs+=(CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=3)
+  exec 3< <(printf '%s' "$token")
+elif [ -n "$apikey" ]; then
+  envs+=(CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=3)
+  exec 3< <(printf '%s' "$apikey")
+else
+  answer_err "the portal sent no Claude credential (an agent runs on a vault token, docs/vault.md)"
+fi
+token=""
+apikey=""
+# What would fail after the OK fails here instead, so the portal starts the agent as before.
+if ! mkdir -p "$AGENT_ROOT/home" 2>/dev/null || ! chmod 0700 "$AGENT_ROOT/home"; then answer_err "cannot make its home $AGENT_ROOT/home"; fi
+cd "$cwd" 2>/dev/null || answer_err "cannot enter $cwd (fff-agent-views, fff-agent@.service BindReadOnlyPaths)"
+mkdir -p "$config" 2>/dev/null || answer_err "cannot make Claude Code's folder $config"
+probe="$config/.fff-agent-probe.$$"
+if ! : >"$probe" 2>/dev/null; then answer_err "cannot write Claude Code's folder $config (its view is not writable as $me)"; fi
+rm -f "$probe"
+memory="$FFF_ROOT/data/orchestrator-memory"
+if [ -d "$memory" ]; then
+  probe="$memory/.fff-agent-probe.$$"
+  if ! : >"$probe" 2>/dev/null; then answer_err "cannot write the orchestrators' memory $memory as $me"; fi
+  rm -f "$probe"
+fi
+echo "fff-agent-launch: starting Claude Code $have as $me in $cwd (${#args[@]} arguments)" >&2
+printf 'OK\n'
+exec /usr/bin/env -i "${envs[@]}" "$claude" "${args[@]}"

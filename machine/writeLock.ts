@@ -11,7 +11,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
+import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { openChildren } from './lowIntegrity.ts';
+import { sessionIdOf } from '../server/workerFence.ts';
+import { TRANSCRIPTS, finishNewTranscripts, linkTranscripts, ownTranscriptArgs } from './transcriptLock.ts';
 
 /** The launcher beside this file. */
 export const FF_LANDLOCK = path.join(import.meta.dirname, 'ff-landlock.py');
@@ -48,6 +51,24 @@ export interface WriteLockPaths {
   extra?: string[];
   /** The configured temp and sandboxes folders: one in the root opens its root child too (w5569). */
   workFolders?: (string | undefined)[];
+  /**
+   * w5702: daemon.json `transcriptLock` is on: `<root>/transcripts` stays shut and each claude gets its own conversation's
+   * rules (machine/transcriptLock.ts). Off, the transcripts folder is opened whole, as `claude` is.
+   */
+  transcriptLock?: boolean;
+}
+
+/**
+ * w5546: the read half. The daemon's folder, `secrets`, `root.json` and the daemon-only children (`steam`, w5639) are
+ * closed to reads; what workers read in the daemon's folder (FENCE_READ_ALLOW: logs, code, the gh shim, Unity MCP status) is given back. Per run, `noRead` closes
+ * more (w5548's gh login) and `read` gives back one path inside a closed folder (the run's own GitHub App tokens, w5547).
+ */
+export function readLockArgs(p: { root: string; appDir?: string; noRead?: string[]; read?: string[] }): string[] {
+  const root = path.resolve(p.root);
+  const app = p.appDir ? path.resolve(p.appDir) : path.join(root, 'daemon');
+  const closed = [...new Set([app, path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), ...DAEMON_ONLY_CHILDREN.map((c) => path.join(root, c)), ...(p.noRead ?? [])])];
+  const back = [...FENCE_READ_ALLOW.map((a) => path.join(app, a)), ...(p.read ?? [])];
+  return [...closed.flatMap((c) => ['--no-read', c]), ...back.flatMap((b) => ['--read', b])];
 }
 
 /** ff-landlock.py's arguments for a worker (everything before `--`). */
@@ -62,6 +83,9 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // folder stays read-only until listed. A listed folder missing at start is skipped by ff-landlock.py (read-only), so
   // the daemon makes the missing ones before each locked worker starts (makeOpenRootChildren, w5676).
   for (const c of openChildren(root, p.workFolders ?? [], except)) args.push('--rw', path.join(root, c));
+  // w5702: off, the transcripts folder is open whole, and made ahead (makeOpenRootChildren) even before any `on`, so a
+  // claude locked before the switch keeps its own transcript once the switch moves them there (w5718's review).
+  if (!p.transcriptLock) args.push('--rw', path.join(root, TRANSCRIPTS));
   for (const r of p.extraRoots ?? []) args.push('--rw', r);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
   if (p.runtimeDir) args.push('--sock', path.join(p.runtimeDir, 'cc-socks'));
@@ -91,8 +115,10 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
  * /tmp/.dotnet/shm (mode 1777, as the runtime makes it) are made here first. The Max
  * events file is no longer granted (w5552): it is the daemon's, read-only for workers like the rest of its folder.
  */
-export function writeLockSpawner(args: string[], o: { python?: string; script?: string } = {}) {
+export function writeLockSpawner(args: string[], o: { python?: string; script?: string; transcripts?: string; log?: (line: string) => void } = {}) {
+  const log = o.log ?? ((l: string) => console.warn(l));
   return (s: SpawnOptions): SpawnedProcess => {
+    const own = o.transcripts ? transcriptRules(o.transcripts, s, log) : undefined;
     for (let i = 0; i < args.length - 1; i++) {
       try {
         if (args[i] === '--sock') fs.mkdirSync(args[i + 1], { recursive: true, mode: 0o700 });
@@ -101,13 +127,44 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
         /* the rule is skipped and the write refused: the agent says so */
       }
     }
-    return spawn(o.python ?? 'python3', [o.script ?? FF_LANDLOCK, ...args, '--', s.command, ...s.args], {
+    const child = spawn(o.python ?? 'python3', [o.script ?? FF_LANDLOCK, ...args, ...(own?.args ?? []), '--', s.command, ...s.args], {
       cwd: s.cwd,
       env: s.env,
       signal: s.signal,
       stdio: ['pipe', 'pipe', 'ignore'],
     });
+    if (own?.sid) {
+      const { sid } = own;
+      child.on('exit', () => {
+        try {
+          finishNewTranscripts(o.transcripts!, sid);
+        } catch (e) {
+          log(`transcript lock: could not move ${sid}'s new transcript into place (${(e as Error).message}); its next start does`);
+        }
+      });
+    }
+    return child as unknown as SpawnedProcess;
   };
+}
+
+/**
+ * w5702 (machine/transcriptLock.ts): the rules for the one conversation this claude may write, after making sure the
+ * Claude home's `projects` is still the link to `transcripts` (a worker may have replaced it; that is logged). A claude
+ * whose argv names no session id, or whose Claude home is not given, gets no transcript rule: it can write none.
+ */
+function transcriptRules(t: string, s: SpawnOptions, log: (line: string) => void): { args: string[]; sid?: string } {
+  const sid = sessionIdOf(s.args);
+  const home = s.env.CLAUDE_CONFIG_DIR;
+  // Only the root's own Claude home (w5718's review): another home's `projects` would be hidden from its resumes.
+  if (!sid || !home || path.resolve(home) !== path.join(path.dirname(t), 'claude')) return { args: [] };
+  try {
+    const did = linkTranscripts(path.dirname(t), home);
+    if (did) log(`transcript lock: ${did}`);
+    return { args: ownTranscriptArgs(t, sid, s.cwd), sid };
+  } catch (e) {
+    log(`transcript lock: could not set up ${sid}'s transcript rules (${(e as Error).message}); it starts with none and its transcript writes are refused`);
+    return { args: [], sid };
+  }
 }
 
 /**

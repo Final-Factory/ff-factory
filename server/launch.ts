@@ -189,6 +189,8 @@ export interface LaunchSpec {
   fence?: WorkerFence;
   /** ff-landlock.py's arguments: claude starts under the Linux write lock (machine/writeLock.ts, w5333). */
   writeLock?: string[];
+  /** w5702: the transcripts folder, when the lock lets claude write only its own conversation's (machine/transcriptLock.ts). */
+  writeLockTranscripts?: string;
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
   init?: { files?: Record<string, string> };
 }
@@ -368,6 +370,7 @@ export const CATALOG = {
     file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
     diagnosis: z.string().max(120).optional().describe('Instead of the zip: one file FFBox\'s diagnosis of the report kept, by its name (e.g. "summary.md"); list_ffbox_files what "diagnosis" lists them.'),
     run: z.number().int().min(1).optional().describe('With diagnosis: which diagnosis run (default the newest that kept the file).'),
+    game: z.enum(['ff', 'ffu']).optional().describe('ff: a Final Factory report (default). ffu: a Final Factory Universe (FFU) report, which FFBox keeps apart.'),
   },
   /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal asks FFBox; nothing on the machine is read. */
   list_ffbox_files: {
@@ -379,6 +382,7 @@ export const CATALOG = {
     app: z.string().max(16).optional().describe('symbols: main or demo.'),
     id: z.string().max(64).optional().describe('reports: only this report. diagnosis, required: the report id, e.g. 20261003T101500Z-crash-3a9f01c2d4.'),
     kind: z.enum(['any', 'crash', 'desync', 'hang']).optional().describe('reports only (default any).'),
+    game: z.enum(['ff', 'ffu']).optional().describe('reports only: ff, Final Factory\'s reports (default), or ffu, Final Factory Universe\'s (FFU), which FFBox keeps apart.'),
     since: z.string().max(40).optional().describe('reports: received from this ISO time with a zone. threads: created from this ISO time with a zone, e.g. 2026-10-28T22:44:00Z (default 7 days ago).'),
     until: z.string().max(40).optional().describe('reports: received up to this ISO time with a zone. threads: created up to this time (default now).'),
     channel: z.string().max(64).optional().describe('threads and open_threads: one channel by its alias as the list shows it (default every bug channel; open_threads also the feedback channel).'),
@@ -731,6 +735,6 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
     ...(spec.fence ? { spawnClaudeCodeProcess: fenceSpawner(spec.fence) } : {}),
-    ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock) } : {}),
+    ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock, { transcripts: spec.writeLockTranscripts }) } : {}),
   };
 }

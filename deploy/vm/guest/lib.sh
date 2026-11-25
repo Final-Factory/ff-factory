@@ -10,6 +10,8 @@ FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
 FFF_CONF=${FFF_CONF:-/etc/fff/fff.conf}
 # The token vault's key (docs/vault.md): root only, outside the data folder; fff-portal.service loads it as a credential.
 FFF_VAULT_KEY=${FFF_VAULT_KEY:-/etc/fff/vault.key}
+# The portal's agents' account switch (w5651, fffctl agents): off, warn or on; fff-portal.service names it (FFF_AGENT_SWITCH).
+FFF_AGENT_SWITCH=${FFF_AGENT_SWITCH:-/etc/fff/agent-account}
 DRY_RUN=${DRY_RUN:-0}
 
 log() { printf '%s fff: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
@@ -75,7 +77,7 @@ install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
   for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-watchdog fff-backup fff-backup-drill fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-watchdog fff-backup fff-backup-drill fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync fff-agent-launch fff-agent-views; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
   # The orchestration worker's PATH (w597): its ssh and fffctl, each one sudo call to a wrapper above; its scp and sftp
   # (w612), /usr/bin/scp and sftp as itself over fff-ops-scp-ssh; its fff-machine-ssh (w676), through fff-ops-priv.
   for f in ssh fffctl scp sftp fff-machine-ssh; do [ -z "$(write_file "$FFF_LIB/ops-bin/$f" 0755 <"$src/ops-bin/$f")" ] || c+=" ops-bin/$f"; done

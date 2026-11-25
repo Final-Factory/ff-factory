@@ -66,7 +66,7 @@ test('windows tests: every listed file exists and says what it covers and why it
 
 test('windows tests: a test skipped everywhere but Windows is listed, or it would never run', () => {
   const listed = new Set(entries.map((e) => e.file));
-  const files = ['server', 'scripts'].flatMap((d) => fs.readdirSync(path.join(ROOT, d)).filter((f) => f.endsWith('.test.ts')).map((f) => `${d}/${f}`));
+  const files = ['server', 'scripts', 'machine'].flatMap((d) => fs.readdirSync(path.join(ROOT, d)).filter((f) => f.endsWith('.test.ts')).map((f) => `${d}/${f}`));
   const missing = files.filter((f) => f !== 'scripts/windows-tests.test.ts' && WINDOWS_ONLY.test(readLf(path.join(ROOT, f))) && !listed.has(f));
   assert.deepEqual(missing, [], 'add them to .github/windows-tests.txt with what they cover and why');
 });

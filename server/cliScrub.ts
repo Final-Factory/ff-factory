@@ -59,10 +59,11 @@ export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number
 /** Every text file below `root`, with its size, never following a link. */
 function textFiles(root: string): Map<string, number> {
   const out = new Map<string, number>();
+  // w5702: the root itself may be a link (a locked Linux worker's `projects` links to `<root>/transcripts`); links below it are skipped.
   const walk = (p: string) => {
     let st: fs.Stats;
     try {
-      st = fs.lstatSync(p);
+      st = p === root ? fs.statSync(p) : fs.lstatSync(p);
     } catch {
       return;
     }

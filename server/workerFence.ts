@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
+import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
 import { projectSlug } from './claudeHome.ts';
 
@@ -30,8 +31,25 @@ export interface WorkerFence {
   darwinCache: string;
   /** More folders a worker may write (the Unity slots mailbox when it is not in the root). */
   extraWritable?: string[];
+  /** The daemon's folder when it is not `<root>/daemon` (an install whose daemon lives elsewhere): read-denied too. */
+  appDir?: string;
+  /** Per run, more paths no worker may read (resolved; a folder covers all below it): w5548's gh login, for example. */
+  readDenied?: string[];
+  /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens folder, w5547); a folder covers all below it. */
+  readAllowed?: string[];
+  /**
+   * The owner-secret rules (w5553, w5560): no Keychain mach services (ownerSecrets.ts KEYCHAIN_MACH_SERVICES) and no
+   * preference writes through cfprefsd. Set with the owner paths in readDenied, never alone; off with the read fence.
+   */
+  ownerSecrets?: { mach: string[] };
+  /** The read fence is switched off on this machine (daemon_control read-fence-off, w5546): no read rules, writes as before. */
+  readOff?: boolean;
+  /** Secrets folders outside `<root>/secrets` (a Dev Drive install's host folder, readFence.ts secretsDirs): read-denied too. */
+  secretsDirs?: string[];
   /** The root children workers write (lowIntegrity.ts openChildren, w5569); absent: openChildren(root). */
   open?: string[];
+  /** w5659: refuse preference writes through cfprefsd too (PREF_RULES); daemon.json `workerPrefFence: true`. */
+  prefDeny?: boolean;
 }
 
 /** An SBPL string literal. */
@@ -44,6 +62,15 @@ const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
  * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
  */
 export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN, ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
+
+/**
+ * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the same three are closed to reads as
+ * well, and `steam` (w5639: steamcmd's cached Steam login and the upload config, which only the daemon reads), except
+ * what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
+ * `file-read-data` only: a stat of a path, which node's module loader and git make up every parent, stays allowed; the
+ * daemon's folder may be listed (names, never contents, as server/daemonReads.ts allows).
+ */
+export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets', ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
 
 /**
  * w5563: the one conversation a fenced process may write in its Claude home's transcripts. `projects` is
@@ -86,6 +113,19 @@ export function ownTranscriptRules(o: OwnTranscript): string[] {
  */
 export const SIGNAL_RULES = [';; signals: only to this fence\'s own processes (w5562)', '(deny signal)', '(allow signal (target self) (target children) (target same-sandbox))'];
 
+/**
+ * Preferences (w5659): `defaults write`, NSUserDefaults, CFPreferences and Unity's EditorPrefs and PlayerPrefs reach the
+ * plist in ~/Library/Preferences through cfprefsd, which writes it outside the sandbox, so the file rules above never see
+ * them: from inside the fence a `defaults write` of a new domain made its plist there (measured on m5). cfprefsd lets a
+ * client write when the client may either write preferences or write the plist's own file, so this rule closes it only
+ * together with the file deny of ~/Library/Preferences above (measured on m5: a fenced `defaults write` of a new domain
+ * exits 1 "Could not write domain" and makes no plist; with this rule alone it is written). Reads still work. A refused
+ * EditorPrefs write is silent to Unity: a fenced batch Unity compiled, passed EditMode 31/31 and a PlayMode load test with
+ * cfprefsd rejecting 66 of its writes (measured on m5). macOS logs nothing for the sandbox itself; cfprefsd logs each
+ * refusal as "rejecting write of key(s) ... from process <pid> (<name>)" (`log show`, from outside the fence).
+ */
+export const PREF_RULES = [";; preferences through cfprefsd are refused too (w5659, with the file deny of ~/Library/Preferences)", '(deny user-preference-write)'];
+
 export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
   const home = (p: string) => path.join(f.home, p);
   const extra = (f.extraWritable ?? []).filter((p) => path.isAbsolute(p));
@@ -125,9 +165,46 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     '(deny file-write*',
     ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
     ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
+    ...(f.appDir && f.appDir !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
     ')',
+    ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
+    // One preference rule for both switches: w5659's workerPrefFence, or the owner-secret rules under the read fence (w5560).
+    ...(f.prefDeny || (f.ownerSecrets && !f.readOff) ? PREF_RULES : []),
   ].join('\n');
+}
+
+/** The read half (w5546, w5547): deny reads of the closed folders, then give back what workers read there. */
+function readRules(f: WorkerFence): string[] {
+  const daemon = f.appDir ?? path.join(f.root, 'daemon');
+  const spot = (p: string) => (/\.[a-z]+$/i.test(p) ? 'literal' : 'subpath');
+  const denied = [
+    ...READ_DENIED_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
+    ...READ_DENIED_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
+    ...(daemon !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(daemon)})`] : []),
+    ...(f.secretsDirs ?? []).filter((p) => path.isAbsolute(p) && p !== path.join(f.root, 'secrets')).map((p) => `  (subpath ${lit(p)})`),
+    ...(f.readDenied ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
+  ];
+  return [
+    ';; reads: the daemon\'s folder, the secrets and the root\'s record are closed (w5546), except what workers read there',
+    '(deny file-read-data',
+    ...denied,
+    ')',
+    '(allow file-read-data',
+    `  (literal ${lit(daemon)})`,
+    ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
+    ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
+    ')',
+    ...(f.ownerSecrets ? ownerSecretRules(f.ownerSecrets.mach) : []),
+  ];
+}
+
+/** w5560: the Keychain's mach services, for a run whose owner paths are read-denied (probe 4, m5). Its preference-write deny is PREF_RULES, added once in seatbeltProfile. */
+function ownerSecretRules(mach: string[]): string[] {
+  return [
+    ';; owner secrets (w5553, w5560): no Keychain service (a write would raise a dialog on the person\'s screen)',
+    ...(mach.length ? [`(deny mach-lookup ${mach.map((n) => `(global-name ${lit(n)})`).join(' ')})`] : []),
+  ];
 }
 
 const real = (p: string) => {
@@ -144,7 +221,7 @@ const confstr = (name: string) => execFileSync('/usr/bin/getconf', [name], { enc
  * The fence for this daemon's agents, or undefined when it is off: daemon.json `workerFence` is not "seatbelt", the
  * machine is not a Mac, it has no worker root, or sandbox-exec is missing.
  */
-export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
+export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; prefDeny?: boolean; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
   if (o.setting !== 'seatbelt' || (o.platform ?? process.platform) !== 'darwin' || !o.root) return undefined;
   if (!(o.exists ?? fs.existsSync)(SANDBOX_EXEC)) return undefined;
   const get = o.getconf ?? confstr;
@@ -156,6 +233,7 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
     darwinTemp: real(get('DARWIN_USER_TEMP_DIR')),
     darwinCache: real(get('DARWIN_USER_CACHE_DIR')),
     ...(o.extraWritable?.length ? { extraWritable: o.extraWritable.map(real) } : {}),
+    ...(o.prefDeny ? { prefDeny: true } : {}),
   };
 }
 
@@ -163,7 +241,9 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
  * What a fenced agent's environment adds: Claude Code's own temp (task output, its /tmp/cc-socks messaging socket) moves
  * into the root, and the auto-updater, which writes ~/.local/share/claude, is off. TMPPREFIX: zsh writes each here-document
  * to /tmp/zshXXXXXX, which the fence refuses (w5397, m5: "can't create temp file for here document: operation not
- * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read.
+ * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read. uv's folders
+ * (w5693, w5745) are not set here: machine/sharedCaches.ts sandboxUvEnv gives every sandbox agent, fenced or not, and its
+ * editor the workers' ones, by one rule.
  */
 export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh') });
 

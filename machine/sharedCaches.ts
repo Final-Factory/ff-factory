@@ -30,9 +30,75 @@ export function mediumUvCacheFor(env: Record<string, string | undefined>, root: 
   return mediumUvCacheDir(root);
 }
 
-/** What a sandbox agent's environment adds (w5565): the workers' uv cache in place of the daemon's Medium one. */
+/**
+ * uv's tool folder (UV_TOOL_DIR, default ~/.local/share/uv/tools, %APPDATA%\uv\tools on Windows), split the way w5565
+ * split the cache (w5693). `uvx` takes a temp file there on every run (uv 0.11.27: "Could not create temporary file ...
+ * at path ~/.local/share/uv/tools/.tmpXXXX"), and no worker fence lets a worker write the person's home, so on m5 every
+ * Seatbelt-fenced sandbox agent's Unity MCP server (`uvx --from mcpforunityserver ...`) exited at start: UnityMCP
+ * CONNECTION_CLOSED. Opening the home folder to workers is no fix: the daemon and Medium agents run uvx from it too, so a
+ * worker could plant a tool there that runs outside the fence. So workers get <root>/cache/uv-tools, which every fence
+ * already opens (the `cache` child), and the daemon and Medium agents <root>/cache-medium/uv-tools, which none does.
+ */
+export const workerUvToolDir = (root: string) => path.join(sharedCacheDir(root), 'uv-tools');
+export const mediumUvToolDir = (root: string) => path.join(root, MEDIUM_CACHE_CHILD, 'uv-tools');
+
+/**
+ * The daemon's own UV_TOOL_DIR at start (w5693), as mediumUvCacheFor: unset or the workers' one moves to the Medium
+ * folder; one daemon.json names (any other folder) stays. Undefined when there is nothing to change.
+ */
+export function mediumUvToolFor(env: Record<string, string | undefined>, root: string): string | undefined {
+  const cur = env.UV_TOOL_DIR;
+  if (cur && path.resolve(cur) !== path.resolve(workerUvToolDir(root))) return undefined;
+  return mediumUvToolDir(root);
+}
+
+/**
+ * Sets the daemon's UV_TOOL_DIR to the Medium tool folder once it is made (w5693). The fallback, so a machine never loses
+ * its daemon's or Medium agents' uvx over it: when the folder cannot be made, UV_TOOL_DIR stays as it was (uv's own
+ * default, what every daemon used before w5693) and the answer is the warning to log. Undefined when nothing was to do.
+ */
+export function applyMediumUvToolDir(env: Record<string, string | undefined>, root: string, mkdir: (dir: string) => void = (d) => fs.mkdirSync(d, { recursive: true })): string | undefined {
+  const dir = mediumUvToolFor(env, root);
+  if (!dir) return undefined;
+  try {
+    mkdir(dir);
+  } catch (e) {
+    return `uv tool folder: could not make ${dir} (${(e as Error).message}); the daemon and Medium agents keep ${env.UV_TOOL_DIR ? env.UV_TOOL_DIR : "uv's own default"} (w5693)`;
+  }
+  env.UV_TOOL_DIR = dir;
+  return `uv tool folder: ${dir} for the daemon and Medium agents; sandbox agents use ${workerUvToolDir(root)} (w5693)`;
+}
+
+/**
+ * uv's tool bin folder (UV_TOOL_BIN_DIR, default ~/.local/bin), where `uv tool install` puts a tool's command (w5745).
+ * `uvx` never writes it; a sandbox agent's `uv tool install` did, and every fence refuses the person's home, so workers
+ * get <root>/cache/uv-bin. The daemon and Medium agents keep ~/.local/bin: it is on their PATH, which a folder of their
+ * own would not be, and no worker can write it.
+ */
+export const workerUvToolBinDir = (root: string) => path.join(sharedCacheDir(root), 'uv-bin');
+
+/**
+ * What a sandbox agent's environment adds, and its editor's (w5745: machine/sandboxes.ts realPoolDeps): w5565 the workers'
+ * uv cache in place of the daemon's Medium one; w5693 the workers' uv tool folder; w5745 the workers' uv tool bin folder.
+ * The cache: one daemon.json names (any other folder) stays. The tool and bin folders: only one inside the workers' cache
+ * stays; uv's default in the person's home (unset), the Medium one or any other folder becomes the workers' one, since
+ * workers write only inside the root and every fence refuses the rest. This is the one rule (w5745 (a)): the Seatbelt
+ * fence's env (server/workerFence.ts fenceEnv) no longer sets its own. uv's managed Pythons (UV_PYTHON_INSTALL_DIR) stay
+ * where they are, read-only to workers: docs/worker-root.md 2.8.
+ */
 export function sandboxUvEnv(env: Record<string, string | undefined>, root: string | undefined): Record<string, string> {
-  return root && env.UV_CACHE_DIR && path.resolve(env.UV_CACHE_DIR) === path.resolve(mediumUvCacheDir(root)) ? { UV_CACHE_DIR: workerUvCacheDir(root) } : {};
+  if (!root) return {};
+  const same = (a: string, b: string) => path.resolve(a) === path.resolve(b);
+  const inCache = (p: string | undefined) => {
+    if (!p) return false;
+    const rel = path.relative(path.resolve(sharedCacheDir(root)), path.resolve(p));
+    return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+  };
+  const out: Record<string, string> = {};
+  if (env.UV_CACHE_DIR && same(env.UV_CACHE_DIR, mediumUvCacheDir(root))) out.UV_CACHE_DIR = workerUvCacheDir(root);
+  if (!inCache(env.UV_TOOL_DIR)) out.UV_TOOL_DIR = workerUvToolDir(root);
+  if (!inCache(env.UV_TOOL_BIN_DIR)) out.UV_TOOL_BIN_DIR = workerUvToolBinDir(root);
+  return out;
 }
 /**
  * Read by the game (FF_DETERMINISM_AUDIT_DIR, NetworkDeterminismAuditRetention.AuditRoot) and the audit scripts in place of

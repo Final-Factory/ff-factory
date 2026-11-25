@@ -140,6 +140,14 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   'disk-usage': { allowed: [''], changes: [] },
   // What the portal's own account can open (w5506): refused or OPENED, credential names counted, never a value.
   'fence-check': { allowed: [''], changes: [] },
+  // The portal's agents' own account (w5598, w5651): status reads; off and warn are the worker's recovery route, which needs no
+  // orchestrator (an orchestrator under that account may be what is broken); on and default stay a person's.
+  agents: {
+    allowed: ['', 'status'],
+    changes: ['off', 'warn', 'on', 'default'],
+    ops: ['off', 'warn'],
+    grant: "off or warn only: agents start as the portal's account again, as before w5598; turning it on stays a person's",
+  },
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },
@@ -458,8 +466,12 @@ const PASS_ENV = /^(CLAUDE_CODE_[A-Z0-9_]+|ANTHROPIC_[A-Z0-9_]+|CLAUDE_AGENT_SDK
 /** The portal's own settings that must not reach it, though they match the pattern. */
 const NEVER_ENV = new Set(['CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_GIT_BASH_PATH']);
 
-/** The SDK's own version (its package.json): the launcher refuses a claude binary of another version. */
-export function sdkVersion(root = process.cwd()): string {
+/**
+ * The SDK's own version (its package.json): the launcher refuses a claude binary of another version. Found from this
+ * file's own folder, not the process's: from any other folder it read as unknown, and every agent fell back to fff
+ * (w5598's real-turn check ran its driver outside the app folder).
+ */
+export function sdkVersion(root = path.resolve(import.meta.dirname, '..')): string {
   try {
     return String(JSON.parse(fs.readFileSync(path.join(root, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), 'utf8')).version ?? '');
   } catch {
@@ -747,6 +759,8 @@ export function workerUpdateFlags(
   nums: { maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number },
   dev: { devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number } = {},
   workerFence?: 'on' | 'off',
+  workerCaps?: 'off' | 'warn' | 'enforce',
+  transcriptLock?: 'on' | 'off',
 ): string[] {
   const win = platform === 'win32';
   return (
@@ -760,8 +774,9 @@ export function workerUpdateFlags(
           dev.moveToDevDrive && '-MoveToDevDrive',
           dev.devDriveMaxGB !== undefined && `-DevDriveMaxGB ${dev.devDriveMaxGB}`,
           workerFence && `-WorkerFence ${workerFence}`,
+          workerCaps && `-WorkerCaps ${workerCaps}`,
         ]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`]
   ).filter((f): f is string => !!f);
 }
 
@@ -997,7 +1012,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1018,6 +1033,11 @@ export class OpsWorker {
     if (dev.devDriveMaxGB !== undefined && (!Number.isInteger(dev.devDriveMaxGB) || dev.devDriveMaxGB < 50 || dev.devDriveMaxGB > 65536)) throw new Error('dev_drive_max_gb: a whole number of GB from 50 (Windows\' own minimum for a Dev Drive) to 65536');
     // w5377: the worker write fence's remote switch, on every platform (each installer sets its own platform's daemon.json key).
     if (o.workerFence !== undefined && o.workerFence !== 'on' && o.workerFence !== 'off') throw new Error('worker_fence: on or off');
+    // w5554: the worker caps' mode, the recovery switch of docs/worker-caps.md (daemon.json `workerCaps`), on every platform.
+    if (o.workerCaps !== undefined && !['off', 'warn', 'enforce'].includes(o.workerCaps)) throw new Error('worker_caps: off, warn or enforce');
+    // w5702: the transcript lock's switch (daemon.json `transcriptLock`), Linux only: the macOS fence already seals transcripts.
+    if (o.transcriptLock !== undefined && o.transcriptLock !== 'on' && o.transcriptLock !== 'off') throw new Error('transcript_lock: on or off');
+    if (o.transcriptLock !== undefined && m.platform !== 'linux') throw new Error(`transcript_lock: Linux only (the macOS fence already does this; docs/transcript-seal.md), and ${m.id} is not a Linux PC`);
     // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
     // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
     // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the
@@ -1030,7 +1050,7 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock }).filter(([, v]) => v !== undefined && v !== false));
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1045,7 +1065,7 @@ export class OpsWorker {
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
