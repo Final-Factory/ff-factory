@@ -581,7 +581,7 @@ check-in, and slot2 showed FREE.
 Lothsahn, 2026-10-18: "Please create a new work item that deploying the latest tools is part of every deploy operation".
 
 **TL;DR:** the installer's `-Tools` (`--tools`) form brings Claude Code's ff-agents, ff-speckit and ff-discord plugins on
-this machine to final-factory-agents master, from FF Factory's own checkout in `<root>/tools`, and changes nothing else.
+this machine to final-factory-agents master, from a fresh clone beside FF Factory's own checkout in `<root>/tools-medium` (a folder no worker can write, w5597), and changes nothing else.
 The portal runs it on every worker-root machine after every verified deploy ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887)).
 
 Before it, nothing in FF Factory ran `registerAgents.sh`: ff-agents 1.29.20 (final-factory-agents #243, w1469) merged at
@@ -599,15 +599,35 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
 
 1. Prints `Agent tools before:` with the versions in `<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/installed_plugins.json`,
    the folder the machine's workers read (BEAST's leave `CLAUDE_CONFIG_DIR` unset, [worker-root.md](worker-root.md)).
-2. Clones `https://github.com/Final-Factory/final-factory-agents.git` into `<root>/tools/final-factory-agents` the first
-   time (anonymously: the repo is public and an ssh session reaches no keychain), and after that fast-forwards it to
-   origin/master. **It never uses a person's checkout** (BEAST's `~/final-factory-agents`, on a branch of its own today):
-   Claude Code installs plugins from its managed marketplace clone (`~/.claude/plugins/marketplaces/final-factory-agents`),
-   which `registerAgents.sh` refreshes from GitHub, so any up-to-date copy of the script will do. If its own checkout has
-   uncommitted changes, is on another branch, has another origin or cannot fast-forward, it prints `NOT PUBLISHED: <why>;
-   nothing in it was overwritten`, exits 3 and leaves it: no reset, stash or branch switch.
-3. Prints `Agent tools latest:` with the commit and master's versions (its `.claude-plugin/marketplace.json`).
-4. Runs `sh registerAgents.sh --claude` there (Git Bash's `sh.exe` on Windows, found from `git --exec-path`), with the
+2. Clones `https://github.com/Final-Factory/final-factory-agents.git` into FF Factory's own checkout,
+   `<root>/tools-medium/final-factory-agents`, the first time (anonymously: the repo is public and an ssh session reaches
+   no keychain), and after that fast-forwards it to origin/master. **It never uses a person's checkout** (BEAST's
+   `~/final-factory-agents`, on a branch of its own today): Claude Code installs plugins from its managed marketplace clone
+   (`~/.claude/plugins/marketplaces/final-factory-agents`), which `registerAgents.sh` refreshes from GitHub, so any
+   up-to-date copy of the script will do. If its own checkout has uncommitted changes, is on another branch, has another
+   origin, cannot fast-forward, cannot be fetched or cannot be made, it prints `WARNING: <why>; nothing in it was
+   overwritten; this run publishes from a fresh clone` and goes on (no reset, stash or branch switch): the plugins come
+   from step 4's clone, so the checkout never stops a publish (w5597; before it, this was `NOT PUBLISHED`, exit 3).
+   **Why `tools-medium` (w5597).** Until w5597 the checkout was `<root>/tools/final-factory-agents`, and `tools` is a
+   folder fenced workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, open under Landlock and Seatbelt too), while
+   this run is the daemon's, at Medium (elevated, in an administrator's ssh on Windows). A worker could plant a git hook,
+   a `core.fsmonitor` or a `registerAgents.sh` there for the next deploy to run. `tools-medium` is in
+   `MEDIUM_ONLY_CHILDREN` (`server/claudeHome.ts`) beside `claude-medium` and `cache-medium`, so all three fences keep it
+   read-only to workers, who still read it (`FF_SKILLS`' fallback in `server/pluginPaths.ts`, `machine/evidenceGate.ts`).
+   The daemon's own folder was the other choice and was not taken: `worker.ts tools` (the installer's form) knows only the
+   root, the daemon folder can sit elsewhere (`~/.ff-factory`, `daemon.json`), and the Mac and Linux fences shut it to
+   workers, who read the checkout. Every git call of the run also sets `core.hooksPath` to an empty folder of its own,
+   with no global config, no system config but on Windows, no replace refs and no templates, on top of
+   `server/safeGit.ts`'s fence; `scripts/updatePath.test.ts` proves with real git that a planted hook does not run.
+   **Moving off the old layout.** The old `<root>/tools/final-factory-agents` is never run, read by git or written again,
+   and never deleted: it stays readable, and readers fall back to it until a run has made the new one
+   (`readableToolsCheckout`). publish-skills' marker moves to the new checkout when it named the old one. Rollback: revert
+   the change; a run before w5597 clones the old path again when it is gone, or takes it forward when it is there.
+3. Prints `Agent tools latest:` with the commit and master's versions (its `.claude-plugin/marketplace.json`), then
+   `Agent tools checkout: <path> at <commit>` (or `none (...)`), which the rollout report shows (`server/machineRollout.ts`
+   `toolsLine`).
+4. Runs `sh registerAgents.sh --claude` from a fresh `--depth 1` clone made in a new folder beside the checkout and removed
+   after (w5573; Git Bash's `sh.exe` on Windows, found from `git --exec-path`), with the
    daemon's Claude Code (`daemon.json` `claude`) first on PATH: the marketplace pulled, every plugin the machine remembers
    updated. That is ff-agents and ff-speckit everywhere, and ff-discord only where a person ran `--plugin ff-discord`
    (registerAgents.sh's `~/.claude/final-factory-agents-plugins`); a bare run never adds it. Codex is not touched.
@@ -618,8 +638,8 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    account, a failed HTTPS fetch fell back to SSH and the step said only "Please make sure you have the correct access
    rights" (2 of 14 rollouts on 2026-10-23).
 5. Puts back publish-skills' marker `~/.claude/final-factory-agents-checkout` if `registerAgents.sh` pointed it at the
-   tools checkout, so a person's skill edits keep going to their own checkout. With no marker before, the new one stays
-   and the output says so.
+   run's clone, so a person's skill edits keep going to their own checkout. With no marker before, it names FF Factory's
+   checkout and the output says so; one that named the old `<root>/tools/final-factory-agents` now names the new one.
 6. In an elevated Windows session (an administrator's ssh, BEAST), gives the checkout and Claude Code's
    final-factory-agents marketplace and cache folders to the daemon task's user (`icacls /setowner`), as the update does,
    so the non-elevated git there does not refuse them.

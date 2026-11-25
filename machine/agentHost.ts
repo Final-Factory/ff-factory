@@ -27,6 +27,7 @@ import { inspect } from 'node:util';
 import { AgentSession, setQueryForTesting, type AutoCompaction, type SessionHandle, type SessionSink, type TurnEndMeta } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { CATALOG, buildOptions, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
+import { TRANSCRIPTS } from './transcriptLock.ts';
 import { addSecretEnv, redactSecrets, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
@@ -594,7 +595,7 @@ export class HostedSession implements SessionHandle {
     }
     fs.mkdirSync(f.dir, { recursive: true });
     const spec = this.deps.spec();
-    fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}) }));
+    fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}), ...(spec.writeLock ? { transcriptsHeld: holdsTranscripts(spec.writeLock, spec.writeLockTranscripts) } : {}) }));
     this.creds = credsOf(spec.env);
     fs.writeFileSync(f.creds, this.creds);
     fs.writeFileSync(f.offset, '0');
@@ -1018,8 +1019,28 @@ async function workerCapsFor(dir: string, env: Record<string, string | undefined
   }
 }
 
-/** A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. */
-export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string }>(hostFiles(dir).place);
+/**
+ * A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. `transcriptsHeld`
+ * (w5702), set for a locked run: whether its lock lets it write in `<root>/transcripts` (the whole folder, or its own
+ * conversation's rules), so moving the transcripts there leaves it its own. Missing on a host older than w5702.
+ */
+export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string; transcriptsHeld?: boolean }>(hostFiles(dir).place);
+
+/**
+ * w5702, w5718's review: the running sandbox agents a transcripts move would cut off from their own transcript, by
+ * session id. No mark: a host older than w5702, or an unlocked run; either may be locked without the folder, so it counts.
+ */
+export const hostsWithoutTranscripts = (hostsRoot: string) =>
+  hostFolders(hostsRoot)
+    .filter((h) => h.record && pidAlive(h.record.pid))
+    .filter((h) => {
+      const p = hostPlace(h.dir);
+      return !!p?.sandbox && p.transcriptsHeld !== true;
+    })
+    .map((h) => h.sessionId);
+
+/** w5702: whether a run with these ff-landlock.py arguments keeps its transcript after the transcripts move (hostPlace). */
+export const holdsTranscripts = (lock: string[], transcripts?: string) => !!transcripts || lock.some((a, i) => lock[i - 1] === '--rw' && path.basename(a) === TRANSCRIPTS);
 
 // ------------------------------------------------------------------------------------------------ the host process
 

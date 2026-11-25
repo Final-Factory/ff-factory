@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, ownTranscriptOf, seatbeltProfile, sessionIdOf, type WorkerFence } from './workerFence.ts';
-import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
+import { ensureReadBackDirs, LOGIN_LABEL_ON_SYSTEM_DRIVE, loginFenceFiles, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
 import { projectSlug } from './claudeHome.ts';
 
 const F: WorkerFence = { kind: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p', darwinTemp: '/private/var/folders/xx/T', darwinCache: '/private/var/folders/xx/C' };
@@ -66,11 +66,9 @@ test('fencedArgv runs the command under sandbox-exec with the profile inline; fe
   const a = fencedArgv(F, '/bin/claude', ['--x']);
   assert.deepEqual([a[0], a[1], a[3], a[4]], [SANDBOX_EXEC, '-p', '/bin/claude', '--x']);
   assert.equal(a[2], seatbeltProfile(F));
-  assert.deepEqual(fenceEnv(F), { CLAUDE_CODE_TMPDIR: '/Users/p/ffw/tmp/claude-code', DISABLE_AUTOUPDATER: '1', TMPPREFIX: '/Users/p/ffw/tmp/zsh', UV_TOOL_DIR: '/Users/p/ffw/cache/uv-tools' });
-  // w5693: uvx's tool folder is inside the workers' cache (a folder the profile opens), never the Medium agents' one
-  const p = seatbeltProfile(F);
-  assert.ok(p.includes('(subpath "/Users/p/ffw/cache")'), 'the workers\' cache is open');
-  assert.ok(!fenceEnv(F).UV_TOOL_DIR.includes('cache-medium'));
+  assert.deepEqual(fenceEnv(F), { CLAUDE_CODE_TMPDIR: '/Users/p/ffw/tmp/claude-code', DISABLE_AUTOUPDATER: '1', TMPPREFIX: '/Users/p/ffw/tmp/zsh' });
+  // w5693/w5745: uv's folders come from sandboxUvEnv, inside the workers' cache, which the profile opens
+  assert.ok(seatbeltProfile(F).includes('(subpath "/Users/p/ffw/cache")'), 'the workers\' cache is open');
 });
 
 test('buildOptions sets spawnClaudeCodeProcess only for a fenced spec', () => {
@@ -329,13 +327,74 @@ test('w5546 lockout review B3: a Dev Drive install\'s secrets in the host folder
   assert.equal(deny.split('(subpath "/Users/p/ffw/secrets")').length, 2, '<root>/secrets once');
 });
 
+test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-denied on every OS, and only it', async () => {
+  const { DAEMON_ONLY_CHILDREN } = await import('./claudeHome.ts');
+  const { readLockArgs } = await import('../machine/writeLock.ts');
+  const { NO_READ_UP, noReadUpTargets } = await import('../machine/lowIntegrity.ts');
+  const { daemonOnlyDirs } = await import('../machine/readFence.ts');
+  assert.deepEqual([...DAEMON_ONLY_CHILDREN], ['steam']);
+  // macOS: in the deny block, absent from the allow block; steam-lobby-gate (the lobby gate's folder) is no subpath of it.
+  const p = seatbeltProfile(F);
+  const deny = p.slice(p.indexOf('(deny file-read-data'), p.indexOf('(allow file-read-data'));
+  const allow = p.slice(p.indexOf('(allow file-read-data'));
+  const sub = `(subpath ${JSON.stringify(path.join(F.root, 'steam'))})`;
+  assert.ok(deny.includes(sub), deny);
+  assert.ok(!/steam/.test(allow), allow);
+  assert.ok(!deny.includes('steam-lobby-gate'), "the lobby gate's folder, which workers write, stays readable");
+  assert.ok(seatbeltProfile({ ...F, readOff: true }).includes(sub), 'read-fence-off keeps the write deny');
+  assert.ok(!/\(deny file-read-data/.test(seatbeltProfile({ ...F, readOff: true })), 'read-fence-off: no read rules, steam included (the recovery route)');
+  // Linux: a --no-read, never a --read.
+  const root = path.resolve('/home/u/ffw');
+  const a = readLockArgs({ root });
+  const steam = path.join(root, 'steam');
+  assert.ok(a.some((x, i) => x === steam && a[i - 1] === '--no-read'), a.join(' '));
+  assert.ok(!a.some((x, i) => a[i - 1] === '--read' && (x === steam || x.startsWith(steam + path.sep))), a.join(' '));
+  // Windows: No-Read-Up on the folder (inherited by everything in it), only when it is there; the same list openNoReadUp
+  // walks to take the labels off at read-fence-off.
+  const W = 'F:\\ffw';
+  const there = new Set([W + '\\daemon', W + '\\secrets', W + '\\steam', W + '\\steam-lobby-gate']);
+  const stat = (x: string) => (there.has(x.replace(/\//g, '\\')) ? ('dir' as const) : undefined);
+  const t = noReadUpTargets({ root: W, appDir: W + '\\daemon', allowBack: [], stat });
+  const s = t.find((x) => x.path.replace(/\//g, '\\') === W + '\\steam');
+  assert.equal(s?.sddl, NO_READ_UP.dir, JSON.stringify(t));
+  assert.ok(!t.some((x) => /steam-lobby-gate/.test(x.path)));
+  assert.ok(!noReadUpTargets({ root: W, appDir: W + '\\daemon', allowBack: [], stat: (x) => (/steam/.test(x) ? undefined : stat(x)) }).some((x) => /steam/.test(x.path)), 'a machine without steam: no target');
+  // The probe: steam is a closed path once it exists.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsteam-'));
+  try {
+    const r = path.join(dir, 'ffw');
+    fs.mkdirSync(path.join(r, 'daemon', 'logs'), { recursive: true });
+    assert.ok(!readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'] }).closed.some((x) => /steam/.test(x)));
+    fs.mkdirSync(path.join(r, 'steam'));
+    fs.mkdirSync(path.join(r, 'steam-lobby-gate'));
+    fs.writeFileSync(path.join(r, 'steam', 'config.json'), '{}');
+    fs.writeFileSync(path.join(r, 'steam-lobby-gate', 'x.json'), '{}');
+    assert.deepEqual(daemonOnlyDirs(r), [path.join(r, 'steam')]);
+    const t2 = readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: false });
+    assert.deepEqual(t2.closed, [path.join(r, 'steam')]);
+    // Linux: Landlock cannot refuse the folder's own open (its parents' READ_DIR is inherited), so the probe opens its files.
+    assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: true }).closed, [path.join(r, 'steam', 'config.json')]);
+    if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
+      // Under the real profile: steam's folder and its config.json refused, the lobby gate's file open.
+      const real = fs.realpathSync(r);
+      const fence: WorkerFence = { ...F, root: real, home: os.homedir(), appDir: path.join(real, 'daemon') };
+      const want = { closed: [path.join(real, 'steam'), path.join(real, 'steam', 'config.json')], open: [path.join(real, 'steam-lobby-gate', 'x.json'), path.join(real, 'daemon', 'logs')] };
+      const [cmd, ...args] = fencedArgv(fence, process.execPath, ['-e', READ_PROBE_SCRIPT, ...want.closed, ...want.open]);
+      const f = spawnSync(cmd, args, { encoding: 'utf8' });
+      if (!/sandbox_apply/.test(f.stderr)) assert.deepEqual(judgeReadProbe(want, f.stdout), { wronglyRefused: [], leftOpen: [], unknown: [] }, f.stdout + f.stderr);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('w5546 lockout review B1: the probe opens each path without reading it and says what would lock workers out', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffprobe-'));
   const root = path.join(dir, 'ffw');
   const app = path.join(root, 'daemon');
   for (const d of ['secrets', 'daemon/logs', 'daemon/gh-app', 'daemon/app/machine']) fs.mkdirSync(path.join(root, d), { recursive: true });
   for (const f of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/app/machine/ghApp.ts', 'daemon/pause.json']) fs.writeFileSync(path.join(root, f), 'x');
-  const t = readFenceProbeTargets({ root, appDir: app, secrets: [path.join(root, 'secrets')], tokenFile: path.join(root, 'secrets/machine-token'), allowBack: ['logs', 'pause.json', 'missing.json'] });
+  const t = readFenceProbeTargets({ root, appDir: app, secrets: [path.join(root, 'secrets')], tokenFile: path.join(root, 'secrets/machine-token'), allowBack: ['logs', 'pause.json', 'missing.json'], linux: false });
   assert.deepEqual(t.closed.map((p) => path.relative(root, p)), ['secrets', 'secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json']);
   assert.deepEqual(t.open.map((p) => path.relative(root, p)), ['daemon/logs', 'daemon/pause.json', 'daemon/app/machine/ghApp.ts'], 'only paths that are there');
   // The probe program itself, unfenced here: everything opens. A file it may not open answers `refused`.
@@ -347,11 +406,45 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
   if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
     // Under the real profile: the closed paths refused, the given-back ones open.
     const fence: WorkerFence = { ...F, root: fs.realpathSync(root), home: os.homedir(), appDir: fs.realpathSync(app) };
-    const real = readFenceProbeTargets({ root: fence.root, appDir: fence.appDir!, secrets: [path.join(fence.root, 'secrets')], allowBack: ['logs', 'pause.json'] });
+    const real = readFenceProbeTargets({ root: fence.root, appDir: fence.appDir!, secrets: [path.join(fence.root, 'secrets')], allowBack: ['logs', 'pause.json'], linux: false });
     const [cmd, ...args] = fencedArgv(fence, process.execPath, ['-e', READ_PROBE_SCRIPT, ...real.closed, ...real.open]);
     const f = spawnSync(cmd, args, { encoding: 'utf8' });
     // Already inside a Seatbelt (a fenced agent's shell), a nested profile cannot apply; the daemon then judges every path unknown.
     if (/sandbox_apply/.test(f.stderr)) return;
     assert.deepEqual(judgeReadProbe(real, f.stdout), { wronglyRefused: [], leftOpen: [], unknown: [] }, f.stdout + f.stderr);
   }
+});
+
+test("w5559: a Claude login on a Windows system drive is closed only on BEAST; LothDesktop's C: is left out", () => {
+  const files = [path.win32.join('C:\\', 'Users', 'x', '.claude', '.credentials.json'), path.win32.join('V:\\', 'ffw', 'claude-medium', '.credentials.json')];
+  const onC = (p: string) => /^c:/i.test(p);
+  assert.deepEqual([...LOGIN_LABEL_ON_SYSTEM_DRIVE], ['beast']);
+  assert.deepEqual(loginFenceFiles(files, { platform: 'win32', machineId: 'beast', onSystemDrive: onC }), { closed: files, left: [] });
+  assert.deepEqual(loginFenceFiles(files, { platform: 'win32', machineId: 'lothdesktop', onSystemDrive: onC }), { closed: [files[1]], left: [files[0]] });
+  assert.deepEqual(loginFenceFiles(files, { platform: 'win32', onSystemDrive: onC }), { closed: [files[1]], left: [files[0]] }, 'no id: the system drive stays untouched');
+  const unix = ['/home/x/.claude/.credentials.json'];
+  assert.deepEqual(loginFenceFiles(unix, { platform: 'linux', machineId: 'biscuit', onSystemDrive: () => true }), { closed: unix, left: [] });
+});
+
+test('w5559: the Seatbelt profile closes a login file given with the secrets, inside its read deny', () => {
+  const login = '/Users/p/.claude/.credentials.json';
+  const p = seatbeltProfile({ ...F, secretsDirs: [login] });
+  const deny = p.indexOf('(deny file-read-data');
+  const at = p.indexOf(`(subpath "${login}")`);
+  assert.ok(deny >= 0 && at > deny && at < p.indexOf('(allow file-read-data', deny), p);
+});
+
+test('seatbeltProfile: owner secrets deny the Keychain mach services and preference writes, and go with readOff (w5560)', () => {
+  const base = fenceFor({ setting: 'seatbelt', root: '/Users/p/ffw', platform: 'darwin', home: '/Users/p', exists: () => true, getconf: (n) => `/t/${n}` })!;
+  const f: WorkerFence = { ...base, readDenied: ['/Users/p/Library/Keychains'], ownerSecrets: { mach: ['com.apple.authd', 'com.apple.SecurityServer'] } };
+  const on = seatbeltProfile(f);
+  assert.match(on, /\(deny mach-lookup \(global-name "com\.apple\.authd"\) \(global-name "com\.apple\.SecurityServer"\)\)/);
+  assert.match(on, /\(deny user-preference-write\)/);
+  assert.match(on, /\(subpath "\/Users\/p\/Library\/Keychains"\)/);
+  const off = seatbeltProfile({ ...f, readOff: true });
+  assert.doesNotMatch(off, /mach-lookup|user-preference-write|Library\/Keychains/);
+  assert.doesNotMatch(seatbeltProfile(base), /user-preference-write/);
+  // With w5659's workerPrefFence as well, the rule is written once; with the read fence off, workerPrefFence alone keeps it.
+  assert.equal(seatbeltProfile({ ...f, prefDeny: true }).match(/deny user-preference-write/g)?.length, 1);
+  assert.match(seatbeltProfile({ ...f, prefDeny: true, readOff: true }), /\(deny user-preference-write\)/);
 });

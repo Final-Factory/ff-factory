@@ -6,6 +6,8 @@ name: Worker update end to end
 # credential and a Mac's PATH carried, the daemon restarted and seen online. docs/worker-install.md, "Updating".
 # w1596: then the updates over the daemon's own link (scripts/worker/test/link-e2e.ts): an update to the portal's commit, one
 # whose daemon never comes back and is put back by the job itself, a restart and an unload, all with no ssh.
+# w5727: and on Linux (ubuntu-latest), under a systemd user unit as FFBox and biscuit run it (server/machineDeployLinux.ts);
+# link-e2e there also installs a daemon from main before #1206 and updates it over its link (OLDER_DAEMONS).
 # On pull requests and by hand only; never on a push to main, whose pull request ran it (w925).
 
 on:
@@ -15,6 +17,9 @@ on:
       - 'scripts/worker/**'
       - 'machine/**'
       - 'server/leftovers.test.ts'
+      - 'server/agentTools.ts'
+      - 'server/safeGit.ts'
+      - 'scripts/updatePath.test.ts'
       - 'server/machineDeploy.ts'
       - 'server/machineDeployWin.ts'
       - 'server/machines.ts'
@@ -39,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest]
+        os: [windows-latest, macos-latest, ubuntu-latest]
     # A clean machine per run: it installs and updates a worker under the OS's service manager.
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -57,12 +62,31 @@ jobs:
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
+      # w5727: the installer runs the daemon as a systemd user unit (`systemctl --user`) and the update job as a transient
+      # one (`systemd-run --user`). The runner's user has no login session, so no user manager runs until lingering starts
+      # one; the installer's own `loginctl enable-linger` needs polkit, so sudo does it here, as the installer tells a person to.
+      - name: A systemd user manager for the runner's user (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$(id -un)"
+          uid="$(id -u)"
+          for i in $(seq 1 30); do [ -S "/run/user/$uid/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user is-system-running || true
       # w1197: the leftover reaper's macOS path on a real Mac: other processes' environments read with `ps -E`, a stopped
       # session's "player" and "Xvfb" ended, a live one's kept, ff-leftovers through its shim. No other job runs unit tests
       # on a Mac, and the m5's daemon runs this same code as its user, as this runner does.
       - name: The leftover reaper on a real Mac
         if: runner.os == 'macOS'
         run: node --test --test-timeout=300000 server/leftovers.test.ts
+      # w5597: the agent tools publish on a real Mac, against real GitHub: an old-layout machine moves to FF Factory's checkout
+      # in <root>/tools-medium, and no hook or script planted where workers write runs (Linux in ci.yml, Windows in windows.yml).
+      - name: The update path and the agent tools publish on a real Mac
+        if: runner.os == 'macOS'
+        env:
+          CI: 'true'
+        run: node --import ./scripts/testEnv.ts --test --test-timeout=600000 scripts/updatePath.test.ts
       - name: Install a test root, tune it, update it as over ssh, and check what the update promises
         run: node scripts/worker/test/update-e2e.ts "${{ runner.temp }}/w613-update" 8797
       - name: The test daemon's log

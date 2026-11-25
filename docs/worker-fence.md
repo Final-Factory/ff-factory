@@ -33,8 +33,8 @@ LothDesktop):
 | | Covers | Does not cover |
 |---|---|---|
 | Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
-| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md) | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd (unless `workerPrefFence`, w5659); signals to other processes of the user; other sandboxes inside the root; the network |
-| Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
+| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md); with the read fence `on`: reads of `~/.ssh`, browsers, `~/.config/gh` and the Keychain, Keychain services and preference writes (w5553, w5560, "Owner secrets" below); preference writes also with `workerPrefFence` (w5659) | with the read fence off: those reads; preference writes through cfprefsd unless `workerPrefFence`; signals to other processes of the user; other sandboxes inside the root; the network |
+| Linux Landlock | file writes outside the root; with `transcriptLock` on, other conversations' transcripts (w5702, docs/transcript-seal.md) | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
 **Resource caps** are not a fence, but they bound what one worker can use: memory, processes and temp disk per worker
@@ -110,14 +110,15 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 
 and then takes write back from `<CLAUDE_CONFIG_DIR>/projects` but the process's own conversation (`<id>.jsonl` in any
 project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from `<root>/daemon`, `<root>/secrets`,
-`<root>/claude-medium` (the Medium agents' Claude folder, w5543), `<root>/cache-medium` (their uv cache, w5565) and
+`<root>/claude-medium` (the Medium agents' Claude folder, w5543), `<root>/cache-medium` (their uv cache, w5565),
+`<root>/tools-medium` (FF Factory's final-factory-agents checkout the agent tools publish takes forward, w5597) and
 `<root>/root.json` (later rules win). The main clone
 `<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
 in `server/workerFence.test.ts` now commits in a worktree). The harness's own text guard keeps a careless agent's tools off it, which a script file gets past. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
-and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`), and `UV_TOOL_DIR=<root>/cache/uv-tools` (w5693: uvx
-writes a temp file in `~/.local/share/uv/tools`, so the Unity MCP server died at start; docs/worker-root.md 2.8).
+and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`). uv's folders are not set by the fence: `sandboxUvEnv`
+gives every sandbox agent and its editor the workers' ones (w5693, w5745; docs/worker-root.md 2.8).
 
 ## Reads: the daemon's folder, secrets and root.json are closed (w5546, every OS)
 
@@ -129,14 +130,28 @@ machine/readFence.ts, from `tokenFile`), `<root>/root.json` and the daemon's fol
 `FENCE_READ_ALLOW` (server/daemonReads.ts): the guard's diagnostic reads (`DAEMON_READ_ALLOW`: logs, the code in `src` and
 `app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
 given back: `daemon.json`, `hosts` (other sessions' specs and environments), `gh-app/tokens.json` (every app's tokens),
-`root.json` and `root-backup.json` (dropped from the guard's list too). A run's own GitHub App tokens file
+`root.json` and `root-backup.json` (dropped from the guard's list too).
+
+**`<root>/steam` is closed too** (w5639, after w5551 made it unwritable): steamcmd, its cached Steam login (the ConnectCache
+in steamcmd's config), the upload `config.json`, the daemon's ffbox clone and `uploads.json`. It is every root child in
+`DAEMON_ONLY_CHILDREN` (server/claudeHome.ts), read-denied on each OS from that one list: macOS `READ_DENIED_IN_ROOT`
+(server/workerFence.ts), Linux `readLockArgs` (machine/writeLock.ts), Windows `noReadUpTargets` (machine/lowIntegrity.ts),
+and the probe's closed paths (`daemonOnlyDirs`, machine/readFence.ts). Nothing is given back inside it. Why this locks out
+nobody who needs it: the daemon runs steamcmd, the checks and the uploads itself (machine/steamUpload.ts `run`), unfenced and
+at Medium, and a No-Read-Up label refuses only a lower integrity; the person's own processes are Medium or unfenced too; no
+worker tool reads it (the `steam_upload` tool asks the daemon, and `urgent_release.py` stopped installing steamcmd in w5640).
+`steam-lobby-gate`, which workers write, is another child and stays open. It follows the same mode as the rest: `read-fence-off`
+takes its label off (Windows) and leaves it out of new runs' rules (macOS, Linux), from the portal with nobody at the machine.
+Tests: server/workerFence.test.ts "w5639", server/writeLock.test.ts (a live Landlock run on Linux CI).
+
+A run's own GitHub App tokens file
 (`gh-app/sessions/<session>/tokens.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux), as a folder, so its rewrite by rename stays readable.
 
 | OS | How | Where |
 |---|---|---|
 | macOS | `(deny file-read-data ...)` on the closed paths, then `(allow file-read-data ...)` on the given-back ones (later rules win). Only contents: stat and realpath of a closed path still work. | `seatbeltProfile` `readRules` (server/workerFence.ts); per run `readAllowed` |
-| Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents list names only) and the given-back ones. Symbolic links are not followed. | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
-| Windows | A Medium mandatory label with No-Read-Up, `S:(ML;OICI;NWNR;;;ME)` on folders (`S:(ML;;NWNR;;;ME)` on files), set with `SetNamedSecurityInfoW` (icacls cannot set NR); the given-back paths get an explicit `S:(ML;OICI;NW;;;ME)`, which overrides the inherited one. Set at every daemon start when `workerIntegrity` is `low` (a self-update's new `app` folder inherits NR), skipping a label already in place. Never on the system drive: a target on C:, or a junction into it, is skipped and logged. | `noReadUpTargets`, `labelNoReadUp` (machine/lowIntegrity.ts), `lowSetup` (machine/daemon.ts) |
+| Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents get READ_DIR only) and the given-back ones. Symbolic links are not followed. Landlock rights are inherited down the tree, so a parent's READ_DIR reaches the closed folder: a worker can still list the names in `<root>/secrets` or `<root>/steam`, never open a file there (w5639, CI on #1237). The probe therefore opens up to three files inside each closed folder on Linux, not the folder (`readFenceProbeTargets`). | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
+| Windows | A Medium mandatory label with No-Read-Up, `S:(ML;OICI;NWNR;;;ME)` on folders (`S:(ML;;NWNR;;;ME)` on files), set with `SetNamedSecurityInfoW` (icacls cannot set NR); the given-back paths get an explicit `S:(ML;OICI;NW;;;ME)`, which overrides the inherited one. Set at every daemon start when `workerIntegrity` is `low` (a self-update's new `app` folder inherits NR), skipping a label already in place. Never on the system drive: a target on C:, or a junction into it, is skipped and logged. `<root>/steam` is made (empty) before the root is labelled, at start and at the read-fence switch, so a machine whose steamcmd arrives later is closed from the start (w5731); its secret files (`STEAM_SECRET_FILES`: `config.json`, `uploads.json`, `steamcmd/config/config.vdf`) each get a file NR label of their own, since an explicit Low label left on a file would win over the folder's inherited one. | `noReadUpTargets`, `labelNoReadUp` (machine/lowIntegrity.ts), `lowSetup` (machine/daemon.ts) |
 
 Kept working through the daemon's own writes (lockout review of #1193):
 
@@ -209,8 +224,103 @@ Limits:
   `GH_TOKEN`, instead of running the shim again without end.
 - **Windows, BEAST**: its `daemon` and `secrets` are junctions into `C:\ffw-anchor`, which the fence does not touch, so they
   stay readable there until a person decides otherwise.
+- **The machine's own Claude login** (w5559, lothsahn: "fenced workers can't read the machine's own Claude login anywhere,
+  and keep LothDesktop's C: off limits"): its `.credentials.json` files (`~/.claude`, the legacy folder, the Medium agents'
+  folder; `server/claudeHome.ts` `fencedLoginFiles`) are closed with the secrets, through the daemon's `secretsDirs`, so all
+  three fences and the read probe take them. Only the files, never the folder: skills in fenced workers read other files in
+  `~/.claude` by fixed path (publish-skills' `final-factory-agents-checkout`, `plugins/cache/...`), and on BEAST a Low
+  worker's `~/.claude` is the legacy folder itself. The workers' own Claude folder is left out: runs start on their vault
+  token and hold no machine login there. On Windows a login on the system drive is labelled only on the machines in
+  `machine/readFence.ts` `LOGIN_LABEL_ON_SYSTEM_DRIVE` (BEAST, whose request allows that one label); elsewhere it is left out
+  of the labels and the probe and logged at start. In `on` mode the daemon checks the login files' labels every minute and
+  sets a missing one again, since a token refresh by a Medium reader (the usage probe) may write the file anew.
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
   is what holds for every process the worker starts.
+
+## Owner secrets: gh login, ~/.ssh, browsers, the Keychain (w5548, w5553, w5560)
+
+Before this, a fenced Mac worker read everything in the owner's home outside the root: measured on m5 (2026-11-25), a
+fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com account bryding (keyring)".
+
+- **What is closed** (machine/ownerSecrets.ts `ownerSecretPaths`, `ownerReadDenied`): the gh login's folder
+  (`GH_CONFIG_DIR` or `~/.config/gh`), `~/.ssh`, every browser profile (Chrome, Edge, Brave, Chromium, Firefox, Opera,
+  Arc, Vivaldi, Safari and `~/Library/Cookies`), and the login keychain (`~/Library/Keychains`; Linux
+  `~/.local/share/keyrings`). They ride the read fence's own mechanism (macOS `WorkerFence.readDenied`, Linux
+  `--no-read`), so they are on only when the read fence is `on` and its probe passed, and `read-fence-off` takes them off live.
+- **macOS also** denies mach-lookup of `com.apple.authd` and `com.apple.SecurityServer` and denies
+  `user-preference-write` (workerFence.ts `ownerSecretRules`, and `PREF_RULES` added once with w5659's `workerPrefFence`). Why both services, measured on m5 (probe 4, 2026-11-25):
+  with `~/Library/Keychains` unreadable there is no default keychain, and `security add-generic-password` then has
+  SecurityAgent raise a "keychain not found" dialog on the person's screen and waits for a click (its "Reset To
+  Defaults" would replace their login keychain). authd alone made the write fail at once but still logged one dialog line;
+  SecurityServer alone still hung; both refused the write in 2 s with no dialog, and git over HTTPS, gh, codesign,
+  python, uv, node, curl, the Claude CLI and a Unity batch run (licence updated) all passed. Never ship the Keychains read
+  deny without both. The preference-write deny refused `defaults write` cleanly, and Unity ran under it.
+- **The gh login reaches only runs with no vault token** (w5548): the daemon reads it with `gh auth token` outside the
+  fence and gives it to such a run as `GH_TOKEN` (`machineGh`, re-read every 30 minutes). A run that holds a token gets
+  `GH_CONFIG_DIR=<root>/gh-worker`, an empty folder, since gh will not start when its config folder is unreadable
+  ("failed to load config ... operation not permitted", measured). Only a run with no token at all (the daemon read none)
+  keeps the gh folder open, as before.
+- **Git never uses the Keychain for github.com**: launch.ts `githubCredentialEnv` clears the system `osxkeychain` helper
+  and sets the app helper (a traced `git credential fill` ran only ghApp.ts's helper), and the Claude CLI gets its token as
+  `CLAUDE_CODE_OAUTH_TOKEN`, so neither needs the Keychain.
+- **Windows: none of this.** Every owner path is on the system drive, where the fence writes no label ("Never touch C: on
+  Windows"). There `lowEnv` moves gh's `APPDATA` into the root, so a Low worker's gh finds no login, and the login's folder
+  is passed (`GH_CONFIG_DIR`) only to a run with no token. A deny ACL for the Low SID on the owner's profile folders is a
+  person's decision, not applied.
+- **Known limits**: the person's own unfenced processes (the sandbox's Unity editor) are not fenced. `spctl -a -t exec`
+  rejects Unity.app with or without the fence ("Unnotarized Developer ID"), so it is no fence check. Linux: a closed path
+  in `$HOME` makes `$HOME` a parent the read lock walks, so a file rewritten there by rename after a run started is
+  unreadable to that run (the same limit as above).
+
+## The Secret Service and the agents: owner secrets over a socket (Linux, w5748)
+
+Closing the keyring's files is not enough on Linux. A fenced run that cannot open `~/.local/share/keyrings` or `~/.ssh`
+can still ask the owner's running services for what they hold, over UNIX sockets in `$XDG_RUNTIME_DIR`:
+
+- the session bus (`bus`), and on it the Secret Service, `org.freedesktop.secrets` (GNOME keyring). The machine's gh login
+  is kept there on a desktop Linux ("(keyring)"), and so are the browsers' Safe Storage keys;
+- GNOME keyring's own folder (`keyring/control`, `keyring/pkcs11`);
+- the ssh agents (`gcr/ssh`, `openssh_agent`, `$SSH_AUTH_SOCK`), which sign with the owner's keys;
+- gpg-agent (`gnupg/S.*`).
+
+**Measured on biscuit** (Linux 7.0.0-38, Landlock ABI 8, 2026-11-25, from inside the daemon's real worker lock):
+`busctl --user status org.freedesktop.secrets` answered (w5733), the login keyring collection lists 9 items (an
+object-path count; no secret was read), and all 12 of these sockets accepted a connect. `ff-landlock.py --deny-unix`
+needs `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, ABI 9 (Linux 7.1): on ABI 8 it is a no-op that says so on stderr.
+
+**The read-fence probe says it** (`probeOwnerSockets`, machine/daemon.ts; `ownerSocketPaths`, `ownerSocketProbeTargets`
+in machine/ownerSecrets.ts; `SOCKET_PROBE_SCRIPT`, `sayOwnerSocketProbe` in machine/readFence.ts). In `warn` and `on`
+modes on Linux, a child of the daemon's own, under the same lock and read rules a run gets, connects to each owner socket
+and closes it, sending nothing (a test server sees no byte), and the daemon logs one line, as on biscuit:
+
+    read fence (warn, linux) owner sockets: 0/12 refused (Landlock ABI 8); reachable from a fenced run: /run/user/1000/bus, ...
+
+In `on` mode on Linux, read rules take effect only once this probe finds every owner socket refused (`readFenceEnforced`;
+a probe that cannot run counts as reachable), and a run in `on` mode gets `ownerSocketDenyArgs` with its other owner
+rules, so `read-fence-off` takes them off live. While a socket answers, `on` logs why and runs start without read rules
+(a warn, never a lockout).
+
+**The three ways to close it, and what each costs** (measured on biscuit unless marked):
+
+| Option | Closes | Cost |
+|---|---|---|
+| Deny the sockets to fenced runs | All of them, where the kernel can: only Landlock ABI 9 | On ABI 8 nothing unprivileged can. seccomp cannot tell one socket path from another. A mount namespace to hide them is refused (`unshare -Urm true`: "write failed /proc/self/uid_map: Operation not permitted"; `kernel.apparmor_restrict_unprivileged_userns = 1`). Unsetting `DBUS_SESSION_BUS_ADDRESS` is no fence: the worker sets it back, and `systemd-run --user` reaches `$XDG_RUNTIME_DIR/systemd/private` without it. Where it works, workers lose nothing they need. With the bus pointed at nothing and `SSH_AUTH_SOCK` empty, these all passed: `gh api user` (token and an empty gh folder, as fenced runs get), `git ls-remote` over HTTPS, Node and Python HTTPS, and `claude --version`. The bus deny has shipped in `writeLockArgs` since w5562. |
+| Refuse to enforce owner secrets below ABI 9 | Nothing on biscuit. It stops `on` from claiming the gh login is closed while the keyring hands it out | No worker loses anything; Linux below 7.1 keeps no read rules (it already has none: B4 refuses `on` on Linux) |
+| Move the daemon's gh login off the keyring (`gh auth login --insecure-storage`, into `~/.config/gh/hosts.yml`, which the fence closes) | The gh token only | Changes the machine's own setup (a person's step). Leaves 8 other keyring items, the ssh and gpg agents and the systemd escape open, so the route to `org.freedesktop.secrets` stays |
+
+**The pick: deny the sockets where the kernel can, and refuse `on` where it cannot.** A run in `on` mode denies the
+bus, keyring and agent sockets (`--deny-unix`; the bus and systemd were already denied to every locked run since w5562),
+and `on` takes effect on Linux only once this probe finds every owner socket refused. A kernel below ABI 9 never passes, so biscuit stays unenforced until it runs Linux 7.1 or
+newer. That is the kernel's limit, not a setting. Lothsahn's call (w5562, 2026-11-25: "Leave it until Ubuntu's normal updates bring
+7.1"): no kernel upgrade by hand (not the 7.3 OEM kernel the archive offers, not unprivileged user namespaces), so Linux
+stays warn-only until Ubuntu's normal kernel reaches 7.1. Moving the gh login alone would not meet "cannot reach
+org.freedesktop.secrets", so it is not handed up.
+
+**The READ_DIR limit** (#1193's documented limit, kept): Landlock rights are inherited down the tree, and every parent on
+the chain to a closed path keeps READ_DIR so its other children stay listable. That READ_DIR reaches the closed folder
+too. A fenced run can list the file names in `~/.ssh`, `~/.local/share/keyrings`, `<root>/secrets` or `<root>/steam`,
+and open none of them (refused). Landlock only grants, so ff-landlock.py cannot take back a right a parent's rule gives.
+The names stay visible on Linux; on macOS Seatbelt's `file-read-data` deny also covers listing.
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
 
@@ -228,6 +338,14 @@ Measured with the generated profile unless noted:
 
 ## Known limits
 
+- **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748; lothsahn: "Leave it until Ubuntu's
+  normal updates bring 7.1"). Below it a fenced run still reaches the session bus (the Secret Service, where the gh login
+  is kept), GNOME keyring and the ssh and gpg agents, and `on` keeps no read rules: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8)
+  measured all 12 owner sockets reachable. A newer kernel alone does not turn `on` on: `readFenceOnRefusal`
+  (machine/readFence.ts) still refuses `read-fence-on` on every Linux kernel for the self-update lockout (B4 of #1193).
+  Once Ubuntu ships 7.1, the owner-socket probe can pass by itself; `on` then still needs B4 fixed and a person's switch.
+  `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check to run there first: it skips below ABI 9 and has
+  never run.
 - **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
   sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
   `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`
@@ -255,6 +373,9 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+- **Sandbox editors** the daemon starts on a Mac run under this profile, warn-only unless daemon.json says
+  `"editorFence": true` (w5630; docs/worker-root.md 4.1, "macOS: sandbox editors start under the workers' Seatbelt
+  profile"). Their HOME moves to `<root>/home`, so Unity's `~/Library` writes land in the root.
 
 ## Signals and launchd jobs (w5562)
 

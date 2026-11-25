@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { MARKETPLACE, toolsCheckout } from './agentTools.ts';
+import { MARKETPLACE, readableToolsCheckout } from './agentTools.ts';
 
 /**
  * Where a worker finds the ff-agents plugin's scripts without searching the disk (w2012, lothsahn: "Stop messing with my
@@ -43,8 +43,9 @@ export function pluginEnv(d: PluginPathDeps): Record<string, string> {
   }
   if (plugin && !exists(path.join(plugin, 'skills'))) plugin = undefined;
   if (!plugin && d.root) {
-    const co = path.join(toolsCheckout(d.root), 'plugins', 'ff-agents');
-    if (exists(path.join(co, 'skills'))) plugin = co;
+    // w5597: FF Factory's checkout in <root>/tools-medium, else the old one in <root>/tools until a publish has made it.
+    const co = readableToolsCheckout(d.root, path.join('plugins', 'ff-agents', 'skills'), exists);
+    if (co) plugin = path.join(co, 'plugins', 'ff-agents');
   }
   return plugin ? { FF_AGENTS_PLUGIN: plugin, FF_SKILLS: path.join(plugin, 'skills') } : {};
 }

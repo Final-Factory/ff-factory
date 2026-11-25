@@ -1,10 +1,14 @@
 /**
  * Updates over the daemon's own link end to end (w1596, docs/worker-install.md "Updates over the daemon's link"), against
- * the throwaway portal, on a real Windows PC or Mac: the real installer, the real OS supervisor (a scheduled task, a
- * LaunchAgent), the real daemon and the real job outside it. Never against the live portal; the test root has its own
+ * the throwaway portal, on a real Windows PC, Mac or Linux computer: the real installer, the real OS supervisor (a scheduled
+ * task, a LaunchAgent, a systemd user unit as on FFBox and biscuit, w5727), the real daemon and the real job outside it. Never against the live portal; the test root has its own
  * service name and its own job name, so it runs beside a real install and never touches it or its agents.
  *
  *   node scripts/worker/test/link-e2e.ts <scratch folder> [port=8795]
+ *
+ * On Linux the user's systemd manager must answer `systemctl --user` (the installer's own route, server/machineDeployLinux.ts):
+ * on a CI runner, which has no login session, `sudo loginctl enable-linger $USER` and XDG_RUNTIME_DIR=/run/user/<uid>
+ * (.github/workflows/worker-update.yml does both).
  *
  * LINK_E2E_INSTALL_FROM=<commit> installs from that older commit instead of this checkout (w5715): the update to B then
  * proves a daemon of that commit updates over its link to this checkout's code (B is this checkout plus one commit).
@@ -34,6 +38,7 @@ const scratch = path.resolve(scratchArg);
 const port = Number(portArg);
 const SRC = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const isWin = process.platform === 'win32';
+const isLinux = process.platform === 'linux';
 const service = isWin ? 'FFWorkerLinkTest' : 'com.fffactory.linktest';
 const node = [process.execPath, ...process.execArgv];
 const elevated = isWin ? spawnSync('net', ['session'], { windowsHide: true, stdio: 'ignore' }).status === 0 : false;
@@ -138,17 +143,35 @@ const connects = () =>
     : 0;
 const version = () => fs.readFileSync(path.join(l.daemon, 'app', 'machine', 'VERSION'), 'utf8').trim();
 const short = (sha: string) => sha.slice(0, 7);
+/** Linux (w5727): whether the user's systemd manager has this unit loaded (a transient unit run with --collect unloads once it ends). */
+const unitLoaded = (unit: string) => {
+  const r = spawnSync('systemctl', ['--user', 'show', '-p', 'LoadState', '--value', unit], { encoding: 'utf8' });
+  return r.status === 0 && r.stdout.trim() !== '' && r.stdout.trim() !== 'not-found';
+};
+// The job's transient unit (machine/osJob.ts launchJob), the daemon's unit file (server/machineDeployLinux.ts unitFile).
 const jobRegistered = () =>
   isWin
     ? spawnSync('powershell.exe', ['-NoProfile', '-Command', `if (Get-ScheduledTask -TaskName '${service}Job' -ErrorAction SilentlyContinue) { 'yes' }`], { encoding: 'utf8', windowsHide: true }).stdout.includes('yes')
-    : fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.job.plist`));
+    : isLinux
+      ? unitLoaded(`${service}.job.service`)
+      : fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.job.plist`));
 const daemonRegistered = () =>
   isWin
     ? spawnSync('powershell.exe', ['-NoProfile', '-Command', `if (Get-ScheduledTask -TaskName '${service}' -ErrorAction SilentlyContinue) { 'yes' }`], { encoding: 'utf8', windowsHide: true }).stdout.includes('yes')
-    : fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`));
+    : isLinux
+      ? fs.existsSync(path.join(os.homedir(), '.config', 'systemd', 'user', `${service}.service`)) || unitLoaded(`${service}.service`)
+      : fs.existsSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${service}.plist`));
+const registration = isWin ? 'task' : isLinux ? 'systemd unit' : 'LaunchAgent';
+const daemonLog = () => (fs.existsSync(path.join(l.logs, 'daemon.log')) ? fs.readFileSync(path.join(l.logs, 'daemon.log'), 'utf8') : '');
 const jobLog = () => fs.readFileSync(path.join(l.daemon, 'logs', 'update-job.log'), 'utf8');
 
 try {
+  if (isLinux) {
+    // Without a user manager the installer cannot start its unit and the job falls back to a plain process: say so first.
+    const um = spawnSync('systemctl', ['--user', 'show-environment'], { encoding: 'utf8' });
+    check(um.status === 0, "the user's systemd manager answers (systemctl --user)", (um.stderr || '').trim().slice(0, 200));
+    if (um.status !== 0) throw new Error('no systemd user manager: enable lingering and set XDG_RUNTIME_DIR');
+  }
   // 1. The install, from this checkout (A) or LINK_E2E_INSTALL_FROM, as a person runs it, with no portal ssh (as a join now installs).
   const install = spawnSync(node[0], [...node.slice(1), path.join(INSTALL_SRC, 'scripts', 'worker', 'worker.ts'), 'install', '--root', root, '--portal-url', portalUrl, '--credential-stdin', '--max-sandboxes', '2', '--max-agents-per-sandbox', '1', '--max-unity', '1', '--service', service, '--repo-url', game, '--no-firewall', '--no-cleanup', '--no-ssh', '--no-dev-drive', '--unity-slots-dir', path.join(scratch, 'slots'), ...(elevated ? ['--owner', os.userInfo().username] : [])], { input: credential + '\n', encoding: 'utf8', timeout: 20 * 60_000 });
   process.stdout.write(install.stdout ?? '');
@@ -167,9 +190,11 @@ try {
   check(version().startsWith(short(B)), "the daemon's code is B", version());
   check(await waitFor('the portal to see B', async () => (await linkState()).daemon?.startsWith(short(B)) === true, 60_000), 'the portal sees the daemon online on B');
   check(connects() > before, 'the daemon restarted for it (a new connection in its log)', `${before} -> ${connects()}`);
+  // w5727: on Linux the job is the user manager's own transient unit, not launchJob's fallback (a plain detached process).
+  if (isLinux) check(/started as the transient systemd unit/.test(daemonLog()), 'the job ran as a transient systemd user unit', (daemonLog().match(/job \S+ started as [^\n]*/g) ?? []).pop() ?? '(no "started as" line)');
   check(!jobLog().includes(credential) && !/ffm_wlink_[A-Za-z0-9_-]{20,}/.test(jobLog() + JSON.stringify(up)), "no credential in the job's log or report");
   check(/The portal sees wlink online running/.test(up.report?.log ?? ''), "the report carries the installer's own lines");
-  check(await waitFor("the job's registration to go", async () => !jobRegistered(), 60_000), `the job's ${isWin ? 'task' : 'LaunchAgent'} is removed once reported`);
+  check(await waitFor("the job's registration to go", async () => !jobRegistered(), 60_000), `the job's ${registration} is removed once reported`);
 
   // 3. An update to a commit whose daemon exits at start (C): the job puts B back by itself.
   const daemonTs = path.join(P, 'machine', 'daemon.ts');
@@ -200,9 +225,9 @@ try {
   const un = await link('uninstall');
   check(un.ok, 'an unload over the link is answered', un.error ?? '');
   check(await waitFor('the daemon offline', async () => !(await linkState()).online), 'the daemon is offline');
-  check(await waitFor('its registration gone', async () => !daemonRegistered(), 60_000), `the daemon's ${isWin ? 'task' : 'LaunchAgent'} is gone`);
+  check(await waitFor('its registration gone', async () => !daemonRegistered(), 60_000), `the daemon's ${registration} is gone`);
   check(fs.existsSync(path.join(l.daemon, 'app', 'machine', 'daemon.ts')) && fs.existsSync(l.token), 'its files are kept (the code, the credential)');
-  check(await waitFor("the unload job's registration to go", async () => !jobRegistered(), 60_000), `the unload job removed its own ${isWin ? 'task' : 'LaunchAgent'}`);
+  check(await waitFor("the unload job's registration to go", async () => !jobRegistered(), 60_000), `the unload job removed its own ${registration}`);
 } finally {
   // A failure's evidence, before the uninstall removes the root: the job's log and the daemon's.
   if (failed) {

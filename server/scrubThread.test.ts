@@ -81,11 +81,11 @@ test('scrub thread (w5613): a large data folder is scrubbed at start with no blo
   assert.ok(r, 'it ran');
   assert.equal(r.errors.length, 0, JSON.stringify(r.errors));
   assert.equal(r.files.length, 6, 'every file that held a secret: the two transcripts, state.json and three small ones');
-  // The scrub's own work on the portal's thread, timed piece by piece: what the old scrub did there for a whole file. The gap a
-  // timer sees is a diagnostic only: on a loaded machine it is the scheduler's (20 to 178 ms over five runs on lothdesktop
-  // at 98% CPU, with the p99 rising with it).
-  t.diagnostic(`longest piece on the portal's thread: ${r.longestTurnMs} ms`);
-  assert.ok(r.longestTurnMs! < 200, `the scrub held the event loop ${r.longestTurnMs} ms at once`);
+  // The scrub's own work on the portal's thread, timed piece by piece: what the old scrub did there for a whole file. Asserted
+  // on the thread's CPU time: the wall time and the gap a timer sees are diagnostics only, since on a loaded machine they are
+  // the scheduler's (20 to 178 ms over five runs on lothdesktop at 98% CPU; one piece 285 ms wall on a CI runner, w5559).
+  t.diagnostic(`longest piece on the portal's thread: ${r.longestTurnMs} ms wall, ${r.longestTurnCpuMs} ms CPU`);
+  assert.ok(r.longestTurnCpuMs! < 200, `the scrub held the event loop ${r.longestTurnCpuMs} ms of CPU at once`);
   assert.ok(lines.some((l) => /^scrubbed on its own thread in [\d.]+ s; the longest piece on the portal's thread took \d+ ms$/.test(l)), lines.join('\n'));
   assert.deepEqual(leaks(lines.join('\n')), [], 'the log names no value');
   assert.deepEqual(leaks(fs.readFileSync(path.join(dir, 'transcripts/big.jsonl'), 'utf8')), [], 'the big transcript is masked');

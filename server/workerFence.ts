@@ -17,7 +17,6 @@ import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
-import { workerUvToolDir } from '../machine/sharedCaches.ts';
 import { projectSlug } from './claudeHome.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -38,6 +37,11 @@ export interface WorkerFence {
   readDenied?: string[];
   /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens folder, w5547); a folder covers all below it. */
   readAllowed?: string[];
+  /**
+   * The owner-secret rules (w5553, w5560): no Keychain mach services (ownerSecrets.ts KEYCHAIN_MACH_SERVICES) and no
+   * preference writes through cfprefsd. Set with the owner paths in readDenied, never alone; off with the read fence.
+   */
+  ownerSecrets?: { mach: string[] };
   /** The read fence is switched off on this machine (daemon_control read-fence-off, w5546): no read rules, writes as before. */
   readOff?: boolean;
   /** Secrets folders outside `<root>/secrets` (a Dev Drive install's host folder, readFence.ts secretsDirs): read-denied too. */
@@ -61,11 +65,12 @@ export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONL
 
 /**
  * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the same three are closed to reads as
- * well, except what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
+ * well, and `steam` (w5639: steamcmd's cached Steam login and the upload config, which only the daemon reads), except
+ * what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
  * `file-read-data` only: a stat of a path, which node's module loader and git make up every parent, stays allowed; the
  * daemon's folder may be listed (names, never contents, as server/daemonReads.ts allows).
  */
-export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+export const READ_DENIED_IN_ROOT = { subpaths: ['daemon', 'secrets', ...DAEMON_ONLY_CHILDREN], files: ['root.json'] };
 
 /**
  * w5563: the one conversation a fenced process may write in its Claude home's transcripts. `projects` is
@@ -164,7 +169,8 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
-    ...(f.prefDeny ? PREF_RULES : []),
+    // One preference rule for both switches: w5659's workerPrefFence, or the owner-secret rules under the read fence (w5560).
+    ...(f.prefDeny || (f.ownerSecrets && !f.readOff) ? PREF_RULES : []),
   ].join('\n');
 }
 
@@ -189,6 +195,15 @@ function readRules(f: WorkerFence): string[] {
     ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
     ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
     ')',
+    ...(f.ownerSecrets ? ownerSecretRules(f.ownerSecrets.mach) : []),
+  ];
+}
+
+/** w5560: the Keychain's mach services, for a run whose owner paths are read-denied (probe 4, m5). Its preference-write deny is PREF_RULES, added once in seatbeltProfile. */
+function ownerSecretRules(mach: string[]): string[] {
+  return [
+    ';; owner secrets (w5553, w5560): no Keychain service (a write would raise a dialog on the person\'s screen)',
+    ...(mach.length ? [`(deny mach-lookup ${mach.map((n) => `(global-name ${lit(n)})`).join(' ')})`] : []),
   ];
 }
 
@@ -226,12 +241,11 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
  * What a fenced agent's environment adds: Claude Code's own temp (task output, its /tmp/cc-socks messaging socket) moves
  * into the root, and the auto-updater, which writes ~/.local/share/claude, is off. TMPPREFIX: zsh writes each here-document
  * to /tmp/zshXXXXXX, which the fence refuses (w5397, m5: "can't create temp file for here document: operation not
- * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read. UV_TOOL_DIR (w5693): uvx
- * takes a temp file in uv's tool folder on every run, ~/.local/share/uv/tools by default, which the fence refuses, so the
- * Unity MCP server (`uvx --from mcpforunityserver ...`) died at start; it runs from <root>/cache/uv-tools instead
- * (machine/sharedCaches.ts workerUvToolDir), never the Medium agents' one.
+ * permitted"); its files go to <root>/tmp/zshXXXXXX instead, and zsh removes each once read. uv's folders
+ * (w5693, w5745) are not set here: machine/sharedCaches.ts sandboxUvEnv gives every sandbox agent, fenced or not, and its
+ * editor the workers' ones, by one rule.
  */
-export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh'), UV_TOOL_DIR: workerUvToolDir(f.root) });
+export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh') });
 
 /** The argv that runs `command args` inside the fence. */
 export const fencedArgv = (f: WorkerFence, command: string, args: string[], own?: OwnTranscript) => [SANDBOX_EXEC, '-p', seatbeltProfile(f, own), command, ...args];

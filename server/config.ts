@@ -292,6 +292,12 @@ export function checkProjectConfig(cfg: Partial<Pick<Config, 'project'>>): void 
 
 export interface Config {
   port: number;
+  /**
+   * The address the portal listens on. Default 127.0.0.1 (w5538, security audit finding 30): Tailscale serve and Funnel, the machines
+   * and FFBox all reach the portal through a proxy on this machine, so loopback is enough, and a default of 0.0.0.0 would serve the
+   * dashboard over plain HTTP to a whole LAN. Set it only for a reason: the portal VM sets "0.0.0.0" because the VM host's health
+   * check calls the VM's own address (its firewall admits only that one source). docs/portal-bind-address.md.
+   */
   host: string;
   /**
    * Trust X-Forwarded-For/-Proto from a reverse proxy on this machine (Tailscale serve/funnel,
@@ -310,10 +316,17 @@ export interface Config {
    */
   ownerDeviceApproval?: 'off' | 'advisory';
   /**
-   * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "warn" (unset) logs what would be
-   * refused and lets it in, "enforce" refuses it, "off" skips the check (the recovery switch, docs/machines.md).
+   * The daemon link (/machine) from the tailnet only (w5575, server/machineLinkGate.ts): "enforce" (unset) refuses it,
+   * "warn" logs what would be refused and lets it in, "off" skips the check (the recovery switch, docs/machines.md).
    */
   machineLinkTailnet?: 'off' | 'warn' | 'enforce';
+  /**
+   * The portal VM's agents (orchestrators, the dispatcher, the bug-thread judge) as their own OS account (w5598,
+   * server/agentAccount.ts, docs/vault.md "In the VM"): "on" starts them through fff-agent.socket as fff-agent, "warn"
+   * (unset) starts them as the portal's own account and only checks the socket, "off" as before (the recovery switch).
+   * Read live; the VM's switch file (fffctl agents) wins over it. Only where the VM's unit names the socket.
+   */
+  agentAccount?: 'off' | 'warn' | 'on';
   /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.
@@ -570,6 +583,8 @@ export interface Config {
   retiredKeys?: string[];
   /** The startup line for a defaultBase naming a retired branch, read as the trunk (w1517): retiredBaseLine. */
   retiredBase?: string;
+  /** The startup line for a config with no "host" (w5538): hostDefaultWarning. Logged where the server listens, never by a CLI. */
+  hostWarning?: string;
   repo: {
     /** Clone URL for the base repository. */
     url: string;
@@ -861,7 +876,7 @@ const DEFAULTS: Omit<Config, 'sandboxRoot' | 'standingRoot' | 'repo' | 'unity' |
   port: 8790,
   usagePollMinutes: DEFAULT_USAGE_POLL_MINUTES,
   trustProxy: true,
-  host: '0.0.0.0',
+  host: '127.0.0.1',
   dataDir: './data',
   defaultBase: 'origin/master',
   protectedPaths: [],
@@ -1169,6 +1184,15 @@ export function withDefaults(raw: any): Config {
   };
 }
 
+/**
+ * w5538: a config with no "host" listens on loopback since the default moved from 0.0.0.0. The portal logs this at every start
+ * (server/index.ts, beside listen), so a portal reached on its own address (the VM host's health check) says why.
+ */
+export function hostDefaultWarning(file: string, raw: { host?: unknown }): string | undefined {
+  if (raw.host !== undefined) return undefined;
+  return `[config] ${file} has no "host": the portal listens on 127.0.0.1 only (the default since w5538). Set "host": "0.0.0.0" where something reaches it on its own address, as the portal VM's host check does (docs/portal-bind-address.md).`;
+}
+
 export function loadConfig(): Config {
   const file = configPath();
   // Damaged by a crash: the newest good version (config.json.1.., or the .prev setAppConfig keeps) takes its place.
@@ -1179,6 +1203,7 @@ export function loadConfig(): Config {
   const cfg = withDefaults(raw);
   cfg.retiredKeys = retiredConfigKeys(raw);
   cfg.retiredBase = retiredBaseLine(raw);
+  cfg.hostWarning = hostDefaultWarning(file, raw);
   // The portal keeps no sandboxes (w510): only the base clone the orchestrators read is required.
   if (!cfg.repo) throw new Error('config.json is missing "repo"');
   const windowsOnly = windowsPathsOffWindows(cfg);

@@ -90,6 +90,10 @@ GUEST_BACKUP_SSH_TARGET=
 VM_DISK_GB=16
 $(if [ "$TIMING" = fast ]; then printf 'WATCH_INTERVAL_SEC=10\nWATCH_FAILS_BEFORE_RESET=2\nWATCH_BOOT_GRACE_SEC=90\n'; fi)
 NIGHTLY_MODE=always
+# The nightly timer half a day from now: the steps run fff-vm nightly --now themselves, and the default 12:00 UTC fired a real
+# nightly in the hang-detection step of a run that crossed noon, a reboot the watch did not make (w5538, run 45605794807).
+NIGHTLY_TIME=$(date -u -d '+12 hours' +%H:%M)
+NIGHTLY_TZ=UTC
 SNAPSHOTS_KEEP=2
 EOF
 if [ "$MODE" = zvol ]; then
@@ -262,6 +266,131 @@ echo "$out"
 for f in environ mem fd; do printf '%s' "$out" | matches -E "^refused: the portal's $f " || fail "the portal's $f is open to its account (w5506): $out"; done
 printf '%s' "$out" | matches -E '^refused: the vault key ' || fail "the vault key is open to the portal's account: $out"
 printf '%s' "$out" | matches -x 'fence: holds' || fail "fffctl fence-check: $out"
+# The portal's agents' own account (w5598, docs/vault.md "In the VM"): the orchestrators, the dispatcher and the judge run
+# as fff-agent through fff-agent.socket, in a unit that sees the portal's folders through idmapped views. As fff-agent, the
+# key, the portal's environ, mem and fd, a running git stand-in's environ and every fff process's environ are refused.
+if ! g 'systemctl is-active fff-agent.socket' | matches -x active; then
+  g 'journalctl -u fff-agent-views.service -u fff-agent.socket -n 30 --no-pager -o cat' || true
+  fail "fff-agent.socket is not listening (w5598)"
+fi
+[ "$(g 'sudo stat -c "%a %U %G" /run/fff-agent/claude.sock')" = "600 fff fff" ] || fail "fff-agent.socket is not 0600 fff"
+g 'sudo /usr/local/lib/fff/fff-agent-views check' || fail "the agents' views are not mounted, or not shown as fff-agent's"
+g 'systemctl show -p Environment fff-portal.service' | matches -F 'FFF_AGENT_SOCKET=/run/fff-agent/claude.sock' || fail "the portal does not name fff-agent.socket"
+printf '%s' "$out" | matches -x "== as fff-agent, the portal's agents' account (w5598), outside the portal's process tree" || fail "fence-check did not probe as fff-agent: $out"
+printf '%s' "$out" | sed -n '/^== as fff-agent/,$p' >/tmp/agent-fence.out
+for f in "the vault key" "the portal's environ" "the portal's mem" "the portal's fd" "the stand-in git or gh child's environ"; do
+  matches -F "refused: $f (" /tmp/agent-fence.out || fail "$f is not refused to fff-agent: $(cat /tmp/agent-fence.out)"
+done
+matches -E '^a stand-in for the portal.s git and gh: pid [0-9]+, as fff; fff itself opens its environ$' /tmp/agent-fence.out || fail "the git stand-in is not open to fff, so its probe proves nothing: $(cat /tmp/agent-fence.out)"
+if matches '^OPENED' /tmp/agent-fence.out; then fail "something of the portal's is open to fff-agent: $(cat /tmp/agent-fence.out)"; fi
+# A file fff-agent writes through a view is the portal's (fff) on disk, so the portal reads its agents' transcripts.
+g 'sudo systemd-run --quiet --wait --collect -p User=fff-agent -p BindPaths=/run/fff-agent-views/claude:/mnt/ci-claude touch /mnt/ci-claude/ci-agent-probe' || fail "fff-agent cannot write Claude Code's folder through its view"
+[ "$(g 'sudo stat -c %U /srv/fff/home/.claude/ci-agent-probe')" = fff ] || fail "a file fff-agent wrote through its view is not fff's on disk"
+g 'sudo rm -f /srv/fff/home/.claude/ci-agent-probe'
+# The launcher through the socket, as the portal's account: OK, then Claude Code, as fff-agent.
+cat >/tmp/fff-agent-sock.js <<'EOF'
+const net = require('node:net');
+const fs = require('node:fs');
+const v = fs.readFileSync('/usr/local/lib/fff/ops/claude.version', 'utf8').trim();
+const s = net.createConnection({ path: '/run/fff-agent/claude.sock', allowHalfOpen: true });
+s.write(JSON.stringify({ v: 1, sdkVersion: v, args: ['--version'], env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-ci-dummy-not-a-token' }, cwd: process.argv[2] || '/srv/fff/base', configDir: '/srv/fff/home/.claude' }) + '\n');
+s.end();
+let out = '';
+s.on('data', (d) => (out += d));
+s.on('close', () => process.stdout.write(out, () => process.exit(0)));
+s.on('error', (e) => process.stdout.write('ERROR ' + e.message, () => process.exit(0)));
+setTimeout(() => process.stdout.write(out + ' TIMEOUT', () => process.exit(0)), 30000).unref();
+EOF
+b64=$(base64 -w0 /tmp/fff-agent-sock.js)
+out=$(g "echo $b64 | base64 -d >/tmp/fff-agent-sock.js && sudo -u fff node /tmp/fff-agent-sock.js" || true)
+echo "$out"
+printf '%s\n' "$out" | head -n 1 | matches -x OK || fail "the agents' launcher did not answer OK: $out"
+printf '%s' "$out" | matches 'Claude Code' || fail "Claude Code did not run as the agents' account: $out"
+g 'sudo journalctl -t fff-agent --no-pager -n 20 -o cat' | matches -E 'starting Claude Code .* as fff-agent in /srv/fff/base' || fail "the journal does not show Claude Code started as fff-agent"
+out=$(g 'sudo -u fff node /tmp/fff-agent-sock.js /etc' || true)
+printf '%s' "$out" | matches '^ERR .*not under /srv/fff' || fail "the agents' launcher ran outside the portal's folders: $out"
+echo "ok: the portal's agents run as fff-agent, see the portal's folders as their own, write them as fff, and the key, the portal's memory and every fff process's environ are refused to them"
+# One real agent turn through the socket (w5651 (e), the lockout review of w5598): the portal's own code (agentAccount.ts)
+# and the Agent SDK as fff, against a stand-in for Anthropic's API on 127.0.0.1 (no credential: CI is public). The turn
+# calls an in-process MCP tool and writes the memory folder, then a resume and an interrupt (fff-agent-turn.driver.ts).
+drv=/srv/fff/app/current/deploy/vm/test/fff-agent-turn.driver.ts
+as_portal='sudo -u fff env HOME=/srv/fff/home CLAUDE_CONFIG_DIR=/srv/fff/home/.claude FFF_AGENT_SOCKET=/run/fff-agent/claude.sock FFF_AGENT_SWITCH=/etc/fff/agent-account'
+cimem=/srv/fff/data/orchestrator-memory/ci-turn
+starts() { g 'sudo journalctl -t fff-agent --no-pager -o cat' | grep -c 'starting Claude Code' || true; }
+instances() { g "systemctl list-units 'fff-agent@*' --state=active --no-legend --plain" | grep -c . || true; }
+agent_running() { [ "$(instances)" -ge 1 ]; }
+no_agent() { [ "$(instances)" = 0 ]; }
+turn() { g "$as_portal node $drv turn $cimem /srv/fff/base 2>&1" | grep -E '^(mode|ok|FAIL|alert|session|agent account)' || true; }
+# What Claude Code said as fff-agent: its stderr goes to the journal, not to the portal (CI's token is a stand-in).
+agent_journal() {
+  echo "---- fff-agent's journal (last 60 lines)"
+  g "sudo journalctl -t fff-agent -u 'fff-agent@*' --no-pager -n 60 -o cat" || true
+  echo "---- Claude Code's folder, on disk and as fff-agent's view"
+  g "sudo ls -la /srv/fff/home/.claude /run/fff-agent-views/claude /srv/fff-agent/home" || true
+}
+turn_ok() { # OUT WHAT
+  [ "$(printf '%s\n' "$1" | grep -c '^ok: ')" = 3 ] || { agent_journal; fail "$2: not a turn, a resume and an interrupt: $1"; }
+  if printf '%s\n' "$1" | matches -E '^(FAIL|alert):'; then agent_journal; fail "$2: $1"; fi
+  [ "$(g "sudo stat -c %U $cimem/ci-agent-turn.md")" = fff ] || fail "$2: the turn's memory note is not fff's on disk"
+  g "sudo rm -f $cimem/ci-agent-turn.md"
+}
+g "sudo -u fff mkdir -p $cimem"
+n0=$(starts)
+out=$(turn)
+echo "$out"
+printf '%s\n' "$out" | matches -x 'mode: on; via: socket' || fail "the agent turn did not go through fff-agent.socket: $out"
+turn_ok "$out" "an agent turn as fff-agent"
+[ $(($(starts) - n0)) -ge 3 ] || fail "the agent turn's three starts are not fff-agent's ($n0 before, $(starts) after)"
+sid=$(printf '%s\n' "$out" | sed -n 's/^session: //p')
+[ "$(g "sudo find /srv/fff/home/.claude/projects -name '$sid.jsonl' -printf '%u\n'")" = fff ] || fail "the turn's transcript $sid.jsonl is not in the portal's Claude folder as fff's"
+echo "ok: a real agent turn ran as fff-agent: an MCP call back to the portal's process, a permission ask, a memory write and a transcript stored as fff's, a resume and an interrupt"
+# The portal stopped mid-turn (the review's gap (b)): fff-portal.service stops every fff-agent@ instance (ExecStopPost=,
+# ExecStartPre=), so a restarted portal never meets a turn of its old self. Then a measurement, not a gate: how long an
+# instance lives on once the process that started it ends (its socket closes) with the portal still up.
+hang() { g "nohup $as_portal node $drv hang $cimem /srv/fff/base >/tmp/ci-hang.out 2>&1 </dev/null &"; }
+hang
+wait_for 60 "an agent instance mid-turn" agent_running
+g 'cat /tmp/ci-hang.out' | matches -x 'hanging' || fail "the hung turn did not start: $(g 'cat /tmp/ci-hang.out')"
+pid=$(g 'systemctl show -p MainPID --value fff-portal.service')
+g 'sudo systemctl restart fff-portal.service'
+wait_for 60 "the portal's restart ended the agent instance mid-turn" no_agent
+wait_for 300 "the portal answers after its restart mid-turn" health
+g 'sudo pkill -TERM -f "fff-agent-turn[.]driver"' || true
+hang
+wait_for 60 "a second agent instance mid-turn" agent_running
+g 'sudo pkill -TERM -f "fff-agent-turn[.]driver"'
+t0=$(date +%s)
+until no_agent || [ $(($(date +%s) - t0)) -ge 120 ]; do sleep 5; done
+if no_agent; then echo "measured: an agent instance ended $(($(date +%s) - t0)) s after the process that started it ended"; else
+  echo "measured: an agent instance still ran 120 s after the process that started it ended (the portal's stop and start end it)"
+  g "sudo systemctl stop 'fff-agent@*.service'"
+fi
+# The ops worker's switch (the review's (b)): no orchestrator and no person. Off: every agent starts as the portal's
+# account and fff-agent.socket stops; warn: as the portal's account, with a check of the socket in the background.
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents off 2>&1') || fail "the ops worker's fffctl agents off: $out"
+[ "$(g 'systemctl is-active fff-agent.socket' || true)" != active ] || fail "fffctl agents off left fff-agent.socket listening"
+n0=$(starts)
+out=$(turn)
+echo "$out"
+printf '%s\n' "$out" | matches -x 'mode: off; via: portal' || fail "with fffctl agents off the turn did not start as the portal's account: $out"
+turn_ok "$out" "an agent turn with fffctl agents off"
+[ "$(starts)" = "$n0" ] || fail "with fffctl agents off an agent still started as fff-agent"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents on 2>&1' || true)
+printf '%s' "$out" | matches -F "a person's" || fail "the ops worker turned the agents' account on: $out"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents warn 2>&1') || fail "the ops worker's fffctl agents warn: $out"
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fffctl agents warn did not start fff-agent.socket"
+n0=$(starts)
+out=$(turn)
+echo "$out"
+printf '%s\n' "$out" | matches -x 'mode: warn; via: portal' || fail "with fffctl agents warn the turn did not start as the portal's account: $out"
+turn_ok "$out" "an agent turn with fffctl agents warn"
+printf '%s\n' "$out" | matches -E "^agent account \(warn\): the check passed" || fail "warn's check of fff-agent.socket did not pass: $out"
+[ $(($(starts) - n0)) = 1 ] || fail "warn started $(($(starts) - n0)) Claude Codes as fff-agent, not its one check"
+g 'sudo fffctl agents default' >/dev/null || fail "fffctl agents default"
+g 'sudo fffctl agents status' | matches -F 'switch: none' || fail "fffctl agents default left a switch: $(g 'sudo fffctl agents status')"
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fff-agent.socket is not listening after fffctl agents default"
+g "sudo rm -rf $cimem /tmp/ci-hang.out"
+echo "ok: the ops worker turns the agents' account off (agents start as fff, the socket stops) and to warn (as fff, with a check that passed), not on; a person's default puts it back"
 out=$(g 'printf "ci-vault-secret-QRST\n" >/tmp/v && sudo fffctl vault add --name ci-env --kind env --env CI_E2E_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v')
 echo "$out"
 if printf '%s' "$out" | matches 'ci-vault-secret'; then fail "fffctl vault add printed the value"; fi
@@ -698,6 +827,12 @@ echo "ok: the orchestration worker survives the portal's update, and deploys and
 
 step "a broken update is rolled back by itself"
 good=$want
+# With the agents' own account switched on explicitly (w5598, lothsahn: "Show the deploy's own rollback still works with it on").
+# Written in place (cat >), so config.json keeps its owner and mode.
+# shellcheck disable=SC2016 # the guest's shell expands $f
+printf '%s\n' 'f=/srv/fff/config/config.json; jq ".agentAccount = \"on\"" "$f" >/tmp/c.json && cat /tmp/c.json >"$f" && rm -f /tmp/c.json' >/tmp/agent-on.sh
+g "echo $(base64 -w0 /tmp/agent-on.sh) | base64 -d >/tmp/agent-on.sh && sudo sh /tmp/agent-on.sh"
+g 'sudo jq -r .agentAccount /srv/fff/config/config.json' | matches -x on || fail "could not set agentAccount on"
 sed -i '1i throw new Error("ci: broken on purpose");' "$ROOT/server/index.ts"
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -am "ci: a broken update"
 bad=$(git -C "$ROOT" rev-parse --short=7 HEAD)
@@ -728,6 +863,10 @@ if marker "$bad"; then fail "a rolled-back update wrote update.verified.json for
 echo "ok: no update.verified.json for the rolled-back $bad"
 wait_for 300 "the portal runs $good again" bash -c "[ \"\$(curl -fsS -m 10 http://$IP:8790/api/health | jq -r .sha)\" = $good ]"
 g 'ls /srv/fff/data/orchestrator-inbox/ 2>/dev/null | tail -n 3; sudo sh -c "cat /srv/fff/data/orchestrator-inbox/*.txt 2>/dev/null | tail -n 5"' || true
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fff-agent.socket is not listening after the rollback (w5598)"
+out=$(g 'sudo -u fff node /tmp/fff-agent-sock.js' || true)
+printf '%s\n' "$out" | head -n 1 | matches -x OK || fail "the agents' launcher does not answer after the rollback with agentAccount on: $out"
+echo "ok: with agentAccount on, the broken update rolled back, and the portal's agents still start as fff-agent"
 git -C "$ROOT" reset -q --hard HEAD~1
 
 step "a hung server is restarted by fff-health"

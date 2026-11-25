@@ -397,6 +397,13 @@ export async function moveSandboxes(o: MoveOptions, d: MoveDeps): Promise<MoveRe
   // 1. Everything that could stop the move is looked at before anything changes.
   const branchOf = new Map<string, string>();
   const problems: string[] = [];
+  const isDir = (p: string) => {
+    try {
+      return fs.statSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  };
   // Which folders are worktrees git still knows. A run cut off after git dropped a worktree but before its folder was gone (something
   // held it) leaves a folder that is not one: empty, or with leftovers. It has no branch to read and no work git could keep, so it is not
   // "a detached HEAD" (w900, found on lothdesktop): it is cleared away in step 4. If git cannot list them, a folder with a .git is live.
@@ -417,6 +424,10 @@ export async function moveSandboxes(o: MoveOptions, d: MoveDeps): Promise<MoveRe
     if (r.status === 'creating' || r.status === 'deleting') problems.push(`${r.id} is ${r.status}: wait for it to finish`);
     if (!fs.existsSync(r.path)) {
       branchOf.set(r.id, r.branch);
+      continue;
+    }
+    if (isDir(path.join(r.path, '.git'))) {
+      problems.push(`${r.id} is a slot repo (w5614: moving one is not built yet: its alternates name the clone's old objects folder, and the clone's worktree list does not hold it; delete it from the portal first, which keeps its branches in the clone)`);
       continue;
     }
     if (!isLive(r.path)) {
