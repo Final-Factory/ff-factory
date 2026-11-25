@@ -311,7 +311,9 @@ rules, so `read-fence-off` takes them off live. While a socket answers, `on` log
 **The pick: deny the sockets where the kernel can, and refuse `on` where it cannot.** A run in `on` mode denies the
 bus, keyring and agent sockets (`--deny-unix`; the bus and systemd were already denied to every locked run since w5562),
 and `on` takes effect on Linux only once this probe finds every owner socket refused. A kernel below ABI 9 never passes, so biscuit stays unenforced until it runs Linux 7.1 or
-newer. That is the kernel's limit, not a setting. Moving the gh login alone would not meet "cannot reach
+newer. That is the kernel's limit, not a setting. Lothsahn's call (w5562, 2026-11-25: "Leave it until Ubuntu's normal updates bring
+7.1"): no kernel upgrade by hand (not the 7.3 OEM kernel the archive offers, not unprivileged user namespaces), so Linux
+stays warn-only until Ubuntu's normal kernel reaches 7.1. Moving the gh login alone would not meet "cannot reach
 org.freedesktop.secrets", so it is not handed up.
 
 **The READ_DIR limit** (#1193's documented limit, kept): Landlock rights are inherited down the tree, and every parent on
@@ -336,6 +338,14 @@ Measured with the generated profile unless noted:
 
 ## Known limits
 
+- **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748; lothsahn: "Leave it until Ubuntu's
+  normal updates bring 7.1"). Below it a fenced run still reaches the session bus (the Secret Service, where the gh login
+  is kept), GNOME keyring and the ssh and gpg agents, and `on` keeps no read rules: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8)
+  measured all 12 owner sockets reachable. A newer kernel alone does not turn `on` on: `readFenceOnRefusal`
+  (machine/readFence.ts) still refuses `read-fence-on` on every Linux kernel for the self-update lockout (B4 of #1193).
+  Once Ubuntu ships 7.1, the owner-socket probe can pass by itself; `on` then still needs B4 fixed and a person's switch.
+  `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check to run there first: it skips below ABI 9 and has
+  never run.
 - **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
   sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
   `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`
