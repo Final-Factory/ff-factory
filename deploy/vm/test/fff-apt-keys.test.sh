@@ -57,6 +57,7 @@ for fpr in 6F71F525282841EEDAF851B42F59B5F99B1BE0B4 2596A99EAAB33821893C0A79458C
 done
 n=$(grep -c '^key ' "$G/install.sh" || true)
 [ "$n" = 3 ] || fail "expected 3 key lines in install.sh, found $n"
+# shellcheck disable=SC2016  # the pattern is literal text, not an expansion
 if grep '^key ' "$G/install.sh" | matches -v '"\$FPR_\|"\${FPR_'; then fail "a key line in install.sh has no pinned fingerprint"; fi
 matches -F "as_fff bash -c 'cd ~ && curl -fsSL https://claude.ai/install.sh | bash'" "$G/install.sh" || fail "the Claude installer line changed"
 echo "fff-apt-keys: ok"
