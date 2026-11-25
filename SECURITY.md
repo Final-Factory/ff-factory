@@ -25,3 +25,7 @@ untrusted text can be steered by it.
 - Prefer a private network (Tailscale) over a public URL; if you publish it, the login page is on
   the internet.
 - List every checkout agents must never touch in `protectedPaths`.
+- The app page sends a Content-Security-Policy (`server/webStatic.ts` `appCsp`: scripts from the portal only, no framing,
+  no plug-ins, no remote images), every answer `X-Content-Type-Options: nosniff`, and HTTPS answers HSTS. Serve the
+  portal behind a TLS proxy that sets `X-Forwarded-Proto` (Tailscale serve or Funnel does), and keep the CSP strict:
+  a new need is a narrow source in `appCsp`, never `'unsafe-inline'` or `'unsafe-eval'` for scripts.

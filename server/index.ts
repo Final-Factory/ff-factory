@@ -2403,6 +2403,10 @@ function parseUrl(raw: string | undefined): URL | undefined {
 }
 
 const server = http.createServer(async (req, res) => {
+  // Every answer (w5518): no content sniffing, and over HTTPS (Funnel) HSTS, so a browser never comes back over plain HTTP.
+  // writeHead's own headers win over these; a browser ignores HSTS sent over plain HTTP anyway.
+  res.setHeader('x-content-type-options', 'nosniff');
+  if (auth.isHttps(req)) res.setHeader('strict-transport-security', 'max-age=31536000');
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
