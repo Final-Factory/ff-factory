@@ -372,8 +372,10 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
     fs.writeFileSync(path.join(r, 'steam', 'config.json'), '{}');
     fs.writeFileSync(path.join(r, 'steam-lobby-gate', 'x.json'), '{}');
     assert.deepEqual(daemonOnlyDirs(r), [path.join(r, 'steam')]);
-    const t2 = readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'] });
+    const t2 = readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: false });
     assert.deepEqual(t2.closed, [path.join(r, 'steam')]);
+    // Linux: Landlock cannot refuse the folder's own open (its parents' READ_DIR is inherited), so the probe opens its files.
+    assert.deepEqual(readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: true }).closed, [path.join(r, 'steam', 'config.json')]);
     if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
       // Under the real profile: steam's folder and its config.json refused, the lobby gate's file open.
       const real = fs.realpathSync(r);
@@ -394,7 +396,7 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
   const app = path.join(root, 'daemon');
   for (const d of ['secrets', 'daemon/logs', 'daemon/gh-app', 'daemon/app/machine']) fs.mkdirSync(path.join(root, d), { recursive: true });
   for (const f of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/app/machine/ghApp.ts', 'daemon/pause.json']) fs.writeFileSync(path.join(root, f), 'x');
-  const t = readFenceProbeTargets({ root, appDir: app, secrets: [path.join(root, 'secrets')], tokenFile: path.join(root, 'secrets/machine-token'), allowBack: ['logs', 'pause.json', 'missing.json'] });
+  const t = readFenceProbeTargets({ root, appDir: app, secrets: [path.join(root, 'secrets')], tokenFile: path.join(root, 'secrets/machine-token'), allowBack: ['logs', 'pause.json', 'missing.json'], linux: false });
   assert.deepEqual(t.closed.map((p) => path.relative(root, p)), ['secrets', 'secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json']);
   assert.deepEqual(t.open.map((p) => path.relative(root, p)), ['daemon/logs', 'daemon/pause.json', 'daemon/app/machine/ghApp.ts'], 'only paths that are there');
   // The probe program itself, unfenced here: everything opens. A file it may not open answers `refused`.
@@ -406,7 +408,7 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
   if (process.platform === 'darwin' && fs.existsSync(SANDBOX_EXEC)) {
     // Under the real profile: the closed paths refused, the given-back ones open.
     const fence: WorkerFence = { ...F, root: fs.realpathSync(root), home: os.homedir(), appDir: fs.realpathSync(app) };
-    const real = readFenceProbeTargets({ root: fence.root, appDir: fence.appDir!, secrets: [path.join(fence.root, 'secrets')], allowBack: ['logs', 'pause.json'] });
+    const real = readFenceProbeTargets({ root: fence.root, appDir: fence.appDir!, secrets: [path.join(fence.root, 'secrets')], allowBack: ['logs', 'pause.json'], linux: false });
     const [cmd, ...args] = fencedArgv(fence, process.execPath, ['-e', READ_PROBE_SCRIPT, ...real.closed, ...real.open]);
     const f = spawnSync(cmd, args, { encoding: 'utf8' });
     // Already inside a Seatbelt (a fenced agent's shell), a nested profile cannot apply; the daemon then judges every path unknown.

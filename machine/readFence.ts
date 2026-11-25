@@ -67,9 +67,36 @@ export function daemonOnlyDirs(root: string): string[] {
   return DAEMON_ONLY_CHILDREN.map((c) => path.join(path.resolve(root), c));
 }
 
-/** What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only. */
-export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean }): { closed: string[]; open: string[] } {
+/**
+ * Up to three regular files directly inside `dir`, by name (w5639): what the Linux probe opens for a closed folder. Landlock
+ * rights are inherited down the tree, so the READ_DIR every parent of a closed path keeps (to list names) reaches the closed
+ * folder too: opening or listing the folder itself succeeds there, and only its files' contents are refused. Names only: the
+ * daemon lists the folder (it is not fenced) and never opens a file.
+ */
+function isDir(p: string): boolean {
+  try {
+    return fs.statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function filesIn(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => path.join(dir, e.name)).sort().slice(0, 3);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only.
+ * `linux` (default: this machine is Linux) swaps each closed folder for the files inside it (filesIn), since Landlock cannot
+ * refuse a closed folder's own open; a closed folder with no files is then not probed.
+ */
+export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
+  const linux = o.linux ?? process.platform === 'linux';
   const closed = [
     ...o.secrets,
     ...daemonOnlyDirs(o.root),
@@ -80,7 +107,8 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
   ];
   const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
   const uniq = (l: string[]) => [...new Set(l)].filter(exists);
-  return { closed: uniq(closed), open: uniq(open) };
+  const asProbed = linux ? closed.flatMap((p) => (exists(p) && isDir(p) ? filesIn(p) : [p])) : closed;
+  return { closed: uniq(asProbed), open: uniq(open) };
 }
 
 /**
