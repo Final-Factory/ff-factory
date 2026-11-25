@@ -600,3 +600,20 @@ test('w3786: a ci wait at a new head is never cleared by the old head\'s runs wh
   const later = block({ ...gate, at: new Date(NOW - CI_NO_RUN_MS - 60_000).toISOString() });
   assert.equal(blockerVerdict(later, facts([], { ci: () => empty, prHealth: oldHealth })).state, 'clear');
 });
+
+test('w5845: a pr gate the planner (named by Part of:) set on a row PR that names its own Request: stays open through a conflict; a Part of:-only step PR still wakes its request', () => {
+  const ref = 'Final-Factory/ffu#1140';
+  const pr = block({ kind: 'pr', ref, what: `${ref} merging`, by: 'worker 00d724a6' });
+  const conflicting = (h: Partial<PrHealth>): Partial<BlockerFacts> => ({
+    pr: () => ({ state: 'open', text: `${ref} is still open` }),
+    prHealth: () => ({ state: 'open', head: 'ac084ff', headRef: 'w5476-blueprints', conflict: { base: 'main' }, ...h }),
+  });
+  const all = [item('w2895'), item('w5476')];
+  assert.equal(blockerVerdict(pr, facts(all, conflicting({ requests: ['w5476'], partOf: ['w2895'] })), 'w2895').state, 'open');
+  assert.equal(blockerVerdict(pr, facts(all, conflicting({ requests: ['w5476'], partOf: ['w2895'] })), 'w5476').state, 'clear');
+  assert.equal(blockerVerdict(pr, facts(all, conflicting({ partOf: ['w2895'] })), 'w2895').state, 'clear');
+  // A ledger link made from a Part of: line yields to a Request: line too.
+  const linked = [item('w2895', { prs: [{ repo: 'Final-Factory/ffu', number: 1140, state: 'open', via: 'line', partOf: true }] })];
+  assert.equal(ownsPr(linked[0], ref, { requests: ['w5476'], partOf: ['w2895'] }), false);
+  assert.equal(ownsPr(linked[0], ref, { partOf: ['w2895'] }), true);
+});

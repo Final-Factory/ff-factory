@@ -16,7 +16,7 @@ import { crossOwnerLine, delegationConstraints, DispatcherChatRefused, DISPATCHE
 import { configPath, type Config } from './config.ts';
 import { memoryDirFor } from './orchestratorMemory.ts';
 import { handoverNote, isOpen, requestAsFiled, requestNotice } from './work.ts';
-import { BlockerWatch, compileErrorsIn, COMPILE_READ_MS, ghCompileVerdict, ghMerge, MERGE_TRIES, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
+import { BlockerWatch, prHealthOf, compileErrorsIn, COMPILE_READ_MS, ghCompileVerdict, ghMerge, MERGE_TRIES, notMergeableRefusal, remergeJob, REPORTED_WAIT_MS } from './blockerWatch.ts';
 import { noteBudget, resetBudgets } from './ghBudget.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { inheritedPayer, personForWork, sessionPerson, setVaultContext } from './vault.ts';
@@ -28,7 +28,7 @@ import { CARDS_MARK, HELD_MARK, RELAYED_MARK, inPersonWords } from '../shared/co
 import { personMessageView } from '../shared/personMessage.ts';
 import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSent } from '../shared/replies.ts';
 import { forYouId, splitForYou } from '../shared/forYou.ts';
-import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, gatesOf, ownsPr, partOfPr, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
 import { cargoShortOf, fetchPlayerNote, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
 import { pickReclaim, type Pressure } from './priorityReclaim.ts';
@@ -542,6 +542,106 @@ test("w3572: replay of ffu#397: requests waiting for another request's PR to mer
   assert.match((await watch.tick()).get('w1') ?? '', /^told:/);
   assert.equal(store.work.get('w2')!.status, 'blocked');
   for (const id of [owner.id, b.id, c.id]) agents.waker.cancel(id);
+});
+
+test("w5845: replay of ffu#1140 at 21:51Z on 2026-11-25: a PR whose body says Part of: wA but Request: wB conflicts; wB's worker is told, the planner wA is not; wA hears only once wB has no worker", async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  // w1 is w2895 (the FFU planner), w2 is w5476 (the row that opened #1140), w3 is w5792 (waits for #1140 to merge).
+  putRequests(store, [{ id: 'w1', status: 'active' }, { id: 'w2' }, { id: 'w3' }]);
+  const ref = 'Final-Factory/ffu#1140';
+  const planner = await startedFor(env, 'w1');
+  const row = await startedFor(env, 'w2', { override_duplicate: 'another request' });
+  const waiter = await startedFor(env, 'w3', { override_duplicate: 'another request' });
+  await waiter.h.blocked_on!({ prs: [ref], what: `${ref} merging` });
+  // What ffu#1140's description says: "Request: w5476" and "Part of: w2895" (read with gh on 2026-11-25).
+  const body = 'M6.13 blueprints\n\nRequest: w2\nPart of: w1\n';
+  const parsed = prHealthOf({ state: 'OPEN', mergeable: 'CONFLICTING', baseRefName: 'main', headRefOid: 'ac084ff0aaaa', headRefName: 'w5476-blueprints', body });
+  assert.deepEqual([parsed.requests, parsed.partOf], [['w2'], ['w1']]);
+  assert.equal(ownsPr(store.work.get('w1'), ref, parsed), false, 'the planner a Part of: line names does not own it');
+  assert.equal(partOfPr(store.work.get('w1'), ref, parsed), true);
+  assert.equal(ownsPr(store.work.get('w2'), ref, parsed), true, 'the Request: line names its owner');
+  // A step PR that names only Part of: (no Request: line at all) is still its request's own.
+  assert.equal(ownsPr(store.work.get('w1'), ref, prHealthOf({ state: 'OPEN', body: 'Part of: w1' })), true);
+  let clock = Date.now();
+  let seen: PrHealth = parsed;
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, pr: async (r) => ({ state: 'open', text: `${r} is still open` }), prHealth: async () => seen });
+  const toldTo = (sid: string) => store.readTranscript(sid).filter((e) => e.kind === 'user' && /PR #1140 \(Final-Factory\/ffu#1140\) conflicts with main/.test((e as { text: string }).text));
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void logged.push(a.join(' '));
+  let did: Map<string, string>;
+  try {
+    did = await watch.tick();
+  } finally {
+    console.log = log;
+  }
+  assert.match(did.get('w2') ?? '', /^told: PR #1140 conflicts with main/);
+  assert.equal(did.has('w1'), false, 'the planner is not told');
+  await until("w2's own worker is told", () => toldTo(row.id).length === 1);
+  assert.match((toldTo(row.id)[0] as { text: string }).text, /w3 wait for it to merge\. It is w2's: merge main into its branch/);
+  assert.equal(toldTo(planner.id).length, 0);
+  assert.doesNotMatch(store.work.get('w1')!.log.join('\n'), /conflicts at/);
+  assert.ok(logged.some((l) => l.includes(`${ref} conflicts with main; w3 wait for it to merge: telling w2 (w2 owns it (its Request: line) and has worker ${row.id}); not told: w1 (w5845)`)), logged.join(' | '));
+  // A new head conflicts again after w2 closed: now the planner its Part of: line names hears it.
+  store.work.get('w2')!.status = 'done';
+  seen = { ...parsed, head: 'bbbbbbb2222' };
+  clock += 3 * 60_000;
+  assert.match((await watch.tick()).get('w1') ?? '', /^told: PR #1140 conflicts with main/);
+  await until("the planner's worker is told", () => toldTo(planner.id).length === 1);
+  assert.match((toldTo(planner.id)[0] as { text: string }).text, /one step of w1 \(its Part of: line\), so it is yours: merge main into its branch/);
+  for (const id of [planner.id, row.id, waiter.id]) agents.waker.cancel(id);
+});
+
+test('w5845: replay of ffu#1097: the row and the planner both wait on its CI; when it finishes only the row (its Request: line) is woken, and the planner waits for the merge, logged', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  agentsRoom(agents, ['pc']);
+  // w1 is w2895 (the planner, whose worker d9f4e2ce merged main into #1097), w2 is w5472 (the row that opened it).
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }]);
+  const ref = 'Final-Factory/ffu#1097';
+  const row = await startedFor(env, 'w2');
+  const planner = await startedFor(env, 'w1', { override_duplicate: 'another request' });
+  await row.h.blocked_on!({ prs: [`ci:${ref}`], what: `CI on ${ref}` });
+  await planner.h.blocked_on!({ prs: [`ci:${ref}`], what: `CI on ${ref}` });
+  let clock = Date.now();
+  const seen: PrHealth = { state: 'open', head: 'dddcef41aaaa', headRef: 'w5472-turrets-shields', requests: ['w2'], partOf: ['w1'] };
+  let checks: Record<string, { done: boolean; text: string }> = {};
+  const watch = new BlockerWatch({ store, orchestrators: o, now: () => clock, ci: async (r) => checks[r] ?? { done: false, text: `CI on ${r} running` }, pr: async (r) => ({ state: 'open', text: `${r} is still open` }), prHealth: async () => seen });
+  assert.equal((await watch.tick()).size, 0);
+  checks = { [ref]: { done: true, text: `CI on ${ref} finished: 1 of 1 workflow runs failed (ci: failure)` } };
+  clock += 3 * 60_000;
+  const logged: string[] = [];
+  const log = console.log;
+  console.log = (...a: unknown[]) => void logged.push(a.join(' '));
+  let did: Map<string, string>;
+  try {
+    did = await watch.tick();
+  } finally {
+    console.log = log;
+  }
+  assert.match(did.get('w2') ?? '', /^clear: CI on Final-Factory\/ffu#1097 finished/);
+  assert.equal(store.work.get('w2')!.status, 'active');
+  assert.equal(did.get('w1'), 'waits for PR #1097 to merge: w2 works on it (w5845)');
+  const w1 = store.work.get('w1')!;
+  assert.deepEqual([w1.status, w1.blocked?.kind, w1.blocked?.ref, w1.blocked?.by], ['blocked', 'pr', ref, 'blocker watch']);
+  assert.match(w1.log.join('\n'), /Final-Factory\/ffu#1097 is w2's to act on, not w1's \(w2 owns it \(its Request: line, ledger link or branch\)\); w1 now waits for it to merge \(w5845\)/);
+  assert.ok(logged.some((l) => l.includes(`blocker watch: ${ref}: w2, w1 would all be woken; only w2 is (w2 owns it`) || l.includes(`blocker watch: ${ref}: w1, w2 would all be woken; only w2 is (w2 owns it`)), logged.join(' | '));
+  // Neither owns it (two requests that only wait on its CI): the one whose worker called blocked_on last is woken.
+  const other = 'Final-Factory/ffu#2000';
+  const x = await startedFor(env, 'w3', { override_duplicate: 'another request' });
+  const y = await startedFor(env, 'w4', { override_duplicate: 'another request' });
+  await x.h.blocked_on!({ prs: [`ci:${other}`], what: `CI on ${other}` });
+  clock += 1000;
+  await new Promise((r) => setTimeout(r, 5));
+  await y.h.blocked_on!({ prs: [`ci:${other}`], what: `CI on ${other}` });
+  checks = { ...checks, [other]: { done: true, text: `CI on ${other} finished: all 1 workflow runs passed or skipped` } };
+  clock += 3 * 60_000;
+  const again = await watch.tick();
+  assert.match(again.get('w4') ?? '', /^clear:/);
+  assert.equal(again.get('w3'), 'waits for PR #2000 to merge: w4 works on it (w5845)');
+  for (const id of [planner.id, row.id, x.id, y.id]) agents.waker.cancel(id);
 });
 
 test("w890 (found live): a worker's own waiting_on_person counts for every request it is the latest worker on, also one it moved on from, so a worker on two requests that ends its turn waiting on a person frees its sandbox", async (t) => {

@@ -19,12 +19,12 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, partOfPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner, isRateLimitText } from './githubTokens.ts';
 import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.ts';
 import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, fetchHudData, findLocalPrEvidence, noScriptRefusal } from '../machine/evidenceGate.ts';
-import { pairDelivers, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
+import { pairDelivers, partOfIdsIn, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
 import { isOpen } from './work.ts';
 import { GAME_REPO } from './pairRuns.ts';
 import { diskWaitIn, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
@@ -58,7 +58,7 @@ export type PrState = { state: 'open' | 'merged' | 'closed'; text: string; sha?:
 export interface BlockerWatchDeps {
   store: Store;
   orchestrators: Pick<Orchestrators, 'unblock' | 'blockerStuck' | 'blockerDecide' | 'gatesCleared' | 'flagQueuedWithRoom' | 'carryOutConditional' | 'dropConditional'> &
-    Partial<Pick<Orchestrators, 'cutDefaultPairs' | 'tellPrConflict' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'pairDidNotCompile' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
+    Partial<Pick<Orchestrators, 'cutDefaultPairs' | 'tellPrConflict' | 'prWorker' | 'handPrGate' | 'recordReportedWait' | 'retellReportWaits' | 'noticeLongOffline' | 'noteCiRead' | 'noteReadPaused' | 'sweepResumes' | 'requeueCapacityBlocks' | 'requeueBrokenPairs' | 'pairDidNotCompile' | 'replaceNoTimedWaits' | 'timedLegBound' | 'mergedOnGreen' | 'keepMergeReport' | 'undecidedBound' | 'holdSteamPairs' | 'flagDeadWait'>>;
   /** w1841: tell the workers waiting on a bench lock that is free now (Agents.resumeBenchWaits): request id to what it did. */
   benchResume?: () => [string, string][];
   /** w2544: work waiting on a computer away (offline or paused) past the grace moves elsewhere (Agents.moveAwayWork). */
@@ -335,6 +335,7 @@ export class BlockerWatch {
         this.d.orchestrators.noteReadPaused?.(ref, f ? `paused: GitHub's rate limit refused the read of ${ref} (${f.why}); FF Factory keeps waiting and reads it again when the limit refills` : undefined);
       }
       const facts = this.facts(ci, pr, health);
+      for (const [id, why] of this.oneWakePerPr(blocked, facts)) did.set(id, why);
       for (const w of blocked) {
         // One request that throws does not hold up the others (w1094: a throw ended the whole look).
         try {
@@ -650,11 +651,60 @@ export class BlockerWatch {
   }
 
   /**
+   * w5845: several requests wait on one pull request's CI (or on its merge, with a worker's pr gate, which a conflict
+   * clears) and would all be woken in this look: only one is, so two workers never push one branch at once. The PR's owner
+   * (shared/blockers.ts ownsPr) first, else the request whose worker called blocked_on on it last; each other one's gate
+   * becomes a wait for the PR to merge (Orchestrators.handPrGate). On 2026-11-25 ffu#1097 (w5472's) cleared for w5472 and
+   * for w2895's planner worker d9f4e2ce at once, and a third worker stood down on it after finding the collision.
+   */
+  private oneWakePerPr(blocked: readonly WorkItem[], facts: BlockerFacts): [string, string][] {
+    const did: [string, string][] = [];
+    const byRef = new Map<string, { w: WorkItem; g: WorkBlocker }[]>();
+    for (const b of blocked) {
+      const w = this.d.store.work.get(b.id);
+      if (!w || w.status !== 'blocked' || !w.blocked) continue;
+      for (const g of gatesOf(w)) {
+        if (!g.ref || !(g.kind === 'ci' || (g.kind === 'pr' && g.by.startsWith('worker ')))) continue;
+        // A merge (or a close) is news for every waiter; only the wakes that send a worker to the branch are rationed.
+        if (g.kind === 'pr' && facts.pr?.(g.ref)?.state !== 'open') continue;
+        if (blockerVerdict(g, facts, w.id).state !== 'clear') continue;
+        const list = byRef.get(g.ref.toLowerCase()) ?? [];
+        if (!list.some((x) => x.w.id === w.id)) list.push({ w, g });
+        byRef.set(g.ref.toLowerCase(), list);
+      }
+    }
+    for (const list of byRef.values()) {
+      if (list.length < 2) continue;
+      const ref = list[0].g.ref!;
+      const h = facts.prHealth?.(ref);
+      const owns = (x: { w: WorkItem }) => ownsPr(x.w, ref, h);
+      const sorted = [...list].sort((a, b) => Number(owns(b)) - Number(owns(a)) || (Date.parse(b.g.at) || 0) - (Date.parse(a.g.at) || 0));
+      const keep = sorted[0];
+      const why = owns(keep) ? `${keep.w.id} owns it (its Request: line, ledger link or branch)` : `none of them owns it and ${keep.w.id}'s worker called blocked_on on it last (${keep.g.at})`;
+      const rest = sorted.slice(1);
+      console.log(`blocker watch: ${ref}: ${list.map((x) => x.w.id).join(', ')} would all be woken; only ${keep.w.id} is (${why}); ${rest.map((x) => x.w.id).join(', ')} now wait for it to merge (w5845)`);
+      for (const x of rest) {
+        try {
+          if (this.d.orchestrators.handPrGate?.(x.w.id, x.g, keep.w.id, why)) did.push([x.w.id, `waits for ${prLabel(ref)} to merge: ${keep.w.id} works on it (w5845)`]);
+        } catch (e) {
+          console.warn(`blocker watch: ${x.w.id}: handing ${ref} to ${keep.w.id}: ${(e as Error).message}`);
+        }
+      }
+    }
+    return did;
+  }
+
+  /**
    * w3572: a pull request other requests wait to merge (a pr gate) conflicts with its base: those requests stay Blocked
-   * (blockerVerdict wakes only the PR's owner, shared/blockers.ts ownsPr), and the requests that own it are told once per
+   * (blockerVerdict wakes only the PR's owner, shared/blockers.ts ownsPr), and the request that owns it is told once per
    * head commit (Orchestrators.tellPrConflict). An owner Blocked on that PR itself (ci: or pr) is not told: its own gate
    * wakes it with the conflict. ffu#397 (w3445's) conflicted with main and w3423, w3416, w3419, w3421, w3422 and w3424, which
    * only waited for it to merge, were each woken to "merge main in, resolve, push", several times an hour.
+   *
+   * w5845: one request is told, never two: the owner (its Request: line, ledger link or branch) with a live worker, the
+   * Request: line first. The planner a `Part of:` line names hears only when no owner is open with a worker. Who was told,
+   * and who was not and why, goes in the portal's log. On 2026-11-25 at 21:51Z w2895 (the FFU planner) was told ffu#1140
+   * "is w2895's" while w5476, whose PR it is, had its own worker on it.
    */
   private tellPrConflicts(health: ReadonlyMap<string, PrHealth | undefined>): [string, string][] {
     const did: [string, string][] = [];
@@ -667,23 +717,47 @@ export class BlockerWatch {
       const waiters = all.filter((w) => gated(w) && !ownsPr(w, ref, h)).map((w) => w.id);
       if (!waiters.length) continue;
       const owners = all.filter((w) => isOpen(w) && ownsPr(w, ref, h));
-      if (!owners.length) {
-        console.log(`blocker watch: ${ref} conflicts with ${h.conflict.base}; ${waiters.join(', ')} wait for it to merge and no open request owns it (no Request: line, ledger link or branch), so nobody is told (w3572)`);
+      const parents = all.filter((w) => isOpen(w) && partOfPr(w, ref, h));
+      const ownGate = owners.find(gated);
+      if (ownGate) {
+        // Its own gate wakes it with the conflict (blockerVerdict); nobody else is told.
+        const others = [...owners, ...parents].filter((w) => w !== ownGate).map((w) => w.id);
+        if (others.length) console.log(`blocker watch: ${ref} conflicts with ${h.conflict.base}: ${ownGate.id} waits on it itself, so its own gate wakes it; ${others.join(', ')} not told (w5845)`);
         this.conflictTold.add(key);
         continue;
       }
-      let told = false;
-      for (const o of owners) {
-        if (gated(o)) { told = true; continue; }
-        const text = `${prLabel(ref)} (${ref}) conflicts with ${h.conflict.base}, so it cannot merge and CI cannot run on it; ${waiters.join(', ')} wait for it to merge. It is ${o.id}'s: merge ${h.conflict.base} into its branch, resolve, push, and wait on its CI again. The requests waiting on it stay Blocked and do not touch it.`;
-        try {
-          if (this.d.orchestrators.tellPrConflict?.(o.id, { mark: `${ref} conflicts at ${(h.head ?? 'its head').slice(0, 7)}`, text })) did.push([o.id, `told: ${prLabel(ref)} conflicts with ${h.conflict.base} (w3572)`]);
-          told = true;
-        } catch (e) {
-          console.warn(`blocker watch: ${o.id}: telling it ${ref} conflicts: ${(e as Error).message}`);
-        }
+      const worker = (w: WorkItem) => this.d.orchestrators.prWorker?.(w.id);
+      const byLine = (w: WorkItem) => (h.requests ?? []).includes(w.id.toLowerCase());
+      const live = owners.filter(worker).sort((a, b) => Number(byLine(b)) - Number(byLine(a)) || (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0));
+      const parent = parents.find(worker);
+      let pick: WorkItem | undefined;
+      let why: string;
+      if (live.length) {
+        pick = live[0];
+        why = `${pick.id} owns it (${byLine(pick) ? 'its Request: line' : 'the ledger link or its branch'}) and has worker ${worker(pick)}`;
+      } else if (parent) {
+        pick = parent;
+        why = owners.length ? `its owner ${owners.map((w) => w.id).join(', ')} has no worker now, so ${parent.id}, which its Part of: line names, is told` : `no open request owns it, so ${parent.id}, which its Part of: line names, is told`;
+      } else if (owners.length) {
+        pick = owners[0];
+        why = `${pick.id} owns it and has no worker now: the line waits in its log for its next turn`;
+      } else {
+        why = 'no open request owns it (no Request: line, ledger link or branch) and none its Part of: line names is open';
       }
-      if (told) this.conflictTold.add(key);
+      const skipped = [...owners, ...parents].filter((w) => w !== pick).map((w) => w.id);
+      console.log(`blocker watch: ${ref} conflicts with ${h.conflict.base}; ${waiters.join(', ')} wait for it to merge: ${pick ? `telling ${pick.id}` : 'nobody is told'} (${why})${skipped.length ? `; not told: ${skipped.join(', ')}` : ''} (w5845)`);
+      if (!pick) {
+        this.conflictTold.add(key);
+        continue;
+      }
+      const whose = owners.includes(pick) ? `It is ${pick.id}'s` : `It is ${owners.length ? `${owners.map((w) => w.id).join(', ')}'s, which has no worker now, and` : ''} one step of ${pick.id} (its Part of: line), so it is yours`;
+      const text = `${prLabel(ref)} (${ref}) conflicts with ${h.conflict.base}, so it cannot merge and CI cannot run on it; ${waiters.join(', ')} wait for it to merge. ${whose}: merge ${h.conflict.base} into its branch, resolve, push, and wait on its CI again. The requests waiting on it stay Blocked and do not touch it.`;
+      try {
+        if (this.d.orchestrators.tellPrConflict?.(pick.id, { mark: `${ref} conflicts at ${(h.head ?? 'its head').slice(0, 7)}`, text })) did.push([pick.id, `told: ${prLabel(ref)} conflicts with ${h.conflict.base} (w3572)`]);
+        this.conflictTold.add(key);
+      } catch (e) {
+        console.warn(`blocker watch: ${pick.id}: telling it ${ref} conflicts: ${(e as Error).message}`);
+      }
     }
     return did;
   }
@@ -960,7 +1034,9 @@ export function prHealthOf(pr: {
 }): PrHealth {
   // w5549: the head's repository, for merge on green's check that the pull request is the worker's own (server/mergeOwner.ts).
   const headRepo = pr.headRepository?.name && pr.headRepositoryOwner?.login ? `${pr.headRepositoryOwner.login}/${pr.headRepository.name}` : undefined;
-  const requests = requestIdsIn(pr.body ?? '');
+  // w5845: a Request: line names the PR's owner; a Part of: line only the request it is one step of (shared/blockers.ts ownsPr).
+  const partOf = partOfIdsIn(pr.body ?? '');
+  const requests = requestIdsIn(pr.body ?? '').filter((id) => !partOf.includes(id));
   const state = pr.state === 'MERGED' ? 'merged' : pr.state === 'CLOSED' ? 'closed' : 'open';
   return {
     state,
@@ -970,6 +1046,7 @@ export function prHealthOf(pr: {
     ...(headRepo ? { headRepo } : {}),
     ...(pr.isCrossRepository === true ? { crossRepo: true as const } : {}),
     ...(requests.length ? { requests } : {}),
+    ...(partOf.length ? { partOf } : {}),
     ...(pr.isDraft === true ? { draft: true as const } : {}),
   };
 }
