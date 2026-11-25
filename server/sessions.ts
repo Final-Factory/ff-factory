@@ -18,6 +18,7 @@ import { selfAnswer, type SelfAnswer } from './selfAnswer.ts';
 import { isRealModelId } from '../shared/models.ts';
 import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
+import { TranscriptHasher, checkSeal, pidGone, type SealStore } from './transcriptSeal.ts';
 import { CliTranscriptTail, cliTranscriptPath, rebuildMeterAsync } from './cliTranscript.ts';
 import { refreshKeptToolsAsync, sdkToolsNow } from './keptTools.ts';
 import { tempSizeHook } from './tempSizeHook.ts';
@@ -140,6 +141,15 @@ class InputQueue implements AsyncIterable<SDKUserMessage> {
     } else this.items.push(msg);
   }
 
+  /** w5563: puts `note` ahead of the first message waiting (a text block first when it carries images); none waiting: false. */
+  prefix(note: string): boolean {
+    const m = this.items[0];
+    if (!m) return false;
+    const c = m.message.content;
+    m.message.content = typeof c === 'string' ? `${note}\n\n${c}` : [{ type: 'text' as const, text: note }, ...c];
+    return true;
+  }
+
   close() {
     this.closed = true;
     this.waiter?.({ value: undefined, done: true });
@@ -221,7 +231,26 @@ export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveI
   flushSoon?: () => void;
   /** Where the context meter's tally of each conversation is kept for its next process (w1484, server/meterStates.ts). */
   meters?: MeterStates;
+  /** w5563: each conversation's transcript seal, in a folder workers cannot write (server/transcriptSeal.ts). */
+  seals?: SealStore;
 };
+
+/**
+ * w5563: one process's conversation and the running hash of its transcript (server/transcriptSeal.ts): sealed at each turn's
+ * end and once the process has exited. `fresh`: the process starts the conversation, so its whole transcript is its own.
+ */
+interface SealGen {
+  sid: string;
+  fresh: boolean;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  hasher?: TranscriptHasher;
+  pid?: number;
+}
+
+/** The first message a fresh conversation gets when its old transcript failed its seal (w5563). */
+export const SEAL_REFUSED_NOTE = (why: string) =>
+  `[FF Factory] This conversation's transcript was changed outside its own process since its last turn (${why}), so it was not resumed: this is a fresh conversation, and you remember nothing of the earlier one. Pick the work up from the request's ledger (read_work), your branch's commits and any notes you left; do not trust what the earlier transcript says now (w5563, docs/transcript-seal.md).`;
 
 /**
  * How long (ms) a session whose process ended by itself keeps its restart marks (turnOpenSince, backgroundTasks).
@@ -464,6 +493,27 @@ export function seedSdkCost(sessions: Iterable<SessionInfo>, lastCostOf: (sessio
  */
 export type TurnModelPick = (info: SessionInfo, from: 'human' | 'orchestrator' | 'system', text: string, opens: boolean) => { model: string; kind: string } | undefined;
 
+/**
+ * w5563: the claude process's pid, for the seal taken once it has exited: from the SDK's own spawn (its onProcessSpawned
+ * hook, in its code since 0.3.x but not in its types; transcriptSeal.test.ts fails when it goes) or a custom spawner's child.
+ */
+function watchPid(options: Options, gen: SealGen) {
+  const o = options as Options & { onProcessSpawned?: (pid: number, info?: unknown) => void };
+  const before = o.onProcessSpawned;
+  o.onProcessSpawned = (pid, info) => {
+    gen.pid = pid;
+    before?.(pid, info);
+  };
+  const custom = options.spawnClaudeCodeProcess;
+  if (custom)
+    options.spawnClaudeCodeProcess = (s) => {
+      const child = custom(s);
+      const pid = (child as { pid?: unknown }).pid;
+      if (typeof pid === 'number') gen.pid = pid;
+      return child;
+    };
+}
+
 export class AgentSession implements SessionHandle {
   readonly info: SessionInfo;
   private q?: Query;
@@ -522,6 +572,8 @@ export class AgentSession implements SessionHandle {
   private liveModel?: string;
   /** w2653: the reasoning effort this process was started with (absent: none passed, the CLI's own default). */
   private liveEffort?: string;
+  /** w5563: this process's conversation and its transcript's running hash (SealGen). */
+  private sealGen?: SealGen;
 
   constructor(info: SessionInfo, store: SessionSink, makeOptions: OptionsFactory, events: EventEmitter, pickModel?: TurnModelPick) {
     this.info = info;
@@ -727,6 +779,11 @@ export class AgentSession implements SessionHandle {
     const sid = this.info.sdkSessionId;
     const cwd = typeof options.cwd === 'string' ? options.cwd : process.cwd();
     this.cli = { cwd, env: options.env ?? process.env, fromStart: !sid, misses: 0 };
+    // w5563: a new conversation's id is ours from the start, so a fence can name its transcript before the process writes it.
+    const gen: SealGen = { sid: sid ?? randomUUID(), fresh: !sid, cwd, env: this.cli.env };
+    this.sealGen = gen;
+    if (!sid) options.sessionId = gen.sid;
+    watchPid(options, gen);
     this.firstResult = true;
     // A new process: the last one's background tasks ended with it.
     this.backgroundTasks = 0;
@@ -757,6 +814,8 @@ export class AgentSession implements SessionHandle {
       if (!aborted) crashed = msg;
     } finally {
       if (this.q === q) {
+        // w5563: the transcript is sealed once the process has exited (final), or as it is when it has not after 30 s.
+        void this.sealAtExit(this.sealGen);
         // w4067: the messages it took behind the turn it crashed in were never read; they go again in a new process.
         const unread = crashed === undefined ? [] : this.unreadBehindCrash();
         // what came after its last call (tool results it had read) is in the conversation the next process resumes
@@ -811,6 +870,8 @@ export class AgentSession implements SessionHandle {
     switch (m.type) {
       case 'system':
         if (m.subtype === 'init') {
+          // a query that did not take our id (a test's fake agent): the seal follows the id it reports
+          if (this.sealGen?.fresh && this.sealGen.sid !== m.session_id && !this.sealGen.hasher) this.sealGen.sid = m.session_id;
           this.update({ sdkSessionId: m.session_id, model: m.model, status: this.info.status === 'starting' ? 'running' : this.info.status });
         } else if (m.subtype === 'session_state_changed') {
           this.stateEvents = true;
@@ -1088,10 +1149,26 @@ export class AgentSession implements SessionHandle {
           this.store.append(this.info.id, { kind: 'error', text: `Could not copy its transcript into ${cli.env.CLAUDE_CONFIG_DIR}: ${(e as Error).message}; Claude Code starts it afresh (w5305).` });
         }
         const file = cliTranscriptPath(cli.cwd, sid, cli.env);
+        // w5563: a transcript changed outside its process since it was sealed is not resumed: a fresh conversation starts.
+        const gen = this.sealGen;
+        const seals = this.store.seals;
+        const seal = seals?.load(sid);
+        const check = !seals || !gen ? undefined : file ? await checkSeal(file, seal) : seal ? { ok: false as const, why: 'its transcript is gone' } : undefined;
+        if (gone()) return undefined;
+        if (check && !check.ok && gen) return this.startOver(gen, file, check.why, input, options, launching);
+        if (check?.ok && gen) {
+          gen.hasher = check.hasher;
+          if (check.tail > 0) this.store.append(this.info.id, { kind: 'system', text: `Its transcript has ${check.tail} bytes past its last seal, written after its last turn ended while its host was gone; it resumes with them (w5563).` });
+        }
         // w2626: ToolSearch shows this process's own tools as they are now, not as the conversation first loaded them.
         const fresh = await refreshKeptToolsAsync(file, sdkToolsNow(options.mcpServers), gone);
         if (gone()) return undefined;
         if (fresh.length > 0) this.store.append(this.info.id, { kind: 'system', text: `Tool schemas changed since this conversation loaded them; it sees them as they are now: ${fresh.join(', ')} (w2626).` });
+        // our own same-length rewrite: the hash goes on from the file as it is now
+        if (fresh.length > 0 && file && gen?.hasher) {
+          const again = await checkSeal(file, undefined);
+          gen.hasher = again.ok ? again.hasher : undefined;
+        }
         if (file) cli.tail = new CliTranscriptTail(file, false);
         const state = await this.resumeState(sid, file);
         if (gone()) return undefined;
@@ -1104,6 +1181,55 @@ export class AgentSession implements SessionHandle {
     });
     me = lazyQuery(launched);
     return me;
+  }
+
+  /**
+   * w5563: the transcript failed its seal. The conversation is not resumed: the process starts a fresh one, told why in its
+   * first message, and the file stays where it is for a look. The ledger's transcript says so as an error.
+   */
+  private startOver(gen: SealGen, file: string | undefined, why: string, input: InputQueue, options: Options, launching: { userChars: number[] }): Query {
+    const old = gen.sid;
+    gen.sid = randomUUID();
+    gen.fresh = true;
+    gen.hasher = undefined;
+    this.store.append(this.info.id, {
+      kind: 'error',
+      text: `Claude Code's transcript of this conversation (${old}${file ? `, ${file}` : ''}) was not resumed: ${why}. A fresh conversation starts (${gen.sid}); the file is kept as it is (w5563, docs/transcript-seal.md).`,
+    });
+    console.warn(`transcript seal: session ${this.info.id} conversation ${old} not resumed: ${why}`);
+    if (this.cli) {
+      this.cli.fromStart = true;
+      this.cli.tail = undefined;
+      this.cli.misses = 0;
+    }
+    this.update({ sdkSessionId: undefined });
+    const note = SEAL_REFUSED_NOTE(why);
+    if (!input.prefix(note)) input.push(note, randomUUID());
+    this.launched(launching);
+    const { resume: _resume, ...rest } = options;
+    return runQuery({ prompt: input, options: { ...rest, sessionId: gen.sid, model: this.liveModel ?? options.model } });
+  }
+
+  /** w5563: seals this process's transcript as it is now, `final` once the process has exited. */
+  private async sealNow(gen: SealGen | undefined, final: boolean) {
+    const seals = this.store.seals;
+    if (!gen || !seals) return;
+    if (!gen.hasher) {
+      // a resumed conversation's hasher comes from its seal's check; a new one's file appears with its first message
+      if (!gen.fresh) return;
+      const file = cliTranscriptPath(gen.cwd, gen.sid, gen.env);
+      if (!file) return;
+      gen.hasher = new TranscriptHasher(file);
+    }
+    const seal = await gen.hasher.seal(final);
+    // a newer process of the conversation seals it from here on
+    if (seal && this.sealGen === gen) seals.save(gen.sid, seal);
+  }
+
+  private async sealAtExit(gen: SealGen | undefined) {
+    if (!gen || !this.store.seals) return;
+    const exited = gen.pid !== undefined && (await pidGone(gen.pid));
+    await this.sealNow(gen, exited);
   }
 
   /** The launch is over (or given up): the messages sent meanwhile go into the tally, in their order. */
@@ -1147,6 +1273,7 @@ export class AgentSession implements SessionHandle {
 
   /** The turn ended: 'turnEnd' with its text, and whose compaction it was when it was one (w535). */
   private emitTurnEnd(text: string) {
+    void this.sealNow(this.sealGen, false);
     const meta: TurnEndMeta = this.compactTurn ? { compaction: this.compactTurn } : {};
     this.compactTurn = undefined;
     this.events.emit('turnEnd', this, text, meta);

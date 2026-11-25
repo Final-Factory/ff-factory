@@ -150,6 +150,22 @@ test('merge: merges on green with --match-head-commit; running waits (exit 3); r
   assert.equal(prMain(['merge'], none), 3);
 });
 
+test("w5549: ff-pr merge merges only this checkout's own pull request: a --pr whose head is another branch, or any fork head, is refused", () => {
+  const green = () => ok(JSON.stringify([{ databaseId: 9, workflowName: 'ci', status: 'completed', conclusion: 'success' }]));
+  const own = JSON.stringify({ ...JSON.parse(pr()), headRefName: 'w1478-x', isCrossRepository: false });
+  const mine = fake({ ...base, 'gh pr view': [ok(own), ok(pr({ state: 'MERGED' }))], 'gh run list': green() });
+  assert.equal(prMain(['merge', '--pr', '7'], mine), 0, mine.said);
+  assert.ok(mine.ran.includes(`gh pr merge 7 --merge --match-head-commit ${SHA}`));
+  const other = fake({ ...base, 'gh pr view': ok(JSON.stringify({ ...JSON.parse(pr()), headRefName: 'w5480-other', isCrossRepository: false })), 'gh run list': green() });
+  assert.equal(prMain(['merge', '--pr', '7'], other), 1);
+  assert.ok(!other.ran.some((l) => l.startsWith('gh pr merge')));
+  assert.match(other.said, /not merged: .*pull\/7 is not this branch's pull request: its head branch is w5480-other, and this checkout is on w1478-x\. ff-pr merge merges only your own \(w5549\)/);
+  const fork = fake({ ...base, 'gh pr view': ok(JSON.stringify({ ...JSON.parse(pr()), headRefName: 'w1478-x', isCrossRepository: true })), 'gh run list': green() });
+  assert.equal(prMain(['merge'], fork), 1);
+  assert.ok(!fork.ran.some((l) => l.startsWith('gh pr merge')));
+  assert.match(fork.said, /its head w1478-x is a branch of another repository \(a fork\)/);
+});
+
 test('merge: an error from gh pr merge on a merge GitHub made anyway (a 502, w1867) is a merge when the base holds the head; else refused', () => {
   const green = { 'gh pr view': ok(pr()), 'gh run list': ok(JSON.stringify([{ databaseId: 9, workflowName: 'ci', status: 'completed', conclusion: 'success' }])), 'gh pr merge': fail('non-200 OK status code: 502 Bad Gateway') };
   const landed = fake({ ...green, 'git merge-base --is-ancestor': ok() });

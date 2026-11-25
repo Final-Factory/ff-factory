@@ -52,7 +52,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | What | Windows | macOS |
 |---|---|---|
 | The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`); on Linux the systemd user unit `~/.config/systemd/user/com.fffactory.daemon.service` |
-| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742) and group "Final Factory ffu-server" (inbound TCP from Tailscale only for `ffu-server.exe` in each ffu slot's `target\debug`, `target\release` and `bin`, w5442; [ffu-sandboxes.md](ffu-sandboxes.md)); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
+| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742, any protocol and port, from Tailscale only since w5581: [The agent node's firewall rule](#the-agent-nodes-firewall-rule-w5581)) and group "Final Factory ffu-server" (inbound TCP from Tailscale only for `ffu-server.exe` in each ffu slot's `target\debug`, `target\release` and `bin`, w5442; [ffu-sandboxes.md](ffu-sandboxes.md)); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
 | The Dev Drive (w900, w1070) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the folder given at install, which keeps the drive's file and what starts before it (`devdrive.vhdx`, `devdrive.json`, `start-daemon.ps1`, `moved.json`) | none |
@@ -626,8 +626,10 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    running from the old folder leaves it for the next rollout (`... is in use`). A failure prints `WARNING: Agent node:`
    and does not change the exit code.
 9. Windows, when the install made firewall rules: reads, without admin rights, whether each player slot, the agents'
-   node and ffu-server in each ffu slot (w5442) has an enabled inbound allow rule for its exact path, and whether rules earlier prompts left under `<root>\tmp`
-   remain (`firewallCheckScript`, two bulk reads, 4 s on lothdesktop's 696 rules). All there: one `Windows Firewall: ...
+   node and ffu-server in each ffu slot (w5442) has an enabled inbound allow rule for its exact path, whether an enabled
+   inbound allow rule lets the node in from any address rather than the tailnet only (`wide`, w5581), and whether rules
+   earlier prompts left under `<root>\tmp` remain (`firewallCheckScript`, three bulk reads; two took 4 s on lothdesktop's
+   696 rules). A wide node rule counts as missing, so the elevated rerun below narrows it. All there: one `Windows Firewall: ...
    are there.` line. Something missing and the run elevated: runs `firewall.ps1` as the install does and records the node's
    group in root.json. Not elevated: `WARNING: Windows Firewall: ...`, and the exit code stays. A daemon update and a tools
    run over the daemon's link are never elevated, so the node's rule from #517 reached no machine (w1742); the rollout
@@ -643,6 +645,30 @@ Tested: `server/agentTools.test.ts` (fake git and sh), and by hand on BEAST on 2
 kept a person's marker, a record set back to 1.29.19 was updated to 1.29.20, a stray file in the checkout gave
 `NOT PUBLISHED ... (1 path)` and exit 3, and `install.ps1 -Tools -Root <fake root>` ran the same (exit 0).
 
+
+### The agent node's firewall rule (w5581)
+
+The rule "Final Factory agent node" lets `<root>\tools\node\node.exe` accept inbound connections, any protocol and any
+port, every profile, **from the tailnet only** (`100.64.0.0/10` and `fd7a:115c:a1e0::/48`, Tailscale's addresses);
+loopback is never filtered, so local callers are unaffected. Before w5581 (lothsahn: "narrow BEAST's agent-node firewall
+rule to the tailnet") it allowed every address, so on BEAST anything on its LAN could reach whatever that node served.
+
+- **Who listens on it.** FF Factory's own listeners bind 127.0.0.1 (`server/listenLoopback.test.ts`). On BEAST the
+  instance portals ([instances.md](instances.md)) run on this node: Light Tree on 8891 (Ben's URL,
+  `http://100.86.157.116:8891`, BEAST's tailnet address) and Lens on 8892. Their daemons and people reach them over the
+  tailnet, which the rule still lets in.
+- **Why no port.** A new instance takes a new port (`scripts/instance/new.ts --port`); a port list would break the next
+  instance. The rule goes by program, like ffu-server's (w5442).
+- **Who makes it.** `firewall.ps1 -AgentNode` (the install, and every elevated tools run). It also removes inbound allow
+  rules for that exact path outside the install's groups (an "allow access" prompt's, from any address), which would
+  undo the narrowing. Rules for other programs, Zoom's among them, are never touched.
+- **How it reaches a machine.** The agent tools run (step 9 above) reads the rule without admin rights; a wide one is
+  reported as `WARNING: Windows Firewall: a rule lets <node> in from any address, not the tailnet only`, and the machine
+  rollout reruns the tools over the portal's ssh, elevated, which rewrites it. No person at the machine.
+- **Revert** (back to any address), with no person at the machine: revert the PR first (otherwise the next tools
+  rollout narrows it again), then over the portal's ssh, elevated (the ops worker):
+  `Get-NetFirewallRule -Group 'Final Factory agent node' | Set-NetFirewallRule -RemoteAddress Any`.
+  A test install's group carries its suffix (`'Final Factory agent node <suffix>'`).
 
 ### The Dev Drive (w900)
 

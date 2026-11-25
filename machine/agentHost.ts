@@ -31,6 +31,7 @@ import { addSecretEnv, redactSecrets, redactValue } from '../server/secrets.ts';
 import type { FromDaemon, SignalName } from '../server/machineProtocol.ts';
 import type { DeliveredAttachment, ImageInput, PermissionMode, Requester, SessionInfo, TranscriptEvent } from '../shared/types.ts';
 import { meterStates } from '../server/meterStates.ts';
+import { sealStore } from '../server/transcriptSeal.ts';
 import { scopeEndCause, scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
 import { capNote, capsFor, startWorkerCaps, type CapHit } from './workerCaps.ts';
@@ -1084,6 +1085,8 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
     },
     // beside the hosts (<appDir>/meters), kept after this host's folder goes: the next host of the conversation reads it (w1484)
     meters: meterStates(path.join(path.dirname(path.dirname(path.resolve(dir))), 'meters')),
+    // w5563: beside them, in the daemon's folder, which every fence keeps read-only to workers
+    seals: sealStore(path.join(path.dirname(path.dirname(path.resolve(dir))), 'transcript-seals')),
   } as SessionSink;
   // w5554: a worker's caps (machine/workerCaps.ts) hold before its claude starts: on Windows the job is made around this host
   // first, so every process the session starts is in it.

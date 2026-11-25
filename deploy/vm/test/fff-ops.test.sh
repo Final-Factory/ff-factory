@@ -167,7 +167,37 @@ else
   printf '#!/bin/sh\nprintf "MSSH HOME=%%s:" "$HOME"; printf " [%%s]" "$@"; echo\n' >"$plib/fff-machine-ssh"
   printf '#!/bin/sh\necho Linux\n' >"$plib/fff-ops-ssh"
   chmod +x "$plib/fff-machine-ssh" "$plib/fff-ops-ssh"
+  # The release's log redactor (w5525: server/redactLogsCli.ts, tested for real in server/journalRedact.test.ts, which has the
+  # portal's node_modules): a fake here that masks the planted words and notes the vault settings it was handed.
+  mkdir -p "$tmp/fffroot/current/server"
+  cat >"$tmp/fffroot/current/server/redactLogsCli.ts" <<EOF
+let b = '';
+process.stdin.on('data', (d) => (b += d)).on('end', () => {
+  require('node:fs').writeFileSync('$tmp/redact-env', 'config=' + process.env.FFSB_CONFIG + ' key=' + process.env.FFF_VAULT_KEY_FILE + ' cwd=' + process.cwd() + '\n');
+  process.stdout.write(b.replace(/PLANTED-[A-Za-z0-9]+|ffsb_[A-Za-z0-9_-]{40,}/g, '[redacted by the release]'));
+});
+EOF
   priv() { FFF_LIB=$plib bash $G/fff-ops-priv "$@" 2>&1; }
+  # logs: the journal goes through the release's redactor, with the vault key and config, from the release's folder; with
+  # no redactor in the release nothing is printed (fails closed).
+  printf '#!/bin/sh\necho "2026-11-25T10:00:00+0000 fff node[1]: started"\necho "2026-11-25T10:00:01+0000 fff node[1]: token PLANTED-abc123 in a line"\n' >"$plib/journalctl"
+  chmod +x "$plib/journalctl"
+  # fff-ops-priv sets its own PATH, so the fake journalctl comes in as a function of a lib.sh of its own
+  llib=$tmp/llib
+  mkdir -p "$llib"
+  cp "$plib/lib.sh" "$llib/lib.sh"
+  printf 'journalctl() { "%s/journalctl" "$@"; }\n' "$plib" >>"$llib/lib.sh"
+  out=$(FFF_LIB=$llib bash $G/fff-ops-priv logs 5 2>&1)
+  printf '%s' "$out" | matches -F 'token [redacted by the release] in a line' || fail "priv: logs did not go through the release's redactor: $out"
+  if printf '%s' "$out" | matches -F PLANTED; then fail "priv: logs printed a planted secret: $out"; fi
+  printf '%s' "$out" | matches -F 'fff node[1]: started' || fail "priv: logs lost an ordinary line: $out"
+  matches -Fx "config=$tmp/fffroot/config/config.json key=/etc/fff/vault.key cwd=$tmp/fffroot/current" "$tmp/redact-env" || fail "priv: the redactor did not get the vault key, the config and the release folder: $(cat "$tmp/redact-env")"
+  mv "$tmp/fffroot/current/server/redactLogsCli.ts" "$tmp/redactLogsCli.ts.away"
+  rc=0; out=$(FFF_LIB=$llib bash $G/fff-ops-priv logs 5 2>&1) || rc=$?
+  [ "$rc" -eq 2 ] || fail "priv: logs with no redactor in the release exited $rc: $out"
+  if printf '%s' "$out" | matches -F PLANTED; then fail "priv: logs with no redactor printed the journal: $out"; fi
+  mv "$tmp/redactLogsCli.ts.away" "$tmp/fffroot/current/server/redactLogsCli.ts"
+  echo "ok: fff-ops-priv logs pipes the journal through the release's redactor (vault key, config, release folder) and prints nothing without it"
   [ "$(priv machine-ssh --check)" = "MSSH HOME=$tmp/fffroot/home: [--check]" ] || fail "priv: machine-ssh --check: $(priv machine-ssh --check)"
   [ "$(priv machine-ssh-check)" = "MSSH HOME=$tmp/fffroot/home: [--check]" ] || fail "priv: machine-ssh-check is not --check"
   [ "$(priv machine-ssh --key)" = "MSSH HOME=$tmp/fffroot/home: [--key]" ] || fail "priv: machine-ssh --key"
@@ -230,6 +260,16 @@ else
     if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
   done
   echo "ok: fff-ops-priv disk-usage reaches fffctl with no option; any other word is refused"
+  # fence-check (w5506): read only, no option at all.
+  [ "$(upriv fence-check)" = "FFFCTL [fence-check]" ] || fail "priv: fence-check: $(upriv fence-check)"
+  for bad in 'fence-check /etc/fff/vault.key' 'fence-check --pid 1' 'fence-check extra' 'fence-check;id' 'fencecheck'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  echo "ok: fff-ops-priv fence-check reaches fffctl with no option; any other word is refused"
   # approvals (w1097): the prompt counts, read only. Only --since and --split, each once, each with a date, reach fffctl.
   [ "$(upriv approvals)" = "FFFCTL [approvals]" ] || fail "priv: approvals: $(upriv approvals)"
   [ "$(upriv approvals --since 2026-10-05 --split 2026-10-13)" = "FFFCTL [approvals] [--since] [2026-10-05] [--split] [2026-10-13]" ] || fail "priv: approvals --since --split: $(upriv approvals --since 2026-10-05 --split 2026-10-13)"
