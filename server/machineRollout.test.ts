@@ -673,6 +673,114 @@ test('w5593: an update or tools run whose bundle download was cut is sent again 
   assert.equal(w2.linkCalls.length, 1);
 });
 
+// w5641 (the w5622 review's M3): the cut-download resend across a restart, a deploy, an adoption and a second machine.
+const cutMsg = (id: string) => `${id} refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)`;
+
+test('w5641: a portal restart while a cut download waits to be sent again keeps its count: 1 + 3 link calls across the restart', async () => {
+  const m = mac('beast', { linkRun: () => ({ throws: cutMsg('beast') }) });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'the first try and resend 1');
+  assert.equal(r.state.machines.beast.cutDownload?.retries, 1);
+  await r.idle();
+  r.close();
+
+  const r2 = w.make();
+  assert.equal(r2.state.machines.beast.cutDownload?.retries, 1, 'saved with the state');
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r2.tick();
+  }
+  assert.equal(w.linkCalls.length, 4, 'resends 2 and 3 after the restart, then the cap holds');
+  r2.close();
+});
+
+test('w5641: a deploy while a cut download waits to be sent again starts afresh: the new commit goes at once, the old one never again', async () => {
+  const NEW2 = 'e'.repeat(40);
+  const m = mac('beast', { linkRun: (_form, commit) => (commit === NEW ? { throws: cutMsg('beast') } : { report: { ok: true }, after: { online: true, daemon: commit.slice(0, 7) } }) });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.equal(r.state.machines.beast.status, 'failed');
+  w.advance(2 * 60_000); // the resend is not due yet
+  w.verify(NEW2);
+  await r.tick();
+  assert.deepEqual(w.linkCalls.map((c) => c.commit), [NEW, NEW2], 'the new deploy is sent at once');
+  assert.equal(r.state.machines.beast.cutDownload, undefined, "the old rollout's resend went with it");
+  for (let i = 0; i < 4; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.deepEqual(w.linkCalls.map((c) => c.commit), [NEW, NEW2], 'nothing goes out for the old commit');
+  assert.equal(m.daemon, NEW2.slice(0, 7));
+  r.close();
+});
+
+test('w5641: a machine that already runs the commit when its resend comes due is not sent it again and ends current', async () => {
+  const m = mac('beast', { linkRun: () => ({ throws: cutMsg('beast') }) });
+  const w = world([m], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  m.daemon = NEW.slice(0, 7); // updated meanwhile, another way
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.length, 1);
+  assert.equal(r.state.machines.beast.status, 'current');
+  r.close();
+});
+
+test('w5641: two machines: m3 updates in the tick beast is cut; each outcome stays on its own machine', async () => {
+  const beast = mac('beast', { linkRun: () => ({ throws: cutMsg('beast') }) });
+  const m3 = mac('m3', { linkRun: () => ({ report: { ok: true }, after: { online: true, daemon: NEW.slice(0, 7) } }) });
+  const w = world([beast, m3], { tools: false });
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.deepEqual(w.linkCalls.map((c) => c.id), ['beast', 'm3'], 'the cut does not hold m3 back');
+  assert.equal(r.state.machines.beast.status, 'failed');
+  assert.equal(r.state.machines.beast.cutDownload?.retries, 0, "m3's update does not clear beast's resend");
+  assert.equal(r.state.machines.m3.status, 'ok');
+  assert.equal(r.state.machines.m3.cutDownload, undefined);
+  assert.match(w.told[0].text, /- beast: FAILED: .*did not finish in 480 s.*sent again by itself in 5 min/);
+  assert.doesNotMatch(w.told[0].text, /- m3: [^\n]*(FAILED|sent again)/);
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.deepEqual(w.linkCalls.map((c) => c.id), ['beast', 'm3', 'beast', 'beast', 'beast'], 'only beast is sent again, 3 times');
+  assert.equal(r.state.machines.m3.status, 'ok');
+  r.close();
+});
+
+test('w5628: once its 3 resends were cut too, the report says its link is slow, stalls or drops and it waits for the next deploy', async () => {
+  const cut = "beast refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)";
+  const m = mac('beast', { linkRun: () => ({ throws: cut }) });
+  const w = world([m]);
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.equal(w.linkCalls.length, 8, 'the first send and 3 resends, each an update and its tools');
+  const ranOut = /its 3 resends were cut too: its link to the portal is slow, stalls or drops, so it waits for the next deploy \(needs a look\)/;
+  const o = r.state.machines.beast;
+  assert.match(o.note!, ranOut);
+  assert.match(o.tools!.note!, ranOut);
+  assert.doesNotMatch(`${o.note} ${o.tools!.note}`, /sent again by itself/);
+  // The follow-up report lifts both notes.
+  const last = w.told.at(-1)!.text;
+  assert.match(last, new RegExp(`- beast: FAILED: .*did not finish in 480 s.*${ranOut.source}`));
+  assert.match(last, new RegExp(`Agent tools FAILED: .*${ranOut.source}`));
+});
+
 test('w2005: a machine that went offline before its update reached it is not called failed, nothing is put back over ssh, and it is updated when it comes back', async () => {
   let tries = 0;
   const asleep = mac('m3', {

@@ -116,6 +116,15 @@ Known causes, so a future failure can be named at once:
   at 10 minutes (a run takes 220 s median, 283 s at most) listing nearly every file's tests in flight since about 176 s
   in, so no single test hung; the cause is unknown (a guess: the runner itself stalled). Re-run it; if it comes back,
   look at what the files in flight share, not at the first one named.
+- **Linux unit runs past the 10-minute watchdog, 2026-11-25** (w5619): a test file whose process outlives its tests holds
+  one of the runner's 3 test workers (`node --test` runs availableParallelism-1 files at once) until it exits.
+  `attachmentFlow.test.ts` lived 282 s past its 3 s of tests (a daemon download's 4 tries of a 60 s idle timer, after the
+  test stopped the portal under it) and `procsBroker.test.ts` 61 s (a real 60 s SIGKILL timer), on a suite whose run had
+  grown from 376 s median (2026-11-01, 339 files) to about 550 s (489 files), measured. The spec output is ordered by file,
+  so the watchdog's in-flight list shows many files "running" behind a slow one: read the "Test files' time" step
+  instead. It lists the slowest files (wall, their tests, the time after their tests) and fails on more than 45 s after
+  a file's tests (`scripts/test-file-times.ts --check`): close the handle in the test (`t.mock.timers`, or wait for what
+  the test started). Raise the watchdog only when the honest run (no file over the limit) passes it.
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 
@@ -128,6 +137,42 @@ shellcheck or gitleaks (or bash, on Windows) skips that step with a `SKIPPED` li
 get the whole check. No git hook is installed: a sandbox is a worktree, so a hook would land in the hooks folder every
 worktree and the person's own clone share, and would run on pushes nobody asked it for. `scripts/prepush.test.ts` plants a
 shellcheck finding, a fake key and a personal email, and fails if the check misses any.
+
+## npm audit
+
+The `Secret scan and commit identities` job runs `node scripts/audit-gate.ts` on every pull request and every push to
+main (w5519, finding 13 of the w5452 security audit; lothsahn: "npm audit fix plus an audit step in CI"). It runs
+`npm audit --omit=dev --audit-level=high --json` in the repo root (the server) and in `web/`, from the lockfiles, and
+fails on any high or critical advisory in a production dependency. An advisory's own severity counts: a package npm marks
+high only because it depends on a vulnerable one is reported once, under the advisory itself. Dev dependencies are not
+gated. Run it locally with `node scripts/audit-gate.ts`.
+
+When it fails, fix the dependency: `npm audit fix` in that folder, or bump the package by hand when the fix is a new
+major (`npm install <pkg>@^<fixed>`), then run the tests the package touches. A transitive one that its parent pins
+needs the parent bumped, or an `overrides` entry in that `package.json`.
+
+**When no fix exists yet**, allow that one advisory in `.github/npm-audit-allow.json`:
+
+```json
+{
+  "allow": [
+    {
+      "advisory": "GHSA-xxxx-xxxx-xxxx",
+      "package": "lodash-es",
+      "project": "web",
+      "reason": "No fixed version yet; we never call _.template, the vulnerable function.",
+      "request": "w1234",
+      "until": "2027-01-31"
+    }
+  ]
+}
+```
+
+An entry allows one advisory in one package in one project (`.` or `web`), nothing wider: there are no wildcards and no
+severity switch. `reason` says why it is safe to wait, `request` names the request that allowed it, and `until` is at
+most 90 days away. The gate fails on an expired entry (fix it, or renew it with a new reason) and on one that matches
+nothing any more (the fix landed: delete it), so the file lists only what is still open. The person who allows one
+says so in the pull request. `scripts/audit-gate.test.ts` holds these rules.
 
 ## Ports in tests
 

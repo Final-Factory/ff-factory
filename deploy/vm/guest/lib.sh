@@ -75,7 +75,7 @@ install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
   for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-watchdog fff-backup fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-watchdog fff-backup fff-backup-drill fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
   # The orchestration worker's PATH (w597): its ssh and fffctl, each one sudo call to a wrapper above; its scp and sftp
   # (w612), /usr/bin/scp and sftp as itself over fff-ops-scp-ssh; its fff-machine-ssh (w676), through fff-ops-priv.
   for f in ssh fffctl scp sftp fff-machine-ssh; do [ -z "$(write_file "$FFF_LIB/ops-bin/$f" 0755 <"$src/ops-bin/$f")" ] || c+=" ops-bin/$f"; done
@@ -145,6 +145,61 @@ as_fff_in() {
   shift
   [ "$(id -un)" != "$FFF_USER" ] || run=()
   (cd "$dir" && "${run[@]}" env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
+
+# The release build's account (w5523): FFF_BUILD_USER with its own home, or fff when that account cannot be made fit
+# (pick_builder, fff-update). as_build_in DIR CMD... runs CMD in DIR as it, with a clean environment: its PATH
+# (lib.sh's fixed one), its home (its TMPDIR too, not a /tmp fff shares) and nothing of the caller's (NODE_ENV=production from fff-portal.service's ExecStartPre
+# would leave out the web build's tools).
+BUILD_AS='' BUILD_HOME=''
+as_build_in() {
+  local dir=$1; shift
+  (cd "$dir" && runuser -u "${BUILD_AS:-$FFF_USER}" -- env -i PATH="$PATH" HOME="${BUILD_HOME:-$FFF_ROOT/home}" TMPDIR="${BUILD_HOME:-$FFF_ROOT/home}" LANG=C.UTF-8 \
+    npm_config_update_notifier=false GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
+
+# ensure_build_user: FFF_BUILD_USER is there and fit to build a release, made when missing: an account of its own (not
+# root, not fff, not in fff's group, no password, no login shell), its home (FFF_BUILD_HOME: its npm cache) its own and
+# closed (0700) in a folder root's and closed to fff's writes, so fff cannot plant an .npmrc or a cached package there;
+# and an ACL entry on $FFF_ROOT (root:fff 1770) that lets it pass through to $RELEASES and read nothing there. Prints why
+# it is not fit, and fails.
+ensure_build_user() {
+  local b=${FFF_BUILD_USER:-} h=${FFF_BUILD_HOME:-} uid
+  case $b in '' | root | "$FFF_USER") echo "FFF_BUILD_USER is '$b': it must be an account of its own"; return 1 ;; esac
+  [[ $h == /?* ]] && [[ $h != */ ]] || { echo "FFF_BUILD_HOME '$h' is not an absolute folder"; return 1; }
+  case "$h/" in "$FFF_ROOT"/*) echo "FFF_BUILD_HOME $h is inside $FFF_ROOT, where fff makes folders"; return 1 ;; esac
+  root_owned "$(dirname "$h")" || { echo "$(dirname "$h") is not root's, or is writable by others"; return 1; }
+  if ! id "$b" >/dev/null 2>&1; then
+    # A group of its name may be left from an earlier account (userdel keeps a group with other members): use it.
+    local grp=(--user-group)
+    if getent group "$b" >/dev/null 2>&1; then grp=(-g "$b"); fi
+    useradd --system "${grp[@]}" --home-dir "$h" --no-create-home --shell /usr/sbin/nologin --comment 'FF Factory release builds (w5523)' "$b" >&2 ||
+      { echo "useradd $b failed"; return 1; }
+    log "made the build account $b"
+  fi
+  uid=$(id -u "$b") || { echo "no account $b"; return 1; }
+  [ "$uid" != 0 ] || { echo "$b has uid 0"; return 1; }
+  [ "$uid" != "$(id -u "$FFF_USER")" ] || { echo "$b has $FFF_USER's uid"; return 1; }
+  if id -nG "$b" | tr ' ' '\n' | matches -xF "$FFF_USER"; then echo "$b is in $FFF_USER's group"; return 1; fi
+  passwd -l "$b" >/dev/null 2>&1 || true
+  [ ! -L "$h" ] || { echo "$h is a symbolic link"; return 1; }
+  install -d -m 0700 -o "$b" -g "$b" "$h" || { echo "could not make $h"; return 1; }
+  { chown "$b:$b" "$h" && chmod 0700 "$h"; } || { echo "could not make $h $b's alone"; return 1; }
+  command -v setfacl >/dev/null || { echo "setfacl is missing (the acl package: the guest install.sh installs it)"; return 1; }
+  setfacl -m "u:$b:--x" "$FFF_ROOT" || { echo "setfacl on $FFF_ROOT failed"; return 1; }
+  # shellcheck disable=SC2016 # $1 is expanded by the inner sh
+  runuser -u "$b" -- sh -c 'cd "$1"' _ "$RELEASES" 2>/dev/null || { echo "$b cannot reach $RELEASES"; return 1; }
+  # shellcheck disable=SC2016
+  if runuser -u "$b" -- sh -c 'ls "$1" || test -w "$1"' _ "$FFF_ROOT" >/dev/null 2>&1; then echo "$b can read or write $FFF_ROOT"; return 1; fi
+}
+
+# end_build_processes: whatever the build account still runs after a build (a watcher npm left behind) is ended, so
+# nothing of it writes into the release once it is root's. Only for the build account, never fff, whose portal runs.
+end_build_processes() {
+  [ -n "$BUILD_AS" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 0
+  pkill -KILL -u "$BUILD_AS" 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$BUILD_AS" >/dev/null 2>&1 || return 0; sleep 0.5; done
+  warn "the build account $BUILD_AS still runs: $(pgrep -u "$BUILD_AS" -l | head -n 3 | paste -sd' ' -)"
 }
 
 # ---------------------------------------------------------------- root in fff's folders (w5531)
@@ -352,7 +407,7 @@ release_ok() {
 # its .git link is rewritten, and DIR.ready names SHA. Fails, saying why, unless release_problem then finds nothing.
 harden_release() {
   local dir=$1 sha=$2 admin p
-  rm -f "$dir.ready"
+  rm -f "$dir.ready" "$dir.builder"
   chown -R -h -P root:root "$dir"
   chmod -R go-w,ug-s "$dir"
   admin=$(release_admin "$dir")
@@ -415,4 +470,50 @@ own_app() {
       rm -rf "$e"
     fi
   done
+}
+
+# ---------------------------------------------------------------- backups (fff-backup, fff-backup-drill; w5529)
+# What the backup and the drill wrote last, read by fffctl status and the portal's system_status (server/backupStatus.ts):
+# root-owned, world-readable, no secrets in them.
+FFF_STATE_DIR=${FFF_STATE_DIR:-/var/lib/fff}
+# The backup target's pinned host key: root:root, not group- or other-writable, one line "fff-backup-target <type> <key>"
+# (fffctl backup-config --host-key). ssh checks the target against it under that alias and nothing else; a changed key
+# fails the backup loudly and is never re-trusted by itself.
+FFF_BACKUP_KNOWN_HOSTS=${FFF_BACKUP_KNOWN_HOSTS:-/etc/fff/backup_known_hosts}
+FFF_BACKUP_HOST_ALIAS=fff-backup-target
+
+# backup_pin_problem: why the pinned host key cannot be used (one line), or nothing when it can.
+backup_pin_problem() {
+  local kh=$FFF_BACKUP_KNOWN_HOSTS perm
+  if [ ! -f "$kh" ]; then echo "no pinned host key for the backup target ($kh is missing; sudo fffctl backup-config --host-key FILE)"; return; fi
+  if [ "${FFF_TEST_NOROOT:-}" != 1 ] && [ "$(stat -c %u "$kh")" != 0 ]; then echo "$kh is not owned by root"; return; fi
+  perm=$(stat -c %a "$kh")
+  if (((8#$perm & 8#022) != 0)); then echo "$kh can be written by others than root (mode $perm)"; return; fi
+  grep -q "^$FFF_BACKUP_HOST_ALIAS " "$kh" || echo "no pinned host key for the backup target in $kh (sudo fffctl backup-config --host-key FILE)"
+}
+
+# backup_sftp BATCH ERR: one sftp batch file to BACKUP_SSH_TARGET, checked only against the pinned key; stderr to ERR.
+backup_sftp() {
+  sftp -q -b "$1" -i "$BACKUP_SSH_KEY" -o BatchMode=yes -o HostKeyAlias="$FFF_BACKUP_HOST_ALIAS" \
+    -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o CheckHostIP=no \
+    -o UserKnownHostsFile="$FFF_BACKUP_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null "$BACKUP_SSH_TARGET" 2>"$2"
+}
+
+# backup_sftp_why ERR: one line saying why an sftp batch failed; a host key that changed is said so plainly.
+backup_sftp_why() {
+  if grep -qE 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|No [A-Za-z0-9-]+ host key is known' "$1" 2>/dev/null; then
+    echo "the backup target's host key does not match the pinned one in $FFF_BACKUP_KNOWN_HOSTS: check the target's key out of band and re-pin it (sudo fffctl backup-config --host-key FILE); it is never re-trusted by itself"
+  else
+    echo "sftp to $BACKUP_SSH_TARGET failed: $(grep -v '^sftp>' "$1" 2>/dev/null | tail -n 1 | cut -c1-200)"
+  fi
+}
+
+# state_write NAME: stdin (JSON) to $FFF_STATE_DIR/NAME, whole, 0644 root.
+state_write() {
+  local tmp
+  install -d -m 0755 "$FFF_STATE_DIR"
+  tmp=$(mktemp "$FFF_STATE_DIR/.$1.XXXXXX")
+  cat >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$FFF_STATE_DIR/$1"
 }

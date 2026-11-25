@@ -2356,6 +2356,13 @@ test('w920: a worker has portal_logs on the machine tool belt and in its brief, 
   // The store's own background save (start_agent's) may still be in flight as a `.async.tmp` (server/durable.ts): that is
   // not the read writing. Since w5072 the list of sources runs a journal check, long enough to catch one mid-write.
   const listing = () => fs.readdirSync(cfg.dataDir).filter((f) => !f.endsWith('.async.tmp')).sort();
+  // w5626: Ben's own orchestrator is still in the turn request_work started; its first model call saves its context meter
+  // to <dataDir>/meters (server/meterStates.ts, from sessions.ts saveMeter), about 100 ms in. That is not the read
+  // writing: let every portal session's turn end first, or `meters` lands between the two listings on a slow runner. The
+  // saves that turn queued (work.json and its rotated copies, server/durable.ts) land before the first listing too.
+  await firstTurn(ben, 'Ben’s orchestrator’s turn to end');
+  await until('no portal session mid-turn', () => [...store.sessions.values()].every((s) => s.status !== 'running'));
+  await store.saved();
   const before = listing();
 
   assert.match(await h.portal_logs!({}), /- cleanup: .*\n[\s\S]*Clean-up logs kept for: pc/);
