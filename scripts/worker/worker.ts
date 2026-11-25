@@ -2082,7 +2082,10 @@ const anonymousEnv = () => ({ ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTE
 async function portalSha(portalUrl: string, fetcher: typeof fetch = fetch): Promise<string | undefined> {
   try {
     const r = await fetcher(`${portalUrl}/api/health`, { signal: AbortSignal.timeout(15_000) });
-    const sha = r.ok ? ((await r.json()) as { sha?: string }).sha : undefined;
+    const j = r.ok ? ((await r.json()) as { sha?: string; commit?: string }) : undefined;
+    // w5516: the full commit when the portal says it (a portal from w5516 on), else its short sha.
+    if (j?.commit && /^[0-9a-f]{40}$/i.test(j.commit)) return j.commit;
+    const sha = j?.sha;
     return sha && /^[0-9a-f]{7,40}$/i.test(sha) ? sha : undefined;
   } catch {
     return undefined;
@@ -2116,6 +2119,12 @@ async function updateSource(l: Layout, f: UpdateFlags, portalUrl: string): Promi
   const r = await exec('git', ['-C', l.src, 'rev-parse', '--verify', '--quiet', `${name}^{commit}`]);
   const commit = r.stdout.trim();
   if (r.code !== 0 || !commit) throw new Error(`${f.ref ?? `the portal's commit ${want}`} is not on ff-factory's main (fetched from ${FF_FACTORY}): pass --ref main or --source <checkout>`);
+  // w5516: a commit id names code only when it is on ff-factory's main as GitHub has it (the portal deploys nothing else,
+  // deploy/vm/guest/fff-update `prepare --on-branch`); one the checkout holds from an earlier bundle but main does not is refused.
+  if (name === want) {
+    const onMain = await exec('git', ['-C', l.src, 'merge-base', '--is-ancestor', commit, 'refs/remotes/github/main']);
+    if (onMain.code !== 0) throw new Error(`ff-factory ${commit.slice(0, 12)} is not on ff-factory's main (fetched from ${FF_FACTORY}): refusing to install it, nothing was changed`);
+  }
   await must('checking out the daemon code', 'git', ['-C', l.src, '-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--force', '--detach', commit]);
   return { from: l.src, commit };
 }

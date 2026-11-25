@@ -1,7 +1,8 @@
 /**
  * The Windows worker fence (w5377, the design in docs/worker-root.md 4.1): sandbox agents run at Low integrity, so
  * Windows' no-write-up rule refuses their writes to anything not labelled Low. The daemon labels the worker root's
- * folders Low (each with (OI)(CI), so what is made in them later is Low too) and starts each sandbox agent's claude from
+ * folders that workers write (WORKER_CHILDREN) Low (each with (OI)(CI), so what is made in them later is Low too), keeps
+ * every other root folder Medium (w5539), and starts each sandbox agent's claude from
  * a Low-labelled copy of the claude executable; a process started from a Low-labelled file runs at Low, and everything
  * it starts (Bash, git, gh, batch Unity, players) inherits Low (both measured on LothDesktop, w5333 and w5377).
  *
@@ -30,6 +31,19 @@ export const MEDIUM_CHILDREN = ['daemon', 'secrets'];
  * Medium also keeps Low workers off the runners' .credentials.
  */
 export const CI_CHILDREN = ['ffu-runners'];
+/**
+ * The root children workers write, the only ones labelled Low (w5539). Every other folder in the root stays Medium, so a
+ * folder added there later is out of the workers' reach until it is listed here: before, every child but daemon and
+ * secrets was labelled Low, and on BEAST that reached `instances` (update-all.ts, which a scheduled task runs at Medium
+ * every 5 minutes), `demos` and the instance portals `ben-factory` and `lens-factory`, whose config holds vault, ledger
+ * and Claude keys (w5451 audit, measured: Low labels and mkdir probes from a Low worker). Each name is one some worker
+ * tool writes: docs/worker-root.md 2.1 and 4.1 say which.
+ */
+export const WORKER_CHILDREN = [
+  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
+  'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam', 'steam-lobby-gate',
+  'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
+];
 
 export interface LowTargetsInput {
   root: string;
@@ -55,11 +69,24 @@ const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.re
 /** The folders and files to label Low. Exported for tests. */
 export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[] } {
   const exists = i.exists ?? fs.existsSync;
-  const keep = new Set([...MEDIUM_CHILDREN, ...CI_CHILDREN].map((c) => c.toLowerCase()));
+  // The daemon's and the secrets' folders, and the daemon's own where it sits in the root: never labelled, either way.
+  const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
   if (inside(i.appDir, i.root) && !same(i.appDir, i.root)) keep.add(path.relative(i.root, i.appDir).split(/[\\/]/)[0].toLowerCase());
+  const write = new Set(WORKER_CHILDREN.filter((c) => !keep.has(c)));
+  // An extra the config puts inside the root (its temp or sandboxes folder elsewhere than tmp and sandboxes) makes its root
+  // child a worker one too.
+  for (const e of i.extra ?? []) if (e && inside(e, i.root) && !same(e, i.root)) write.add(path.relative(i.root, e).split(/[\\/]/)[0].toLowerCase());
+  for (const k of keep) write.delete(k);
   const dirs: string[] = [];
+  // Root children no worker writes (the instances, demos and instance portals on BEAST, CI runners, anything new): kept
+  // Medium where an earlier rollout labelled them Low (labelLow touches only those that inherited Low).
+  const fenced: string[] = [];
   for (const c of i.children) {
-    if (!c.dir || keep.has(c.name.toLowerCase())) continue;
+    if (!c.dir) continue;
+    if (!write.has(c.name.toLowerCase())) {
+      if (!keep.has(c.name.toLowerCase())) fenced.push(path.join(i.root, c.name));
+      continue;
+    }
     if (c.name.toLowerCase() === 'repo') {
       // A worker install's repo is one bare store every sandbox is a worktree of (worker.ts cloneRepo): label all of it,
       // as Landlock and Seatbelt already let workers write it. A clone with a working tree: only its .git.
@@ -84,8 +111,7 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // would crash (0xC0000022 on msys' shared object directory; measured w5377). A Low agent's node is Low anyway (a Low
   // parent starts Low children), and a worker cannot rewrite the shared node.
   const medium = dirs.some((d) => same(d, path.join(i.root, 'tools'))) ? [path.join(i.root, 'tools', 'node')] : [];
-  const ci = new Set(CI_CHILDREN.map((c) => c.toLowerCase()));
-  for (const c of i.children) if (c.dir && ci.has(c.name.toLowerCase())) medium.push(path.join(i.root, c.name));
+  medium.push(...fenced);
   return { dirs, files, medium };
 }
 

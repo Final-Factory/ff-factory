@@ -384,6 +384,17 @@ node cannot take the OS file locks the queue lives on):
   `quiet_gate.sh bench_lock` (exclusive), the nightly (`ffnightly.py --lock-night`, one shared ticket for the night) and
   `urgent_release.py` (exclusive, at its request's priority: frantic since w4620 (named release until w4710), no pre-empt).
 
+**The daemon and the agent host run only a trusted copy** (w5572, from w5542's audit): the tickets they take themselves
+(a timed run's exclusive ticket, an editor's boot ticket, the editor bench gate's shared ones) run the game repo's master
+`bench_queue.py`, kept in the daemon's folder at `<appDir>/trusted/bench/bench_queue.py`, which no worker can write
+(`machine/benchQueue.ts` trustedBenchTicket, refreshTrustedBench). It is fetched with `gh api` (the machine's gh login,
+else a GitHub App token the portal gave the daemon) when missing or older than 10 minutes, a failed fetch keeping the copy
+it had, and runs under `python -s`, no `PYTHON*` setting, a PATH with no worker-root folder, its own folder as working
+directory and `core.fsmonitor=false` for the git it runs in a sandbox. Before it, they took the sandbox copy of the
+highest `RULES_VERSION` below, so a worker's planted copy ran at the host's level. With no trusted copy (gh cannot read
+the repository and none from before), they take no ticket and log why, as with no script at all. `unity-slot run` runs in
+the worker's own shell, inside its fence, and keeps the choice below.
+
 A checkout without `bench_queue.py` (a branch from before w1615) takes its ticket with another sandbox's copy of the
 script (`newestBenchQueueScript` over `<worker root>/sandboxes/*`, w1628: the queue is its files, not its code;
 `benchTicketFor` takes the root from `FF_WORKER_ROOT` when its caller names none, w5026: `unity-slot run` named none, so

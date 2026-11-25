@@ -36,6 +36,8 @@ export interface MachineJoinDeps {
   portalUrl(req: http.IncomingMessage): string;
   /** A bootstrap's text (join.ps1, join.sh, join.cmd), or undefined when this portal's checkout lacks it. */
   script(kind: JoinScript): string | undefined;
+  /** This portal's own full commit (server/version.ts portalCommit): the join scripts install exactly it (w5516). */
+  commit?(): string | undefined;
   /** Why it acts on nothing (a dry-run portal), or undefined. */
   refused?(): string | undefined;
   /** A line for the owners' [machines] report. */
@@ -49,6 +51,8 @@ const MAX_FAILS = 10;
 const FAIL_WINDOW_MS = 15 * 60_000;
 /** The placeholder a bootstrap carries for this portal's URL. */
 export const PORTAL_URL_MARK = '__FF_PORTAL_URL__';
+/** The placeholder join.sh and join.ps1 carry for this portal's full commit, which their installer is pinned to (w5516); '' when unknown. */
+export const PORTAL_COMMIT_MARK = '__FF_PORTAL_COMMIT__';
 /** The placeholder join.cmd carries for the join code ('' in the download any PC may take: the bootstrap asks). */
 export const JOIN_CODE_MARK = '__FF_JOIN_CODE__';
 export type JoinScript = 'windows' | 'unix' | 'cmd';
@@ -140,7 +144,8 @@ export function machineJoinHttp(d: MachineJoinDeps) {
         res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': `attachment; filename="${WINDOWS_INSTALLER_NAME}"`, 'cache-control': 'no-store' }).end(out);
         return;
       }
-      const out = text.split(PORTAL_URL_MARK).join(d.portalUrl(req));
+      const commit = d.commit?.();
+      const out = text.split(PORTAL_URL_MARK).join(d.portalUrl(req)).split(PORTAL_COMMIT_MARK).join(commit && /^[0-9a-f]{40}$/.test(commit) ? commit : '');
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }).end(out);
       return;
     }
