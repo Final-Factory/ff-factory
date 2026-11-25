@@ -21,16 +21,17 @@ test('fenceFor: off unless the setting is "seatbelt" on a Mac with a root and sa
   assert.equal(fenceFor({ ...base, exists: () => false }), undefined);
   const f = fenceFor(base);
   assert.equal(f?.kind, 'seatbelt');
-  assert.equal(f?.darwinTemp, '/t/DARWIN_USER_TEMP_DIR');
+  // fenceFor resolves what getconf answers (a missing folder by path.resolve), so off macOS '/t/...' gains a drive (w5808)
+  assert.equal(f?.darwinTemp, path.resolve('/t/DARWIN_USER_TEMP_DIR'));
 });
 
 test('the profile opens only the root folders workers write: no blanket root, no portal, instances or runners (w5569)', () => {
   const p = seatbeltProfile(F);
   assert.ok(!p.includes('(subpath "/Users/p/ffw")'), 'no blanket grant of the root');
-  for (const c of ['tmp', 'sandboxes', 'repo', 'cache', 'tools']) assert.ok(p.includes(`(subpath "${path.join('/Users/p/ffw', c)}")`), c);
-  for (const c of ['instances', 'demos', 'ben-factory', 'ffu-runners']) assert.ok(!p.includes(path.join('/Users/p/ffw', c)), c);
+  for (const c of ['tmp', 'sandboxes', 'repo', 'cache', 'tools']) assert.ok(p.includes(`(subpath "${path.posix.join('/Users/p/ffw', c)}")`), c);
+  for (const c of ['instances', 'demos', 'ben-factory', 'ffu-runners']) assert.ok(!p.includes(path.posix.join('/Users/p/ffw', c)), c);
   const back = p.lastIndexOf('(deny file-write*');
-  for (const c of ['daemon', 'secrets']) assert.ok(p.indexOf(path.join('/Users/p/ffw', c)) > back, `${c} only in the read-only block`);
+  for (const c of ['daemon', 'secrets']) assert.ok(p.indexOf(path.posix.join('/Users/p/ffw', c)) > back, `${c} only in the read-only block`);
   const f = fenceFor({ setting: 'seatbelt', root: '/r', platform: 'darwin', home: '/h', exists: () => true, getconf: (n) => `/t/${n}`, workFolders: [path.join('/r', 'work', 'temp'), path.join('/r', 'secrets', 'x')] });
   assert.ok(f?.open?.includes('work') && f.open.includes('tmp'));
   assert.ok(!f?.open?.includes('secrets') && !f?.open?.includes('daemon'));
@@ -47,7 +48,7 @@ test('the profile refuses every write, then allows the worker folders, then take
   assert.ok(at('(deny file-write*)') < at('(subpath "/Users/p/ffw/tmp")'));
   const back = p.lastIndexOf('(deny file-write*');
   assert.ok(back > at('(subpath "/Users/p/ffw/tmp")'), 'the read-only denies come after the worker folders (later rules win)');
-  assert.ok(p.indexOf(`(subpath "${path.join('/Users/p/ffw', 'repo')}")`) < back, 'the main clone stays writable: worktree git writes its index and objects there');
+  assert.ok(p.indexOf(`(subpath "${path.posix.join('/Users/p/ffw', 'repo')}")`) < back, 'the main clone stays writable: worktree git writes its index and objects there');
   for (const s of ['(subpath "/Users/p/ffw/daemon")', '(subpath "/Users/p/ffw/secrets")', '(literal "/Users/p/ffw/root.json")']) assert.ok(at(s) > back, s);
   // No blanket home or /tmp allowance: only named paths in them.
   assert.ok(!p.includes('(subpath "/Users/p")'));
@@ -317,11 +318,17 @@ test('w5659: preference writes through cfprefsd are refused only when prefDeny i
 });
 
 test('w5546 lockout review B3: a Dev Drive install\'s secrets in the host folder are closed too, on every OS', () => {
-  assert.deepEqual(secretsDirs('/r'), ['/r/secrets']);
-  assert.deepEqual(secretsDirs('/r', '/r/secrets/machine-token'), ['/r/secrets'], 'the same folder once');
-  assert.deepEqual(secretsDirs('/r', '/host/ffw/secrets/machine-token'), ['/r/secrets', '/host/ffw/secrets'], 'the host folder (LothDesktop: D:\\work\\ffw\\secrets for root V:\\ffw)');
-  assert.deepEqual(secretsDirs('/r', '/home/p/token'), ['/r/secrets'], 'a token file in a folder not named secrets never closes that folder');
-  const p = seatbeltProfile({ ...F, secretsDirs: secretsDirs(F.root, '/Volumes/host/ffw/secrets/machine-token') });
+  // secretsDirs runs on every OS with that OS's paths: '/r' resolves to V:\r on Windows (w5808), so the expectations resolve too.
+  const r = (p: string) => path.resolve(p);
+  assert.deepEqual(secretsDirs('/r'), [r('/r/secrets')]);
+  assert.deepEqual(secretsDirs('/r', '/r/secrets/machine-token'), [r('/r/secrets')], 'the same folder once');
+  assert.deepEqual(secretsDirs('/r', '/host/ffw/secrets/machine-token'), [r('/r/secrets'), r('/host/ffw/secrets')], 'the host folder (LothDesktop: D:\\work\\ffw\\secrets for root V:\\ffw)');
+  assert.deepEqual(secretsDirs('/r', '/home/p/token'), [r('/r/secrets')], 'a token file in a folder not named secrets never closes that folder');
+  if (process.platform === 'win32') assert.deepEqual(secretsDirs('V:\\ffw', 'D:\\work\\ffw\\Secrets\\machine-token'), ['V:\\ffw\\secrets', 'D:\\work\\ffw\\Secrets'], "LothDesktop's own layout, any case");
+  // The profile is built on macOS only, where secretsDirs answers POSIX paths; on Windows it answers drive paths (above), so
+  // the test hands the profile what macOS would get (w5808).
+  const macDirs = path.sep === '/' ? secretsDirs(F.root, '/Volumes/host/ffw/secrets/machine-token') : ['/Users/p/ffw/secrets', '/Volumes/host/ffw/secrets'];
+  const p = seatbeltProfile({ ...F, secretsDirs: macDirs });
   const deny = p.slice(p.indexOf('(deny file-read-data'), p.indexOf('(allow file-read-data'));
   assert.ok(deny.includes('(subpath "/Volumes/host/ffw/secrets")'), deny);
   assert.equal(deny.split('(subpath "/Users/p/ffw/secrets")').length, 2, '<root>/secrets once');
@@ -337,7 +344,7 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
   const p = seatbeltProfile(F);
   const deny = p.slice(p.indexOf('(deny file-read-data'), p.indexOf('(allow file-read-data'));
   const allow = p.slice(p.indexOf('(allow file-read-data'));
-  const sub = `(subpath ${JSON.stringify(path.join(F.root, 'steam'))})`;
+  const sub = `(subpath ${JSON.stringify(path.posix.join(F.root, 'steam'))})`;
   assert.ok(deny.includes(sub), deny);
   assert.ok(!/steam/.test(allow), allow);
   assert.ok(!deny.includes('steam-lobby-gate'), "the lobby gate's folder, which workers write, stays readable");
@@ -402,8 +409,10 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
   for (const d of ['secrets', 'daemon/logs', 'daemon/gh-app', 'daemon/app/machine']) fs.mkdirSync(path.join(root, d), { recursive: true });
   for (const f of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/app/machine/ghApp.ts', 'daemon/pause.json']) fs.writeFileSync(path.join(root, f), 'x');
   const t = readFenceProbeTargets({ root, appDir: app, secrets: [path.join(root, 'secrets')], tokenFile: path.join(root, 'secrets/machine-token'), allowBack: ['logs', 'pause.json', 'missing.json'], linux: false });
-  assert.deepEqual(t.closed.map((p) => path.relative(root, p)), ['secrets', 'secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json']);
-  assert.deepEqual(t.open.map((p) => path.relative(root, p)), ['daemon/logs', 'daemon/pause.json', 'daemon/app/machine/ghApp.ts'], 'only paths that are there');
+  // path.relative answers in the OS's separator (backslashes on Windows, w5808): compare with forward slashes.
+  const rel = (p: string) => path.relative(root, p).split(path.sep).join('/');
+  assert.deepEqual(t.closed.map(rel), ['secrets', 'secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json']);
+  assert.deepEqual(t.open.map(rel), ['daemon/logs', 'daemon/pause.json', 'daemon/app/machine/ghApp.ts'], 'only paths that are there');
   // The probe program itself, unfenced here: everything opens. A file it may not open answers `refused`.
   const r = spawnSync(process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open], { encoding: 'utf8' });
   const v = judgeReadProbe(t, r.stdout);

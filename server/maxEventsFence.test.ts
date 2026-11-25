@@ -46,8 +46,8 @@ test('every fence keeps the daemon\'s folder, and so the events file, out of a w
   // macOS: Seatbelt denies writes under <root>/daemon after allowing the root's open folders.
   assert.ok(READ_ONLY_IN_ROOT.subpaths.includes('daemon'));
   const profile = seatbeltProfile({ root: '/r', home: '/Users/u', darwinTemp: '/private/var/folders/x/T', darwinCache: '/private/var/folders/x/C', extraWritable: [] } as never);
-  const daemonRule = `(subpath ${JSON.stringify(path.join('/r', 'daemon'))})`;
-  assert.ok(profile.indexOf(daemonRule) > profile.lastIndexOf('(allow file-write* (subpath') && profile.indexOf(daemonRule) > profile.indexOf(`(subpath ${JSON.stringify(path.join('/r', 'tmp'))})`), "the daemon's folder is denied after the root's folders are allowed");
+  const daemonRule = `(subpath ${JSON.stringify(path.posix.join('/r', 'daemon'))})`;
+  assert.ok(profile.indexOf(daemonRule) > profile.lastIndexOf('(allow file-write* (subpath') && profile.indexOf(daemonRule) > profile.indexOf(`(subpath ${JSON.stringify(path.posix.join('/r', 'tmp'))})`), "the daemon's folder is denied after the root's folders are allowed");
   assert.ok(!profile.includes('max-events'));
   // Windows: the daemon's folder is never labelled Low, nor anything in it but what workerIntegrityAllow names.
   const t = lowTargets({ root: path.resolve('/r'), appDir: path.resolve('/r/daemon'), children: [{ name: 'daemon', dir: true }, { name: 'sandboxes', dir: true }], exists: () => false });

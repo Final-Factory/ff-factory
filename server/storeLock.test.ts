@@ -112,12 +112,12 @@ test('"on" stays off for a main clone outside <root>/repo, no root, no git folde
 test('the fences: with lockStore, repo leaves the Seatbelt and Landlock write sets, and its git folder is Medium on Windows', () => {
   const root = path.resolve('/Users/p/ffw');
   const mac = (lockStore: boolean) => fenceFor({ setting: 'seatbelt', root, platform: 'darwin', home: '/Users/p', lockStore, exists: () => true, getconf: (n) => `/t/${n}` })!;
-  // The profile quotes each path, doubling a backslash (workerFence.ts lit): on Windows path.join gives D:\...
+  // The profile quotes each path, doubling a backslash (workerFence.ts lit), and joins with path.posix, a macOS text on every host (w5808): on Windows the root is a drive path
   const subpath = (p: string) => `(subpath ${JSON.stringify(p)})`;
-  const repoRule = subpath(path.join(root, 'repo'));
+  const repoRule = subpath(path.posix.join(root, 'repo'));
   assert.ok(seatbeltProfile(mac(false)).includes(repoRule));
   assert.ok(!seatbeltProfile(mac(true)).includes(repoRule), 'locked: repo is not writable');
-  assert.ok(seatbeltProfile(mac(true)).includes(subpath(path.join(root, 'sandboxes'))), 'the slots still are');
+  assert.ok(seatbeltProfile(mac(true)).includes(subpath(path.posix.join(root, 'sandboxes'))), 'the slots still are');
   // path.join throughout (w5764's review): the file runs on Windows too.
   const L = path.resolve('/home/u/ffw');
   const lin = (lockStore: boolean) => writeLockArgs({ root: L, lockStore });

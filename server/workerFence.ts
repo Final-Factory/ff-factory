@@ -53,6 +53,13 @@ export interface WorkerFence {
   prefDeny?: boolean;
 }
 
+/**
+ * Paths in a Seatbelt profile are macOS paths, so the profile and fenceEnv join them with POSIX rules on every host
+ * (w5808). On macOS `path` is `path.posix` itself, so nothing changes there; the fence is never built off macOS
+ * (fenceFor), but the unit tests build its profile on Windows too, where `path` would join with backslashes.
+ */
+const mac = path.posix;
+
 /** An SBPL string literal. */
 const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
@@ -128,8 +135,8 @@ export const SIGNAL_RULES = [';; signals: only to this fence\'s own processes (w
 export const PREF_RULES = [";; preferences through cfprefsd are refused too (w5659, with the file deny of ~/Library/Preferences)", '(deny user-preference-write)'];
 
 export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
-  const home = (p: string) => path.join(f.home, p);
-  const extra = (f.extraWritable ?? []).filter((p) => path.isAbsolute(p));
+  const home = (p: string) => mac.join(f.home, p);
+  const extra = (f.extraWritable ?? []).filter((p) => mac.isAbsolute(p));
   return [
     '(version 1)',
     '(allow default)',
@@ -137,7 +144,7 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     '(deny file-write*)',
     ';; only the root folders workers write (w5569): a portal, an instances folder or a new root folder stays read-only',
     '(allow file-write*',
-    ...(f.open ?? openChildren(f.root)).map((c) => `  (subpath ${lit(path.join(f.root, c))})`),
+    ...(f.open ?? openChildren(f.root)).map((c) => `  (subpath ${lit(mac.join(f.root, c))})`),
     ')',
     ';; device nodes every shell writes to',
     '(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty") (literal "/dev/ptmx")',
@@ -164,9 +171,9 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     ...(own ? ownTranscriptRules(own) : []),
     ';; inside the root, read-only for workers',
     '(deny file-write*',
-    ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
-    ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
-    ...(f.appDir && f.appDir !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
+    ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(mac.join(f.root, p))})`),
+    ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(mac.join(f.root, p))})`),
+    ...(f.appDir && f.appDir !== mac.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
@@ -177,14 +184,14 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
 
 /** The read half (w5546, w5547): deny reads of the closed folders, then give back what workers read there. */
 function readRules(f: WorkerFence): string[] {
-  const daemon = f.appDir ?? path.join(f.root, 'daemon');
+  const daemon = f.appDir ?? mac.join(f.root, 'daemon');
   const spot = (p: string) => (/\.[a-z]+$/i.test(p) ? 'literal' : 'subpath');
   const denied = [
-    ...READ_DENIED_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
-    ...READ_DENIED_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
-    ...(daemon !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(daemon)})`] : []),
-    ...(f.secretsDirs ?? []).filter((p) => path.isAbsolute(p) && p !== path.join(f.root, 'secrets')).map((p) => `  (subpath ${lit(p)})`),
-    ...(f.readDenied ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
+    ...READ_DENIED_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(mac.join(f.root, p))})`),
+    ...READ_DENIED_IN_ROOT.files.map((p) => `  (literal ${lit(mac.join(f.root, p))})`),
+    ...(daemon !== mac.join(f.root, 'daemon') ? [`  (subpath ${lit(daemon)})`] : []),
+    ...(f.secretsDirs ?? []).filter((p) => mac.isAbsolute(p) && p !== mac.join(f.root, 'secrets')).map((p) => `  (subpath ${lit(p)})`),
+    ...(f.readDenied ?? []).filter((p) => mac.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
   ];
   return [
     ';; reads: the daemon\'s folder, the secrets and the root\'s record are closed (w5546), except what workers read there',
@@ -193,8 +200,8 @@ function readRules(f: WorkerFence): string[] {
     ')',
     '(allow file-read-data',
     `  (literal ${lit(daemon)})`,
-    ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
-    ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
+    ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(mac.join(daemon, p))})`),
+    ...(f.readAllowed ?? []).filter((p) => mac.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
     ')',
     ...(f.ownerSecrets ? ownerSecretRules(f.ownerSecrets.mach) : []),
   ];
@@ -247,7 +254,7 @@ export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS
  * (w5693, w5745) are not set here: machine/sharedCaches.ts sandboxUvEnv gives every sandbox agent, fenced or not, and its
  * editor the workers' ones, by one rule.
  */
-export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: path.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: path.join(f.root, 'tmp', 'zsh') });
+export const fenceEnv = (f: WorkerFence): Record<string, string> => ({ CLAUDE_CODE_TMPDIR: mac.join(f.root, 'tmp', 'claude-code'), DISABLE_AUTOUPDATER: '1', TMPPREFIX: mac.join(f.root, 'tmp', 'zsh') });
 
 /** The argv that runs `command args` inside the fence. */
 export const fencedArgv = (f: WorkerFence, command: string, args: string[], own?: OwnTranscript) => [SANDBOX_EXEC, '-p', seatbeltProfile(f, own), command, ...args];
