@@ -1,0 +1,1 @@
+- Workers (w5581): a firewall read that fails now says why in its warning (the error, or the last lines it printed). The read lists the machine's processes once rather than once per tailnet-only program, and a failure reading one program's rule or connections no longer loses the whole answer. After #1265 merged, BEAST's tools run logged only "could not read the rules".

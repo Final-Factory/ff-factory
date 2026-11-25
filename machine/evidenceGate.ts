@@ -418,3 +418,40 @@ export function trustedGit(): string {
 // `remote -v` and `log` run no hooks, no pager (stdout is a pipe) and no external diff (--no-ext-diff); a repo's fsmonitor and a
 // signature check (gpg.program) are the programs left, both off here.
 export const TRUSTED_GIT = ['-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false'];
+
+/** Whether `p` is a file this user may run (POSIX). */
+function runnable(p: string): boolean {
+  try {
+    fs.accessSync(p, fs.constants.X_OK);
+    return fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * w5836: a `python` in the agents' bin folder (first on a worker's PATH) on a macOS or Linux machine that has python3 and no
+ * python (biscuit: Ubuntu ships only python3), so the documented `python "$FF_SKILLS/evidence-gate/pr_evidence.py"` and
+ * every other `python …` command run there. It runs that python3 by its full path. Removed again once the machine has a
+ * python of its own; Windows has none (its python is `python`). Answers what it did. Nothing trusts it: the merge gate
+ * resolves its own python3 outside this worker-writable folder (trustedPython).
+ */
+export function installPythonShim(bin: string, pathVar = process.env.PATH ?? '', platform: NodeJS.Platform = process.platform, canRun = runnable): 'written' | 'removed' | 'none' {
+  if (platform === 'win32') return 'none';
+  const shim = path.join(bin, 'python');
+  const dirs = pathVar.split(':').filter((d) => d && path.resolve(d) !== path.resolve(bin));
+  const find = (name: string) => dirs.map((d) => path.posix.join(d, name)).find((p) => canRun(p));
+  const mine = fs.existsSync(shim) && fs.readFileSync(shim, 'utf8').includes('# FF Factory: python (w5836)');
+  const python3 = find('python3');
+  if (find('python') || !python3) {
+    if (!mine) return 'none';
+    fs.rmSync(shim, { force: true });
+    return 'removed';
+  }
+  if (fs.existsSync(shim) && !mine) return 'none';
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(`${shim}.tmp`, `#!/bin/sh\n# FF Factory: python (w5836): this machine has only python3. Written by the machine daemon at start.\nexec "${python3.replace(/(["$`\\])/g, '\\$1')}" "$@"\n`);
+  fs.chmodSync(`${shim}.tmp`, 0o755);
+  fs.renameSync(`${shim}.tmp`, shim);
+  return 'written';
+}
