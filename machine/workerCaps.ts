@@ -32,11 +32,14 @@
 // - off: nothing starts: no job, no scope limits, no watch, no temp stop.
 // - warn: everything is measured and reported, nothing is limited or ended. Windows: the job exists with no limit flags and the
 //   helper's `stat` answers the active count and the peak commit. Linux: the scope has no MemoryMax or TasksMax, and its
-//   memory.peak and pids.peak are read. A Mac: the tree watch only reports. The temp folder: reported, not stopped. A report
-//   says "would have hit" (capNote) and the host.log's last line says the peaks seen, so a week of it can set enforce.
-// - enforce: the limits above, with two safeguards: tools are ended only when the process list proves who the host's claude is
-//   (an empty or host-less list ends nothing, and the helper skips a pid that is no longer in the job), and on Linux the
-//   kernel's own action (an OOM kill, a refused fork) is reported but never followed by a kill of ours.
+//   anonymous memory (memory.stat's anon, no page cache; w5766) and pids.peak are read. A Mac: the tree watch only reports. The
+//   temp folder (a hard-linked file counted once): reported, not stopped. The worker's note is only a note (capNote) and the
+//   host.log's last line says the peaks seen, so a week of it can set enforce.
+// - enforce: the limits above, with these safeguards: tools are ended only when the process list proves who the host's claude
+//   is (an empty or host-less list ends nothing, and the helper skips a pid that is no longer in the job); the Unity MCP server
+//   and `ff-leftovers launch` programs are spared, and nothing is ended when their environments cannot be read (w5766); on
+//   Linux and a Mac a pid is ended only if a re-read just before the kill shows the same process (pid, parent, start time;
+//   w5766); and on Linux the kernel's own action (an OOM kill, a refused fork) is reported but never followed by a kill of ours.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -133,7 +136,15 @@ export function capNote(h: CapHit): string {
         ? 'Something you ran asked for more memory than a worker may use: run fewer heavy jobs at once (a batch Unity build is about 15 GB), or find the runaway before you start it again.'
         : 'Something you ran started processes without end (a fork loop, a runaway script): fix it before you run it again.';
   if (h.warn) {
-    return `FF Factory measured your tools: you would have hit your ${capWords(h)} (warn-only: nothing was stopped; w5554, docs/worker-caps.md). ${what} Say in your report that this happened.`;
+    // w5766 (from the reviews of w5554): only a note, so it reads as one. Nothing was stopped and nothing is wrong yet; the
+    // numbers help set the caps, so it asks for a line in the report, not for the work to stop.
+    const tip =
+      h.kind === 'temp'
+        ? 'If some of it is done with, removing it (rm -rf "$TMPDIR/<name>", each path written out) keeps you clear of the cap.'
+        : h.kind === 'memory'
+          ? 'If you are running several heavy jobs at once (a batch Unity build is about 15 GB), running fewer keeps you clear of the cap.'
+          : 'If something you started keeps starting processes (a loop, a script), it is worth a look.';
+    return `For your information: your tools went past the ${capWords(h)} that worker caps measure (w5554, docs/worker-caps.md). The caps only measure for now, so nothing was stopped and you can carry on. ${tip} Please mention it in your report.`;
   }
   if (h.kernel) {
     return `You hit your ${capWords(h)} (w5554, docs/worker-caps.md): the kernel ended the biggest process of your scope or refused a new one; FF Factory ended nothing else and your session goes on. ${what} Say in your report that this happened.`;
@@ -150,7 +161,7 @@ export function capLedgerLine(sessionId: string, arg: unknown): string | undefin
   if (!a || !['memory', 'processes', 'temp'].includes(a.kind as string) || typeof a.limit !== 'number' || typeof a.ended !== 'number') return undefined;
   const seen = typeof a.seen === 'number' ? a.seen : undefined;
   const words = capWords({ kind: a.kind as CapKind, limit: a.limit, seen });
-  if (a.warn === true) return `worker ${sessionId.slice(0, 8)} would have hit its ${words} (warn-only: nothing was stopped; w5554)`;
+  if (a.warn === true) return `worker ${sessionId.slice(0, 8)} went past its ${words} (measured only: nothing was stopped; w5554)`;
   if (a.kernel === true) return `worker ${sessionId.slice(0, 8)} hit its ${words}: the kernel ended a process or refused a fork, FF Factory ended nothing (w5554)`;
   return `worker ${sessionId.slice(0, 8)} hit its ${words}: FF Factory ended ${a.ended} of its tool processes (w5554)`;
 }
@@ -162,16 +173,55 @@ export interface PsRow {
   ppid: number;
   /** Resident bytes. */
   rss: number;
+  /** When it started (`lstart`, "Wed Nov 25 16:03:25 2026"): with the pid and parent, which process this is (w5766, pid reuse). */
+  start?: string;
 }
 
-/** `ps -axo pid=,ppid=,rss=` (rss in KiB) as rows. */
+/** The `ps` arguments parsePs reads: every process, its parent, its resident KiB and its start time. */
+export const PS_ARGS = ['-axo', 'pid=,ppid=,rss=,lstart='];
+
+/** `ps -axo pid=,ppid=,rss=,lstart=` (rss in KiB) as rows; a line without lstart has no start. */
 export function parsePs(out: string): PsRow[] {
   const rows: PsRow[] = [];
   for (const line of out.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)/.exec(line);
-    if (m) rows.push({ pid: +m[1], ppid: +m[2], rss: +m[3] * 1024 });
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)(?:\s+(\S.*?))?\s*$/.exec(line);
+    if (m) rows.push({ pid: +m[1], ppid: +m[2], rss: +m[3] * 1024, ...(m[4] ? { start: m[4].replace(/\s+/g, ' ') } : {}) });
   }
   return rows;
+}
+
+/**
+ * Whether `now` (a process list read just before a kill) still shows the process `then` (from the list the kill was decided
+ * on): the same pid, parent and start time (w5766, from w5689's review: between reading the list and the kill another program
+ * can get a reused pid). An unknown start time never matches: a process that cannot be told apart is not ended.
+ */
+export function sameProcess(then: PsRow | undefined, now: PsRow | undefined): boolean {
+  return !!then && !!now && then.pid === now.pid && then.ppid === now.ppid && !!then.start && then.start === now.start;
+}
+
+/**
+ * What a kill of the worker's tools spares besides the host and its claude (w5766): the Unity MCP server its claude runs (its
+ * environment carries FF_UNITY_MCP, machine/unityMcp.ts scopedUnityMcp; its uvx and python inherit it), and a program
+ * started for a person with `ff-leftovers launch` and what that starts (FF_FOR_PERSON and no session, machine/leftovers.ts
+ * personEnv). Ending the first cuts the worker off its editor; ending the second closes a person's window.
+ */
+export function sparedByEnv(e: { session?: string; person?: string; mcp?: string } | undefined): boolean {
+  return !!e && (!!e.mcp || (!!e.person && !e.session));
+}
+
+/** The pids of `envs` that a kill spares (sparedByEnv). */
+export function sparedPids(envs: Map<number, { session?: string; person?: string; mcp?: string }>): Set<number> {
+  return new Set([...envs].filter(([, e]) => sparedByEnv(e)).map(([p]) => p));
+}
+
+/**
+ * Linux: a cgroup's anonymous memory from its `memory.stat` (`anon 123`), -1 when absent (w5766). memory.peak and
+ * memory.current count page cache too, which MemoryMax reclaims before it acts, so a worker that only read a big clone looked
+ * near the cap; anon is what the cap would actually have to refuse.
+ */
+export function anonBytes(stat: string): number {
+  const m = /^anon\s+(\d+)\s*$/m.exec(stat);
+  return m ? Number(m[1]) : -1;
 }
 
 /** `root` and every process under it. */
@@ -316,7 +366,14 @@ export interface CapsOptions {
   cgroup?: string;
   /** CAP_WATCH's timings (tests). */
   watch?: Partial<typeof CAP_WATCH>;
+  /** The FF variables of processes (tests; else machine/leftovers.ts readEnvs): what a kill spares (sparedByEnv). */
+  readEnvs?: (platform: NodeJS.Platform, pids: number[]) => Promise<Map<number, { session?: string; person?: string; mcp?: string }>>;
+  /** The process list (tests: a pid reused between a kill's list and its re-read); else `ps` with PS_ARGS. */
+  ps?: () => PsRow[];
 }
+
+/** machine/leftovers.ts readEnvs, loaded only when a kill needs it (it is big, and warn mode never kills). */
+const leftoverEnvs = async (platform: NodeJS.Platform, pids: number[]) => (await import('./leftovers.ts')).readEnvs(platform as 'win32' | 'darwin' | 'linux', pids);
 
 /**
  * The caps of the host this runs in, live: returns a stop, which logs the peaks seen and resolves once the job helper is gone
@@ -339,61 +396,118 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
   const reportedSeen = new Map<CapKind, number>();
   let killing: Promise<number> | undefined;
   // What was seen, for the line the host logs when it stops (a week of these sets enforce): the most processes (Linux: tasks)
-  // at once, the peak memory (Windows: commit; Linux: the scope's, page cache included; a Mac: resident), the biggest temp
+  // at once, the peak memory (Windows: commit; Linux: the scope's anonymous memory, no page cache; a Mac: resident), the biggest temp
   // folder measured (it is measured only now and then).
   const peaks = { active: 0, memory: 0, temp: 0 };
   const finals: Array<() => Promise<void> | void> = [];
 
-  const ps = (): PsRow[] => parsePs(spawnSync('ps', ['-axo', 'pid=,ppid=,rss='], { encoding: 'utf8', timeout: 10_000 }).stdout ?? '');
+  const ps = o.ps ?? ((): PsRow[] => parsePs(spawnSync('ps', PS_ARGS, { encoding: 'utf8', timeout: 10_000 }).stdout ?? ''));
   const cgroup = o.cgroup ?? (platform === 'linux' ? ownCgroup() : undefined);
   const scoped = !!cgroup && /\/ffw-agent-[^/]+\.scope$/.test(cgroup);
+  // The job helper's answers a kill waits for ("pids", "killed"): each waiter takes the line it is for.
+  const jobWaiters: Array<(line: string) => boolean> = [];
+  const askJob = (cmd: string, event: string, ms: number): Promise<string | undefined> =>
+    new Promise((resolve) => {
+      const t = setTimeout(() => {
+        const i = jobWaiters.indexOf(take);
+        if (i >= 0) jobWaiters.splice(i, 1);
+        resolve(undefined);
+      }, ms);
+      t.unref();
+      const take = (line: string) => {
+        if (!line.includes(`"event":"${event}"`)) return false;
+        clearTimeout(t);
+        resolve(line);
+        return true;
+      };
+      jobWaiters.push(take);
+      job!.stdin!.write(`${cmd}\n`);
+    });
+
+  // The pids of `pids` a kill spares (sparedByEnv), or undefined when their environments could not be read: then nothing is
+  // ended, since a Unity MCP server or a person's program could not be told from a tool.
+  const spareOf = async (pids: number[]): Promise<Set<number> | undefined> => {
+    try {
+      return sparedPids(await (o.readEnvs ?? leftoverEnvs)(platform, pids));
+    } catch (e) {
+      o.log(`worker caps: ended nothing: the tools' environments could not be read, so UnityMCP and ff-leftovers launch programs could not be spared (${(e as Error).message.slice(0, 200)})`);
+      return undefined;
+    }
+  };
 
   // Ends the tools: the job's (Windows), the scope's (Linux, a setsid escapee included), else the tree's. Resolves how many.
   // Never in warn mode, and never without a process list that holds the host: with none, which process is its claude is a guess.
+  // Spared besides the host and its claude: the Unity MCP server and `ff-leftovers launch` programs (sparedByEnv, w5766).
+  const endWith = async (): Promise<number> => {
+    if (job?.stdin?.writable) {
+      // The job's pids first, to read their environments; the helper then ends only pids of that list (a process that started
+      // since is spared, as a pid missing from its snapshot is), each checked to be in the job still.
+      const listed = await askJob('pids', 'pids', 15_000);
+      const all = /"pids":\[([\d,]*)\]/.exec(listed ?? '')?.[1];
+      if (all === undefined) {
+        o.log('worker caps: ended nothing: the job helper did not list its processes');
+        return 0;
+      }
+      const pids = all.split(',').filter(Boolean).map(Number);
+      const spare = await spareOf(pids);
+      if (!spare) return 0;
+      const may = pids.filter((p) => p !== host && !spare.has(p));
+      if (spare.size) o.log(`worker caps: spared ${spare.size} process(es) of UnityMCP or ff-leftovers launch: ${[...spare].join(' ')}`);
+      if (!may.length) return 0;
+      const done = await askJob(`kill-tools ${host} ${may.join(' ')}`, 'killed', 15_000);
+      if (!done) return 0;
+      const why = /"why":"([^"]*)"/.exec(done)?.[1];
+      if (why) o.log(`worker caps: the job helper ended nothing: ${why}`);
+      return Number(/"n":(\d+)/.exec(done)?.[1] ?? 0);
+    }
+    const rows = ps();
+    let pids = treeOf(rows, host).map((r) => r.pid);
+    if (scoped) {
+      try {
+        pids = fs.readFileSync(path.join(cgroup!, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean).map(Number);
+      } catch {
+        // the tree's
+      }
+    }
+    const ends = toolsToEnd(rows, host, pids);
+    if (ends.why) {
+      o.log(`worker caps: ended nothing: ${ends.why}`);
+      return 0;
+    }
+    const spare = await spareOf(ends.pids);
+    if (!spare) return 0;
+    if (spare.size) o.log(`worker caps: spared ${spare.size} process(es) of UnityMCP or ff-leftovers launch: ${[...spare].join(' ')}`);
+    // Pid reuse (w5766): the list is read again just before the kill, and only a process with the same pid, parent and start
+    // time as in the list the kill was decided on is ended. What remains is the time between that read and the kill.
+    const then = new Map(rows.map((r) => [r.pid, r]));
+    const now = new Map(ps().map((r) => [r.pid, r]));
+    let n = 0;
+    let changed = 0;
+    for (const p of ends.pids) {
+      if (spare.has(p)) continue;
+      if (!sameProcess(then.get(p), now.get(p))) {
+        if (now.has(p)) changed++;
+        continue;
+      }
+      try {
+        process.kill(p, 'SIGKILL');
+        n++;
+      } catch {
+        // gone already
+      }
+    }
+    if (changed) o.log(`worker caps: left ${changed} process(es) whose pid now names another process (pid reuse)`);
+    return n;
+  };
   const endTools = (): Promise<number> => {
     if (warn) return Promise.resolve(0);
     if (killing) return killing;
-    killing = new Promise<number>((resolve) => {
-      if (job?.stdin?.writable) {
-        const onLine = (d: Buffer) => {
-          const m = /"event":"killed","n":(\d+)/.exec(String(d));
-          if (!m) return;
-          job?.stdout?.off('data', onLine);
-          const why = /"why":"([^"]*)"/.exec(String(d))?.[1];
-          if (why) o.log(`worker caps: the job helper ended nothing: ${why}`);
-          resolve(Number(m[1]));
-        };
-        job.stdout?.on('data', onLine);
-        job.stdin.write(`kill-tools ${host}\n`);
-        setTimeout(() => resolve(0), 15_000).unref();
-        return;
-      }
-      const rows = ps();
-      let pids = treeOf(rows, host).map((r) => r.pid);
-      if (scoped) {
-        try {
-          pids = fs.readFileSync(path.join(cgroup!, 'cgroup.procs'), 'utf8').split('\n').filter(Boolean).map(Number);
-        } catch {
-          // the tree's
-        }
-      }
-      const ends = toolsToEnd(rows, host, pids);
-      if (ends.why) {
-        o.log(`worker caps: ended nothing: ${ends.why}`);
-        resolve(0);
-        return;
-      }
-      let n = 0;
-      for (const p of ends.pids) {
-        try {
-          process.kill(p, 'SIGKILL');
-          n++;
-        } catch {
-          // gone already
-        }
-      }
-      resolve(n);
-    }).finally(() => (killing = undefined));
+    killing = endWith()
+      .catch((e) => {
+        o.log(`worker caps: ended nothing: ${(e as Error).message}`);
+        return 0;
+      })
+      .finally(() => (killing = undefined));
     return killing;
   };
 
@@ -450,7 +564,9 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
           while ((i = buf.indexOf('\n')) >= 0) {
             const line = buf.slice(0, i).trim();
             buf = buf.slice(i + 1);
-            if (line.includes('"ready"')) (clearTimeout(t), resolve(true));
+            const wi = jobWaiters.findIndex((f) => f(line));
+            if (wi >= 0) jobWaiters.splice(wi, 1);
+            else if (line.includes('"ready"')) (clearTimeout(t), resolve(true));
             else if (line.includes('"error"')) (o.log(`worker caps: the job helper: ${line}`), clearTimeout(t), resolve(false));
             else if (line.includes('"stat"')) {
               const m = /"active":(\d+),"peak":(\d+)/.exec(line);
@@ -506,9 +622,19 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
       }
       return -1;
     };
+    const anon = () => {
+      try {
+        return anonBytes(fs.readFileSync(path.join(cgroup!, 'memory.stat'), 'utf8'));
+      } catch {
+        return -1;
+      }
+    };
     const look = () => {
-      // memory.peak counts page cache too, so warn mode reads high against MemoryMax (which reclaims cache first): a warning, never a stop.
-      const mem = readFirst('memory.peak', 'memory.current');
+      // The anonymous memory, read every POLL_MS (w5766): memory.peak and memory.current count page cache too, which MemoryMax
+      // reclaims before it refuses anything, so they read high. anon has no kernel peak: a spike between two looks is missed.
+      // Without memory.stat, memory.current (cache included).
+      const a = anon();
+      const mem = a >= 0 ? a : readFirst('memory.current');
       const tasks = readFirst('pids.peak', 'pids.current');
       peaks.memory = Math.max(peaks.memory, mem);
       peaks.active = Math.max(peaks.active, tasks);

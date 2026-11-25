@@ -31,6 +31,7 @@ import {
   ffboxRelinkSteps,
   historyPlan,
   indexSpec,
+  machineLinkPreflight,
   manifestDiff,
   manifestDir,
   parseManifest,
@@ -1403,7 +1404,15 @@ export class Migration {
     // 1. The first copy while BEAST still runs, so the stop waits only for what changes after it; rewritten once to check
     // it before anything is touched.
     const first = await this.pullAll();
-    const { publicUrl } = this.rewrite();
+    const { next: firstNext, publicUrl } = this.rewrite();
+    // The daemon link is tailnet-only (w5575): a portal that daemons reach by a LAN or public address would refuse them all
+    // under enforce. Checked on the config this portal will start on, before BEAST or this portal is touched (w5716).
+    const lockout = machineLinkPreflight(readJson(path.join(firstNext, 'config', 'config.json')), publicUrl, { serve: this.o.tailscale });
+    if (lockout) {
+      this.say(`refused, nothing on BEAST or here was touched: ${lockout}`);
+      this.writeReport('cut-over-refused');
+      return 4;
+    }
     const beastCfg = readJson(path.join(this.stage, 'beast', 'config.json'));
     const beastPort = Number(beastCfg.port ?? 8790);
     this.say('');
@@ -1472,6 +1481,10 @@ export class Migration {
       // 4. The rest of the copy: nothing changes on BEAST any more.
       const last = await this.pullAll();
       const { next } = this.rewrite();
+      // BEAST's machineLinkTailnet may have changed since the first copy (w5771): the config this portal starts on is
+      // checked again, and a lockout now rolls back like any other failure here.
+      const lockoutNow = machineLinkPreflight(readJson(path.join(next, 'config', 'config.json')), publicUrl, { serve: this.o.tailscale });
+      if (lockoutNow) throw new Error(`the final copy would lock the daemons out: ${lockoutNow}`);
       // 5. This portal, for real.
       await this.sys.setDryRun(false);
       await this.install(next, last.moves);

@@ -116,6 +116,8 @@ export interface ProcEnv {
    * is live (queued, waiting for its ticket or running), whatever became of that worker or its request.
    */
   run?: string;
+  /** FF_UNITY_MCP: the Unity MCP server an agent's claude runs, and its uvx and python (w5766, machine/unityMcp.ts). */
+  mcp?: string;
 }
 
 /** w4047: a program a worker started for a person (`ff-leftovers launch`): the marker, and no session of its own. */
@@ -874,7 +876,7 @@ export class LeftoverReaper {
 
 // ---------------------------------------------------------------- the real machine
 
-const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN)=(.*)$/;
+const WANT = /^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN|FF_UNITY_MCP)=(.*)$/;
 
 /**
  * w3714: whether a process's FF_WORKER_ROOT is this daemon's root. Either unknown (a process of a worker from before
@@ -902,6 +904,8 @@ export function envFrom(entries: Iterable<string>): ProcEnv {
       if (m[2]) o.person = m[2];
     } else if (m[1] === 'FF_TIMED_RUN') {
       if (m[2]) o.run = m[2];
+    } else if (m[1] === 'FF_UNITY_MCP') {
+      if (m[2]) o.mcp = m[2];
     } else if (m[2]) o.root = m[2];
   }
   return o;
@@ -916,7 +920,7 @@ export function macEnvLine(line: string): { pid: number; env: ProcEnv } | undefi
   const m = /^\s*(\d+)\s+(.*)$/.exec(line);
   if (!m) return undefined;
   const env: ProcEnv = {};
-  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
+  for (const x of m[2].matchAll(/(?:^|\s)(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN|FF_UNITY_MCP)=(\S+)/g)) Object.assign(env, envFrom([`${x[1]}=${x[2]}`]));
   return { pid: Number(m[1]), env };
 }
 
@@ -966,7 +970,7 @@ export function winEnvScript(pids: number[]): string {
   const list = pids.filter((p) => Number.isInteger(p) && p > 4).join(',');
   return [
     `Add-Type -TypeDefinition @'\n${WIN_ENV_CS}\n'@`,
-    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON='))) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON']; run = $m['FF_TIMED_RUN'] } } }`,
+    `$out = foreach ($id in @(${list || '0'})) { $b = $null; try { $b = [FFProcEnv]::Block([int]$id) } catch { }; if ($b -and ($b.Contains('FF_SESSION_ID=') -or $b.Contains('FF_FOR_PERSON='))) { $m = @{}; foreach ($kv in $b.Split([char]0)) { if ($kv -match '^(FF_SESSION_ID|FF_SANDBOX_ID|FF_MACHINE_ID|FF_WORKER_ROOT|FF_FOR_PERSON|FF_TIMED_RUN|FF_UNITY_MCP)=(.*)$') { $m[$matches[1]] = $matches[2] } }; [pscustomobject]@{ pid = [int]$id; session = $m['FF_SESSION_ID']; sandbox = $m['FF_SANDBOX_ID']; machine = $m['FF_MACHINE_ID']; root = $m['FF_WORKER_ROOT']; person = $m['FF_FOR_PERSON']; run = $m['FF_TIMED_RUN']; mcp = $m['FF_UNITY_MCP'] } } }`,
     `@($out) | ConvertTo-Json -Compress`,
   ].join('\n');
 }
@@ -997,8 +1001,8 @@ export async function readEnvs(platform: UnityPlatform, pids: number[]): Promise
   }
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winEnvScript(pids)], { timeoutMs: 120_000 });
   if (r.code !== 0) throw new Error(`reading process environments failed (${r.code}): ${r.stderr.trim().slice(0, 200)}`);
-  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string; run?: string }>(r.stdout, 'the Windows process environments')) {
-    if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}), ...(x.run ? { run: x.run } : {}) });
+  for (const x of parsePsJson<{ pid: number; session?: string; sandbox?: string; machine?: string; root?: string; person?: string; run?: string; mcp?: string }>(r.stdout, 'the Windows process environments')) {
+    if (x.session || x.person) out.set(Number(x.pid), { ...(x.session ? { session: x.session } : {}), ...(x.sandbox ? { sandbox: x.sandbox } : {}), ...(x.machine ? { machine: x.machine } : {}), ...(x.root ? { root: x.root } : {}), ...(x.person ? { person: x.person } : {}), ...(x.run ? { run: x.run } : {}), ...(x.mcp ? { mcp: x.mcp } : {}) });
   }
   return out;
 }

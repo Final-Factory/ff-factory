@@ -121,7 +121,10 @@ class TestSystem implements System {
   constructor(portal: Portal) {
     this.portal = portal;
   }
+  /** How many times the migration stopped this VM's portal. */
+  stops = 0;
   async stopPortal() {
+    this.stops++;
     await this.portal.stop();
   }
   async startPortal() {
@@ -137,7 +140,7 @@ class TestSystem implements System {
   async logsSince(t: number) {
     return this.portal.log(t);
   }
-  async funnelState() {
+  async funnelState(): Promise<'funnel' | 'serve' | 'off' | undefined> {
     return undefined;
   }
   async setFunnel() {}
