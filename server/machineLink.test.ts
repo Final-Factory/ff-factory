@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -13,7 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
+import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
@@ -147,6 +147,60 @@ test('w1596: a worker install says it updates over its link; the portal sends th
   const bad = await s.mm.linkUpdate('mx');
   assert.equal(bad.ok, false);
   assert.equal(bad.rollback, 'ok');
+});
+
+test('w5593: a machine gets only what its checkout lacks, from the commit its daemon runs; one whose checkout lacks that base gets the full bundle', async (t) => {
+  const s = await setup(t);
+  await until('online, its hello read', () => s.mm.canLink('mx'));
+  s.d.selfUpdate.deps.launch = finishing(s, {});
+  const offered: UpdateBundle[] = [];
+  const offer = s.mm.bundles.offer.bind(s.mm.bundles);
+  s.mm.bundles.offer = (id, b, now) => (offered.push(b), offer(id, b, now));
+  let runs: string | undefined;
+  s.mm.daemonCommit = () => runs;
+  const f = updateFiles(s.appDir);
+  // A daemon that does not say its commit (or names one the portal lacks) gets the full bundle, as before.
+  const one = s.repo.commit;
+  runs = 'f'.repeat(40);
+  assert.equal((await s.mm.linkUpdate('mx')).ok, true);
+  assert.equal(offered.at(-1)?.from, undefined, 'an unknown commit: the full bundle');
+  const full1 = offered.at(-1)!;
+  // The portal moved on, with a big file: the daemon on `one` gets a bundle without what it has.
+  fs.writeFileSync(path.join(s.repo.root, 'big.bin'), randomBytes(200_000));
+  const two = portalRepo(s.repo.root, 'two').commit;
+  runs = one.slice(0, 8);
+  assert.equal((await s.mm.linkUpdate('mx')).ok, true);
+  const thin = offered.at(-1)!;
+  assert.deepEqual([thin.commit, thin.from], [two, [one]]);
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), two, 'checked out from the incremental bundle');
+  const three = portalRepo(s.repo.root, 'three').commit;
+  const full3 = await s.mm.bundles.prepare();
+  runs = two;
+  assert.equal((await s.mm.linkUpdate('mx')).ok, true);
+  assert.ok(offered.at(-1)!.size < full3.size / 10, `incremental ${offered.at(-1)!.size} bytes against the full ${full3.size}`);
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), three);
+  // The tools publish on a daemon that runs this commit already: from its parents.
+  runs = three;
+  assert.equal((await s.mm.linkUpdate('mx', { form: 'tools' })).ok, true);
+  assert.deepEqual(offered.at(-1)!.from, [two]);
+  // A checkout without the base (a machine installed another way, a checkout made again): its daemon refuses the incremental
+  // bundle and the full one goes in the same call, so it is never left behind.
+  const four = portalRepo(s.repo.root, 'four').commit;
+  fs.rmSync(f.src, { recursive: true, force: true });
+  const n = offered.length;
+  const r = await s.mm.linkUpdate('mx');
+  assert.equal(r.ok, true);
+  assert.deepEqual(offered.slice(n).map((b) => b.from), [[three], undefined], 'the incremental bundle, then the full one');
+  assert.equal(git(f.src, 'rev-parse', 'HEAD'), four);
+  // Any other refusal is not mended by the full bundle: it is not sent.
+  writeJson(f.job, { ...readJson<UpdateJob>(f.job)!, phase: 'staged', reported: false });
+  const m = offered.length;
+  await assert.rejects(s.mm.linkUpdate('mx'), /mx refused it: an update job of this machine is still running/);
+  assert.equal(offered.length, m + 1, 'one offer, no fall back');
+  // Bundles of the current commit stay; of older ones only the newest.
+  const left = fs.readdirSync(path.join(s.tmp, 'data', 'update-bundles')).filter((x) => x.endsWith('.bundle'));
+  assert.ok(left.includes(path.basename(full1.file)) === false, 'the first commit\'s bundle is gone');
+  assert.ok(left.filter((x) => x.startsWith(four.slice(0, 16))).length >= 2, `both of four's bundles stay: ${left.join(', ')}`);
 });
 
 test('w1596: the bundle goes only to the machine it was offered to, with its own credential; a wrong size, SHA-256 or commit changes nothing', async (t) => {
