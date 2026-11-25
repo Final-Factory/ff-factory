@@ -15,7 +15,7 @@ import { Auth } from './auth.ts';
 import { AttachmentStore } from './attachments.ts';
 import { Identity } from './identity.ts';
 import { routeMcp } from './mcp.ts';
-import { describeEvents, originOf, portalLinks, tailnetAddress, tailnetOnly, timing, turnOf } from './remoteChat.ts';
+import { describeEvents, originOf, portalLinks, tailnetAddress, tailnetDeviceAddress, tailnetOnly, timing, turnOf } from './remoteChat.ts';
 import type { Config } from './config.ts';
 import type { Requester, TranscriptEvent, UserInfo } from '../shared/types.ts';
 import { splitVia } from '../shared/replies.ts';
@@ -243,8 +243,8 @@ test('tailnetOnly and tailnetAddress: Funnel header, forwarded address only from
   assert.equal(tailnetOnly(req('::ffff:127.0.0.1', { 'x-forwarded-for': '100.90.1.2' })), undefined);
   assert.match(tailnetOnly(req('127.0.0.1', { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '100.90.1.2' }))!, /Funnel/);
   assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4' }))!, /tailnet/);
-  // The first forwarded address is the client's: Serve sets it, it does not append to what the client sent.
-  assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4, 100.90.1.2' }))!, /tailnet/);
+  // The last forwarded address is the one the proxy added; a tailnet address the client wrote in front of it means nothing (w5535).
+  assert.match(tailnetOnly(req('127.0.0.1', { 'x-forwarded-for': '100.90.1.2, 198.51.100.4' }))!, /tailnet/);
   // A connection that is not from this machine is judged by its own address; a forwarded header it sends means nothing.
   assert.equal(tailnetOnly(req('100.90.1.2', { 'x-forwarded-for': '8.8.8.8' })), undefined);
   assert.match(tailnetOnly(req('203.0.113.7', { 'x-forwarded-for': '100.90.1.2' }))!, /tailnet/);
@@ -387,4 +387,12 @@ test('turnOf and describeEvents: the turn that answers a message; the chat as te
   assert.match(text, /#1 you \(web app\): first/);
   assert.match(text, /#2 you \(Claude Code or Desktop \(k\)\): second/);
   assert.match(text, /#5 — turn ended \(it used: list_work\)/);
+});
+
+test('tailnetDeviceAddress: the device is looked up for a tailnet request, never for a Funnel or public one (w5532)', () => {
+  const req = (remote: string, headers: Record<string, string> = {}) => ({ socket: { remoteAddress: remote }, headers }) as never;
+  assert.equal(tailnetDeviceAddress(req('127.0.0.1', { 'x-forwarded-for': '100.90.1.2' })), '100.90.1.2', 'tailnet via the local proxy');
+  assert.equal(tailnetDeviceAddress(req('100.90.1.2')), '100.90.1.2', 'direct tailnet connection');
+  assert.equal(tailnetDeviceAddress(req('127.0.0.1', { 'tailscale-funnel-request': '?1', 'x-forwarded-for': '100.90.1.2' })), undefined, 'Funnel');
+  assert.equal(tailnetDeviceAddress(req('127.0.0.1', { 'x-forwarded-for': '198.51.100.4' })), undefined, 'public address');
 });

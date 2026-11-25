@@ -316,8 +316,11 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
 2. **The daemon checks it before anything runs.** It downloads `GET /machine/update/<sha256>` with its own credential (the
    portal serves only the bundle it offered that machine, for an hour), checks the size and SHA-256 against the message (which
    came on its own authenticated link), runs `git bundle verify`, fetches it into the install's checkout `<daemon>/src` (git
-   checks every object), checks that the bundle's HEAD is the commit named, and checks it out. A mismatch is refused with
-   the reason (`self_update_ack`) and changes nothing. A download that stalls (30 s without a byte) or breaks resumes from
+   checks every object), checks that the bundle's HEAD is the commit named, checks that commit is on ff-factory's main on
+   GitHub (w5516, `checkPublished`: an anonymous fetch of main into `refs/remotes/ff-published/main`, then `merge-base
+   --is-ancestor`; the portal deploys nothing else, so a portal sending another commit is refused), and checks it out. A
+   mismatch is refused with the reason (`self_update_ack`) and changes nothing. Only the link end-to-end test names another
+   published branch, its own repository (daemon.json `updateOrigin`). A download that stalls (30 s without a byte) or breaks resumes from
    the bytes it has with a Range request, up to 6 tries within 8 minutes, each logged in the daemon's log with its cause
    (`machine/selfUpdate.ts` `DOWNLOAD`; w1641: beast's stalled at 7 of 18.5 MB and Node's fetch sat 300 s before it said
    "terminated"). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
@@ -433,16 +436,31 @@ over ssh (the orchestration worker's path, [ops-worker.md](ops-worker.md)). It i
 
 ```bash
 # a Mac, as the account the daemon runs as (locally, or over ssh with no keychain):
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /Users/Shared/ffw
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --update --ref <commit> --root /Users/Shared/ffw
 # from a checkout of ff-factory instead:
 bash scripts/worker/install.sh --update --root /Users/Shared/ffw
 ```
 
 ```powershell
 # Windows, as the account the daemon's task runs as: a normal PowerShell, or an ssh session (elevated or not):
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\ffw
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Update -Ref <commit> -Root D:\ffw
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\worker\install.ps1 -Update -Root D:\ffw
 ```
+
+**`<commit>` is the portal's own full commit** (w5516, the w5452 security audit's finding 11): the `commit` field of
+`curl -fsS <portal>/api/health` (`server/version.ts` `portalCommit`). The installer is fetched at that commit and told to
+install exactly it, never main's head, which may hold code nobody verified yet. With a 40-character commit as `--ref` /
+`-Ref` the installer fetches that commit alone and checks it is what it got (`HEAD` equals it), the update checks out that
+commit and refuses one that is not on ff-factory's main as GitHub has it (`scripts/worker/worker.ts` `updateSource`), and a
+7-to-39-character id is refused (it could name another commit). Without `--ref` an update goes to the portal's commit as
+before. The rollout (`server/machineRollout.ts`) writes these commands itself from the verified deploy's sha, and counts an
+update done only when the daemon says hello on that commit (`checkEnded`). A join (`scripts/worker/join.sh`, `join.ps1`) is
+served with the portal's commit written in (`server/machineJoinHttp.ts` `PORTAL_COMMIT_MARK`) and pins the same way.
+
+**From today's daemon** (the first rollout of this change): the ssh form is written by the new portal, so it fetches the new
+installer at the verified commit whatever the machine ran before. Over the link, an older daemon checks the bundle and its
+commit as it always did and installs the portal's commit; from then on the daemon also checks every commit it is sent is on
+GitHub's main before it checks it out (below), so the next update is held to it.
 
 Both run `node scripts/worker/worker.ts update --root <root>`. What it does (each from what the ops worker hit
 reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
@@ -563,10 +581,10 @@ Before it, nothing in FF Factory ran `registerAgents.sh`: ff-agents 1.29.20 (fin
 ran it by hand.
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Tools -Root D:\ffw
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Tools -Ref <commit> -Root D:\ffw
 ```
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --tools --root ~/ffw
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --tools --ref <commit> --root ~/ffw
 ```
 
 What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):

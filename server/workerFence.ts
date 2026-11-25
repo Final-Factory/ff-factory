@@ -13,6 +13,7 @@
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
@@ -33,11 +34,12 @@ export interface WorkerFence {
 const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 
 /**
- * Inside the root, still read-only for workers: the daemon's folder, the secrets, the root's record. Not `repo`, the
+ * Inside the root, still read-only for workers: the daemon's folder, the secrets, the root's record, and the Medium agents'
+ * Claude Code folder (w5543: settings, plugins and hooks that agents outside the fence load). Not `repo`, the
  * main clone: a sandbox is a git worktree whose git data (index, objects, refs) lives in it, so a fenced commit there
  * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
  */
-export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN], files: ['root.json'] };
 
 export function seatbeltProfile(f: WorkerFence): string {
   const home = (p: string) => path.join(f.home, p);

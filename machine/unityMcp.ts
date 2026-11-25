@@ -116,7 +116,8 @@ export class McpScopes {
  * The uvx runs that fill a uv cache with the server's package, when the server is `uvx --offline --from <pkg> <tool>`
  * (what MCP for Unity registers): first a check that needs no network (the package already there), then the same run
  * online. Agents run the server against the worker install's own uv cache (UV_CACHE_DIR, w5281), which nothing else
- * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377).
+ * fills, and `--offline` cannot fill it, so every sandbox agent had no Unity MCP bridge on LothDesktop (w5377). Since w5565
+ * Medium agents have their own cache (sharedCaches.ts mediumUvCacheDir), filled the same way.
  * Undefined for any other server.
  */
 export function uvWarmRuns(server: StdioServer): { offline: string[]; online: string[] } | undefined {
