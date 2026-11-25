@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# fff-agent-views (w5598, docs/vault.md "In the VM"): the folders the portal's agents (fff-agent@.service, as AGENT_USER)
+# see, as idmapped bind mounts of the portal's own. Through a view, fff's files show as AGENT_USER's and what AGENT_USER
+# writes there is stored as fff's, so the portal reads its agents' transcripts and memory exactly as before, and with
+# agentAccount "off" the same files serve agents started as fff. The views sit in a root-only folder: only the agent unit's
+# own mount namespace (BindPaths=, BindReadOnlyPaths=) puts them where the agents look. Never the secrets folder, the
+# portal's home or its key: those stay out of the agents' namespace.
+#   fff-agent-views start   mount every view that is not mounted yet, then check each shows AGENT_USER as owner
+#   fff-agent-views stop    unmount them
+#   fff-agent-views check   exit 1 unless every view is mounted and owned right (fffctl fence-check, CI)
+set -o errexit -o nounset -o pipefail
+# shellcheck source=lib.sh
+. "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
+need_root
+load_conf
+VIEWS=${AGENT_VIEWS:-/run/fff-agent-views}
+# name, source, rw or ro. Claude Code's folder (transcripts, its .claude.json) and the orchestrators' memory are written;
+# the game repo, the settings (config holds no secret, w1078) and the data folder are read. The data folder's files are
+# as readable to the agents as they were to fff (the read guard keeps its closed files closed, server/secretGuard.ts);
+# what the agents may never read stays outside their namespace: the vault key (/etc/fff), the secrets folder, the
+# portal's home and every fff process's /proc.
+views() {
+  printf '%s\n' "claude $FFF_ROOT/home/.claude rw" "memory $FFF_ROOT/data/orchestrator-memory rw" \
+    "data $FFF_ROOT/data ro" "base ${BASE_PATH:-$FFF_ROOT/base} ro" "config $FFF_ROOT/config ro" "app $FFF_ROOT/app ro"
+}
+agent_uid=$(id -u "$AGENT_USER" 2>/dev/null) || die "fff-agent-views: no account $AGENT_USER (install.sh makes it)"
+agent_gid=$(id -g "$AGENT_USER")
+fff_uid=$(id -u "$FFF_USER")
+fff_gid=$(id -g "$FFF_USER")
+
+check() {
+  local bad=0 name src mode
+  while read -r name src mode; do
+    if ! mountpoint -q "$VIEWS/$name"; then
+      log "fff-agent-views: $VIEWS/$name is not mounted"
+      bad=1
+    elif [ "$(stat -c %u "$VIEWS/$name")" != "$agent_uid" ]; then
+      log "fff-agent-views: $VIEWS/$name shows owner $(stat -c %U "$VIEWS/$name"), not $AGENT_USER (no idmapped mount?)"
+      bad=1
+    fi
+  done < <(views)
+  return "$bad"
+}
+
+case "${1:-}" in
+  start)
+    install -d -m 0700 -o root -g root "$VIEWS"
+    while read -r name src mode; do
+      install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$src"
+      install -d -m 0700 -o root -g root "$VIEWS/$name"
+      mountpoint -q "$VIEWS/$name" && continue
+      # u:<in the view>:<on disk>:1, util-linux mount(8) X-mount.idmap (2.39 and newer: noble and resolute).
+      mount --bind -o "X-mount.idmap=u:$agent_uid:$fff_uid:1 g:$agent_gid:$fff_gid:1" "$src" "$VIEWS/$name" ||
+        die "fff-agent-views: cannot mount the idmapped view of $src (kernel 5.12+ and util-linux 2.39+ do)"
+      mount -o "remount,bind,nosuid,nodev,$mode" "$VIEWS/$name" || die "fff-agent-views: cannot make $VIEWS/$name $mode"
+    done < <(views)
+    check || die "fff-agent-views: a view is not right (above): the portal starts its agents as $FFF_USER until it is"
+    log "fff-agent-views: $(views | wc -l) views for $AGENT_USER in $VIEWS"
+    ;;
+  stop)
+    while read -r name src mode; do
+      if mountpoint -q "$VIEWS/$name"; then umount -l "$VIEWS/$name"; fi
+    done < <(views)
+    ;;
+  check) check ;;
+  *) die "usage: fff-agent-views start|stop|check" ;;
+esac

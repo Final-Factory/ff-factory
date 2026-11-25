@@ -14,6 +14,8 @@ UMask=0077
 Environment=FFSB_SUPERVISOR=systemd
 Environment=FFSB_CONFIG=/srv/fff/config/config.json
 Environment=NODE_ENV=production
+# Its agents start as fff-agent through this socket (w5598, server/agentAccount.ts); without it, as fff, with an alert.
+Environment=FFF_AGENT_SOCKET=/run/fff-agent/claude.sock
 Environment=HOME=/srv/fff/home
 Environment=PATH=/srv/fff/home/.local/bin:/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=/srv/fff/app/current

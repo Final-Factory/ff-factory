@@ -68,6 +68,8 @@
 #   fffctl fence-check                  what the portal's own account can open (w5506): the vault key, the portal's environ,
 #                                       mem and fd, and which credential names its other processes' environments hold; it opens
 #                                       and counts, never prints a value. Exits 1 if the key or a Claude credential is open
+#                                       to it; then as the agents' account (w5598): the key, the portal's environ, mem and fd, a
+#                                       stand-in git child's environ and every process of the portal's account, each refused
 #   fffctl state                        what is set up, as JSON (the host's install.sh reads it to do only what is missing)
 #   fffctl vault list | add | rotate | grant | remove ...
 #                                       the token vault (docs/vault.md): secrets the portal hands worker runs. A value comes
@@ -700,6 +702,8 @@ declare -A CONF_REFUSED=(
   [FFF_PORT]="the VM's layout: must match config.json's port"
   [BASE_PATH]="the VM's layout: must match config.json's repo.basePath"
   [OPS_USER]="the orchestration worker's own fence: its account"
+  [AGENT_USER]="the portal's agents' own fence: their account (w5598)"
+  [AGENT_ROOT]="the portal's agents' own fence: their home (w5598)"
   [OPS_ROOT]="the orchestration worker's own fence: its file system"
   [OPS_IMAGE]="the orchestration worker's own fence: its file system"
   [OPS_DISK_MB]="the orchestration worker's own fence: its disk cap"
@@ -1098,7 +1102,52 @@ cmd_fence_check() {
       *) echo "process $p ($comm): holds$line in its environment (the read guard's /proc rule fences it; docs/vault.md, w5506)" ;;
     esac
   done
+  fence_agent "$pid" || rc=1
   [ "$rc" = 0 ] && echo "fence: holds" || echo "fence: OPEN"
+  return "$rc"
+}
+# fence_agent PORTAL_PID (w5598): the same probes as the portal's agents' own account (AGENT_USER, FENCE_AGENT_USER in the
+# test), which may open no process of the portal's account: the key, the portal's environ, mem and fd, a running stand-in
+# for the portal's git and gh (a process of the portal's account whose environment holds a dummy GH_TOKEN, never a real
+# one; the portal's account itself may open it, as it could the real ones), and every process of the portal's account.
+fence_agent() {
+  local pid=$1 agent=${FENCE_AGENT_USER-${AGENT_USER:-}} owner=${FENCE_USER:-$FFF_USER} rc=0 p comm spid n=0
+  if [ -z "$agent" ] || ! id "$agent" >/dev/null 2>&1; then
+    echo "absent: the agents' own account (${agent:-AGENT_USER unset}): the portal starts its agents as $owner (w5598)"
+    return 0
+  fi
+  echo "== as $agent, the portal's agents' account (w5598), outside the portal's process tree"
+  FENCE_USER=$agent fence_open "the vault key" "${FENCE_KEY:-/etc/fff/vault.key}" || rc=1
+  if [ "${pid:-0}" != 0 ]; then
+    for p in environ mem fd; do FENCE_USER=$agent fence_open "the portal's $p" "/proc/$pid/$p" || rc=1; done
+  fi
+  if [ "$owner" = "$(id -un)" ]; then
+    env -i GH_TOKEN=fence-check-stand-in-not-a-token sleep 30 &
+  else
+    setpriv --reuid="$owner" --regid="$(id -g "$owner")" --init-groups --inh-caps=-all -- env -i GH_TOKEN=fence-check-stand-in-not-a-token sleep 30 &
+  fi
+  spid=$!
+  sleep 0.3
+  # shellcheck disable=SC2016 # $1 is the inner shell's: the path, opened and never read
+  if FENCE_USER=$owner fence_as sh -c 'exec 3<"$1"' fence "/proc/$spid/environ" 2>/dev/null; then
+    echo "a stand-in for the portal's git and gh: pid $spid, as $owner; $owner itself opens its environ"
+  else
+    echo "a stand-in for the portal's git and gh: pid $spid, as $owner; $owner itself cannot open its environ, so this probe proves less"
+  fi
+  FENCE_USER=$agent fence_open "the stand-in git or gh child's environ" "/proc/$spid/environ" || rc=1
+  kill "$spid" 2>/dev/null || true
+  wait "$spid" 2>/dev/null || true
+  for p in ${FENCE_PIDS-$(pgrep -u "$owner" 2>/dev/null)}; do
+    comm=$(cat "/proc/$p/comm" 2>/dev/null) || continue
+    # shellcheck disable=SC2016 # $1 is the inner shell's
+    if FENCE_USER=$agent fence_as sh -c 'exec 3<"$1"' fence "/proc/$p/environ" 2>/dev/null; then
+      echo "OPENED: process $p ($comm)'s environ, to $agent"
+      rc=1
+    else
+      n=$((n + 1))
+    fi
+  done
+  echo "processes of $owner: $n environs refused to $agent"
   return "$rc"
 }
 

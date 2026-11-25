@@ -309,6 +309,12 @@ export interface Config {
    */
   machineLinkTailnet?: 'off' | 'warn' | 'enforce';
   /**
+   * The portal VM's agents (orchestrators, the dispatcher, the bug-thread judge) as their own OS account (w5598,
+   * server/agentAccount.ts, docs/vault.md "In the VM"): "on" (unset) starts them through fff-agent.socket as fff-agent, "off"
+   * as the portal's own account, as before (the recovery switch, read live). Only where the VM's unit names the socket.
+   */
+  agentAccount?: 'on' | 'off';
+  /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.
    */

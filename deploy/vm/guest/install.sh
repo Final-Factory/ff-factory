@@ -276,6 +276,31 @@ if [ -n "$c" ] || ! systemctl is-active --quiet fff-ops.socket; then run_cmd sys
 # Its Claude Code: the portal's own Agent SDK binary (fff-portal.service runs this again at each start).
 run_cmd "$FFF_LIB/fff-ops-sync" || warn "fff-ops-sync failed: the orchestration worker cannot start until the portal's next start copies its Claude Code"
 
+log "9/10 (b) the portal's agents (w5598, docs/vault.md \"In the VM\"): account $AGENT_USER, fff-agent.socket"
+# Never fatal: whatever fails here, the portal starts its agents as $FFF_USER, as before, and alerts its owners
+# (server/agentAccount.ts). Each step says what failed; the socket is then stopped, so the portal does not try it.
+agent_setup() {
+  if ! id "$AGENT_USER" >/dev/null 2>&1; then
+    run_cmd useradd --system --user-group --home-dir "$AGENT_ROOT/home" --no-create-home --shell /usr/sbin/nologin --comment "FF Factory's agents (w5598)" "$AGENT_USER" || return 1
+  fi
+  run_cmd passwd -l "$AGENT_USER" >/dev/null || return 1
+  run_cmd install -d -m 0700 -o "$AGENT_USER" -g "$AGENT_USER" "$AGENT_ROOT" "$AGENT_ROOT/home" || return 1
+  local u=""
+  u+=$(render_unit "$here/units/fff-agent-views.service.in" FFF_ROOT FFF_LIB | write_file /etc/systemd/system/fff-agent-views.service 0644) || return 1
+  u+=$(render_unit "$here/units/fff-agent@.service.in" AGENT_USER AGENT_ROOT FFF_ROOT FFF_LIB "BASE_PATH=${BASE_PATH:-$FFF_ROOT/base}" | write_file /etc/systemd/system/fff-agent@.service 0644) || return 1
+  u+=$(write_file /etc/systemd/system/fff-agent.socket 0644 <"$here/units/fff-agent.socket") || return 1
+  [ -z "$u" ] || run_cmd systemctl daemon-reload || return 1
+  run_cmd systemctl enable fff-agent-views.service fff-agent.socket || return 1
+  # Only when it changed or is not up: the views of running agents stay theirs either way (their own mount namespace).
+  if [ -n "$u" ] || ! systemctl is-active --quiet fff-agent-views.service; then run_cmd systemctl restart fff-agent-views.service || return 1; fi
+  if [ -n "$u" ] || ! systemctl is-active --quiet fff-agent.socket; then run_cmd systemctl restart fff-agent.socket || return 1; fi
+  if [ "$DRY_RUN" != 1 ]; then "$FFF_LIB/fff-agent-views" check || return 1; fi
+}
+if ! agent_setup; then
+  warn "the portal's agents' own account is not set up (above): they start as $FFF_USER, and the portal alerts its owners"
+  run_cmd systemctl disable --now fff-agent.socket 2>/dev/null || true
+fi
+
 log "10/10 systemd units"
 c=""
 for u in fff-portal.service fff-health.service fff-health.timer fff-update.path fff-update.service fff-backup.service fff-base-refresh.service fff-base-refresh.timer; do

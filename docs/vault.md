@@ -83,13 +83,41 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   **The agents' Claude tokens (w5506).** Orchestrators, the dispatcher, the bug-thread judge and the usage probe (`fetchPlanUsage`) get their vault token on a
   pipe at descriptor 3 (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`; `server/tokenPipe.ts`), the way the ops worker's
   launcher does. It is never in their environment, where another orchestrator's tools could read it in `/proc`.
-  **What is left.** The portal's own git and gh carry a GitHub token in their environment while they run. The read guard's
-  `/proc` rule (`portalSecretRules`) keeps every orchestrator's Read, Grep and Glob out of `/proc`, and orchestrators have
-  no shell. A separate account for the agents would fence that at the OS level too.
+  **The agents' own account (w5598).** The portal's own git and gh carry a GitHub token in their environment while they
+  run, which any `fff` process could read in `/proc`. So the orchestrators, the dispatcher and the bug-thread judge run as
+  a second account, `fff-agent` (`AGENT_USER` in `fff.conf`), which may open no `fff` process's `/proc` at all. The portal
+  starts each one through `fff-agent.socket` (`/run/fff-agent/claude.sock`, `0600 fff`, named in `FFF_AGENT_SOCKET`;
+  `agentSpawner` in `server/agentAccount.ts`): one connection per agent, a header like the ops worker's plus `cwd` and
+  `configDir`, and `deploy/vm/guest/fff-agent-launch` answers `OK` and becomes Claude Code as `fff-agent`, its token on
+  fd 3. Its unit, `fff-agent@.service`, empties `/srv/fff` (`TemporaryFileSystem=`) and puts back only the views
+  `fff-agent-views` mounts: idmapped binds of the portal's `home/.claude` and `data/orchestrator-memory` (read-write),
+  and `data`, `base`, `config` and `app` (read-only). Through a view `fff`'s files show as `fff-agent`'s, and what
+  `fff-agent` writes is stored as `fff`'s, so the portal reads its agents' transcripts and memory as before *(sourced:
+  mount(8), `X-mount.idmap`; needs util-linux 2.39 and kernel 5.12; noble and resolute have both)*. Never the secrets
+  folder, the portal's home, `/etc/fff`, or another process: `ProtectProc=invisible`. Claude Code writes its transcripts
+  `0600` whatever the umask (measured on biscuit), which is why a shared group or ACL could not do this.
+  **Never a lockout** (lothsahn, w5598: "Put the new account behind a setting, ready to switch off live (set_app_config),
+  with the old single-account path kept as the fallback"). Any failure before the launcher's `OK` (no socket, a refused
+  connection, its `ERR <why>`, no answer in 30 s) starts that agent as `fff`, as before (`tokenPipeSpawner`), and alerts
+  the owners once per reason per 6 h ("Agents run as the portal's account"). Two agents through the socket that end before
+  any result within 30 minutes, none succeeding between, switch every later agent back to `fff` until the portal
+  restarts ("Agents switched back to the portal's account"; `AGENT_BREAKER`). Config `agentAccount` `"off"`
+  (`set_app_config`, Lothsahn and Ben; read live) does the same at once. `install.sh`'s agent step never fails the
+  install: on any error it warns and stops the socket, and the portal falls back. A rollback is unchanged: an older
+  release has no `FFF_AGENT_SOCKET` in its unit (`portal_unit_back`) and ignores the setting; `ci-vm-e2e.sh` rolls back a
+  broken update with `agentAccount` `"on"`.
+  **What is left.** The data folder is as readable to `fff-agent` as it was to `fff` (its sessions and logins files; the
+  read guard keeps them closed to the Read tool); the vault there is sealed with the key the agents cannot open. A
+  `.credentials.json` in the portal's `home/.claude`, if a person ever logged in there, is in the agents' view, as it was
+  before. The usage probe (`fetchPlanUsage`, no tools) still runs as `fff`, its token on fd 3. While the agents fall back,
+  the w5506 fences alone hold: the read guard's `/proc` rule and no shell for orchestrators.
   **Check it:** `fffctl fence-check` (the ops worker may run it) probes as `fff`, outside the portal's tree. For the key,
   the credentials folder and the portal's `environ`, `mem` and `fd`, it prints `refused` with the kernel's reason or
   `OPENED`. For each other `fff` process it prints which credential names its environment holds, by name and never by
-  value. It exits 1 if the key, the portal's memory or a Claude token is open.
+  value. It exits 1 if the key, the portal's memory or a Claude token is open. Then, as `fff-agent` (w5598): the key,
+  the portal's `environ`, `mem` and `fd`, a stand-in for the portal's git (a process of `fff` holding a dummy
+  `GH_TOKEN`, which `fff` itself may open) and every `fff` process's environ must each be `refused`; it exits 1 on any
+  `OPENED`. Without the account it says `absent:`.
 - **Elsewhere** (a portal still on Windows, the e2e tests): config `vault.keyFile`. `loadConfig` refuses one inside
   `data/`; `readKey` refuses one that any group or other user can read (Linux, macOS).
 - **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. A Claude process then does not

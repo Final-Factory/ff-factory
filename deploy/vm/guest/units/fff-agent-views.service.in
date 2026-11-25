@@ -1,0 +1,18 @@
+[Unit]
+Description=FF Factory agents: their idmapped views of the portal's folders (w5598)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/vault.md
+RequiresMountsFor=@FFF_ROOT@
+# A failed mount is tried again, 5 times in 10 minutes; meanwhile the portal starts its agents as fff (server/agentAccount.ts).
+StartLimitIntervalSec=10min
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=@FFF_LIB@/fff-agent-views start
+ExecStop=-@FFF_LIB@/fff-agent-views stop
+Restart=on-failure
+RestartSec=30s
+
+[Install]
+WantedBy=multi-user.target

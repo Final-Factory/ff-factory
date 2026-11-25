@@ -244,6 +244,47 @@ echo "$out"
 for f in environ mem fd; do printf '%s' "$out" | matches -E "^refused: the portal's $f " || fail "the portal's $f is open to its account (w5506): $out"; done
 printf '%s' "$out" | matches -E '^refused: the vault key ' || fail "the vault key is open to the portal's account: $out"
 printf '%s' "$out" | matches -x 'fence: holds' || fail "fffctl fence-check: $out"
+# The portal's agents' own account (w5598, docs/vault.md "In the VM"): the orchestrators, the dispatcher and the judge run
+# as fff-agent through fff-agent.socket, in a unit that sees the portal's folders through idmapped views. As fff-agent, the
+# key, the portal's environ, mem and fd, a running git stand-in's environ and every fff process's environ are refused.
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fff-agent.socket is not listening (w5598)"
+[ "$(g 'sudo stat -c "%a %U %G" /run/fff-agent/claude.sock')" = "600 fff fff" ] || fail "fff-agent.socket is not 0600 fff"
+g 'sudo /usr/local/lib/fff/fff-agent-views check' || fail "the agents' views are not mounted, or not shown as fff-agent's"
+g 'systemctl show -p Environment fff-portal.service' | matches -F 'FFF_AGENT_SOCKET=/run/fff-agent/claude.sock' || fail "the portal does not name fff-agent.socket"
+printf '%s' "$out" | matches -x "== as fff-agent, the portal's agents' account (w5598), outside the portal's process tree" || fail "fence-check did not probe as fff-agent: $out"
+printf '%s' "$out" | sed -n '/^== as fff-agent/,$p' >/tmp/agent-fence.out
+for f in "the vault key" "the portal's environ" "the portal's mem" "the portal's fd" "the stand-in git or gh child's environ"; do
+  matches -F "refused: $f (" /tmp/agent-fence.out || fail "$f is not refused to fff-agent: $(cat /tmp/agent-fence.out)"
+done
+matches -E '^a stand-in for the portal.s git and gh: pid [0-9]+, as fff; fff itself opens its environ$' /tmp/agent-fence.out || fail "the git stand-in is not open to fff, so its probe proves nothing: $(cat /tmp/agent-fence.out)"
+if matches '^OPENED' /tmp/agent-fence.out; then fail "something of the portal's is open to fff-agent: $(cat /tmp/agent-fence.out)"; fi
+# A file fff-agent writes through a view is the portal's (fff) on disk, so the portal reads its agents' transcripts.
+g 'sudo systemd-run --quiet --wait --collect -p User=fff-agent -p BindPaths=/run/fff-agent-views/claude:/mnt/ci-claude touch /mnt/ci-claude/ci-agent-probe' || fail "fff-agent cannot write Claude Code's folder through its view"
+[ "$(g 'sudo stat -c %U /srv/fff/home/.claude/ci-agent-probe')" = fff ] || fail "a file fff-agent wrote through its view is not fff's on disk"
+g 'sudo rm -f /srv/fff/home/.claude/ci-agent-probe'
+# The launcher through the socket, as the portal's account: OK, then Claude Code, as fff-agent.
+cat >/tmp/fff-agent-sock.js <<'EOF'
+const net = require('node:net');
+const fs = require('node:fs');
+const v = fs.readFileSync('/usr/local/lib/fff/ops/claude.version', 'utf8').trim();
+const s = net.createConnection({ path: '/run/fff-agent/claude.sock', allowHalfOpen: true });
+s.write(JSON.stringify({ v: 1, sdkVersion: v, args: ['--version'], env: { CLAUDE_CODE_OAUTH_TOKEN: 'sk-ant-oat01-ci-dummy-not-a-token' }, cwd: process.argv[2] || '/srv/fff/base', configDir: '/srv/fff/home/.claude' }) + '\n');
+s.end();
+let out = '';
+s.on('data', (d) => (out += d));
+s.on('close', () => process.stdout.write(out, () => process.exit(0)));
+s.on('error', (e) => process.stdout.write('ERROR ' + e.message, () => process.exit(0)));
+setTimeout(() => process.stdout.write(out + ' TIMEOUT', () => process.exit(0)), 30000).unref();
+EOF
+b64=$(base64 -w0 /tmp/fff-agent-sock.js)
+out=$(g "echo $b64 | base64 -d >/tmp/fff-agent-sock.js && sudo -u fff node /tmp/fff-agent-sock.js" || true)
+echo "$out"
+printf '%s\n' "$out" | head -n 1 | matches -x OK || fail "the agents' launcher did not answer OK: $out"
+printf '%s' "$out" | matches 'Claude Code' || fail "Claude Code did not run as the agents' account: $out"
+g 'sudo journalctl -t fff-agent --no-pager -n 20 -o cat' | matches -E 'starting Claude Code .* as fff-agent in /srv/fff/base' || fail "the journal does not show Claude Code started as fff-agent"
+out=$(g 'sudo -u fff node /tmp/fff-agent-sock.js /etc' || true)
+printf '%s' "$out" | matches '^ERR .*not under /srv/fff' || fail "the agents' launcher ran outside the portal's folders: $out"
+echo "ok: the portal's agents run as fff-agent, see the portal's folders as their own, write them as fff, and the key, the portal's memory and every fff process's environ are refused to them"
 out=$(g 'printf "ci-vault-secret-QRST\n" >/tmp/v && sudo fffctl vault add --name ci-env --kind env --env CI_E2E_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v')
 echo "$out"
 if printf '%s' "$out" | matches 'ci-vault-secret'; then fail "fffctl vault add printed the value"; fi
@@ -664,6 +705,12 @@ echo "ok: the orchestration worker survives the portal's update, and deploys and
 
 step "a broken update is rolled back by itself"
 good=$want
+# With the agents' own account switched on explicitly (w5598, lothsahn: "Show the deploy's own rollback still works with it on").
+# Written in place (cat >), so config.json keeps its owner and mode.
+# shellcheck disable=SC2016 # the guest's shell expands $f
+printf '%s\n' 'f=/srv/fff/config/config.json; jq ".agentAccount = \"on\"" "$f" >/tmp/c.json && cat /tmp/c.json >"$f" && rm -f /tmp/c.json' >/tmp/agent-on.sh
+g "echo $(base64 -w0 /tmp/agent-on.sh) | base64 -d >/tmp/agent-on.sh && sudo sh /tmp/agent-on.sh"
+g 'sudo jq -r .agentAccount /srv/fff/config/config.json' | matches -x on || fail "could not set agentAccount on"
 sed -i '1i throw new Error("ci: broken on purpose");' "$ROOT/server/index.ts"
 git -C "$ROOT" -c user.name=ci -c user.email=ci@users.noreply.github.com commit -q -am "ci: a broken update"
 bad=$(git -C "$ROOT" rev-parse --short=7 HEAD)
@@ -694,6 +741,10 @@ if marker "$bad"; then fail "a rolled-back update wrote update.verified.json for
 echo "ok: no update.verified.json for the rolled-back $bad"
 wait_for 300 "the portal runs $good again" bash -c "[ \"\$(curl -fsS -m 10 http://$IP:8790/api/health | jq -r .sha)\" = $good ]"
 g 'ls /srv/fff/data/orchestrator-inbox/ 2>/dev/null | tail -n 3; sudo sh -c "cat /srv/fff/data/orchestrator-inbox/*.txt 2>/dev/null | tail -n 5"' || true
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fff-agent.socket is not listening after the rollback (w5598)"
+out=$(g 'sudo -u fff node /tmp/fff-agent-sock.js' || true)
+printf '%s\n' "$out" | head -n 1 | matches -x OK || fail "the agents' launcher does not answer after the rollback with agentAccount on: $out"
+echo "ok: with agentAccount on, the broken update rolled back, and the portal's agents still start as fff-agent"
 git -C "$ROOT" reset -q --hard HEAD~1
 
 step "a hung server is restarted by fff-health"

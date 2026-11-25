@@ -1,0 +1,40 @@
+[Unit]
+Description=FF Factory agent: Claude Code as @AGENT_USER@ for the portal (w5598)
+Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/vault.md
+Requires=fff-agent-views.service
+After=fff-agent-views.service network-online.target
+
+[Service]
+Type=simple
+User=@AGENT_USER@
+Group=@AGENT_USER@
+# One connection to fff-agent.socket: the portal's header, then Claude Code's stream on the same socket. Any failure before
+# the launcher's OK (this unit not starting included) and the portal starts that agent as fff, as before, and alerts.
+ExecStart=@FFF_LIB@/fff-agent-launch
+Environment=FFF_ROOT=@FFF_ROOT@ AGENT_ROOT=@AGENT_ROOT@
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+SyslogIdentifier=fff-agent
+WorkingDirectory=@AGENT_ROOT@
+UMask=0077
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+# Its own processes alone in /proc; the rest of the file system read-only.
+ProtectProc=invisible
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+# The portal's tree is an empty folder here but for the views fff-agent-views mounted (idmapped: fff's files show as
+# @AGENT_USER@'s). Never the secrets folder, the portal's home beyond Claude Code's folder, nor /etc/fff (the vault key:
+# 0600 root, which @AGENT_USER@ cannot read anyway).
+TemporaryFileSystem=@FFF_ROOT@:mode=0755
+BindReadOnlyPaths=/run/fff-agent-views/app:@FFF_ROOT@/app /run/fff-agent-views/base:@BASE_PATH@ /run/fff-agent-views/config:@FFF_ROOT@/config /run/fff-agent-views/data:@FFF_ROOT@/data
+BindPaths=/run/fff-agent-views/claude:@FFF_ROOT@/home/.claude /run/fff-agent-views/memory:@FFF_ROOT@/data/orchestrator-memory
+ReadWritePaths=@AGENT_ROOT@ @FFF_ROOT@/home/.claude @FFF_ROOT@/data/orchestrator-memory
+TasksMax=512
+CPUWeight=80
