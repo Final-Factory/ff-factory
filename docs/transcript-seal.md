@@ -118,6 +118,11 @@ Two things the first CI run on the Windows runner showed (w5703):
   everything else in them Medium, and denies delete-child as above. A Low copy
   of node tries to make a file in `projects` and in a project folder. The expected result is a refusal ("transcript labels:
   self-test at Low"). A write that went through is logged as a `WARNING` and changes nothing else (warn-only).
+  One way it goes through: a token with `SeBackupPrivilege`/`SeRestorePrivilege` **enabled** keeps them at Low, and Node
+  (libuv) opens every file with `FILE_FLAG_BACKUP_SEMANTICS`, which then passes both the label and the ACL. A GitHub
+  Windows runner's account is such a token (measured, w5703: every Low write went through, while `cmd`'s `>>` from the
+  same Low process was refused); a worker's filtered user token holds neither, so the Windows test removes both from its
+  own process first (`removePrivileges` in `server/transcriptLabels.test.ts`).
 - **The agent host** (`lowTranscriptSpawner`, used by `server/launch.ts` when the spec says `transcriptLabels`): before
   claude starts, it makes the conversation's `<id>\` folder and labels it and what is in it `(OI)(CI)low` (`/T`). On a resume it also labels the
   existing `<id>.jsonl` (found in any project folder) `low`. When the last process of that conversation exits, both go back

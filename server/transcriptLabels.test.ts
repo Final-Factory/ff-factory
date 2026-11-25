@@ -221,9 +221,47 @@ process.stdin.on('end',()=>process.exit(0));`;
 /** A Low process cannot label anything Medium (a worker on a fenced machine): the Windows leg needs Medium or above (CI, the daemon). */
 const atLowItself = () => process.platform === 'win32' && /Low Mandatory Level/i.test(execFileSync(path.join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8' }));
 
+/**
+ * Removes privileges from a running process's token (PowerShell P/Invoke of AdjustTokenPrivileges, SE_PRIVILEGE_REMOVED);
+ * answers one line per name: `removed`, or `not held`. A privilege not in the token is not an error.
+ */
+const PRIV_PS = `param([int]$procId, [string]$names)
+Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class FfPriv {
+  [StructLayout(LayoutKind.Sequential, Pack = 4)] struct TP { public int Count; public long Luid; public int Attr; }
+  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValue(string sys, string name, out long luid);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool all, ref TP state, int len, IntPtr prev, IntPtr ret);
+  public static string Remove(int pid, string name) {
+    IntPtr h = OpenProcess(0x1000, false, pid); if (h == IntPtr.Zero) return "OpenProcess " + Marshal.GetLastWin32Error();
+    IntPtr t; if (!OpenProcessToken(h, 0x28, out t)) return "OpenProcessToken " + Marshal.GetLastWin32Error();
+    long luid; if (!LookupPrivilegeValue(null, name, out luid)) return "LookupPrivilegeValue " + Marshal.GetLastWin32Error();
+    TP tp = new TP(); tp.Count = 1; tp.Luid = luid; tp.Attr = 4;
+    if (!AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) return "AdjustTokenPrivileges " + Marshal.GetLastWin32Error();
+    return Marshal.GetLastWin32Error() == 1300 ? "not held" : "removed";
+  }
+}
+"@
+foreach ($n in $names.Split(',')) { "$n " + [FfPriv]::Remove($procId, $n) }
+`;
+function removePrivileges(pid: number, names: string[], dir: string): string {
+  const ps1 = path.join(dir, 'remove-privileges.ps1');
+  fs.writeFileSync(ps1, PRIV_PS);
+  return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps1, String(pid), names.join(',')], { encoding: 'utf8' }).trim();
+}
+
 test('Windows: a Low process cannot touch another transcript under the lock, its own stays writable, and the spawner runs a new conversation', { skip: process.platform !== 'win32' ? 'Windows only' : atLowItself() ? 'this process runs at Low and cannot set a Medium label' : false }, async (t) => {
   const root = tmp();
   const home = path.join(root, 'claude');
+  // A GitHub runner's account holds SeBackupPrivilege and SeRestorePrivilege enabled, and a Low child keeps them: Node opens
+  // files with FILE_FLAG_BACKUP_SEMANTICS, so they pass both the label and the ACL (measured, w5703: every write WRITTEN,
+  // while cmd's >> at Low was refused). A worker's token holds neither (a filtered user token). Remove them from this
+  // process so every child here, the spawner's included, has a worker's token.
+  const removed = removePrivileges(process.pid, ['SeBackupPrivilege', 'SeRestorePrivilege'], root);
+  t.diagnostic(`privileges: ${removed.split(/\s*\r?\n\s*/).join('; ')}`);
+  assert.match(removed, /^SeBackupPrivilege (removed|not held)\s+SeRestorePrivilege (removed|not held)$/, removed);
   const projects = path.join(home, 'projects');
   const slug = path.join(projects, 'F--work');
   fs.mkdirSync(slug, { recursive: true });
@@ -280,10 +318,6 @@ console.log(out.join('; '))`,
     home,
   );
   t.diagnostic(`at Low under the lock: ${res}`);
-  // DIAG w5703: what the Low child holds, and whether a write without backup semantics (cmd's >>) is refused too.
-  t.diagnostic(`DIAG priv at Low: ${atLow(`const cp=require('child_process');const w=require('path').join(process.env.SystemRoot,'System32','whoami.exe');const nl=String.fromCharCode(10);console.log(cp.execFileSync(w,['/priv','/fo','csv','/nh'],{encoding:'utf8'}).split(nl).join(' ')+' | '+cp.execFileSync(w,['/groups'],{encoding:'utf8'}).split(nl).filter(l=>l.includes('Mandatory Label')).join(' '))`)}`);
-  t.diagnostic(`DIAG cmd append at Low: ${atLow(`const cp=require('child_process');try{cp.execFileSync('cmd.exe',['/d','/c','echo x>>"'+process.argv[1]+'"'],{stdio:'pipe',windowsVerbatimArguments:true});console.log('WRITTEN')}catch(e){console.log('refused '+String(e.stderr).trim())}`, other)}`);
-  t.diagnostic(`DIAG priv at host: ${execFileSync(path.join(process.env.SystemRoot ?? '', 'System32', 'whoami.exe'), ['/priv', '/fo', 'csv', '/nh'], { encoding: 'utf8' }).split(String.fromCharCode(10)).join(' ')}`);
   for (const w of ['append other', 'truncate other', 'plant', 'mkdir', 'plant in other folder', 'rename other', 'rename other to its folder', 'delete other', 'delete other folder', 'new project folder', 'undo deny on projects', 'label projects low']) assert.match(res, new RegExp(`${w} E(ACCES|PERM)`), w);
   assert.match(res, /append own WRITTEN/);
   assert.match(res, /own folder WRITTEN/);
