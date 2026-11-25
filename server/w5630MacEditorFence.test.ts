@@ -12,23 +12,23 @@ const BIN = '/Applications/Unity/Hub/Editor/6000.3.19f1/Unity.app/Contents/MacOS
 const WORKER: WorkerFence = { kind: 'seatbelt', root: ROOT, home: '/Users/u', darwinTemp: '/private/var/folders/x/T', darwinCache: '/private/var/folders/x/C', open: ['sandboxes', 'tmp', 'home'] };
 
 test('w5630: no editor fence while the workers\' Seatbelt fence is off', () => {
-  assert.equal(macEditorFenceFor(undefined, 'enforce', '/Users/u'), undefined);
+  assert.equal(macEditorFenceFor(undefined, 'enforce'), undefined);
 });
 
 test('w5630: the enforced editor profile is the workers\' with <root>/home writable; its home and bridge folder are set', () => {
-  const f = macEditorFenceFor(WORKER, 'enforce', '/Users/u')!;
+  const f = macEditorFenceFor(WORKER, 'enforce')!;
   assert.equal(f.kind, 'seatbelt');
   assert.equal(f.warn, false);
   assert.equal(f.profile, seatbeltProfile({ ...WORKER, extraWritable: [`${ROOT}/home`] }));
   assert.match(f.profile, /\(deny file-write\*\)/);
   assert.match(f.profile, /\(subpath "\/Users\/u\/ffw\/home"\)/);
   assert.match(f.profile, /\(deny file-write\*\n {2}\(subpath "\/Users\/u\/ffw\/daemon"\)\n {2}\(subpath "\/Users\/u\/ffw\/secrets"\)/, 'the daemon and secrets folders stay read-only');
-  assert.deepEqual(f.env, { HOME: `${ROOT}/home`, CFFIXED_USER_HOME: `${ROOT}/home`, UNITY_MCP_STATUS_DIR: '/Users/u/.unity-mcp' });
+  assert.deepEqual(f.env, { HOME: `${ROOT}/home`, CFFIXED_USER_HOME: `${ROOT}/home`, UNITY_MCP_STATUS_DIR: `${ROOT}/home/.unity-mcp` });
 });
 
 test('w5630: warn-only turns every deny into a reported allow and keeps the rest', () => {
-  const enforced = macEditorFenceFor(WORKER, 'enforce', '/Users/u')!.profile;
-  const warn = macEditorFenceFor(WORKER, 'warn', '/Users/u')!;
+  const enforced = macEditorFenceFor(WORKER, 'enforce')!.profile;
+  const warn = macEditorFenceFor(WORKER, 'warn')!;
   assert.equal(warn.warn, true);
   assert.equal(warn.profile, warnOnlyProfile(enforced));
   assert.doesNotMatch(warn.profile, /\(deny /);
@@ -40,7 +40,7 @@ test('w5630: warn-only turns every deny into a reported allow and keeps the rest
 
 test('w5630: both profiles compile under sandbox-exec (macOS only)', { skip: process.platform !== 'darwin' || !fs.existsSync(SANDBOX_EXEC) }, () => {
   for (const mode of ['enforce', 'warn'] as const) {
-    const r = spawnSync(SANDBOX_EXEC, ['-p', macEditorFenceFor(WORKER, mode, '/Users/u')!.profile, '/usr/bin/true'], { encoding: 'utf8' });
+    const r = spawnSync(SANDBOX_EXEC, ['-p', macEditorFenceFor(WORKER, mode)!.profile, '/usr/bin/true'], { encoding: 'utf8' });
     // Inside a worker's own fence sandbox-exec compiles the profile, then cannot apply it (sandbox_apply EPERM): either is fine;
     // a syntax error says "unbound variable" or "syntax" before that.
     assert.ok(r.status === 0 || /sandbox_apply/.test(r.stderr), `${mode}: ${r.stderr}`);
@@ -68,7 +68,7 @@ function fakeMac(fence: EditorFence | undefined, fenced: boolean, platform: 'dar
 }
 
 test('w5630: a Mac sandbox editor starts through the fenced launch with its own binary and arguments, and says how', async () => {
-  const enforce = macEditorFenceFor(WORKER, 'enforce', '/Users/u')!;
+  const enforce = macEditorFenceFor(WORKER, 'enforce')!;
   const a = fakeMac(enforce, true);
   const said = await a.u.start();
   assert.equal(a.world.plain.length, 0, 'never the unfenced launch');
@@ -78,13 +78,13 @@ test('w5630: a Mac sandbox editor starts through the fenced launch with its own 
   assert.match(said, /inside the workers' Seatbelt profile/);
   assert.deepEqual(a.u.fenced, { on: true });
 
-  const w = fakeMac(macEditorFenceFor(WORKER, 'warn', '/Users/u')!, true);
+  const w = fakeMac(macEditorFenceFor(WORKER, 'warn')!, true);
   assert.match(await w.u.start(), /warn-only/);
   assert.deepEqual(w.u.fenced, { on: true, warn: true });
 });
 
 test('w5630: no fenced launcher, no fence (editorFence false or the workers\' fence off), or a Seatbelt fence off a Mac: the editor starts as before', async () => {
-  const enforce = macEditorFenceFor(WORKER, 'enforce', '/Users/u')!;
+  const enforce = macEditorFenceFor(WORKER, 'enforce')!;
   const noLauncher = fakeMac(enforce, false);
   assert.match(await noLauncher.u.start(), /unfenced \(no fenced launcher here\)/);
   assert.deepEqual(noLauncher.world.plain[0], [BIN, '-projectPath', REPO]);

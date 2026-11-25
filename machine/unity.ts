@@ -97,7 +97,10 @@ export interface LowEditorFence {
  *   ~/Library/Preferences/Unity/Editor-5.x, and a fenced editor refused there stops on a modal "Moving file failed" with
  *   its bridge never up (measured on m5, w5630); Foundation's home follows CFFIXED_USER_HOME, Mono's HOME. Its EditorPrefs
  *   still go through cfprefsd to the real ~/Library/Preferences plist, so the daemon's App Nap and Burst prefs still apply.
- *   UNITY_MCP_STATUS_DIR stays the real ~/.unity-mcp (the profile's named exception), where agents' MCP servers look.
+ *   UNITY_MCP_STATUS_DIR is `<root>/home/.unity-mcp`, beside the port file the bridge writes under the moved home
+ *   (unity-mcp-port-<hash>.json follows HOME, measured on m5): with the status file in the real ~/.unity-mcp, a port file
+ *   an unfenced start left there would beat it in bridgeInfo. The daemon reads the folder (addMcpStatusDir) and copies
+ *   the status into each sandbox's own folder for its agents (server/unityMcp.ts syncStatusDir), as on Windows.
  */
 export interface SeatbeltEditorFence {
   kind: 'seatbelt';
@@ -112,10 +115,10 @@ export const isSeatbeltFence = (f: EditorFence | undefined): f is SeatbeltEditor
 
 /**
  * w5630: the macOS editor fence from the workers' (server/workerFence.ts fenceFor), or undefined when theirs is off: their
- * profile with `<root>/home` writable as the editor's home, warn-only unless `mode` is enforce. `realHome` is the user's
- * home, where the bridge's status folder stays (~/.unity-mcp, a named exception of the workers' profile).
+ * profile with `<root>/home` writable as the editor's home, warn-only unless `mode` is enforce. Its
+ * home's `.unity-mcp` is the bridge's status folder.
  */
-export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' | 'enforce', realHome: string): SeatbeltEditorFence | undefined {
+export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' | 'enforce'): SeatbeltEditorFence | undefined {
   if (!worker) return undefined;
   const home = path.join(worker.root, 'home');
   const enforced = seatbeltProfile({ ...worker, extraWritable: [...(worker.extraWritable ?? []), home] });
@@ -123,7 +126,7 @@ export function macEditorFenceFor(worker: WorkerFence | undefined, mode: 'warn' 
     kind: 'seatbelt',
     profile: mode === 'warn' ? warnOnlyProfile(enforced) : enforced,
     warn: mode === 'warn',
-    env: { HOME: home, CFFIXED_USER_HOME: home, UNITY_MCP_STATUS_DIR: path.join(realHome, '.unity-mcp') },
+    env: { HOME: home, CFFIXED_USER_HOME: home, UNITY_MCP_STATUS_DIR: path.join(home, '.unity-mcp') },
   };
 }
 

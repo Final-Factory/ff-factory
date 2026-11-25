@@ -3139,11 +3139,12 @@ export class Daemon {
     if (this.macEditorMemo) return this.macEditorMemo.fence;
     let fence: SeatbeltEditorFence | undefined;
     try {
-      fence = macEditorFenceFor(this.workerFence, this.cfg.editorFence === true ? 'enforce' : 'warn', HOME);
+      fence = macEditorFenceFor(this.workerFence, this.cfg.editorFence === true ? 'enforce' : 'warn');
       if (!fence) log('editor fence: sandbox editors start unfenced (the Seatbelt worker fence is off here)');
       else {
         const probe = probeFence([SANDBOX_EXEC, '-p', fence.profile, '/usr/bin/true']);
-        if (probe.ok) log(`editor fence: sandbox editors start under the workers' Seatbelt profile${fence.warn ? ', warn-only (refusals logged as "Sandbox: ... allow ... (with report)"; editorFence true enforces)' : ''}, home ${fence.env.HOME}, from their next start`);
+        if (probe.ok) addMcpStatusDir(fence.env.UNITY_MCP_STATUS_DIR);
+        if (probe.ok) log(`editor fence: sandbox editors start under the workers' Seatbelt profile${fence.warn ? ', warn-only (refusals logged as "Sandbox: ... allow ... (with report)"; editorFence true enforces)' : ''}, home <root>/home, from their next start`);
         else {
           log(`editor fence: the editor profile could not run a no-op (${probe.why}); sandbox editors start unfenced`);
           fence = undefined;

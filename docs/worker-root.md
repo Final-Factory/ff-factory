@@ -759,7 +759,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   fence is on (`"workerFence": "seatbelt"`), `MacUnity.start` (`machine/unity.ts`) starts a Mac sandbox editor through
   `launchFenced` as `sandbox-exec -p <profile> <Unity> -projectPath <sandbox>`. The profile is the workers' own
   (`seatbeltProfile`, `server/workerFence.ts`) with `<root>/home` writable too (`macEditorFenceFor`). The environment
-  adds `HOME=<root>/home`, `CFFIXED_USER_HOME=<root>/home` and `UNITY_MCP_STATUS_DIR=~/.unity-mcp`:
+  adds `HOME=<root>/home`, `CFFIXED_USER_HOME=<root>/home` and `UNITY_MCP_STATUS_DIR=<root>/home/.unity-mcp`:
   - **Why the home moves.** Unity writes its window layouts to `~/Library/Preferences/Unity/Editor-5.x/Layouts` at
     every start. Refused there, the editor sat on a modal "Moving file failed" alert (a `sample` showed
     `MoveReplaceFile` in `NSAlert runModal`), and the bridge never came up (measured, m5 pretest 1, 2026-11-25).
@@ -767,6 +767,12 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     `Logs/Unity/upm.log`, `Caches/com.unity3d.UnityEditor` (bee, GiCache) and the game's `persistentDataPath` go under
     `<root>/home/Library` instead. The licence still resolves through the user's running LicenseClient. The project's
     Library is untouched, so the caches stay warm.
+  - **The bridge's files.** The bridge writes its port file (`unity-mcp-port-<hash>.json`) under the moved home, so its
+    status file goes there too. The daemon reads that folder (`addMcpStatusDir`, `server/unityHang.ts`) and copies the
+    status file into each sandbox's own folder for its agents (`syncStatusDir`, `server/unityMcp.ts`), as on Windows. With
+    the status left in the real `~/.unity-mcp`, a port file an unfenced start had left there (6403, a day old) beat the
+    fresh status file (6402) in `bridgeInfo`, so the daemon would have pinged the wrong port (measured on m5, found by
+    the PR's review).
   - **EditorPrefs** go through cfprefsd, which writes outside the sandbox, so they still land in the real
     `~/Library/Preferences/com.unity3d.UnityEditor5.x.plist`. The daemon's own EditorPrefs (App Nap off, Burst on)
     therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
@@ -786,7 +792,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - **Batch runs and builds** are not started by the daemon. A worker starts them with `unity-slot run` from its own
     shell, which is already inside the fence, so this change does not touch them.
   - **Measured before the change** (m5 slot2, 2026-11-25): a GUI editor was started from inside the fence with the
-    workers' profile and the three variables, the same as the daemon now does.
+    workers' profile, HOME and CFFIXED_USER_HOME moved as the daemon now does (its status folder was still the real `~/.unity-mcp`).
     - Licensing connected to the user's LicenseClient.
     - The bridge was ready.
     - `reload-and-wait` compiled in 9 s (warm), with 0 `error CS`.
@@ -796,7 +802,12 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     - A write probe from `execute_code` was refused (`UnauthorizedAccessException`) for `~/`, `/`, `<root>/secrets`,
       `<root>/daemon`, `~/Library/Preferences`, `~/Library/Application Support` and `/private/tmp`. It was written in
       the sandbox's `Temp`.
-  - Not tested: an editor that must start its own licensing client (none running) with the home moved.
+  - Not tested: an editor that must start its own licensing client (none running) with the home moved. That client
+    would run inside the fence and serve later editors, a person's too, on the shared socket (the "Known limits" of
+    docs/worker-fence.md); Windows gives fenced editors their own `-licensingIpc`.
+  - A `sandbox-exec` that fails at launch is not retried unfenced: the start reports the pid and the editor never comes
+    up (the hang watch then restarts it). The probe at the daemon's start runs the same profile, so it would fail there
+    first and the editors would start unfenced.
 
 **What a Low worker meets** (LothDesktop's trial, w5377, 2026-11-24; all measured from a Low agent):
 - **Works at Low:**
