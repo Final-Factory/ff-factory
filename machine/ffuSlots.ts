@@ -13,13 +13,15 @@
  * one last on its branch first, then the one used most recently (the warmest target), and only then a new one (a cold
  * target), up to FF_FFU_SLOTS_MAX. A slot is free when no one holds it, or its holder's process no longer runs here
  * (cleanup-facts.json's `live`) and its checkout holds no work (no change, no commit missing from origin). A held slot whose
- * holder stopped with work in it stays theirs. The cargo registry stays the machine's (CARGO_HOME, already one per machine).
+ * holder stopped with work in it stays theirs. The cargo registry is the machine's, inside the install folder (w5501): every
+ * slot shares one CARGO_HOME, `<root>/cache/cargo` unless one already sits inside the root (sharedCaches.ts workerCargoHome).
  * Measured design: docs/ffu-sandboxes.md.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import { workerCargoHome } from './sharedCaches.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
 export const FFU_SLOTS_DIR = 'ffu-sandboxes';
@@ -56,6 +58,8 @@ export interface FfuSlotDeps {
   root: string;
   session: string;
   max: number;
+  /** The machine's CARGO_HOME inside the root (w5501, sharedCaches.ts workerCargoHome); `take` exports it. */
+  cargoHome?: string;
   facts?: CleanupFacts;
   now: () => number;
   git: (args: string[], cwd?: string) => Ran;
@@ -247,10 +251,13 @@ function prepare(d: FfuSlotDeps, id: string, branch: string | undefined, base: s
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const fwd = (p: string) => p.replace(/\\/g, '/');
 
-/** The lines `eval "$(ffu-slot take)"` runs: the slot, its checkout and target, and a cd into the checkout. */
-export function envLines(root: string, id: string): string {
+/**
+ * The lines `eval "$(ffu-slot take)"` runs: the slot, its checkout and target, the machine's cargo home inside the root
+ * (w5501: a fenced worker can fetch a new crate there, which it could not in the person's ~/.cargo), and a cd into the checkout.
+ */
+export function envLines(root: string, id: string, cargoHome?: string): string {
   const wt = fwd(slotCheckout(root, id));
-  return [`export FFU_SLOT=${q(id)}`, `export FFU_DIR=${q(wt)}`, `export CARGO_TARGET_DIR=${q(fwd(slotTarget(root, id)))}`, `cd ${q(wt)}`, ''].join('\n');
+  return [`export FFU_SLOT=${q(id)}`, `export FFU_DIR=${q(wt)}`, `export CARGO_TARGET_DIR=${q(fwd(slotTarget(root, id)))}`, ...(cargoHome ? [`export CARGO_HOME=${q(fwd(cargoHome))}`] : []), `cd ${q(wt)}`, ''].join('\n');
 }
 
 export interface TakeOptions {
@@ -340,14 +347,14 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
       const branch = opt('--branch');
       if (branch !== undefined && !/^[A-Za-z0-9._/-]+$/.test(branch)) throw new Error(`not a branch name: ${branch}`);
       const id = takeSlot(d, { branch, base: opt('--base') });
-      d.write(envLines(d.root, id));
+      d.write(envLines(d.root, id, d.cargoHome));
       d.say(`ffu-slot: ${id}: ${fwd(slotCheckout(d.root, id))} (target ${fwd(slotTarget(d.root, id))})\n`);
       return 0;
     }
     if (cmd === 'where') {
       const mine = readSlotState(d.root).slots.find((s) => s.holder === d.session);
       if (!mine) return 1;
-      d.write(envLines(d.root, mine.id));
+      d.write(envLines(d.root, mine.id, d.cargoHome));
       return 0;
     }
     if (cmd === 'release') {
@@ -382,6 +389,7 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
   return {
     root,
     session: env.FF_SESSION_ID ?? '',
+    cargoHome: workerCargoHome(root, env, '').home, // the home folder only names a seed's source, which take does not need
     max: Number.isInteger(max) && max >= 0 ? max : FFU_SLOTS_DEFAULT_MAX,
     facts,
     now: () => Date.now(),

@@ -110,7 +110,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
-import { UvCachePruner, findUv, runQuiet, runQuietEnv, warmUvCache, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
+import { UvCachePruner, findUv, runQuiet, runQuietEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
@@ -309,10 +309,12 @@ export function withRootDefaults(cfg: DaemonConfig): DaemonConfig {
  * user's own folders, (w5297) the other tools' caches (workerToolCacheEnv), and (w5306) the game's data root
  * (FF_GAME_DATA_DIR=<root>/gamedata, machine/gameData.ts): saves, settings, logs and AgentControl of every editor and player
  * from a commit with game PR #4237, and (w5344) the players' own home (FF_PLAYER_HOME=<root>/gamedata-home), which the game's
- * player_slots.py and the timed runs turn into a player's XDG_CONFIG_HOME or CFFIXED_USER_HOME. The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
+ * player_slots.py and the timed runs turn into a player's XDG_CONFIG_HOME or CFFIXED_USER_HOME, and (w5501) CARGO_HOME=<root>/cache/cargo,
+ * the cargo registry a fenced worker can write (sharedCaches.ts workerCargoHome: one already inside the root stays, one
+ * outside it moves here, seeded from the old). The daemon sets each only where its own environment lacks it (`??=`). Exported for tests.
  */
 export function rootEnv(root: string, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), [PLAYER_HOME_VARIABLE]: workerPlayerHomeDir(root), ...workerToolCacheEnv(root, platform) };
+  return { FF_WORKER_ROOT: root, FF_PLAYER_SLOT_ROOT: path.join(root, 'players'), UV_CACHE_DIR: workerUvCacheDir(root), FF_DETERMINISM_AUDIT_DIR: workerDeterminismAuditDir(root), [GAME_DATA_VARIABLE]: workerGameDataDir(root), [PLAYER_HOME_VARIABLE]: workerPlayerHomeDir(root), CARGO_HOME: workerCargoHomeDir(root), ...workerToolCacheEnv(root, platform) };
 }
 
 /** The machine credential: daemon.json's, else the token file's first line (w513). Exported for tests. */
@@ -3738,7 +3740,20 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   cfg.token = readToken(cfg);
   for (const [k, v] of Object.entries(cfg.env ?? {})) if (typeof v === 'string') process.env[k] = v;
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
+  // w5501: a CARGO_HOME outside the root (the person's ~/.cargo on C:, where a Low worker's `cargo fetch` was refused) moves
+  // to <root>/cache/cargo, seeded in the background from the old one, which is only read; one inside the root stays.
+  const cargo = cfg.root ? workerCargoHome(cfg.root, process.env, HOME) : undefined;
+  if (cargo) process.env.CARGO_HOME = cargo.home;
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
+  if (cargo) {
+    try {
+      fs.mkdirSync(cargo.home, { recursive: true });
+    } catch (e) {
+      log(`cargo home: could not make ${cargo.home}: ${(e as Error).message}`);
+    }
+    if (cargo.seedFrom) void seedCargoHome(cargo.seedFrom, cargo.home).then((m) => log(m));
+    else log(`cargo home: ${cargo.home} (already inside the root)`);
+  }
   // w5305: its agents' Claude Code folder is <root>/claude, not the person's ~/.claude (server/claudeHome.ts), unless daemon.json
   // names one (an instance's own) or says FF_CLAUDE_HOME "legacy". Agents already running keep the folder they started with.
   const movedClaude = cfg.root ? moveClaudeHome(process.env, cfg.root, HOME, (line) => log(line)) : undefined;

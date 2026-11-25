@@ -117,6 +117,8 @@ test('w3764: no new slot below the free-disk floor, and take prints the lines ev
   const lines = ok.out.join('');
   assert.match(lines, /^export FFU_SLOT='slot1'$/m);
   assert.match(lines, /^export CARGO_TARGET_DIR='.*ffu-sandboxes\/slot1\/target'$/m);
+  // w5501: the machine's cargo home inside the root, where a fenced worker can fetch a new crate.
+  assert.match(lines, /^export CARGO_HOME='.*\/cache\/cargo'$/m);
   assert.match(lines, /^cd '.*ffu-sandboxes\/slot1\/ffu'$/m);
 });
 
