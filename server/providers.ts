@@ -716,14 +716,12 @@ export class ProviderManager {
     };
     // A dry run (server/dryRun.ts) takes no connector: FFBox must keep talking to the real portal.
     if (dryRun()) return refuse('503 Service Unavailable');
-    if (recent.length >= 10) {
-      recent.push(now);
-      this.failures.set(ip, recent);
-      return refuse('429 Too Many Requests');
-    }
+    // The token first (w5528, w5452 finding 20): a valid token gets in whatever the address's lockout, or anyone sending
+    // bad requests from FFBox's address would keep the real connector out. The lockout only blocks bad tokens.
     if (!this.authenticate(req.headers.authorization)) {
       recent.push(now);
       this.failures.set(ip, recent);
+      if (recent.length > 10) return refuse('429 Too Many Requests');
       console.warn(`provider ${this.id}: refused a connection from ${ip} (bad or missing token)`);
       return refuse('401 Unauthorized');
     }

@@ -1595,9 +1595,22 @@ from the other pilots, server/mergeOnGreen.ts) is in the arm:
   exit 0: a FAIL, a usage error, a gh failure, or no script to run (w3088, after #3180 merged on green with a failing
   Evidence section). `ff-pr merge` (machine/prFlow.ts evidencePasses) and a raw `gh pr merge` or API merge in a worker's
   shell (server/guard.ts ghEvidence) run the same check. A pull request with no game code or assets passes it.
-  On a worker's machine, a refusal that says only that the copy is older than the released ff-agents ("this
+  The guard's check runs at the agent host's level, so it never runs a copy a worker could have written (w5542, after
+  w5451's audit: it picked the highest version in `<root>/claude/plugins/cache` and `<root>/tools/final-factory-agents`,
+  both worker-writable). It keeps its own shallow checkout of final-factory-agents' master in the daemon's folder,
+  `<appDir>/trusted/final-factory-agents` (machine/evidenceGate.ts trustedAgentsCheckout, refreshTrustedCheckout:
+  cloned anonymously aside and renamed into place, fetched when older than 10 minutes and again on a "this pr_evidence.py
+  is ff-agents X, but Y is released" refusal), and runs it with `python -s`, no `PYTHON*` setting, the checkout as its
+  working folder, and python and gh resolved on a PATH with every worker-root folder but the daemon's left out
+  (trustedEvidenceRun, trustedPathValue). A folder of the daemon's, not a hash of the worker's copy: the fences keep
+  `<root>/daemon` from workers on every OS (Low integrity on Windows, Landlock `--except daemon` on Linux, Seatbelt on
+  macOS when on), and a hash would not cover the modules the script imports (`unity-ui/ui_layout.py`), python or gh.
+  Each check logs `w5542 evidence check <repo>#<n>: <python> -s <script>: exit <n>` in the host's log. No trusted copy (a
+  clone that fails with none from before) refuses the merge. `ff-pr merge` runs inside the worker's own fence, so it keeps
+  using the worker's copy below.
+  On a worker's machine, `ff-pr merge`'s refusal that says only that the copy is older than the released ff-agents ("this
   pr_evidence.py is ff-agents X, but Y is released") updates the plugin (`claude plugin marketplace update` and `claude plugin
-  update`, machine/evidenceGate.ts updateLocalPlugin) and checks once more with the newest copy, in both of those paths
+  update`, machine/evidenceGate.ts updateLocalPlugin) and checks once more with the newest copy
   (w4926: w4873's version bump was refused at 1.34.382 against 1.34.383, since plugins otherwise move only with a deploy).
   Any other refusal, a failed update or the second verdict stands.
   Final-Factory/ffu is checked the same way since w3098 (EVIDENCE_GATED): an ffu pull request that touches `art/` or the
@@ -3562,6 +3575,22 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
     `set_app_config` keys, and `for_user` attribution;
   - memory writes (`memoryGuard`, [Memory](#memory));
   - recording and cancelling a conditional decision ([below](#conditional-decisions-w830)).
+- **Relayed text in a person's turn needs their own words** (w5507, lothsahn: "File it: high-risk gates check my own
+  words, relayed text marked"). A message that joins a turn its person opened is not theirs by joining it: the rest
+  of an FFBox hand-over ([ffbox.md](ffbox.md#operators-own-words-w831), relayed right after their own words,
+  `server/devRequests.ts`), a `[worker update]`, `[dispatch]`, `[ledger]` or another person's `message_person`.
+  `SessionHandle.send` (`server/sessions.ts`) sets `turnRelayed` when a non-person message joins a person's turn, and
+  appends `RELAYED_MARK` (`shared/conditional.ts`, "relayed into a turn your person started ...") to it in an
+  orchestrator. In such a turn `Orchestrators.turnOwnWords` passes a gate above only with `words` quoted from the
+  person's own message in this turn (`inPersonWords`, from the turn's opening message on), or their click on a card
+  (`reactionTurn`); a turn only they wrote passes as before, words or not. The gates: `ops_worker` `send`/`deploy`/
+  `restart` (`deploy`'s text counts as words), `set_app_config`, `set_ffbox_config`, `set_pool`, `approve_delegation`,
+  `delete_memory`, `restore_memory`, `request_work` and `update_work` (`humanAsked`, approve/decline, close/reopen of
+  another's, `main_clone`, an owner acting on another owner's request), the `message_person` loop guard and
+  `dispatcherHeardPerson`. A refusal inside `request_work`/`update_work` stays a `GateRefused`, so it is held and
+  offered again on their next message (w830); `request_work` in a relayed turn files the request but not as their ask.
+  Kept on turn origin, deliberately: memory writes (`memoryGuard`: a Write has no words), the bench ticket's stop, a
+  conditional's cancel and the report `asked` mark. Tests: the w5507 cases in `orchestrators.test.ts`, `ask.test.ts`, `opsWorker.test.ts` and `sessions.test.ts`.
 
 ### A per-turn budget (w2007)
 
