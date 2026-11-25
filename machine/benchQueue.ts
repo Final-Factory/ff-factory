@@ -8,12 +8,15 @@
 // helper (`bench_queue.py hold`) run as a child: it takes the ticket for this process (its owner pid), writes its
 // state to a status file, and lets go when the file `<status>.release` appears or this process dies. Every failure
 // to run it (no python, a checkout from before w1615) fails open: the launch goes ahead without a ticket, said in the log.
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { rpcCall, RpcRefused } from './daemonRpc.ts';
+import { trustedGh, trustedPython } from './evidenceGate.ts';
+import { ghAppPaths, readGhAppTokens } from './ghApp.ts';
+import { appTokenFor } from '../shared/githubAppRoute.ts';
 
 export type BenchMode = 'shared' | 'exclusive';
 
@@ -129,6 +132,10 @@ export interface BenchTicketOptions {
    * (the lost ticket's number, `bench_queue.py hold --place`). Passed only to a copy that knows the flag (supportsPlace).
    */
   place?: number;
+  /** w5572: the python's own arguments before the script (`-s` for the trusted copy). */
+  pythonArgs?: string[];
+  /** w5572: the helper's working folder (the trusted copy's own, never a sandbox: Windows looks in it for ps, git, bash). */
+  cwd?: string;
 }
 
 /** Whether a copy of the queue script takes `hold --place` (w4624); a copy from before it would refuse the flag. */
@@ -192,7 +199,7 @@ export class BenchTicket {
       // w5545: a helper this process starts holds the ticket itself (the daemon's own, or a worker's without the RPC): with
       // the daemon's token it would ask the daemon again (the game repo's bench_queue.py proxies whenever both are set).
       const { FF_DAEMON_RPC: _r, FF_DAEMON_TOKEN: _t, ...env } = this.o.env ?? process.env;
-      this.child = spawn(this.o.python ?? pythonExe(this.o.env), args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env });
+      this.child = spawn(this.o.python ?? pythonExe(this.o.env), [...(this.o.pythonArgs ?? []), ...args], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, env, ...(this.o.cwd ? { cwd: this.o.cwd } : {}) });
     } catch (e) {
       this.exited = (e as Error).message;
       return this;
@@ -253,7 +260,8 @@ export class BenchTicket {
  * A ticket for a launch, or undefined when this machine cannot keep one (no queue script in the checkouts given, no
  * lock place): the caller goes ahead without, and says why with `why`.
  */
-export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & { checkouts: (string | undefined)[]; root?: string }): { ticket?: BenchTicket; why?: string } {
+export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & { checkouts: (string | undefined)[]; root?: string; trusted?: TrustedBench }): { ticket?: BenchTicket; why?: string } {
+  if (o.trusted) return trustedBenchTicket(o, o.trusted);
   const env = o.env ?? process.env;
   // w1628: a checkout from before w1615 has no queue script; any sandbox's copy on this machine keeps the same queue
   // (the queue is its files, not its code), so the run still waits its turn instead of going ahead without a ticket.
@@ -419,4 +427,107 @@ export function heldTicket(lock: string | undefined, env: NodeJS.ProcessEnv, ali
   const name = env.FF_BENCH_TICKET;
   if (!lock || !name || !/^t\d{8}$/.test(name)) return undefined;
   return queueTickets(lock, alive).find((t) => t.ticket === name && t.granted && !t.revoked);
+}
+
+/**
+ * w5572: the daemon and the agent host take their tickets with this copy only. A worker can write any sandbox, so the
+ * newest copy among them (newestBenchQueueScript) would run a planted bench_queue.py at the host's level: the host runs
+ * the game repo's master copy, fetched with the machine's gh into the daemon's folder, which no worker can write
+ * (machine/evidenceGate.ts trustedAppDir).
+ */
+export interface TrustedBench {
+  /** The daemon's folder (appDirOfConfig). */
+  appDir: string;
+  /** For tests: what fetches the file (default `gh api` of FinalFactory's master). */
+  fetch?: () => { text?: string; error?: string };
+  now?: () => number;
+  exists?: (p: string) => boolean;
+  platform?: NodeJS.Platform;
+}
+
+export const BENCH_REPO = 'Final-Factory/FinalFactory';
+export const BENCH_SCRIPT_PATH = 'scripts/bench/bench_queue.py';
+/** The trusted copy's place: one file, never a pick among versions. */
+export const trustedBenchScript = (appDir: string) => path.join(appDir, 'trusted', 'bench', 'bench_queue.py');
+/** How old the trusted copy may be before a ticket fetches it again (master's rules move with merges, w1962). */
+export const TRUSTED_BENCH_MAX_AGE_MS = 10 * 60_000;
+
+/**
+ * Fetches master's bench_queue.py with gh on a trusted PATH, in the daemon's folder: the machine's gh login (or the host's
+ * GH_TOKEN), and when that cannot read it, a GitHub App installation token the portal gave this daemon (machine/ghApp.ts).
+ */
+function ghFetchBench(root: string | undefined, appDir: string, cwd: string): { text?: string; error?: string } {
+  const run = (extra: NodeJS.ProcessEnv) => spawnSync(trustedGh(root, appDir), ['api', '-H', 'Accept: application/vnd.github.raw+json', `repos/${BENCH_REPO}/contents/${BENCH_SCRIPT_PATH}?ref=master`], {
+    encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, cwd, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, GH_PROMPT_DISABLED: '1', ...extra },
+  });
+  let r = run({});
+  if (r.status !== 0) {
+    const tokens = readGhAppTokens(ghAppPaths(appDir).file);
+    const app = appTokenFor(tokens, BENCH_REPO.toLowerCase(), [...new Set(tokens.map((t) => t.app))], Date.now());
+    if (app) r = run({ GH_TOKEN: app.token });
+  }
+  if (r.status !== 0) return { error: `gh api ${BENCH_SCRIPT_PATH}: ${String(r.stderr || r.error?.message || `exit ${r.status}`).replace(/\s+/g, ' ').trim().slice(0, 200)}` };
+  return { text: r.stdout };
+}
+
+/**
+ * w5572: brings the trusted copy up to date when it is missing or older than TRUSTED_BENCH_MAX_AGE_MS: written beside it
+ * and renamed into place, so a helper never starts half a file. Answers what failed; a failed fetch keeps the copy it had.
+ */
+export function refreshTrustedBench(t: TrustedBench, root: string | undefined): string | undefined {
+  const file = trustedBenchScript(t.appDir);
+  const now = t.now ?? Date.now;
+  try {
+    if (now() - fs.statSync(file).mtimeMs < TRUSTED_BENCH_MAX_AGE_MS) return undefined;
+  } catch {
+    // none yet
+  }
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+  } catch (e) {
+    return `${path.dirname(file)}: ${(e as Error).message}`;
+  }
+  const got = (t.fetch ?? (() => ghFetchBench(root, t.appDir, path.dirname(file))))();
+  if (!got.text) return got.error ?? 'nothing fetched';
+  if (!/^RULES_VERSION = \d+/m.test(got.text)) return `the fetched ${BENCH_SCRIPT_PATH} has no RULES_VERSION`;
+  try {
+    const tmp = `${file}.${process.pid}-${now()}`;
+    fs.writeFileSync(tmp, got.text);
+    fs.renameSync(tmp, file);
+    return undefined;
+  } catch (e) {
+    return `${file}: ${(e as Error).message}`;
+  }
+}
+
+/**
+ * The trusted copy and how to run it (w5572): the script, a python outside the worker root with its clean env (`-s`,
+ * fsmonitor off) and its own folder as cwd; or why there is none. The daemon's own tickets and the tickets it holds for
+ * a worker's call (w5545, benchProxy.ts) both run it this way.
+ */
+export function trustedBenchRun(t: TrustedBench, root: string | undefined, env: NodeJS.ProcessEnv): { script: string; python: string; pythonArgs: string[]; env: NodeJS.ProcessEnv; cwd: string } | { why: string } {
+  const failed = refreshTrustedBench(t, root);
+  const script = trustedBenchScript(t.appDir);
+  if (!fs.existsSync(script)) return { why: `no trusted bench_queue.py in the daemon's folder (w5572): ${failed}` };
+  if (failed) console.warn(`bench queue: kept the trusted copy from before: ${failed}`);
+  const py = trustedPython({ workerEnv: env, root, appDir: t.appDir, ...(t.platform ? { platform: t.platform } : {}), ...(t.exists ? { exists: t.exists } : {}) });
+  if ('error' in py) return { why: `bench queue (w5572): ${py.error}` };
+  // bench_queue.py runs git in a worker's checkout (wip_note): a repository's fsmonitor setting is a program it names.
+  const n = Number(py.env.GIT_CONFIG_COUNT) || 0;
+  const gitEnv = { GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: 'core.fsmonitor', [`GIT_CONFIG_VALUE_${n}`]: 'false' };
+  return { script, python: py.python, pythonArgs: ['-s'], env: { ...py.env, ...gitEnv }, cwd: path.dirname(script) };
+}
+
+function trustedBenchTicket(o: Omit<BenchTicketOptions, 'script' | 'lock'> & { root?: string }, t: TrustedBench): { ticket?: BenchTicket; why?: string } {
+  const env = o.env ?? process.env;
+  const root = o.root ?? (env.FF_WORKER_ROOT || undefined);
+  const lock = benchLockPath(root, env);
+  if (!lock) return { why: 'no worker root to keep the bench queue under' };
+  const tr = trustedBenchRun(t, root, env);
+  if ('why' in tr) return { why: tr.why };
+  const { script } = tr;
+  const run = { ...o, ...tr, lock };
+  if (o.place !== undefined && !supportsPlace(script)) return { ticket: new BenchTicket({ ...run, place: undefined }).take(), why: 'the trusted queue script takes no --place: queued without its earlier place' };
+  return { ticket: new BenchTicket(run).take() };
 }

@@ -741,7 +741,7 @@ export class Daemon {
         worker: {
           sandboxIds: () => (this.pool ? this.pool.list().map((sb) => sb.id) : []),
           ticket: (o) =>
-            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
+            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
         },
       });
     }
@@ -755,6 +755,7 @@ export class Daemon {
     if (cfg.root) {
       this.benchProxy = new BenchProxy({
         dir: path.join(appDirOfConfig(cfg), 'bench-holds'),
+        trusted: { appDir: appDirOfConfig(cfg) },
         lock: () => benchLockDir(cfg.root!),
         root: cfg.root,
         sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
@@ -958,7 +959,7 @@ export class Daemon {
         // own sandbox's timed leg (rides_along: "running editor <sandbox>", with the sandbox in the ticket)
         // w1962: under a session of its own (editor:<sandbox>, at its sandbox's worker's priority in priorities.json), which
         // FF_BENCH_SESSION gives it: FF_SESSION_ID would make it a worker's, whose leftovers FF Factory ends
-        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
       },
       pd,
     );

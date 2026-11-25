@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { benchQueueDir, newestBenchQueueScript, pythonExe, queueTickets, supportsPlace, type BenchMode } from './benchQueue.ts';
+import { benchQueueDir, newestBenchQueueScript, pythonExe, queueTickets, supportsPlace, trustedBenchRun, type BenchMode, type TrustedBench } from './benchQueue.ts';
 import { RpcRefused, type Caller } from './daemonRpc.ts';
 
 const HANDLE = /^h[0-9a-f]{16}$/;
@@ -44,6 +44,8 @@ export interface BenchProxyDeps {
   sessionOf: (pid: number) => Promise<string | undefined>;
   now?: () => number;
   log?: (line: string) => void;
+  /** w5572: run the game repo's master copy the daemon fetched, never a sandbox's (the daemon passes it; tests may not). */
+  trusted?: TrustedBench;
   /** Tests: start the helper. */
   spawnHelper?: (python: string, args: string[], o: { cwd?: string; env: NodeJS.ProcessEnv }) => { pid?: number; onExit(cb: (code: number | null) => void): void };
 }
@@ -89,7 +91,12 @@ export class BenchProxy {
     const lock = this.d.lock();
     if (!lock) throw new RpcRefused('no worker root here to keep the bench queue under');
     const cwd = c.sandbox ? this.d.sandboxPath(c.sandbox) : undefined;
-    const script = newestBenchQueueScript([cwd], this.d.root);
+    // The ticket says who asked from the token alone. The daemon's own token and secrets stay out of the helper.
+    const { FF_DAEMON_TOKEN: _t, FF_DAEMON_RPC: _r, FF_BENCH_TICKET: _h, ...base } = process.env;
+    const askEnv: NodeJS.ProcessEnv = { ...base, FF_SESSION_ID: c.session, FF_SANDBOX_ID: c.sandbox ?? '', FF_BENCH_SESSION: '', ...(cwd ? { FF_SANDBOX_PATH: cwd } : {}) };
+    const tr = this.d.trusted ? trustedBenchRun(this.d.trusted, this.d.root, askEnv) : undefined;
+    if (tr && 'why' in tr) throw new RpcRefused(tr.why);
+    const script = tr ? tr.script : newestBenchQueueScript([cwd], this.d.root);
     if (!script) throw new RpcRefused('no scripts/bench/bench_queue.py in any sandbox here');
     // A script owner's revoked turn is stopped by the helper (SIGTERM to the owner and what it started, w1656): only for
     // an owner that runs under the caller's own session, so no worker can point a revoke at another's process.
@@ -113,11 +120,8 @@ export class BenchProxy {
     if (mode === 'exclusive' && Number.isFinite(place) && place > 0 && supportsPlace(script)) args.push('--place', String(place));
     if (b.detached === true) args.push('--detached');
     args.push('--owner-kind', ownerKind);
-    // The ticket says who asked from the token alone. The daemon's own token and secrets stay out of the helper.
-    const { FF_DAEMON_TOKEN: _t, FF_BENCH_TICKET: _h, ...base } = process.env;
-    const env: NodeJS.ProcessEnv = { ...base, FF_SESSION_ID: c.session, FF_SANDBOX_ID: c.sandbox ?? '', FF_BENCH_SESSION: '', ...(cwd ? { FF_SANDBOX_PATH: cwd } : {}) };
     const rec: BenchHandleRecord = { handle, session: c.session, ...(c.sandbox ? { sandbox: c.sandbox } : {}), ownerPid, ownerKind, mode, what: str(b.what, 200), createdAt: new Date(this.now()).toISOString() };
-    const child = (this.d.spawnHelper ?? spawnDetached)(pythonExe(env), args, { cwd, env });
+    const child = tr ? (this.d.spawnHelper ?? spawnDetached)(tr.python, [...tr.pythonArgs, ...args], { cwd: tr.cwd, env: tr.env }) : (this.d.spawnHelper ?? spawnDetached)(pythonExe(askEnv), args, { cwd, env: askEnv });
     if (!child.pid) throw new RpcRefused('the bench queue helper did not start');
     rec.pid = child.pid;
     fs.writeFileSync(this.rec(handle), JSON.stringify(rec));

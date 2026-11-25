@@ -7,3 +7,4 @@
   `unity-slot` uses the calls when it has a token; the game repo's `bench_queue.py` and `unity_slot.py` follow in their own
   pull request. Old branches' scripts run ungated (slots, still counted as processes) or in an ignored queue (bench, and
   the timing guard refuses their timings). Docs: unity-lifecycle.md ("Asking the daemon"). Tests: `daemonRpc.test.ts`.
+- A ticket the daemon holds for a worker's call runs the daemon's trusted master copy of bench_queue.py (w5572), with `python -s`, never the caller's sandbox copy.

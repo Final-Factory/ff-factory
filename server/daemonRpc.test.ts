@@ -6,7 +6,7 @@ import path from 'node:path';
 import { DaemonRpc, loadRpcKey, makeToken, readToken, rpcCall, RpcRefused, RPC_ENV, TOKEN_ENV } from '../machine/daemonRpc.ts';
 import { UnitySlots, acquire, reqFile, rpcMailbox, slotRpcHandlers, readSlotPriorities } from '../machine/unitySlots.ts';
 import { BenchProxy } from '../machine/benchProxy.ts';
-import { benchLockPath, benchQueueDir, queueTickets } from '../machine/benchQueue.ts';
+import { benchLockPath, benchQueueDir, queueTickets, trustedBenchScript } from '../machine/benchQueue.ts';
 import { benchLockDir, foreignTimedHold, legacyBenchLockDir } from '../machine/benchLock.ts';
 
 // w5545 (item 9 of the w5451 rogue-worker audit): Unity slot requests and bench tickets only through the daemon's own
@@ -170,4 +170,29 @@ test('w5545: the bench proxy keys a ticket to the token\'s session, lets only th
   await assert.rejects(async () => h['bench/register'](me, { ticket: 't00000008', pid: 31337 }), (e) => e instanceof RpcRefused && e.status === 403);
   await assert.rejects(async () => h['bench/register'](me, { ticket: 't00000009', pid: 31337 }), (e) => e instanceof RpcRefused && e.status === 404);
   assert.ok(!fs.existsSync(path.join(q, 't00000008', 'pids')));
+});
+
+test('w5545 with w5572: the bench proxy runs the daemon\'s trusted copy of bench_queue.py with -s, never the caller\'s sandbox copy', async (t) => {
+  const root = tmp(t, 'benchproxy-trusted');
+  const sb = path.join(root, 'sandboxes', 'slot3');
+  fs.mkdirSync(path.join(sb, 'scripts', 'bench'), { recursive: true });
+  fs.writeFileSync(path.join(sb, 'scripts', 'bench', 'bench_queue.py'), 'RULES_VERSION = 999\n# planted\n');
+  const appDir = path.join(root, 'daemon');
+  const spawned: { py: string; args: string[]; cwd?: string }[] = [];
+  const proxy = new BenchProxy({
+    dir: path.join(appDir, 'bench-holds'),
+    trusted: { appDir, fetch: () => ({ text: 'RULES_VERSION = 8\n# trusted\n' }) },
+    lock: () => benchLockDir(root),
+    root,
+    sandboxPath: (id) => (id === 'slot3' ? sb : undefined),
+    alive: () => true,
+    sessionOf: async () => undefined,
+    spawnHelper: (py, args, o) => (spawned.push({ py, args, cwd: o.cwd }), { pid: 778, onExit: () => undefined }),
+  });
+  await proxy.handlers()['bench/take']({ session: 'w5545-worker', sandbox: 'slot3' }, { mode: 'shared', what: 'build', ownerPid: process.pid });
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].args[0], '-s');
+  assert.equal(spawned[0].args[1], trustedBenchScript(appDir));
+  assert.equal(spawned[0].cwd, path.dirname(trustedBenchScript(appDir)));
+  assert.ok(!spawned[0].args.some((a) => a.startsWith(sb)), spawned[0].args.join(' '));
 });
