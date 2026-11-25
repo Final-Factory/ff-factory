@@ -89,7 +89,7 @@ r290 (fix 5) measured 9 d 1 h between the finished multi-select design (r87, w30
 - **Questions together.** The worker brief tells a design's worker to ask all of its open questions on one card (one
   `waiting_on_person` call with every one in `questions`), never one at a time or in chat, and never to offer the go in chat.
 
-Tests: `server/designGo.test.ts` (the section reader on r87 revision 4's own text, the message), `server/orchestrators.test.ts`
+Tests: `server/designGo.test.ts` (the section reader on r87 revision 4's own text, the message), `server/orchestrators*.test.ts`
 ("w4739: the w3031 replay", and no card when a build already names the design or the report is not a design).
 
 ## Tools
@@ -118,5 +118,5 @@ All three are in the `ledger` group (`server/toolManifest.ts`).
 The ad-hoc `.md` files already in the data folder stay where they are. `w643-migration.md` is a migration marker
 (`server/waitsMigration.ts:68`), not a report.
 
-Tests: `server/reports.test.ts` (store, revise, media, list, search), `server/orchestrators.test.ts` ("w2541: …", the
+Tests: `server/reports.test.ts` (store, revise, media, list, search), `server/orchestrators*.test.ts` ("w2541: …", the
 mark, the DONE hold, the link, the tools), `e2e/reports.spec.ts` (the tab, the filters, the page, the request link).

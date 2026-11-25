@@ -1,6 +1,6 @@
 // w5550 (rogue-worker audit w5451 item 18): file_ffbox_symbols only for the worker's own builds. lothsahn: "File it:
 // file_ffbox_symbols only for the worker's own builds". The store is server/symbolOwners.ts; the wiring through
-// switch_branch and file_ffbox_symbols is tested in machineSandboxes.test.ts ("w5550").
+// switch_branch and file_ffbox_symbols is tested in machineSandboxes*.test.ts ("w5550").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
