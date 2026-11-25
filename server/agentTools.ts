@@ -170,9 +170,11 @@ export function prependPath(env: NodeJS.ProcessEnv, dir: string, platform: NodeJ
 
 /**
  * Publish the latest agent tools on this machine. `root`: the worker root; `claude`: the daemon's Claude Code binary
- * (daemon.json `claude`), whose folder goes first on PATH. Returns the exit code (EXIT).
+ * (daemon.json `claude`), whose folder goes first on PATH; `medium`: the Medium agents' Claude Code folder (w5543,
+ * server/claudeHome.ts), which gets the same plugins from the same checkout in the same run, so the two never drift: the
+ * run fails when either is not on master's version. Returns the exit code (EXIT).
  */
-export async function publishAgentTools(root: string, d: PublishDeps, o: { claude?: string } = {}): Promise<number> {
+export async function publishAgentTools(root: string, d: PublishDeps, o: { claude?: string; medium?: string } = {}): Promise<number> {
   const claudeDir = d.env.CLAUDE_CONFIG_DIR || path.join(d.home, '.claude');
   const installed = path.join(claudeDir, 'plugins', 'installed_plugins.json');
   const before = installedVersions(readJson(installed));
@@ -223,8 +225,28 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
 
   // registerAgents.sh records the checkout it ran from in $HOME/.claude for publish-skills; that stays the person's.
   const marker = path.join(d.env.HOME || d.home, '.claude', `${MARKETPLACE}-checkout`);
-  const markerBefore = readText(marker);
   const sh = await shell(d);
+  // The workers' folder first (its lines are the ones the rollout reads, machineRollout.ts), then the Medium agents' one.
+  const code = await registerInto(root, d, { co, env, sh, marker, claudeDir, latest, label: '' });
+  if (code !== EXIT.ok) return code;
+  const medium = o.medium && path.resolve(o.medium) !== path.resolve(claudeDir) ? o.medium : undefined;
+  if (medium) {
+    fs.mkdirSync(medium, { recursive: true });
+    const mBefore = installedVersions(readJson(path.join(medium, 'plugins', 'installed_plugins.json')));
+    const label = ` (Medium agents, ${medium})`;
+    d.say(`${LINE.before.replace(/:$/, label + ':')} ${formatVersions(mBefore)}`);
+    const m = await registerInto(root, d, { co, env: { ...env, CLAUDE_CONFIG_DIR: medium }, sh, marker, claudeDir: medium, latest, label });
+    if (m !== EXIT.ok) return m;
+  }
+  d.say('Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.');
+  return EXIT.ok;
+}
+
+/** One Claude Code folder's part of a publish: registerAgents.sh into it, then the check that every plugin is on master's version. */
+async function registerInto(root: string, d: PublishDeps, x: { co: string; env: NodeJS.ProcessEnv; sh: string; marker: string; claudeDir: string; latest: Versions; label: string }): Promise<number> {
+  const { co, env, sh, marker, claudeDir, latest, label } = x;
+  const installed = path.join(claudeDir, 'plugins', 'installed_plugins.json');
+  const markerBefore = readText(marker);
   const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
   const register = async () => {
     const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: co, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
@@ -254,16 +276,15 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   }
 
   const after = installedVersions(readJson(installed));
-  d.say(`${LINE.after} ${formatVersions(after)}`);
+  d.say(`${LINE.after.replace(/:$/, label + ':')} ${formatVersions(after)}`);
   if (r.code !== 0) {
-    d.say(`FAILED: registerAgents.sh exited ${r.code}${r.code === -1 ? ' (timed out or could not start)' : ''}: ${tail(r)}`);
+    d.say(`FAILED${label}: registerAgents.sh exited ${r.code}${r.code === -1 ? ' (timed out or could not start)' : ''}: ${tail(r)}`);
     return EXIT.failed;
   }
   const stale = staleAfter(after, latest);
   if (stale.length) {
-    d.say(`FAILED: not on master's version after registerAgents.sh: ${stale.join(', ')}.`);
+    d.say(`FAILED${label}: not on master's version after registerAgents.sh: ${stale.join(', ')}.`);
     return EXIT.failed;
   }
-  d.say('Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.');
   return EXIT.ok;
 }

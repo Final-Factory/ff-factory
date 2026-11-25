@@ -75,7 +75,8 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | `~/Library/Logs/Unity`, `~/Library/Unity/licenses` | the licensing client's logs and entitlement cache |
 | `~/Library/Caches/com.unity3d.UnityEditor` | Unity's per-user GI cache, Bee cache and `CurlRequestCache.db`: a fenced player build logged "Failed to create GICache directory at the default location" 81,224 times |
 
-and then takes write back from `<root>/daemon`, `<root>/secrets` and `<root>/root.json` (later rules win). The main clone
+and then takes write back from `<root>/daemon`, `<root>/secrets`, `<root>/claude-medium` (the Medium agents' Claude
+folder, w5543), `<root>/cache-medium` (their uv cache, w5565) and `<root>/root.json` (later rules win). The main clone
 `<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
