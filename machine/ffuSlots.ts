@@ -196,7 +196,11 @@ function ensureRepo(d: FfuSlotDeps, remote: string): void {
  */
 export function writeSlotCargoConfig(root: string, id: string): void {
   const file = path.join(slotDir(root, id), '.cargo', 'config.toml');
-  const text = `# Written by FF Factory's ffu-slot (w4258): this slot's builds go in its own warm target.\n[build]\ntarget-dir = ${JSON.stringify(fwd(slotTarget(root, id)))}\n`;
+  // w5499: incremental off, as ffu CI builds (ci.yml, CARGO_INCREMENTAL: 0). debug/incremental was the biggest and fastest
+  // growing part of every slot target (BEAST slot2: 38 of 55 GB; a fresh workspace test build 14.2 GB with it, 9.1 GB
+  // without) for an edit rebuild about 60 s faster (docs/ffu-sandboxes.md, "Incremental off"). CARGO_INCREMENTAL=1 in a
+  // worker's shell turns it back on for a tight edit loop; the clean-up drops an idle incremental cache.
+  const text = `# Written by FF Factory's ffu-slot (w4258): this slot's builds go in its own warm target.\n# w5499: incremental off, as ffu CI builds; CARGO_INCREMENTAL=1 turns it on for one shell.\n[build]\ntarget-dir = ${JSON.stringify(fwd(slotTarget(root, id)))}\nincremental = false\n`;
   try {
     if (fs.existsSync(file) && fs.readFileSync(file, 'utf8') === text) return;
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -250,7 +254,7 @@ const fwd = (p: string) => p.replace(/\\/g, '/');
 /** The lines `eval "$(ffu-slot take)"` runs: the slot, its checkout and target, and a cd into the checkout. */
 export function envLines(root: string, id: string): string {
   const wt = fwd(slotCheckout(root, id));
-  return [`export FFU_SLOT=${q(id)}`, `export FFU_DIR=${q(wt)}`, `export CARGO_TARGET_DIR=${q(fwd(slotTarget(root, id)))}`, `cd ${q(wt)}`, ''].join('\n');
+  return [`export FFU_SLOT=${q(id)}`, `export FFU_DIR=${q(wt)}`, `export CARGO_TARGET_DIR=${q(fwd(slotTarget(root, id)))}`, 'export CARGO_INCREMENTAL=0', `cd ${q(wt)}`, ''].join('\n');
 }
 
 export interface TakeOptions {

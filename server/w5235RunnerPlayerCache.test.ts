@@ -6,7 +6,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { cacheLogSessions, judgeWithGit, planFolders, PLAYER_CACHE_KEEP_NEWEST, type CleanupFacts, type SlotContext } from './cleanupFolders.ts';
 import type { ProcLite } from './installLeftovers.ts';
-import { removeFenceProblem } from '../machine/leftovers.ts';
+import { removeFenceProblem, removeFolders } from '../machine/leftovers.ts';
 
 /**
  * w5235: `ff-leftovers folders`/`check`/`remove` judge the FFU runners' job folders and the shared player cache. On biscuit
@@ -202,4 +202,20 @@ test('w5235: remove never takes the player-cache folder whole', (t) => {
   const { root } = world(t);
   fs.mkdirSync(path.join(root, 'player-cache'));
   assert.match(removeFenceProblem(path.join(root, 'player-cache'), root, { home: os.homedir() }) ?? '', /a top folder of the install folder \(player-cache\)/);
+});
+
+test("w5499: remove of a runner job folder a fenced worker gets EPERM on says the daemon's rule takes it, not a half-done delete", async (t) => {
+  const { root, facts } = world(t);
+  runners(root);
+  const c = ctx({ procs: [listener(root, 'ffu-biscuit-2', 100)] });
+  const job = path.join(root, 'ffu-runners', 'ffu-biscuit-2', '_work', 'ffu');
+  // Windows' Medium integrity label (NW) on ffu-runners refuses a Low integrity worker every file: rmSync throws EPERM.
+  const rm = t.mock.method(fs, 'rmSync', () => {
+    throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+  });
+  const out: string[] = [];
+  const code = await removeFolders([job], facts, NOW, (s) => void out.push(s), async () => c, new Map(), { log: path.join(root, 'removed.jsonl'), cwd: root });
+  rm.mock.restore();
+  assert.equal(code, 1);
+  assert.match(out.join(''), /KEEP .*\n.*a fenced worker cannot delete an FFU runner's folders \(EPERM.*the daemon's clean-up rule ffu-runner-work removes this one on its own pass/);
 });
