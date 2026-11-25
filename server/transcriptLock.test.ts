@@ -11,6 +11,9 @@ import { NEW_TRANSCRIPT, TRANSCRIPTS, finishNewTranscripts, linkTranscripts, own
 import { projectSlug } from './claudeHome.ts';
 import type { SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
 
+/** The transcript lock is Linux's (machine/transcriptLock.ts, under Landlock): its links need no privilege there, and readlink spells them with /. */
+const LINUX_LINKS = process.platform === 'win32' && 'the transcript lock is Linux only';
+
 // w5702: the Linux half of w5563 (machine/transcriptLock.ts, docs/transcript-seal.md): under the write lock a claude writes
 // only its own conversation's transcript.
 
@@ -26,7 +29,7 @@ function home(t: { after: (f: () => void) => void }) {
   return { base, root, claude, tr: path.join(root, TRANSCRIPTS) };
 }
 
-test('linkTranscripts moves projects out of the Claude home once, then keeps the link and sets aside what replaced it', (t) => {
+test('linkTranscripts moves projects out of the Claude home once, then keeps the link and sets aside what replaced it', { skip: LINUX_LINKS }, (t) => {
   const { root, claude, tr } = home(t);
   fs.writeFileSync(path.join(claude, 'projects', 'p1', `${OTHER}.jsonl`), 'x\n');
   assert.match(linkTranscripts(root, claude) ?? '', /moved/);
@@ -46,7 +49,7 @@ test('linkTranscripts moves projects out of the Claude home once, then keeps the
   assert.equal(fs.readlinkSync(path.join(claude, 'projects')), `../${TRANSCRIPTS}`);
 });
 
-test("a new conversation gets its own folder and a link its claude's first write follows; the file is moved in after it exits", (t) => {
+test("a new conversation gets its own folder and a link its claude's first write follows; the file is moved in after it exits", { skip: LINUX_LINKS }, (t) => {
   const { root, claude, tr, base } = home(t);
   linkTranscripts(root, claude);
   const cwd = path.join(base, 'work');
@@ -81,7 +84,7 @@ test('writeLockArgs opens the transcripts folder whole while transcriptLock is o
   assert.ok(!writeLockArgs({ root, transcriptLock: true }).includes(tr));
 });
 
-test('the first move goes into the transcripts folder made ahead, keeping its inode (a running lock is bound to it)', (t) => {
+test('the first move goes into the transcripts folder made ahead, keeping its inode (a running lock is bound to it)', { skip: LINUX_LINKS }, (t) => {
   const { root, claude, tr } = home(t);
   fs.mkdirSync(tr);
   const ino = fs.statSync(tr).ino;
@@ -175,7 +178,7 @@ test('live w5702: a locked claude writes its own transcript and folder, and is r
   assert.ok(base);
 });
 
-test("the secret scrubbers walk a linked projects folder, and the read guard holds its real folder as the Claude home's", async (t) => {
+test("the secret scrubbers walk a linked projects folder, and the read guard holds its real folder as the Claude home's", { skip: LINUX_LINKS }, async (t) => {
   const { root, claude, tr } = home(t);
   fs.writeFileSync(path.join(claude, 'projects', 'p1', `${OTHER}.jsonl`), 'x\n');
   linkTranscripts(root, claude);

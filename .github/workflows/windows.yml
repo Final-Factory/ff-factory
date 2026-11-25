@@ -55,6 +55,7 @@ on:
       - 'server/sandboxes.test.ts'
       - 'server/sandboxes.ts'
       - 'server/toolsLabelsWin.test.ts'
+      - 'server/agentNode.test.ts'
       - 'server/agentNode.ts'
       - 'server/storeLock.test.ts'
       - 'server/gitHooks/**'
@@ -65,6 +66,11 @@ on:
       - 'server/updateSteps.test.ts'
       - 'server/watchdog.ts'
       - 'server/workerCaps.test.ts'
+      - 'server/workerFence.test.ts'
+      - 'server/workerFence.ts'
+      - 'machine/readFence.ts'
+      - 'server/w5564PlayerFence.test.ts'
+      - 'server/w5630MacEditorFence.test.ts'
       - '.github/windows-tests.txt'
       - '.github/workflows/windows.yml'
   # The safety net: the whole suite on Windows once a day, for what no list names. In the 30 days to 2026-10-10 the
@@ -90,9 +96,16 @@ permissions:
 
 jobs:
   windows:
-    name: Windows tests${{ (github.event_name == 'schedule' || inputs.all) && ' (the whole suite)' || '' }}
+    # The whole suite in four shards, each on its own runner (w5810). On one runner it took 14.5-14.8 min of its 15 min
+    # watchdog on its last green days (2026-11-19, 2026-11-20) and outlived it on 27 of the 30 days to 2026-11-25, on a
+    # suite that grew from 339 to 499 files in a month; Linux split the same suite in two for the same reason (w5679).
+    name: Windows tests${{ (github.event_name == 'schedule' || inputs.all) && format(' (the whole suite, {0}/4)', matrix.shard) || '' }}
     runs-on: windows-latest
     timeout-minutes: 22
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON((github.event_name == 'schedule' || inputs.all) && '[1, 2, 3, 4]' || '[1]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -104,15 +117,32 @@ jobs:
           git config --global user.name "FF Factory CI"
           git config --global user.email "ci@users.noreply.github.com"
       - run: npm ci --no-audit --no-fund
+      # A few tests load the web's code (server/swClick.test.ts, server/vault.test.ts, scripts/release.test.ts), as on Linux.
+      - if: github.event_name == 'schedule' || inputs.all
+        run: npm ci --prefix web --no-audit --no-fund
       - name: The tests that need Windows (.github/windows-tests.txt), or every test once a day
-        # The whole suite took about 6 min of tests on one runner before w910; the listed files, about 2.
+        # The listed files take about 2 min; a quarter of the whole suite about 4 (w5810).
         timeout-minutes: 17
         shell: bash
         env:
           ALL: ${{ github.event_name == 'schedule' || inputs.all }}
+          FF_TEST_FILE_TIMES: ${{ runner.temp }}/file-times.json
         run: |
-          if [ "$ALL" = true ]; then files=(server/*.test.ts scripts/*.test.ts machine/*.test.ts); else
+          shard=()
+          if [ "$ALL" = true ]; then
+            files=(server/*.test.ts scripts/*.test.ts scripts/worker/*.test.ts machine/*.test.ts)
+            shard=(--test-shard=${{ matrix.shard }}/4)
+          else
             mapfile -t files < <(grep -vE '^\s*(#|$)' .github/windows-tests.txt | cut -d'|' -f1 | tr -d ' ')
           fi
-          echo "${#files[@]} test files"
-          node scripts/test-watchdog.ts --minutes $([ "$ALL" = true ] && echo 15 || echo 9) -- node --test --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout "${files[@]}"
+          echo "${#files[@]} test files ${shard[*]}"
+          node scripts/test-watchdog.ts --minutes $([ "$ALL" = true ] && echo 15 || echo 9) -- node --test --test-timeout=300000 "${shard[@]}" --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --test-reporter=./scripts/test-file-times.ts --test-reporter-destination=stdout "${files[@]}"
+      - name: Test files' time (the slowest, and a file whose process outlives its tests)
+        if: always() && (github.event_name == 'schedule' || inputs.all)
+        shell: bash
+        run: |
+          rc=0
+          node scripts/test-file-times.ts --check "$RUNNER_TEMP/file-times.json" > file-times.txt || rc=$?
+          cat file-times.txt
+          { echo '### Test files, shard ${{ matrix.shard }}/4'; echo '```'; cat file-times.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc

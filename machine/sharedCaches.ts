@@ -357,7 +357,7 @@ export async function warmUvCache(command: string, runs: { offline: string[]; on
   if (!runs) return undefined;
   // w5542: the entry may come from <root>/claude/.claude.json, which workers can write, and this runs at the daemon's level:
   // never a uvx or a --from package inside the worker root (outside the daemon's folder).
-  const planted = trust && [command, ...runs.online].find((a) => workerWritable(a.replace(/^(git\+)?file:\/\//, ''), trust.root, trust.appDir));
+  const planted = trust && [command, ...runs.online].find((a) => workerWritable(fileUrlPath(a), trust.root, trust.appDir));
   if (planted) return `unity mcp: did not warm the uv cache${forWhom === 'agents' ? '' : ` for ${forWhom}`}: ${planted} is in a folder workers can write (w5542)`;
   const env: NodeJS.ProcessEnv = { ...process.env, ...agentEnv, UV_CACHE_DIR: cacheDir };
   // A Low agent's APPDATA is inside the root: its uv.toml is a worker's file, so the daemon's run reads no uv config.
@@ -366,6 +366,15 @@ export async function warmUvCache(command: string, runs: { offline: string[]; on
   if (!(await run(command, runs.offline, env)).error) return `unity mcp: its package is in ${cacheDir}${tag}`;
   const online = await run(command, runs.online, env);
   return online.error ? `unity mcp: could not fill ${cacheDir} with its package${tag}, so ${forWhom} here get no Unity MCP bridge: ${online.error.slice(0, 300)}` : `unity mcp: filled ${cacheDir} with its package${tag}`;
+}
+
+/**
+ * The path of a `file://` or `git+file://` argument, else the argument. A Windows file URL keeps its drive and loses the
+ * slash before it (`file:///V:/x` is `V:/x`): left as `/V:/x`, Windows resolved it onto the current drive, outside the
+ * root, and a package a worker planted in the root was warmed (w5810, found by the daily Windows run).
+ */
+export function fileUrlPath(a: string): string {
+  return a.replace(/^(git\+)?file:\/\//, '').replace(/^\/([A-Za-z]:[\\/])/, '$1');
 }
 
 /** w5542: whether `p` is an absolute path inside the worker root and outside the daemon's folder (where workers can write). */

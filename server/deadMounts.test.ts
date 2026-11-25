@@ -23,7 +23,8 @@ function fixture(t: { after: (fn: () => void) => void }): { dir: string; points:
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ffmount-'));
   t.after(() => fs.rmSync(d, { recursive: true, force: true }));
   const dir = path.join(d, STACKED);
-  const points = ['gvfs', 'doc'].map((n) => path.join(dir, 'w994', 'gs', n));
+  // A mount point as /proc/self/mountinfo spells it: the lines join it to the folder with /, on Windows too (w5810).
+  const points = ['gvfs', 'doc'].map((n) => `${dir}/w994/gs/${n}`);
   for (const p of points) fs.mkdirSync(p, { recursive: true });
   return { dir, points };
 }

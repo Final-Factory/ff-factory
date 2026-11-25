@@ -297,6 +297,9 @@ test("w5541: a `.git` file pointing at a git folder the worker made runs none of
     fs.cpSync(path.join(main, '.git'), planted, { recursive: true });
     const wtGit = path.join(planted, 'worktrees', path.basename(wt));
     fs.writeFileSync(path.join(wtGit, 'commondir'), slash(planted) + '\n');
+    // Removed first: git for Windows hides a worktree's `.git` (core.hideDotFiles), and Windows refuses to open a hidden
+    // file for writing (EPERM, w5810).
+    fs.rmSync(path.join(wt, '.git'));
     fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${slash(wtGit)}\n`);
     plant(f, planted, path.join(planted, 'hooks'));
 

@@ -684,7 +684,12 @@ test("w5506: the key systemd opened (OpenFile=) is read from its descriptor, clo
   const closed: number[] = [];
   // fd 4 (the second name) stands for the real descriptor.
   const fsx = {
-    fstatSync: (fd: number) => fs.fstatSync(fd === 4 ? real : -1),
+    // Windows has no file modes (every file reads as 0o666): the key stands as systemd's 0600 file there (w5810).
+    fstatSync: (fd: number) => {
+      const s = fs.fstatSync(fd === 4 ? real : -1);
+      if (process.platform === 'win32') s.mode = (s.mode & ~0o777) | 0o600;
+      return s;
+    },
     readFileSync: (fd: number, enc: 'utf8') => fs.readFileSync(fd === 4 ? real : -1, enc),
     closeSync: (fd: number) => closed.push(fd),
   } as unknown as Parameters<typeof takeOpenedKey>[1] extends infer O ? NonNullable<O extends { fsx?: infer F } ? F : never> : never;

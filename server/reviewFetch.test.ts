@@ -21,7 +21,8 @@ function setup(t: { after: (fn: () => void) => void }) {
   return { dir, root, store: new AttachmentStore(path.join(dir, 'data')) };
 }
 
-const real = (p: string) => fs.realpathSync(p);
+// The native realpath, as reviewFilesFor's fs.promises.realpath: it spells a Windows 8.3 name (RUNNER~1) in full (w5810).
+const real = (p: string) => fs.realpathSync.native(p);
 
 test('fetch_review: files by the path publish_review answered and relative to the root, with either separator, once each', async (t) => {
   const { root } = setup(t);

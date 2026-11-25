@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { uvWarmRuns } from '../machine/unityMcp.ts';
-import { warmUvCache } from '../machine/sharedCaches.ts';
+import { fileUrlPath, warmUvCache } from '../machine/sharedCaches.ts';
 
 const UVX = { command: 'C:/Users/u/.local/bin/uvx.exe', args: ['--offline', '--from', 'mcpforunityserver==10.0.0', 'mcp-for-unity'] };
 
@@ -59,4 +59,11 @@ test('w5542: the daemon never warms a uvx or a package a worker planted in the r
   await warmUvCache('V:/ffw/daemon/tools/uvx.exe', uvWarmRuns(UVX), 'V:/ffw/cache/uv', fake, {}, 'agents', trust);
   await warmUvCache(UVX.command, uvWarmRuns(UVX), 'V:/ffw/cache/uv', fake, { APPDATA: 'V:/ffw/low/AppData/Roaming' }, 'Low agents', trust);
   assert.deepEqual(ran.map((r) => [r.bin, r.env.UV_NO_CONFIG]), [['V:/ffw/daemon/tools/uvx.exe', undefined], [UVX.command, '1']]);
+});
+
+test('w5810: a file URL names its path with the drive first on Windows, so the root check sees it on every OS', () => {
+  assert.equal(fileUrlPath('file:///V:/ffw/sandboxes/slot1/evil'), 'V:/ffw/sandboxes/slot1/evil');
+  assert.equal(fileUrlPath('git+file:///C:/ffw/x'), 'C:/ffw/x');
+  assert.equal(fileUrlPath('file:///home/u/ffw/evil'), '/home/u/ffw/evil');
+  assert.equal(fileUrlPath('mcp-for-unity'), 'mcp-for-unity');
 });
