@@ -2193,11 +2193,14 @@ export class Agents {
     const warnings: string[] = [];
     // w4498: merge on green armed: a draft or a failing Evidence check is refused now, not found after green CI.
     const arming = typeof a.merge_on_green === 'string' && a.merge_on_green.trim() !== '';
+    // w5549: each ci: pull request's head as GitHub reads it, for merge on green's check that it is the worker's own.
+    const prHeads = new Map<string, PrHealth | undefined>();
     for (const raw of prs) {
       const m = /^\s*ci:\s*/i.exec(raw);
       const ref = m ? prRefOf(raw.slice(m[0].length)) : undefined;
       if (!ref) continue;
       const problem = await this.ciWaitProblem(ref, head, arming);
+      prHeads.set(ref, problem?.pr);
       if (problem?.refuse) throw new Error(problem.refuse);
       if (problem?.warn) warnings.push(problem.warn);
       // w3021: a short head the pull request's own head starts with is recorded whole, as merge on green passes it to GitHub.
@@ -2217,6 +2220,7 @@ export class Agents {
       what: String(a.what ?? ''),
       ...(head ? { head } : {}),
       ...(typeof a.merge_on_green === 'string' && a.merge_on_green.trim() ? { mergeOnGreen: a.merge_on_green } : {}),
+      prHeads,
     });
     this.blockerWatch?.kick();
     return warnings.length ? `${out} WARNING: ${warnings.join(' ')}` : out;
@@ -2284,14 +2288,23 @@ export class Agents {
   }
 
   /** Why a ci: wait on `ref` should not be set: its pull request conflicts, or its head is not the pushed `head`; or a warning. */
-  private async ciWaitProblem(ref: string, head: string, arming = false): Promise<{ refuse?: string; warn?: string; head?: string } | undefined> {
+  private async ciWaitProblem(ref: string, head: string, arming = false): Promise<{ refuse?: string; warn?: string; head?: string; pr?: PrHealth } | undefined> {
+    const h = await this.readPrHealth(ref);
+    const problem = this.ciWaitProblemOf(ref, head, arming, h);
+    return h ? { ...problem, pr: h } : problem;
+  }
+
+  private async readPrHealth(ref: string): Promise<PrHealth | undefined> {
     if (!this.prHealth) return undefined;
-    let h: PrHealth | undefined;
     try {
-      h = await this.prHealth(ref);
+      return await this.prHealth(ref);
     } catch {
-      h = undefined;
+      return undefined;
     }
+  }
+
+  private ciWaitProblemOf(ref: string, head: string, arming: boolean, h: PrHealth | undefined): { refuse?: string; warn?: string; head?: string } | undefined {
+    if (!this.prHealth) return undefined;
     if (!h) return { warn: `FF Factory could not read ${prLabel(ref)}, so it did not check that your push landed or that it can merge: check yourself (gh pr view ${ref.split('#')[1]} --json headRefOid,mergeable).` };
     if (h.state !== 'open') return undefined;
     if (h.conflict) return { refuse: `${conflictText(ref, h.conflict.base).replace(/, and wait again$/, '')}; then call blocked_on again. Nothing was recorded.` };
