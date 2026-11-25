@@ -354,7 +354,7 @@ cmd_update() {
     say "already up to date at $(grep -oE 'already at [0-9a-f]+' <<<"$l" | tail -n 1 | cut -d' ' -f3): nothing to restart"
     exit 0
   fi
-  target=$(jq -r '.sha // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  target=$(jq -r '.sha // empty' "$PREPARED" 2>/dev/null || true)
   [ -n "$target" ] || target=$(grep -oE 'built [0-9a-f]+' <<<"$l" | tail -n 1 | cut -d' ' -f2 || true)
   say "built ${target:0:12} in $(mmss $(($(date +%s) - t0)))"
   # 2. The drain and the restart.
@@ -976,7 +976,7 @@ cmd_disk_usage() {
   echo
   echo "== app releases ($RELEASES), newest first: size, node_modules, built; RELEASES_KEEP_EXTRA=${RELEASES_KEEP_EXTRA:-?}"
   cur=$(readlink -e "$CURRENT" 2>/dev/null || true); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
-  prepared=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  prepared=$(jq -r '.dir // empty' "$PREPARED" 2>/dev/null || true)
   if [ -d "$RELEASES" ]; then
     find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' | sort -rn | while read -r _ d; do
       mark=""

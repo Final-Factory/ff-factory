@@ -93,8 +93,17 @@ except its own. Permission mode is `bypassPermissions`, bounded by two `PreToolU
    `-fls`/`-delete`, `tree -o`/`-R`, `uniq IN OUT` or `file -C`. It refuses shell variables and `$'…'` quoting,
    `VAR=value` except formatting variables (`LC_*`, `TZ`, `GH_REPO`, a pager set to empty or `cat`, …), a glob or brace
    that could expand into an option of those programs, and a program run from a path other than a system folder.
-   Not covered: git still reads the configuration of the repository it runs in, so a repository folder the agent
-   wrote itself could set `core.fsmonitor` (the follow-up of w5504).
+   Git also reads the configuration of the repository it runs in, which could name a program (w5514). So a standing
+   agent's process carries command-scope git config that outranks any repository's (`server/launch.ts`
+   `standingGitEnv`): `safe.bareRepository=explicit` (a folder shaped like a bare repository is not taken as one),
+   `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.pager=cat`, `protocol.ext.allow=never`, and
+   `GIT_CONFIG_NOSYSTEM=1` except on Windows (Git for Windows keeps its TLS backend and credential manager there).
+   Keys a repository names freely (`diff.<driver>.textconv`, `filter.<driver>.clean`, `gpg.program`) cannot be
+   overridden that way, and `diff.external=` (empty) breaks every `git diff` ("cannot run", git 2.50.1), so Write and
+   Edit never reach git's own files (`standingWriteProblem`): no path with a `.git` segment in any spelling (`.GIT`,
+   `.git.`, `GIT~1`), judged on the real path, so a symlink a cloned repository checked out (`x -> .git`, or out of the
+   folder) does not carry a write there. `server/standingGit.test.ts` spawns git in a crafted repository and shows the
+   programs it names run without the env and not with it.
 
 Tool groups (none by default, so the default is read-only on files only):
 
