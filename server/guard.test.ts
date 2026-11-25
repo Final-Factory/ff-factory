@@ -47,6 +47,16 @@ test('Unity MCP: refused until pinned, and only to this sandbox editor', async (
   assert.equal(await decide(g, 'mcp__UnityMCP__read_console', { unity_instance: 'FinalFactory@abc' }), 'deny');
 });
 
+test("w5799: Unity MCP: a peer run's second editor on the sandbox's ParrelSync clone may be pinned, no other clone", async () => {
+  const g = make();
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'sb1_clone_0@def' }), 'allow');
+  assert.equal(await decide(g, 'mcp__UnityMCP__read_console', { unity_instance: 'sb1_clone_12@def' }), 'allow');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'sb10_clone_0@def' }), 'deny');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'sb1_clone_x@def' }), 'deny');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'sb1_clone_0' }), 'deny');
+  assert.equal(await decide(g, 'mcp__UnityMCP__set_active_instance', { instance: 'FinalFactory_clone_0@def' }), 'deny');
+});
+
 test('review bypasses are closed (push variants, gh, process kills)', async () => {
   const g = make();
   const deny = [

@@ -168,13 +168,21 @@ worker holds (`slots.json`, what `ffu-slot list` reads; a holder that neither ru
 nothing, as the daemon's `holderUp` judges it), with cargo's `CACHEDIR.TAG`, no running process naming the slot (cargo,
 rustc, a test binary from the target, a shell in the checkout) and nothing in its top three levels written within the
 settle time (15 min). The same goes for a stray `slot<N>/ffu/target` inside the checkout, where builds landed before the
-w4258 `.cargo/config.toml` routing (25 GB in biscuit's slot1), which the daemon's sweep never looks at: only with cargo's
+w4258 `.cargo/config.toml` routing (25 GB in biscuit's slot1): only with cargo's
 `CACHEDIR.TAG`, or (w5499) with the checkout's `.gitignore` ignoring `/target` and cargo's tag in a folder right
 inside it: ffu's own scripts point `CARGO_TARGET_DIR` at `target/compat-base`, `target/deploy-base` or
 `target/sim-switch-b`, and cargo tags only those (LothDesktop's four slots held 0.8 to 1.9 GB each there, kept as "not
 provably build output"). Everything else is KEEP with the reason: a held or busy slot, the checkout and anything else in it, the
 slot folder, the shared clone. A clean-up worker takes a target sooner than the daemon's 7 idle days; the next build in the
 slot rebuilds it cold (minutes, not seconds). Tests: `ffuSlotCheck.test.ts`.
+
+**A stray `ffu/target` in a held slot (w5796).** Since w5796 the daemon's `ffu-slot-target` rule takes a stray
+`slot<N>/ffu/target` too (`installLeftovers.ts` `strayInTreeTarget`), and `check` agrees: whole, once no build runs in it
+and nothing in it was written for `ffuSlotKeepHours` (48 h), even in a held slot, or after the settle time in a released
+one. It is a build that missed the slot's own target, not its warm cache: a build started from a working folder outside
+the slot (cargo reads `.cargo/config.toml` from the working folder up, not from the manifest's), or an ffu script that
+named `$repo/target/<dir>` itself (before ffu PR #1154 the three scripts above did). LothDesktop, 2026-11-25: 828 MB to
+1.9 GB in three held slots, two untouched for 9 days. Tests: `ffuSlots.test.ts`, `ffuSlotCheck.test.ts` (w5796).
 
 ## Incremental off (w5499)
 

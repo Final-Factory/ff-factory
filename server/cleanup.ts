@@ -135,6 +135,8 @@ export interface CleanupRun {
   held?: { path: string; bytes: number; why: string }[];
   /** The portal host's media retention (w2268, mediaRetention.ts withMedia). */
   media?: MediaSummary;
+  /** How long each step took, in ms (staleOutput.ts cleanupPass, w5795). */
+  phasesMs?: Record<string, number>;
 }
 
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
@@ -1129,6 +1131,46 @@ export function staleAtFile(dir: string): { load(): number | undefined; save(at:
   };
 }
 
+/**
+ * The pass in flight, kept in `<dir>/cleanup-pass.json` (w5795): written when a pass starts and removed when it ends, so a
+ * daemon start that finds it knows the last pass was cut off (a restart, a crash, an update) before it removed anything.
+ */
+export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['marker']> {
+  const file = path.join(dir, 'cleanup-pass.json');
+  return {
+    load: () => {
+      try {
+        const m = JSON.parse(fs.readFileSync(file, 'utf8'));
+        const at = Date.parse(m.startedAt);
+        return Number.isFinite(at) && typeof m.trigger === 'string' ? { startedAt: at, trigger: m.trigger } : undefined;
+      } catch {
+        return undefined;
+      }
+    },
+    save: (m) => {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(file, JSON.stringify({ startedAt: new Date(m.startedAt).toISOString(), trigger: m.trigger, pid: process.pid }));
+      } catch {
+        // best-effort: a cut-off pass then goes unreported
+      }
+    },
+    clear: () => {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        // best-effort
+      }
+    },
+  };
+}
+
+/** The words for a pass a daemon start found cut off (passMarkerFile). */
+export function describeCutOff(m: { startedAt: number; trigger: string }, now: number): string {
+  const min = Math.max(0, Math.round((now - m.startedAt) / 60_000));
+  return `clean-up: the previous ${m.trigger} pass, started ${new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')}Z, was cut off ${min} min later, before it finished: nothing it had planned was removed (w5795)`;
+}
+
 // ---------------------------------------------------------------- the runner
 
 const GB = 1024 ** 3;
@@ -1261,6 +1303,20 @@ export interface CleanupRunnerDeps {
   /** The summary after every pass; `notice` only when clean-up could not get back above the soft threshold. */
   done(summary: CleanupSummary, notice?: string): void;
   now?(): number;
+  /**
+   * The pass in flight, kept on disk (passMarkerFile, w5795): a start that finds one says the last pass was cut off. Absent:
+   * not tracked.
+   */
+  marker?: { load(): { startedAt: number; trigger: string } | undefined; save(m: { startedAt: number; trigger: string }): void; clear(): void };
+  /** A pass starts (not a dry run): said, so a pass a restart cuts off still shows in the log (w5795). */
+  started?(trigger: CleanupSummary['trigger'], low: boolean): void;
+  /** The words for a pass this start found cut off (describeCutOff), said once at construction. */
+  cutOff?(text: string, m: { startedAt: number; trigger: string }): void;
+  /**
+   * A low pass's quick plan (w5795, report-only for now): what the cargo-target cap with the low-space rules alone would
+   * remove, measured. Planned and timed first; the summary carries it; nothing of it is removed apart from the full pass.
+   */
+  quick?(): Promise<{ path: string; bytes: number; rule: string }[]>;
 }
 
 /** When to run a pass, and what to say about it. Shared by the host guard and the machine daemons. */
@@ -1282,6 +1338,11 @@ export class CleanupRunner {
     const kept = deps.staleAt?.load();
     this.lastStaleAt = kept ?? this.now();
     if (kept === undefined) deps.staleAt?.save(this.lastStaleAt);
+    const cut = deps.marker?.load();
+    if (cut) {
+      deps.cutOff?.(describeCutOff(cut, this.now()), cut);
+      deps.marker?.clear();
+    }
   }
 
   private now() {
@@ -1362,7 +1423,19 @@ export class CleanupRunner {
         }
       }
       const critical = trigger === 'critical' || (before !== undefined && s.criticalFreeGB !== undefined && before < s.criticalFreeGB * GB);
+      const t0 = Date.now();
+      if (!dryRun) {
+        this.d.started?.(trigger, low);
+        this.d.marker?.save({ startedAt: this.now(), trigger });
+      }
+      let quick: CleanupSummary['quick'];
+      if (low && !dryRun && this.d.quick) {
+        const q0 = Date.now();
+        const q = await this.d.quick().catch(() => undefined);
+        if (q) quick = { items: q.length, bytes: q.reduce((n, x) => n + x.bytes, 0), ms: Date.now() - q0, top: [...q].sort((a, b) => b.bytes - a.bytes).slice(0, 5) };
+      }
       const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}) });
+      const passMs = Date.now() - t0;
       const vols = await this.volumes();
       const after = vols.free;
       const soft = softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? vols.total : undefined);
@@ -1385,6 +1458,9 @@ export class CleanupRunner {
         ...(r.listed?.length ? { listed: r.listed.slice(0, 50) } : {}),
         ...(r.held?.length ? { held: r.held.slice(0, 50) } : {}),
         ...(r.media ? { media: r.media } : {}),
+        ...(r.phasesMs ? { phasesMs: r.phasesMs } : {}),
+        passMs,
+        ...(quick ? { quick } : {}),
       };
       if (dryRun) {
         this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
@@ -1404,6 +1480,7 @@ export class CleanupRunner {
       this.d.done(summary, notice);
       return summary;
     } finally {
+      if (!opts.dryRun) this.d.marker?.clear();
       this.running = false;
     }
   }

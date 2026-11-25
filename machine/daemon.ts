@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -31,6 +31,8 @@ import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from '
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
+import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
+import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -68,7 +70,7 @@ import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
@@ -251,6 +253,12 @@ export interface DaemonConfig {
    * Off when unset; set remotely by `ops_worker machine_update transcript_lock`, and `worker_fence off` lifts it with the lock.
    */
   transcriptLock?: 'on' | 'off';
+  /**
+   * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
+   * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
+   * unset; decided once per daemon process; set remotely by `ops_worker machine_update store_lock`.
+   */
+  storeLock?: 'off' | 'warn' | 'on';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -1033,6 +1041,8 @@ export class Daemon {
         idleStopMinutes: cfg.sandboxIdleStopMinutes,
         activity: (id) => this.sandboxActivity(id),
         liveAgents: (id) => this.liveIn(id),
+        // w5614: while the store lock holds, a new sandbox is a slot repo whatever slot_repos says (a worktree's git data is in the store).
+        storeLocked: () => this.storeLockMemo?.locked === true,
         trim: cfg.sandboxCacheTrim,
         // w1668: urgent releases build in slot1 of a build computer (placement.build's default list): its caches stay warm.
         warm: DEFAULT_BUILD.includes(cfg.id.toLowerCase()) ? [RELEASE_SANDBOX] : [],
@@ -1205,8 +1215,34 @@ export class Daemon {
         this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
       },
       done: (summary, notice) => {
-        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${notice ? `; ${notice}` : ''}`);
+        const mins = summary.passMs !== undefined ? ` in ${(summary.passMs / 60_000).toFixed(1)} min` : '';
+        const q = summary.quick ? `; a quick plan first would have freed ${(summary.quick.bytes / 2 ** 30).toFixed(1)} GB (${summary.quick.items} item(s), planned in ${(summary.quick.ms / 1000).toFixed(0)} s)` : '';
+        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${mins}${q}${notice ? `; ${notice}` : ''}`);
         this.out({ type: 'cleanup', summary, notice });
+      },
+      // w5795: a pass a restart cuts off said at the next start, and every start said, so the log shows passes lost to restarts.
+      marker: passMarkerFile(appDirOfConfig(cfg)),
+      started: (trigger, low) => log(`clean-up (${trigger}): pass started${low ? ', below the soft threshold' : ''}`),
+      cutOff: (text, m) => {
+        log(text);
+        appendCleanupLog(appDirOfConfig(cfg), { at: new Date().toISOString(), trigger: m.trigger, cutOff: true, startedAt: new Date(m.startedAt).toISOString(), removed: 0, freedBytes: 0 });
+      },
+      // w5795, report-only: what the cargo-target cap with the low-space rules would free at once, before the full plan.
+      quick: async () => {
+        if (!this.cfg.root || staleOutputSettings(this.cleanupSettings.staleOutput).mode !== 'on') return [];
+        const plan = await planInstallLeftovers({
+          root: this.cfg.root,
+          sandboxes: [],
+          tempRoots: [agentTempRoot(this.cfg.tempDir)],
+          guard: this.cleanupGuard(),
+          ctx: this.staleCtx,
+          procs: await this.procs().catch(() => undefined),
+          self: [process.pid, process.ppid],
+          scope: 'cargo-cap',
+          low: true,
+          closed: this.closedSessionDirs(),
+        });
+        return sizePlan(fenceToRoot(plan.items, [this.cfg.root, ...(this.cfg.extraRoots ?? [])]).inside);
       },
     });
   }
@@ -3172,6 +3208,23 @@ export class Daemon {
     }
   }
 
+  private storeLockMemo?: StoreLockDecision;
+  /**
+   * w5614: whether the store lock holds for this daemon process (machine/storeLock.ts), decided at its first use (the fence
+   * set-up or the first fenced worker) and kept, as the fences it changes are. "warn", or "on" held off, starts the watch.
+   */
+  private get storeLock(): StoreLockDecision {
+    if (!this.storeLockMemo) {
+      const d = decideStoreLock({ setting: this.cfg.storeLock, root: this.cfg.root, repoPath: this.cfg.repoPath, sandboxes: this.pool.list().map((s) => ({ id: s.id, path: s.path })), isSlotRepo });
+      this.storeLockMemo = d;
+      const line = storeLockLine(d);
+      if (line) log(line);
+      if (d.watch && d.gitDir) this.stopStoreWatch = watchStore(d.gitDir, (l) => log(l));
+    }
+    return this.storeLockMemo;
+  }
+  private stopStoreWatch?: () => void;
+
   private fenceMemo?: { fence?: WorkerFence; why?: string };
   /**
    * The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). Probed once
@@ -3183,7 +3236,7 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       let why: string | undefined;
       try {
-        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true });
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true, lockStore: this.storeLock.locked });
         if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg), secretsDirs: this.secretsDirs };
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
@@ -3228,6 +3281,8 @@ export class Daemon {
    */
   private async fenceSetup(): Promise<void> {
     try {
+      // w5614: the store lock is decided before any sandbox is made, so one made after it is a slot repo when it holds.
+      void this.storeLock;
       if (process.platform === 'win32') await this.lowSetup();
       // w5630: a fenced editor that ran through this daemon's restart writes its bridge status only under <root>/home; read
       // that folder from the start, whatever the fence switches say now (an extra folder is harmless: the newest status wins).
@@ -3333,12 +3388,20 @@ export class Daemon {
         extra: [...(this.cfg.extraRoots ?? []), this.cfg.tempDir, this.sandboxRoot(), ...allow.filter((a) => !isFile(a))],
         files: allow.filter(isFile),
         allowInAppDir: allow,
+        lockStore: this.storeLock.locked,
       });
       // w5557: the owner's own game folder inherits Low from LocalLow; an explicit Medium label refuses a Low worker's write.
       const ownerGameData = this.cfg.workerIntegrityLockGameData ? legacyGameDataRoot('win32') : undefined;
       if (ownerGameData) targets.medium.push(ownerGameData);
       if (!(await labelLow(targets, exec, say))) {
         return this.lowFail('not every folder could be labelled Low');
+      }
+      // w5614 (w5764's review): "store lock: on" was logged before the labels; say so when the Medium label did not take.
+      const sl = this.storeLock;
+      if (sl.locked && sl.gitDir) {
+        const r = await exec('icacls', [sl.gitDir]);
+        if (r.code !== 0 || !isLabelledMedium(r.stdout)) log(`store lock: NOT in force on Windows: ${sl.gitDir} does not read Medium after labelling (${r.code !== 0 ? `icacls exit ${r.code}` : 'no Medium label'}), so Low workers can still write it; store_lock off, or a daemon restart to label it again`);
+        else log(`store lock: ${sl.gitDir} reads Medium; Low workers' writes there are refused`);
       }
       // w5546: the read half: No-Read-Up on the daemon's folder, secrets and root.json, with what workers read there given
       // back (and the runs' own GitHub App token files, w5547). Again at every start: a self-update's new folders inherit NR.
@@ -3720,7 +3783,7 @@ export class Daemon {
           waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
           if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts });
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg));
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
