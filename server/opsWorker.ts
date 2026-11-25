@@ -672,8 +672,11 @@ export interface OpsDeps {
   options: (info: SessionInfo) => Options;
   /** A message to a person's own orchestrator (the worker's turn ended). */
   tellOrchestrator: (person: Requester, text: string) => void;
-  /** Whether the orchestrator's current turn is its person's own (not the harness's). */
-  personTurn: (orchestratorId: string) => boolean;
+  /**
+   * Whether the orchestrator's current turn is its person's own (not the harness's). In a turn a relayed message joined
+   * (w5507), only with `words` found in their own message in it.
+   */
+  personTurn: (orchestratorId: string, words?: string) => boolean;
   /**
    * w1039: whether a click of the person's (👍 ✅ on their orchestrator's proposal) is their own words for `need` now, and spends
    * it. Optional: a portal without it takes only a typed turn.
@@ -920,14 +923,14 @@ export class OpsWorker {
    * `fresh` is the stronger form of a new job: it also cuts off a turn the worker is still in, which a plain new job refuses
    * to do (the worker is busy with the open job: wait for its report, follow up, or interrupt it).
    */
-  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = [], byRequest = false, followUp = false): string {
+  send(caller: SessionInfo | undefined, text: string, fresh = false, workIds: readonly string[] = [], byRequest = false, followUp = false, words?: string): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
     const body = text.trim();
     if (!body) throw new Error('text: what the orchestration worker should do');
     if (fresh && followUp) throw new Error("fresh and follow_up are opposites: a new job (fresh, the default in your person's turn) or a follow-up on the open job");
     const ids = this.workIdsOf(workIds);
-    const theirTurn = this.d.personTurn(caller.id) || byRequest || !!this.d.reactionCovers?.(caller.id, { verb: 'job', refs: ids });
+    const theirTurn = this.d.personTurn(caller.id, words) || byRequest || !!this.d.reactionCovers?.(caller.id, { verb: 'job', refs: ids });
     const jobOpen = !!this.job && this.job.by.userId.toLowerCase() === person.userId.toLowerCase() && this.now() - Date.parse(this.job.at) < OPS_LIMITS.jobMs;
     if (followUp && !jobOpen) {
       const why = !this.job ? 'there is no job yet' : this.job.by.userId.toLowerCase() !== person.userId.toLowerCase() ? `the job it has is ${this.job.by.displayName}'s` : `your last job ended (${OPS_LIMITS.jobMs / 3_600_000} hours)`;
@@ -938,7 +941,7 @@ export class OpsWorker {
       throw new Error(`a follow-up in a harness turn (a check-in, a timer or a relayed report) is accepted only in the first ${OPS_LIMITS.harnessFollowUpMs / 60_000} minutes of the job; this job is older, so it needs a turn ${person.displayName} started with a message of their own: a new job, or follow_up: true there`);
     }
     const opening = fresh || !jobOpen || (theirTurn && !followUp);
-    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report)`);
+    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it: then quote ${person.displayName}'s own words from it in words, w5507)`);
     if (opening && !fresh && jobOpen && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with your open job (${this.job!.what}), and a new job starts a fresh conversation, which would cut that turn off. Wait for its [ops worker] report, send follow_up: true to add to that job, ops_worker interrupt to end its turn, or fresh: true to cut it off and start over`);
     }
@@ -1041,10 +1044,12 @@ export class OpsWorker {
    * Leaves the action's grant in the data folder, good once for `ms`, which fff-ops-priv checks and removes before it runs
    * the command: without it the worker cannot run it, whatever it is told.
    */
-  private grantFor(caller: SessionInfo | undefined, o: { noun: 'deploy' | 'restart'; file: string; ms: number }, workIds: readonly string[]) {
+  private grantFor(caller: SessionInfo | undefined, o: { noun: 'deploy' | 'restart'; file: string; ms: number }, workIds: readonly string[], words?: string) {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
-    if (!this.d.personTurn(caller.id) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report); ask them`);
+    // w5507: in a turn a relayed message joined, the deploy's text (their own words, as they said them) or words must be
+    // found in their own message in it.
+    if (!this.d.personTurn(caller.id, words) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it, and neither text nor words quotes their own message in it, w5507); ask them`);
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
     const h = this.handle();
@@ -1074,8 +1079,8 @@ export class OpsWorker {
    * A portal deploy (lothsahn, 2026-10-07: "Yes, please modify the ops worker to update yourself."), through grantFor's gate
    * and a deploy grant. Then tells the worker to do it and report.
    */
-  deploy(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = []): string {
-    const g = this.grantFor(caller, { noun: 'deploy', file: OPS_GRANT, ms: OPS_LIMITS.deployGrantMs }, workIds);
+  deploy(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = [], words?: string): string {
+    const g = this.grantFor(caller, { noun: 'deploy', file: OPS_GRANT, ms: OPS_LIMITS.deployGrantMs }, workIds, words ?? note);
     const { person, ids, grant } = g;
     this.deploying = { by: person, at: g.at.toISOString() };
     this.lastDeploy = this.deploying;
@@ -1098,8 +1103,8 @@ Report to ${person.displayName}: the commit before, the commit after, whether it
    * process restarts on the release it runs, and the machines' workers keep running and are taken back by the new portal
    * (machines.keepAgentsOnRestart, which fff-ops-priv requires). Then tells the worker to do it, to prove that, and to report.
    */
-  restart(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = []): string {
-    const g = this.grantFor(caller, { noun: 'restart', file: OPS_RESTART_GRANT, ms: OPS_LIMITS.restartGrantMs }, workIds);
+  restart(caller: SessionInfo | undefined, note = '', workIds: readonly string[] = [], words?: string): string {
+    const g = this.grantFor(caller, { noun: 'restart', file: OPS_RESTART_GRANT, ms: OPS_LIMITS.restartGrantMs }, workIds, words ?? note);
     const { person, ids, grant } = g;
     this.restarting = { by: person, at: g.at.toISOString() };
     this.openGrantedJob(g, 'restart the portal (fffctl restart)', 'a restart');

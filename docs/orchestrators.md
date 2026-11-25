@@ -3562,6 +3562,22 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
     `set_app_config` keys, and `for_user` attribution;
   - memory writes (`memoryGuard`, [Memory](#memory));
   - recording and cancelling a conditional decision ([below](#conditional-decisions-w830)).
+- **Relayed text in a person's turn needs their own words** (w5507, lothsahn: "File it: high-risk gates check my own
+  words, relayed text marked"). A message that joins a turn its person opened is not theirs by joining it: the rest
+  of an FFBox hand-over ([ffbox.md](ffbox.md#operators-own-words-w831), relayed right after their own words,
+  `server/devRequests.ts`), a `[worker update]`, `[dispatch]`, `[ledger]` or another person's `message_person`.
+  `SessionHandle.send` (`server/sessions.ts`) sets `turnRelayed` when a non-person message joins a person's turn, and
+  appends `RELAYED_MARK` (`shared/conditional.ts`, "relayed into a turn your person started ...") to it in an
+  orchestrator. In such a turn `Orchestrators.turnOwnWords` passes a gate above only with `words` quoted from the
+  person's own message in this turn (`inPersonWords`, from the turn's opening message on), or their click on a card
+  (`reactionTurn`); a turn only they wrote passes as before, words or not. The gates: `ops_worker` `send`/`deploy`/
+  `restart` (`deploy`'s text counts as words), `set_app_config`, `set_ffbox_config`, `set_pool`, `approve_delegation`,
+  `delete_memory`, `restore_memory`, `request_work` and `update_work` (`humanAsked`, approve/decline, close/reopen of
+  another's, `main_clone`, an owner acting on another owner's request), the `message_person` loop guard and
+  `dispatcherHeardPerson`. A refusal inside `request_work`/`update_work` stays a `GateRefused`, so it is held and
+  offered again on their next message (w830); `request_work` in a relayed turn files the request but not as their ask.
+  Kept on turn origin, deliberately: memory writes (`memoryGuard`: a Write has no words), the bench ticket's stop, a
+  conditional's cancel and the report `asked` mark. Tests: the w5507 cases in `orchestrators.test.ts`, `ask.test.ts`, `opsWorker.test.ts` and `sessions.test.ts`.
 
 ### A per-turn budget (w2007)
 
