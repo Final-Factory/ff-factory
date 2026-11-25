@@ -1,0 +1,2 @@
+# w5583: git hooks run under sh; CRLF from core.autocrlf on Windows must not reach them.
+server/gitHooks/* text eol=lf

@@ -313,11 +313,13 @@ test('w5541: git-lfs keeps its filter and the user’s credential helper stays w
     const { gitFence } = await import('./safeGit.ts');
     const fenced = await gitFence(['-C', wt, 'status'], { env: { ...process.env, GIT_CONFIG_GLOBAL: path.join(f.root, 'gc') } });
     // --get answers the value git uses (the last one); --get-all lists every helper in order.
-    const get = (k: string, all = false) => spawnSync('git', ['-C', wt, 'config', all ? '--get-all' : '--get', k], { env: fenced.env, encoding: 'utf8' }).stdout.trim();
+    const raw = (k: string, all = false) => spawnSync('git', ['-C', wt, 'config', all ? '--get-all' : '--get', k], { env: fenced.env, encoding: 'utf8' }).stdout;
+    const get = (k: string) => raw(k).trim();
     assert.equal(get('filter.lfs.clean'), 'git-lfs clean -- %f');
     assert.equal(get('core.fsmonitor'), 'false');
-    // git keeps the helpers after the last empty one (credential.c).
-    const helpers = get('credential.helper', true).split('\n');
+    // git keeps the helpers after the last empty one (credential.c). Not trimmed: with no trusted helper after it (a
+    // runner with no system helper), the fence's empty entry is the last line (w5583).
+    const helpers = raw('credential.helper', true).replace(/\r?\n$/, '').split(/\r?\n/);
     assert.ok(!helpers.slice(helpers.lastIndexOf('') + 1).some((h) => h.includes('evil')), helpers.join(' | '));
     assert.equal(f.ran(), '');
   } finally {

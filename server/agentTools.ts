@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 /**
@@ -127,7 +126,7 @@ export interface PublishDeps {
   env: NodeJS.ProcessEnv;
   /** The user's home folder (os.homedir()). */
   home: string;
-  /** Where the run's fresh clone goes (os.tmpdir()). */
+  /** Where the run's fresh clone goes (default: <root>/tools, beside the checkout, inside the worker root). */
   tmpdir?: string;
   platform: NodeJS.Platform;
   /** Windows, an elevated session (BEAST's ssh, w613): hand what the run made to the daemon task's user, so its non-elevated git does not refuse it. */
@@ -233,7 +232,7 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   const sh = await shell(d);
   const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
   // w5573: the script runs from a clone nothing else wrote, not from the checkout in the worker root.
-  const tmp = fs.mkdtempSync(path.join(d.tmpdir ?? os.tmpdir(), 'ff-agents-run-'));
+  const tmp = fs.mkdtempSync(path.join(d.tmpdir ?? path.dirname(co), 'ff-agents-run-'));
   try {
     return await registerFrom(tmp);
   } finally {

@@ -107,7 +107,7 @@ const NETWORK = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote', 'remote'
 export function refusal(args: string[], rows: { scope: string; key: string }[]): string | undefined {
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
   if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return undefined;
-  return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote`;
+  return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote; remove it with \`git config --local --unset-all ${bad.key}\` in that repository`;
 }
 
 /** `git config --show-scope -z --get-regexp` output: scope NUL key LF value NUL ... */
