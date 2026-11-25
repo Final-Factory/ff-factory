@@ -53,8 +53,13 @@ export function mcpPlaces(
   sandboxes: { id: string; path: string; unity: { pid?: number } }[],
   alive: (pid?: number) => number | undefined,
   instancePid: (project: string) => number | undefined,
-): { place: string; project: string; pid?: number }[] {
-  return sandboxes.map((sb) => ({ place: sb.id, project: sb.path, pid: alive(sb.unity.pid) ?? alive(instancePid(sb.path)) }));
+): { place: string; project: string; pid?: number; fromInstance?: boolean }[] {
+  return sandboxes.map((sb) => {
+    const own = alive(sb.unity.pid);
+    if (own) return { place: sb.id, project: sb.path, pid: own };
+    const pid = alive(instancePid(sb.path));
+    return pid ? { place: sb.id, project: sb.path, pid, fromInstance: true } : { place: sb.id, project: sb.path, pid: undefined };
+  });
 }
 
 const asServer = (x: unknown): StdioServer | undefined => {
@@ -128,6 +133,10 @@ export function scopedUnityMcp(server: StdioServer, appDir: string, place: strin
  * the daemon's watches already know. A status file counts only if written since that editor started: for a pid first
  * seen at a later look, since the look before (it was not running then); for one already running at the daemon's
  * first look, any age (it predates the daemon, and a stale file of the same project cannot be newer than its own).
+ * Not so for a pid read from the project's Library/EditorInstance.json (`fromInstance`, w5746): a crashed editor leaves
+ * that file and its status file behind, and its pid may since belong to any process, so at the first look only status
+ * written from then on counts. A live editor's bridge rewrites its file every 0.5 s (MCP for Unity StdioBridgeHost
+ * ProcessCommands), so it is picked up at the next look; a dead one's port never is (independent review w5753).
  */
 export class McpScopes {
   private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number }>();
@@ -139,11 +148,11 @@ export class McpScopes {
   }
 
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
-  sync(appDir: string, places: { place: string; project: string; pid?: number }[], now: number, log: (line: string) => void = () => undefined) {
+  sync(appDir: string, places: { place: string; project: string; pid?: number; fromInstance?: boolean }[], now: number, log: (line: string) => void = () => undefined) {
     const files = readStatusFiles(this.home ?? mcpStatusDirs());
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
-      if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? 0;
+      if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? (p.fromInstance ? now : 0);
       st.pid = p.pid;
       st.lookedAt = now;
       this.seen.set(p.place, st);

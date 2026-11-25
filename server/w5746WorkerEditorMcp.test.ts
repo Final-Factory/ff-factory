@@ -74,6 +74,7 @@ test("w5746: a sandbox with no daemon editor follows the editor a worker started
   live.add(10);
   instance = 10;
   assert.deepEqual(places(10), [{ place: 'slot2', project, pid: 10 }]);
+  assert.deepEqual(places(), [{ place: 'slot2', project, pid: 10, fromInstance: true }]);
   // A dead daemon editor and a stale EditorInstance.json: none.
   live.delete(10);
   assert.deepEqual(places(10), [{ place: 'slot2', project, pid: undefined }]);
@@ -95,4 +96,49 @@ test("w5746: a sandbox with no daemon editor follows the editor a worker started
   instance = 30;
   scopes.sync(app, places(), T + 200_000);
   assert.equal(port(), 0, 'the stale file predates the new pid');
+});
+
+test("w5746: at the daemon's first look, a crashed editor's old status file is not copied for a reused EditorInstance.json pid", (t) => {
+  // Independent review w5753 (PR #1246, check 3): a fresh McpScopes (the daemon just started or updated) took a status
+  // file of any age, so a 24 h old file of a crashed editor whose EditorInstance.json pid now belongs to another live
+  // process copied the dead editor's port 6402, which another sandbox's editor may hold now.
+  const dir = tmpdir(t, 'first');
+  const editors = path.join(dir, 'home', '.unity-mcp');
+  const app = path.join(dir, 'app');
+  fs.mkdirSync(editors, { recursive: true });
+  const project = path.join(dir, 'sandboxes', 'slot2');
+  const T = Date.now();
+  const f = path.join(editors, 'unity-mcp-status-dead.json');
+  const status = (port: number, mtime: number) => {
+    fs.writeFileSync(f, JSON.stringify({ unity_port: port, project_path: `${project}/Assets` }));
+    fs.utimesSync(f, mtime / 1000, mtime / 1000);
+  };
+  status(6402, T - 24 * 3600_000);
+  const places = mcpPlaces([{ id: 'slot2', path: project, unity: {} }], (pid) => pid, () => 4242);
+  const port = () => JSON.parse(fs.readFileSync(path.join(mcpStatusDir(app, 'slot2'), 'unity-mcp-port.json'), 'utf8')).unity_port;
+  const scopes = new McpScopes(editors);
+  scopes.sync(app, places, T);
+  assert.equal(port(), 0, "the dead editor's port is not copied");
+  assert.equal(fs.existsSync(path.join(mcpStatusDir(app, 'slot2'), 'unity-mcp-status-dead.json')), false);
+  scopes.sync(app, places, T + 5_000);
+  assert.equal(port(), 0, 'nor at the next look, while nothing writes it');
+  // A live batch editor of that pid writes its heartbeat (every 0.5 s): taken at the next look.
+  status(6405, T + 6_000);
+  scopes.sync(app, places, T + 10_000);
+  assert.equal(port(), 6405);
+});
+
+test("w5746: at the daemon's first look, the daemon's own running editor keeps its status of any age", (t) => {
+  const dir = tmpdir(t, 'own');
+  const editors = path.join(dir, 'home', '.unity-mcp');
+  const app = path.join(dir, 'app');
+  fs.mkdirSync(editors, { recursive: true });
+  const project = path.join(dir, 'sandboxes', 'slot2');
+  const T = Date.now();
+  const f = path.join(editors, 'unity-mcp-status-own.json');
+  fs.writeFileSync(f, JSON.stringify({ unity_port: 6401, project_path: `${project}/Assets` }));
+  fs.utimesSync(f, (T - 3600_000) / 1000, (T - 3600_000) / 1000);
+  const scopes = new McpScopes(editors);
+  scopes.sync(app, mcpPlaces([{ id: 'slot2', path: project, unity: { pid: 77 } }], (pid) => pid, () => undefined), T);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(mcpStatusDir(app, 'slot2'), 'unity-mcp-port.json'), 'utf8')).unity_port, 6401);
 });
