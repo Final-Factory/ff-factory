@@ -97,26 +97,43 @@ export interface PrHealth {
   crossRepo?: true;
   /** Since when (ms) this portal has seen this head commit (set by the blocker watch). */
   headSeenAt?: number;
-  /** w3572: the requests its description names with a `Request:` or `Part of:` line (lower case). */
+  /** w3572: the requests its description names with a `Request:` line (lower case); w5845: `Part of:` lines are `partOf`. */
   requests?: string[];
+  /** w5845: the requests its description names with a `Part of:` line only (lower case): the planner a row's PR is a step of. */
+  partOf?: string[];
   /** w4498: GitHub marks it a draft, which `gh pr merge` refuses ("Pull Request is still a draft"). */
   draft?: true;
 }
 
 /**
  * Whether request `w` owns pull request `ref` (w3572): the ledger linked it to `w` (its Request line, its own worker opened
- * it, its branch, its title), its description names `w` with a `Request:` or `Part of:` line, or its head branch is `w`'s
- * own. Only the owner is woken to merge the base into a conflicting PR; a request that only waits for another request's
- * PR to merge is not (w3423 and five others waiting on ffu#397, w3445's, were each woken three times in an hour to resolve
- * a conflict on a PR none of them owned).
+ * it, its branch, its title), its description names `w` with a `Request:` line, or its head branch is `w`'s own. Only the
+ * owner is woken to merge the base into a conflicting PR; a request that only waits for another request's PR to merge is
+ * not (w3423 and five others waiting on ffu#397, w3445's, were each woken three times in an hour to resolve a conflict on a
+ * PR none of them owned).
+ *
+ * w5845: a `Part of:` line (or a ledger link made from one) makes `w` its owner only when no `Request:` line names any
+ * request: a request's own step PR. A row's PR that says `Request: w5476` and `Part of: w2895` is w5476's; w2895, the
+ * planner, is its parent (partOfPr). On 2026-11-25 at 21:51Z ffu#1140 (w5476's) and ffu#1097 (w5472's) conflicted with main
+ * and w2895's worker 00d724a6 was told each "is w2895's", while w5476's own worker and another w2895 worker worked on them.
  */
-export function ownsPr(w: Pick<WorkItem, 'id' | 'prs' | 'source' | 'mergedInto'> | undefined, ref: string | undefined, h: Pick<PrHealth, 'requests' | 'headRef'> | undefined): boolean {
+export function ownsPr(w: Pick<WorkItem, 'id' | 'prs' | 'source' | 'mergedInto'> | undefined, ref: string | undefined, h: Pick<PrHealth, 'requests' | 'partOf' | 'headRef'> | undefined): boolean {
   if (!w || !ref) return false;
   const [repo, num] = [ref.slice(0, ref.lastIndexOf('#')).toLowerCase(), Number(ref.slice(ref.lastIndexOf('#') + 1))];
-  if (w.prs?.some((p) => p.repo.toLowerCase() === repo && p.number === num)) return true;
+  const claimed = !!h?.requests?.length;
+  if (w.prs?.some((p) => p.repo.toLowerCase() === repo && p.number === num && !(p.partOf && claimed))) return true;
   const ids = [w.id, ...(w.mergedInto ? [w.mergedInto] : [])].map((x) => x.toLowerCase());
   if (h?.requests?.some((r) => ids.includes(r.toLowerCase()))) return true;
+  if (!claimed && h?.partOf?.some((r) => ids.includes(r.toLowerCase()))) return true;
   return !!(h?.headRef && w.source?.branch && h.headRef === w.source.branch);
+}
+
+/** w5845: pull request `ref` names `w` only as the request it is one step of (`Part of:`), and it is not `w`'s own (ownsPr). */
+export function partOfPr(w: Pick<WorkItem, 'id' | 'prs' | 'source' | 'mergedInto'> | undefined, ref: string | undefined, h: Pick<PrHealth, 'requests' | 'partOf' | 'headRef'> | undefined): boolean {
+  if (!w || !ref || ownsPr(w, ref, h)) return false;
+  const [repo, num] = [ref.slice(0, ref.lastIndexOf('#')).toLowerCase(), Number(ref.slice(ref.lastIndexOf('#') + 1))];
+  const ids = [w.id, ...(w.mergedInto ? [w.mergedInto] : [])].map((x) => x.toLowerCase());
+  return !!h?.partOf?.some((r) => ids.includes(r.toLowerCase())) || !!w.prs?.some((p) => p.partOf && p.repo.toLowerCase() === repo && p.number === num);
 }
 
 /** A full 40-character commit sha, the only form GitHub's expectedHeadOid (`gh pr merge --match-head-commit`) takes (w3021). */
