@@ -110,7 +110,10 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key
-  minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a
+  minted before this change, or without `--user`, acts for the owner (by name in `server/mcp.ts`, the only owner default
+  left in a login lookup). A bound key whose login no longer exists (`users.json` edited or restored) is refused with a
+  401, and so is a browser session of such a login, which ends there (w5533, `Auth.bearer` and `Auth.user` in
+  `server/auth.ts`); neither is ever read as the owner's. A key for a member login, written straight into a
   0600 file on a machine and never printed, is the orchestration worker's `fffctl apikey issue` (w1415,
   [ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)); owner logins and Ben's and Lothsahn's stay `apikey.ts`.
 - Deleting a login (w1864): `sudo fffctl user delete <id> --by <your login>` in the VM (`server/userCli.ts`; the

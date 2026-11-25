@@ -2165,6 +2165,8 @@ export class MachineManager {
       return undefined;
     }
     this.failures.delete(ip);
+    // The address each daemon links from (w5575): what the tailnet-only check judges, listed before it is enforced.
+    console.log(`machine ${id}: link from ${ip}`);
     return { id, hash: cred!.hash, staged: cred!.staged };
   }
 

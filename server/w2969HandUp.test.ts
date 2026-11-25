@@ -90,7 +90,7 @@ test('w2969: the [follow-ups to file] message carries the line, the report and t
   assert.match(text, /If they are not wanted, close w2194 with update_work/);
 });
 
-test('w4352: an unfiled hand-up is its orchestrator’s backlog until FF Factory files it, and nothing is pending once it has', () => {
+test('w5577: an unfiled hand-up is its orchestrator’s backlog until 12 h, then its person’s card to file or drop, and nothing is pending once dropped', () => {
   const h: WorkHandedUp = { worker: 'c68864ef', at: '2026-11-15T00:00:00.000Z', count: 2, items: [], to: ['ben'], filed: [] };
   const ben = { userId: 'ben', displayName: 'Ben' };
   const w = { handedUp: h, requestedBy: ben, requesters: [ben] };
@@ -99,8 +99,22 @@ test('w4352: an unfiled hand-up is its orchestrator’s backlog until FF Factory
   assert.deepEqual(live.waitsOn, ["Ben's orchestrator"]);
   assert.equal(live.backlog, true);
   assert.equal(live.orchestrator, true);
-  assert.match(live.why, /FF Factory files them itself at low priority at 12:00 UTC/);
-  h.autoFiled = { at: '2026-11-15T12:00:00.000Z', filed: ['w9'], dropped: [{ title: 'x', by: 'w3', why: 'similar' }] };
+  assert.match(live.why, /left unfiled, they become a card for Ben to file or drop at 12:00 UTC/);
+  assert.doesNotMatch(live.why, /files them itself/);
+  h.card = '2026-11-15T12:00:00.000Z';
+  const card = handUpLive(w as never, Date.parse('2026-11-15T13:00:00.000Z'))!;
+  assert.deepEqual(card.waitsOn, ['Ben']);
+  assert.equal(card.handUpCard, true);
+  assert.ok(!card.backlog && !card.orchestrator);
+  assert.match(card.why, /Ben files them or drops them \(w5577: a hand-up never files itself\)/);
+  h.dropped = { at: '2026-11-15T14:00:00.000Z', by: 'Ben' };
   assert.equal(handUpsPending(w), 0);
-  assert.equal(handUpLive(w as never, Date.parse('2026-11-15T13:00:00.000Z')), undefined);
+  assert.equal(handUpLive(w as never, Date.parse('2026-11-15T15:00:00.000Z')), undefined);
+});
+
+test('w4352: a hand-up FF Factory filed before w5577 (autoFiled) still reads as settled', () => {
+  const ben = { userId: 'ben', displayName: 'Ben' };
+  const h: WorkHandedUp = { worker: 'c68864ef', at: '2026-11-15T00:00:00.000Z', count: 2, items: [], to: ['ben'], filed: ['w9'], autoFiled: { at: '2026-11-15T12:00:00.000Z', filed: ['w9'], dropped: [{ title: 'x', by: 'w3', why: 'similar' }] } };
+  assert.equal(handUpsPending({ handedUp: h }), 0);
+  assert.equal(handUpLive({ handedUp: h, requestedBy: ben, requesters: [ben] } as never, Date.parse('2026-11-15T13:00:00.000Z')), undefined);
 });

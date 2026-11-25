@@ -305,7 +305,8 @@ test('w5442: ffu-server has a firewall path in every slot an ffu machine can mak
   assert.match(ps, new RegExp(String.raw`\$FfuGroup = '` + FFU_SERVER_GROUP + `'`), 'the group name matches machine/ffuSlots.ts');
   assert.match(ps, /Get-NetFirewallRule -Group \$FfuGroup/, 'a re-run and -Remove delete the group first');
   assert.match(ps, /\$Tailnet = @\('100\.64\.0\.0\/10', 'fd7a:115c:a1e0::\/48'\)/, 'the tailnet only, never the internet');
-  assert.match(ps, /-Program \$exe -Protocol TCP `\s*-RemoteAddress \$script:Tailnet/, 'inbound TCP by program, from the tailnet');
+  assert.match(ps, /-Program \$exe -Protocol \$Protocol `\s*-RemoteAddress \$script:Tailnet/, 'inbound by program, from the tailnet');
+  assert.match(ps, /\[string\]\$Protocol = 'TCP'/, 'TCP unless a caller says otherwise (ffu-server says nothing: TCP; w5581)');
   const worker = fs.readFileSync(path.join(import.meta.dirname, '..', 'scripts', 'worker', 'worker.ts'), 'utf8');
   assert.match(worker, /'-FfuServer', ffuServerExes\(l\.root\)\.join\(';'\)/, 'the install and firewallRepair pass the paths');
   assert.match(worker, /\.\.\.\(fs\.existsSync\(node\) \? \[node\] : \[\]\), \.\.\.ffu\]/, 'firewallRepair checks them on every tools rollout');

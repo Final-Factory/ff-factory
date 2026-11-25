@@ -58,6 +58,8 @@ export const SETTABLE_KEYS = [
   // New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"), the owner's only: "off",
   // "advisory" (the default: let in, but logged as one that would need approval); null puts back the default.
   'ownerDeviceApproval',
+  // The daemon link from the tailnet only (w5575): "warn", "enforce" or "off" (the recovery switch); null puts back "warn".
+  'machineLinkTailnet',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
@@ -196,7 +198,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -581,6 +583,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === 'off' || value === 'advisory') return value;
       if (value === 'enforce') throw new Error(`ownerDeviceApproval "enforce" does not exist yet: owner logins are only recorded for now (advisory), and holding them comes in a later change`);
       throw new Error(`ownerDeviceApproval is "advisory" (the default: an owner's login from a new browser outside the tailnet is let in and logged as one that would need approval), "off", or null for the default`);
+    }
+    case 'machineLinkTailnet': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'off' || value === 'warn' || value === 'enforce') return value;
+      throw new Error('machineLinkTailnet is "warn" (log a daemon link from outside the tailnet, let it in), "enforce" (refuse it) or "off" (no check: the recovery switch); null puts back "warn"');
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1049,6 +1056,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     if (v === undefined) delete cfg.ownerDeviceApproval;
     else cfg.ownerDeviceApproval = v as 'off' | 'advisory';
   }
+  else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;
