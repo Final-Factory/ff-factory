@@ -44,9 +44,10 @@ export const CI_CHILDREN = ['ffu-runners'];
  * tool writes: docs/worker-root.md 2.1 and 4.1 say which.
  */
 // Not `steam` (w5551): steamcmd's folder, its config and cached login are the daemon's alone (machine/steamUpload.ts);
-// a worker uploads through steam_upload.
+// a worker uploads through steam_upload. `gamedata-home` (w5579): FF_PLAYER_HOME, the home every player a worker starts
+// gets on Linux and macOS (gameData.ts workerPlayerHomeDir); left out, a fenced worker's player could not write its prefs.
 export const WORKER_CHILDREN = [
-  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
+  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'gamedata-home', 'home', 'logs', 'nightly', 'nightly-history',
   'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam-lobby-gate',
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];
