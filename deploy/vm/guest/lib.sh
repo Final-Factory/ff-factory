@@ -124,7 +124,7 @@ as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env P
 # (pick_builder, fff-update). as_build_in DIR CMD... runs CMD in DIR as it, with a clean environment: its PATH
 # (lib.sh's fixed one), its home (its TMPDIR too, not a /tmp fff shares) and nothing of the caller's (NODE_ENV=production from fff-portal.service's ExecStartPre
 # would leave out the web build's tools).
-BUILD_AS= BUILD_HOME=
+BUILD_AS='' BUILD_HOME=''
 as_build_in() {
   local dir=$1; shift
   (cd "$dir" && runuser -u "${BUILD_AS:-$FFF_USER}" -- env -i PATH="$PATH" HOME="${BUILD_HOME:-$FFF_ROOT/home}" TMPDIR="${BUILD_HOME:-$FFF_ROOT/home}" LANG=C.UTF-8 \
@@ -154,20 +154,21 @@ ensure_build_user() {
   passwd -l "$b" >/dev/null 2>&1 || true
   [ ! -L "$h" ] || { echo "$h is a symbolic link"; return 1; }
   install -d -m 0700 -o "$b" -g "$b" "$h" || { echo "could not make $h"; return 1; }
-  chown "$b:$b" "$h" && chmod 0700 "$h" || { echo "could not make $h $b's alone"; return 1; }
+  { chown "$b:$b" "$h" && chmod 0700 "$h"; } || { echo "could not make $h $b's alone"; return 1; }
   command -v setfacl >/dev/null || { echo "setfacl is missing (the acl package: the guest install.sh installs it)"; return 1; }
   setfacl -m "u:$b:--x" "$FFF_ROOT" || { echo "setfacl on $FFF_ROOT failed"; return 1; }
+  # shellcheck disable=SC2016 # $1 is expanded by the inner sh
   runuser -u "$b" -- sh -c 'cd "$1"' _ "$RELEASES" 2>/dev/null || { echo "$b cannot reach $RELEASES"; return 1; }
+  # shellcheck disable=SC2016
   if runuser -u "$b" -- sh -c 'ls "$1" || test -w "$1"' _ "$FFF_ROOT" >/dev/null 2>&1; then echo "$b can read or write $FFF_ROOT"; return 1; fi
 }
 
 # end_build_processes: whatever the build account still runs after a build (a watcher npm left behind) is ended, so
 # nothing of it writes into the release once it is root's. Only for the build account, never fff, whose portal runs.
 end_build_processes() {
-  local i
   [ -n "$BUILD_AS" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 0
   pkill -KILL -u "$BUILD_AS" 2>/dev/null || true
-  for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$BUILD_AS" >/dev/null 2>&1 || return 0; sleep 0.5; done
+  for _ in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$BUILD_AS" >/dev/null 2>&1 || return 0; sleep 0.5; done
   warn "the build account $BUILD_AS still runs: $(pgrep -u "$BUILD_AS" -l | head -n 3 | paste -sd' ' -)"
 }
 
