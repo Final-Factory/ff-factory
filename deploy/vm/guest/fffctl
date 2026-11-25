@@ -1163,8 +1163,9 @@ cmd_agents() {
       journalctl -u fff-portal.service --since '-1 day' --no-pager -o short-iso 2>/dev/null | grep -F 'agent account' | tail -n 10 | sed 's/^/  /' || true
       ;;
     off | warn | on)
-      printf '%s\n' "$what" >"$FFF_AGENT_SWITCH.new" && chmod 0644 "$FFF_AGENT_SWITCH.new" && mv -f "$FFF_AGENT_SWITCH.new" "$FFF_AGENT_SWITCH" ||
+      if ! { printf '%s\n' "$what" >"$FFF_AGENT_SWITCH.new" && chmod 0644 "$FFF_AGENT_SWITCH.new" && mv -f "$FFF_AGENT_SWITCH.new" "$FFF_AGENT_SWITCH"; }; then
         die "agents $what: cannot write $FFF_AGENT_SWITCH"
+      fi
       if [ "$what" = off ]; then
         systemctl disable --now fff-agent.socket 2>/dev/null || true
         say "agents: off. Every agent the portal starts from now on runs as $FFF_USER, as before w5598; the ones running as ${AGENT_USER:-fff-agent} end with the portal's next restart (fffctl agents status)"

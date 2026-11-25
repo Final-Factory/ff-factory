@@ -220,6 +220,7 @@ grep -qx "ExecStartPre=-+/usr/bin/systemctl stop 'fff-agent@\*.service'" "$p" ||
 grep -qx "ExecStopPost=-+/usr/bin/systemctl stop --no-block 'fff-agent@\*.service'" "$p" || fail "fff-portal.service does not stop its agents when it stops"
 [ "$(value "$a" Service TimeoutStopSec)" = 15 ] || fail "fff-agent@.service has no short TimeoutStopSec"
 grep -qx 'Environment=FFF_AGENT_SWITCH=/etc/fff/agent-account' "$p" || fail "fff-portal.service does not name the switch fffctl agents writes"
+# shellcheck disable=SC2016 # a fixed string from install.sh, not expanded here
 grep -qF '"$(cat "$FFF_AGENT_SWITCH" 2>/dev/null)" = off' $G/install.sh || fail "install.sh starts fff-agent.socket even when fffctl agents switched it off"
 ok "the agents end with their portal (ExecStartPre and ExecStopPost, TimeoutStopSec=15), and fffctl agents' switch reaches the portal and install.sh"
 echo "all unit checks pass"
