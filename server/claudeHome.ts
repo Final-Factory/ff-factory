@@ -19,6 +19,14 @@
 // an agent on the stored login run with CLAUDE_CONFIG_DIR unset (loginClaudeEnv); and registerAgents.sh's checkout marker and
 // plugin set (`$HOME/.claude/final-factory-agents-*`), which registerAgents.sh writes and publish-skills reads at that fixed
 // path. docs/worker-root.md "Claude Code's folder".
+//
+// w5543 (the w5451 audit's item 6): <root>/claude is writable by workers (Low-labelled on Windows, inside every fence), so a
+// hook or plugin a worker planted there would run in every agent that loads it, Medium ones too. Agents that run at Medium
+// (every launch that is not a sandbox's: standing agents and the like) get their own folder, <root>/claude-medium, which no
+// fence lets a worker write: Windows keeps it Medium (lowIntegrity.ts MEDIUM_CHILDREN), Landlock and Seatbelt keep it
+// read-only (writeLock.ts LOCKED_CHILDREN, workerFence.ts READ_ONLY_IN_ROOT). The tools publish installs the plugins into both
+// folders in one run (agentTools.ts). Until the Medium folder's plugins are in, a Medium agent starts on the legacy folder,
+// never on the workers' one (agentClaudeEnv).
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -26,6 +34,8 @@ import path from 'node:path';
 export const LEGACY_VAR = 'FF_CLAUDE_LEGACY_DIR';
 /** The worker root's own Claude Code folder, <root>/claude; set only by moveClaudeHome. */
 export const WORKER_VAR = 'FF_CLAUDE_WORKER_DIR';
+/** The Medium agents' own Claude Code folder, <root>/claude-medium (w5543); set only by moveClaudeHome. */
+export const MEDIUM_VAR = 'FF_CLAUDE_MEDIUM_DIR';
 /** daemon.json env `FF_CLAUDE_HOME: "legacy"` keeps a machine on ~/.claude (the off switch). */
 export const SWITCH_VAR = 'FF_CLAUDE_HOME';
 
@@ -33,6 +43,14 @@ type Env = Record<string, string | undefined>;
 
 /** <root>/claude. */
 export const workerClaudeDir = (root: string) => path.join(root, 'claude');
+/** The root child that holds the Medium agents' folder: no worker fence lets a worker write it (w5543). */
+export const MEDIUM_CLAUDE_CHILD = 'claude-medium';
+/** <root>/claude-medium. */
+export const mediumClaudeDir = (root: string) => path.join(root, MEDIUM_CLAUDE_CHILD);
+/** The root child that holds the daemon's and Medium agents' tool caches (w5565: their uv cache, machine/sharedCaches.ts). */
+export const MEDIUM_CACHE_CHILD = 'cache-medium';
+/** The root's children only Medium writes: kept Medium on Windows, read-only under the Landlock and Seatbelt fences. */
+export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD] as const;
 
 /** Whether a worker root's agents move to <root>/claude: CLAUDE_CONFIG_DIR not set already (an instance's own) and no off switch. */
 export function movesClaudeHome(env: Env): boolean {
@@ -46,6 +64,7 @@ export function movesClaudeHome(env: Env): boolean {
 export function moveClaudeHome(env: Env, root: string, home: string, log: (line: string) => void = () => {}): string | undefined {
   if (!movesClaudeHome(env)) return undefined;
   const dir = workerClaudeDir(root);
+  const medium = mediumClaudeDir(root);
   const legacy = path.join(home, '.claude');
   try {
     fs.mkdirSync(dir, { recursive: true });
@@ -57,7 +76,17 @@ export function moveClaudeHome(env: Env, root: string, home: string, log: (line:
   env[WORKER_VAR] = dir;
   env.CLAUDE_CONFIG_DIR = dir;
   const carried = carrySettings(legacy, dir);
-  return `Claude Code's folder: ${dir} (was ${legacy}; settings.json ${carried})${pluginsReady(dir) ? '' : '; its plugins are not installed yet, so agents start on the old folder until the tools publish installs them'}`;
+  // The Medium agents' folder: made by the daemon (Medium, outside every fence); its settings come from the legacy folder,
+  // never from the workers' one. Without it Medium agents stay on the legacy folder (agentClaudeEnv).
+  let mediumSaid: string;
+  try {
+    fs.mkdirSync(medium, { recursive: true });
+    env[MEDIUM_VAR] = medium;
+    mediumSaid = `Medium agents' folder ${medium} (settings.json ${carrySettings(legacy, medium)}${pluginsReady(medium) ? '' : '; plugins not installed yet, so Medium agents start on the old folder'})`;
+  } catch (e) {
+    mediumSaid = `could not make the Medium agents' folder ${medium} (${(e as Error).message}); they stay on ${legacy}`;
+  }
+  return `Claude Code's folder: ${dir} (was ${legacy}; settings.json ${carried})${pluginsReady(dir) ? '' : '; its plugins are not installed yet, so agents start on the old folder until the tools publish installs them'}; ${mediumSaid}`;
 }
 
 /** Whether `dir`'s plugins/installed_plugins.json lists ff-agents with an install folder that exists. */
@@ -85,11 +114,14 @@ export const hasOwnCredential = (env: Env) => !!(env.CLAUDE_CODE_OAUTH_TOKEN || 
 /**
  * The folder one agent launch uses (part 2): the worker folder once its plugins are in, else the legacy one; the legacy one
  * also for a run on the stored login (its login is there). `env`: the environment the launch starts from; `runEnv`: what the
- * run adds on top (its vault token).
+ * run adds on top (its vault token). `medium` (w5543): a launch that runs at Medium, outside every worker fence (not a
+ * sandbox's): the Medium agents' folder once its plugins are in, else the legacy one, never the workers' folder.
  */
-export function agentClaudeEnv<E extends Env>(env: E, runEnv: Env = {}, ready: (dir: string | undefined) => boolean = pluginsReady): E {
+export function agentClaudeEnv<E extends Env>(env: E, runEnv: Env = {}, ready: (dir: string | undefined) => boolean = pluginsReady, medium = false): E {
   if (!env[LEGACY_VAR] || !env.CLAUDE_CONFIG_DIR || env.CLAUDE_CONFIG_DIR !== env[WORKER_VAR]) return env;
-  return hasOwnCredential({ ...env, ...runEnv }) && ready(env.CLAUDE_CONFIG_DIR) ? env : legacyEnv(env);
+  const own = hasOwnCredential({ ...env, ...runEnv });
+  if (medium) return own && ready(env[MEDIUM_VAR]) ? { ...env, CLAUDE_CONFIG_DIR: env[MEDIUM_VAR] } : legacyEnv(env);
+  return own && ready(env.CLAUDE_CONFIG_DIR) ? env : legacyEnv(env);
 }
 
 /** The environment that reads the machine's own claude.ai login (the usage probe): the legacy folder, where the login is. */
@@ -102,10 +134,19 @@ export function pluginClaudeEnv<E extends Env>(env: E, ready: (dir: string | und
   return env[LEGACY_VAR] && env.CLAUDE_CONFIG_DIR === env[WORKER_VAR] && !ready(env.CLAUDE_CONFIG_DIR) ? legacyEnv(env) : env;
 }
 
+/**
+ * The folder whose plugins the daemon itself runs a script from (the evidence gate's pr_evidence.py, w5543): the daemon runs
+ * at Medium, so the Medium agents' folder, else the legacy one; never the workers' folder, which a worker can write.
+ */
+export function mediumPluginClaudeEnv<E extends Env>(env: E, ready: (dir: string | undefined) => boolean = pluginsReady): E {
+  if (!env[LEGACY_VAR] || env.CLAUDE_CONFIG_DIR !== env[WORKER_VAR]) return env;
+  return ready(env[MEDIUM_VAR]) ? { ...env, CLAUDE_CONFIG_DIR: env[MEDIUM_VAR] } : legacyEnv(env);
+}
+
 /** Every Claude Code folder a transcript or config may be in, the environment's own first, no repeats. */
 export function claudeDirs(env: Env, home: string): string[] {
   const own = env.CLAUDE_CONFIG_DIR || path.join(home, '.claude');
-  const all = [own, env[WORKER_VAR], env[LEGACY_VAR]].filter((x): x is string => !!x);
+  const all = [own, env[WORKER_VAR], env[MEDIUM_VAR], env[LEGACY_VAR]].filter((x): x is string => !!x);
   return all.filter((d, i) => all.findIndex((x) => path.resolve(x) === path.resolve(d)) === i);
 }
 
@@ -219,5 +260,6 @@ export function findTranscript(projects: string, slug: string, sessionId: string
   return undefined;
 }
 
-/** The legacy folder's projects, when the daemon moved its agents (the transcript scrubber looks there too). */
-export const legacyProjectsDirs = (env: Env): string[] => (env[LEGACY_VAR] && env.CLAUDE_CONFIG_DIR === env[WORKER_VAR] ? [path.join(env[LEGACY_VAR]!, 'projects')].filter((d) => fs.existsSync(d)) : []);
+/** The legacy folder's projects and the Medium agents' ones, when the daemon moved its agents (the transcript scrubber looks there too). */
+export const legacyProjectsDirs = (env: Env): string[] =>
+  env[LEGACY_VAR] && env.CLAUDE_CONFIG_DIR === env[WORKER_VAR] ? [env[LEGACY_VAR], env[MEDIUM_VAR]].filter((x): x is string => !!x).map((d) => path.join(d, 'projects')).filter((d) => fs.existsSync(d)) : [];

@@ -16,12 +16,16 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
 /** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
 export const MEDIUM_LABEL = '(OI)(CI)medium';
-/** Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record). */
-export const MEDIUM_CHILDREN = ['daemon', 'secrets'];
+/**
+ * Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record), the Medium agents' Claude Code
+ * folder among them (w5543): a Low worker must not plant a hook or plugin that a Medium agent loads.
+ */
+export const MEDIUM_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN];
 /**
  * Root children that hold CI runners, which are not worker agents (w5440): they stay Medium, explicitly where an earlier
  * rollout labelled them Low. A runner's Runner.Worker.exe is started per job from its bin folder, and a process started

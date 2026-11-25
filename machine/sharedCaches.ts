@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { MEDIUM_CACHE_CHILD } from '../server/claudeHome.ts';
 
 /**
  * The machine's shared caches inside the worker install folder (w5281). Before it, every `uv run --with pillow ...` the
@@ -12,6 +13,27 @@ import path from 'node:path';
  */
 export const sharedCacheDir = (root: string) => path.join(root, 'cache');
 export const workerUvCacheDir = (root: string) => path.join(sharedCacheDir(root), 'uv');
+/**
+ * The daemon's and Medium agents' own uv cache, <root>/cache-medium/uv (w5565, item 5 of the w5451 audit): they run uvx
+ * (the Unity MCP server) and `uv run --with ...` from it, so it sits where no worker fence lets a worker write, and
+ * sandbox agents keep workerUvCacheDir (daemon.ts runSpec).
+ */
+export const mediumUvCacheDir = (root: string) => path.join(root, MEDIUM_CACHE_CHILD, 'uv');
+
+/**
+ * The daemon's own UV_CACHE_DIR at start (w5565): the Medium cache, also in place of the workers' one a daemon started by
+ * an older one may have carried over; one daemon.json names (any other folder) stays. Undefined when it is already right.
+ */
+export function mediumUvCacheFor(env: Record<string, string | undefined>, root: string): string | undefined {
+  const cur = env.UV_CACHE_DIR;
+  if (cur && path.resolve(cur) !== path.resolve(workerUvCacheDir(root))) return undefined;
+  return mediumUvCacheDir(root);
+}
+
+/** What a sandbox agent's environment adds (w5565): the workers' uv cache in place of the daemon's Medium one. */
+export function sandboxUvEnv(env: Record<string, string | undefined>, root: string | undefined): Record<string, string> {
+  return root && env.UV_CACHE_DIR && path.resolve(env.UV_CACHE_DIR) === path.resolve(mediumUvCacheDir(root)) ? { UV_CACHE_DIR: workerUvCacheDir(root) } : {};
+}
 /**
  * Read by the game (FF_DETERMINISM_AUDIT_DIR, NetworkDeterminismAuditRetention.AuditRoot) and the audit scripts in place of
  * `<game data>/DeterminismAudit`. No clean-up pass deletes in it (server/cleanup.ts PROTECTED_SEGMENTS: an `audit` segment is

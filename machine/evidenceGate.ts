@@ -6,7 +6,7 @@
 // `pr_evidence.py --repo <repo> --pr <n>` first (for the game repo and ffu, EVIDENCE_GATED) and refuse on anything but exit 0: a FAIL, a usage error, a gh failure, or
 // no python or no script to run. The script decides which pull requests it covers: one with no game code or assets
 // changed prints "PASS: no game code or assets changed" and exits 0, so docs, tools and tests still merge.
-import { pluginClaudeEnv } from '../server/claudeHome.ts';
+import { mediumPluginClaudeEnv } from '../server/claudeHome.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -67,8 +67,9 @@ export function findPrEvidence(d: FindDeps): string | undefined {
   const read = d.read ?? ((p: string) => fs.readFileSync(p, 'utf8'));
   const P = d.pathApi ?? path;
   if (d.env.FF_PR_EVIDENCE) return exists(d.env.FF_PR_EVIDENCE) ? d.env.FF_PR_EVIDENCE : undefined;
-  // w5305: the folder whose plugins the agents load (the legacy ~/.claude until the worker root's folder has them)
-  const cfgDir = pluginClaudeEnv(d.env).CLAUDE_CONFIG_DIR;
+  // w5305: the folder whose plugins the agents load (the legacy ~/.claude until the worker root's folder has them). w5543: the
+  // daemon runs this script at Medium, so the Medium agents' folder, never the one workers can write.
+  const cfgDir = mediumPluginClaudeEnv(d.env).CLAUDE_CONFIG_DIR;
   const cache = P.join(cfgDir || P.join(d.home, '.claude'), 'plugins', 'cache', 'final-factory-agents', 'ff-agents');
   const plugins = list(cache).map((v) => P.join(cache, v));
   if (d.env.FF_SKILLS) plugins.push(P.dirname(d.env.FF_SKILLS));

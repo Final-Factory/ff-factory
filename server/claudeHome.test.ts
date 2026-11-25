@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, LEGACY_VAR, loginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR } from './claudeHome.ts';
+import { spawn, spawnSync } from 'node:child_process';
+import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, LEGACY_VAR, legacyProjectsDirs, loginClaudeEnv, MEDIUM_VAR, mediumPluginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR } from './claudeHome.ts';
+import { buildOptions, type LaunchSpec } from './launch.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 import { resolveUnityMcpServer } from '../machine/unityMcp.ts';
 
@@ -151,4 +153,90 @@ test("the Unity MCP entry is read from the daemon's own config first, then the p
   fs.writeFileSync(path.join(w.dir, '.claude.json'), JSON.stringify({ mcpServers: { UnityMCP: { command: 'own' } } }));
   assert.equal(resolveUnityMcpServer(undefined, '/repo', files).server?.command, 'own');
   assert.match(resolveUnityMcpServer(undefined, '/repo', [path.join(w.base, 'none.json')]).source, /^no /);
+});
+
+// w5543: agents that run at Medium (any launch that is not a sandbox's) get their own folder, <root>/claude-medium, which no
+// worker fence lets a worker write; a hook or plugin a worker plants in <root>/claude never reaches them.
+test("a Medium launch uses the Medium agents' folder once its plugins are in, else the legacy one, never the workers' folder", () => {
+  const w = world();
+  const env: Record<string, string | undefined> = { PATH: '/bin' };
+  const said = moveClaudeHome(env, w.root, w.home);
+  const medium = path.join(w.root, 'claude-medium');
+  assert.equal(env[MEDIUM_VAR], medium);
+  assert.ok(fs.statSync(medium).isDirectory());
+  assert.match(said ?? '', /Medium agents' folder .*claude-medium/);
+  const token = { CLAUDE_CODE_OAUTH_TOKEN: 'x' };
+  installPlugins(w.dir);
+  // the workers' folder is ready, the Medium one is not: a Medium launch stays on the legacy folder
+  assert.equal(agentClaudeEnv(env, token).CLAUDE_CONFIG_DIR, w.dir);
+  assert.equal(agentClaudeEnv(env, token, undefined, true).CLAUDE_CONFIG_DIR, undefined);
+  assert.equal(mediumPluginClaudeEnv(env).CLAUDE_CONFIG_DIR, undefined);
+  installPlugins(medium);
+  assert.equal(agentClaudeEnv(env, token, undefined, true).CLAUDE_CONFIG_DIR, medium);
+  assert.equal(agentClaudeEnv(env, {}, undefined, true).CLAUDE_CONFIG_DIR, undefined, 'the stored login is in the legacy folder');
+  assert.equal(mediumPluginClaudeEnv(env).CLAUDE_CONFIG_DIR, medium);
+  // the Medium launch keeps the variables a resume and the transcript readers need
+  assert.equal(agentClaudeEnv(env, token, undefined, true)[WORKER_VAR], w.dir);
+  assert.deepEqual(claudeDirs({ ...env, CLAUDE_CONFIG_DIR: medium }, w.home), [medium, w.dir, w.legacy]);
+  assert.ok(legacyProjectsDirs(env).length === 0, 'no projects folders yet');
+  fs.mkdirSync(path.join(medium, 'projects'));
+  assert.deepEqual(legacyProjectsDirs(env), [path.join(medium, 'projects')], 'the scrubber reads the Medium agents\' transcripts too');
+});
+
+test("the Medium agents' folder gets the legacy settings.json, never the workers' one", () => {
+  const w = world();
+  fs.writeFileSync(path.join(w.legacy, 'settings.json'), JSON.stringify({ model: 'opus' }));
+  fs.mkdirSync(w.dir, { recursive: true });
+  fs.writeFileSync(path.join(w.dir, 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'planted' }] }] } }));
+  const env: Record<string, string | undefined> = {};
+  moveClaudeHome(env, w.root, w.home);
+  const m = JSON.parse(fs.readFileSync(path.join(w.root, 'claude-medium', 'settings.json'), 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(m, { model: 'opus' });
+});
+
+test("a standing agent's launch (no sandbox) gets the Medium folder from buildOptions; a sandbox agent's gets the workers'", () => {
+  const w = world();
+  const env: Record<string, string | undefined> = { PATH: '/bin' };
+  moveClaudeHome(env, w.root, w.home);
+  installPlugins(w.dir);
+  installPlugins(path.join(w.root, 'claude-medium'));
+  const spec = { cwd: w.base, settingSources: ['user'], append: '', strictMcp: true, env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' }, guard: { id: 'standing-a', ownPath: w.base, protectedPaths: [] } } as unknown as LaunchSpec;
+  assert.equal(buildOptions(spec, {}, env as NodeJS.ProcessEnv).env?.CLAUDE_CONFIG_DIR, path.join(w.root, 'claude-medium'));
+  assert.equal(buildOptions({ ...spec, sandbox: 'slot1' }, {}, env as NodeJS.ProcessEnv).env?.CLAUDE_CONFIG_DIR, w.dir);
+});
+
+// The real Claude Code CLI: a SessionStart hook planted in the workers' settings.json, and one in the Medium agents', each
+// touching a marker. Claude Code runs SessionStart hooks before its first API call, so a dead API address is enough.
+const claudeBin = spawnSync('claude', ['--version'], { encoding: 'utf8' }).status === 0 ? 'claude' : undefined;
+test('live: a hook planted in the workers\' folder does not run in a Medium agent; the Medium folder\'s own does', { skip: !claudeBin && 'needs the claude CLI' }, async () => {
+  const w = world();
+  const env: Record<string, string | undefined> = { PATH: process.env.PATH, HOME: w.home };
+  moveClaudeHome(env, w.root, w.home);
+  const medium = path.join(w.root, 'claude-medium');
+  const hook = (dir: string, marker: string) => fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `node -e "require('fs').writeFileSync(process.argv[1],'')" "${marker}"` }] }] } }));
+  for (const d of [w.dir, medium]) installPlugins(d);
+  const planted = path.join(w.base, 'marker-planted');
+  const own = path.join(w.base, 'marker-medium');
+  hook(w.dir, planted);
+  hook(medium, own);
+  const run = async (spec: LaunchSpec, wait: string) => {
+    const o = buildOptions(spec, {}, env as NodeJS.ProcessEnv);
+    const runEnv = { ...o.env, ANTHROPIC_API_KEY: 'sk-ant-dummy', ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', CLAUDE_CODE_OAUTH_TOKEN: '', DISABLE_AUTOUPDATER: '1' } as NodeJS.ProcessEnv;
+    const p = spawn(claudeBin!, ['-p', 'hi', '--setting-sources', 'user', '--max-turns', '1'], { cwd: w.base, env: runEnv, stdio: 'ignore' });
+    const until = Date.now() + 60_000;
+    while (!fs.existsSync(wait) && Date.now() < until) await new Promise((r) => setTimeout(r, 200));
+    p.kill('SIGKILL');
+    return o.env?.CLAUDE_CONFIG_DIR;
+  };
+  const spec = { cwd: w.base, settingSources: ['user'], append: '', strictMcp: true, env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' }, guard: { id: 'standing-a', ownPath: w.base, protectedPaths: [] } } as unknown as LaunchSpec;
+  try {
+    assert.equal(await run(spec, own), medium);
+    assert.ok(fs.existsSync(own), "the Medium folder's own hook ran: hooks load from it");
+    assert.ok(!fs.existsSync(planted), "the hook planted in the workers' folder did not run in the Medium agent");
+    // the control: a sandbox agent on the same machine loads the workers' folder, planted hook and all
+    assert.equal(await run({ ...spec, sandbox: 'slot1' }, planted), w.dir);
+    assert.ok(fs.existsSync(planted), "a sandbox agent loads the workers' folder");
+  } finally {
+    fs.rmSync(w.base, { recursive: true, force: true });
+  }
 });

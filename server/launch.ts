@@ -619,7 +619,8 @@ export function standingGitEnv(prior: Record<string, string | undefined>, platfo
  */
 export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogTool, ToolHandler>>, processEnv: NodeJS.ProcessEnv = process.env, editorRunning?: () => boolean): Options {
   // w5305: the worker root's own Claude Code folder once its plugins are in, else the legacy ~/.claude (server/claudeHome.ts).
-  const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env);
+  // w5543: a launch that is not a sandbox's runs at Medium, outside every worker fence: the Medium agents' folder instead.
+  const baseEnv = agentClaudeEnv(spec.login ? usageEnv(processEnv) : processEnv, spec.env, undefined, !spec.sandbox);
   const g = spec.guard;
   // Git fails fast instead of waiting on a credential prompt nobody will answer.
   const agentEnv = (() => {
