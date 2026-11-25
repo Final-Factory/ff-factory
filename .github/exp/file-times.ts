@@ -3,7 +3,7 @@ export default async function* fileTimes(source: AsyncIterable<{ type: string; d
   const rows: [number, string][] = [];
   for await (const e of source) {
     const d = e.data;
-    if ((e.type === 'test:pass' || e.type === 'test:fail') && d && d.nesting === 0 && typeof d.name === 'string' && d.name.endsWith('.test.ts')) {
+    if (e.type === 'test:complete' && d && d.nesting === 0 && typeof d.name === 'string' && d.name.endsWith('.test.ts')) {
       rows.push([d.details?.duration_ms ?? -1, d.name]);
     }
   }
