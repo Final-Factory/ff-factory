@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../server/safeGit.ts';
 
 type PlatformPath = typeof path.posix;
 
@@ -150,7 +151,7 @@ export function refreshTrustedCheckout(co: string, d: TrustedRefreshDeps = {}, o
   const now = d.now ?? Date.now;
   const env: NodeJS.ProcessEnv = { ...(d.env ?? process.env), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
   const git = d.git ?? ((args: string[]) => {
-    const r = spawnSync('git', [...ANON_GIT, ...args], { encoding: 'utf8', timeout: 2 * 60_000, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const r = gitSpawnSync([...ANON_GIT, ...args], { encoding: 'utf8', timeout: 2 * 60_000, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
     return { code: r.status ?? 1, stderr: String(r.stderr || r.error?.message || '') };
   });
   const said = (r: { code: number; stderr: string }) => r.stderr.replace(/\s+/g, ' ').trim().slice(0, 200) || `exit ${r.code}`;

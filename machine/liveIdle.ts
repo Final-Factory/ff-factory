@@ -4,7 +4,7 @@
 //
 // lothsahn, 2026-10-22: "If a live view is idle for more than 15 minutes can we close it down to free the box?"
 
-import { execFile } from 'node:child_process';
+import { gitExecFile } from '../server/safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -328,7 +328,7 @@ export type GitRun = (cwd: string, args: string[]) => Promise<string>;
 
 export const runGit: GitRun = (cwd, args) =>
   new Promise((resolve, reject) =>
-    execFile('git', ['-c', 'core.fsmonitor=false', '-C', cwd, ...args], { encoding: 'utf8', timeout: 30_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(out))),
+    gitExecFile(['-C', cwd, ...args], { encoding: 'utf8', timeout: 30_000, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(out))),
   );
 
 /** The tracked `.mat` files `git status` lists as changed (modified or type-changed, staged or not), worktree-relative with `/`. */

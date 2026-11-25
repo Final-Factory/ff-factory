@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppVersion } from '../shared/types.ts';
@@ -25,7 +25,7 @@ export function readSha(root = ROOT): string | undefined {
   const env = process.env.FFSB_GIT_SHA?.trim();
   if (env) return env.slice(0, 12);
   try {
-    return execFileSync('git', ['-C', root, 'rev-parse', '--short=7', 'HEAD'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
+    return gitExecFileSync(['-C', root, 'rev-parse', '--short=7', 'HEAD'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim() || undefined;
   } catch {
     return undefined;
   }
@@ -39,7 +39,7 @@ export function readCommit(root = ROOT): string | undefined {
   const env = process.env.FFSB_GIT_SHA?.trim().toLowerCase();
   if (env && FULL_COMMIT.test(env)) return env;
   try {
-    const out = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim().toLowerCase();
+    const out = gitExecFileSync(['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }).trim().toLowerCase();
     return FULL_COMMIT.test(out) ? out : undefined;
   } catch {
     return undefined;

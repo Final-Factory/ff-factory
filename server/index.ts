@@ -4,7 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, FINAL_FACTORY_PRODUCT_NAME, brandName, configPath, loadConfig, productName, projectOf, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
@@ -2403,6 +2403,10 @@ function parseUrl(raw: string | undefined): URL | undefined {
 }
 
 const server = http.createServer(async (req, res) => {
+  // Every answer (w5518): no content sniffing, and over HTTPS (Funnel) HSTS, so a browser never comes back over plain HTTP.
+  // writeHead's own headers win over these; a browser ignores HSTS sent over plain HTTP anyway.
+  res.setHeader('x-content-type-options', 'nosniff');
+  if (auth.isHttps(req)) res.setHeader('strict-transport-security', 'max-age=31536000');
   try {
     const url = parseUrl(req.url);
     if (!url) return send(res, 400, { error: 'bad request' });
@@ -2811,7 +2815,7 @@ server.listen(cfg.port, cfg.host, () => {
 /** This app's git HEAD, to tell the orchestrator what an update or restart changed. */
 function appHead(): string | undefined {
   try {
-    return execFileSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim() || undefined;
+    return gitExecFileSync(['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000 }).trim() || undefined;
   } catch {
     return undefined;
   }

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import { gitExecFile } from './safeGit.ts';
 import { hasLocalWork, neverDelete, norm, removeRenamed, touchedSince, within, type CleanupGuard, type CleanupItem, type CleanupRun } from './cleanup.ts';
 
 /**
@@ -222,7 +222,7 @@ export type GitRunner = (cwd: string, args: string[], timeoutMs?: number) => Pro
 
 export const runGit: GitRunner = (cwd, args, timeoutMs = 60_000) =>
   new Promise((resolve, reject) =>
-    execFile('git', ['--no-optional-locks', '-C', cwd, ...args], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out)))),
+    gitExecFile(['--no-optional-locks', '-C', cwd, ...args], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out)))),
   );
 
 /**

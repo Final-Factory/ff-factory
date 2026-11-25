@@ -2,7 +2,7 @@ import { noteBench, recentPlayers, type PlayerSeen } from './crashHolds.ts';
 import { MACHINE_ID, dropStagedToken, enrolledMachines, issueMachineToken, machineTokensFile, promoteStagedToken, readMachineTokens, revokeMachineToken, stageMachineToken, stagedKey, tokenSha } from './machineTokens.ts';
 import { JoinCodes, checkJoinLimits, joinRefusal, machineJoinsFile, type JoinLimits } from './machineJoin.ts';
 import fs from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './safeGit.ts';
 import type { SaveResult } from './saveWork.ts';
 import path from 'node:path';
 import type http from 'node:http';
@@ -18,6 +18,7 @@ import { AnsweredCalls } from './answeredCalls.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
 import { LINK_ACK_MS, PendingCalls, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
+import type { PortalPinStatus } from '../machine/portalPin.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
@@ -1095,7 +1096,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; portalPin?: PortalPinStatus }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1198,6 +1199,11 @@ export class MachineManager {
   }
 
   /** The commit a connected daemon says it runs (its hello's machine/VERSION), or undefined. */
+  /** The portal hosts its daemon follows and what pinning would have refused (w5576), from its hello; undefined from an older daemon. */
+  portalPinOf(id: string): PortalPinStatus | undefined {
+    return this.isOnline(id) ? this.hellos.get(id)?.portalPin : undefined;
+  }
+
   daemonOf(id: string): string | undefined {
     return this.isOnline(id) ? this.hellos.get(id)?.daemon : undefined;
   }
@@ -2434,7 +2440,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
@@ -3481,7 +3487,7 @@ export function machineForPath<M extends Pick<Machine, 'repoPath' | 'home' | 'pl
 /** The commit a checkout is at, or undefined. */
 function gitHead(dir: string): string | undefined {
   try {
-    return execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
+    return gitExecFileSync(['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', windowsHide: true, timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || undefined;
   } catch {
     return undefined;
   }

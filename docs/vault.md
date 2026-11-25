@@ -1493,7 +1493,11 @@ the model (the tool result) and Claude Code's own transcript on the worker's mac
   (`github_pat_[redacted …yVC9]`). The GitHub shapes had a look-behind that let a token through after a JSON `\n` or a
   terminal colour code; that is gone.
 - **The scrub** (`server/scrubSecrets.ts`) masks what is already on disk. The portal runs it over its data folder at start,
-  once per `SCRUB_VERSION` (`<dataDir>/secret-scrub.json` records it), logging paths and counts. By hand:
+  once per `SCRUB_VERSION` (`<dataDir>/secret-scrub.json` records it), logging paths and counts. It reads and masks on a
+  thread of its own (`server/scrubThread.ts`, w5613: on the portal's thread, scrub version 3 held the event loop up to 10 s
+  over one big transcript); the portal's thread only swaps each masked file in, in one turn, keeping what was appended since
+  the read (`commitScrubbed`). Its last line says how long the longest piece on the portal's thread took: the number to
+  check after a `SCRUB_VERSION` bump. By hand:
 
   ```sh
   sudo fffctl scrub-secrets --dry-run   # counts only; the ops worker may run this one
