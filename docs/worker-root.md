@@ -861,6 +861,21 @@ for systemd-executor, or turning the sysctl off for the whole machine.
 - Needs Landlock (on in Ubuntu since 22.04). Without it the launcher exits 125 and the agent does not start: leave the
   setting off there.
 
+**Signals and `systemd-run --user` (w5562).** Measured on biscuit before it (w5463): `systemd-run --user` started a
+job outside the lock that wrote to the daemon's folder, and the daemon, Unity, the desktop shell and claude were all
+signalable from a locked worker. Now:
+- `ff-landlock.py` sets `LANDLOCK_SCOPE_SIGNAL` (Landlock ABI 6, Linux 6.12; biscuit has ABI 8): a locked worker signals
+  only processes of its own lock, itself and what it started; each worker's launch is a lock of its own, so not another
+  worker either. Signal 0 to an outside process answers EPERM, which our liveness checks read as alive.
+- `--deny-unix $XDG_RUNTIME_DIR/bus` and `.../systemd` (`writeLockArgs`) refuse `connect()` to the user bus and the
+  systemd user manager's sockets with `LANDLOCK_ACCESS_FS_RESOLVE_UNIX`, so `systemd-run --user` and `systemctl --user`
+  cannot reach it. That right is **ABI 9 (Linux 7.1)**: on biscuit's 7.0 kernel (ABI 8) the option is a no-op that says
+  so on stderr, and the escape stays open until the kernel is 7.1 or newer. seccomp cannot tell one socket path from
+  another, and a mount namespace to hide the socket is refused here (Ubuntu's `apparmor_restrict_unprivileged_userns`,
+  above). Other pathname sockets stay reachable: the rule grants each sibling of the denied paths and of their parents
+  (`/`, `/run`, `/run/user`, `/run/user/<uid>`), like `--except`, so a socket an outside server makes later directly in
+  one of those four folders is refused too; sockets the worker's own processes make stay reachable.
+
 ### 4.3 Turning a fence off, and why recovery never runs inside one (w5377, 2026-11-24)
 
 lothsahn (w5377): "If we turn on the fences, is there some emergency way we could reinstall the system if things go
