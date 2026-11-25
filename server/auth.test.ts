@@ -176,6 +176,7 @@ test('a key or a session whose login no longer exists is refused, never read as 
   const usersFile = path.join(dir, 'users.json');
   const users = JSON.parse(fs.readFileSync(usersFile, 'utf8')) as { username: string }[];
   fs.writeFileSync(usersFile, JSON.stringify(users.filter((u) => u.username !== 'loth')));
+  assert.deepEqual(a.goneLogins(), { keys: 1, sessions: 1, unboundKeys: 1 });
   assert.deepEqual(bearer(lothKey), { ok: false, status: 401 });
   assert.equal(a.user(req({ cookie })), undefined);
   // The session is gone for good, even if the login comes back.

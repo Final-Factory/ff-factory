@@ -466,6 +466,11 @@ setInterval(() => {
 }, 30_000);
 // trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
 const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
+{
+  // w5533: counts only, never a key, a name or a session: what the refusal of logins that no longer exist cuts off.
+  const gone = auth.goneLogins();
+  console.log(`auth: ${gone.keys} API key(s) and ${gone.sessions} live session(s) name a login that no longer exists and are refused (w5533); ${gone.unboundKeys} unbound MCP key(s) act for the owner`);
+}
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);

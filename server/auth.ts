@@ -243,6 +243,20 @@ export class Auth {
     return this.keys().map(({ name, createdAt, user, scope }) => ({ name, createdAt, ...(user ? { user } : {}), ...(scope ? { scope } : {}) }));
   }
 
+  /**
+   * How many bound keys and live sessions name a login that no longer exists, so are refused (w5533): counts only, for
+   * the boot log, so the portal's own log says what a deploy of the check cut off without anyone reading the files.
+   */
+  goneLogins(now = Date.now()): { keys: number; sessions: number; unboundKeys: number } {
+    const known = new Set(this.users().map((u) => u.username));
+    const mcp = this.keys().filter((k) => !k.scope);
+    return {
+      keys: this.keys().filter((k) => k.user !== undefined && !known.has(k.user)).length,
+      sessions: [...this.sessions.values()].filter((x) => x.expires > now && !known.has(x.username)).length,
+      unboundKeys: mcp.filter((k) => k.user === undefined).length,
+    };
+  }
+
   revokeApiKey(name: string) {
     const keys = this.keys();
     writeJsonDurable(this.keysFile, keys.filter((k) => k.name !== name), { indent: 2 });
