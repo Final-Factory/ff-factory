@@ -2621,7 +2621,7 @@ export class Agents {
       await Promise.race([j.done, new Promise((r) => setTimeout(r, Agents.STEAM_WAIT_MS).unref())]);
     };
     if (action === 'status') {
-      const j = (typeof a.job === 'string' && this.steamJobs.byId(a.job)) || running;
+      const j = (typeof a.job === 'string' && this.steamJobs.byId(a.job)) || this.steamJobs.latestOn(machineId);
       if (!j) return `No Steam job on ${machineId} since this portal started.`;
       await wait(j);
       return describeJob(j);
