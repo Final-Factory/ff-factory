@@ -33,7 +33,7 @@ LothDesktop):
 | | Covers | Does not cover |
 |---|---|---|
 | Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
-| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md); with the read fence `on`: reads of `~/.ssh`, browsers, `~/.config/gh` and the Keychain, Keychain services and preference writes (w5553, w5560, "Owner secrets" below) | with the read fence off: those reads and preference writes; signals to other processes of the user; other sandboxes inside the root; the network |
+| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md); with the read fence `on`: reads of `~/.ssh`, browsers, `~/.config/gh` and the Keychain, Keychain services and preference writes (w5553, w5560, "Owner secrets" below); preference writes also with `workerPrefFence` (w5659) | with the read fence off: those reads; preference writes through cfprefsd unless `workerPrefFence`; signals to other processes of the user; other sandboxes inside the root; the network |
 | Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
@@ -223,7 +223,7 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
   `~/.local/share/keyrings`). They ride the read fence's own mechanism (macOS `WorkerFence.readDenied`, Linux
   `--no-read`), so they are on only when the read fence is `on` and its probe passed, and `read-fence-off` takes them off live.
 - **macOS also** denies mach-lookup of `com.apple.authd` and `com.apple.SecurityServer` and denies
-  `user-preference-write` (workerFence.ts `ownerSecretRules`). Why both services, measured on m5 (probe 4, 2026-11-25):
+  `user-preference-write` (workerFence.ts `ownerSecretRules`, and `PREF_RULES` added once with w5659's `workerPrefFence`). Why both services, measured on m5 (probe 4, 2026-11-25):
   with `~/Library/Keychains` unreadable there is no default keychain, and `security add-generic-password` then has
   SecurityAgent raise a "keychain not found" dialog on the person's screen and waits for a click (its "Reset To
   Defaults" would replace their login keychain). authd alone made the write fail at once but still logged one dialog line;
@@ -263,8 +263,26 @@ Measured with the generated profile unless noted:
 
 ## Known limits
 
-- **Not file writes, so not fenced**: preferences through cfprefsd (EditorPrefs, `defaults write`) and the Keychain go
-  through system daemons. `(deny user-preference-write)` would close the first; untried.
+- **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the
+  sandbox, so the file rules never see them: from inside the fence a `defaults write` of a new domain made its plist in
+  `~/Library/Preferences` (measured on m5). daemon.json `"workerPrefFence": true` adds `(deny user-preference-write)`
+  (`PREF_RULES`, w5659), once the daemon restarts (the fence is decided once per daemon process). Measured on m5, macOS 26.4:
+  - cfprefsd lets a write through when the client may write preferences **or** the plist's file. The rule therefore works
+    only with the file deny of `~/Library/Preferences`: together, a fenced `defaults write com.<new>` exits 1 ("Could
+    not write domain") and makes no plist. The rule alone did not refuse it.
+  - Reads still work (`defaults read com.unity3d.UnityEditor5.x` gave the same lines as unfenced).
+  - Unity is not hurt: a batch Unity under the profile with the rule compiled, passed `SimulationRateConstantsTest` 31/31
+    and the PlayMode `PlayModeTestsWriteNoQuitSavesTest`, while cfprefsd rejected 66 of its EditorPrefs and PlayerPrefs
+    writes. A refused EditorPrefs write is silent to Unity, so a worker's batch run no longer changes the user's
+    EditorPrefs, such as Burst's on/off (w5270).
+  - The daemon's own writes (App Nap, Burst's EditorPref) run outside the fence and are untouched.
+  - **No warn-only form exists on macOS.** The sandbox logs nothing for a rule, neither for an allow `(with report)` nor for
+    a deny, and `(trace ...)` writes no file (measured). Only cfprefsd logs each refusal: `log show --predicate
+    'eventMessage CONTAINS "rejecting write"'`, run from outside the fence. So the switch is off until it is enforced.
+  - The Keychain goes through securityd and stays open.
+- **The macOS sandbox reports nothing**: on m5 (macOS 26.4), no `Sandbox:` unified-log line and no kernel `deny(1)` line
+  were found for any refused write in 3 h of fenced workers being refused (measured, w5659). Evidence of a refusal is the
+  tool's own error (EPERM, "Operation not permitted").
 - **A licensing client a fenced editor starts stays fenced** after the editor exits, and a later unfenced editor may talk
   to it. It still writes only where the profile allows, which is where it needs to (measured: the licence resolved).
 - **Unity's fixed `/tmp` names**: a new Unity version that adds one fails until the profile allows it; the failure is
