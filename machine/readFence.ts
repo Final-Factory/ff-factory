@@ -57,6 +57,24 @@ export function secretsDirs(root: string, tokenFile?: string): string[] {
   return out;
 }
 
+/**
+ * w5559 (lothsahn: "fenced workers can't read the machine's own Claude login anywhere, and keep LothDesktop's C: off
+ * limits"): the Windows machines whose Claude login on the system drive the read fence labels. BEAST only, whose request
+ * allows the one label on its legacy folder's login (C:\Users\rydin\.claude); every other Windows machine keeps its system
+ * drive untouched (lowIntegrity.ts labelNoReadUp) and its login there is left out and said, for its person to decide.
+ */
+export const LOGIN_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['beast']);
+
+/**
+ * The Claude login files (claudeHome.ts fencedLoginFiles) this machine's read fences close, and those left out: on Windows
+ * a file on the system drive unless the machine is in LOGIN_LABEL_ON_SYSTEM_DRIVE. A left-out file is not probed either,
+ * so the read probe does not count it as a hole the fence was never meant to close.
+ */
+export function loginFenceFiles(files: readonly string[], o: { platform: string; machineId?: string; onSystemDrive: (p: string) => boolean }): { closed: string[]; left: string[] } {
+  if (o.platform !== 'win32' || (o.machineId && LOGIN_LABEL_ON_SYSTEM_DRIVE.has(o.machineId.toLowerCase()))) return { closed: [...files], left: [] };
+  return { closed: files.filter((f) => !o.onSystemDrive(f)), left: files.filter((f) => o.onSystemDrive(f)) };
+}
+
 /** What the fence probe opens: paths it must find refused, and paths workers need that it must find open. Existing ones only. */
 export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
