@@ -93,7 +93,9 @@ before redeploying by hand.
   (`nslookup fff.<tailnet>.ts.net 1.1.1.1`) and pin it: `curl --resolve fff.<tailnet>.ts.net:443:<public IPv4>
   https://fff.<tailnet>.ts.net/machine`. Measured: 403 `{"error":"the daemon link is tailnet-only"}` for HTTP and for
   a websocket upgrade, each logged `machine link: refused ... came in through Tailscale Funnel`; the same URL from the
-  tailnet answered 200.
+  tailnet answered 200. Those refusals carry the public address of the site the probe left from (LothDesktop and
+  FFBox share one, so FFBox's connector logs the same address): say the probe's time and source address in the report,
+  so its refusal lines are not taken for a stray client (w5789 traced the three of 16:36Z back to w5575's own probe).
 
   **A refused machine is named and alerted** (w5575 review): when the check refuses a request whose bearer token is a
   machine's, the portal logs `machine <id>: link refused by machineLinkTailnet (enforce) from <address>: <why>` and,
@@ -1145,6 +1147,20 @@ it needs a daemon restart and reaches agents started after it. Every sandbox age
 `UNITY_MCP_STATUS_DIR` (`slotEnv`), so the game repo's `scripts/unity-bridge.py` finds its own editor, fenced or not;
 an editor the daemon does not watch (a ParrelSync clone, a second editor for a peer run) is found with
 `UNITY_MCP_STATUS_DIR=` (empty) on the command, the person's own `~/.unity-mcp`.
+
+**An editor a worker starts itself** (w5746): a `-batchmode` editor through `unity-slot run` (with
+`UNITY_MCP_ALLOW_BATCH=1`, a windowless editor on a locked screen) used to inherit the worker's `UNITY_MCP_STATUS_DIR`,
+the synced folder in the daemon's folder, which every worker fence keeps read-only: its bridge started and listened, its
+heartbeat (MCP for Unity `StdioBridgeHost.WriteHeartbeat`, which swallows the error) wrote nothing, and the worker's
+server answered "No Unity instances are currently connected" (measured on m5, w5693). Now `slotEnv` also gives a sandbox
+agent `FF_UNITY_MCP_EDITOR_STATUS_DIR`, and `unity-slot run` passes it to what it starts as `UNITY_MCP_STATUS_DIR`
+(`editorStatusEnv`, `machine/unitySlots.ts`). It is a folder every fence already lets a worker write, which the daemon
+reads from its start (`workerEditorStatusDir`, `machine/unityMcp.ts`): `~/.unity-mcp` on macOS (a Seatbelt named
+exception, and where the server's preflight looks), `<root>/home/.unity-mcp` on Linux and Windows (the root child
+`home` is open to the Landlock lock and to Low workers). With no daemon editor running in the sandbox, its synced folder
+follows the editor whose pid the project's `Library/EditorInstance.json` holds (`mcpPlaces`), under the same
+written-since-first-seen rule, so a dead editor's file is never copied. No fence changed. A second editor of a peer run
+in another project (a ParrelSync clone) is still not in any sandbox's folder.
 
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,

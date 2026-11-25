@@ -25,6 +25,48 @@ export const mcpStatusDir = (appDir: string, place: string) => path.join(appDir,
  */
 export const mcpHomeStatusDir = (appDir: string, place: string) => path.join(mcpStatusDir(appDir, place), '.unity-mcp');
 
+/**
+ * w5746: where an editor a sandbox worker starts itself (`unity-slot run` of a `-batchmode` editor, a second editor of a
+ * peer run) writes its bridge status. The worker's own UNITY_MCP_STATUS_DIR is its place's synced folder in the daemon's
+ * folder (mcpStatusDir), which the worker fences keep read-only, so such an editor's heartbeat
+ * (MCP for Unity StdioBridgeHost.WriteHeartbeat, which swallows the error) wrote nothing and the worker's server answered
+ * "No Unity instances are currently connected" (measured on m5, w5693). This folder is one every worker fence already
+ * lets a worker write, and the daemon reads it (server/unityHang.ts addMcpStatusDir) and copies the editor's file into the
+ * place's folder (McpScopes, from the pid in the project's Library/EditorInstance.json):
+ * - macOS: `~/.unity-mcp`, a named exception of the Seatbelt fence (server/workerFence.ts), where the daemon's own
+ *   editors write too, so the server's preflight (it reads only Path.home()/.unity-mcp there) finds the editor's own file;
+ * - Linux and Windows: `<root>/home/.unity-mcp`, inside a root child every fence opens (lowIntegrity.ts WORKER_CHILDREN:
+ *   the Landlock lock does not open ~/.unity-mcp, a Low worker cannot write ~/.unity-mcp on C:), where the daemon's
+ *   fenced Windows editors write already (w5540).
+ */
+export function workerEditorStatusDir(root: string, platform: NodeJS.Platform = process.platform, home = os.homedir()): string {
+  return platform === 'darwin' ? path.join(home, '.unity-mcp') : path.join(root, 'home', '.unity-mcp');
+}
+
+/**
+ * The places McpScopes keeps, with the pid of the editor each one's folder follows: the daemon's own editor of the sandbox,
+ * else (w5746) the editor a worker started itself in the sandbox's project (a -batchmode `unity-slot run`), by the pid Unity
+ * wrote to its Library/EditorInstance.json at boot (`instancePid`). That pid counts only while `editors` (the machine's
+ * top-level Unity processes, unitySlots.ts unityProcesses) has it as a Unity editor of this very project: a crashed editor
+ * leaves the file behind, and its pid may since belong to any process, which "alive" alone took for the editor and copied
+ * the dead one's port for as long as that process lived (independent review w5779). `editors` undefined (not read yet):
+ * no such pid counts. `alive`: the daemon's own editor's pid while it runs.
+ */
+export function mcpPlaces(
+  sandboxes: { id: string; path: string; unity: { pid?: number } }[],
+  alive: (pid?: number) => number | undefined,
+  instancePid: (project: string) => number | undefined,
+  editors: { pid: number; project?: string }[] | undefined,
+): { place: string; project: string; pid?: number; fromInstance?: boolean }[] {
+  return sandboxes.map((sb) => {
+    const own = alive(sb.unity.pid);
+    if (own) return { place: sb.id, project: sb.path, pid: own };
+    const pid = instancePid(sb.path);
+    const editor = pid ? editors?.find((e) => e.pid === pid && e.project !== undefined && normProject(e.project) === normProject(sb.path)) : undefined;
+    return editor ? { place: sb.id, project: sb.path, pid: editor.pid, fromInstance: true } : { place: sb.id, project: sb.path, pid: undefined };
+  });
+}
+
 const asServer = (x: unknown): StdioServer | undefined => {
   const s = x as { type?: string; command?: unknown; args?: unknown; env?: unknown } | undefined;
   if (!s || typeof s.command !== 'string' || !s.command || (s.type && s.type !== 'stdio')) return undefined;
@@ -96,9 +138,15 @@ export function scopedUnityMcp(server: StdioServer, appDir: string, place: strin
  * the daemon's watches already know. A status file counts only if written since that editor started: for a pid first
  * seen at a later look, since the look before (it was not running then); for one already running at the daemon's
  * first look, any age (it predates the daemon, and a stale file of the same project cannot be newer than its own).
+ * Not so for a pid read from the project's Library/EditorInstance.json (`fromInstance`, w5746): a crashed editor leaves
+ * that file and its status file behind, and its pid may since belong to any process, so at the first look only status
+ * written from then on counts. A live editor's bridge rewrites its file every 0.5 s (MCP for Unity StdioBridgeHost
+ * ProcessCommands), so it is picked up at the next look; a dead one's port never is (independent review w5753). Its
+ * file must also be written after `since`, with no allowance (`strict`): the 2 s one let a file written just before the
+ * first look through (w5779).
  */
 export class McpScopes {
-  private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number }>();
+  private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number; strict?: boolean }>();
   private readonly home?: string;
 
   /** `home`: one status folder (tests); unset: every folder editors write in (server/unityHang.ts mcpStatusDirs, w5540). */
@@ -107,18 +155,19 @@ export class McpScopes {
   }
 
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
-  sync(appDir: string, places: { place: string; project: string; pid?: number }[], now: number, log: (line: string) => void = () => undefined) {
+  sync(appDir: string, places: { place: string; project: string; pid?: number; fromInstance?: boolean }[], now: number, log: (line: string) => void = () => undefined) {
     const files = readStatusFiles(this.home ?? mcpStatusDirs());
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
-      if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? 0;
+      if (p.pid && p.pid !== st.pid) st.since = st.lookedAt ?? (p.fromInstance ? now : 0);
       st.pid = p.pid;
+      st.strict = p.fromInstance;
       st.lookedAt = now;
       this.seen.set(p.place, st);
       // Each folder on its own: a failed first one must not leave the home copy with a stale `reloading: true` (w5677).
       for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) {
         try {
-          syncStatusDir(dir, p.project, p.pid ? { since: st.since } : undefined, files);
+          syncStatusDir(dir, p.project, p.pid ? { since: st.since, strict: st.strict } : undefined, files);
         } catch (e) {
           log(`unity mcp ${p.place}: status folder ${dir}: ${(e as Error).message}`);
         }
