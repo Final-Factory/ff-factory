@@ -1509,7 +1509,18 @@ export async function removeFolders(
     try {
       fs.rmSync(p, { recursive: true, force: true, maxRetries: 3 });
     } catch (e) {
-      no(a, `the delete failed part-way (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})${fs.existsSync(p) ? '; what is left stays: run it again, or report it' : ''}`);
+      const code = (e as NodeJS.ErrnoException).code;
+      // w5499: an FFU runner's folders carry Windows' Medium integrity label with no-write-up (icacls on BEAST's ffu-runners:
+      // "Mandatory Label\Medium Mandatory Level:(OI)(CI)(NW)"), so a fenced worker at Low integrity gets EPERM on every file
+      // in them, whether a job runs or not. The daemon runs at Medium: its rule ffu-runner-work takes the same folder on its
+      // own pass once no job runs (renamed aside first, so a job that holds a file keeps it), as it took LothDesktop's 9.9 GB
+      // _work\ffu at 2026-11-25 03:24 UTC.
+      const runnerWork = /^ffu-runners\/[^/]+\/_work\/./i.test(path.relative(root, p).split(path.sep).join('/'));
+      if (runnerWork && (code === 'EPERM' || code === 'EACCES')) {
+        no(a, `a fenced worker cannot delete an FFU runner's folders (${code}: they carry a Medium integrity label a Low integrity process cannot write); the daemon's clean-up rule ffu-runner-work removes this one on its own pass while no job runs: after 15 min untouched when the disk is low, else after 14 days`);
+        continue;
+      }
+      no(a, `the delete failed part-way (${code ?? (e as Error).message})${fs.existsSync(p) ? '; what is left stays: run it again, or report it' : ''}`);
       continue;
     }
     const freeAfter = freeBefore === undefined ? undefined : await volume(path.dirname(p));

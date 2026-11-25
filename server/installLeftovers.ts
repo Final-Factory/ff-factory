@@ -1354,6 +1354,13 @@ export async function planInstallLeftovers(o: {
       if (!kept) whole(`the disk is low, no running or resumable worker holds the slot, and nothing in it was written for ${settleMs / 60_000} min`);
       else trim(`the disk is low and nothing in it was written for ${settleMs / 60_000} min (${kept})`);
     }
+    // w5499: ffu slots build with incremental off (machine/ffuSlots.ts writeSlotCargoConfig), so a slot's incremental cache is
+    // what builds before that left, or a worker's own CARGO_INCREMENTAL=1 loop: it goes, held slot or not, once no build has
+    // written it for the settle time (BEAST slot2: 38 of 55 GB, measured 2026-11-24).
+    const wholeTaken = items.has(target) && !items.get(target)!.members;
+    if (incLeft > 0 && !wholeTaken && !items.has(incremental) && (await newestTopWrite(incremental)) <= now - settleMs) {
+      trim(`no build has written it for ${settleMs / 60_000} min and ffu slots now build with incremental off, as ffu CI does (w5499)${kept ? ` (${kept})` : ''}`);
+    }
   }
 
   // ---- stale scratch: named after an open request it stays; the rest goes by age

@@ -258,6 +258,24 @@ const isSlotDir = (name: string) => /^slot[\w-]*$/i.test(name);
 const agoMin = (ms: number) => `${Math.max(0, Math.round(ms / 60_000))} min`;
 
 /**
+ * True when a slot checkout's ffu/target is cargo's output though cargo wrote no CACHEDIR.TAG at its top (w5499): ffu's own
+ * scripts point CARGO_TARGET_DIR at a folder inside it (tools/check_snapshot_compat.sh target/compat-base, rolling_deploy.sh
+ * target/deploy-base, sim_switch.sh target/sim-switch-b), and cargo tags only those. LothDesktop's four slots held 0.8 to
+ * 1.9 GB each there, kept as "not provably build output". It counts when the checkout's .gitignore ignores /target (so no
+ * worker's tracked work lies in it) and a folder right inside it carries cargo's tag.
+ */
+function strayCargoOutput(slot: string): boolean {
+  const target = path.join(slot, 'ffu', 'target');
+  try {
+    const ignore = fs.readFileSync(path.join(slot, 'ffu', '.gitignore'), 'utf8');
+    if (!ignore.split(/\r?\n/).some((l) => /^\/?target\/?$/.test(l.trim()))) return false;
+    return fs.readdirSync(target, { withFileTypes: true }).some((e) => e.isDirectory() && isCargoTarget(path.join(target, e.name)));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * An ffu slot's build output (<root>/ffu-sandboxes/slot<N>/target, machine/ffuSlots.ts), judged as the daemon's clean-up
  * judges the whole target (installLeftovers.ts, rule ffu-slot-target; docs/ffu-sandboxes.md), or undefined for a path
  * outside the ffu slots. Before w4422 `check` called a released slot's target and its debug/incremental "not a place with
@@ -280,7 +298,7 @@ export async function judgeFfuSlotPath(p: string, f: CleanupFacts, now: number, 
   if (rel[1] !== 'target' && !stray) return row('keep', `ffu ${id}'s checkout or own files: never deleted (it may hold a worker's work); only its target/ and a stray ffu/target/ cargo made are candidates`);
   const target = stray ? path.join(slot, 'ffu', 'target') : path.join(slot, 'target');
   const what = stray ? `the cargo target left inside ffu ${id}'s checkout (ffu/target, where builds landed before the w4258 .cargo/config.toml routing)` : `ffu ${id}'s cargo target`;
-  if (!isCargoTarget(target)) return row('keep', `${what} has no CACHEDIR.TAG written by cargo: not provably build output`);
+  if (!isCargoTarget(target) && !(stray && strayCargoOutput(slot))) return row('keep', `${what} has no CACHEDIR.TAG written by cargo: not provably build output`);
   const holder = readSlotState(f.root).slots.find((x) => x.id === id)?.holder;
   const is = (list: string[]) => !!holder && list.some((s) => s.toLowerCase() === holder.toLowerCase());
   const up = is([...f.live, ...f.resumable, ...Object.keys(f.owners ?? {}), ...(ctx?.hosts ?? []), ...(ctx?.self ? [ctx.self] : [])]);

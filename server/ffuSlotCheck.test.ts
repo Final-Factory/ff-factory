@@ -178,3 +178,20 @@ test('w5240: an idle sandbox\'s superseded Burst player builds are DELETE, the n
   fs.writeFileSync(path.join(sb, 'Temp', 'UnityLockfile'), '');
   assert.equal((await at(`Library/BurstCache/Windows-Intel/${hashes[0]}.dll`)).verdict, 'keep');
 });
+
+test('w5499: a stray ffu/target whose only CACHEDIR.TAG is in a folder an ffu script made (compat-base) goes; not without the checkout ignoring /target', async (t) => {
+  const { base, facts, ctx, target } = world(t, [{ id: 'slot1' }, { id: 'slot2' }]);
+  // LothDesktop's four slots: ffu/target/compat-base from tools/check_snapshot_compat.sh, no tag at ffu/target itself.
+  for (const id of ['slot1', 'slot2']) target(path.join(base, id, 'ffu', 'target', 'compat-base'));
+  fs.writeFileSync(path.join(base, 'slot1', 'ffu', '.gitignore'), '/target\n*.log\n');
+  fs.writeFileSync(path.join(base, 'slot2', 'ffu', '.gitignore'), '*.log\n');
+  const old = (Date.now() - 2 * HOUR) / 1000;
+  for (const id of ['slot1', 'slot2']) fs.utimesSync(path.join(base, id, 'ffu', 'target'), old, old);
+  const at = (rel: string) => judgeWithGit(path.join(base, rel), facts, Date.now(), ctx());
+  const stray = await at('slot1/ffu/target');
+  assert.equal(stray.verdict, 'delete', stray.why);
+  assert.equal((await at('slot1/ffu/target/compat-base')).verdict, 'delete');
+  const unignored = await at('slot2/ffu/target');
+  assert.equal(unignored.verdict, 'keep');
+  assert.match(unignored.why, /not provably build output/);
+});
