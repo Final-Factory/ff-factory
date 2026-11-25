@@ -317,9 +317,11 @@ instances() { g "systemctl list-units 'fff-agent@*' --state=active --no-legend -
 agent_running() { [ "$(instances)" -ge 1 ]; }
 no_agent() { [ "$(instances)" = 0 ]; }
 turn() { g "$as_portal node $drv turn $cimem /srv/fff/base 2>&1" | grep -E '^(mode|ok|FAIL|alert|session|agent account)' || true; }
+# What Claude Code said as fff-agent: its stderr goes to the journal, not to the portal (CI's token is a stand-in).
+agent_journal() { echo "---- fff-agent's journal (last 60 lines)"; g "sudo journalctl -t fff-agent -u 'fff-agent@*' --no-pager -n 60 -o cat" || true; }
 turn_ok() { # OUT WHAT
-  [ "$(printf '%s\n' "$1" | grep -c '^ok: ')" = 3 ] || fail "$2: not a turn, a resume and an interrupt: $1"
-  if printf '%s\n' "$1" | matches -E '^(FAIL|alert):'; then fail "$2: $1"; fi
+  [ "$(printf '%s\n' "$1" | grep -c '^ok: ')" = 3 ] || { agent_journal; fail "$2: not a turn, a resume and an interrupt: $1"; }
+  if printf '%s\n' "$1" | matches -E '^(FAIL|alert):'; then agent_journal; fail "$2: $1"; fi
   [ "$(g "sudo stat -c %U $cimem/ci-agent-turn.md")" = fff ] || fail "$2: the turn's memory note is not fff's on disk"
   g "sudo rm -f $cimem/ci-agent-turn.md"
 }
