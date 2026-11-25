@@ -58,6 +58,8 @@ export const OPS_LIMITS = {
   turnMaxMs: 2 * 3_600_000,
   /** A job a person opened in a turn of their own can be followed up by their orchestrator's harness turns this long. */
   jobMs: 12 * 3_600_000,
+  /** w5508 (audit w5452 finding 8, lothsahn: "Shorten ops workers follow up to 1 hour only"): a send in a harness turn (a check-in, a timer, a relayed `[ops worker]` report) follows up its job only this long after it started; later it needs the person's own turn. */
+  harnessFollowUpMs: 3_600_000,
   /** A deploy grant (ops_worker deploy) is good for this long, once: fff-ops-priv refuses `fffctl update` without one. */
   deployGrantMs: 15 * 60_000,
   /** A restart grant (ops_worker restart, w974) is good for this long, once: fff-ops-priv refuses `fffctl restart` without one. */
@@ -933,6 +935,9 @@ export class OpsWorker {
       throw new Error(`follow_up: ${why}, so there is nothing to follow up. Send it again, in full, with no follow_up: that is a new job`);
     }
     const h = this.handle();
+    if (!theirTurn && jobOpen && this.now() - Date.parse(this.job!.at) >= OPS_LIMITS.harnessFollowUpMs) {
+      throw new Error(`a follow-up in a harness turn (a check-in, a timer or a relayed report) is accepted only in the first ${OPS_LIMITS.harnessFollowUpMs / 60_000} minutes of the job; this job is older, so it needs a turn ${person.displayName} started with a message of their own: a new job, or follow_up: true there`);
+    }
     const opening = fresh || !jobOpen || (theirTurn && !followUp);
     if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it: then quote ${person.displayName}'s own words from it in words, w5507)`);
     if (opening && !fresh && jobOpen && isMidTurn(h.info)) {
