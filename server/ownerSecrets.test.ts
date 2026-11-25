@@ -311,6 +311,9 @@ test('ghLoginStorage (w5749): keyring, file or none, from gh auth status', () =>
   assert.equal(ghLoginStorage(['github.com', '  ✓ Logged in to github.com account Lothsahn (keyring)', '  - Token: gho_***'].join('\n')), 'keyring');
   assert.equal(ghLoginStorage(['github.com', `  ✓ Logged in to github.com account Lothsahn (${w.join('C:', 'U', 'GitHub CLI', 'hosts.yml')})`].join('\n')), 'file');
   assert.equal(ghLoginStorage('You are not logged into any GitHub hosts.'), undefined);
+  // A login gh could not check (w5849: an invalid token; a network outage likely the same) is still stored where it says.
+  assert.equal(ghLoginStorage(['github.com', `  X Failed to log in to github.com account Lothsahn (${w.join('C:', 'U', 'GitHub CLI', 'hosts.yml')})`].join('\n')), 'file');
+  assert.equal(ghLoginStorage('  X Failed to log in to github.com account Lothsahn (keyring)'), 'keyring');
 });
 
 test('machineGhStatusEnv (w5749): no token reaches the status check', () => {
