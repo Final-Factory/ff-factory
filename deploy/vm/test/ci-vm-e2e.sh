@@ -26,7 +26,19 @@ ROOT=$PWD
 [ -n "${CI:-}" ] || [ "${FFF_E2E_I_AM_A_THROWAWAY:-}" = yes ] || { echo "refusing outside CI (set FFF_E2E_I_AM_A_THROWAWAY=yes on a throwaway machine)"; exit 1; }
 
 step() { printf '\n==== %s %s\n' "$(date -u +%T)" "$*"; }
-fail() { echo "FAIL: $*"; exit 1; }
+fail() {
+  echo "FAIL: $*"
+  # What names the cause, read without ssh (w5608: a 900 s wait on ssh into the guest ended with only "not within").
+  if [ -x /usr/local/sbin/fff-vm ] && virsh domstate "$VM" >/dev/null 2>&1; then
+    echo "---- fff-vm status"
+    /usr/local/sbin/fff-vm status 2>&1 || true
+    echo "---- the host's watch and events (last 40 lines)"
+    journalctl --no-pager -u fff-vm-watch -u fff-vm-events | grep -v 'Deactivated successfully\|Starting fff-vm-watch\|Finished fff-vm-watch' | tail -n 40 || true
+    echo "---- fff-vm guest-logs (through the guest agent)"
+    timeout 180 /usr/local/sbin/fff-vm guest-logs 2>&1 || true
+  fi
+  exit 1
+}
 # matches ARGS...: grep that reads all of its input. "grep -q" stops at the first match, and the writer of a pipe into it
 # then dies of SIGPIPE, which pipefail turns into a failure (nft 1.1 on Ubuntu 26.04 hit it).
 matches() { grep "$@" >/dev/null; }
@@ -142,6 +154,12 @@ wait_for 900 "ssh as the admin user" g true
 # 0 done, 2 done with recoverable warnings, 1 failed.
 wait_for 900 "cloud-init done" g 'cloud-init status --wait >/dev/null; test $? -ne 1'
 g cloud-init status --long || true
+# The reboot cloud-init asks for after its first upgrade is not a hang: the watch's boot grace starts again on it
+# (w5608: it reset the guest 11 s into that reboot, CI run 45567844311).
+first_boot_watch=$(journalctl -u fff-vm-watch --no-pager)
+if grep 'resetting' <<<"$first_boot_watch"; then fail "the watch reset the guest during its first boot"; fi
+grep 'booting (' <<<"$first_boot_watch" | tail -n 3 || true
+echo "ok: the watch left the first boot alone"
 wait_for 300 "watchdog0 armed by PID 1" g 'test "$(cat /sys/class/watchdog/watchdog0/state)" = active'
 g 'cat /sys/class/watchdog/watchdog0/identity /sys/class/watchdog/watchdog0/timeout'
 

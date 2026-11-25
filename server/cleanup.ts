@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { gitExecFile, gitSpawn } from './safeGit.ts';
 import type { CleanupPolicy } from './config.ts';
 import { CLEANUP_SOFT_GB_DEFAULT, type CleanupSummary, type MediaSummary } from '../shared/types.ts';
 import type { StaleOutputSettings } from './staleOutput.ts';
@@ -340,7 +341,7 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
   const git = (...a: string[]) =>
     new Promise<string>((resolve, reject) =>
       // --no-optional-locks: status must not rewrite .git/index, or the clone looks touched and never ages out.
-      execFile('git', ['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
+      gitExecFile(['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
     );
   const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
   try {
@@ -375,7 +376,7 @@ export async function localWorkWhy(dir: string, timeoutMs = 15_000): Promise<str
 export async function unpushedWorkWhy(dir: string, timeoutMs = 15_000): Promise<string | undefined> {
   const git = (...a: string[]) =>
     new Promise<string>((resolve, reject) =>
-      execFile('git', ['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
+      gitExecFile(['--no-optional-locks', '-C', dir, ...a], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))),
     );
   const n = (k: number, one: string, many = `${one}s`) => `${k} ${k === 1 ? one : many}`;
   const work: string[] = [];
@@ -414,7 +415,7 @@ async function realChanges(dir: string, lines: string[], timeoutMs: number): Pro
   if (untracked === lines.length) return untracked;
   try {
     const out = await new Promise<string>((resolve, reject) =>
-      execFile('git', ['--no-optional-locks', '-C', dir, 'diff', 'HEAD', '--no-renames', '--ignore-cr-at-eol', '--numstat', '--summary'], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, o) => (e ? reject(e) : resolve(String(o)))),
+      gitExecFile(['--no-optional-locks', '-C', dir, 'diff', 'HEAD', '--no-renames', '--ignore-cr-at-eol', '--numstat', '--summary'], { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (e, o) => (e ? reject(e) : resolve(String(o)))),
     );
     const changed = new Set<string>();
     for (const l of out.split('\n')) {
@@ -435,7 +436,7 @@ async function realChanges(dir: string, lines: string[], timeoutMs: number): Pro
 /** Runs git in `dir` with `input` on stdin (rev lists too long for a command line). */
 function gitWithInput(dir: string, args: string[], input: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const p = spawn('git', ['--no-optional-locks', '-C', dir, ...args], { windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+    const p = gitSpawn(['--no-optional-locks', '-C', dir, ...args], { windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
     const timer = setTimeout(() => p.kill(), timeoutMs);
     let out = '';
     let err = '';
