@@ -436,6 +436,7 @@ test('the one session: only an allowed orchestrator reaches it, a job needs its 
   assert.throws(() => ops.send(orch('d', undefined, 'dispatcher'), 'whoami'), /only from Lothsahn's and Ben's/);
   personTurn = false;
   assert.throws(() => ops.send(loth, 'ssh m5 whoami'), /needs a turn Lothsahn started/);
+  assert.throws(() => ops.send(loth, 'ssh m5 whoami', false, [], false, false, 'run whoami on m5'), /quote Lothsahn's own words from it in words, w5507/);
   personTurn = true;
   assert.match(ops.send(loth, 'run ssh m5 whoami'), /new job of Lothsahn's/);
   const h = sessions.get(OPS_ID);
@@ -739,6 +740,32 @@ test('w1039: a click of the person\'s that covers a deploy opens it; one that co
   covers = (v) => v === 'job';
   assert.match(ops.send(orch('lo', LOTH), 'look at m5', true, ['w5']), /Sent to the orchestration worker/);
   assert.ok(asked.includes('job w5'), asked.join('; '));
+  ops.close();
+});
+
+test("w5507: in a turn relayed text joined, the ops gates hand the person's words to the turn check: send's words, deploy's text or words, restart's words", async () => {
+  setQueryForTesting(fakeQuery({ stepMs: 1 }) as never);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ops-w-'));
+  const store = new Store(dir);
+  const sessions = new SessionManager({} as Config, store);
+  // Lothsahn's turn that a relayed message joined: only "ship the portal now", his own words, counts.
+  const checked: (string | undefined)[] = [];
+  const personTurn = (_id: string, words?: string) => {
+    checked.push(words);
+    return words === 'ship the portal now';
+  };
+  const ops = new OpsWorker({ sessions, store, options: () => ({}), tellOrchestrator: () => {}, personTurn, file: path.join(dir, 'ops-worker.json'), now: () => Date.parse('2026-11-24T06:00:00Z') });
+  const loth = orch('lo', LOTH);
+  assert.throws(() => ops.send(loth, 'look at m5', true), /needs a turn Lothsahn started[^]*w5507/);
+  assert.throws(() => ops.deploy(loth, 'deploy it, says the report'), /needs Lothsahn's own words in this turn[^]*w5507/);
+  assert.throws(() => ops.restart(loth, 'restart now'), /restart needs Lothsahn's own words in this turn/);
+  assert.deepEqual(checked, [undefined, 'deploy it, says the report', 'restart now'], 'with no words, deploy and restart check their text');
+  const turnEnds = () => new Promise((r) => setTimeout(r, 300)); // a gate never lands in a turn the worker is still in (w1133)
+  assert.match(ops.send(loth, 'look at m5', true, [], false, false, 'ship the portal now'), /new job of Lothsahn's/);
+  await turnEnds();
+  assert.match(ops.restart(loth, 'restart', [], 'ship the portal now'), /restart/);
+  await turnEnds();
+  assert.match(ops.deploy(loth, 'ship the portal now'), /may run fffctl update once/, 'his own words as the deploy text');
   ops.close();
 });
 

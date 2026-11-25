@@ -582,6 +582,37 @@ export function ghLoginCredentialEnv(prior: Record<string, string | undefined>):
 }
 
 /**
+ * Git settings that outrank the repository's own config, for a standing agent (w5514). A standing agent may Write files in
+ * its folder, so it could write a clone's config, or a folder shaped like a bare repository, naming a program; the next
+ * allowed `git status`, `log` or `fetch` would run it. Command-scope config (GIT_CONFIG_COUNT) beats every config file, so
+ * these keys hold whatever the repository says: no implicit bare repositories, no fsmonitor program, no hooks, the plain
+ * pager, no ext:: transport. Keys a repository names freely (`diff.<driver>.textconv`, `filter.<driver>.clean`) cannot be
+ * overridden here, so the standing guard also refuses writes into `.git` (standingGuard.ts gitMetadataProblem).
+ * `diff.external` is left out: an empty value makes every `git diff` fail ("cannot run", measured on git 2.50.1), and
+ * only a repository's config, which the guard keeps the agent from writing, could set it.
+ * GIT_CONFIG_NOSYSTEM drops the system config, except on Windows, where Git for Windows keeps its TLS backend and
+ * credential manager there; nobody but an administrator writes that file on any platform. Appended after `prior`'s entries.
+ */
+export const STANDING_GIT_CONFIG: [string, string][] = [
+  ['safe.bareRepository', 'explicit'],
+  ['core.fsmonitor', 'false'],
+  ['core.hooksPath', '/dev/null'],
+  ['core.pager', 'cat'],
+  ['protocol.ext.allow', 'never'],
+];
+export function standingGitEnv(prior: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  const n = Number(prior.GIT_CONFIG_COUNT ?? 0) || 0;
+  const env: Record<string, string> = {};
+  STANDING_GIT_CONFIG.forEach(([k, v], i) => {
+    env[`GIT_CONFIG_KEY_${n + i}`] = k;
+    env[`GIT_CONFIG_VALUE_${n + i}`] = v;
+  });
+  env.GIT_CONFIG_COUNT = String(n + STANDING_GIT_CONFIG.length);
+  if (platform !== 'win32') env.GIT_CONFIG_NOSYSTEM = '1';
+  return env;
+}
+
+/**
  * SDK options for a spec. `handlers` answers the spec's MCP tools; `processEnv` is the environment to start from (without its
  * credentials for spec.login); `editorRunning`, for a machine sandbox, says whether its editor is up (raw branch switches are
  * refused then).
@@ -597,9 +628,10 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     const plugins = localPluginEnv(baseEnv, g.workerRoot);
     const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, ...plugins, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
     // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
-    if (spec.env?.GH_TOKEN) return { ...env, ...githubCredentialEnv(env) };
     // w5430: a Low worker's gh login (GH_CONFIG_DIR from lowEnv); a GitHub App run keeps its own helper.
-    return spec.env?.GH_CONFIG_DIR && !env.FF_GH_APP_HELPER ? { ...env, ...ghLoginCredentialEnv(env) } : env;
+    const cred = spec.env?.GH_TOKEN ? { ...env, ...githubCredentialEnv(env) } : spec.env?.GH_CONFIG_DIR && !env.FF_GH_APP_HELPER ? { ...env, ...ghLoginCredentialEnv(env) } : env;
+    // w5514: a standing agent's git ignores what a repository's own config says about programs to run (standingGitEnv).
+    return g.standing ? { ...cred, ...standingGitEnv(cred) } : cred;
   })();
   // w3758: a worker with a vault GitHub token keeps the token's last calls for the portal's CI waits and merges, and hears
   // when one command of its own spent hundreds of them (server/ghSpendHook.ts).
