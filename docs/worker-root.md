@@ -722,6 +722,10 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     Medium; a Low worker's write there is refused"). The owner's game runs at Medium and is unaffected. Opt-in per
     machine because it changes a label on C:: set on BEAST; on LothDesktop the C: rule (lothsahn, w1755) keeps the
     daemon and workers off C:, and the per-sandbox redirect below is the protection there.
+  - Other conversations' transcripts (w5703): with `daemon.json` `workerTranscriptLabels: true` the daemon labels
+    `<root>\claude\projects` Medium, and each agent's own conversation is labelled Low only while its claude runs. With the
+    switch off again, the next daemon start labels everything there Low. How it works, the self-test and the limits:
+    docs/transcript-seal.md, "Windows: transcript labels".
   - Setting a label needs WRITE_OWNER, which an owner lacks by right (it has READ_CONTROL and WRITE_DAC). Where the
     account writes the root only through a group ACE, `icacls /setintegritylevel` answers "Access is denied" (BEAST,
     w5402: `F:\ffw` inherits `Authenticated Users:(M)` from the drive, and the daemon's token is not elevated, so

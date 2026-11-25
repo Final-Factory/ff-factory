@@ -62,6 +62,7 @@ import { CARD_QUESTION_CHARS, MAX_ASKS } from '../shared/questionCard.ts';
 import { rangedNumber } from './forgiving.ts';
 import { EXPORT_GROUPS, EXPORT_ROLES, EXPORT_VIEWS } from './spendExport.ts';
 import { fenceSpawner, type WorkerFence } from './workerFence.ts';
+import { lowTranscriptSpawner } from './transcriptLabels.ts';
 
 /** w5222: agent_transcript's time window and turn timing (server/turnTiming.ts, Store.readTranscriptBetween), for every role that has it. */
 export const TRANSCRIPT_WINDOW_SCHEMA = {
@@ -189,6 +190,8 @@ export interface LaunchSpec {
   fence?: WorkerFence;
   /** ff-landlock.py's arguments: claude starts under the Linux write lock (machine/writeLock.ts, w5333). */
   writeLock?: string[];
+  /** Windows Low fence with daemon.json `workerTranscriptLabels`: this agent's own conversation is labelled Low around its claude (server/transcriptLabels.ts, w5703). */
+  transcriptLabels?: boolean;
   /** w5702: the transcripts folder, when the lock lets claude write only its own conversation's (machine/transcriptLock.ts). */
   writeLockTranscripts?: string;
   /** Created before the process starts: `cwd` itself, and these files (relative to cwd) when missing. */
@@ -735,6 +738,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
     env: agentEnv,
     ...(spec.claudeExecutable ? { pathToClaudeCodeExecutable: spec.claudeExecutable } : {}),
     ...(spec.fence ? { spawnClaudeCodeProcess: fenceSpawner(spec.fence) } : {}),
+    ...(spec.transcriptLabels && process.platform === 'win32' ? { spawnClaudeCodeProcess: lowTranscriptSpawner() } : {}),
     ...(spec.writeLock && process.platform === 'linux' ? { spawnClaudeCodeProcess: writeLockSpawner(spec.writeLock, { transcripts: spec.writeLockTranscripts }) } : {}),
   };
 }

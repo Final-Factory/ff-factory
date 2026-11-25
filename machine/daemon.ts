@@ -18,6 +18,7 @@ import { probeFence } from './fenceProbe.ts';
 import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
+import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
 import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
@@ -49,7 +50,7 @@ import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scope
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
 import { cliProjectsDir } from '../server/cliTranscript.ts';
-import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome } from '../server/claudeHome.ts';
+import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, workerClaudeDir } from '../server/claudeHome.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
@@ -188,6 +189,12 @@ export interface DaemonConfig {
    * where the owner asked (BEAST). Workers' own games write to their sandbox's folder in the root (gameData.ts).
    */
   workerIntegrityLockGameData?: boolean;
+  /**
+   * w5703: with the fence on, also keep `<CLAUDE_CONFIG_DIR>\projects` Medium, so a Low worker cannot plant, edit, rename or
+   * delete another conversation's transcript; each agent's own conversation is labelled Low while its claude runs
+   * (server/transcriptLabels.ts). Off by default; turning it off again labels everything there Low again at the next start.
+   */
+  workerTranscriptLabels?: boolean;
   /**
    * w5540: false keeps sandbox editors unfenced (Medium) while agents are fenced. Unset or true: with the Windows fence on,
    * the daemon starts each sandbox editor at Low integrity too (machine/unity.ts EditorFence), so C# a worker writes, and
@@ -3116,7 +3123,7 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   private ghMemo?: { at: number; token?: string };
@@ -3202,7 +3209,7 @@ export class Daemon {
   }
 
   /** The Windows Low fence once set up (lowSetup): the Low claude copy, the root's Git and Unity junction folder. */
-  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: LowEditorFence };
+  private low?: { claude: string; git?: string; unity?: string; gh?: string; editor?: LowEditorFence; transcripts?: boolean };
   private lowStarted = false;
   /** Why lowSetup left the Low fence off (w5555): the fence gate's failure and the portal's alert say it. */
   private lowWhy?: string;
@@ -3381,7 +3388,8 @@ export class Daemon {
       const versions = await lowUnityJunctions(root, found, exec, say);
       const gh = ghConfigDirFor(process.env);
       const editor = versions.length && this.cfg.editorFence !== false ? await this.lowEditorFence(root, exec, say) : undefined;
-      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}) };
+      const transcripts = await this.lowTranscripts(root, exec, say);
+      this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}), ...(transcripts ? { transcripts } : {}) };
       log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'}); sandbox editors ${editor ? `start at Low too (launcher ${editor.launcher}), from their next start` : this.cfg.editorFence === false ? 'stay Medium (editorFence false)' : 'stay Medium (no Low launcher or no Unity junction)'}`);
       await this.lowGhSelfTest(root, gh, exec, say);
       // w5717: the agent Git sits in a folder Low workers write, so its bash runs here with nothing of the daemon's
@@ -3412,6 +3420,28 @@ export class Daemon {
     } catch (e) {
       this.lowFail((e as Error).message);
     }
+  }
+
+  /**
+   * w5703: daemon.json `workerTranscriptLabels`: on, `projects` is labelled Medium and a Low node tries to plant a file there
+   * (warn-only: a WARNING in the log when it can, never worse than before); off, an earlier lock is undone (everything there
+   * Low again), so the way back is the switch and a daemon restart, from anywhere. Answers whether agents get their own
+   * conversation labelled Low (launch.ts lowTranscriptSpawner).
+   */
+  private async lowTranscripts(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<boolean> {
+    const projects = path.join(process.env.CLAUDE_CONFIG_DIR || workerClaudeDir(root), 'projects');
+
+    // The pinned conversations, in the daemon's own folder: a Low worker can write anywhere in the Claude home (w5774).
+    const pins = path.join(appDirOfConfig(this.cfg), 'transcript-pins.json');
+    if (!this.cfg.workerTranscriptLabels) {
+      await unlockTranscripts(projects, exec, say, undefined, undefined, pins);
+      return false;
+    }
+    if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
+    const node = await lowCopy(root, process.execPath, exec, say);
+    const probe = node ? probeTranscriptLock(node, projects) : 'no Low node copy';
+    log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
+    return true;
   }
 
   /**

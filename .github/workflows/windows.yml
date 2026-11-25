@@ -58,6 +58,8 @@ on:
       - 'server/agentNode.ts'
       - 'server/gitHooks/**'
       - 'server/testPowershell.ts'
+      - 'server/transcriptLabels.test.ts'
+      - 'server/transcriptLabels.ts'
       - 'server/unityReaper.test.ts'
       - 'server/updateSteps.test.ts'
       - 'server/watchdog.ts'
