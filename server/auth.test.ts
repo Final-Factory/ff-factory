@@ -66,7 +66,8 @@ test('rate limit: five failures per client lock it out for a while; others are u
 
 test('client address: X-Forwarded-For is believed only from a local proxy, and only with trustProxy', () => {
   const trusting = new Auth(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-')), { trustProxy: true });
-  const fwd = { 'x-forwarded-for': '198.51.100.1, 10.0.0.1' };
+  // The last entry is the one the proxy added; the client wrote the ones before it (w5535).
+  const fwd = { 'x-forwarded-for': '10.0.0.1, 198.51.100.1' };
   assert.equal(trusting.clientIp(req({ ip: '127.0.0.1', headers: fwd })), '198.51.100.1');
   assert.equal(trusting.clientIp(req({ ip: '::1', headers: fwd })), '198.51.100.1');
   // A remote peer cannot pick its own address for the rate limiter.
