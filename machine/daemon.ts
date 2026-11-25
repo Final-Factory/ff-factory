@@ -28,6 +28,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, writeLockArgs } from './writeLock.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
+import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts';
@@ -151,6 +152,12 @@ export interface DaemonConfig {
    * under a macOS Seatbelt profile that lets it write only in `root` and a few named exceptions. Off when unset; macOS only.
    */
   workerFence?: 'seatbelt';
+  /**
+   * The per-worker memory, process and temp-disk caps' mode (w5554, docs/worker-caps.md): "warn" (also when unset) measures and
+   * reports and never limits or kills, "enforce" limits and ends a runaway's tools, "off" does nothing. Handed to each worker's
+   * agent host in its start record; set remotely by `ops_worker machine_update worker_caps`.
+   */
+  workerCaps?: 'off' | 'warn' | 'enforce';
   /**
    * The Windows worker fence (w5377, docs/worker-root.md 4.1): "low" runs each sandbox agent's claude, and all it starts,
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
@@ -3390,6 +3397,7 @@ export class Daemon {
       },
       changed: () => this.awake(),
       log: (line) => log(line),
+      capsMode: () => capsModeOf(this.cfg.workerCaps),
       toolsCpu: (pid) => this.toolsCpu(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {
