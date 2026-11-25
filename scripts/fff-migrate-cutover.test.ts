@@ -67,3 +67,46 @@ test('fffctl migrate --cut-over: BEAST\'s portal drains, sends its daemon here a
   assert.ok(fs.existsSync(path.join(w.vm, 'home', '.claude', 'projects', claudeProjectFolder(w.vmBase), 'sdk-disp-1.jsonl')));
   assert.doesNotMatch(report, new RegExp(`${FAKE_TOKEN}|${BEAST_TOKEN}`));
 });
+
+/** BEAST's config.json with machineLinkTailnet unset (enforce, the default since w5575), as a real BEAST's is now. */
+function enforceOnBeast(w: Awaited<ReturnType<typeof world>>) {
+  const f = path.join(w.beastRoot, 'config.json');
+  const c = JSON.parse(fs.readFileSync(f, 'utf8'));
+  delete c.machineLinkTailnet;
+  fs.writeFileSync(f, JSON.stringify(c, null, 2));
+}
+
+test('fffctl migrate --cut-over (w5716): with machineLinkTailnet on enforce and the daemons sent to a LAN address, it refuses before touching anything', { skip, timeout: 300_000 }, async (t) => {
+  const w = await world(t);
+  enforceOnBeast(w);
+  const beastBefore = treeHash(w.beastRoot + '/scripts');
+  const vmCfgBefore = fs.readFileSync(w.vmCfgFile, 'utf8');
+  w.sys.answers = ['CUT OVER'];
+  // A LAN address as the daemons' new URL, named here so a runner whose own address is a tailnet one changes nothing.
+  const lan = 'http://192.168.77.20:8790';
+  const m = migration(w, 'cut-over', { publicUrl: lan });
+  const code = await m.cutOver();
+  const report = m.report.join('\n');
+  assert.equal(code, 4, report);
+  assert.match(report, /refused, nothing on BEAST or here was touched: machineLinkTailnet is unset \(enforce\)/);
+  assert.ok(report.includes(lan), report);
+  assert.match(report, /set machineLinkTailnet to "warn"/);
+  assert.deepEqual(w.sys.answers, ['CUT OVER'], 'it never asked to go on');
+  assert.ok(!fs.existsSync(path.join(w.base, 'schtasks.log')), "BEAST's task untouched");
+  assert.deepEqual(treeHash(w.beastRoot + '/scripts'), beastBefore);
+  assert.equal(fs.readFileSync(w.vmCfgFile, 'utf8'), vmCfgBefore, "this portal's config untouched");
+});
+
+test('fffctl migrate --cut-over (w5716): with enforce on and the portal behind Tailscale Serve, the preflight lets it go on to the confirmation', { skip, timeout: 300_000 }, async (t) => {
+  const w = await world(t);
+  enforceOnBeast(w);
+  w.sys.funnelState = async () => 'funnel';
+  w.sys.answers = ['no'];
+  const m = migration(w, 'cut-over', { tailscale: true });
+  const code = await m.cutOver();
+  const report = m.report.join('\n');
+  assert.equal(code, 3, report);
+  assert.doesNotMatch(report, /refused/);
+  assert.match(report, /stopped: nothing on BEAST was touched/);
+  assert.deepEqual(w.sys.answers, [], 'it asked to go on');
+});

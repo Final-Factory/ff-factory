@@ -79,7 +79,11 @@ before redeploying by hand.
   connection carrying a header the portal may not believe (`untrustedProxied`, `server/clientAddress.ts`), and is
   refused (the w5595 review measured this). A portal that daemons reach by a LAN or public address (a
   `fffctl migrate --cut-over` to such a host, or a test world: `scripts/fff-migrate.world.ts` sets `"off"`) refuses
-  them under enforce: set `machineLinkTailnet` to `"warn"` before such a move.
+  them under enforce: set `machineLinkTailnet` to `"warn"` before such a move. `fffctl migrate --cut-over` checks this
+  itself (w5716, `machineLinkPreflight` in `server/vmMigration.ts`): on the config the new portal will start on, under
+  enforce, it goes on only behind Tailscale Serve (`--tailscale`, with `trustProxy` on) or to a `publicUrl` whose host
+  is a Tailscale address, and otherwise stops with exit code 4 before the typed confirmation, with BEAST and the VM's
+  portal untouched, saying to set `"warn"` first or to cut over through Serve.
 
   **A refused machine is named and alerted** (w5575 review): when the check refuses a request whose bearer token is a
   machine's, the portal logs `machine <id>: link refused by machineLinkTailnet (enforce) from <address>: <why>` and,

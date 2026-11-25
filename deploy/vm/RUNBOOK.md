@@ -291,6 +291,9 @@ sudo fffctl migrate --cut-over
 ```
 
 1. **A first copy while BEAST still runs**, rewritten once to check it. Nothing on BEAST changes yet.
+   If daemons could not reach the new portal over the tailnet (`machineLinkTailnet` unset or `enforce` and no
+   Tailscale Serve in front of it, w5716), it stops here with exit code 4 and says to set `"warn"` first
+   (docs/machines.md, "The daemon link is tailnet-only").
 2. **It asks you to type `CUT OVER`.** Anything else stops there, with nothing touched.
 3. **The VM's own portal stops**, so a daemon sent to it meets a closed door and retries rather than being refused.
 4. **BEAST's portal drains**, up to `--drain-minutes` (5 by default). It sends every connected daemon to the VM's

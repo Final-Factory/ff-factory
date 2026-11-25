@@ -137,7 +137,7 @@ class TestSystem implements System {
   async logsSince(t: number) {
     return this.portal.log(t);
   }
-  async funnelState() {
+  async funnelState(): Promise<'funnel' | 'serve' | 'off' | undefined> {
     return undefined;
   }
   async setFunnel() {}

@@ -4,6 +4,8 @@
 
 import { currentAccounts, retiredConfigKeys, withDefaults, withoutRetiredKeys } from './config.ts';
 import { convertMachineRecord, localDaemonExtras } from './machines.ts';
+import { machineLinkMode } from './machineLinkGate.ts';
+import { tailnetAddress } from './remoteChat.ts';
 import type { Machine, SessionInfo, StandingAgent } from '../shared/types.ts';
 
 type Json = Record<string, unknown>;
@@ -75,6 +77,41 @@ export function rewriteConfig(beast: Json, vm: Json, o: { publicUrl: string; bea
   if (retired.length) notes.push(`left out, as nothing reads them any more (w510, w1078): ${retired.join(', ')}`);
   const config = withoutRetiredKeys(out);
   return { config, notes, windowsPaths: windowsPathsIn(config) };
+}
+
+/**
+ * The cut-over's preflight for the tailnet-only daemon link (w5716, item 4 of w5707's review of w5575): why moving the
+ * portal with this config to `publicUrl` would lock every daemon out, or undefined when it would not. `config` is the
+ * rewritten config.json the new portal starts on (machineLinkTailnet is BEAST's, trustProxy the VM's: HOST_KEYS).
+ *
+ * Under "enforce" (unset is enforce, server/machineLinkGate.ts machineLinkMode) the portal lets a daemon link in only from
+ * loopback or a Tailscale address (100.64.0.0/10, fd7a:115c:a1e0::/48), judged by clientAddress. So it passes when:
+ * - machineLinkTailnet is "warn" or "off" (or a typo, which is "warn"): nothing is refused;
+ * - the portal sits behind Tailscale Serve here (`serve`: --tailscale, whose check needs the Funnel on) and trusts it
+ *   (trustProxy not false): a daemon on the tailnet comes through Serve with its 100.x address forwarded;
+ * - `publicUrl`'s host is itself a Tailscale address: daemons dial it over the tailnet.
+ * Anything else (a LAN or public address or name reached without Serve) is refused, before anything is touched.
+ */
+export function machineLinkPreflight(config: Json, publicUrl: string, o: { serve: boolean }): string | undefined {
+  const mode = machineLinkMode(config.machineLinkTailnet);
+  if (mode !== 'enforce') return undefined;
+  const fix =
+    "set machineLinkTailnet to \"warn\" in BEAST's config.json first (set_app_config machineLinkTailnet warn; the copy carries it), " +
+    'or cut over through Tailscale Serve (--tailscale with the Funnel on, publicUrl https://<node>.<tailnet>.ts.net); docs/machines.md, "The daemon link is tailnet-only"';
+  const unset = config.machineLinkTailnet === undefined || config.machineLinkTailnet === null;
+  const why = `machineLinkTailnet is ${unset ? 'unset (enforce)' : '"enforce"'}`;
+  if (o.serve) {
+    if (config.trustProxy === false) return `${why} and trustProxy is off, so every daemon that comes in through Tailscale Serve would be refused (the portal may not believe Serve's forwarded address): turn trustProxy on, or ${fix}`;
+    return undefined;
+  }
+  let host = '';
+  try {
+    host = new URL(publicUrl).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    // an unparsable URL is no Tailscale address
+  }
+  if (host && tailnetAddress(host)) return undefined;
+  return `${why} and the daemons would reach the new portal at ${publicUrl || '(no URL)'}, which is not a Tailscale address and not behind Tailscale Serve, so the portal would refuse every daemon: ${fix}`;
 }
 
 function pick(o: Json, keys: string[]): Json {

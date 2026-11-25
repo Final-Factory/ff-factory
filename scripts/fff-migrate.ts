@@ -31,6 +31,7 @@ import {
   ffboxRelinkSteps,
   historyPlan,
   indexSpec,
+  machineLinkPreflight,
   manifestDiff,
   manifestDir,
   parseManifest,
@@ -1373,7 +1374,15 @@ export class Migration {
     // 1. The first copy while BEAST still runs, so the stop waits only for what changes after it; rewritten once to check
     // it before anything is touched.
     const first = await this.pullAll();
-    const { publicUrl } = this.rewrite();
+    const { next: firstNext, publicUrl } = this.rewrite();
+    // The daemon link is tailnet-only (w5575): a portal that daemons reach by a LAN or public address would refuse them all
+    // under enforce. Checked on the config this portal will start on, before BEAST or this portal is touched (w5716).
+    const lockout = machineLinkPreflight(readJson(path.join(firstNext, 'config', 'config.json')), publicUrl, { serve: this.o.tailscale });
+    if (lockout) {
+      this.say(`refused, nothing on BEAST or here was touched: ${lockout}`);
+      this.writeReport('cut-over-refused');
+      return 4;
+    }
     const beastCfg = readJson(path.join(this.stage, 'beast', 'config.json'));
     const beastPort = Number(beastCfg.port ?? 8790);
     this.say('');
