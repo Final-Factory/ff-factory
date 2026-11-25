@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ghConfigFolder, ghLoginStorage, machineGhStatusEnv, OWNER_LABEL_ON_SYSTEM_DRIVE, ownerLabelTargets, sayOwnerLabels, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
+import { ghConfigFolder, ghLoginStorage, machineGhStatusEnv, OWNER_LABEL_ON_SYSTEM_DRIVE, ownerLabelTargets, sayOwnerLabels, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, ghLoginToFile, ghLoginToKeyring, ghLoginAccounts, ghKeyringTargets, OWNER_GH_MOVED_NOTE, type GhRun, type TokenRun } from '../machine/ownerSecrets.ts';
 import { NO_READ_UP } from '../machine/lowIntegrity.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
@@ -330,4 +330,74 @@ test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and wh
   assert.match(line, /left open: Chrome \(AppContainer\)$/);
   assert.match(sayOwnerLabels('on', plan, 'file'), /rules label No-Read-Up on .*hosts\.yml/);
   assert.match(sayOwnerLabels('warn', { label: [], left: [] }, undefined), /none on this Windows machine .*only on lothdesktop/);
+});
+
+/** A fake gh for the w5749 move: keeps where the login is and its token, and answers status, token and login as gh does. */
+function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: string[]; loginFails?: boolean; loginLies?: boolean }) {
+  const st = { storage: start.storage, token: start.token ?? 'gho_abcdefghijklmnopqrstuvwxyz0123', users: start.users ?? ['lothsahn'] };
+  const calls: string[][] = [];
+  const gh: GhRun = async (args, o = {}) => {
+    calls.push(args);
+    if (args[1] === 'status') {
+      if (!st.storage) return { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.' };
+      const where = st.storage === 'keyring' ? 'keyring' : 'C:\\Users\\o\\AppData\\Roaming\\GitHub CLI\\hosts.yml';
+      return { code: 0, stdout: `github.com\n${st.users.map((u) => `  ✓ Logged in to github.com account ${u} (${where})\n  - Token: gho_****`).join('\n')}`, stderr: '' };
+    }
+    if (args[1] === 'token') return st.storage ? { code: 0, stdout: `${st.token}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'no oauth token' };
+    if (args[1] === 'login') {
+      assert.equal(o.input?.trim(), st.token, 'the login is given its own token');
+      if (start.loginFails) return { code: 1, stdout: '', stderr: 'boom' };
+      if (!start.loginLies) st.storage = args.includes('--insecure-storage') ? 'file' : 'keyring';
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  };
+  return { gh, st, calls };
+}
+
+test('w5749: ghLoginToFile moves a keyring login into hosts.yml with its own token, checked, and names the entries to delete', async () => {
+  const f = fakeGh({ storage: 'keyring' });
+  const m = await ghLoginToFile(f.gh);
+  assert.deepEqual({ ok: m.ok, moved: m.moved, deleteFrom: m.deleteFrom }, { ok: true, moved: true, deleteFrom: ['gh:github.com:', 'gh:github.com:lothsahn'] });
+  assert.equal(f.st.storage, 'file');
+  assert.ok(f.calls.some((a) => a.join(' ') === 'auth login --hostname github.com --with-token --insecure-storage'));
+  // Again: already in the file, nothing moved, the entries still named (a delete that failed last time is tried again).
+  const again = await ghLoginToFile(f.gh);
+  assert.deepEqual({ ok: again.ok, moved: again.moved, deleteFrom: again.deleteFrom }, { ok: true, moved: false, deleteFrom: ['gh:github.com:', 'gh:github.com:lothsahn'] });
+});
+
+test('w5749: ghLoginToFile leaves the login in Credential Manager, with nothing to delete, on any failure', async () => {
+  for (const start of [{ storage: 'keyring' as const, loginFails: true }, { storage: 'keyring' as const, loginLies: true }, { storage: 'keyring' as const, users: ['a', 'b'] }, { storage: 'keyring' as const, token: 'short' }]) {
+    const f = fakeGh(start);
+    const m = await ghLoginToFile(f.gh);
+    assert.equal(m.ok, false, JSON.stringify(start));
+    assert.equal(m.moved, false);
+    assert.equal(m.deleteFrom, undefined, 'no Credential Manager entry is deleted');
+    assert.equal(f.st.storage, 'keyring');
+  }
+  const none = await ghLoginToFile(fakeGh({}).gh);
+  assert.deepEqual({ ok: none.ok, moved: none.moved, deleteFrom: none.deleteFrom }, { ok: true, moved: false, deleteFrom: undefined });
+});
+
+test('w5749: the way back, ghLoginToKeyring, moves a hosts.yml login into Credential Manager and leaves it on failure', async () => {
+  const f = fakeGh({ storage: 'file' });
+  const b = await ghLoginToKeyring(f.gh);
+  assert.deepEqual({ ok: b.ok, moved: b.moved }, { ok: true, moved: true });
+  assert.equal(f.st.storage, 'keyring');
+  assert.ok(f.calls.some((a) => a.join(' ') === 'auth login --hostname github.com --with-token'));
+  assert.deepEqual(await ghLoginToKeyring(f.gh).then((x) => [x.ok, x.moved]), [true, false]);
+  const bad = fakeGh({ storage: 'file', loginFails: true });
+  assert.deepEqual(await ghLoginToKeyring(bad.gh).then((x) => [x.ok, x.moved]), [false, false]);
+  assert.equal(bad.st.storage, 'file');
+  // A round trip ends where it started, with the same token.
+  const r = fakeGh({ storage: 'keyring' });
+  await ghLoginToFile(r.gh);
+  await ghLoginToKeyring(r.gh);
+  assert.deepEqual([r.st.storage, r.st.token], ['keyring', 'gho_abcdefghijklmnopqrstuvwxyz0123']);
+});
+
+test('w5749: ghLoginAccounts and ghKeyringTargets', () => {
+  assert.deepEqual(ghLoginAccounts('  ✓ Logged in to github.com account lothsahn (keyring)\n  ✓ Logged in to github.com account bryding (keyring)'), ['lothsahn', 'bryding']);
+  assert.deepEqual(ghKeyringTargets('x'), ['gh:github.com:', 'gh:github.com:x']);
+  assert.equal(OWNER_GH_MOVED_NOTE, 'read-fence-gh-moved.json');
 });
