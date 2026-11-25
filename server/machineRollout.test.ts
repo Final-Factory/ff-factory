@@ -623,6 +623,56 @@ test('w4421: an update a full disk refused is sent again by itself once the disk
   assert.doesNotMatch(w3.told[0].text, /disk was full/);
 });
 
+test('w5593: an update or tools run whose bundle download was cut is sent again by itself 5 minutes later, at most 3 times', async () => {
+  // BEAST 2026-11-25 08:20:52Z (machine/selfUpdate.ts downloadBundle), over a link relayed at 35 KB/s.
+  const cut = "beast refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)";
+  let tries = 0;
+  const m = mac('beast', { linkRun: (form) => (form === 'tools' ? { throws: cut } : ++tries <= 2 ? { throws: cut } : { report: { ok: true }, after: { online: true, daemon: NEW.slice(0, 7) } }) });
+  const w = world([m]);
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  assert.deepEqual(w.linkCalls.map((c) => c.form), ['update', 'tools']);
+  assert.match(w.told[0].text, /- beast: FAILED: .*did not finish in 480 s.*sent again by itself in 5 min/);
+
+  // Not before 5 minutes, and not while offline.
+  w.advance(4 * 60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'too soon');
+  w.advance(2 * 60_000);
+  m.online = false;
+  await r.tick();
+  assert.equal(w.linkCalls.length, 2, 'offline');
+  m.online = true;
+  await r.tick();
+  assert.deepEqual(w.linkCalls.slice(2).map((c) => c.form), ['update', 'tools'], 'the update, then its tools, again');
+
+  // The third update goes through; its tools are cut once more and sent again on their own, then the cap holds.
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.deepEqual(w.linkCalls.slice(4).map((c) => c.form), ['update', 'tools']);
+  assert.equal(m.daemon, NEW.slice(0, 7));
+  w.advance(6 * 60_000);
+  await r.tick();
+  assert.deepEqual(w.linkCalls.slice(6).map((c) => c.form), ['tools'], 'retry 3: the tools alone');
+  for (let i = 0; i < 3; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.equal(w.linkCalls.length, 7, 'three retries used: the tools wait for the next deploy');
+
+  // A refusal that is not a cut download is never sent again.
+  const other = mac('m3', { linkRun: () => ({ throws: 'm3 refused it: the bundle does not match what the portal said on the link' }) });
+  const w2 = world([other], { tools: false });
+  w2.verify();
+  const r2 = w2.make();
+  for (let i = 0; i < 4; i++) {
+    w2.advance(6 * 60_000);
+    await r2.tick();
+  }
+  assert.equal(w2.linkCalls.length, 1);
+});
+
 test('w2005: a machine that went offline before its update reached it is not called failed, nothing is put back over ssh, and it is updated when it comes back', async () => {
   let tries = 0;
   const asleep = mac('m3', {
