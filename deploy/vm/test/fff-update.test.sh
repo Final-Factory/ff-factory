@@ -62,7 +62,7 @@ printf '#!/bin/sh\nexit 0\n' >"$T/bin/systemctl"
 chmod 0755 "$T/bin/npm" "$T/bin/systemctl"
 : >"$T/evil"
 chmod 0644 "$T/evil"
-export FFF_LIB=$T/lib FFF_CONF=$T/fff.conf FAKE_NPM_EVIL=$T/evil PATH=$T/bin:$PATH
+export FFF_LIB=$T/lib FFF_CONF=$T/fff.conf FAKE_NPM_EVIL=$T/evil FFF_PATH_PREFIX=$T/bin PATH=$T/bin:$PATH
 upd() { "$T/lib/fff-update" "$@"; }
 as_u() { (cd / && runuser -u "$U" -- env HOME="$R/home" GIT_TERMINAL_PROMPT=0 "$@"); }
 # problem DIR SHA: release_problem's answer, from lib.sh as fff-update has it.
