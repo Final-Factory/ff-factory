@@ -15,10 +15,10 @@ import { spawnSync } from 'node:child_process';
 /** Opens `$1` for append and writes nothing; prints WROTE or REFUSED. */
 export const MAX_EVENTS_PROBE = 'if printf "" >> "$1" 2>/dev/null; then echo WROTE; else echo REFUSED; fi';
 
-export type ProbeOut = (cmd: string, args: string[], timeoutMs: number) => { status: number | null; stdout?: string; stderr?: string; error?: Error };
+export type ProbeOut = (cmd: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv) => { status: number | null; stdout?: string; stderr?: string; error?: Error };
 
-const realRun: ProbeOut = (cmd, args, timeoutMs) => {
-  const r = spawnSync(cmd, args, { timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+const realRun: ProbeOut = (cmd, args, timeoutMs, env) => {
+  const r = spawnSync(cmd, args, { timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...(env ? { env } : {}) });
   return { status: r.status, stdout: r.stdout, stderr: r.stderr, error: r.error };
 };
 
@@ -33,10 +33,10 @@ export interface MaxProbeResult {
  * Runs `argv` (a fence's launcher around a shell, with MAX_EVENTS_PROBE and the file as its arguments; maxProbeArgv)
  * and says whether that fence refuses a worker's write to `file`.
  */
-export function probeMaxEvents(fence: string, argv: string[], file: string, o: { run?: ProbeOut; timeoutMs?: number } = {}): MaxProbeResult {
+export function probeMaxEvents(fence: string, argv: string[], file: string, o: { run?: ProbeOut; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): MaxProbeResult {
   try {
     const [cmd, ...args] = argv;
-    const r = (o.run ?? realRun)(cmd, args, o.timeoutMs ?? 30_000);
+    const r = (o.run ?? realRun)(cmd, args, o.timeoutMs ?? 30_000, o.env);
     const out = (r.stdout ?? '').trim().split(/\r?\n/).pop()?.trim();
     if (out === 'REFUSED') return { refused: true, line: `max events: ${fence} refuses a fenced worker's write to ${file} (checked)` };
     if (out === 'WROTE') return { refused: false, line: `max events: WARNING: a worker inside ${fence} could write ${file}; a hijacked worker could forge Max events and drop an intake thread (docs/max.md, w5552)` };
@@ -49,3 +49,14 @@ export function probeMaxEvents(fence: string, argv: string[], file: string, o: {
 
 /** The shell and its arguments for the check, to go after a fence's launcher (or alone, for a Low-labelled shell). */
 export const maxProbeArgv = (shell: string, file: string) => [shell, '-c', MAX_EVENTS_PROBE, 'max-events-probe', file];
+
+/**
+ * The environment for a shell the daemon runs from a folder workers write (w5717: the agent Git's bash, which a Low
+ * worker could replace): only what Windows needs to start a process, none of the daemon's tokens or keys.
+ */
+export function bareEnv(from: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const keep = ['SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'SystemDrive', 'SYSTEMDRIVE'];
+  const out: NodeJS.ProcessEnv = {};
+  for (const k of Object.keys(from)) if (keep.includes(k)) out[k] = from[k];
+  return out;
+}
