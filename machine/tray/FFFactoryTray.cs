@@ -7,7 +7,8 @@
 //                   {"type":"firefox","state":"closing"|"idle"} the Close Firefox item's state; {"type":"notify","title":
 //                   "...","text":"...","warn":bool} a notification; {"type":"firefox_item"} answered by the item as shown;
 //                   the state's "firefox" is whether closing Firefox is allowed here (off unless turned on);
-//                   {"type":"busy","ms":n} a test's: the window thread sleeps n ms (answered {"type":"busy"} first)
+//                   {"type":"busy","ms":n} a test's: the window thread sleeps n ms (answered {"type":"busy"} first);
+//                   {"type":"selftest"} a test's: a person's key and click through the hook procedures (answered)
 //   tray -> daemon  {"type":"hello"}, {"type":"pause"}, {"type":"unpause"}, {"type":"settings","settings":{...}},
 //                   {"type":"input","kind":"key"|"click","at":<epoch ms>} a person's key or click (at most one per
 //                   INPUT_EVERY_MS), {"type":"injected","keys":n,"clicks":n} input programs injected, ignored (once a
@@ -400,7 +401,26 @@ namespace FFFactory
                 Send(new Dictionary<string, object> { { "type", "busy" }, { "ms", ms } });
                 Thread.Sleep(ms);
             }
+            else if (type == "selftest") SelfTest();
             else if (type == "quit") Quit();
+        }
+
+        // For a test (w5743): a key press and release (F24) and a left button press with no injected flag, the hook data a
+        // keyboard and a mouse make, through the hooks' own procedures (KeyboardProc, MouseProc), so a test sees a person's
+        // input counted as a person's and sent as input; a program cannot make that input itself. The daemon never sends it.
+        void SelfTest()
+        {
+            IntPtr k = Marshal.AllocHGlobal(32), ms = Marshal.AllocHGlobal(32);
+            try
+            {
+                for (int i = 0; i < 32; i++) { Marshal.WriteByte(k, i, 0); Marshal.WriteByte(ms, i, 0); }
+                Marshal.WriteInt32(k, 0, 0x87);
+                KeyboardProc(0, (IntPtr)Native.WM_KEYDOWN, k);
+                KeyboardProc(0, (IntPtr)Native.WM_KEYUP, k);
+                MouseProc(0, (IntPtr)Native.WM_LBUTTONDOWN, ms);
+            }
+            finally { Marshal.FreeHGlobal(k); Marshal.FreeHGlobal(ms); }
+            Send(new Dictionary<string, object> { { "type", "selftest" } });
         }
 
         void Send(Dictionary<string, object> m)

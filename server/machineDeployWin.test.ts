@@ -761,6 +761,29 @@ $null = [Console]::In.ReadLine()
     assert.ok(Number(counts.injectedClicks) >= 1, 'the hook saw the injected click as injected, its window thread busy');
     if (Number(counts.personKeys) === 0 && Number(counts.personClicks) === 0) assert.equal(lines.filter((l) => l.type === 'input').length, 0, "injected input is never a person's input");
     else t.diagnostic('someone used this computer during the test: the no-input check is skipped');
+    // w5743: a person's key and click (the hook data a keyboard and a mouse make: no injected flag) through the same hook
+    // procedures count as a person's, and the tray tells the daemon (input). No program can make that input itself.
+    const from = lines.length;
+    const next = async (type: string) => {
+      const end = Date.now() + 10_000;
+      for (;;) {
+        const hit = lines.slice(from).find((l) => l.type === type);
+        if (hit) return hit;
+        if (Date.now() > end) throw new Error(`no ${type} from the tray; it said: ${JSON.stringify(lines.slice(from))}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    tray.stdin.write(`${JSON.stringify({ type: 'selftest' })}\n`);
+    await next('selftest');
+    tray.stdin.write(`${JSON.stringify({ type: 'counts' })}\n`);
+    const after = await next('counts');
+    t.diagnostic(`tray counts after a person's key and click: ${JSON.stringify(after)}`);
+    assert.ok(Number(after.personKeys) >= Number(counts.personKeys) + 1, "a person's key counts as a person's");
+    assert.ok(Number(after.personClicks) >= Number(counts.personClicks) + 1, "a person's click counts as a person's");
+    assert.equal(Number(after.injectedKeys), Number(counts.injectedKeys), "a person's key is never injected");
+    assert.equal(Number(after.injectedClicks), Number(counts.injectedClicks), "a person's click is never injected");
+    const input = await next('input');
+    assert.ok(input.kind === 'key' || input.kind === 'click', `the tray sent the person's input (${JSON.stringify(input)})`);
   } else t.diagnostic(`the tray's input hooks did not install here (${String(hello.hooks)}): the injected-key check is skipped`);
   tray.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);
   const code = await new Promise<number | null>((r) => tray.on('exit', (c) => r(c)));
