@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ghConfigFolder, hasOwnGithub, machineGhEnv, machineGhToken, ownerSecretPaths, type TokenRun } from '../machine/ownerSecrets.ts';
+import { ghConfigFolder, hasOwnGithub, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadWarn, ownerSecretPaths, ownerSecretPathsWarn, sayOwnerWarnStage, type TokenRun } from '../machine/ownerSecrets.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
 
@@ -80,4 +80,48 @@ test('ownerReadDenied: the gh folder is closed only to a run with a token; Windo
 test('KEYCHAIN_MACH_SERVICES: authd and SecurityServer together, as probe 4 measured (w5560)', async () => {
   const { KEYCHAIN_MACH_SERVICES } = await import('../machine/ownerSecrets.ts');
   assert.deepEqual([...KEYCHAIN_MACH_SERVICES].sort(), ['com.apple.SecurityServer', 'com.apple.authd']);
+});
+
+test('ownerSecretPathsWarn (w5749): ~/.netrc, git credentials and the other gh folders, warn stage only', () => {
+  const env = { GH_CONFIG_DIR: '/srv/gh', XDG_CONFIG_HOME: '/x/cfg' };
+  const mac = ownerSecretPathsWarn({ platform: 'darwin', home: '/Users/p', env }).map((s) => s.path);
+  for (const p of ['/Users/p/.netrc', '/Users/p/.git-credentials', '/x/cfg/git/credentials', '/Users/p/.config/git/credentials', '/x/cfg/gh', '/Users/p/.config/gh'])
+    assert.ok(mac.includes(p), `${p} is in the warn stage`);
+  // The gh folder in use is the enforced one, never listed twice.
+  assert.ok(!mac.includes('/srv/gh'));
+  // None of them is enforced yet: separate PRs for warn and enforce (lothsahn's lockout rule).
+  const denied = ownerReadDenied({ platform: 'darwin', home: '/Users/p', env, hasToken: true });
+  for (const p of mac) assert.ok(!denied.includes(p), `${p} is not enforced in the warn PR`);
+  // With no GH_CONFIG_DIR or XDG_CONFIG_HOME, ~/.config/gh is the enforced folder, not a warn-stage one.
+  assert.ok(!ownerSecretPathsWarn({ platform: 'darwin', home: '/Users/p', env: {} }).some((s) => s.path === '/Users/p/.config/gh'));
+});
+
+test('ownerSecretPathsWarn (w5749): Linux flatpak and snap browsers, and ~/.config browsers when XDG_CONFIG_HOME moved', () => {
+  const lin = ownerSecretPathsWarn({ platform: 'linux', home: '/home/p', env: { XDG_CONFIG_HOME: '/home/p/cfg' } }).map((s) => s.path);
+  for (const p of ['/home/p/.var/app/org.mozilla.firefox', '/home/p/.var/app/com.google.Chrome', '/home/p/.var/app/org.chromium.Chromium', '/home/p/snap/brave', '/home/p/.config/google-chrome', '/home/p/.config/gh'])
+    assert.ok(lin.includes(p), p);
+  const plain = ownerSecretPathsWarn({ platform: 'linux', home: '/home/p', env: {} }).map((s) => s.path);
+  assert.ok(!plain.includes('/home/p/.config/google-chrome'), 'already enforced when XDG_CONFIG_HOME is unset');
+  assert.ok(!plain.some((p) => p === '/home/p' || p.startsWith('/home/p/ffw')), 'never the worker root');
+});
+
+test('ownerSecretPathsWarn (w5749): Windows gets none (the system drive is never labelled without a person)', () => {
+  assert.deepEqual(ownerSecretPathsWarn({ platform: 'win32', home: 'C:\Users\p', env: { APPDATA: 'C:\Users\p\AppData\Roaming' } }), []);
+  assert.equal(sayOwnerWarnStage({ platform: 'win32', home: 'C:\Users\p', env: {}, mode: 'warn', exists: () => true }), undefined);
+});
+
+test('ownerReadWarn (w5749): the other gh folders stay open to a run with no GitHub token, as the gh folder does', () => {
+  const env = { GH_CONFIG_DIR: '/srv/gh' };
+  const withTok = ownerReadWarn({ platform: 'linux', home: '/home/p', env, hasToken: true });
+  const noTok = ownerReadWarn({ platform: 'linux', home: '/home/p', env, hasToken: false });
+  assert.ok(withTok.includes('/home/p/.config/gh'));
+  assert.ok(!noTok.includes('/home/p/.config/gh'));
+  assert.ok(noTok.includes('/home/p/.netrc'));
+});
+
+test('sayOwnerWarnStage (w5749): names only the paths that exist, and nothing when none does', () => {
+  const line = sayOwnerWarnStage({ platform: 'darwin', home: '/Users/p', env: {}, mode: 'warn', exists: (p) => p === '/Users/p/.netrc' });
+  assert.match(line ?? '', /\/Users\/p\/\.netrc exist here/);
+  assert.doesNotMatch(line ?? '', /git-credentials/);
+  assert.equal(sayOwnerWarnStage({ platform: 'darwin', home: '/Users/p', env: {}, mode: 'warn', exists: () => false }), undefined);
 });

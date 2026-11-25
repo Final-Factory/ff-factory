@@ -85,7 +85,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, workerGhConfigDir } from './ownerSecrets.ts';
+import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, sayOwnerWarnStage, workerGhConfigDir } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -3412,6 +3412,9 @@ export class Daemon {
       this.readProbeBlocks = true;
       return;
     }
+    // w5749: the owner secrets still in their warn stage (not closed yet): which exist here, said once per probe.
+    const ownerWarn = sayOwnerWarnStage({ platform: process.platform, home: os.homedir(), env: process.env, mode });
+    if (ownerWarn) log(ownerWarn);
     try {
       ensureReadBackDirs(appDir);
       fs.mkdirSync(ghAppPaths(appDir).sessions, { recursive: true });
