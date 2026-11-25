@@ -585,7 +585,7 @@ export class AgentSession implements SessionHandle {
     // says so to the agent at its end.
     else if (from !== 'human' && this.turnStarter?.from === 'human') {
       this.relayedInTurn = true;
-      if (this.info.kind === 'orchestrator') text = text ? `${text}\n\n${RELAYED_MARK}` : text;
+      if (this.info.kind === 'orchestrator' && text && !text.endsWith(RELAYED_MARK)) text = `${text}\n\n${RELAYED_MARK}`;
     }
     this.lastFrom = from;
     this.lastUuid = uuid;
