@@ -138,13 +138,13 @@ test('worker daemon: a root gives the folders, the agents\' environment and the 
   assert.equal(cfg.appDir, path.join('/r', 'daemon'));
   assert.equal(cfg.tempDir, path.join('/r', 'tmp'));
   assert.equal(cfg.tokenFile, path.join('/r', 'secrets', 'machine-token'));
-  // w5377: what workers write for the daemon is inside the root, outside its Medium daemon folder; the old events file is drained.
+  // w5377: the Unity slots mailbox workers write is inside the root, outside its Medium daemon folder. w5552: the Max events
+  // file is the daemon's own, in its folder, whatever daemon.json names (a path a worker could write would let it forge lines).
   assert.equal(cfg.unitySlotsDir, path.join('/r', 'unity-slots'));
-  assert.equal(cfg.maxEventsFile, path.join('/r', 'max', 'max-events.jsonl'));
-  assert.equal(cfg.maxEventsLegacy, path.join('/r', 'daemon', 'max-events.jsonl'));
-  const own = withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d', maxEventsFile: '/e.jsonl', unitySlotsDir: '/s' });
-  assert.deepEqual([own.maxEventsFile, own.maxEventsLegacy, own.unitySlotsDir], ['/e.jsonl', undefined, '/s'], 'daemon.json\'s own paths win');
-  assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d' }).maxEventsLegacy, path.join('/d', 'max-events.jsonl'));
+  assert.equal(cfg.maxEventsFile, path.join('/r', 'daemon', 'max', 'max-events.jsonl'));
+  const own = withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', appDir: '/d', maxEventsFile: '/r/max/max-events.jsonl', unitySlotsDir: '/s' });
+  assert.deepEqual([own.maxEventsFile, own.unitySlotsDir], [path.join('/d', 'max', 'max-events.jsonl'), '/s'], 'the slots mailbox may move; the events file stays the daemon\'s');
+  assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r', root: '/r', maxEventsFile: null }).maxEventsFile, null, 'null still turns it off');
   assert.equal(withRootDefaults({ portalUrl: 'p', id: 'x', token: 't', repoPath: 'r' }).appDir, undefined, 'no root: unchanged');
   // w1099: no FF_NIGHTLY_ROOT: the nightly lab root is gone (the night keeps its history in <root>/nightly-history).
   // w5281: the shared uv cache and the determinism audits' folder are inside the root.

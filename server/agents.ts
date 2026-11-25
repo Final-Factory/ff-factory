@@ -20,7 +20,7 @@ import { FfboxSymbolUploads, describeSymbolUpload } from './ffboxUrgentSymbols.t
 import { postAsMax, postImages } from './ffboxPost.ts';
 import { setFfboxConfig } from './ffboxConfig.ts';
 import type { MaxManager } from './max.ts';
-import { eventsFileOf, maxEnv } from './maxEvents.ts';
+import { maxEnv } from './maxEvents.ts';
 import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
@@ -5427,8 +5427,8 @@ A report is for a person who asked for one, and people want very few. File one w
         // countdown's (it counts down from a fixed 15,000,000). Claude Code 2.1.284 reads this switch first (`off` is one of its
         // modes); measured on a probe session there: the first message's total_tokens_reminder attachment is gone.
         CLAUDE_CODE_TOTAL_TOKENS_REMINDER: 'off',
-        // On the portal's own host its agents write this server's Max events file (the daemon keeps none of its own there).
-        ...(m.local ? { FF_MAX_EVENTS: eventsFileOf(this.cfg) } : {}),
+        // w5552: no FF_MAX_EVENTS. A sandbox agent posts as Max through post_as_max (the portal records it with its session);
+        // the events file is the daemon's and no fence lets a worker write it (machine/maxEventsFence.ts).
         ...connectorEnv(this.cfg, 'workers'),
         // The nightly run's worker (w864): FF Factory's URL and that night's nightly-scoped key, for the lab's report.
         // Redacted like every *_KEY of a launch spec (server/secrets.ts SECRET_ENV); never in a brief or a file.
