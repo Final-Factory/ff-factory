@@ -1,9 +1,10 @@
 /**
- * The fence's safe fallback (w5377, lothsahn: "is there some emergency way we could reinstall the system if things go
+ * The fence's probe (w5377, lothsahn: "is there some emergency way we could reinstall the system if things go
  * wrong?"): before the daemon puts its first sandbox agent inside a write fence, it runs a harmless command inside the
  * same fence once. If that command does not exit 0 in time (Landlock missing from the kernel, a profile the kernel
- * refuses, python3 gone, the launcher missing), the daemon logs why and runs its agents unfenced, as before the fence.
- * A fence that cannot apply never stops the daemon or an agent's start; nothing here throws.
+ * refuses, python3 gone, the launcher missing), the daemon logs why and, since w5555, fails closed: it holds its sandbox
+ * workers and the portal alerts (machine/fenceGate.ts). A fence that cannot apply never stops the daemon; nothing here
+ * throws.
  *
  * The daemon, the agent host, the machine agent's link and the installer are never fenced, so a machine update or an
  * installer re-run that turns the fence off always works (docs/worker-root.md, "Turning a fence off").
