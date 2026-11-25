@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
-import { deniesDeleteChild, explicitMedium, isLink, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
+import { deniesDeleteChild, explicitMedium, isLink, labelTree, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { Exec } from '../machine/lowIntegrity.ts';
 
@@ -189,6 +189,49 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
   assert.deepEqual(denied.calls.length, 1);
 });
 
+test('lockTranscripts and unlockTranscripts leave the event loop free between icacls calls, and run icacls through exec by default', async () => {
+  // On BEAST the first lock ran ~400 synchronous icacls calls on the daemon's loop and held its heartbeats 5.5 minutes
+  // (w5703, 2026-11-25). Each call here holds the thread 5 ms, as a synchronous icacls does: a 1 ms timer must still tick.
+  const projects = path.join(tmp(), 'projects');
+  const slug = path.join(projects, 'F--work');
+  fs.mkdirSync(path.join(slug, 'old'), { recursive: true });
+  for (let i = 0; i < 10; i++) fs.writeFileSync(path.join(slug, `old-${i}.jsonl`), '');
+  const week = (Date.now() - 7 * 24 * 3600_000) / 1000;
+  for (const n of fs.readdirSync(slug)) fs.utimesSync(path.join(slug, n), week, week);
+  let label = '';
+  const exec: Exec = async () => ({ code: 0, stdout: label, stderr: '' });
+  const slow = recorder(() => {
+    const until = Date.now() + 5;
+    while (Date.now() < until) {
+      /* a synchronous icacls */
+    }
+    return { code: 0, out: 'ok' };
+  });
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 1);
+  try {
+    assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: slow.icacls, account: 'HOST\\me' }), true);
+    assert.ok(slow.calls.length >= 10, `${slow.calls.length} calls`);
+    assert.ok(ticks >= slow.calls.length / 2, `the loop ticked ${ticks} times in ${slow.calls.length} icacls calls`);
+    label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
+    ticks = 0;
+    slow.calls.length = 0;
+    await unlockTranscripts(projects, exec, () => {}, slow.icacls, 'HOST\\me');
+    assert.ok(slow.calls.length > 0, 'unlock ran icacls (a label it misread would return at once and prove nothing)');
+    assert.ok(ticks >= slow.calls.length / 2, `unlock: the loop ticked ${ticks} times in ${slow.calls.length} icacls calls`);
+  } finally {
+    clearInterval(timer);
+  }
+  // With no icacls given, every call goes through the daemon's (asynchronous) exec.
+  const viaExec: string[][] = [];
+  label = '';
+  const projects2 = path.join(tmp(), 'projects');
+  fs.mkdirSync(path.join(projects2, 'F--work'), { recursive: true });
+  const exec2: Exec = async (cmd, args) => (assert.equal(cmd, 'icacls'), viaExec.push(args), { code: 0, stdout: args.length === 1 ? label : 'ok', stderr: '' });
+  assert.equal(await lockTranscripts(projects2, exec2, () => {}, { account: 'HOST\\me' }), true);
+  assert.deepEqual(viaExec.slice(1).map((a) => a.slice(1)), [['/deny', 'HOST\\me:(DC)'], ['/deny', 'HOST\\me:(DC)'], ['/deny', 'HOST\\me:(DC)'], ['/setintegritylevel', '(OI)(CI)medium'], ['/setintegritylevel', '(OI)(CI)medium']]);
+});
+
 test('lockTranscripts pins running and recent conversations, and a later start takes back to Medium the pins no longer running', async () => {
   const root = tmp();
   const projects = path.join(root, 'projects');
@@ -221,6 +264,24 @@ test('lockTranscripts pins running and recent conversations, and a later start t
   assert.deepEqual(later.calls.filter((c) => c[1] === '/setintegritylevel'), [[at('dddddddd-recent.jsonl'), '/setintegritylevel', 'medium']]);
   assert.deepEqual(JSON.parse(fs.readFileSync(pins, 'utf8')), [at(`${SID}.jsonl`)]);
   assert.match(said.join('\n'), /1 pinned conversation entry no longer running labelled Medium/);
+});
+
+test('labelTree to Low leaves a sub-folder that already answers Low unread, and walks one that answers Medium', async () => {
+  const tree = path.join(tmp(), 'tree');
+  for (const d of ['low', 'med']) {
+    fs.mkdirSync(path.join(tree, d, 'deep'), { recursive: true });
+    fs.writeFileSync(path.join(tree, d, 'x.jsonl'), '');
+  }
+  const lowOut = (p: string) => `${p} Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)\r\n`;
+  const answer = (args: string[]) => ({ code: 0, out: args.length === 1 && args[0].startsWith(path.join(tree, 'low')) ? lowOut(args[0]) : 'ok' });
+  for (const run of ['sync', 'async'] as const) {
+    const r = recorder(answer);
+    if (run === 'sync') labelTreeSync(tree, 'low', r.icacls, 'HOST\\me');
+    else await labelTree(tree, 'low', r.icacls, 'HOST\\me');
+    const inLow = r.calls.filter((c) => c[0].startsWith(path.join(tree, 'low') + path.sep));
+    assert.deepEqual(inLow, [], `${run}: nothing inside the Low sub-folder is read or labelled: ${JSON.stringify(inLow)}`);
+    assert.ok(r.calls.some((c) => c[0].startsWith(path.join(tree, 'med') + path.sep) && c[1] === '/setintegritylevel'), `${run}: the Medium sub-folder is walked`);
+  }
 });
 
 test('labelTreeSync never follows a junction: it labels each real entry and skips the link, both ways', { skip: process.platform !== 'win32' ? 'junctions are a Windows thing' : false }, () => {
