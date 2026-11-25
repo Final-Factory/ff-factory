@@ -118,36 +118,47 @@ export function agentNodePathDir(root: string | undefined, platform: NodeJS.Plat
 /**
  * The PowerShell that reads, with no administrator rights, whether Windows Firewall lets each program listen without a
  * prompt (w1742): "ok <path>" when an enabled inbound Allow rule names that exact path and no enabled Block does, else
- * "missing <path>"; then "stale=<n>", the inbound rules earlier prompts left for programs under `tmp` (outside the
- * install's own "Final Factory ..." groups), which scripts/worker/firewall.ps1 -StaleUnder deletes. Two bulk reads
- * (every application filter, every inbound rule) joined on the rule's id: one Get-NetFirewallApplicationFilter per
- * path took about 2.5 s each on lothdesktop's 696 rules (player_slots.py firewall, measured).
+ * "missing <path>"; then "wide <path>" for each path in `tailnetOnly` that an enabled inbound Allow rule lets in from any
+ * address (w5581: the agents' node and ffu-server take connections from the tailnet only, and a rule from before that,
+ * or one a prompt made, is made again by scripts/worker/firewall.ps1); then "stale=<n>", the inbound rules earlier
+ * prompts left for programs under `tmp` (outside the install's own "Final Factory ..." groups), which firewall.ps1
+ * -StaleUnder deletes. Three bulk reads (every application filter, every address filter, every inbound rule) joined on
+ * the rule's id: one Get-NetFirewallApplicationFilter per path took about 2.5 s each on lothdesktop's 696 rules
+ * (player_slots.py firewall, measured).
  */
-export function firewallCheckScript(exes: string[], tmp: string): string {
+export function firewallCheckScript(exes: string[], tmp: string, tailnetOnly: string[] = []): string {
   const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
   const under = `${path.win32.resolve(tmp).replace(/\\+$/, '')}\\`.toLowerCase();
+  const narrow = tailnetOnly.length ? `@(${tailnetOnly.map(q).join(', ')})` : '@()';
   return `$ErrorActionPreference = 'Stop'
 $progs = @{}
 foreach ($f in @(Get-NetFirewallApplicationFilter)) { if ($f.Program) { $progs[[string]$f.InstanceID] = ([string]$f.Program).ToLowerInvariant() } }
-$allow = @{}; $block = @{}; $stale = 0
+$anyFrom = @{}
+foreach ($a in @(Get-NetFirewallAddressFilter)) { if (@($a.RemoteAddress) -contains 'Any') { $anyFrom[[string]$a.InstanceID] = 1 } }
+$allow = @{}; $block = @{}; $wide = @{}; $stale = 0
 foreach ($r in @(Get-NetFirewallRule -Direction Inbound)) {
   $p = $progs[[string]$r.Name]
   if (-not $p) { continue }
-  if ([string]$r.Enabled -eq 'True') { if ([string]$r.Action -eq 'Allow') { $allow[$p] = 1 } elseif ([string]$r.Action -eq 'Block') { $block[$p] = 1 } }
+  if ([string]$r.Enabled -eq 'True') { if ([string]$r.Action -eq 'Allow') { $allow[$p] = 1; if ($anyFrom[[string]$r.Name]) { $wide[$p] = 1 } } elseif ([string]$r.Action -eq 'Block') { $block[$p] = 1 } }
   if ($p.StartsWith(${q(under)}) -and ([string]$r.Group) -notlike 'Final Factory*') { $stale++ }
 }
 foreach ($e in @(${exes.map(q).join(', ')})) {
   $k = $e.ToLowerInvariant()
   if ($allow[$k] -and -not $block[$k]) { "ok $e" } else { "missing $e" }
 }
+foreach ($e in ${narrow}) { if ($wide[$e.ToLowerInvariant()]) { "wide $e" } }
 "stale=$stale"
 `;
 }
 
-/** firewallCheckScript's answer: the paths without an allow rule and the count of stale temp rules; undefined when unreadable. */
-export function parseFirewallCheck(out: string): { missing: string[]; stale: number } | undefined {
+/**
+ * firewallCheckScript's answer: the paths without an allow rule, the tailnet-only paths an allow rule opens to any
+ * address (w5581), and the count of stale temp rules; undefined when unreadable.
+ */
+export function parseFirewallCheck(out: string): { missing: string[]; wide: string[]; stale: number } | undefined {
   const lines = out.replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
   const stale = lines.map((l) => /^stale=(\d+)$/.exec(l)).find(Boolean);
   if (!stale) return undefined;
-  return { missing: lines.filter((l) => l.startsWith('missing ')).map((l) => l.slice('missing '.length)), stale: Number(stale[1]) };
+  const after = (word: string) => lines.filter((l) => l.startsWith(`${word} `)).map((l) => l.slice(word.length + 1));
+  return { missing: after('missing'), wide: after('wide'), stale: Number(stale[1]) };
 }
