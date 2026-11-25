@@ -26,7 +26,7 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
-import { FF_LANDLOCK, readLockArgs, writeLockArgs } from './writeLock.ts';
+import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
@@ -3019,6 +3019,11 @@ export class Daemon {
     const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey], own);
     // w5546: the fences close the daemon's folder, secrets and root.json to reads; the run's own tokens file is given back.
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
+    // w5676: ff-landlock.py skips an open root folder that does not exist yet, and the locked worker cannot make it.
+    if (lockArgs && this.cfg.root) {
+      const made = makeOpenRootChildren(this.cfg.root, lockArgs, appDirOfConfig(this.cfg), [this.sandboxRoot()]);
+      if (made.length) log(`write lock: made the open root folders ${made.map((m) => path.basename(m)).join(', ')} before a locked worker starts (w5676)`);
+    }
     // Its own folder, not the file: a rewrite of the file keeps the grant (lockout review of #1193).
     const ownDir = own ? path.dirname(own) : undefined;
     const readOff = !this.readFenceEnforced();

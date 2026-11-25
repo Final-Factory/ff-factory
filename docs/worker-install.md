@@ -312,7 +312,15 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    form (`update`, or `tools` for the agent tools), the settings named, and the SHA-256 and size of a **git bundle of the
    portal's own checkout** at its HEAD (`server/machineLink.ts` `UpdateBundles`: a release is a worktree of a full clone,
    deploy/vm/guest/fff-update; a shallow checkout is refused, since its bundle cannot be fetched). The bundle is made once per
-   commit in `data/update-bundles`, the two newest kept. So a machine updates to exactly the code its portal runs.
+   commit in `data/update-bundles`: this commit's bundles are kept, and the newest one before them. So a machine updates to
+   exactly the code its portal runs. **Only what the machine lacks goes** (w5593, `UpdateBundles.thin`): when its daemon's
+   hello names a commit the portal's clone holds and that is behind HEAD, the bundle leaves out everything that commit
+   reaches (`git bundle create ... HEAD ^<its commit>`; from HEAD's parents when it runs HEAD already, as at the agent tools
+   run after its update). The update its checkout `<daemon>/src` already took put that commit there. BEAST took 35-50 KB/s
+   from the portal on 2026-11-25 and never finished the 29 MB full bundle in 480 s; from its 0a239f1c to a1701f9 the
+   incremental bundle is 790 KB (measured). A daemon whose checkout lacks the base refuses it ("the bundle is not one git
+   can read", or "git fetch failed": `THIN_REFUSED`), and `linkUpdate` sends the full bundle in the same call, so no
+   machine is left with less than the full bundle gave it. Any other refusal is not sent again that way.
 2. **The daemon checks it before anything runs.** It downloads `GET /machine/update/<sha256>` with its own credential (the
    portal serves only the bundle it offered that machine, for an hour), checks the size and SHA-256 against the message (which
    came on its own authenticated link), runs `git bundle verify`, fetches it into the install's checkout `<daemon>/src` (git
@@ -385,7 +393,7 @@ smart enough to automatically reinstall it in v: if the V: ever gets reset"). No
   reads as JSON.
 
 **Tests**: `server/machineLink.test.ts` (a real daemon and portal over WebSockets: the update and its report, a second one
-refused while a job runs, a failed one put back, who may fetch the bundle, a wrong size, SHA-256 or commit refused, a
+refused while a job runs, a failed one put back, the incremental bundle and its fall back to the full one (w5593), who may fetch the bundle, a wrong size, SHA-256 or commit refused, a
 restart, an unload, a daemon outside a worker root left to ssh), `scripts/worker/linkJob.test.ts` (the job: an update, a put
 back, a put back that cannot move the folders or does not come online, a reboot, the tools and unload forms, the OS job's
 task XML, LaunchAgent and systemd-run line), `server/machineRollout.test.ts` and `server/opsWorker.test.ts` (the link path,
