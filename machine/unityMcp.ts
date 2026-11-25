@@ -57,14 +57,43 @@ export function mcpPlaces(
   alive: (pid?: number) => number | undefined,
   instancePid: (project: string) => number | undefined,
   editors: { pid: number; project?: string }[] | undefined,
-): { place: string; project: string; pid?: number; fromInstance?: boolean }[] {
+): McpPlace[] {
   return sandboxes.map((sb) => {
+    const clones = cloneEditors(sb.path, editors);
     const own = alive(sb.unity.pid);
-    if (own) return { place: sb.id, project: sb.path, pid: own };
+    if (own) return { place: sb.id, project: sb.path, pid: own, clones };
     const pid = instancePid(sb.path);
     const editor = pid ? editors?.find((e) => e.pid === pid && e.project !== undefined && normProject(e.project) === normProject(sb.path)) : undefined;
-    return editor ? { place: sb.id, project: sb.path, pid: editor.pid, fromInstance: true } : { place: sb.id, project: sb.path, pid: undefined };
+    return editor ? { place: sb.id, project: sb.path, pid: editor.pid, fromInstance: true, clones } : { place: sb.id, project: sb.path, pid: undefined, clones };
   });
+}
+
+/** A place McpScopes keeps: its own editor, and (w5799) the Unity editors running on ParrelSync clones of its project. */
+export interface McpPlace {
+  place: string;
+  project: string;
+  pid?: number;
+  fromInstance?: boolean;
+  clones?: { project: string; pid: number }[];
+}
+
+/** w5799: the -projectPath of a ParrelSync clone of `project`: the sibling folder `<project>_clone_<n>`, and nothing else. */
+const CLONE = /^(.*)_clone_\d+$/;
+
+/**
+ * w5799: the Unity editors (`editors`, the machine's top-level Unity processes) whose -projectPath is a ParrelSync clone of
+ * `project` (`<project>_clone_<n>`, where ParrelSync puts it and the game repo's determinism-audit opens a peer run's second
+ * editor). Found by the process list alone, so each is a live Unity process of exactly that clone. None while the list
+ * is unread.
+ */
+export function cloneEditors(project: string, editors: { pid: number; project?: string }[] | undefined): { project: string; pid: number }[] {
+  const want = normProject(project);
+  const out: { project: string; pid: number }[] = [];
+  for (const e of editors ?? []) {
+    if (!e.project || CLONE.exec(normProject(e.project))?.[1] !== want) continue;
+    out.push({ project: e.project, pid: e.pid });
+  }
+  return out.sort((a, b) => a.project.localeCompare(b.project) || a.pid - b.pid);
 }
 
 const asServer = (x: unknown): StdioServer | undefined => {
@@ -146,7 +175,7 @@ export function scopedUnityMcp(server: StdioServer, appDir: string, place: strin
  * first look through (w5779).
  */
 export class McpScopes {
-  private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number; strict?: boolean }>();
+  private readonly seen = new Map<string, { pid?: number; since?: number; lookedAt?: number; strict?: boolean; clones?: Map<string, { pid: number; since: number }> }>();
   private readonly home?: string;
 
   /** `home`: one status folder (tests); unset: every folder editors write in (server/unityHang.ts mcpStatusDirs, w5540). */
@@ -155,7 +184,7 @@ export class McpScopes {
   }
 
   /** One look: `places` maps a place key to its project folder and its editor's pid (undefined: not running). */
-  sync(appDir: string, places: { place: string; project: string; pid?: number; fromInstance?: boolean }[], now: number, log: (line: string) => void = () => undefined) {
+  sync(appDir: string, places: McpPlace[], now: number, log: (line: string) => void = () => undefined) {
     const files = readStatusFiles(this.home ?? mcpStatusDirs());
     for (const p of places) {
       const st = this.seen.get(p.place) ?? {};
@@ -163,11 +192,19 @@ export class McpScopes {
       st.pid = p.pid;
       st.strict = p.fromInstance;
       st.lookedAt = now;
+      // w5799: a clone's editor counts from the look that first sees its pid on that clone: only a file written after it.
+      const clones = new Map<string, { pid: number; since: number }>();
+      for (const c of p.clones ?? []) {
+        const key = `${normProject(c.project)}#${c.pid}`;
+        clones.set(key, st.clones?.get(key) ?? { pid: c.pid, since: now });
+      }
+      st.clones = clones;
       this.seen.set(p.place, st);
+      const cloneSince = (p.clones ?? []).map((c) => ({ project: c.project, since: clones.get(`${normProject(c.project)}#${c.pid}`)!.since }));
       // Each folder on its own: a failed first one must not leave the home copy with a stale `reloading: true` (w5677).
       for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) {
         try {
-          syncStatusDir(dir, p.project, p.pid ? { since: st.since, strict: st.strict } : undefined, files);
+          syncStatusDir(dir, p.project, p.pid ? { since: st.since, strict: st.strict } : undefined, files, cloneSince);
         } catch (e) {
           log(`unity mcp ${p.place}: status folder ${dir}: ${(e as Error).message}`);
         }
