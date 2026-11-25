@@ -9,6 +9,7 @@ import { pipeline } from 'node:stream/promises';
 import type { AppSettings, DelegationRequest, Machine, Sandbox, ServerEvent, SessionInfo, StandingAgent, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { LEGACY_FRANTIC } from '../shared/types.ts';
 import { meterStates, type MeterStates } from './meterStates.ts';
+import { sealStore, type SealStore } from './transcriptSeal.ts';
 import { removedUpload } from './mediaRetention.ts';
 import { pairText, repairText, transientPairAvoids } from '../shared/capacity.ts';
 import { settleOutcome } from './findings.ts';
@@ -201,6 +202,8 @@ export class Store {
   private readonly uploadDir: string;
   /** The context meter's tally per conversation, for the next process of the portal's own sessions (w1484). */
   readonly meters: MeterStates;
+  /** w5563: each of the portal's own conversations' transcript seal (server/transcriptSeal.ts). */
+  readonly seals: SealStore;
   private readonly seqs = new Map<string, number>();
   /** lastSeqAsync's unzips, one after another (w2026). */
   private unzipQueue: Promise<unknown> = Promise.resolve();
@@ -213,6 +216,7 @@ export class Store {
     this.transcriptDir = path.join(dataDir, 'transcripts');
     this.uploadDir = path.join(dataDir, 'uploads');
     this.meters = meterStates(path.join(dataDir, 'meters'));
+    this.seals = sealStore(path.join(dataDir, 'transcript-seals'));
     fs.mkdirSync(this.transcriptDir, { recursive: true });
     this.stateFile = new SnapshotFile(file, () => JSON.stringify(this.persisted(), null, 2), { ...STATE_SAVE, label: 'state' });
     this.workFile = new SnapshotFile(workFile, () => JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2), { ...WORK_SAVE, label: 'work ledger' });

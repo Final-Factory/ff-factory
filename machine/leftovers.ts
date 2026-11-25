@@ -59,7 +59,7 @@ import type { Proc, UnityPlatform } from './unity.ts';
 import { mountsIn, unmountOwnFuse, type Mount } from '../server/deadMounts.ts';
 import { gamePlayers, isUnityBinary, slotsDir, splitArgs, unityProcesses } from './unitySlots.ts';
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
-import { askDaemon, orDaemon, procsMailbox, type ProcsAsk } from './procsBroker.ts';
+import { askDaemon, orDaemon, procsMailbox, type ProcsAsk, type ProcsWho } from './procsBroker.ts';
 import { readShellGroups, shellGroupsDir, withShellGroups, type ShellGroup } from './shellGroups.ts';
 
 const MIN = 60_000;
@@ -1051,20 +1051,107 @@ export const localReaders = (platform: UnityPlatform): ProcReaders => ({ procs: 
  * the daemon's answers through the mailbox (machine/procsBroker.ts). Unfenced, nothing changes. `local` and `ask` are
  * for tests.
  */
-export function workerReaders(platform: UnityPlatform, mailbox: string, local: ProcReaders = localReaders(platform), ask: typeof askDaemon = askDaemon): ProcReaders {
+export function workerReaders(platform: UnityPlatform, mailbox: string, local: ProcReaders = localReaders(platform), ask: typeof askDaemon = askDaemon, who: ProcsWho | undefined = whoAsks()): ProcReaders {
+  const by = who ? { who } : {};
   return {
-    procs: () => orDaemon(local.procs, () => ask<Proc[]>(mailbox, { op: 'procs' })),
-    envs: (pids) => orDaemon(() => local.envs(pids), async () => new Map(await ask<[number, ProcEnv][]>(mailbox, { op: 'env', pids }))),
-    inspect: (pids) => orDaemon(() => local.inspect(pids), () => ask<ProcFacts[]>(mailbox, { op: 'inspect', pids })),
+    procs: () => orDaemon(local.procs, () => ask<Proc[]>(mailbox, { op: 'procs', ...by })),
+    envs: (pids) => orDaemon(() => local.envs(pids), async () => new Map(await ask<[number, ProcEnv][]>(mailbox, { op: 'env', pids, ...by }))),
+    inspect: (pids) => orDaemon(() => local.inspect(pids), () => ask<ProcFacts[]>(mailbox, { op: 'inspect', pids, ...by })),
   };
 }
 
-/** The daemon's answer to a fenced worker's ask (machine/procsBroker.ts): the same reads, run outside the fence. */
-export function answerProcsAsk(platform: UnityPlatform, readers: ProcReaders = localReaders(platform)) {
+/** This process as the daemon's asker (w5558): its session (FF_SESSION_ID) and pid; none outside a worker. */
+export function whoAsks(e: NodeJS.ProcessEnv = process.env, pid = process.pid): ProcsWho | undefined {
+  const session = e.FF_SESSION_ID;
+  return session ? { session, pid } : undefined;
+}
+
+/**
+ * The machine's processes for the clean-up's KEEP checks (slotContext: does anyone build in, play from or run in this
+ * slot, sandbox or runner folder?), the one worker read that needs more than the worker's own processes (w5558).
+ * Unfenced: this machine's whole list, as before. Fenced: the daemon's census, the command lines that name the install
+ * folder or an agent's host, with no environment.
+ */
+export function workerCensus(platform: UnityPlatform, mailbox: string, local: ProcReaders = localReaders(platform), ask: typeof askDaemon = askDaemon, who: ProcsWho | undefined = whoAsks()): () => Promise<Proc[]> {
+  return () => orDaemon(local.procs, () => ask<Proc[]>(mailbox, { op: 'census', ...(who ? { who } : {}) }));
+}
+
+/** What one fenced worker may see (w5558). */
+export interface ProcsScope {
+  /** The session's processes, what they run (no other session's), and the parents of those. */
+  procs: Proc[];
+  /** The environments of the session's processes and what they run, its shells' process groups filled in; no other. */
+  env: Map<number, ProcEnv>;
+  /** The whole machine's list, for the census; never answered as it is. */
+  all: Proc[];
+}
+
+/**
+ * The asking worker's view of the machine (w5558; procsBroker.ts's header): refused unless `who.pid` runs and the nearest
+ * process on its parent chain that carries a session carries `who.session`. Then the processes with that session (by
+ * FF_SESSION_ID, or by the session's shell records for an Apple program whose environment reads empty, w5401), everything
+ * under them that carries no other session, and the parents of those (the agent's host; launchd for an orphan) without
+ * their environment, unless one carries another session.
+ */
+export async function sessionScope(who: ProcsWho, readers: ProcReaders, groups: (session: string) => ShellGroup[] = () => []): Promise<ProcsScope> {
+  const all = await readers.procs();
+  const byPid = new Map(all.map((p) => [p.pid, p]));
+  if (!byPid.has(who.pid)) throw new Error(`process ${who.pid} is not running: the daemon answers a worker only about its own processes`);
+  const env = await withShellGroups(all, await readers.envs(all.map((p) => p.pid)), groups(who.session), (pids) => readers.inspect(pids));
+  let claimed: string | undefined;
+  const seen = new Set<number>();
+  for (let x = byPid.get(who.pid); x && !seen.has(x.pid) && !claimed; x = byPid.get(x.ppid)) {
+    seen.add(x.pid);
+    claimed = env.get(x.pid)?.session;
+  }
+  if (claimed !== who.session) throw new Error(`process ${who.pid} is not of session ${who.session}: the daemon answers a worker only about its own processes`);
+  const kids = new Map<number, number[]>();
+  for (const p of all) if (p.ppid !== p.pid) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
+  const theirs = (pid: number) => {
+    const s = env.get(pid)?.session;
+    return s !== undefined && s !== who.session;
+  };
+  const own = new Set<number>();
+  const q = all.filter((p) => env.get(p.pid)?.session === who.session).map((p) => p.pid);
+  while (q.length) {
+    const x = q.pop()!;
+    if (own.has(x)) continue;
+    own.add(x);
+    for (const k of kids.get(x) ?? []) if (!own.has(k) && !theirs(k)) q.push(k);
+  }
+  const shown = new Set(own);
+  for (const pid of own) {
+    const pp = byPid.get(pid)!.ppid;
+    if (byPid.has(pp) && !theirs(pp)) shown.add(pp);
+  }
+  return { procs: all.filter((p) => shown.has(p.pid)), env: new Map([...env].filter(([pid]) => own.has(pid))), all };
+}
+
+/** A command line the census shows (w5558): one that names the install folder `root` (either slash, any case) or an agent's host. */
+export function censusLine(cmd: string, root: string | undefined): boolean {
+  if (AGENT_HOST.test(cmd)) return true;
+  const n = (s: string) => s.replace(/\\/g, '/').replace(/\/+/g, '/').toLowerCase();
+  const r = root ? n(root).replace(/\/+$/, '') : '';
+  return r.length > 1 && n(cmd).includes(`${r}/`);
+}
+
+/**
+ * The daemon's answer to a fenced worker's ask (machine/procsBroker.ts): the same reads, run outside the fence, each
+ * limited to the asking worker's own processes (w5558, sessionScope); the census for the clean-up's KEEP checks.
+ * `root`: the install folder the census lines must name; `groups`: a session's shell records (machine/shellGroups.ts).
+ */
+export function answerProcsAsk(platform: UnityPlatform, readers: ProcReaders = localReaders(platform), o: { root?: string; groups?: (session: string) => ShellGroup[] } = {}) {
   return async (a: ProcsAsk): Promise<unknown> => {
-    if (a.op === 'procs') return readers.procs();
-    if (a.op === 'env') return [...(await readers.envs(a.pids ?? []))];
-    return readers.inspect(a.pids ?? []);
+    if (!a.who) throw new Error('the ask names no session: the daemon answers a worker only about its own processes');
+    const scope = await sessionScope(a.who, readers, o.groups);
+    // Without the install folder the census would miss what uses it, and the clean-up would take that for idle: no answer.
+    if (a.op === 'census' && !o.root) throw new Error('the daemon knows no install folder to take a census of');
+    if (a.op === 'census') return scope.all.filter((p) => censusLine(p.cmd, o.root)).map((p) => ({ pid: p.pid, ppid: p.ppid, cmd: p.cmd, ...(p.pgid !== undefined ? { pgid: p.pgid } : {}) }));
+    if (a.op === 'procs') return scope.procs;
+    if (a.op === 'env') return (a.pids ?? []).filter((pid) => scope.env.has(pid)).map((pid) => [pid, scope.env.get(pid)!]);
+    const shown = new Set(scope.procs.map((p) => p.pid));
+    const asked = (a.pids ?? []).filter((pid) => shown.has(pid));
+    return asked.length ? readers.inspect(asked) : [];
   };
 }
 
@@ -1277,7 +1364,7 @@ export function slotProcList(procs: Proc[], self: number, callers: number[] = []
 /** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
 export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[]; session?: string } = {}): Promise<SlotContext> {
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
-  const list = o.procs ?? (() => workerReaders(platform, procsMailbox(slotsDir())).procs());
+  const list = o.procs ?? workerCensus(platform, procsMailbox(slotsDir()));
   const all = await list().catch(() => undefined);
   const procList = all && slotProcList(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
   const procs = procList?.map((p) => p.cmd);
@@ -1285,11 +1372,14 @@ export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: num
   return { host: os.hostname().toLowerCase(), alive: isAlive, procs, ...(procList ? { procList } : {}), ...(self ? { self } : {}), ...(all ? { hosts: hostSessionsIn(all.map((p) => p.cmd)) } : {}) };
 }
 
+/** An agent's host command line, with its session (hostSessionsIn, censusLine). */
+const AGENT_HOST = /agentHost\.ts["']?\s+["']?.*?[\\/]hosts[\\/]([\w-]+)["']?\s*$/i;
+
 /** The sessions whose agent host runs, from command lines: `node ... agentHost.ts <app>/hosts/<session>` (machine/daemon.ts hostedSession, w3217). */
 export function hostSessionsIn(cmds: string[]): string[] {
   const out = new Set<string>();
   for (const c of cmds) {
-    const m = /agentHost\.ts["']?\s+["']?.*?[\\/]hosts[\\/]([\w-]+)["']?\s*$/i.exec(c);
+    const m = AGENT_HOST.exec(c);
     if (m) out.add(m[1]!);
   }
   return [...out];
@@ -1625,7 +1715,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const { realDeps } = await import('./unity.ts');
   const hands = realDeps(platform);
   // w5397: under the worker fence `ps` is refused, and the daemon reads for this worker.
-  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e)));
+  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e)), undefined, undefined, whoAsks(e));
   const send = t.signal ?? ((pid: number, sig: 'SIGTERM' | 'SIGKILL') => hands.kill(pid, sig));
   const wait = t.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const tempRoot = sessionTempRoot(session, e);

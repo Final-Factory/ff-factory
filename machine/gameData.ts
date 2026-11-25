@@ -14,6 +14,40 @@ export const GAME_DATA_VARIABLE = 'FF_GAME_DATA_DIR';
 /** The game data root a worker install gives its editors and players. */
 export const workerGameDataDir = (root: string) => path.join(root, 'gamedata');
 
+/**
+ * w5557: each sandbox's own data root inside the machine's, `<root>/gamedata/sandboxes/<id>`. Its agent (slotEnv) and its
+ * editor (sandboxes.ts) get it as FF_GAME_DATA_DIR, and so does every player or batch run the agent starts, so one
+ * sandbox's saves, settings, logs and AgentControl never mix with another's or the person's (lothsahn: "worker-run games use
+ * per-slot save folders; owner's saves protected"). The game turns Steam Cloud off whenever FF_GAME_DATA_DIR is set
+ * (game repo SteamCloudGuard), and no folder under the install is in Steam's Auto-Cloud rule (LocalLow/Never Games/...).
+ */
+export const SANDBOX_GAME_DATA_FOLDER = 'sandboxes';
+
+/** The sandbox's data root under the machine's `base` (its FF_GAME_DATA_DIR); a sandbox id is a plain name, kept to [\w.-]. */
+export function sandboxGameDataDir(base: string, sandbox: string): string {
+  return path.join(base, SANDBOX_GAME_DATA_FOLDER, sandbox.replace(/[^\w.-]/g, '_'));
+}
+
+/** FF_GAME_DATA_DIR for a sandbox's processes: its own folder under the machine's root `env` names; {} when none is set. */
+export function sandboxGameDataEnv(env: NodeJS.ProcessEnv, sandbox: string | undefined): Record<string, string> {
+  const base = gameDataOverride(env);
+  return base && sandbox ? { [GAME_DATA_VARIABLE]: sandboxGameDataDir(base, sandbox) } : {};
+}
+
+/** The sandboxes' data roots that exist under the machine's `base` (sandboxGameDataDir). */
+export function sandboxGameDataDirs(base: string, list: (dir: string) => string[] = listDirs): string[] {
+  const dir = path.join(base, SANDBOX_GAME_DATA_FOLDER);
+  return list(dir).map((n) => path.join(dir, n));
+}
+
+function listDirs(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch {
+    return [];
+  }
+}
+
 /** The game's own root with no override: GameDataPaths.ResolveRoot per OS. */
 export function legacyGameDataRoot(platform: NodeJS.Platform = process.platform, home = os.homedir()): string {
   if (platform === 'win32') return path.join(home, 'AppData', 'LocalLow', 'Never Games', 'finalfactory');
@@ -27,11 +61,14 @@ export function gameDataOverride(env: NodeJS.ProcessEnv = process.env): string |
   return v ? v : undefined;
 }
 
-/** The roots a game process here may write, the override first: a build from after #4237 uses it, an older one the old root. */
-export function gameDataRoots(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home = os.homedir()): string[] {
+/**
+ * The roots a game process here may write, the override first: a build from after #4237 uses it, an older one the old root.
+ * w5557: with the override, each sandbox's own root under it too (sandboxGameDataDirs), where its editor and players write.
+ */
+export function gameDataRoots(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home = os.homedir(), list: (dir: string) => string[] = listDirs): string[] {
   const given = gameDataOverride(env);
   const legacy = legacyGameDataRoot(platform, home);
-  return given && path.resolve(given) !== path.resolve(legacy) ? [given, legacy] : [legacy];
+  return given && path.resolve(given) !== path.resolve(legacy) ? [given, ...sandboxGameDataDirs(given, list), legacy] : [legacy];
 }
 
 /** Where a build keeps its managed code or IL2CPP metadata, under its folder (Windows and Linux `<name>_Data`, a Mac app). */

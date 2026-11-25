@@ -197,8 +197,8 @@ test('w1628: against the real bench_queue.py, an editor compile waits for the ti
 
 test("w2605: against the real bench_queue.py, the timed leg's own session runs its tests at once while another session's compile waits", { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w2605-'));
-  // the daemon reads the queue under <root>/tmp/bench.lock (machine/benchLock.ts), where the tickets are taken
-  const env: NodeJS.ProcessEnv = { ...process.env, BENCH_POLL_S: '0.1', BENCH_LEGACY_GRACE_S: '0', BENCH_LOCK: path.join(dir, 'tmp', 'bench.lock'), FF_SESSION_ID: 'aaaa0001' };
+  // the daemon reads the queue under <root>/daemon/bench.lock (machine/benchLock.ts), where the tickets are taken
+  const env: NodeJS.ProcessEnv = { ...process.env, BENCH_POLL_S: '0.1', BENCH_LEGACY_GRACE_S: '0', BENCH_LOCK: path.join(dir, 'daemon', 'bench.lock'), FF_SESSION_ID: 'aaaa0001' };
   fs.mkdirSync(path.join(dir, 'tmp'), { recursive: true });
   delete env.FF_BENCH_TICKET;
   delete env.FF_BENCH_SESSION;

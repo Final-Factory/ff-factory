@@ -13,7 +13,7 @@ import type { DesktopSession } from '../shared/desktop.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
 import type { BenchHourRow } from '../shared/benchHours.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport, WorkerFenceReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -240,7 +240,7 @@ export type ToDaemon =
   | { type: 'cleanup_context'; context: StaleContext }
   /**
    * Each worker's request priority on this machine (w1628), for its bench queue: the daemon writes it to
-   * <root>/tmp/bench.queue/priorities.json, which the game repo's scripts/bench/bench_queue.py reads at every decision.
+   * <root>/daemon/bench.queue/priorities.json (w5545), which the game repo's scripts/bench/bench_queue.py reads at every decision.
    */
   | { type: 'bench_priorities'; sessions: Record<string, BenchPriority>; singleWorker?: boolean; noTimedRuns?: NoTimedRuns; timedAsk?: TimedAskMark; personPlay?: { enabled: boolean; graceMinutes: number; who?: string } }
   /**
@@ -407,6 +407,8 @@ export type FromDaemon =
   | { type: 'activity_set'; activity: { enabled: boolean; idleMinutes: number } }
   /** Its host guard's state, when it changes (protocol 8, w466). */
   | { type: 'host_health'; health: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'> }
+  /** Its worker write fence's state, at welcome and when it changes (w5555): a failed one holds its sandbox workers. */
+  | { type: 'worker_fence'; fence: WorkerFenceReport }
   /** The session's current record (the daemon's AgentSession changed it). */
   | { type: 'session'; info: SessionInfo; live: boolean }
   | { type: 'event'; sessionId: string; event: TranscriptEvent }

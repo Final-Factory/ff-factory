@@ -335,3 +335,18 @@ export function strayLowServers(servers: { pid: number; rid: number; dll: string
   const under = lowUnityDir(root).toLowerCase();
   return servers.filter((s) => s.rid > 0 && s.rid < 0x2000 && s.dll && !path.resolve(s.dll).toLowerCase().startsWith(under)).map((s) => s.pid);
 }
+
+/** Whether icacls says this path carries a Medium mandatory label. Exported for tests. */
+export const isLabelledMedium = (icaclsOut: string) => /Mandatory Label\\Medium Mandatory Level/i.test(icaclsOut);
+
+/**
+ * w5557: reads back the owner's game folder's label after labelLow kept it Medium (daemon.json
+ * `workerIntegrityLockGameData`) and says what a Low worker meets there: a Medium label refuses its writes (no-write-up),
+ * a Low one lets them through. A folder that does not exist yet is said as such; the next start labels it.
+ */
+export async function ownerGameDataLock(dir: string, exec: Exec, exists: (p: string) => boolean = fs.existsSync): Promise<string> {
+  if (!exists(dir)) return `worker integrity: the owner's game folder ${dir} does not exist yet; it is kept Medium on the next start after it does`;
+  const r = await exec('icacls', [dir], { timeoutMs: 60_000 });
+  if (r.code === 0 && isLabelledMedium(r.stdout) && !isLabelledLow(r.stdout)) return `worker integrity: the owner's game folder ${dir} is Medium; a Low worker's write there is refused`;
+  return `worker integrity: the owner's game folder ${dir} is NOT Medium (${r.code === 0 ? 'icacls shows no Medium label' : (r.stderr || r.stdout).trim().slice(-200)}); a Low worker could write the owner's saves`;
+}

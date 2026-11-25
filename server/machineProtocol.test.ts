@@ -151,9 +151,11 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // daemon.json has `writeLock` (off by default), and a launch that lacks it starts claude unlocked as before.
 // w5333 (no bump): `LaunchSpec.fence`, the Mac worker write fence. The daemon sets it for its own agent host; the portal
 // never sends it, and an older agent host ignores it and runs claude unfenced (the setting is off by default).
+// w5555 (no bump): `worker_fence`, the daemon's worker fence state. An older portal's switch has no case for it and drops
+// it (the fence then holds workers without the alert); an older daemon never sends it.
 // w5576 (no bump): `portalPin` in the hello, the portal hosts the daemon follows and what pinning would refuse; an older
 // portal ignores it, and an older daemon sends none (list_machines says so).
-const DECIDED = { protocol: 9, fingerprint: '5237e18512a4d764' };
+const DECIDED = { protocol: 9, fingerprint: '362468346fce0835' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
