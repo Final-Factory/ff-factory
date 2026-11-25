@@ -65,6 +65,9 @@ fs.writeFileSync(path.join(P, 'machine', 'LINK_E2E'), 'B\n');
 git(P, 'add', 'machine/LINK_E2E');
 git(P, 'commit', '-qm', 'link-e2e: B');
 const B = git(P, 'rev-parse', 'HEAD');
+// w5516: a daemon takes over its link only a commit on the published main; here that is P's main (daemon.json
+// updateOrigin, set after the install), moved to each commit as it is "published".
+git(P, 'branch', '-f', 'main', B);
 
 // Claude Code is a prerequisite the install checks, never used here (as update-e2e.ts).
 // On Windows in the native install's folder (~\.local\bin): the update job runs as a scheduled task, without this
@@ -134,6 +137,8 @@ try {
   check(install.status === 0, 'the test install (from A, no portal ssh)', `exit ${install.status}`);
   if (install.status !== 0) throw new Error('the install failed');
   check(await waitFor('the daemon to offer updates over its link', async () => (await linkState()).canLink), 'the daemon offers updates over its link, and the portal sees it');
+  const cfgFile = path.join(l.daemon, 'daemon.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(fs.readFileSync(cfgFile, 'utf8').replace(/^\uFEFF/, '')), updateOrigin: { url: P, branch: 'main' } }, null, 2));
 
   // 2. An update to the portal's commit (B), over the link.
   const before = connects();
@@ -151,6 +156,11 @@ try {
   fs.writeFileSync(daemonTs, fs.readFileSync(daemonTs, 'utf8').replace("if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {", "if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {\n  console.error('link-e2e: this daemon exits at start');\n  process.exit(3);"));
   git(P, 'commit', '-qam', 'link-e2e: C, a daemon that exits at start');
   const C = git(P, 'rev-parse', 'HEAD');
+  // w5516: C is not on the published main yet, so the daemon refuses it and changes nothing.
+  const unpublished = await link('update');
+  check(!unpublished.ok && /is not on main/.test(unpublished.error ?? ''), 'an update to a commit not on the published main is refused', unpublished.error ?? JSON.stringify(unpublished.report ?? {}).slice(0, 200));
+  check(version().startsWith(short(B)), "the daemon's code is still B after the refusal", version());
+  git(P, 'branch', '-f', 'main', C);
   const bad = await link('update');
   check(bad.ok && bad.report?.ok === false, 'an update to C, whose daemon never comes back, is reported failed', bad.error ?? '');
   check(bad.report?.rollback === 'ok', 'its job put B back by itself', bad.report?.note ?? '');

@@ -1722,6 +1722,38 @@ test('w1856: a release build hands its sandbox back: switch_branch onto urgent/<
   assert.equal(sbOf('sb1')!.branch, 'sandbox/sb1-w1767');
 });
 
+test("w5550: file_ffbox_symbols takes a version only from the request whose switch_branch onto urgent/<v> built it", async (t) => {
+  const { store, mm, sessions, agents } = await twoSandboxes(t);
+  const by = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const work = (id: string, sid: string): WorkItem => ({ id, title: `${id} work`, brief: 'Do it.', priority: 'normal', keys: [], requestedBy: by, requesters: [], humanAsked: true, status: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sessionIds: [sid], overlaps: [], asks: 0, log: [] });
+  // The builder of the urgent release (w5600) and another worker (w5601) in the other sandbox.
+  const b = mm.createSession('pc', { kind: 'worker', title: 'w5600: the 1.0.0.20 urgent release', permissionMode: 'default', sandbox: 'sb1' });
+  const o = mm.createSession('pc', { kind: 'worker', title: 'w5601: other work', permissionMode: 'default', sandbox: 'sb2' });
+  store.putWork(work('w5600', b.info.id));
+  store.putWork(work('w5601', o.info.id));
+  store.workSeq = Math.max(store.workSeq, 5601);
+  sessions.send(b.info.id, 'go');
+  sessions.send(o.info.id, 'go');
+  await until('both live and idle', () => b.live && b.info.status === 'idle' && o.live && o.info.status === 'idle');
+  const file = (s: SessionInfo, version: string) => (agents as unknown as { fileFfboxSymbols: (i: SessionInfo, a: Record<string, unknown>) => Promise<string> }).fileFfboxSymbols(s, { version, entries: [{ app: 'main', platform: 'WindowsPlayer', attachment: 'att_aaaaaaaaaaaa' }] });
+
+  // Nobody built 1.0.0.20 yet: refused for both.
+  assert.match(await file(b.info, '1.0.0.20'), /^Refused \(w5550\): no urgent build of 1\.0\.0\.20 is recorded/);
+  // The builder's switch onto urgent/1.0.0.20 (urgent-release.md 3.1) records w5600's build.
+  await agents.switchBranch({ sandbox: 'pc/sb1', branch: 'urgent/1.0.0.20', createFrom: 'origin/master', callerSessionId: b.info.id });
+  assert.deepEqual(agents.symbolOwners.get('1.0.0.20')?.builds.map((x) => [x.workIds, x.session, x.machine, x.sandbox]), [[['w5600'], b.info.id, 'pc', 'sb1']]);
+  // Another request's build: refused. An unknown version: refused.
+  assert.match(await file(o.info, '1.0.0.20'), /^Refused \(w5550\): 1\.0\.0\.20 was built for w5600, not for your request \(w5601\)/);
+  assert.match(await file(b.info, '1.0.0.21'), /^Refused \(w5550\): no urgent build of 1\.0\.0\.21/);
+  // Its own build passes the gate (this harness has no FFBox link, so the next step says so).
+  await assert.rejects(file(b.info, '1.0.0.20'), /FFBox is not wired into this server/);
+  // w5601 building 1.0.0.20 too (its own switch onto urgent/1.0.0.20; git keeps one branch in one worktree, so recorded
+  // here as the switch records it) makes it a builder, but symbols w5600 filed are never overwritten by it.
+  agents.symbolOwners.recordFiling('1.0.0.20', b.info.id, ['w5600']);
+  agents.symbolOwners.recordSwitch('urgent/1.0.0.20', o.info.id, ['w5601'], 'pc', 'sb2');
+  assert.match(await file(o.info, '1.0.0.20'), /^Refused \(w5550\): 1\.0\.0\.20's symbols were filed by w5600/);
+});
+
 test('w1944: a sandbox being handed to new work (its editor stopped, its branch switched, before the worker exists) is not free: no room for it, and a second start into it is refused', async (t) => {
   const { mm, sessions, agents, gitNow } = await twoSandboxes(t);
   const w = mm.createSession('pc', { kind: 'worker', title: 'w1935 work', permissionMode: 'default', sandbox: 'sb1' });

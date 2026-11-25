@@ -447,8 +447,8 @@ export async function askPlayerToQuit(pid: number, platform: NodeJS.Platform, ru
   }
 }
 
-/** The guard's file of sandboxes a turn keeps closed: <root>/tmp/bench.queue/closed.json, {sandbox: refusal}. */
-export const closedFile = (root: string) => path.join(root, 'tmp', 'bench.queue', 'closed.json');
+/** The guard's file of sandboxes a turn keeps closed: <root>/daemon/bench.queue/closed.json, {sandbox: refusal} (w5545: where no worker writes). */
+export const closedFile = (root: string) => path.join(root, 'daemon', 'bench.queue', 'closed.json');
 
 /** Write it whole (a reader never sees half a file); errors are logged by the caller's log, never thrown. */
 export function writeClosedFile(root: string, marks: Record<string, string>, log: (t: string) => void = () => undefined) {

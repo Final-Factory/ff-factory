@@ -27,6 +27,8 @@
 #                                      `--rollback-dry-run` and `--cut-over` change state: a person's
 #   fffctl scrub-secrets --dry-run     how many vault values and token shapes are still on disk (w1584): paths and counts,
 #                                      never a value, then "remaining: N". The scrub itself (no --dry-run) is a person's
+#   fffctl fence-check                 what the portal's own account can open (w5506): refused or OPENED, and credential names
+#                                      counted in its processes' environments, never a value (fffctl fence-check)
 #   fffctl logs [N]                    the portal's last N journal lines (default 200, at most 2000), secrets redacted
 #   fffctl machine-ssh --check         the portal's ssh to each machine, then its authorized_keys line (fff-machine-ssh
 #                                      --check, read only; machine-ssh-check is the same). Its PATH's fff-machine-ssh
@@ -249,6 +251,11 @@ case "${1:-help}" in
       --check) [ $# -eq 2 ] || refuse "config --check takes nothing more"; exec "$FFFCTL" config --check ;;
       *) refuse "config | config --check (changing a setting is set_app_config's, through the dispatcher or an owner's orchestrator)" ;;
     esac
+    ;;
+  fence-check)
+    # Read only (w5506): opens as the portal's account and counts credential names; never prints a value. No option.
+    [ $# -eq 1 ] || refuse "fence-check takes nothing more"
+    exec "$FFFCTL" fence-check
     ;;
   disk-usage)
     # Read only (w2267): du, find, df and line counts by program; nothing written, no file's text printed. No option.

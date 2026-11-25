@@ -11,6 +11,20 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 - Each person has a login in `data/users.json`: a username, a scrypt hash, a display name and a role
   (`server/auth.ts`). The username is the **user id**. It never changes, and it is what FFBox maps to an
   account. The display name is what people and prompts see ("Lothsahn").
+- Failed logins are throttled per attempted username and per client address, never globally (w5521,
+  `server/loginThrottle.ts`): an address (an IPv6 /64) is refused for 15 minutes after 5 failures; a username, from
+  any address, after 10, with a backoff of 1 s that doubles on each further failure and stops at 60 s, so its owner
+  waits at most a minute. Both tables hold at most 10,000 entries (keys cut to 64 characters, about 3 MB each when
+  full, measured) and are swept every minute; an evicted entry's count stays in a fixed table of 65,536 salted
+  hash buckets, so flooding the table with made-up names cannot reset a targeted name's backoff. Every login answer
+  (unknown name, wrong or right password, throttled) is held to one time, measured on the machine: the slowest of
+  its recent logins plus a tenth and 3 ms (`LoginTimer`), waited on a timer.
+- The client address, for the login throttle and every other caller (join codes, the /provider, /machine and
+  /machine/live sockets, page sockets, the tailnet-only checks, logs), comes from one helper,
+  `server/clientAddress.ts` (w5535): X-Forwarded-For is believed only with `trustProxy` on and only from a connection
+  out of this machine (Tailscale Serve and Funnel) or a configured proxy, and only its last entry, the one the proxy
+  added; the entries before it are whatever the client wrote. The Funnel header is checked before any address, and a
+  proxied request is not taken for this machine when `trustProxy` is off.
 - Roles: `owner` (Ben, who runs the portal) and `member` (a teammate). The first login is the owner and
   later ones are members. A `users.json` written before roles existed reads every login as the owner.
   **Roles are recorded, and enforced in a few places so far:** an owner may close or reopen another person's request
@@ -62,7 +76,10 @@ worker then runs on that person's Claude account when FF Factory holds one for t
 
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key
-  minted before this change, or without `--user`, acts for the owner. A key for a member login, written straight into a
+  minted before this change, or without `--user`, acts for the owner (by name in `server/mcp.ts`, the only owner default
+  left in a login lookup). A bound key whose login no longer exists (`users.json` edited or restored) is refused with a
+  401, and so is a browser session of such a login, which ends there (w5533, `Auth.bearer` and `Auth.user` in
+  `server/auth.ts`); neither is ever read as the owner's. A key for a member login, written straight into a
   0600 file on a machine and never printed, is the orchestration worker's `fffctl apikey issue` (w1415,
   [ops-worker.md](ops-worker.md#api-keys-for-a-member-login-w1415)); owner logins and Ben's and Lothsahn's stay `apikey.ts`.
 - Deleting a login (w1864): `sudo fffctl user delete <id> --by <your login>` in the VM (`server/userCli.ts`; the

@@ -230,6 +230,16 @@ else
     if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
   done
   echo "ok: fff-ops-priv disk-usage reaches fffctl with no option; any other word is refused"
+  # fence-check (w5506): read only, no option at all.
+  [ "$(upriv fence-check)" = "FFFCTL [fence-check]" ] || fail "priv: fence-check: $(upriv fence-check)"
+  for bad in 'fence-check /etc/fff/vault.key' 'fence-check --pid 1' 'fence-check extra' 'fence-check;id' 'fencecheck'; do
+    rc=0
+    # shellcheck disable=SC2086 # the words are the arguments
+    out=$(upriv $bad) || rc=$?
+    [ "$rc" -eq 2 ] || fail "priv: '$bad' was not refused (exit $rc): $out"
+    if printf '%s' "$out" | matches FFFCTL; then fail "priv: '$bad' reached fffctl: $out"; fi
+  done
+  echo "ok: fff-ops-priv fence-check reaches fffctl with no option; any other word is refused"
   # approvals (w1097): the prompt counts, read only. Only --since and --split, each once, each with a date, reach fffctl.
   [ "$(upriv approvals)" = "FFFCTL [approvals]" ] || fail "priv: approvals: $(upriv approvals)"
   [ "$(upriv approvals --since 2026-10-05 --split 2026-10-13)" = "FFFCTL [approvals] [--since] [2026-10-05] [--split] [2026-10-13]" ] || fail "priv: approvals --since --split: $(upriv approvals --since 2026-10-05 --split 2026-10-13)"

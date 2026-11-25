@@ -296,7 +296,8 @@ export const TIMING_HOW =
   '`python scripts/bench/bench_queue.py run --mode exclusive --reason timing --what "<what>" -- bash <script>`. A batch ' +
   'Performance run: `unity-slot run --bench exclusive --bench-reason timing -- ...`. A snippet that reads a clock only for a ' +
   'timeout carries a `// ff-not-timing: <why>` comment. Merge origin/master first if your branch\'s bench_queue.py has no ' +
-  '`timed` (the game repo\'s Documentation/Bench-Lock.md, "Every timing measurement holds an exclusive ticket").';
+  '`timed`, or if it says `granted` and this still refuses: a copy from before w5545 takes its ticket in tmp/bench.queue, ' +
+  'which counts for nothing now that the daemon takes tickets (the game repo\'s Documentation/Bench-Lock.md, "Every timing measurement holds an exclusive ticket").';
 
 /** One line of `<root>/tmp/bench.queue/timing.jsonl` (the game repo's timing_gate.py log). Never throws. */
 export function logTiming(root: string | undefined, rec: { via: string; outcome: 'ticket' | 'refused' | 'not-timing'; found: string[]; ticket?: string; why?: string; session?: string; sandbox?: string; host?: string }, now = Date.now()): void {

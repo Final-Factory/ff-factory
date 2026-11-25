@@ -7,6 +7,7 @@ import { HOST_ROLES, roleNames, type Config, type HostRole } from './config.ts';
 import { noSessionLimit, type AccountUsage, type PlanUsage, type SessionInfo, type SessionKind, type UsageMeter } from '../shared/types.ts';
 import { checkObject, readJsonDurable, SnapshotFile, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
+import { tokenPipeOptions } from './tokenPipe.ts';
 
 /**
  * The user's Claude plan usage: the weekly limit, the 5-hour session limit and any per-model weekly limit,
@@ -460,6 +461,8 @@ export async function fetchPlanUsage(
       persistSession: false,
       abortController: abort,
       env,
+      // A vault token on a pipe, not in the CLI's environment, where the portal's agents could read it (w5506).
+      ...tokenPipeOptions(),
       ...(opts.claudeExecutable ? { pathToClaudeCodeExecutable: opts.claudeExecutable } : {}),
     },
   });
