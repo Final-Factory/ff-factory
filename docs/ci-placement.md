@@ -6,7 +6,8 @@ on the FFBox build server's runner containers (`ffgithubrunners`); those now ser
 
 | Workflow, job | Runs on | Why that runner |
 |---|---|---|
-| `ci.yml` `checks` (typecheck, unit tests with coverage, web build) | `ubuntu-latest` | Linux, Node; PowerShell 7 is in the image, so the scripts' `pwsh` tests run |
+| `ci.yml` `checks` (typecheck, web build) | `ubuntu-latest` | Linux, Node |
+| `ci.yml` `unit` (unit tests with coverage, two shards, w5679) and `coverage` (the shards' coverage added up) | `ubuntu-latest` | Linux, Node; PowerShell 7 is in the image, so the scripts' `pwsh` tests run |
 | `ci.yml` `e2e` (Playwright, one job per browser engine, w1191) | `ubuntu-latest` | the Linux screenshot baselines match its fonts (below) |
 | `ci.yml` `hygiene` (gitleaks and noreply emails, one job since w1191) | `ubuntu-latest` | Linux, git |
 | `vm-scripts.yml` `plan` | `ubuntu-latest` | reads `git diff`; no API |
