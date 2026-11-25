@@ -199,6 +199,10 @@ through the GH_TOKEN credential helper, both with the machine login's token and 
 must exit 0; on a Mac `security add-generic-password` must fail at once (a hang means a SecurityAgent dialog; a success is
 deleted again outside the fence). Their line is `read fence probe, tools under the owner rules (w5747): ...`. A failed
 leg, or legs not run because the daemon read no machine gh token, keeps `on` from enforcing, like a wrongly refused path.
+A Keychain leg that hung or got through is held (w5752's review of #1245): the daemon records it with its code version in
+`read-fence-keychain-held.json` in its own folder, and later probes skip that leg, so a dialog comes back at most once per
+code version rather than at every daemon start. The skipped leg still keeps `on` from enforcing; deleting the file or a
+daemon update runs it again.
 The per-run wiring is `ownerRunWiring` (machine/ownerSecrets.ts), tested in server/ownerSecrets.test.ts.
 
 Only a daemon whose hello offers

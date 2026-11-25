@@ -249,7 +249,7 @@ export interface OwnerToolLeg {
  *   denies it hung on a dialog on the person's screen).
  * gh and git need a token (the machine login's, read by the daemon); without one they are `skipped`, which blocks enforcing.
  */
-export function ownerToolLegs(o: { platform: NodeJS.Platform; gh: string; git?: string; token?: string; ghConfigDir: string; credentialEnv: Record<string, string>; repo?: string }): { legs: OwnerToolLeg[]; skipped: string[] } {
+export function ownerToolLegs(o: { platform: NodeJS.Platform; gh: string; git?: string; token?: string; ghConfigDir: string; credentialEnv: Record<string, string>; repo?: string; keychainHeld?: string }): { legs: OwnerToolLeg[]; skipped: string[] } {
   const legs: OwnerToolLeg[] = [];
   const skipped: string[] = [];
   const quiet = { GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1', GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
@@ -264,7 +264,9 @@ export function ownerToolLegs(o: { platform: NodeJS.Platform; gh: string; git?: 
       timeoutMs: 60_000,
     });
   } else skipped.push('gh and git ls-remote (the daemon read no machine gh token to test with)');
-  if (o.platform === 'darwin') {
+  if (o.platform === 'darwin' && o.keychainHeld) {
+    skipped.push(`security (held: an earlier probe on this code found the Keychain write ${o.keychainHeld}; it runs again once the daemon's code changes)`);
+  } else if (o.platform === 'darwin') {
     legs.push({ name: 'security', cmd: '/usr/bin/security', args: ['add-generic-password', '-a', PROBE_KEYCHAIN_ITEM, '-s', PROBE_KEYCHAIN_ITEM, '-w', 'probe'], env: {}, expect: 'refused', timeoutMs: 20_000 });
   }
   return { legs, skipped };
@@ -356,4 +358,28 @@ function statOr(p: string): fs.Stats | undefined {
  */
 export function ownerSocketDenyArgs(runtimeDir: string | undefined): string[] {
   return ownerSocketPaths({ runtimeDir, env: {} }).flatMap((p) => ['--deny-unix', p]);
+}
+
+/**
+ * The Keychain write leg's hold (w5752's review of #1245): a probe that finds the leg hung (a dialog may be on the person's
+ * screen, and its "Reset To Defaults" would replace their login keychain) or the write let through records it here, in the
+ * daemon's own folder, with the daemon's code version, and later probes skip the leg until that version changes, so the
+ * dialog comes back at most once per code version, not at every daemon start. A skipped leg still blocks `on`
+ * (probeOwnerTools: any skipped leg blocks).
+ */
+export const keychainHoldFile = (appDir: string) => path.join(appDir, 'read-fence-keychain-held.json');
+
+/** What the hold says for this code version (`hung, ...` or `let through`), or undefined: no hold, or another version's. */
+export function keychainHeld(file: string, version: string, read: (f: string) => string = (f) => fs.readFileSync(f, 'utf8')): string | undefined {
+  try {
+    const h = JSON.parse(read(file)) as { version?: unknown; why?: unknown };
+    return h.version === version && typeof h.why === 'string' && h.why ? h.why : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Records the hold for this code version. A hold that cannot be written is said in the log by the caller. */
+export function holdKeychainLeg(file: string, version: string, why: string, write: (f: string, d: string) => void = (f, d) => fs.writeFileSync(f, d)): void {
+  write(file, JSON.stringify({ version, why, at: new Date().toISOString() }) + '\n');
 }

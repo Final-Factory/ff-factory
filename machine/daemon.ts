@@ -86,7 +86,7 @@ import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { trustedGh } from './evidenceGate.ts';
-import { hasOwnGithub, judgeToolLeg, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -3468,7 +3468,9 @@ export class Daemon {
     const root = this.cfg.root;
     if (!root) return { blocks: true };
     const appDir = appDirOfConfig(this.cfg);
-    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: this.machineGh().GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env) });
+    const holdFile = keychainHoldFile(appDir);
+    const version = readVersion();
+    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: this.machineGh().GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env), keychainHeld: keychainHeld(holdFile, version) });
     const said: ToolLegVerdict[] = [];
     for (const leg of legs) {
       const argv = fenced(leg.cmd, leg.args);
@@ -3478,7 +3480,16 @@ export class Daemon {
       if (!leg.env.GH_TOKEN) delete env.GH_TOKEN;
       delete env.GITHUB_TOKEN;
       const r = await run(cmd, args, { timeoutMs: leg.timeoutMs, env, cwd: root });
-      said.push(judgeToolLeg(leg, r));
+      const v = judgeToolLeg(leg, r);
+      said.push(v);
+      if (leg.name === 'security' && !v.ok) {
+        // w5752: never again on this code: a hung write may have put a dialog on the person's screen.
+        try {
+          holdKeychainLeg(holdFile, version, r.timedOut ? 'hung, a dialog may have been on the screen' : 'let through');
+        } catch (e) {
+          log(`read fence probe: could not record the Keychain leg's hold (${(e as Error).message}); the next probe runs it again`);
+        }
+      }
       if (leg.name === 'security' && r.code === 0) {
         // The write got through: take the probe's item out of the person's keychain again, outside the fence.
         await run('/usr/bin/security', ['delete-generic-password', '-a', PROBE_KEYCHAIN_ITEM, '-s', PROBE_KEYCHAIN_ITEM], { timeoutMs: 20_000 });

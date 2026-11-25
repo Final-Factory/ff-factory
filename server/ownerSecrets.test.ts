@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ghConfigFolder, hasOwnGithub, judgeToolLeg, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerRunWiring, ownerSecretPaths, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
+import { ghConfigFolder, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerRunWiring, ownerSecretPaths, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
 
@@ -177,4 +177,28 @@ test('sayOwnerRules: warn names what on would close (w5747)', () => {
   assert.match(l, /preference writes/);
   assert.match(sayOwnerRules('on', 'linux', ['/home/p/.ssh']), /owner-secret rules close: reads of \/home\/p\/\.ssh$/);
   assert.match(sayOwnerRules('warn', 'win32', []), /none on Windows/);
+});
+
+test('the Keychain write leg is held after it hung or got through, until the code version changes, and still blocks on (w5752)', () => {
+  const files = new Map<string, string>();
+  const write = (f: string, d: string) => void files.set(f, d);
+  const read = (f: string) => {
+    const d = files.get(f);
+    if (d === undefined) throw new Error('ENOENT');
+    return d;
+  };
+  const file = keychainHoldFile('/d');
+  assert.equal(keychainHeld(file, 'v1', read), undefined, 'no hold: the leg runs');
+  holdKeychainLeg(file, 'v1', 'hung, a dialog may have been on the screen', write);
+  assert.equal(keychainHeld(file, 'v1', read), 'hung, a dialog may have been on the screen');
+  assert.equal(keychainHeld(file, 'v2', read), undefined, 'new code: the leg runs again');
+  files.set(file, '{not json');
+  assert.equal(keychainHeld(file, 'v1', read), undefined, 'a broken hold file is no hold');
+
+  const held = ownerToolLegs({ platform: 'darwin', gh: 'gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: {}, keychainHeld: 'let through' });
+  assert.deepEqual(held.legs.map((l) => l.name), ['gh', 'git ls-remote'], 'the held leg does not run');
+  assert.equal(held.skipped.length, 1, 'a skipped leg, which blocks on mode in probeOwnerTools');
+  assert.match(held.skipped[0], /^security \(held: .*let through/);
+  const linux = ownerToolLegs({ platform: 'linux', gh: 'gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: {}, keychainHeld: 'let through' });
+  assert.deepEqual(linux.skipped, [], 'the hold means nothing off a Mac');
 });
