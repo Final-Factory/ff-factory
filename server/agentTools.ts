@@ -74,10 +74,12 @@ export function readableToolsCheckout(root: string, rel: string, exists: (p: str
 }
 /** w5776: how many publishes in a row may find the same fault in FF Factory's checkout before it is moved aside and cloned again. */
 export const REPAIR_AFTER = 3;
-/** w5776: where a broken checkout is moved before it is cloned again; one backup, the newest. */
+/** w5776: where a broken checkout is moved when its new clone replaces it; one backup, the newest. */
 export const checkoutBackup = (root: string) => `${toolsCheckout(root)}.broken`;
 /** w5776: the fault the last publishes found and how many in a row, beside the checkout (Medium only, like it). */
 export const repairStateFile = (root: string) => `${toolsCheckout(root)}.repair.json`;
+/** w5776 follow-up (w5787 review): the repair clones here first and swaps only once that clone worked (Medium only, like it). */
+export const checkoutStaging = (root: string) => `${toolsCheckout(root)}.new`;
 const samePath = (a: string, b: string) => {
   const r = (p: string) => path.resolve(p).replace(/[\\/]+$/, '');
   return process.platform === 'win32' || /^[a-z]:/i.test(a) ? r(a).toLowerCase() === r(b).toLowerCase() : r(a) === r(b);
@@ -269,20 +271,41 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
         fs.writeFileSync(state, JSON.stringify({ kind: fault.kind, count }));
       } else {
         const bak = checkoutBackup(root);
+        const next = checkoutStaging(root);
         const times = fault.kind === 'no-git' ? '' : ` for ${count} publishes in a row`;
-        let moved = false;
+        const keep = () => fs.writeFileSync(state, JSON.stringify({ kind: fault!.kind, count }));
+        // The new clone is made first, beside it, and swapped in only once it worked (w5787's review): a fault that is the
+        // network (a fetch that failed three times) then leaves the old, readable checkout in place rather than nothing.
+        let r: Ran = { code: 1, stdout: '', stderr: '' };
         try {
-          fs.rmSync(bak, { recursive: true, force: true, maxRetries: 3 });
-          fs.renameSync(co, bak);
-          moved = true;
+          fs.rmSync(next, { recursive: true, force: true, maxRetries: 3 });
+          r = await git(['clone', '--quiet', '--branch', BRANCH, AGENTS_REPO_URL, next]);
         } catch (e) {
-          d.say(`WARNING: ${co} ${fault.why}${times}, and it could not be moved aside (${(e as Error).message}); it is left as it is${fresh}.`);
-          fs.writeFileSync(state, JSON.stringify({ kind: fault.kind, count }));
+          r = { code: 1, stdout: '', stderr: (e as Error).message };
         }
-        if (moved) {
-          d.say(`WARNING: ${co} ${fault.why}${times}; it was moved to ${bak} (the one backup kept) and is cloned again.`);
-          fs.rmSync(state, { force: true });
-          await clone(`Repaired FF Factory's checkout: cloned ${MARKETPLACE} into ${co} again.`);
+        if (r.code !== 0) {
+          fs.rmSync(next, { recursive: true, force: true, maxRetries: 3 });
+          d.say(`WARNING: ${co} ${fault.why}${times}, and a new clone to replace it failed (${tail(r)}); it is left as it is${fresh}.`);
+          keep();
+        } else {
+          let moved = false;
+          try {
+            fs.rmSync(bak, { recursive: true, force: true, maxRetries: 3 });
+            fs.renameSync(co, bak);
+            moved = true;
+            fs.renameSync(next, co);
+          } catch (e) {
+            d.say(`WARNING: ${co} ${fault.why}${times}, and it could not be ${moved ? `replaced after it was moved to ${bak}` : 'moved aside'} (${(e as Error).message}); ${moved ? 'the next publish clones it' : 'it is left as it is'}${fresh}.`);
+            fs.rmSync(next, { recursive: true, force: true, maxRetries: 3 });
+            if (moved) fs.rmSync(state, { force: true });
+            else keep();
+            moved = false;
+          }
+          if (moved) {
+            d.say(`WARNING: ${co} ${fault.why}${times}; it was moved to ${bak} (the one backup kept) and replaced by a new clone.`);
+            d.say(`Repaired FF Factory's checkout: cloned ${MARKETPLACE} into ${co} again.`);
+            fs.rmSync(state, { force: true });
+          }
         }
       }
     }
