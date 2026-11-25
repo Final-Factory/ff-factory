@@ -434,7 +434,11 @@ test('w469: a daemon gives its agents the Unity slots mailbox, their holder and 
   try {
     const slots = path.join(dir, 'slots');
     const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'lothdesktop', token: 't', repoPath: path.join(dir, 'FinalFactory'), appDir: dir, maxEventsFile: null, unitySlotsDir: slots }, (i, s, o, e) => new FakeAgent(i, s, o, e), PROBES);
-    assert.deepEqual(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }), { FF_UNITY_SLOTS: slots, FF_UNITY_HOLDER: 'sandbox:sb1' }, 'before start wrote the commands: no PATH change');
+    assert.deepEqual(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }, {}), { FF_UNITY_SLOTS: slots, FF_UNITY_HOLDER: 'sandbox:sb1' }, 'before start wrote the commands: no PATH change');
+    // w5557: under a data root override, a sandbox agent gets its sandbox's own folder; no sandbox, the root stays as it is.
+    const gd = path.join(dir, 'gamedata');
+    assert.equal(d.slotEnv({ sandbox: 'sb1', cwd: path.join(dir, 'ffsb', 'sb1') }, { FF_GAME_DATA_DIR: gd }).FF_GAME_DATA_DIR, path.join(gd, 'sandboxes', 'sb1'));
+    assert.equal(d.slotEnv({ cwd: path.join(dir, 'agents', 'nightly') }, { FF_GAME_DATA_DIR: gd }).FF_GAME_DATA_DIR, undefined);
     assert.equal(d.slotEnv({ cwd: path.join(dir, 'FinalFactory') }).FF_UNITY_HOLDER, undefined, 'no holder for the main clone (w536)');
     assert.equal(d.slotEnv({ cwd: path.join(dir, 'agents', 'nightly') }).FF_UNITY_HOLDER, undefined, 'a standing agent holds for itself');
     (d as unknown as { slotBin: string }).slotBin = path.join(slots, 'bin');

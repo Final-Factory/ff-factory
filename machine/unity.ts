@@ -39,7 +39,7 @@ export interface UnityDeps {
   /** Why the signal could not be sent, when the platform says; nothing when sent or already gone (w1983). */
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
   /** Start the editor detached; its pid (the Windows launch goes through PowerShell, so it may be a promise). */
-  launch(bin: string, args: string[], cwd: string): number | Promise<number>;
+  launch(bin: string, args: string[], cwd: string, env?: Record<string, string>): number | Promise<number>;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -280,15 +280,18 @@ export class MacUnity {
   readonly platform: UnityPlatform;
   /** The editor's own log (-logFile), for a sandbox editor (machine/sandboxes.ts); unset: Unity's default Editor.log. */
   readonly logFile?: string;
+  /** w5557: variables the editor starts with on top of the daemon's (a sandbox editor's own FF_GAME_DATA_DIR). */
+  readonly env: Record<string, string>;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
   /** w5270: what the last start() found of the Burst EditorPref when it was off (undefined: it was on). */
   burstNote?: string;
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string } = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; env?: Record<string, string> } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.logFile = opts.logFile;
+    this.env = opts.env ?? {};
     this.d = deps ?? realDeps(platform);
     this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
   }
@@ -382,7 +385,7 @@ export class MacUnity {
     this.burstNote = await this.d.burstPrefOn?.().catch((e: Error) => `could not check Unity's Burst EditorPref: ${e.message}`);
     const bin = this.bin();
     await this.noAppNap(bin);
-    const pid = await this.d.launch(bin, ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])], this.repo);
+    const pid = await this.d.launch(bin, ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])], this.repo, this.env);
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
       if (this.editors(await this.d.procs()).length) break;
@@ -460,9 +463,9 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
   if (platform === 'linux') {
     const { noAppNap: _n, ...linux } = base;
     // Each editor in a systemd scope of its own, out of the daemon's cgroup (machine/linuxScope.ts, w2474).
-    return { ...linux, launch: (bin, args, cwd) => {
+    return { ...linux, launch: (bin, args, cwd, env) => {
       const cmd = scoped('unity', path.basename(cwd), bin, args, { platform: 'linux' });
-      return base.launch(cmd.bin, cmd.args, cwd);
+      return base.launch(cmd.bin, cmd.args, cwd, env);
     } };
   }
   if (platform !== 'win32') return base;
@@ -482,11 +485,11 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       const why = `${r.stderr ?? ''} ${r.stdout ?? ''}`.replace(/\s+/g, ' ').trim() || (r.error ? String(r.error.message) : `taskkill exit ${r.status}`);
       return /not found/i.test(why) ? undefined : `taskkill: ${why}`;
     },
-    launch: async (bin, args, cwd) => {
+    launch: async (bin, args, cwd, env) => {
       // w5297: the editor's temp files in the install folder, not the person's %LOCALAPPDATA%\Temp (Start-Process passes PowerShell's environment on).
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
-      const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winLaunchScript(bin, args, cwd)], { timeoutMs: 60_000, env: { ...process.env, ...temp } });
+      const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winLaunchScript(bin, args, cwd)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...env } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
       return pid;
@@ -519,8 +522,8 @@ function realDepsMac(): UnityDeps {
         if (code && code !== 'ESRCH') return `kill: ${code}`;
       }
     },
-    launch: (bin, args, cwd) => {
-      const child = spawn(bin, args, { cwd, detached: true, stdio: 'ignore' });
+    launch: (bin, args, cwd, env) => {
+      const child = spawn(bin, args, { cwd, detached: true, stdio: 'ignore', env: { ...process.env, ...env } });
       child.unref();
       if (!child.pid) throw new Error(`could not start ${bin}`);
       return child.pid;
