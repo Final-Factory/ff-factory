@@ -222,6 +222,29 @@ export function resolveTrusted(name: string, pathValue: string, P: PlatformPath 
   return undefined;
 }
 
+/**
+ * w5542/w5572: a python and an environment for a script the host runs at its own level: no PYTHON* setting but UTF8 and
+ * IOENCODING (a PYTHONPATH or pycache prefix could name a worker's folder), a PATH with no worker-writable folder, and the
+ * python resolved on it to an absolute path (FF_PYTHON refused inside the worker root). Run it with `-s`.
+ */
+export function trustedPython(o: {
+  workerEnv: NodeJS.ProcessEnv; host?: NodeJS.ProcessEnv; root: string | undefined; appDir: string;
+  platform?: NodeJS.Platform; P?: PlatformPath; exists?: (p: string) => boolean;
+}): { python: string; env: NodeJS.ProcessEnv } | { error: string } {
+  const platform = o.platform ?? process.platform;
+  const P = o.P ?? (platform === 'win32' ? path.win32 : path.posix);
+  const host = o.host ?? process.env;
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(o.workerEnv)) if (!/^PYTHON/i.test(k) || /^PYTHON(UTF8|IOENCODING)$/i.test(k)) env[k] = v;
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
+  env[pathKey] = trustedPathValue(env[pathKey] ?? host.PATH, o.root, o.appDir, P);
+  const want = evidencePython(host, platform);
+  if (P.isAbsolute(want) && o.root && within(want, o.root, P) && !within(want, o.appDir, P)) return { error: `FF_PYTHON ${want} is in a folder workers can write` };
+  const python = resolveTrusted(want, env[pathKey]!, P, o.exists, env.PATHEXT ?? host.PATHEXT);
+  if (!python) return { error: `no ${want} on a trusted PATH` };
+  return { python, env };
+}
+
 export interface TrustedEvidence {
   /** The python, as an absolute path outside the worker-writable folders. */
   python: string;
@@ -245,15 +268,9 @@ export function trustedEvidenceRun(o: {
   const platform = o.platform ?? process.platform;
   const P = o.P ?? (platform === 'win32' ? path.win32 : path.posix);
   const host = o.hostEnv ?? process.env;
-  const root = o.workerEnv.FF_WORKER_ROOT || host.FF_WORKER_ROOT;
-  const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(o.workerEnv)) if (!/^PYTHON/i.test(k) || /^PYTHON(UTF8|IOENCODING)$/i.test(k)) env[k] = v;
-  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-  env[pathKey] = trustedPathValue(env[pathKey] ?? host.PATH, root, o.appDir, P);
-  const want = evidencePython(host, platform);
-  if (P.isAbsolute(want) && root && within(want, root, P) && !within(want, o.appDir, P)) return { error: `FF_PYTHON ${want} is in a folder workers can write` };
-  const python = resolveTrusted(want, env[pathKey]!, P, o.exists, env.PATHEXT ?? host.PATHEXT);
-  if (!python) return { error: `no ${want} on a trusted PATH` };
+  const t = trustedPython({ ...o, platform, P, host, root: o.workerEnv.FF_WORKER_ROOT || host.FF_WORKER_ROOT });
+  if ('error' in t) return t;
+  const { python, env } = t;
   if (!env.FF_HUD_DATA && o.sandboxDir) {
     const has = o.exists ?? ((p: string) => fs.existsSync(p));
     for (let d = P.resolve(o.sandboxDir); ; d = P.dirname(d)) {
@@ -384,8 +401,8 @@ export async function fetchHudData(repo: string, pr: number | string, run: GitRu
 }
 
 /** w5542: gh on the agent host's PATH with every folder workers can write left out (<root>/unity-slots/bin comes first there). */
-export function trustedGh(): string {
-  return resolveTrusted('gh', trustedPathValue(process.env.PATH ?? process.env.Path, process.env.FF_WORKER_ROOT, trustedAppDir())) ?? 'gh';
+export function trustedGh(root: string | undefined = process.env.FF_WORKER_ROOT, appDir: string = trustedAppDir()): string {
+  return resolveTrusted('gh', trustedPathValue(process.env.PATH ?? process.env.Path, root, appDir)) ?? 'gh';
 }
 
 /** w5542: git the same way, for the guard's reads of a worker's repository. */
