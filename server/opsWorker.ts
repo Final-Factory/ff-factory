@@ -138,6 +138,8 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   approvals: { allowed: ['', '--since', '--split'], changes: [] },
   // Where the VM's disk went (w2267): sizes, counts, dates and paths only, and auth.log's and syslog's lines counted by program.
   'disk-usage': { allowed: [''], changes: [] },
+  // What the portal's own account can open (w5506): refused or OPENED, credential names counted, never a value.
+  'fence-check': { allowed: [''], changes: [] },
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },

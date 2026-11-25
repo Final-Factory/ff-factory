@@ -79,7 +79,7 @@ import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
 import { clock, firstFree, outOfPool, poolBanner, poolLabel, poolKind, poolLimits, warningsForUser } from './tokenPool.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
-import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
+import { VAULT_FILE, VAULT_KINDS, VAULT_ROLES, Vault, keySource, setVaultContext, takeOpenedKey, tokenPersonForWork, vaultStatusLine, type VaultKind, type VaultRole, type VaultShare } from './vault.ts';
 import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf, githubTokens, setGithubTokens } from './githubTokens.ts';
 import { GithubApps } from './githubApps.ts';
 import { startGhCallLog } from './ghBudget.ts';
@@ -105,6 +105,7 @@ import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller }
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress } from './remoteChat.ts';
+import { clientAddress, configureClientAddress } from './clientAddress.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -118,6 +119,9 @@ import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { StallProfiler } from './stallProfile.ts';
 
+// The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
+// process starts anything that could inherit it.
+const openedKey = takeOpenedKey();
 const WEB = path.join(ROOT, 'web', 'dist');
 
 /** The server's version plus the web UI build it serves now (server/webStatic.ts): an open page reloads when that changes. */
@@ -244,12 +248,14 @@ guardMemory('backup');
 setInterval(() => guardMemory('backup'), 10 * 60_000).unref();
 // The token vault (docs/vault.md, w512): data/vault.json, sealed with a key outside data/. Loaded first, so redaction knows
 // its values (registerSecretValues) before any transcript is written or scrubbed.
-// systemd's credentials folder (the VM: the vault key) is kept here and taken out of the environment every agent inherits.
+// systemd's credentials folder (LoadCredential, before w5506) is kept here and taken out of the environment every agent inherits.
 const credentialsDir = process.env.CREDENTIALS_DIRECTORY;
 delete process.env.CREDENTIALS_DIRECTORY;
 // The portal's own secrets in its environment (w1688: a password, a bot token, a key), masked by value like the vault's.
 addSecretEnv(process.env);
-const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+const vault = new Vault({ file: path.join(cfg.dataDir, VAULT_FILE), key: () => openedKey ?? keySource(cfg, { CREDENTIALS_DIRECTORY: credentialsDir }), onValues: addSecretValues });
+// Where the key came from, never the key (deploy/vm/test/ci-vm-e2e.sh reads this line).
+if (openedKey) console.log(`vault key: ${openedKey.key ? `from ${openedKey.file}` : `not loaded: ${openedKey.why}`}`);
 // The vault's GitHub tokens (w868, docs/vault.md section 13): the portal's gh reads per person, and each token's health.
 // The vault's GitHub Apps (w1519, docs/github-apps.md): installation tokens for the repositories an allowed account installed
 // them on (a modder's private repositories); started once the machines are there, which get the tokens.
@@ -467,6 +473,8 @@ setInterval(() => {
 }, 30_000);
 // trustProxy and deviceApproval are read live: set_app_config changes them without a restart.
 const auth = new Auth(cfg.dataDir, { trustProxy: () => cfg.trustProxy, deviceApproval: () => cfg.deviceApproval ?? 'off' });
+// Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
+configureClientAddress({ trustProxy: () => cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
@@ -2545,24 +2553,18 @@ server.on('upgrade', (req, socket, head) => {
   // attacker-supplied Origin ("null", garbage) must never be able to throw.
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    providers.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    providers.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
   if (livePath) {
     // A daemon's live frame socket (w1398, docs/live-view.md): the machine token, as /machine.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgradeLive(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer, livePath[1]);
+    machines.upgradeLive(req, socket, head, clientAddress(req), livePath[1]);
     return;
   }
   if (parseUrl(req.url)?.pathname === '/machine') {
     // A machine daemon (docs/machines.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    machines.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const origin = req.headers.origin;

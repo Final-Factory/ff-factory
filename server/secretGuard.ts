@@ -290,6 +290,9 @@ export function portalSecretRules(o: {
       ...(env.FFBOX_CONFIG_DIR ? [env.FFBOX_CONFIG_DIR] : []),
       // The token vault's key (docs/vault.md, w512): systemd's credentials and the VM's /etc/fff, where the key file is.
       ...(platform === 'win32' ? [] : ['/run/credentials', '/etc/fff', ...(env.CREDENTIALS_DIRECTORY ? [env.CREDENTIALS_DIRECTORY] : [])]),
+      // Other processes' environments and memory (w5506): every process the portal starts runs as its account, and git's and
+      // gh's carry a GitHub token in theirs.
+      ...(platform === 'linux' ? ['/proc'] : []),
       ...homeSecrets(env, platform),
     ],
     allow: [...(o.allow ?? [])],
