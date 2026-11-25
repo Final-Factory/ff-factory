@@ -95,7 +95,9 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
 - **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. A Claude process then does not
   start, and says why (section 4; before w1078 it fell back to the host token or a login), and `system_status` names the
   entries sealed with another key. Rotating an entry re-seals it with the current key.
-- **Never in a backup:** `fff-backup` packs `/srv/fff` only (`tar -C "$FFF_ROOT"`, `deploy/vm/guest/fff-backup:36`).
+- **The key is never in a backup:** `fff-backup` packs `/srv/fff` only (`tar -C "$FFF_ROOT"`), and refuses to run if the
+  key's path is inside it or a file named `vault.key*` is among what it packs (`deploy/vm/guest/fff-backup`, w5529). The
+  vault itself (`data/vault.json`, sealed values) is in the backup since w5529.
 
 **Adding, rotating and removing.** There are two ways in, and neither goes through chat:
 
@@ -708,8 +710,10 @@ work is the risk; lothsahn decided each person's tokens serve only their own wor
 - **The FFBox host is where the tokens live** (lothsahn, 2026-10-06; [section 11](#11-the-tokens-on-the-ffbox-host)).
   The VM's vault is filled from there by `fff-vm vault-sync`, so a rebuilt or moved VM gets them back from the host.
   What is added in the VM is copied to the host every night, so the host is the full backup ([section 12](#12-adding-in-the-vm-and-the-nightly-copy-to-the-host-w749)).
-- **Not in the VM's daily backup:** `fff-backup` leaves `data/vault.json` out (`--exclude='data/vault.json*'`), and the
-  key was never in it (`/etc/fff` is not under `/srv/fff`).
+- **In the VM's daily backup, without its key** (w5529): `fff-backup` packs `data/vault.json` (its `.prev` and other
+  `vault.json.*` copies left out), never the key (`/etc/fff` is not under `/srv/fff`, and the script refuses a key file
+  among what it packs). A backup's vault opens only with the key below; the monthly restore drill checks that it does
+  (docs/portal-on-ffbox-host.md, 2.2).
 - **The key's spare copy** is `/etc/fff-vm/secrets/vault.key` on the host, kept in step with the VM's key by every
   `fff-vm vault-sync` (the one before kept as `.prev`). Entries added by hand in the VM (Max's Discord token, say) are
   copied to the host's `vault-extra/` at night and put back by the sync; they open again after a rebuild once root puts that
