@@ -23,7 +23,7 @@ const root = () => {
 
 /** One ticket folder as bench_queue.py writes it; `revokedTs` (epoch ms) writes a revoked file. */
 function ticket(r: string, name: string, t: { info?: Record<string, unknown>; revokedTs?: number; revokedRaw?: string } = {}) {
-  const dir = path.join(r, 'tmp', 'bench.queue', name);
+  const dir = path.join(r, 'daemon', 'bench.queue', name);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'info.json'), JSON.stringify({ pid: 4242, session: SESSION, what: 'probe A/B', mode: 'exclusive', ...t.info }));
   fs.writeFileSync(path.join(dir, 'granted'), JSON.stringify({ at: 'x', ts: NOW / 1000 - 600 }));
@@ -92,7 +92,7 @@ test('w3731: the rescan never touches a harness ticket, a ticket not revoked, a 
   ticket(r, 't00000013', { info: { pid: 5004 }, revokedTs: old });
   ticket(r, 't00000014', { info: { pid: 0 }, revokedTs: old });
   ticket(r, 't00000015', { info: { pid: process.pid }, revokedTs: old });
-  fs.mkdirSync(path.join(r, 'tmp', 'bench.queue', 'not-a-ticket'), { recursive: true });
+  fs.mkdirSync(path.join(r, 'daemon', 'bench.queue', 'not-a-ticket'), { recursive: true });
   const f = fakes(NOW, (pid) => pid !== 5004);
   assert.deepEqual(resumeRevokes(r, f.deps), []);
   await settle();

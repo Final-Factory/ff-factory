@@ -18,13 +18,14 @@ import { spawn, spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import type { Proc, UnityPlatform } from './unity.ts';
 import { heldNotStarted, unitySlotsLine } from '../shared/fleet.ts';
-import { benchLockPath, benchQueueDir, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, type BenchMode, type BenchTicket } from './benchQueue.ts';
+import { benchLockPath, benchQueueDir, benchTicketFor, heldTicket, HELD_WAIT_CAP_MS, RpcBenchTicket, type BenchMode, type TicketLike } from './benchQueue.ts';
 import { asWorkPriority, priorityRank, raiseOne, type PairRaise, type UnitySlotsReport, type WorkPriority } from '../shared/types.ts';
 import { benchLockDir, foreignTimedHold } from './benchLock.ts';
 import { editorBenchSession } from './benchRaise.ts';
 import { personHoldReason } from './personPlay.ts';
 import { batchUnityLogFile } from './sharedCaches.ts';
 import { beeAccessDenied, compilerServerAdvice, compilerServers, logFileArg, logTail } from './compilerServer.ts';
+import { rpcAvailable, rpcCall, RpcRefused, RpcUnavailable, type Caller } from './daemonRpc.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -716,7 +717,7 @@ export interface ArbiterDeps {
   holderWaitMs?: number;
   staleMs?: number;
   /**
-   * The worker root (the daemon's cfg.root): its tmp/bench.queue/priorities.json says each session's priority, which
+   * The worker root (the daemon's cfg.root): its daemon/bench.queue/priorities.json (w5545) says each session's priority, which
    * orders the queue (w4620). Absent: everyone counts as low.
    */
   root?: string;
@@ -1116,20 +1117,163 @@ export interface ClientDeps {
   sleep(ms: number): Promise<void>;
   /** Progress lines (stderr). */
   say(line: string): void;
+  /** w5545: where requests go; the file mailbox in `dir` when not given (tests, `serve`, a machine without the daemon). */
+  mailbox?: SlotMailbox;
 }
 
-export const realClientDeps = (dir = slotsDir()): ClientDeps => ({
+export const realClientDeps = (dir = slotsDir(), env: NodeJS.ProcessEnv = process.env): ClientDeps => ({
   dir,
   pid: process.pid,
   now: () => Date.now(),
   sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
   say: (line) => process.stderr.write(`unity-slot: ${line}\n`),
+  // w5545: an agent of FF Factory's daemon asks the daemon itself; a file it wrote in the old mailbox is ignored there.
+  ...(rpcAvailable(env) ? { mailbox: rpcMailbox(env) } : {}),
 });
 
 /** The arbiter's file when it is fresh, else undefined (no FF Factory daemon here, or it is down). */
 export function arbiterNow(dir: string, now: number): ArbiterFile | undefined {
   const f = readJson<ArbiterFile>(arbiterFile(dir));
   return f && now - Date.parse(f.at) <= ARBITER_FRESH_MS ? f : undefined;
+}
+
+/** Where a request is: granted, refused (why), still waiting, or gone (released, or dropped by the arbiter). */
+export type SlotLook = { state: 'granted' } | { state: 'denied'; why: string } | { state: 'waiting' } | { state: 'gone' };
+
+/**
+ * How a client files and follows a request (w5545). The file mailbox (a folder of req/grant/deny files) is what the
+ * daemon arbitrates; its agents reach it only through the daemon's calls (rpcMailbox), which write the request with the
+ * caller's own session and sandbox. Every method may throw when the daemon cannot be reached.
+ */
+export interface SlotMailbox {
+  /** For messages: the folder, or "FF Factory's daemon". */
+  where: string;
+  arbiter(now: number): Promise<ArbiterFile | undefined>;
+  file(body: RequestFile): Promise<void>;
+  touch(id: string, now: number): Promise<void>;
+  look(id: string): Promise<SlotLook>;
+  /** True when it was held. */
+  release(id: string): Promise<boolean>;
+}
+
+/** Look up one request in a mailbox folder. */
+export function lookIn(dir: string, id: string): SlotLook {
+  const deny = readJson<{ why: string }>(denyFile(dir, id));
+  if (deny) return { state: 'denied', why: deny.why };
+  if (fs.existsSync(grantFile(dir, id))) return { state: 'granted' };
+  return fs.existsSync(reqFile(dir, id)) ? { state: 'waiting' } : { state: 'gone' };
+}
+
+/** Remove one request and its answers from a mailbox folder; true when it was there. */
+export function releaseIn(dir: string, id: string): boolean {
+  const had = fs.existsSync(reqFile(dir, id));
+  for (const f of [reqFile(dir, id), grantFile(dir, id), denyFile(dir, id)]) rm(f);
+  return had;
+}
+
+/** The folder itself, as before w5545. */
+export function fileMailbox(dir: string): SlotMailbox {
+  return {
+    where: dir,
+    arbiter: async (now) => arbiterNow(dir, now),
+    file: async (body) => writeAtomic(reqFile(dir, body.id), JSON.stringify(body)),
+    touch: async (id, now) => {
+      try {
+        const t = new Date(now);
+        fs.utimesSync(reqFile(dir, id), t, t);
+      } catch {
+        // released
+      }
+    },
+    look: async (id) => lookIn(dir, id),
+    release: async (id) => releaseIn(dir, id),
+  };
+}
+
+/** w5545: the daemon's calls (machine/daemonRpc.ts). The daemon writes the request with the token's session and sandbox. */
+export function rpcMailbox(env: NodeJS.ProcessEnv = process.env): SlotMailbox {
+  return {
+    where: "FF Factory's daemon",
+    arbiter: async () => {
+      try {
+        return (await rpcCall<{ arbiter?: ArbiterFile }>('slots/status', {}, env)).arbiter;
+      } catch (e) {
+        if (e instanceof RpcUnavailable) return undefined;
+        throw e;
+      }
+    },
+    file: async (b) => {
+      await rpcCall('slots/request', { id: b.id, pid: b.pid, count: b.count, label: b.label, ...(b.projects ? { projects: b.projects } : {}) }, env);
+    },
+    touch: async (id) => {
+      await rpcCall('slots/touch', { id }, env).catch(() => undefined);
+    },
+    look: async (id) => (await rpcCall<{ look: SlotLook }>('slots/look', { id }, env)).look,
+    release: async (id) => (await rpcCall<{ had?: boolean }>('slots/release', { id }, env).catch(() => ({ had: false }))).had === true,
+  };
+}
+
+/**
+ * The daemon's side of rpcMailbox (w5545): the requests a caller files go in the protected queue folder `dir` with the
+ * caller's session and holder (`sandbox:<its sandbox>`, else `pid:<pid>`), whatever the body said, and only the session
+ * that filed a request may touch, look at or release it.
+ */
+export function slotRpcHandlers(dir: string, o: { now?: () => number; filed?: () => void } = {}): Record<string, (c: Caller, b: Record<string, unknown>) => unknown> {
+  const now = o.now ?? (() => Date.now());
+  const own = (c: Caller, b: Record<string, unknown>) => {
+    const id = String(b.id ?? '');
+    if (!ID.test(id)) throw new RpcRefused(`not a slot id: "${id.slice(0, 80)}"`);
+    const f = readJson<RequestFile>(reqFile(dir, id));
+    if (f && f.session !== c.session) throw new RpcRefused(`slot request ${id} is another session's`, 403);
+    return { id, f };
+  };
+  return {
+    'slots/status': () => ({ arbiter: arbiterNow(dir, now()) }),
+    'slots/request': (c, b) => {
+      const { id, f } = own(c, b);
+      const pid = Number(b.pid);
+      const count = Number(b.count);
+      if (!Number.isInteger(pid) || pid <= 0) throw new RpcRefused('pid: the asking process, a positive integer');
+      if (!Number.isInteger(count) || count < 1 || count > 16) throw new RpcRefused('count: 1 to 16 slots');
+      const projects = Array.isArray(b.projects) ? b.projects.filter((p): p is string => typeof p === 'string').map((p) => p.slice(0, 400)).slice(0, 8) : [];
+      const body: RequestFile = {
+        v: 1,
+        id,
+        pid,
+        holder: c.sandbox ? `sandbox:${c.sandbox}` : `pid:${pid}`,
+        count,
+        label: String(b.label ?? `pid ${pid}`).slice(0, 120),
+        ...(projects.length ? { projects } : {}),
+        session: c.session,
+        // A request filed again (the arbiter dropped it while its client was suspended) keeps its first time and place.
+        createdAt: f?.createdAt ?? new Date(now()).toISOString(),
+      };
+      fs.mkdirSync(dir, { recursive: true });
+      writeAtomic(reqFile(dir, id), JSON.stringify(body));
+      o.filed?.();
+      return { id, holder: body.holder };
+    },
+    'slots/touch': (c, b) => {
+      const { id, f } = own(c, b);
+      if (f) {
+        const t = new Date(now());
+        try {
+          fs.utimesSync(reqFile(dir, id), t, t);
+        } catch {
+          // released meanwhile
+        }
+      }
+      return { held: !!f };
+    },
+    'slots/look': (c, b) => {
+      const { id, f } = own(c, b);
+      return { look: f ? lookIn(dir, id) : ({ state: 'gone' } as SlotLook) };
+    },
+    'slots/release': (c, b) => {
+      const { id, f } = own(c, b);
+      return { had: f ? releaseIn(dir, id) : false };
+    },
+  };
 }
 
 export interface Held {
@@ -1152,50 +1296,45 @@ export async function acquire(
   d: ClientDeps,
   opts: { count: number; label: string; holder?: string; projects?: string[]; session?: string; timeoutMs?: number; arbiterGraceMs?: number; heartbeatMs?: number; pollMs?: number },
 ): Promise<Held> {
+  const box = d.mailbox ?? fileMailbox(d.dir);
   const none = (why: string): Held => ({ count: opts.count, ungated: why, stop: () => undefined });
-  if (!arbiterNow(d.dir, d.now())) {
-    const why = `no slot arbiter on this machine (FF Factory's daemon keeps ${arbiterFile(d.dir)} fresh); running without a slot`;
+  if (!(await box.arbiter(d.now()))) {
+    const why = box === d.mailbox ? `no slot arbiter answers on this machine (${box.where}); running without a slot` : `no slot arbiter on this machine (FF Factory's daemon keeps ${arbiterFile(d.dir)} fresh); running without a slot`;
     d.say(why);
     return none(why);
   }
   const id = `${d.now().toString(36)}-${d.pid}-${randomBytes(3).toString('hex')}`;
-  const file = reqFile(d.dir, id);
   const body: RequestFile = { v: 1, id, pid: d.pid, holder: opts.holder || `pid:${d.pid}`, count: opts.count, label: opts.label.slice(0, 120), ...(opts.projects?.length ? { projects: opts.projects } : {}), ...(opts.session ? { session: opts.session } : {}), createdAt: new Date(d.now()).toISOString() };
-  writeAtomic(file, JSON.stringify(body));
-  const touch = () => {
-    try {
-      const t = new Date(d.now());
-      fs.utimesSync(file, t, t);
-    } catch {
-      // released
-    }
-  };
-  const beat = setInterval(touch, opts.heartbeatMs ?? 15_000);
+  await box.file(body);
+  const beat = setInterval(() => void box.touch(id, d.now()).catch(() => undefined), opts.heartbeatMs ?? 15_000);
   beat.unref?.(); // the wait loop, the command a run holds for, or the hold loop keeps the process up
+  let released = false;
   const release = () => {
     clearInterval(beat);
-    for (const f of [file, grantFile(d.dir, id), denyFile(d.dir, id)]) rm(f);
+    if (released) return;
+    released = true;
+    void box.release(id).catch(() => undefined);
   };
   const started = d.now();
   let lastSaid = '';
   let goneSince = 0;
   try {
     for (;;) {
-      const deny = readJson<{ why: string }>(denyFile(d.dir, id));
-      if (deny) throw new SlotRefused(`refused: ${deny.why}`);
-      if (fs.existsSync(grantFile(d.dir, id))) {
+      const look = await box.look(id).catch(() => ({ state: 'waiting' }) as SlotLook);
+      if (look.state === 'denied') throw new SlotRefused(`refused: ${look.why}`);
+      if (look.state === 'granted') {
         d.say(`granted ${opts.count} Unity slot(s) to "${opts.label}" (${id})`);
         return { id, count: opts.count, stop: release };
       }
       // The arbiter dropped the request while this still waits (it found the heartbeat silent: the process was suspended,
       // or the daemon came back after a gap): filed again under its first time, so it keeps its place. Without this the
       // client waited for a grant that could never come, silently (LothDesktop, 2026-10-07: a run waited 4 h).
-      if (!fs.existsSync(file)) {
-        writeAtomic(file, JSON.stringify(body));
+      if (look.state === 'gone') {
+        await box.file(body).catch(() => undefined);
         d.say(`the request for ${opts.count} Unity slot(s) was gone from the mailbox; asked again (${id})`);
       }
       const now = d.now();
-      const arb = arbiterNow(d.dir, now);
+      const arb = await box.arbiter(now).catch(() => undefined);
       if (!arb) {
         goneSince ||= now;
         if (now - goneSince > (opts.arbiterGraceMs ?? 10 * 60_000)) {
@@ -1401,7 +1540,8 @@ const labelOf = (o: CliOpts) => o.label ?? (o.rest.map((a) => path.basename(a)).
 export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
   const { cmd, o } = parseCli(argv);
   const dir = o.dir ?? slotsDir(env);
-  const d = realClientDeps(dir);
+  // w5545: --dir names a mailbox folder to use as is (tests, a hand-run `serve`); otherwise an agent asks the daemon.
+  const d = o.dir ? { ...realClientDeps(dir, {}) } : realClientDeps(dir, env);
   const holder = env.FF_UNITY_HOLDER || undefined;
   const held = Number(env.FF_UNITY_SLOT_HELD) || 0;
   const job = env.FF_UNITY_SLOT_JOB && JOB_ID.test(env.FF_UNITY_SLOT_JOB) ? env.FF_UNITY_SLOT_JOB : undefined;
@@ -1439,12 +1579,15 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     if (held >= o.count) d.say(`inside a run that holds ${held} slot(s): no new slot`);
     else h = await acquire(d, { count: o.count, label: labelOf(o), holder, projects: o.projects, session: env.FF_SESSION_ID || undefined, timeoutMs });
     // Then the bench ticket (slot first, ticket second: the queue's deadlock rule). A nested run reuses its parent's.
-    let ticket: BenchTicket | undefined;
+    let ticket: TicketLike | undefined;
     let ticketName = inside?.ticket;
     if (!inside && held < o.count && env.FF_BENCH_TICKETS !== 'off') {
       const projectArg = o.rest.findIndex((a) => /^-projectpath$/i.test(a));
       const mode = o.bench ?? (env.FF_UNITY_SLOT_BENCH === 'exclusive' ? 'exclusive' : 'shared');
-      const t = benchTicketFor({ mode, what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], root: env.FF_WORKER_ROOT, env });
+      // w5545: an agent's run takes its ticket through the daemon, which holds it under the agent's own session.
+      const t: { ticket?: TicketLike; why?: string } = rpcAvailable(env)
+        ? { ticket: await new RpcBenchTicket({ mode, what: `unity: ${labelOf(o)}`, env }).take() }
+        : benchTicketFor({ mode, what: `unity: ${labelOf(o)}`, checkouts: [...o.projects, projectArg >= 0 ? o.rest[projectArg + 1] : undefined, env.FF_SANDBOX_PATH, process.cwd()], root: env.FF_WORKER_ROOT, env });
       let refused = t.why;
       if (!refused) {
         ticket = t.ticket;
@@ -1581,22 +1724,27 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     writeAtomic(answer, JSON.stringify({ ok: true, id: h.id, text: h.ungated ?? `holding ${count} Unity slot(s) as ${h.id} for at most ${Math.round(Number(ttl) / 60_000)} min; unity-slot release ${h.id} when done` }));
     if (!h.id) return 0;
     const until = Date.now() + Number(ttl);
-    while (Date.now() < until && fs.existsSync(reqFile(dir, h.id)) && !fs.existsSync(denyFile(dir, h.id))) await d.sleep(2000);
+    const box = d.mailbox ?? fileMailbox(dir);
+    for (;;) {
+      if (Date.now() >= until) break;
+      const look = await box.look(h.id).catch(() => ({ state: 'granted' }) as SlotLook);
+      if (look.state === 'gone' || look.state === 'denied') break;
+      await d.sleep(2000);
+    }
     h.stop();
     return 0;
   }
   if (cmd === 'release') {
     const id = o.rest[0];
     if (!id || !ID.test(id)) throw new Error('release needs the slot id acquire printed');
-    const had = fs.existsSync(reqFile(dir, id));
-    for (const f of [reqFile(dir, id), grantFile(dir, id), denyFile(dir, id)]) rm(f);
+    const had = await (d.mailbox ?? fileMailbox(dir)).release(id);
     d.say(had ? `released ${id}` : `${id} was not held`);
     return 0;
   }
   if (cmd === 'status') {
-    const a = arbiterNow(dir, Date.now());
+    const a = d.mailbox ? await d.mailbox.arbiter(Date.now()) : arbiterNow(dir, Date.now());
     if (!a) {
-      process.stdout.write(`no slot arbiter on this machine (${arbiterFile(dir)} missing or stale)\n`);
+      process.stdout.write(d.mailbox ? `no slot arbiter answers on this machine (${d.mailbox.where})\n` : `no slot arbiter on this machine (${arbiterFile(dir)} missing or stale)\n`);
       return 0;
     }
     const lines = [`Unity on ${a.machine ?? 'this machine'}: ${a.line} (as of ${a.at})`];

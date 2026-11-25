@@ -10,7 +10,7 @@
 // wait_for_ci_quiet makes the timing wait for that job instead). A listener that took a job in the instant it was paused
 // is continued at once. A process run from a runner's _work folder that no worker of that runner started is a job's
 // leftover: it is ended (SIGTERM, never forced) during the turn. What was paused and ended is kept in
-// <root>/tmp/bench.queue/runners.json, so a daemon restarted mid-turn or after it continues its paused listeners, and
+// <root>/daemon/bench.queue/runners.json, so a daemon restarted mid-turn or after it continues its paused listeners, and
 // bench_queue.py reports it in the ticket's history. On Windows (w3454) the listener is suspended (NtSuspendProcess, the
 // daemon's signal for SIGSTOP and SIGCONT there, as machine/loadRunners.ts does): until then BEAST's five ffu runners
 // took new jobs under exclusive ticket t00006095 on 2026-11-07 (jobs 5, 4, 5, 4, 3, 4, 5, 3, 2 while it waited). A
@@ -316,8 +316,8 @@ export class BenchRunners {
   }
 }
 
-/** <root>/tmp/bench.queue/runners.json: what the turn paused and ended (bench_queue.py RUNNERS_FILE reads it). */
-export const runnersFile = (root: string) => path.join(root, 'tmp', 'bench.queue', 'runners.json');
+/** <root>/daemon/bench.queue/runners.json (w5545): what the turn paused and ended (bench_queue.py RUNNERS_FILE reads it). */
+export const runnersFile = (root: string) => path.join(root, 'daemon', 'bench.queue', 'runners.json');
 
 export function readRunnersFile(root: string): RunnersState | undefined {
   try {

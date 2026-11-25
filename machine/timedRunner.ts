@@ -7,7 +7,7 @@
 // only the build's own finalfactory.exe, one leg at a time, each within its time bound.
 //
 // The ticket: a play-only machine has no game checkout and no python, so the daemon writes its ticket in the queue's own
-// format (<root>/tmp/bench.queue/tNNNNNNNN, bench.lock/owner; machine/benchQueue.ts reads it), the holder being the daemon
+// format (<root>/daemon/bench.queue/tNNNNNNNN, bench.lock/owner; machine/benchQueue.ts reads it), the holder being the daemon
 // itself. Only it takes tickets there; it still waits while a live ticket of anyone else's is in the queue, or a person plays.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -305,11 +305,76 @@ function inside(dir: string, rel: string): string {
   return p;
 }
 
-/** Write a build into `dir` from the cached pieces, unless it holds that build already. */
+/** The folder's own mark of the build laid out in it (layOut); never one of the build's files. */
+const BUILD_MARK = '.timed-build';
+
+/**
+ * w5574 (from w5542's audit): how player folder `dir` differs from build `v`, or undefined when it holds exactly that build.
+ * The folders are in the worker root (`<root>/timing/builds/b<i>`, a sandbox's player slots, `<root>/players`), which a
+ * worker can write, and so is the piece cache, so sizes prove nothing: every file of the order must be there at its size,
+ * every piece's bytes must hash to the SHA-256 the order names (the expected hashes come from the order the daemon holds,
+ * never from the disk), and nothing else may be in the folder (a planted DLL beside the exe is loaded by it).
+ * `bad` is the hash of the first piece that differs, for the caller to drop from the cache.
+ */
+export async function buildProblem(v: Pick<TimedVariant, 'files' | 'pieces'>, dir: string): Promise<{ problem: string; bad?: string } | undefined> {
+  const want = new Map(v.files.map((f) => [f.path.replace(/\\/g, '/'), f.size]));
+  const seen = new Set<string>();
+  const walk = (rel: string): string | undefined => {
+    for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+      const r = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        const p = walk(r);
+        if (p) return p;
+        continue;
+      }
+      if (!rel && e.name === BUILD_MARK) continue;
+      if (!e.isFile()) return `${r} is not a plain file`;
+      if (!want.has(r)) return `${r} is not one of the build's files`;
+      seen.add(r);
+    }
+    return undefined;
+  };
+  let extra: string | undefined;
+  try {
+    extra = walk('');
+  } catch (e) {
+    return { problem: (e as Error).message };
+  }
+  if (extra) return { problem: extra };
+  for (const [rel, size] of want) {
+    if (!seen.has(rel)) return { problem: `${rel} is missing` };
+    if (fs.statSync(inside(dir, rel)).size !== size) return { problem: `${rel} is not ${size} bytes` };
+  }
+  for (const piece of v.pieces) {
+    const h = createHash('sha256');
+    for (const part of piece.parts) {
+      const fd = await fs.promises.open(inside(dir, part.path), 'r');
+      try {
+        const buf = Buffer.alloc(Math.min(4 * 1024 * 1024, Math.max(1, part.length)));
+        for (let done = 0; done < part.length; ) {
+          const { bytesRead } = await fd.read(buf, 0, Math.min(buf.length, part.length - done), part.offset + done);
+          if (!bytesRead) return { problem: `${part.path} ends early`, bad: piece.sha256 };
+          h.update(buf.subarray(0, bytesRead));
+          done += bytesRead;
+        }
+      } finally {
+        await fd.close();
+      }
+    }
+    if (h.digest('hex') !== piece.sha256) return { problem: `the bytes of ${piece.parts.map((x) => x.path).join(', ')} are not the build's (piece ${piece.sha256.slice(0, 12)})`, bad: piece.sha256 };
+  }
+  return undefined;
+}
+
+/**
+ * Write a build into `dir` from the cached pieces, unless it holds that build already (w5574: checked by content, buildProblem).
+ * A written build that is still not the order's (a cached piece that is not what its name says) is removed with that piece,
+ * and this throws.
+ */
 export async function layOut(v: Pick<TimedVariant, 'files' | 'pieces'>, dir: string, cache: string): Promise<'kept' | 'written'> {
   const key = buildKey(v);
-  const mark = path.join(dir, '.timed-build');
-  if (fs.existsSync(mark) && fs.readFileSync(mark, 'utf8').trim() === key && v.files.every((f) => fs.statSync(inside(dir, f.path), { throwIfNoEntry: false })?.size === f.size)) return 'kept';
+  const mark = path.join(dir, BUILD_MARK);
+  if (fs.existsSync(mark) && fs.readFileSync(mark, 'utf8').trim() === key && !(await buildProblem(v, dir))) return 'kept';
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
   for (const f of v.files) {
@@ -340,6 +405,12 @@ export async function layOut(v: Pick<TimedVariant, 'files' | 'pieces'>, dir: str
     } finally {
       await src.close();
     }
+  }
+  const wrong = await buildProblem(v, dir);
+  if (wrong) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (wrong.bad) fs.rmSync(path.join(cache, wrong.bad), { force: true });
+    throw new Error(`the laid-out build is not the order's (w5574): ${wrong.problem}`);
   }
   fs.writeFileSync(mark, key);
   return 'written';
@@ -837,6 +908,9 @@ export class TimedRunner {
     contention.push(`${new Date().toISOString()} ${v.name} round ${round} start: cpu=${load.toFixed(0)}% ram=${mem()}%${load >= 25 ? ' (still busy after 2 minutes: ran anyway)' : ''}`);
     const logFile = path.join(out, 'player.log');
     const args = legArgs(o.settings, v, round, saveName, logFile);
+    // w5574: the player folder is one a worker can write; it starts only while it holds exactly the order's build.
+    const wrong = await buildProblem(v, path.dirname(exe));
+    if (wrong) throw new Error(`${v.name} round ${round}: not started: ${path.dirname(exe)} is not the build the run laid out (w5574): ${wrong.problem}`);
     const inputBefore = this.d.lastInputAt?.();
     const start = Date.now();
     const csv = [`"time","cpuPct","memPct"`];

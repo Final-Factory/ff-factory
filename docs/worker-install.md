@@ -52,7 +52,7 @@ MCP-for-Unity editor plugin), Unity's caches, logs and licence (`%LOCALAPPDATA%\
 | What | Windows | macOS |
 |---|---|---|
 | The service | scheduled task `FFFactoryDaemon` (at logon, the user's interactive session, not elevated) | LaunchAgent `com.fffactory.daemon` (`~/Library/LaunchAgents`); on Linux the systemd user unit `~/.config/systemd/user/com.fffactory.daemon.service` |
-| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742) and group "Final Factory ffu-server" (inbound TCP from Tailscale only for `ffu-server.exe` in each ffu slot's `target\debug`, `target\release` and `bin`, w5442; [ffu-sandboxes.md](ffu-sandboxes.md)); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
+| Firewall rules | group "Final Factory player slots" (per slot exe path: in and out, TCP and UDP, every profile), group "Final Factory Unity editors" (each Unity editor the Hub has) and group "Final Factory agent node" (one inbound rule for `<root>\tools\node\node.exe`, the agents' node at its one fixed path, w1742, any protocol and port, from Tailscale only since w5581: [The agent node's firewall rule](#the-agent-nodes-firewall-rule-w5581)) and group "Final Factory ffu-server" (inbound TCP from Tailscale only for `ffu-server.exe` in each ffu slot's `target\debug`, `target\release` and `bin`, w5442; [ffu-sandboxes.md](ffu-sandboxes.md)); the step also deletes rules earlier prompts left for programs under `<root>\tmp` | none |
 | The slot config for scripts outside the daemon | `%ProgramData%\FinalFactory\player-slots.json` | `~/.config/finalfactory/player-slots.json` |
 | The Unity slots mailbox (`~/.ff-factory/unity-slots`, its standard place: no pointer is written, so the daemon, its agents and the nightly harness all use the same one, w469) | `%USERPROFILE%\.ff-factory\unity-slots` | `~/.ff-factory/unity-slots` |
 | The Dev Drive (w900, w1070) | the SYSTEM tasks `ffsb-helper-mount` (also at every boot), `-trim` and `-compact`, and their script in `%ProgramData%\ffsb-helpers`; the folder given at install, which keeps the drive's file and what starts before it (`devdrive.vhdx`, `devdrive.json`, `start-daemon.ps1`, `moved.json`) | none |
@@ -316,8 +316,11 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
 2. **The daemon checks it before anything runs.** It downloads `GET /machine/update/<sha256>` with its own credential (the
    portal serves only the bundle it offered that machine, for an hour), checks the size and SHA-256 against the message (which
    came on its own authenticated link), runs `git bundle verify`, fetches it into the install's checkout `<daemon>/src` (git
-   checks every object), checks that the bundle's HEAD is the commit named, and checks it out. A mismatch is refused with
-   the reason (`self_update_ack`) and changes nothing. A download that stalls (30 s without a byte) or breaks resumes from
+   checks every object), checks that the bundle's HEAD is the commit named, checks that commit is on ff-factory's main on
+   GitHub (w5516, `checkPublished`: an anonymous fetch of main into `refs/remotes/ff-published/main`, then `merge-base
+   --is-ancestor`; the portal deploys nothing else, so a portal sending another commit is refused), and checks it out. A
+   mismatch is refused with the reason (`self_update_ack`) and changes nothing. Only the link end-to-end test names another
+   published branch, its own repository (daemon.json `updateOrigin`). A download that stalls (30 s without a byte) or breaks resumes from
    the bytes it has with a Range request, up to 6 tries within 8 minutes, each logged in the daemon's log with its cause
    (`machine/selfUpdate.ts` `DOWNLOAD`; w1641: beast's stalled at 7 of 18.5 MB and Node's fetch sat 300 s before it said
    "terminated"). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
@@ -433,16 +436,31 @@ over ssh (the orchestration worker's path, [ops-worker.md](ops-worker.md)). It i
 
 ```bash
 # a Mac, as the account the daemon runs as (locally, or over ssh with no keychain):
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /Users/Shared/ffw
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --update --ref <commit> --root /Users/Shared/ffw
 # from a checkout of ff-factory instead:
 bash scripts/worker/install.sh --update --root /Users/Shared/ffw
 ```
 
 ```powershell
 # Windows, as the account the daemon's task runs as: a normal PowerShell, or an ssh session (elevated or not):
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root D:\ffw
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Update -Ref <commit> -Root D:\ffw
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\worker\install.ps1 -Update -Root D:\ffw
 ```
+
+**`<commit>` is the portal's own full commit** (w5516, the w5452 security audit's finding 11): the `commit` field of
+`curl -fsS <portal>/api/health` (`server/version.ts` `portalCommit`). The installer is fetched at that commit and told to
+install exactly it, never main's head, which may hold code nobody verified yet. With a 40-character commit as `--ref` /
+`-Ref` the installer fetches that commit alone and checks it is what it got (`HEAD` equals it), the update checks out that
+commit and refuses one that is not on ff-factory's main as GitHub has it (`scripts/worker/worker.ts` `updateSource`), and a
+7-to-39-character id is refused (it could name another commit). Without `--ref` an update goes to the portal's commit as
+before. The rollout (`server/machineRollout.ts`) writes these commands itself from the verified deploy's sha, and counts an
+update done only when the daemon says hello on that commit (`checkEnded`). A join (`scripts/worker/join.sh`, `join.ps1`) is
+served with the portal's commit written in (`server/machineJoinHttp.ts` `PORTAL_COMMIT_MARK`) and pins the same way.
+
+**From today's daemon** (the first rollout of this change): the ssh form is written by the new portal, so it fetches the new
+installer at the verified commit whatever the machine ran before. Over the link, an older daemon checks the bundle and its
+commit as it always did and installs the portal's commit; from then on the daemon also checks every commit it is sent is on
+GitHub's main before it checks it out (below), so the next update is held to it.
 
 Both run `node scripts/worker/worker.ts update --root <root>`. What it does (each from what the ops worker hit
 reinstalling beast and m5 on 2026-10-07, f3f19c0 → 9ea8476):
@@ -563,10 +581,10 @@ Before it, nothing in FF Factory ran `registerAgents.sh`: ff-agents 1.29.20 (fin
 ran it by hand.
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Tools -Root D:\ffw
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Tools -Ref <commit> -Root D:\ffw
 ```
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --tools --root ~/ffw
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --tools --ref <commit> --root ~/ffw
 ```
 
 What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
@@ -608,8 +626,10 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    running from the old folder leaves it for the next rollout (`... is in use`). A failure prints `WARNING: Agent node:`
    and does not change the exit code.
 9. Windows, when the install made firewall rules: reads, without admin rights, whether each player slot, the agents'
-   node and ffu-server in each ffu slot (w5442) has an enabled inbound allow rule for its exact path, and whether rules earlier prompts left under `<root>\tmp`
-   remain (`firewallCheckScript`, two bulk reads, 4 s on lothdesktop's 696 rules). All there: one `Windows Firewall: ...
+   node and ffu-server in each ffu slot (w5442) has an enabled inbound allow rule for its exact path, whether an enabled
+   inbound allow rule lets the node in from any address rather than the tailnet only (`wide`, w5581), and whether rules
+   earlier prompts left under `<root>\tmp` remain (`firewallCheckScript`, three bulk reads; two took 4 s on lothdesktop's
+   696 rules). A wide node rule counts as missing, so the elevated rerun below narrows it. All there: one `Windows Firewall: ...
    are there.` line. Something missing and the run elevated: runs `firewall.ps1` as the install does and records the node's
    group in root.json. Not elevated: `WARNING: Windows Firewall: ...`, and the exit code stays. A daemon update and a tools
    run over the daemon's link are never elevated, so the node's rule from #517 reached no machine (w1742); the rollout
@@ -625,6 +645,30 @@ Tested: `server/agentTools.test.ts` (fake git and sh), and by hand on BEAST on 2
 kept a person's marker, a record set back to 1.29.19 was updated to 1.29.20, a stray file in the checkout gave
 `NOT PUBLISHED ... (1 path)` and exit 3, and `install.ps1 -Tools -Root <fake root>` ran the same (exit 0).
 
+
+### The agent node's firewall rule (w5581)
+
+The rule "Final Factory agent node" lets `<root>\tools\node\node.exe` accept inbound connections, any protocol and any
+port, every profile, **from the tailnet only** (`100.64.0.0/10` and `fd7a:115c:a1e0::/48`, Tailscale's addresses);
+loopback is never filtered, so local callers are unaffected. Before w5581 (lothsahn: "narrow BEAST's agent-node firewall
+rule to the tailnet") it allowed every address, so on BEAST anything on its LAN could reach whatever that node served.
+
+- **Who listens on it.** FF Factory's own listeners bind 127.0.0.1 (`server/listenLoopback.test.ts`). On BEAST the
+  instance portals ([instances.md](instances.md)) run on this node: Light Tree on 8891 (Ben's URL,
+  `http://100.86.157.116:8891`, BEAST's tailnet address) and Lens on 8892. Their daemons and people reach them over the
+  tailnet, which the rule still lets in.
+- **Why no port.** A new instance takes a new port (`scripts/instance/new.ts --port`); a port list would break the next
+  instance. The rule goes by program, like ffu-server's (w5442).
+- **Who makes it.** `firewall.ps1 -AgentNode` (the install, and every elevated tools run). It also removes inbound allow
+  rules for that exact path outside the install's groups (an "allow access" prompt's, from any address), which would
+  undo the narrowing. Rules for other programs, Zoom's among them, are never touched.
+- **How it reaches a machine.** The agent tools run (step 9 above) reads the rule without admin rights; a wide one is
+  reported as `WARNING: Windows Firewall: a rule lets <node> in from any address, not the tailnet only`, and the machine
+  rollout reruns the tools over the portal's ssh, elevated, which rewrites it. No person at the machine.
+- **Revert** (back to any address), with no person at the machine: revert the PR first (otherwise the next tools
+  rollout narrows it again), then over the portal's ssh, elevated (the ops worker):
+  `Get-NetFirewallRule -Group 'Final Factory agent node' | Set-NetFirewallRule -RemoteAddress Any`.
+  A test install's group carries its suffix (`'Final Factory agent node <suffix>'`).
 
 ### The Dev Drive (w900)
 

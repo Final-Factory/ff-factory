@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { MEDIUM_CACHE_CHILD } from '../server/claudeHome.ts';
 
 /**
  * The machine's shared caches inside the worker install folder (w5281). Before it, every `uv run --with pillow ...` the
@@ -12,6 +13,27 @@ import path from 'node:path';
  */
 export const sharedCacheDir = (root: string) => path.join(root, 'cache');
 export const workerUvCacheDir = (root: string) => path.join(sharedCacheDir(root), 'uv');
+/**
+ * The daemon's and Medium agents' own uv cache, <root>/cache-medium/uv (w5565, item 5 of the w5451 audit): they run uvx
+ * (the Unity MCP server) and `uv run --with ...` from it, so it sits where no worker fence lets a worker write, and
+ * sandbox agents keep workerUvCacheDir (daemon.ts runSpec).
+ */
+export const mediumUvCacheDir = (root: string) => path.join(root, MEDIUM_CACHE_CHILD, 'uv');
+
+/**
+ * The daemon's own UV_CACHE_DIR at start (w5565): the Medium cache, also in place of the workers' one a daemon started by
+ * an older one may have carried over; one daemon.json names (any other folder) stays. Undefined when it is already right.
+ */
+export function mediumUvCacheFor(env: Record<string, string | undefined>, root: string): string | undefined {
+  const cur = env.UV_CACHE_DIR;
+  if (cur && path.resolve(cur) !== path.resolve(workerUvCacheDir(root))) return undefined;
+  return mediumUvCacheDir(root);
+}
+
+/** What a sandbox agent's environment adds (w5565): the workers' uv cache in place of the daemon's Medium one. */
+export function sandboxUvEnv(env: Record<string, string | undefined>, root: string | undefined): Record<string, string> {
+  return root && env.UV_CACHE_DIR && path.resolve(env.UV_CACHE_DIR) === path.resolve(mediumUvCacheDir(root)) ? { UV_CACHE_DIR: workerUvCacheDir(root) } : {};
+}
 /**
  * Read by the game (FF_DETERMINISM_AUDIT_DIR, NetworkDeterminismAuditRetention.AuditRoot) and the audit scripts in place of
  * `<game data>/DeterminismAudit`. No clean-up pass deletes in it (server/cleanup.ts PROTECTED_SEGMENTS: an `audit` segment is
@@ -262,13 +284,31 @@ export function runQuiet(bin: string, args: string[], timeoutMs: number): Promis
  * (lowIntegrity.ts lowEnv), so uv finds no managed Python there, picks another one from PATH and needs other packages, and
  * a cache warmed under the daemon's own APPDATA still had no Unity MCP bridge for them (BEAST, w5402).
  */
-export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>, agentEnv: Record<string, string> = {}, forWhom = 'agents'): Promise<string | undefined> {
+export async function warmUvCache(command: string, runs: { offline: string[]; online: string[] } | undefined, cacheDir: string, run: (bin: string, args: string[], env: NodeJS.ProcessEnv) => Promise<{ error?: string }>, agentEnv: Record<string, string> = {}, forWhom = 'agents', trust?: { root: string; appDir: string }): Promise<string | undefined> {
   if (!runs) return undefined;
-  const env = { ...process.env, ...agentEnv, UV_CACHE_DIR: cacheDir };
+  // w5542: the entry may come from <root>/claude/.claude.json, which workers can write, and this runs at the daemon's level:
+  // never a uvx or a --from package inside the worker root (outside the daemon's folder).
+  const planted = trust && [command, ...runs.online].find((a) => workerWritable(a.replace(/^(git\+)?file:\/\//, ''), trust.root, trust.appDir));
+  if (planted) return `unity mcp: did not warm the uv cache${forWhom === 'agents' ? '' : ` for ${forWhom}`}: ${planted} is in a folder workers can write (w5542)`;
+  const env: NodeJS.ProcessEnv = { ...process.env, ...agentEnv, UV_CACHE_DIR: cacheDir };
+  // A Low agent's APPDATA is inside the root: its uv.toml is a worker's file, so the daemon's run reads no uv config.
+  if (trust && Object.values(agentEnv).some((v) => workerWritable(v, trust.root, trust.appDir))) env.UV_NO_CONFIG = '1';
   const tag = forWhom === 'agents' ? '' : ` for ${forWhom}`;
   if (!(await run(command, runs.offline, env)).error) return `unity mcp: its package is in ${cacheDir}${tag}`;
   const online = await run(command, runs.online, env);
   return online.error ? `unity mcp: could not fill ${cacheDir} with its package${tag}, so ${forWhom} here get no Unity MCP bridge: ${online.error.slice(0, 300)}` : `unity mcp: filled ${cacheDir} with its package${tag}`;
+}
+
+/** w5542: whether `p` is an absolute path inside the worker root and outside the daemon's folder (where workers can write). */
+export function workerWritable(p: string, root: string, appDir: string): boolean {
+  const P = /^[A-Za-z]:[\\/]|^\\\\/.test(root) ? path.win32 : path.posix;
+  if (!P.isAbsolute(p)) return false;
+  const inside = (dir: string) => {
+    const fold = (x: string) => (P === path.win32 ? x.toLowerCase() : x);
+    const rel = P.relative(fold(P.resolve(dir)), fold(P.resolve(p)));
+    return rel === '' || (!!rel && !rel.startsWith('..') && !P.isAbsolute(rel));
+  };
+  return inside(root) && !inside(appDir);
 }
 
 /** runQuiet with an environment. */

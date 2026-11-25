@@ -8,13 +8,56 @@ to do that." On a Mac the worker root is `~/ffw` (docs/worker-root.md), so the f
 daemon reads it at start; check it after a redeploy rewrites daemon.json). On another OS, with no `root`, or without
 `/usr/bin/sandbox-exec`, the setting logs one line and agents run unfenced.
 
+## What protects a machine, and what does not (w5556, from the w5451 audit)
+
+**The text guard is not protection.** `server/guard.ts` (and `standingGuard.ts`, `secretGuard.ts`, `privacyGuard.ts` and the
+other guards it calls) match only the text of a command or tool call. They catch the careless mistakes of a well-meaning
+worker: a force push, killing the wrong editor, a delete outside the install folder. A script file gets past them
+(`guard.ts:30-34` says so), and so do `execute_code` in the worker's own editor and a junction. They do not stop a determined
+or hijacked worker (prompt injection through a Discord message, an issue or a web page), and no doc or prompt may call them a
+sandbox, a boundary or protection.
+
+**The real protection is three things the worker cannot edit around:**
+
+1. **The OS write fences** (this page and docs/worker-root.md section 4): Windows Low integrity, macOS Seatbelt, Linux
+   Landlock. The daemon, the agent host and its hooks stay outside them.
+2. **The read blocks**: what a fenced worker may not read (secrets, the daemon's folder, the machine's gh login and the
+   Keychain). Today the fences are write-only, so these are not closed yet (below).
+3. **Daemon-side checks**: the daemon and the portal verify what a worker asks for (a machine's session report sets only run
+   state, machine updates install exactly the verified commit, the evidence check runs a file only the daemon wrote).
+
+**What each fence covers today** (sourced from the w5451 audit, whose Windows findings were measured on BEAST and whose Mac and
+Linux findings are sourced, not yet probed on a live fenced worker; the probe legs are w5462 m5/m3, w5463 biscuit, w5464
+LothDesktop):
+
+| | Covers | Does not cover |
+|---|---|---|
+| Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
+| macOS Seatbelt | file writes outside the root | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd; signals to other processes of the user; other sandboxes inside the root; the network |
+| Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
+| Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
+
+**Fixes, by state** (a fix is "merged" only when its PR has merged; everything else is in progress):
+
+- Merged: standing-agent shell guard refuses the w5452 bypass forms (w5504, #1150); standing agents' git ignores repo-config
+  programs (w5514, #1152); root-owned releases and an activation that verifies commit, clean tree and path (w5505, #1149);
+  a machine's session report sets only run state (w5515, #1155); machine updates install exactly the verified commit
+  (w5516, #1161).
+- In progress, PR open: label Low only the root folders workers write (w5539, #1166); fenced workers signal only their own
+  processes, and the Linux lock refuses the systemd user bus (w5562, #1168); the evidence check runs only a
+  `pr_evidence.py` workers cannot have written (w5542, #1171); no process the portal starts can read the vault key
+  (w5506, #1154).
+- In progress, no PR yet: workers cannot read the secrets and daemon folders on any OS (w5546); the fence fails closed with a
+  portal alert (w5555); the gh-config and Keychain read deny (w5548). Until they land, treat every item in the "does not
+  cover" column as open.
+
 ## How it works
 
 `server/workerFence.ts`. The daemon's `runSpec` (machine/daemon.ts) adds `fence` to a sandbox agent's spec; `buildOptions`
 (server/launch.ts) then gives the SDK `spawnClaudeCodeProcess: fenceSpawner(fence)`, which starts the CLI as
 `/usr/bin/sandbox-exec -p <profile> <claude> ...`. sandbox-exec execs claude, so the pid the SDK kills is claude's own. The
 fence holds for every process claude starts: Bash, subagents, git, gh, uv, batch Unity, `unity-slot run`. The daemon, the
-agent host, its hooks and in-process FF Factory tools stay outside it (they are the guard). Same user; reads, exec and the
+agent host, its hooks and in-process FF Factory tools stay outside it (they are the text guard, which catches mistakes and is not protection; see the section above). Same user; reads, exec and the
 network are unchanged. The profile is passed inline, so no file a worker could edit decides it.
 
 The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then allow writes in:
@@ -24,7 +67,7 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | the worker root | the point |
 | `/dev/null`, `/dev/tty*`, `/dev/fd/*`, ... | every shell |
 | `getconf DARWIN_USER_TEMP_DIR` / `_CACHE_DIR` | system frameworks (Metal shader cache, CoreServices) write there with no setting |
-| `~/.ff-factory/unity-slots`, `~/.unity-mcp` | named exceptions with no setting (docs/worker-root.md 2.7); a worker root's mailbox is `<root>/unity-slots` since w5377, so the first is left for installs without one |
+| `~/.ff-factory/unity-slots`, `~/.unity-mcp` | named exceptions with no setting (docs/worker-root.md 2.7); a worker root's mailbox is `<root>/unity-slots` since w5377, so the first is left for installs without one. w5545: requests are no longer files there; the arbiter reads `<app_dir>/slot-queue`, which no worker writes (docs/unity-lifecycle.md, "Asking the daemon") |
 | `/tmp/Unity-Upm-<pid>.sock` | Unity's Package Manager: "listen EPERM /tmp/Unity-Upm-<pid>.sock" |
 | `/tmp/ilpp.sock-<hash>` | IL post-processing: "ILPPTrigger: Can't find file /tmp/ilpp.sock-..." |
 | `/tmp/Unity-ShaderCompilerIPC-<pid>-<n>.sock`/`.lock`, `/tmp/unitypreflock` | shader compiler: "Failed to listen on local IPC stream (Name in use)", then a fatal abort |
@@ -32,11 +75,12 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | `~/Library/Logs/Unity`, `~/Library/Unity/licenses` | the licensing client's logs and entitlement cache |
 | `~/Library/Caches/com.unity3d.UnityEditor` | Unity's per-user GI cache, Bee cache and `CurlRequestCache.db`: a fenced player build logged "Failed to create GICache directory at the default location" 81,224 times |
 
-and then takes write back from `<root>/daemon`, `<root>/secrets` and `<root>/root.json` (later rules win). The main clone
+and then takes write back from `<root>/daemon`, `<root>/secrets`, `<root>/claude-medium` (the Medium agents' Claude
+folder, w5543), `<root>/cache-medium` (their uv cache, w5565) and `<root>/root.json` (later rules win). The main clone
 `<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
-in `server/workerFence.test.ts` now commits in a worktree). The harness's own guard still keeps agents' tools off it. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
+in `server/workerFence.test.ts` now commits in a worktree). The harness's own text guard keeps a careless agent's tools off it, which a script file gets past. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
 and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`).
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
@@ -64,6 +108,25 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+
+## Signals and launchd jobs (w5562)
+
+lothsahn (w5562): "probe, then block signals and launchctl/systemd-run escapes on Mac and Linux". From the rogue-worker
+audit w5451, items 22 and 23.
+
+- **Signals.** Before w5562 a fenced worker could signal any process of its user: on m5, 2026-11-25, `kill -0` from
+  inside the fence reached the daemon's agent host and Finder (only launchd, pid 1, answered EPERM). The profile now ends
+  with `(deny signal)` and `(allow signal (target self) (target children) (target same-sandbox))` (`SIGNAL_RULES` in
+  `server/workerFence.ts`): a worker signals itself and what it started, which inherits its sandbox, and nothing else.
+  Signal 0 counts, so a liveness check of an outside process answers EPERM, which our checks read as alive
+  (`isAlive` in `machine/unitySlots.ts`, `bench_queue.py`, `player_slots.py`). What a worker needs ended outside its tree
+  (its editor, a daemon job) goes through the daemon (`mcp__machine__unity`, `unity-slot`), as before.
+- **launchd jobs.** No rule is needed: launchd refuses job submission from a sandboxed caller. Measured on m5 from inside
+  the fence (2026-11-25): `launchctl submit -l <label> -- <cmd>` exits 1 ("Operation not permitted"),
+  `launchctl bootstrap gui/<uid> <plist>` fails "5: Input/output error", and neither job ever ran. That goes over the
+  bootstrap port, not a `mach-lookup` name a profile could deny.
+- Still open: `open`/LaunchServices and Apple events (`osascript` telling Terminal to run a script) start programs
+  outside the fence; untried.
 
 ## Setuid programs: ps, top (w5397)
 

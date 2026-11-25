@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { asWorkPriority, type BenchState, type BenchTicketGlance, type UntimedTiming, type WorkPriority } from '../shared/types.ts';
-import { APPROVED_MAX_MIN, benchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
+import { APPROVED_MAX_MIN, benchLockDir, legacyBenchLockDir, pidAlive, readBenchLock } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import { closedFile } from './benchTurn.ts';
 
@@ -222,7 +222,8 @@ export function readBenchState(root: string | undefined, now: number = Date.now(
   const editors = mode === 'exclusive' ? closedEditors(root) : [];
   const players = mode === 'exclusive' ? playersClosed : 0;
   const g = (t: QueueTicket) => glance(t, m, waiters);
-  const untimed = readUntimed(qdir, now);
+  // w5545: timing.jsonl stays where workers write it (the game repo's timing_gate.py, server/timingGuard.ts logTiming)
+  const untimed = readUntimed(benchQueueDir(legacyBenchLockDir(root)), now);
   // w1949: every waiter with its place, so the ledger can show a request Blocked on the lock while its worker's ticket waits.
   const inQueue = waiting.slice(0, BENCH_STATE_MAX_WAITERS).map((t, ahead) => ({ ...g(t), ahead }));
   return {
