@@ -697,6 +697,13 @@ export class MachineManager {
    * Called once per failure: on the change to failed, and once more when a failed fence is on or off again.
    */
   fenceAlert?: (machineId: string, title: string, text: string) => void;
+  /**
+   * A known machine's daemon link was refused by the tailnet-only check (w5575; wired by index.ts like offlineAlert: the
+   * orchestrator and a push). Without it a refused machine looks like any offline one, whose alert says to ask nobody.
+   */
+  linkRefusedAlert?: (machineId: string, title: string, text: string) => void;
+  /** When linkRefusedAlert last told about each machine (once an hour per machine). */
+  private linkRefusedAt = new Map<string, number>();
 
   /** Its daemon's worker fence report (w5555, machine/fenceGate.ts): stored on the machine, alerted when it fails. */
   takeFence(id: string, raw: unknown): void {
@@ -2225,6 +2232,32 @@ export class MachineManager {
     // The address each daemon links from (w5575): what the tailnet-only check judges, listed before it is enforced.
     console.log(`machine ${id}: link from ${ip}`);
     return { id, hash: cred!.hash, staged: cred!.staged };
+  }
+
+  /**
+   * A /machine request or upgrade the tailnet-only check refused (w5575, server/machineLinkGate.ts): the machine its bearer
+   * token belongs to, if any, so a lockout of a real machine is seen rather than taken for a machine that is offline. The
+   * token only names the machine; the request stays refused and no failure is counted. Logged every time, alerted once an
+   * hour per machine.
+   */
+  linkRefused(req: Pick<http.IncomingMessage, 'headers'>, address: string, why: string, now = Date.now()): string | undefined {
+    const cred = this.credential(req.headers.authorization);
+    const m = cred ? this.store.machines.get(cred.id) : undefined;
+    if (!m) return undefined;
+    console.warn(`machine ${m.id}: link refused by machineLinkTailnet (enforce) from ${address}: ${why}`);
+    const last = this.linkRefusedAt.get(m.id);
+    if (last !== undefined && now - last < 60 * 60_000) return m.id;
+    this.linkRefusedAt.set(m.id, now);
+    this.linkRefusedAlert?.(
+      m.id,
+      `${m.name ?? m.id}: daemon link refused (machineLinkTailnet)`,
+      `[machines] ${m.id}'s daemon reached the portal from ${address}, outside the tailnet (${why}), and machineLinkTailnet "enforce" refused it: ` +
+        `it is locked out, not offline, and redials about every 30 to 40 s. To let it back in, set machineLinkTailnet to "warn": the dispatcher calls ` +
+        `set_app_config machineLinkTailnet "warn" with the work_id of an open request an owner asked for in their own words; with none open, a worker ` +
+        `merges the one-line change of the default to "warn" (server/machineLinkGate.ts machineLinkMode), which deploys by itself (only while some machine still links, since workers run on them). ` +
+        `docs/machines.md, "The daemon link is tailnet-only". Nobody needs to go to the machine.`,
+    );
+    return m.id;
   }
 
   /** The welcome a daemon gets on connecting, and again when its hello moved its pool (w513). */
