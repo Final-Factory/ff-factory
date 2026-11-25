@@ -33,7 +33,7 @@ LothDesktop):
 | | Covers | Does not cover |
 |---|---|---|
 | Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
-| macOS Seatbelt | file writes outside the root | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd; signals to other processes of the user; other sandboxes inside the root; the network |
+| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md) | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd; signals to other processes of the user; other sandboxes inside the root; the network |
 | Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
@@ -47,9 +47,37 @@ LothDesktop):
   processes, and the Linux lock refuses the systemd user bus (w5562, #1168); the evidence check runs only a
   `pr_evidence.py` workers cannot have written (w5542, #1171); no process the portal starts can read the vault key
   (w5506, #1154).
+- Players the daemon starts run fenced on Linux and macOS (w5564, below).
 - In progress, no PR yet: workers cannot read the secrets and daemon folders on any OS (w5546); the fence fails closed with a
   portal alert (w5555); the gh-config and Keychain read deny (w5548). Until they land, treat every item in the "does not
   cover" column as open.
+
+## Players the daemon starts (w5564, w5451 item 33)
+
+A timed run's player (`machine/timedRunner.ts`, `leg()`) is a file in a folder fenced workers write (`players/slotK-n/player`,
+`timing/builds`), and the daemon starts it. Before w5564 it ran as the daemon's plain child, so a swapped player wrote
+anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macOS, whatever the worker fence setting:
+
+- **Writable**: the leg's run folder, the player's own build folder, the game's data root (`FF_GAME_DATA_DIR`, saves) and the
+  player home (`FF_PLAYER_HOME`), each only if it lies inside the worker root, is not the root itself and is not under
+  `daemon` or `secrets` (`playerWritable`). Nothing else: not `/tmp`, not the home folder, not other slots or sandboxes.
+- **Linux**: `ff-landlock.py --rw /dev --rw /proc --rw <each>` (files only; the network is untouched, so pair runs work).
+  `/dev` stays writable for the GPU and `/dev/shm` (tmpfs, gone at reboot).
+- **macOS**: `sandbox-exec -p` with `(allow default) (deny file-write*)`, then the device nodes, the user's Darwin temp and
+  cache folders (`getconf DARWIN_USER_TEMP_DIR`/`DARWIN_USER_CACHE_DIR`) and each writable folder.
+- **Fails closed**: the fence is probed once (a no-op inside it, `fenceProbe.ts`); if the wrapper is missing or the no-op
+  fails, every leg is refused with the reason and no player starts. Windows players are unchanged (Low integrity comes
+  from the folder labels, w5539). `launch.txt` in each leg's folder names the fence it ran under.
+- **Measured on biscuit, 2026-11-25** (Linux, 1280x720 under Xvfb, w1440 life save, 2 interleaved rounds per side, both
+  sides already under the worker's Landlock, so the delta is the player's own layer): fenced 117.1 and 109.5 fps, unfenced
+  113.1 and 117.1 fps; frame average 8.54/9.13 ms against 8.83/8.53 ms. The spread between rounds of one side (7.6 fps)
+  is wider than the gap between the sides (1.9 fps): no cost seen. The save loaded in every leg. A write to `/tmp` (which the
+  worker shell itself could write), the home folder, `ffw/tmp`, `ffw/sandboxes/slot1` and another player slot was refused.
+- The player writes `.ff-local-automation-status.json` (and `.tmp<guid>` copies) beside its own exe on every leg. w5574's
+  per-leg check (`buildProblem`) refused any file that is not the build's, so every leg after the first was refused; the
+  runner now drops those status files before the check (`dropPlayerStatus`), and any other extra file is still refused.
+- Pair runs' players are started by workers (`player_slots.py launch`), so they already run inside the worker's fence;
+  the daemon starts no pair player (`server/pairRuns.ts` spawns nothing).
 
 ## How it works
 
@@ -67,7 +95,7 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | the worker root | the point |
 | `/dev/null`, `/dev/tty*`, `/dev/fd/*`, ... | every shell |
 | `getconf DARWIN_USER_TEMP_DIR` / `_CACHE_DIR` | system frameworks (Metal shader cache, CoreServices) write there with no setting |
-| `~/.ff-factory/unity-slots`, `~/.unity-mcp` | named exceptions with no setting (docs/worker-root.md 2.7); a worker root's mailbox is `<root>/unity-slots` since w5377, so the first is left for installs without one |
+| `~/.ff-factory/unity-slots`, `~/.unity-mcp` | named exceptions with no setting (docs/worker-root.md 2.7); a worker root's mailbox is `<root>/unity-slots` since w5377, so the first is left for installs without one. w5545: requests are no longer files there; the arbiter reads `<app_dir>/slot-queue`, which no worker writes (docs/unity-lifecycle.md, "Asking the daemon") |
 | `/tmp/Unity-Upm-<pid>.sock` | Unity's Package Manager: "listen EPERM /tmp/Unity-Upm-<pid>.sock" |
 | `/tmp/ilpp.sock-<hash>` | IL post-processing: "ILPPTrigger: Can't find file /tmp/ilpp.sock-..." |
 | `/tmp/Unity-ShaderCompilerIPC-<pid>-<n>.sock`/`.lock`, `/tmp/unitypreflock` | shader compiler: "Failed to listen on local IPC stream (Name in use)", then a fatal abort |
@@ -75,8 +103,10 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | `~/Library/Logs/Unity`, `~/Library/Unity/licenses` | the licensing client's logs and entitlement cache |
 | `~/Library/Caches/com.unity3d.UnityEditor` | Unity's per-user GI cache, Bee cache and `CurlRequestCache.db`: a fenced player build logged "Failed to create GICache directory at the default location" 81,224 times |
 
-and then takes write back from `<root>/daemon`, `<root>/secrets`, `<root>/claude-medium` (the Medium agents' Claude
-folder, w5543), `<root>/cache-medium` (their uv cache, w5565) and `<root>/root.json` (later rules win). The main clone
+and then takes write back from `<CLAUDE_CONFIG_DIR>/projects` but the process's own conversation (`<id>.jsonl` in any
+project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from `<root>/daemon`, `<root>/secrets`,
+`<root>/claude-medium` (the Medium agents' Claude folder, w5543), `<root>/cache-medium` (their uv cache, w5565) and
+`<root>/root.json` (later rules win). The main clone
 `<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
 '.../repo/.git/worktrees/s1/index.lock': Operation not permitted" (w5333, measured on a stand-in root; the live test
@@ -108,6 +138,25 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+
+## Signals and launchd jobs (w5562)
+
+lothsahn (w5562): "probe, then block signals and launchctl/systemd-run escapes on Mac and Linux". From the rogue-worker
+audit w5451, items 22 and 23.
+
+- **Signals.** Before w5562 a fenced worker could signal any process of its user: on m5, 2026-11-25, `kill -0` from
+  inside the fence reached the daemon's agent host and Finder (only launchd, pid 1, answered EPERM). The profile now ends
+  with `(deny signal)` and `(allow signal (target self) (target children) (target same-sandbox))` (`SIGNAL_RULES` in
+  `server/workerFence.ts`): a worker signals itself and what it started, which inherits its sandbox, and nothing else.
+  Signal 0 counts, so a liveness check of an outside process answers EPERM, which our checks read as alive
+  (`isAlive` in `machine/unitySlots.ts`, `bench_queue.py`, `player_slots.py`). What a worker needs ended outside its tree
+  (its editor, a daemon job) goes through the daemon (`mcp__machine__unity`, `unity-slot`), as before.
+- **launchd jobs.** No rule is needed: launchd refuses job submission from a sandboxed caller. Measured on m5 from inside
+  the fence (2026-11-25): `launchctl submit -l <label> -- <cmd>` exits 1 ("Operation not permitted"),
+  `launchctl bootstrap gui/<uid> <plist>` fails "5: Input/output error", and neither job ever ran. That goes over the
+  bootstrap port, not a `mach-lookup` name a profile could deny.
+- Still open: `open`/LaunchServices and Apple events (`osascript` telling Terminal to run a script) start programs
+  outside the fence; untried.
 
 ## Setuid programs: ps, top (w5397)
 

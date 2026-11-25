@@ -55,6 +55,9 @@ export const SETTABLE_KEYS = [
   // and whether a member's login from a new browser waits for an owner's approval ("off" or "members").
   'trustProxy',
   'deviceApproval',
+  // New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"), the owner's only: "off",
+  // "advisory" (the default: let in, but logged as one that would need approval); null puts back the default.
+  'ownerDeviceApproval',
   // The daemon link from the tailnet only (w5575): "warn", "enforce" or "off" (the recovery switch); null puts back "warn".
   'machineLinkTailnet',
   // The agents' own OS account on the portal VM (w5598, docs/vault.md "In the VM"): "on" (unset) or "off" (the recovery
@@ -198,7 +201,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'machineLinkTailnet', 'agentAccount', 'privacyGuards']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -577,6 +580,12 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null || value === 'off') return value === 'off' ? 'off' : undefined;
       if (value === 'members') return 'members';
       throw new Error(`deviceApproval is "members" (a member's login from a new browser waits for an owner's approval in the portal) or "off"`);
+    }
+    case 'ownerDeviceApproval': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'off' || value === 'advisory') return value;
+      if (value === 'enforce') throw new Error(`ownerDeviceApproval "enforce" does not exist yet: owner logins are only recorded for now (advisory), and holding them comes in a later change`);
+      throw new Error(`ownerDeviceApproval is "advisory" (the default: an owner's login from a new browser outside the tailnet is let in and logged as one that would need approval), "off", or null for the default`);
     }
     case 'machineLinkTailnet': {
       if (value === undefined || value === null) return undefined;
@@ -1051,6 +1060,10 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'publicUrl') cfg.publicUrl = v as string | undefined;
   else if (key === 'trustProxy') cfg.trustProxy = v as boolean;
   else if (key === 'deviceApproval') cfg.deviceApproval = v as 'off' | 'members' | undefined;
+  else if (key === 'ownerDeviceApproval') {
+    if (v === undefined) delete cfg.ownerDeviceApproval;
+    else cfg.ownerDeviceApproval = v as 'off' | 'advisory';
+  }
   else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
   else if (key === 'agentAccount') cfg.agentAccount = v as 'on' | 'off' | undefined;
   else if (key === 'privacyGuards') {

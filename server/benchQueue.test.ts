@@ -30,7 +30,7 @@ function ticket(lock: string, name: string, info: object, granted?: number, revo
 
 test('w1615: readBenchLock counts a queue holder while its helper lives, however old its dir; never a gone, waiting or revoked one', (t) => {
   const root = tmp(t);
-  const lock = path.join(root, 'tmp', 'bench.lock');
+  const lock = path.join(root, 'daemon', 'bench.lock');
   fs.mkdirSync(lock, { recursive: true });
   fs.writeFileSync(path.join(lock, 'owner'), 'BEAST pid 4121 worker 21:04:10 probe A round 2 [t00000007] (/f/ffw/sandboxes/slot4)\n');
   const old = Date.now() / 1000 - 3 * 3600;

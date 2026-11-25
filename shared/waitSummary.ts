@@ -199,6 +199,26 @@ export function approveAsk(w: Pick<WorkItem, 'source'>, recommendation: string |
   };
 }
 
+export const FILE_HANDUPS_LABEL = 'File them: each becomes your request, like one you asked for';
+export const DROP_HANDUPS_LABEL = 'Drop them: nothing is filed';
+
+/**
+ * w5577: a hand-up left unfiled 12 h, as a question for the person it was handed up to: File them (through their own
+ * orchestrator's file_follow_ups, its limits included) or Drop them. FF Factory never files them by itself.
+ */
+export function handUpAsk(w: Pick<WorkItem, 'id' | 'handedUp'>): Ask {
+  const h = w.handedUp;
+  const n = Math.max(1, (h?.count ?? 1) - (h?.filed.length ?? 0));
+  const titles = (h?.items ?? []).map((i) => `“${clip(i.title, 70)}”`).slice(0, 4).join(', ');
+  return {
+    question: `File the ${n} follow-up request${n === 1 ? '' : 's'} worker ${h?.worker ?? ''} handed up on ${w.id}?`.replace('  ', ' '),
+    options: [
+      { label: FILE_HANDUPS_LABEL, description: `${titles ? `${titles}${(h?.items.length ?? 0) > 4 ? ' and more' : ''}: f` : 'F'}iled through your orchestrator, with the same limits as any request you file.` },
+      { label: DROP_HANDUPS_LABEL, description: `${w.id} no longer waits on them and can close.` },
+    ],
+  };
+}
+
 /** Who acts, in words. */
 const whoText = (on: readonly string[], ask: WaitingAsk, facts: WaitFacts) => (ask === 'approve' ? `a reviewer${facts.reviewers ? ` (${facts.reviewers})` : ''}` : on.join(', ') || 'its person');
 

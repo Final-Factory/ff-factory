@@ -41,7 +41,7 @@
 // the request, read from the log). A worker that waits on another request's worker (its files, its results) is Blocked on
 // that request. And a worker that says it waits on the orchestrator for its own work says so in the Stalled line.
 import { needsAwayText } from './availability.ts';
-import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type SessionInfo, type WorkItem } from './types.ts';
+import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type Requester, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
 import { gatesName, gatesOf } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
@@ -90,9 +90,11 @@ export interface WorkLive {
   /**
    * w4352: what it waits on is follow-up requests its worker handed up, for its requester's orchestrator to file: that
    * orchestrator's backlog, shown apart from waits on a person on the Waiting on input tab. FF Factory re-sends them at
-   * 2 h and files them itself at 12 h (Orchestrators.handUpStep).
+   * 2 h, and at 12 h they become a card for that person (handUpCard, w5577; Orchestrators.handUpStep).
    */
   backlog?: boolean;
+  /** w5577: the hand-up's card: its person files or drops the follow-ups with one click (WorkHandedUp.card). */
+  handUpCard?: boolean;
 }
 
 /**
@@ -510,13 +512,16 @@ export function unfiledFollowUpsIn(report: string | undefined): { line: string; 
 
 /** w4352: unfiled handed-up follow-ups are sent again to the requester's orchestrator this long after the hand-up (once). */
 export const HAND_UP_RESEND_MS = 2 * 3_600_000;
-/** w4352: and this long after it FF Factory files them itself at low priority and closes the request on its kept DONE. */
-export const HAND_UP_AUTOFILE_MS = 12 * 3_600_000;
+/**
+ * w5577: and this long after it they become a Waiting-on-input card for the person they were handed up to, once, to file
+ * or drop. Until w5577 FF Factory filed them itself here (w4352), so a hijacked or careless worker could start paid work.
+ */
+export const HAND_UP_CARD_MS = 12 * 3_600_000;
 
 /** w2969: how many of a request's handed-up follow-ups are still to file (0 when none, all filed, or dropped). */
 export function handUpsPending(w: Pick<WorkItem, 'handedUp'>): number {
   const h = w.handedUp;
-  if (!h || h.autoFiled) return 0;
+  if (!h || h.autoFiled || h.dropped) return 0;
   return Math.max(0, h.count - h.filed.length);
 }
 
@@ -743,22 +748,47 @@ const orchestratorLive = (w: Pick<WorkItem, 'requestedBy'>, worker: string, line
   line,
 });
 
-/** w4352: the hand-up's wait (WorkItem.handedUp), on the orchestrator of the person it was sent to; undefined when none is pending. */
+/**
+ * w4352: the hand-up's wait (WorkItem.handedUp), on the orchestrator of the person it was sent to, and from 12 h on (w5577)
+ * on that person, as their card to file or drop them; undefined when none is pending.
+ */
 export function handUpLive(w: Pick<WorkItem, 'handedUp' | 'requestedBy' | 'requesters'>, now: number): WorkLive | undefined {
   const left = handUpsPending(w);
   const h = w.handedUp;
   if (!left || !h) return undefined;
-  const to = [w.requestedBy, ...w.requesters].find((r) => h.to.some((u) => u.toLowerCase() === r.userId.toLowerCase())) ?? w.requestedBy;
+  const to = handUpPerson(w);
+  const them = left === 1 ? 'it' : 'them';
+  const what = `${left} follow-up request${left === 1 ? '' : 's'} its worker ${h.worker} handed up ${ago(h.at, now)}`;
+  if (h.card) {
+    return {
+      state: 'waiting',
+      why: `${what} ${left === 1 ? 'is' : 'are'} still not filed: ${to.displayName} files ${them} or drops ${them} (w5577: a hand-up never files itself)`,
+      waitsOn: [to.displayName],
+      worker: h.worker,
+      handUpCard: true,
+    };
+  }
   const at = Date.parse(h.at) || now;
-  const fileAt = new Date(at + HAND_UP_AUTOFILE_MS).toISOString();
+  const cardAt = new Date(at + HAND_UP_CARD_MS).toISOString();
   return {
     state: 'waiting',
-    why: `${left} follow-up request${left === 1 ? '' : 's'} its worker ${h.worker} handed up ${ago(h.at, now)} wait${left === 1 ? 's' : ''} for ${to.displayName}'s orchestrator to file ${left === 1 ? 'it' : 'them'}; FF Factory files ${left === 1 ? 'it' : 'them'} itself at low priority at ${fileAt.slice(11, 16)} UTC${fileAt.slice(0, 10) !== new Date(now).toISOString().slice(0, 10) ? ` on ${fileAt.slice(0, 10)}` : ''} (w4352)`,
+    why: `${what} wait${left === 1 ? 's' : ''} for ${to.displayName}'s orchestrator to file ${them}; left unfiled, ${left === 1 ? 'it becomes' : 'they become'} a card for ${to.displayName} to file or drop at ${cardAt.slice(11, 16)} UTC${cardAt.slice(0, 10) !== new Date(now).toISOString().slice(0, 10) ? ` on ${cardAt.slice(0, 10)}` : ''} (w5577)`,
     waitsOn: [`${to.displayName}'s orchestrator`],
     worker: h.worker,
     orchestrator: true,
     backlog: true,
   };
+}
+
+/** w5577: the person a request's follow-ups were handed up to (WorkHandedUp.to), else its requester. */
+export function handUpPerson(w: Pick<WorkItem, 'handedUp' | 'requestedBy' | 'requesters'>): Requester {
+  const to = w.handedUp?.to ?? [];
+  return [w.requestedBy, ...w.requesters].find((r) => to.some((u) => u.toLowerCase() === r.userId.toLowerCase())) ?? w.requestedBy;
+}
+
+/** w5577: whether a request's hand-up is a person's card now (12 h unfiled): its follow-ups still pending and `card` set. */
+export function handUpCardOf(w: Pick<WorkItem, 'handedUp'>): boolean {
+  return !!w.handedUp?.card && handUpsPending(w) > 0;
 }
 
 const outsideLive = (worker: string, who: string, line: string): WorkLive => ({
@@ -1030,7 +1060,7 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   }
 
   // w4352: follow-up requests its worker handed up wait for the requester's orchestrator to file them (w2969): Waiting, on
-  // that orchestrator, as its backlog, not on a person; FF Factory files them itself 12 h after the hand-up.
+  // that orchestrator, as its backlog, not on a person; 12 h after the hand-up they become that person's card (w5577).
   const handUp = handUpLive(w, f.now);
   if (handUp) return handUp;
 

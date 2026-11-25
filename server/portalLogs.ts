@@ -4,7 +4,7 @@ import { describeCleanup } from './cleanup.ts';
 import { describeMedia } from './mediaRetention.ts';
 import { contextCycles, contextReport } from './contextGrowth.ts';
 import { run } from './proc.ts';
-import { redactSecrets } from './secrets.ts';
+import { redactLogText, stillLooksSecret } from './logRedact.ts';
 import type { CleanupSummary } from '../shared/types.ts';
 import { HOUR_MS, type BenchHourRow } from '../shared/benchHours.ts';
 
@@ -117,48 +117,8 @@ export interface PortalLogsDeps {
 
 // ---------------------------------------------------------------- redaction
 
-/**
- * What a log line may carry that redactSecrets (server/secrets.ts: token shapes and the vault's values) does not name:
- * Authorization and cookie headers, bearer tokens, a password in a URL or a query string, `password=…`/`token: …`
- * assignments, JWTs and the Claude credentials file's refresh token. The same families FFBox redacts before its logs
- * view picks lines (docs/ffbox.md, `logs`). Paths, URLs, addresses, commits and ids stay.
- */
-const MASK = '[redacted]';
-const SECRET_KEY = '(?:x-api-key|x-auth-token|api[-_]?key|apikey|access[-_]?token|refresh[-_]?token|id[-_]?token|auth[-_]?token|session[-_]?token|client[-_]?secret|secret|passwd|password|token|credential|credentials)';
-const REDACTIONS: [RegExp, (...m: string[]) => string][] = [
-  // Authorization: Bearer abc / Proxy-Authorization / "authorization":"Basic …" (the scheme stays, the value goes)
-  [/\b((?:proxy-)?authorization)(["']?\s*[:=]\s*["']?)(?:(bearer|basic|token|bot|digest)\s+)?[^\s"',;}]+/gi, (_m, k, sep, scheme) => `${k}${sep}${scheme ? `${scheme} ` : ''}${MASK}`],
-  [/\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (_m, scheme) => `${scheme} ${MASK}`],
-  // Cookie and Set-Cookie: the rest of the line
-  [/\b((?:set-)?cookie)(["']?\s*[:=]\s*)[^\r\n]*/gi, (_m, k, sep) => `${k}${sep}${MASK}`],
-  // a Tailscale login link (tailscaled prints one when the node needs a login): whoever opens it first logs the node in
-  [/(https?:\/\/login\.tailscale\.com\/a\/)[A-Za-z0-9]+/gi, (_m, base) => `${base}${MASK}`],
-  // scheme://user:password@host and scheme://<long token>@host
-  [/(\b[a-z][a-z0-9+.-]*:\/\/)([^\s/:@"']*):([^\s/@"']+)@/gi, (_m, scheme, user) => `${scheme}${user}:${MASK}@`],
-  [/(\b[a-z][a-z0-9+.-]*:\/\/)[A-Za-z0-9._~-]{24,}@/gi, (_m, scheme) => `${scheme}${MASK}@`],
-  // ?token=…&key=… in a URL
-  [/([?&](?:access_token|refresh_token|id_token|token|api_key|apikey|key|sig|signature|auth|secret|client_secret|password)=)[^&\s"']+/gi, (_m, k) => `${k}${MASK}`],
-  // password=…, "token": "…", x-api-key: …
-  [new RegExp(`\\b(${SECRET_KEY})(["']?\\s*[:=]\\s*["']?)(?!\\[redacted)([^\\s"',;&}\\]]{6,})`, 'gi'), (_m, k, sep) => `${k}${sep}${MASK}`],
-  // any Anthropic key shape (oat/ort/api/sid …), JWTs, AWS, Slack
-  [/sk-ant-[a-z]{3}\d\d-[A-Za-z0-9_-]{20,}/g, () => 'sk-ant-[redacted]'],
-  [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g, () => `[redacted jwt]`],
-  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, () => '[redacted aws key]'],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, () => '[redacted slack token]'],
-];
-
-/** A line that still holds one of these after redaction is left out (a regex that missed it): FFBox's `withheld_lines`. */
-const STILL_SECRET =
-  /sk-ant-[a-z]{3}\d\d-[\w-]{10,}|\bgh[pousr]_\w{20,}|github_pat_\w{20,}|-----BEGIN [A-Z0-9 ]*PRIVATE KEY|AGE-SECRET-KEY-1[0-9A-Z]{20,}|\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}|ffpv1_[\w-]{20,}|\bffm_[\w.-]+_[\w-]{32,}|tskey-[a-z]+-[\w-]{16,}|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/;
-
-/** `text` with its secrets masked: redactSecrets (token shapes, the vault's values), then the header, URL and assignment forms. */
-export function redactLogText(text: string): string {
-  let out = redactSecrets(text);
-  for (const [re, fn] of REDACTIONS) out = out.replace(re, fn as never);
-  return out;
-}
-
-export const stillLooksSecret = (line: string) => STILL_SECRET.test(line);
+// The redactor is server/logRedact.ts (w5525): the journal and `fffctl logs` mask the same way as this view.
+export { redactLogText, stillLooksSecret } from './logRedact.ts';
 
 // ---------------------------------------------------------------- the call
 

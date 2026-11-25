@@ -1,5 +1,5 @@
 // A machine's bench lock (w1600): the lock the game repo's timed runs hold for their whole length
-// (scripts/bench/quiet_gate.sh bench_lock, w1438), a directory `<FF_WORKER_ROOT>/tmp/bench.lock` with the holder's line in
+// (scripts/bench/quiet_gate.sh bench_lock, w1438), a directory `<FF_WORKER_ROOT>/daemon/bench.lock` (w5545; before it tmp/bench.lock) with the holder's line in
 // `owner`. The daemon reports it with its stats, so the portal keeps a Live view editor from starting beside a timed run
 // (docs/live-view.md, "On BEAST first"): a streaming editor in play mode takes the CPU and GPU the run measures.
 import fs from 'node:fs';
@@ -9,8 +9,14 @@ import type { TimedAskState } from '../server/timedAsk.ts';
 import { benchQueueDir, queueTickets, type QueueTicket } from './benchQueue.ts';
 import type { PassedMark } from './benchRaise.ts';
 
-/** Where quiet_gate.sh keeps the lock: `$FF_WORKER_ROOT/tmp/bench.lock` (Git Bash's /f/ffw is F:\ffw). */
-export const benchLockDir = (root: string) => path.join(root, 'tmp', 'bench.lock');
+/**
+ * The bench lock dir; its queue is beside it (benchQueueDir: <root>/daemon/bench.queue). w5545: inside the daemon's own
+ * folder, which no worker writes (the write fences' LOCKED_CHILDREN), so every ticket in it is one the daemon's helper took
+ * for a caller its token named (machine/benchProxy.ts). The old place, <root>/tmp/bench.lock, is ignored.
+ */
+export const benchLockDir = (root: string) => path.join(root, 'daemon', 'bench.lock');
+/** Before w5545: workers wrote tickets here themselves. Nothing reads it now; a ticket left or forged there counts for nothing. */
+export const legacyBenchLockDir = (root: string) => path.join(root, 'tmp', 'bench.lock');
 
 /**
  * An old-style lock (a branch from before w1615, no ticket in its owner line) older than this is a killed run's
@@ -68,7 +74,7 @@ export function readBenchQueue(root: string | undefined, alive: (pid: number) =>
 }
 
 /**
- * Write each worker's request priority where the bench queue reads it (w1628): <root>/tmp/bench.queue/priorities.json,
+ * Write each worker's request priority where the bench queue reads it (w1628): <root>/daemon/bench.queue/priorities.json (w5545),
  * {at, v, sessions: {<session id>: {priority, requests, exempt?}}, single_worker}, replaced whole (a reader never sees
  * half a file). A ticket whose FF_SESSION_ID is not in it counts as normal. v 2 (w1832) says the exempt marks and
  * single_worker are this daemon's: bench_queue.py then honours a pre-empt ticket only from the session marked release.

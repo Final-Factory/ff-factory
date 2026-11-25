@@ -86,6 +86,12 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
         </div>
       )}
       {m.status === 'error' && <div className="banner banner-error">{m.statusDetail ?? 'Error'}</div>}
+      {/* w5555: its daemon holds every sandbox worker so none starts unfenced; placement sends work elsewhere. */}
+      {m.fence?.state === 'failed' && (
+        <div className="banner banner-error">
+          Worker fence failed on {m.name ?? m.id}: {m.fence.why ?? 'no reason given'}. Sandbox workers there are held so none starts unfenced; work goes to other machines.
+        </div>
+      )}
       <DetailsSheet open={details} onClose={() => setDetails(false)} title={displayName(m)}>
         <DetailsSection
           title="Machine"
