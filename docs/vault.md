@@ -101,11 +101,25 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   connection, its `ERR <why>`, no answer in 30 s) starts that agent as `fff`, as before (`tokenPipeSpawner`), and alerts
   the owners once per reason per 6 h ("Agents run as the portal's account"). Two agents through the socket that end before
   any result within 30 minutes, none succeeding between, switch every later agent back to `fff` until the portal
-  restarts ("Agents switched back to the portal's account"; `AGENT_BREAKER`). Config `agentAccount` `"off"`
-  (`set_app_config`, Lothsahn and Ben; read live) does the same at once. `install.sh`'s agent step never fails the
-  install: on any error it warns and stops the socket, and the portal falls back. A rollback is unchanged: an older
-  release has no `FFF_AGENT_SOCKET` in its unit (`portal_unit_back`) and ignores the setting; `ci-vm-e2e.sh` rolls back a
-  broken update with `agentAccount` `"on"`.
+  restarts ("Agents switched back to the portal's account"; `AGENT_BREAKER`). After `OK`, a Claude Code that writes
+  nothing for 3 minutes after its input (`AGENT_FIRST_OUTPUT_MS`) counts as a failure too: the connection is dropped and
+  that agent starts as `fff` with the same input (w5651). `install.sh`'s agent step never fails the install: on any error
+  it warns and stops the socket, and the portal falls back. A rollback is unchanged: an older release has no
+  `FFF_AGENT_SOCKET` in its unit (`portal_unit_back`) and ignores the setting; `ci-vm-e2e.sh` rolls back a broken update
+  with `agentAccount` `"on"`. The agents end with the portal: `fff-portal.service` stops every `fff-agent@` instance when
+  it stops (`ExecStopPost=`) and before it starts (`ExecStartPre=`), so a restarted portal never meets a turn of its old
+  self (`ci-vm-e2e.sh` restarts it mid-turn).
+  **Three modes, warn first** (w5651, the lockout review): `"off"` starts every agent as `fff`; `"warn"`, the default
+  while `agentAccount` is unset, starts every agent as `fff` and, at most once per 30 minutes, checks in the background
+  that the socket starts Claude Code as `fff-agent` (`--version`, a dummy token), logging `agent account (warn): the
+  check passed` or alerting "The agent account check failed"; `"on"` starts them as `fff-agent`. An owner sets it with
+  `set_app_config` (Lothsahn and Ben; read live at each start). On the VM, `fffctl agents off|warn|on|default` writes
+  `/etc/fff/agent-account` (`FFF_AGENT_SWITCH`), which wins over the setting; off also stops `fff-agent.socket`. The ops
+  worker may run `fffctl agents`, `off` and `warn` (`FFFCTL_FORMS`), so turning the account off needs no orchestrator
+  and no person; `on` and `default` are a person's. `ci-vm-e2e.sh` runs one real agent turn through the socket (the
+  portal's `agentAccount.ts` and the Agent SDK against a stand-in API: an in-process MCP call, a permission ask, a memory
+  write, a resume and an interrupt; `deploy/vm/test/fff-agent-turn.driver.ts`), then the same turn after the ops worker's
+  `off` and `warn`.
   **What is left.** The data folder is as readable to `fff-agent` as it was to `fff` (its sessions and logins files; the
   read guard keeps them closed to the Read tool); the vault there is sealed with the key the agents cannot open. A
   `.credentials.json` in the portal's `home/.claude`, if a person ever logged in there, is in the agents' view, as it was

@@ -214,4 +214,12 @@ a=$out/fff-agent@.service
 ! grep -nE "secrets|/etc/fff|$FFF_ROOT/home( |$)" "$a" | grep -vE '^[0-9]+:#' | grep -q . || fail "fff-agent@.service binds the secrets folder, /etc/fff or the portal's home: $(grep -nE "secrets|/etc/fff" "$a")"
 { grep -q '^agent_setup()' $G/install.sh && grep -qF 'run_cmd systemctl disable --now fff-agent.socket' $G/install.sh; } || fail "install.sh's agent step is not the non-fatal one that stops the socket on a failure"
 ok "the portal's agents run as $AGENT_USER behind fff-agent.socket, in a unit that sees only its views and its own processes; install.sh falls back"
+# The lockout review (w5651): the agents never outlive their portal (its crash resume would run a second Claude Code on one
+# session), and the switch the ops worker turns (fffctl agents) is named to the portal and kept off by install.sh.
+grep -qx "ExecStartPre=-+/usr/bin/systemctl stop 'fff-agent@\*.service'" "$p" || fail "fff-portal.service does not stop its old agents before it starts"
+grep -qx "ExecStopPost=-+/usr/bin/systemctl stop --no-block 'fff-agent@\*.service'" "$p" || fail "fff-portal.service does not stop its agents when it stops"
+[ "$(value "$a" Service TimeoutStopSec)" = 15 ] || fail "fff-agent@.service has no short TimeoutStopSec"
+grep -qx 'Environment=FFF_AGENT_SWITCH=/etc/fff/agent-account' "$p" || fail "fff-portal.service does not name the switch fffctl agents writes"
+grep -qF '"$(cat "$FFF_AGENT_SWITCH" 2>/dev/null)" = off' $G/install.sh || fail "install.sh starts fff-agent.socket even when fffctl agents switched it off"
+ok "the agents end with their portal (ExecStartPre and ExecStopPost, TimeoutStopSec=15), and fffctl agents' switch reaches the portal and install.sh"
 echo "all unit checks pass"

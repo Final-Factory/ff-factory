@@ -750,8 +750,9 @@ function mayDrive(req: http.IncomingMessage, s: SessionInfo) {
   if (identity.get(me.userId)?.role !== 'owner') throw new HttpError(403, "only the owner answers the dispatcher's permission requests or changes its mode; ask your own orchestrator, which files work with it");
 }
 const notifier = new Notifier(cfg.dataDir, store, sessions);
-// The portal VM's agents as their own OS account (w5598, server/agentAccount.ts): the owner's setting, read at each start,
-// and the owners told when one started as the portal's account instead.
+// The portal VM's agents as their own OS account (w5598, server/agentAccount.ts): the owner's setting ("warn" while unset;
+// the VM's fffctl agents switch wins), read at each start, and the owners told when one started as the portal's account
+// instead or warn's check failed.
 configureAgentAccount({ setting: () => cfg.agentAccount, alert: (title, body) => notifier.host(title, body) });
 notifier.orchestratorId = () => store.orchestratorId;
 // Device approval (docs/identity.md): a member's login from a new browser waits; the owners are told.

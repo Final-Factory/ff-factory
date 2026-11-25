@@ -315,10 +315,18 @@ agent_setup() {
   u+=$(render_unit "$here/units/fff-agent@.service.in" AGENT_USER AGENT_ROOT FFF_ROOT FFF_LIB "BASE_PATH=${BASE_PATH:-$FFF_ROOT/base}" | write_file /etc/systemd/system/fff-agent@.service 0644) || return 1
   u+=$(write_file /etc/systemd/system/fff-agent.socket 0644 <"$here/units/fff-agent.socket") || return 1
   [ -z "$u" ] || run_cmd systemctl daemon-reload || return 1
-  run_cmd systemctl enable fff-agent-views.service fff-agent.socket || return 1
-  # Only when it changed or is not up: the views of running agents stay theirs either way (their own mount namespace).
+  run_cmd systemctl enable fff-agent-views.service || return 1
+  # Only when it changed or is not up. A restart of the views stops the running agents with them (fff-agent@ Requires=
+  # them); step 10 restarts the portal after a change anyway, which stops them too (fff-portal.service, w5651).
   if [ -n "$u" ] || ! systemctl is-active --quiet fff-agent-views.service; then run_cmd systemctl restart fff-agent-views.service || return 1; fi
-  if [ -n "$u" ] || ! systemctl is-active --quiet fff-agent.socket; then run_cmd systemctl restart fff-agent.socket || return 1; fi
+  if [ "$(cat "$FFF_AGENT_SWITCH" 2>/dev/null)" = off ]; then
+    # fffctl agents off (w5651): a person or the ops worker switched it off; it stays off until fffctl agents warn or on.
+    log "  fffctl agents off ($FFF_AGENT_SWITCH): fff-agent.socket stays stopped"
+    run_cmd systemctl disable --now fff-agent.socket 2>/dev/null || true
+  else
+    run_cmd systemctl enable fff-agent.socket || return 1
+    if [ -n "$u" ] || ! systemctl is-active --quiet fff-agent.socket; then run_cmd systemctl restart fff-agent.socket || return 1; fi
+  fi
   if [ "$DRY_RUN" != 1 ]; then "$FFF_LIB/fff-agent-views" check || return 1; fi
 }
 if ! agent_setup; then

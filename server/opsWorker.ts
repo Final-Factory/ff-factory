@@ -140,6 +140,14 @@ export const FFFCTL_FORMS: Record<string, { allowed: string[]; changes: string[]
   'disk-usage': { allowed: [''], changes: [] },
   // What the portal's own account can open (w5506): refused or OPENED, credential names counted, never a value.
   'fence-check': { allowed: [''], changes: [] },
+  // The portal's agents' own account (w5598, w5651): status reads; off and warn are the worker's recovery route, which needs no
+  // orchestrator (an orchestrator under that account may be what is broken); on and default stay a person's.
+  agents: {
+    allowed: ['', 'status'],
+    changes: ['off', 'warn', 'on', 'default'],
+    ops: ['off', 'warn'],
+    grant: "off or warn only: agents start as the portal's account again, as before w5598; turning it on stays a person's",
+  },
   help: { allowed: [''], changes: [] },
   units: { allowed: ['', '--check'], changes: [] },
   logs: { allowed: ['', 'N'], changes: ['-f'] },

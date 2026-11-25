@@ -3,6 +3,7 @@ Description=FF Factory agent: Claude Code as @AGENT_USER@ for the portal (w5598)
 Documentation=https://github.com/Final-Factory/ff-factory/blob/main/docs/vault.md
 Requires=fff-agent-views.service
 After=fff-agent-views.service network-online.target
+# Never longer than its portal: fff-portal.service stops every instance at its stop and before its start (w5651).
 
 [Service]
 Type=simple
@@ -16,6 +17,7 @@ StandardInput=socket
 StandardOutput=socket
 StandardError=journal
 SyslogIdentifier=fff-agent
+TimeoutStopSec=15
 WorkingDirectory=@AGENT_ROOT@
 UMask=0077
 NoNewPrivileges=yes

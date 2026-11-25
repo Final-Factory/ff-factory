@@ -594,8 +594,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
     }
     case 'agentAccount': {
       if (value === undefined || value === null) return undefined;
-      if (value === 'on' || value === 'off') return value;
-      throw new Error('agentAccount is "on" (the portal VM starts its agents as their own OS account, fff-agent) or "off" (as the portal\'s account, as before w5598: the recovery switch); null puts back "on"');
+      if (value === 'on' || value === 'warn' || value === 'off') return value;
+      throw new Error('agentAccount is "on" (the portal VM starts its agents as their own OS account, fff-agent), "warn" (as the portal\'s account, checking the agent account\'s socket and alerting when it fails) or "off" (as the portal\'s account, as before w5598: the recovery switch); null puts back "warn"; the VM\'s fffctl agents wins over it');
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1065,7 +1065,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
     else cfg.ownerDeviceApproval = v as 'off' | 'advisory';
   }
   else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
-  else if (key === 'agentAccount') cfg.agentAccount = v as 'on' | 'off' | undefined;
+  else if (key === 'agentAccount') cfg.agentAccount = v as 'off' | 'warn' | 'on' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;

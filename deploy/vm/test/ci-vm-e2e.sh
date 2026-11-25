@@ -306,6 +306,80 @@ g 'sudo journalctl -t fff-agent --no-pager -n 20 -o cat' | matches -E 'starting 
 out=$(g 'sudo -u fff node /tmp/fff-agent-sock.js /etc' || true)
 printf '%s' "$out" | matches '^ERR .*not under /srv/fff' || fail "the agents' launcher ran outside the portal's folders: $out"
 echo "ok: the portal's agents run as fff-agent, see the portal's folders as their own, write them as fff, and the key, the portal's memory and every fff process's environ are refused to them"
+# One real agent turn through the socket (w5651 (e), the lockout review of w5598): the portal's own code (agentAccount.ts)
+# and the Agent SDK as fff, against a stand-in for Anthropic's API on 127.0.0.1 (no credential: CI is public). The turn
+# calls an in-process MCP tool and writes the memory folder, then a resume and an interrupt (fff-agent-turn.driver.ts).
+drv=/srv/fff/app/current/deploy/vm/test/fff-agent-turn.driver.ts
+as_portal='sudo -u fff env HOME=/srv/fff/home CLAUDE_CONFIG_DIR=/srv/fff/home/.claude FFF_AGENT_SOCKET=/run/fff-agent/claude.sock FFF_AGENT_SWITCH=/etc/fff/agent-account'
+cimem=/srv/fff/data/orchestrator-memory/ci-turn
+starts() { g 'sudo journalctl -t fff-agent --no-pager -o cat' | grep -c 'starting Claude Code' || true; }
+instances() { g "systemctl list-units 'fff-agent@*' --state=active --no-legend --plain" | grep -c . || true; }
+agent_running() { [ "$(instances)" -ge 1 ]; }
+no_agent() { [ "$(instances)" = 0 ]; }
+turn() { g "$as_portal node $drv turn $cimem /srv/fff/base 2>&1" | grep -E '^(mode|ok|FAIL|alert|session|agent account)' || true; }
+turn_ok() { # OUT WHAT
+  [ "$(printf '%s\n' "$1" | grep -c '^ok: ')" = 3 ] || fail "$2: not a turn, a resume and an interrupt: $1"
+  if printf '%s\n' "$1" | matches -E '^(FAIL|alert):'; then fail "$2: $1"; fi
+  [ "$(g "sudo stat -c %U $cimem/ci-agent-turn.md")" = fff ] || fail "$2: the turn's memory note is not fff's on disk"
+  g "sudo rm -f $cimem/ci-agent-turn.md"
+}
+g "sudo -u fff mkdir -p $cimem"
+n0=$(starts)
+out=$(turn)
+echo "$out"
+printf '%s\n' "$out" | matches -x 'mode: on; via: socket' || fail "the agent turn did not go through fff-agent.socket: $out"
+turn_ok "$out" "an agent turn as fff-agent"
+[ $(($(starts) - n0)) -ge 3 ] || fail "the agent turn's three starts are not fff-agent's ($n0 before, $(starts) after)"
+sid=$(printf '%s\n' "$out" | sed -n 's/^session: //p')
+[ "$(g "sudo find /srv/fff/home/.claude/projects -name '$sid.jsonl' -printf '%u\n'")" = fff ] || fail "the turn's transcript $sid.jsonl is not in the portal's Claude folder as fff's"
+echo "ok: a real agent turn ran as fff-agent: an MCP call back to the portal's process, a permission ask, a memory write and a transcript stored as fff's, a resume and an interrupt"
+# The portal stopped mid-turn (the review's gap (b)): fff-portal.service stops every fff-agent@ instance (ExecStopPost=,
+# ExecStartPre=), so a restarted portal never meets a turn of its old self. Then a measurement, not a gate: how long an
+# instance lives on once the process that started it ends (its socket closes) with the portal still up.
+hang() { g "nohup $as_portal node $drv hang $cimem /srv/fff/base >/tmp/ci-hang.out 2>&1 </dev/null &"; }
+hang
+wait_for 60 "an agent instance mid-turn" agent_running
+g 'cat /tmp/ci-hang.out' | matches -x 'hanging' || fail "the hung turn did not start: $(g 'cat /tmp/ci-hang.out')"
+pid=$(g 'systemctl show -p MainPID --value fff-portal.service')
+g 'sudo systemctl restart fff-portal.service'
+wait_for 60 "the portal's restart ended the agent instance mid-turn" no_agent
+wait_for 300 "the portal answers after its restart mid-turn" health
+g 'sudo pkill -TERM -f "fff-agent-turn[.]driver"' || true
+hang
+wait_for 60 "a second agent instance mid-turn" agent_running
+g 'sudo pkill -TERM -f "fff-agent-turn[.]driver"'
+t0=$(date +%s)
+until no_agent || [ $(($(date +%s) - t0)) -ge 120 ]; do sleep 5; done
+if no_agent; then echo "measured: an agent instance ended $(($(date +%s) - t0)) s after the process that started it ended"; else
+  echo "measured: an agent instance still ran 120 s after the process that started it ended (the portal's stop and start end it)"
+  g "sudo systemctl stop 'fff-agent@*.service'"
+fi
+# The ops worker's switch (the review's (b)): no orchestrator and no person. Off: every agent starts as the portal's
+# account and fff-agent.socket stops; warn: as the portal's account, with a check of the socket in the background.
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents off 2>&1') || fail "the ops worker's fffctl agents off: $out"
+[ "$(g 'systemctl is-active fff-agent.socket' || true)" != active ] || fail "fffctl agents off left fff-agent.socket listening"
+n0=$(starts)
+out=$(turn)
+echo "$out"
+printf '%s\n' "$out" | matches -x 'mode: off; via: portal' || fail "with fffctl agents off the turn did not start as the portal's account: $out"
+turn_ok "$out" "an agent turn with fffctl agents off"
+[ "$(starts)" = "$n0" ] || fail "with fffctl agents off an agent still started as fff-agent"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents on 2>&1' || true)
+printf '%s' "$out" | matches -F "a person's" || fail "the ops worker turned the agents' account on: $out"
+out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents warn 2>&1') || fail "the ops worker's fffctl agents warn: $out"
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fffctl agents warn did not start fff-agent.socket"
+n0=$(starts)
+out=$(turn)
+echo "$out"
+printf '%s\n' "$out" | matches -x 'mode: warn; via: portal' || fail "with fffctl agents warn the turn did not start as the portal's account: $out"
+turn_ok "$out" "an agent turn with fffctl agents warn"
+printf '%s\n' "$out" | matches -E "^agent account \(warn\): the check passed" || fail "warn's check of fff-agent.socket did not pass: $out"
+[ $(($(starts) - n0)) = 1 ] || fail "warn started $(($(starts) - n0)) Claude Codes as fff-agent, not its one check"
+g 'sudo fffctl agents default' >/dev/null || fail "fffctl agents default"
+g 'sudo fffctl agents status' | matches -F 'switch: none' || fail "fffctl agents default left a switch: $(g 'sudo fffctl agents status')"
+g 'systemctl is-active fff-agent.socket' | matches -x active || fail "fff-agent.socket is not listening after fffctl agents default"
+g "sudo rm -rf $cimem /tmp/ci-hang.out"
+echo "ok: the ops worker turns the agents' account off (agents start as fff, the socket stops) and to warn (as fff, with a check that passed), not on; a person's default puts it back"
 out=$(g 'printf "ci-vault-secret-QRST\n" >/tmp/v && sudo fffctl vault add --name ci-env --kind env --env CI_E2E_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v')
 echo "$out"
 if printf '%s' "$out" | matches 'ci-vault-secret'; then fail "fffctl vault add printed the value"; fi

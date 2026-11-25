@@ -378,8 +378,12 @@ and it ignores config `agentAccount`; the account, its socket and its views stay
 
 **The agents' account (w5598).** If orchestrators or the dispatcher fail as `fff-agent` (the alert "Agents run as the
 portal's account" or "Agents switched back to the portal's account" says why), they already run as `fff`. To keep them
-there: config `agentAccount` `"off"` (set_app_config, read live), or `sudo systemctl disable --now fff-agent.socket`.
-`sudo /usr/local/lib/fff/fff-agent-views check` and `journalctl -t fff-agent` show what failed.
+there: `sudo fffctl agents off` (the ops worker may run it too: it writes `/etc/fff/agent-account`, which wins over the
+setting, and stops `fff-agent.socket`), or config `agentAccount` `"off"` (set_app_config, read live). Unset is `"warn"`:
+agents start as `fff`, and a background check logs `agent account (warn): the check passed` or alerts "The agent account
+check failed". `sudo fffctl agents on` turns it on; `sudo fffctl agents default` hands it back to the setting.
+`sudo fffctl agents status` (the switch, the socket, the views, the running instances, the portal's "agent account"
+lines), `sudo /usr/local/lib/fff/fff-agent-views check` and `journalctl -t fff-agent` show what failed.
 
 Once the new release is verified, the portal itself updates every worker-root machine's daemon (w887) and then publishes
 the latest agent tools, final-factory-agents' plugins, on each of them (w1476), and sends one `[machine updates]` report

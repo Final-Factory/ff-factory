@@ -10,6 +10,8 @@ FFF_LIB=${FFF_LIB:-/usr/local/lib/fff}
 FFF_CONF=${FFF_CONF:-/etc/fff/fff.conf}
 # The token vault's key (docs/vault.md): root only, outside the data folder; fff-portal.service loads it as a credential.
 FFF_VAULT_KEY=${FFF_VAULT_KEY:-/etc/fff/vault.key}
+# The portal's agents' account switch (w5651, fffctl agents): off, warn or on; fff-portal.service names it (FFF_AGENT_SWITCH).
+FFF_AGENT_SWITCH=${FFF_AGENT_SWITCH:-/etc/fff/agent-account}
 DRY_RUN=${DRY_RUN:-0}
 
 log() { printf '%s fff: %s\n' "$(date -u +%FT%TZ)" "$*" >&2; }
