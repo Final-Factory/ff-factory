@@ -26,7 +26,7 @@ import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun } from './dryRun.ts';
 import { ghRunner } from './githubTokens.ts';
 import { poolRunEnv } from './secrets.ts';
-import { tokenPipeOptions } from './tokenPipe.ts';
+import { agentProcessOptions } from './agentAccount.ts';
 import { QueryBudgetSpent } from './ffboxBugThreads.ts';
 import type { ProviderConversation, Requester, WorkItem, WorkSourceKind } from '../shared/types.ts';
 
@@ -211,7 +211,7 @@ export function sdkJudge(
           maxTurns: 1,
           env,
           abortController: abort,
-          ...tokenPipeOptions(),
+          ...agentProcessOptions(),
           ...(cfg.claudeExecutable ? { pathToClaudeCodeExecutable: cfg.claudeExecutable } : {}),
         },
       });

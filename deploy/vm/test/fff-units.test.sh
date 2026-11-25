@@ -44,7 +44,7 @@ OPS_IMAGE_DIR=$(dirname "$OPS_IMAGE")
 OPS_ROOT_PARENT=$(dirname "$OPS_ROOT")
 for f in "$U"/*.in; do
   name=$(basename "$f" .in)
-  render_unit "$f" OPS_DISK_MB OPS_ROOT OPS_IMAGE OPS_USER OPS_IMAGE_DIR OPS_ROOT_PARENT FFF_LIB FFF_ROOT OPS_ALLOW_NETS RESOLVERS OPS_MEMORY_MAX OPS_RUNTIME_MAX BACKUP_TIME >"$out/$name"
+  render_unit "$f" OPS_DISK_MB OPS_ROOT OPS_IMAGE OPS_USER OPS_IMAGE_DIR OPS_ROOT_PARENT FFF_LIB FFF_ROOT OPS_ALLOW_NETS RESOLVERS OPS_MEMORY_MAX OPS_RUNTIME_MAX BACKUP_TIME AGENT_USER AGENT_ROOT "BASE_PATH=${BASE_PATH:-$FFF_ROOT/base}" >"$out/$name"
 done
 ! grep -E '@[A-Z_]+@' "$out"/* >/dev/null || fail "a template left a token: $(grep -HE '@[A-Z_]+@' "$out"/*)"
 mkdir -p "$out/tailscaled.service.d"
@@ -169,6 +169,8 @@ for f in "$out"/*.service; do
   base=${name%.service}
   base=${base%@}
   if [ -f "$out/$base.timer" ] || [ -f "$out/$base.path" ] || [ -f "$out/$base.socket" ]; then continue; fi
+  # Not critical on purpose, started at boot all the same: install.sh enables it (fff-agent-views.service, w5598).
+  if [ "$(value "$f" Install WantedBy)" = multi-user.target ] && grep -qE "systemctl enable .*\b$name\b" $G/install.sh; then continue; fi
   fail "$name is neither a critical unit nor triggered by a timer, path or socket: nothing starts it"
 done
 ok "every other service is triggered by a timer, a path or a socket"
@@ -197,4 +199,28 @@ grep -q '^portal_unit_back()' deploy/vm/guest/fff-update || fail "fff-update has
 # shellcheck disable=SC2016 # the literal $prev of fff-update's source
 sed -n '/^cmd_rollback()/,/^}/p' deploy/vm/guest/fff-update | grep -qF '  portal_unit_back "$prev"' || fail "fff-update's rollback does not put back the older release's fff-portal.service (w5506)"
 ok "a rollback puts back the older release's fff-portal.service"
+
+# ---------------------------------------------------------------- the portal's agents' own account (w5598)
+# The orchestrators, the dispatcher and the judge run as AGENT_USER through fff-agent.socket; the portal names it, and
+# falls back to its own account without it (server/agentAccount.ts). The agent unit sees the portal's folders only
+# through the views, never the secrets folder, and only its own processes in /proc.
+grep -qx 'Environment=FFF_AGENT_SOCKET=/run/fff-agent/claude.sock' "$p" || fail "fff-portal.service does not name fff-agent.socket in FFF_AGENT_SOCKET"
+[ "$(value "$out/fff-agent.socket" Socket ListenStream)" = /run/fff-agent/claude.sock ] || fail "fff-agent.socket does not listen where the portal looks"
+[ "$(value "$out/fff-agent.socket" Socket SocketMode)" = 0600 ] && [ "$(value "$out/fff-agent.socket" Socket SocketUser)" = "$FFF_USER" ] || fail "fff-agent.socket is not the portal account's alone (0600)"
+a=$out/fff-agent@.service
+[ "$(value "$a" Service User)" = "$AGENT_USER" ] || fail "fff-agent@.service does not run as $AGENT_USER"
+[ "$(value "$a" Service ProtectProc)" = invisible ] || fail "fff-agent@.service shows other processes in /proc"
+[ "$(value "$a" Service TemporaryFileSystem)" = "$FFF_ROOT:mode=0755" ] || fail "fff-agent@.service does not empty $FFF_ROOT before its views"
+! grep -nE "secrets|/etc/fff|$FFF_ROOT/home( |$)" "$a" | grep -vE '^[0-9]+:#' | grep -q . || fail "fff-agent@.service binds the secrets folder, /etc/fff or the portal's home: $(grep -nE "secrets|/etc/fff" "$a")"
+{ grep -q '^agent_setup()' $G/install.sh && grep -qF 'run_cmd systemctl disable --now fff-agent.socket' $G/install.sh; } || fail "install.sh's agent step is not the non-fatal one that stops the socket on a failure"
+ok "the portal's agents run as $AGENT_USER behind fff-agent.socket, in a unit that sees only its views and its own processes; install.sh falls back"
+# The lockout review (w5651): the agents never outlive their portal (its crash resume would run a second Claude Code on one
+# session), and the switch the ops worker turns (fffctl agents) is named to the portal and kept off by install.sh.
+grep -qx "ExecStartPre=-+/usr/bin/systemctl stop 'fff-agent@\*.service'" "$p" || fail "fff-portal.service does not stop its old agents before it starts"
+grep -qx "ExecStopPost=-+/usr/bin/systemctl stop --no-block 'fff-agent@\*.service'" "$p" || fail "fff-portal.service does not stop its agents when it stops"
+[ "$(value "$a" Service TimeoutStopSec)" = 15 ] || fail "fff-agent@.service has no short TimeoutStopSec"
+grep -qx 'Environment=FFF_AGENT_SWITCH=/etc/fff/agent-account' "$p" || fail "fff-portal.service does not name the switch fffctl agents writes"
+# shellcheck disable=SC2016 # a fixed string from install.sh, not expanded here
+grep -qF '"$(cat "$FFF_AGENT_SWITCH" 2>/dev/null)" = off' $G/install.sh || fail "install.sh starts fff-agent.socket even when fffctl agents switched it off"
+ok "the agents end with their portal (ExecStartPre and ExecStopPost, TimeoutStopSec=15), and fffctl agents' switch reaches the portal and install.sh"
 echo "all unit checks pass"
