@@ -55,6 +55,19 @@ namespace FFFactory
         public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         public static extern IntPtr GetModuleHandle(string name);
+        public const uint WM_QUIT = 0x12, WM_TIMER = 0x113, WM_APP = 0x8000, PM_NOREMOVE = 0;
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSG { public IntPtr hwnd; public uint message; public IntPtr wParam, lParam; public uint time; public int x, y; }
+        [DllImport("user32.dll")]
+        public static extern int GetMessage(out MSG msg, IntPtr hWnd, uint min, uint max);
+        [DllImport("user32.dll")]
+        public static extern bool PeekMessage(out MSG msg, IntPtr hWnd, uint min, uint max, uint remove);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool PostThreadMessage(uint threadId, uint msg, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern IntPtr SetTimer(IntPtr hWnd, IntPtr id, uint ms, IntPtr proc);
+        [DllImport("kernel32.dll")]
+        public static extern uint GetCurrentThreadId();
         [DllImport("user32.dll")]
         public static extern bool SetProcessDPIAware();
         [DllImport("user32.dll")]
@@ -113,7 +126,11 @@ namespace FFFactory
         readonly Control ui = new Control();
 
         Native.HookProc keyProc, mouseProc;
+        // Set and used on the hooks' own thread only (HookLoop), read by the window thread once that thread pumps.
         IntPtr keyHook = IntPtr.Zero, mouseHook = IntPtr.Zero;
+        Thread hookThread;
+        uint hookThreadId;
+        const uint REINSTALL_MS = 30 * 60 * 1000;
         static long lastKey, lastClick, injectedKeys, injectedClicks;
         // Since it started, for the daemon's counts message (a test, the evidence of what was injected).
         static long personKeys, personClicks, allInjectedKeys, allInjectedClicks, repeats;
@@ -121,7 +138,7 @@ namespace FFFactory
         // Left Ctrl held down for good (30 repeats a second, never released, nobody at the mouse): only a press counts.
         static readonly bool[] held = new bool[256];
         long sentInput;
-        DateTime lastInputSent = DateTime.MinValue, lastInjectedReport = DateTime.UtcNow, hooksAt = DateTime.UtcNow;
+        DateTime lastInputSent = DateTime.MinValue, lastInjectedReport = DateTime.UtcNow;
         bool paused, haveState, firefoxBusy, firefoxAllowed;
         readonly int session = Process.GetCurrentProcess().SessionId;
         string portalUrl;
@@ -172,7 +189,7 @@ namespace FFFactory
             Render(null);
             icon.Visible = true;
 
-            InstallHooks();
+            StartHooks();
             tick.Interval = 1000;
             tick.Tick += delegate { OnTick(); };
             tick.Start();
@@ -210,6 +227,56 @@ namespace FFFactory
 
         // ------------------------------------------------------------------ input
 
+        // w5743: Windows calls a low-level hook on the thread that set it, inside that thread's GetMessage, and skips it (and
+        // since Windows 7 removes it, untold) when the thread does not answer within LowLevelHooksTimeout (at most 1 s). On
+        // the window thread a slow paint, the state message's Render or the Promote registry scan was enough: a CI run saw a
+        // SendInput key never counted (ff-factory run 45638958877). So the hooks get a thread that does nothing else but pump,
+        // and the tray says hello once that thread has taken a message from its own queue (it pumps).
+        void StartHooks()
+        {
+            var ready = new ManualResetEvent(false);
+            hookThread = new Thread(delegate() { HookLoop(ready); });
+            hookThread.IsBackground = true;
+            hookThread.Name = "input hooks";
+            hookThread.Priority = ThreadPriority.AboveNormal;
+            hookThread.Start();
+            if (!ready.WaitOne(10000)) Log("the input hooks' thread was not pumping after 10 s");
+        }
+
+        void HookLoop(ManualResetEvent ready)
+        {
+            try
+            {
+                hookThreadId = Native.GetCurrentThreadId();
+                Native.MSG msg;
+                // A thread has no message queue until it asks for one: made here, before anything is posted to it.
+                Native.PeekMessage(out msg, IntPtr.Zero, 0, 0, Native.PM_NOREMOVE);
+                InstallHooks();
+                // A hook Windows dropped for a slow answer is never reported: put both back every half hour (a thread timer:
+                // WM_TIMER comes to this loop).
+                if (Native.SetTimer(IntPtr.Zero, IntPtr.Zero, REINSTALL_MS, IntPtr.Zero) == IntPtr.Zero) Log("the hooks' reinstall timer failed: error " + Marshal.GetLastWin32Error());
+                Native.PostThreadMessage(hookThreadId, Native.WM_APP, IntPtr.Zero, IntPtr.Zero);
+                while (Native.GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+                {
+                    if (msg.message == Native.WM_APP) ready.Set();
+                    else if (msg.message == Native.WM_TIMER) { RemoveHooks(); InstallHooks(); }
+                }
+            }
+            catch (Exception e) { Log("the input hooks' thread failed: " + e.Message); }
+            finally
+            {
+                RemoveHooks();
+                ready.Set();
+            }
+        }
+
+        void StopHooks()
+        {
+            if (hookThread == null) return;
+            if (hookThreadId != 0) Native.PostThreadMessage(hookThreadId, Native.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+            hookThread.Join(2000);
+        }
+
         void InstallHooks()
         {
             keyProc = KeyboardProc;
@@ -221,7 +288,6 @@ namespace FFFactory
             if (keyHook == IntPtr.Zero) Log("the keyboard hook failed: error " + Marshal.GetLastWin32Error());
             mouseHook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, mouseProc, mod, 0);
             if (mouseHook == IntPtr.Zero) Log("the mouse hook failed: error " + Marshal.GetLastWin32Error());
-            hooksAt = DateTime.UtcNow;
         }
 
         void RemoveHooks()
@@ -283,12 +349,6 @@ namespace FFFactory
                 long ik = Interlocked.Exchange(ref injectedKeys, 0), ic = Interlocked.Exchange(ref injectedClicks, 0);
                 if (ik + ic > 0) Send(new Dictionary<string, object> { { "type", "injected" }, { "keys", ik }, { "clicks", ic } });
             }
-            // A hook Windows dropped for a slow answer is never reported: put both back every half hour.
-            if ((DateTime.UtcNow - hooksAt).TotalMinutes >= 30)
-            {
-                RemoveHooks();
-                InstallHooks();
-            }
         }
 
         // ------------------------------------------------------------------ the daemon
@@ -345,10 +405,10 @@ namespace FFFactory
 
         void Send(Dictionary<string, object> m)
         {
-            string line = json.Serialize(m);
+            // Under the lock: the hooks' thread logs too, and one serializer is shared.
             lock (outLock)
             {
-                try { stdout.WriteLine(line); }
+                try { stdout.WriteLine(json.Serialize(m)); }
                 catch { /* the daemon is gone; ReadLoop ends the app */ }
             }
         }
@@ -567,7 +627,7 @@ namespace FFFactory
 
         void Quit()
         {
-            RemoveHooks();
+            StopHooks();
             icon.Visible = false;
             icon.Dispose();
             ExitThread();
