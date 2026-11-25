@@ -39,6 +39,9 @@ param(
     [string]$StaleUnder = '',
     # ffu-server's paths, ';'-separated (w5442).
     [string]$FfuServer = '',
+    # w5581's warn stage: the agent node's rule from any address, as it was, when firewallRepair re-makes the rules for a
+    # missing or stale one while the node's rule is still wide (narrowing waits for the enforce stage).
+    [switch]$AgentNodeAnyAddress,
     [switch]$Remove,
     [string]$LogFile = '',
     # A test install beside a live one: its own rule groups ("<group> <suffix>") and no slot config (the live one's stays).
@@ -65,7 +68,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One, [switch]$Tailnet, [string]$Protocol = 'TCP') {
+function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One, [switch]$Tailnet, [string]$Protocol = 'TCP', [switch]$AnyAddress) {
     # A Block rule an earlier, dismissed prompt left for this exact path (outside our groups) would win over ours.
     # Allow rules people made stay: an uninstall then leaves the path as it found it. Except for a tailnet-only path
     # (-Tailnet, w5581): there an inbound Allow from outside our groups (an "allow access" prompt's, any address) would
@@ -81,7 +84,7 @@ function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [s
         # ffu-server (w5442, TCP) and the agents' node (w5581, any protocol): inbound from the tailnet only, every
         # profile. Loopback is never filtered, so local callers still reach them.
         New-NetFirewallRule -DisplayName $name -Group $group -Direction Inbound -Program $exe -Protocol $Protocol `
-            -RemoteAddress $script:Tailnet -Action Allow -Profile Any -Description $why | Out-Null
+            -RemoteAddress $(if ($AnyAddress) { 'Any' } else { $script:Tailnet }) -Action Allow -Profile Any -Description $why | Out-Null
         return 1
     }
     if ($One) {
@@ -126,7 +129,7 @@ try {
         }
     }
     if ($AgentNode) {
-        $made += Add-Allow $AgentNode 'Final Factory agent node' $NodeGroup "The agents' node at its one fixed path, from Tailscale only (server/agentNode.ts, w1742, w5581)" -Tailnet -Protocol Any
+        $made += Add-Allow $AgentNode 'Final Factory agent node' $NodeGroup "The agents' node at its one fixed path, from Tailscale only (server/agentNode.ts, w1742, w5581)" -Tailnet -Protocol Any -AnyAddress:$AgentNodeAnyAddress
     }
     $ffu = 0
     foreach ($exe in @($FfuServer -split ';' | Where-Object { $_ })) {

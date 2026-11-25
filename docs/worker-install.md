@@ -659,7 +659,7 @@ What `worker.ts tools` does (`server/agentTools.ts` `publishAgentTools`):
    node and ffu-server in each ffu slot (w5442) has an enabled inbound allow rule for its exact path, whether an enabled
    inbound allow rule lets the node in from any address rather than the tailnet only (`wide`, w5581), and whether rules
    earlier prompts left under `<root>\tmp` remain (`firewallCheckScript`, three bulk reads; two took 4 s on lothdesktop's
-   696 rules). A wide node rule counts as missing, so the elevated rerun below narrows it. All there: one `Windows Firewall: ...
+   696 rules). A wide node rule is only warned of while w5581 is in its warn stage (see "The agents' node" below). All there: one `Windows Firewall: ...
    are there.` line. Something missing and the run elevated: runs `firewall.ps1` as the install does and records the node's
    group in root.json. Not elevated: `WARNING: Windows Firewall: ...`, and the exit code stays. A daemon update and a tools
    run over the daemon's link are never elevated, so the node's rule from #517 reached no machine (w1742); the rollout
@@ -692,9 +692,17 @@ rule to the tailnet") it allowed every address, so on BEAST anything on its LAN 
 - **Who makes it.** `firewall.ps1 -AgentNode` (the install, and every elevated tools run). It also removes inbound allow
   rules for that exact path outside the install's groups (an "allow access" prompt's, from any address), which would
   undo the narrowing. Rules for other programs, Zoom's among them, are never touched.
-- **How it reaches a machine.** The agent tools run (step 9 above) reads the rule without admin rights; a wide one is
-  reported as `WARNING: Windows Firewall: a rule lets <node> in from any address, not the tailnet only`, and the machine
-  rollout reruns the tools over the portal's ssh, elevated, which rewrites it. No person at the machine.
+- **How it reaches a machine.** The agent tools run (step 9 above) reads the rule without admin rights. A rule counts as
+  tailnet only when its RemoteAddress is read and holds only the tailnet (`TAILNET_FORMS`); a rule missing from the bulk
+  read is read again on its own. BEAST's rule allowed Any while the earlier check, which looked for `Any` in the bulk read,
+  said "tailnet only" on every run (w5581). **Warn stage (now):** a wide one gives `WARNING: tailnet-only rule (w5581, warn
+  only): ...` with the addresses read (`from`), the counts read, and each connection to the node's listening ports from
+  outside loopback and the tailnet (`peer`; "could not see" when the node was not seen running or the read failed). That
+  warning leaves out "Windows Firewall", so the rollout does not rerun the tools elevated for it, and a repair for a
+  missing or stale rule keeps the node's rule from any address (`firewall.ps1 -AgentNodeAnyAddress`), and so does an
+  elevated update, which reads the node's rule first (`agentNodeRuleWide`; an unread rule counts as wide, so it is never
+  narrowed blind). A fresh install (`firewall.ps1 -AgentNode` without it) still makes it tailnet only. **Enforce stage (a later PR):** once every machine's
+  warnings show no outside connection, the wide case triggers the elevated rewrite. No person at the machine.
 - **Revert** (back to any address), with no person at the machine: revert the PR first (otherwise the next tools
   rollout narrows it again), then over the portal's ssh, elevated (the ops worker):
   `Get-NetFirewallRule -Group 'Final Factory agent node' | Set-NetFirewallRule -RemoteAddress Any`.

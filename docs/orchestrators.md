@@ -1243,7 +1243,8 @@ without one means it is off or failing, worth a person's look.
      worker's check-in and tells it to end its turn. The dispatcher's `decide_work block` is the other way in. The backstop
      for a lost call is the report's `still open:` line (`BlockerWatch.recordReportedWaits`): a stopped worker's line that
      waits on an open request (w2422, `requestWaitOf`), on FF Factory, which only a portal deploy brings (w2457,
-     `portalWaitIn`), on another worker of the request (w2476, `siblingWaitOf`), or on low disk (w3338, `diskWaitIn`:
+     `portalWaitIn`: the wait must say a deploy or an update, or wait on FF Factory or the portal itself; the repo's
+     name or one of its PRs alone is none, w5827), on another worker of the request (w2476, `siblingWaitOf`), or on low disk (w3338, `diskWaitIn`:
      "paused for low disk", never for a clean-up request, `WorkItem.diskCleanup`) becomes that worker's own gate, marked
      `reported` (the report it was read from). **Disk gates** (w3338, kind `disk`, ref the worker's machine; also
      `blocked_on` with `disk: true`, which the `[disk critical]` notice now asks for) show "Blocked on disk space on
