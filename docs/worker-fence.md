@@ -33,7 +33,7 @@ LothDesktop):
 | | Covers | Does not cover |
 |---|---|---|
 | Windows Low integrity | writes outside the root, registry under HKCU\Software, scheduled tasks, shutdown (measured on BEAST); writes to `daemon`, `secrets`, `ffu-runners`, `tools\node` | reads of anything, including `secrets\`; writes to every other sandbox, instance portals, `claude\` and players inside the root; signalling or injecting into other Low workers' processes; the network; code that runs above the fence (the instances updater task, a Medium editor, the daemon's `git status`) |
-| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md) | reads (`~/.ssh`, browsers, `~/.config/gh`, the Keychain through securityd); preferences through cfprefsd (unless `workerPrefFence`, w5659); signals to other processes of the user; other sandboxes inside the root; the network |
+| macOS Seatbelt | file writes outside the root; other conversations' transcripts in the root's Claude home (w5563, docs/transcript-seal.md); with the read fence `on`: reads of `~/.ssh`, browsers, `~/.config/gh` and the Keychain, Keychain services and preference writes (w5553, w5560, "Owner secrets" below); preference writes also with `workerPrefFence` (w5659) | with the read fence off: those reads; preference writes through cfprefsd unless `workerPrefFence`; signals to other processes of the user; other sandboxes inside the root; the network |
 | Linux Landlock | file writes outside the root | reads; signals; other sandboxes inside the root; the network; the systemd user bus (`systemd-run --user`, guess) |
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
@@ -211,6 +211,41 @@ Limits:
   stay readable there until a person decides otherwise.
 - Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
   is what holds for every process the worker starts.
+
+## Owner secrets: gh login, ~/.ssh, browsers, the Keychain (w5548, w5553, w5560)
+
+Before this, a fenced Mac worker read everything in the owner's home outside the root: measured on m5 (2026-11-25), a
+fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com account bryding (keyring)".
+
+- **What is closed** (machine/ownerSecrets.ts `ownerSecretPaths`, `ownerReadDenied`): the gh login's folder
+  (`GH_CONFIG_DIR` or `~/.config/gh`), `~/.ssh`, every browser profile (Chrome, Edge, Brave, Chromium, Firefox, Opera,
+  Arc, Vivaldi, Safari and `~/Library/Cookies`), and the login keychain (`~/Library/Keychains`; Linux
+  `~/.local/share/keyrings`). They ride the read fence's own mechanism (macOS `WorkerFence.readDenied`, Linux
+  `--no-read`), so they are on only when the read fence is `on` and its probe passed, and `read-fence-off` takes them off live.
+- **macOS also** denies mach-lookup of `com.apple.authd` and `com.apple.SecurityServer` and denies
+  `user-preference-write` (workerFence.ts `ownerSecretRules`, and `PREF_RULES` added once with w5659's `workerPrefFence`). Why both services, measured on m5 (probe 4, 2026-11-25):
+  with `~/Library/Keychains` unreadable there is no default keychain, and `security add-generic-password` then has
+  SecurityAgent raise a "keychain not found" dialog on the person's screen and waits for a click (its "Reset To
+  Defaults" would replace their login keychain). authd alone made the write fail at once but still logged one dialog line;
+  SecurityServer alone still hung; both refused the write in 2 s with no dialog, and git over HTTPS, gh, codesign,
+  python, uv, node, curl, the Claude CLI and a Unity batch run (licence updated) all passed. Never ship the Keychains read
+  deny without both. The preference-write deny refused `defaults write` cleanly, and Unity ran under it.
+- **The gh login reaches only runs with no vault token** (w5548): the daemon reads it with `gh auth token` outside the
+  fence and gives it to such a run as `GH_TOKEN` (`machineGh`, re-read every 30 minutes). A run that holds a token gets
+  `GH_CONFIG_DIR=<root>/gh-worker`, an empty folder, since gh will not start when its config folder is unreadable
+  ("failed to load config ... operation not permitted", measured). Only a run with no token at all (the daemon read none)
+  keeps the gh folder open, as before.
+- **Git never uses the Keychain for github.com**: launch.ts `githubCredentialEnv` clears the system `osxkeychain` helper
+  and sets the app helper (a traced `git credential fill` ran only ghApp.ts's helper), and the Claude CLI gets its token as
+  `CLAUDE_CODE_OAUTH_TOKEN`, so neither needs the Keychain.
+- **Windows: none of this.** Every owner path is on the system drive, where the fence writes no label ("Never touch C: on
+  Windows"). There `lowEnv` moves gh's `APPDATA` into the root, so a Low worker's gh finds no login, and the login's folder
+  is passed (`GH_CONFIG_DIR`) only to a run with no token. A deny ACL for the Low SID on the owner's profile folders is a
+  person's decision, not applied.
+- **Known limits**: the person's own unfenced processes (the sandbox's Unity editor) are not fenced. `spctl -a -t exec`
+  rejects Unity.app with or without the fence ("Unnotarized Developer ID"), so it is no fence check. Linux: a closed path
+  in `$HOME` makes `$HOME` a parent the read lock walks, so a file rewritten there by rename after a run started is
+  unreadable to that run (the same limit as above).
 
 ## Trial results (m5, macOS 26.4, 2026-11-23)
 
