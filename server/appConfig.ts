@@ -60,8 +60,9 @@ export const SETTABLE_KEYS = [
   'ownerDeviceApproval',
   // The daemon link from the tailnet only (w5575): "warn", "enforce" or "off" (the recovery switch); null puts back "warn".
   'machineLinkTailnet',
-  // The agents' own OS account on the portal VM (w5598, docs/vault.md "In the VM"): "on" (unset) or "off" (the recovery
-  // switch: agents start as the portal's account, as before); null puts back "on".
+  // The agents' own OS account on the portal VM (w5598, docs/vault.md "In the VM"): "off" (the recovery switch: agents
+  // start as the portal's account, as before), "warn" (unset: as the portal's account, with a background check of the
+  // agents' own) or "on" (as fff-agent); null puts back "warn". fffctl agents on the VM wins over it.
   'agentAccount',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).

@@ -261,7 +261,13 @@ g 'sudo journalctl -u fff-portal.service -b --no-pager -o cat' | matches -F 'vau
 [ "$(g 'cat /proc/sys/fs/suid_dumpable')" != 1 ] || fail "fs.suid_dumpable is 1: the portal's execute-only node stays dumpable"
 [ "$(g 'sudo stat -c "%a %U" /usr/local/lib/fff/node-portal')" = "111 root" ] || fail "the portal's node is not 0111 root"
 [ "$(g 'sudo readlink /proc/$(systemctl show -p MainPID --value fff-portal.service)/exe')" = /usr/local/lib/fff/node-portal ] || fail "the portal does not run the execute-only node"
+# A stand-in Claude login in the portal's home (w5841): a person's would sit in the agents' read-write view without
+# fff-agent@'s InaccessiblePaths=. A dummy, fff's and 0600 like the real one; removed right after the check.
+cicred=/srv/fff/home/.claude/.credentials.json
+if g "sudo test -e $cicred"; then cicred=""; else g "sudo -u fff sh -c 'umask 077; echo ci-stand-in-not-a-login >$cicred'"; fi
+g 'sudo test -s /srv/fff/data/vapid.json' || fail "the portal wrote no push key (vapid.json), so its fence probe proves nothing"
 out=$(g 'sudo fffctl fence-check' 2>&1) || fail "fffctl fence-check (w5506): $out"
+[ -z "$cicred" ] || g "sudo rm -f $cicred"
 echo "$out"
 for f in environ mem fd; do printf '%s' "$out" | matches -E "^refused: the portal's $f " || fail "the portal's $f is open to its account (w5506): $out"; done
 printf '%s' "$out" | matches -E '^refused: the vault key ' || fail "the vault key is open to the portal's account: $out"
@@ -283,6 +289,14 @@ for f in "the vault key" "the portal's environ" "the portal's mem" "the portal's
 done
 matches -E '^a stand-in for the portal.s git and gh: pid [0-9]+, as fff; fff itself opens its environ$' /tmp/agent-fence.out || fail "the git stand-in is not open to fff, so its probe proves nothing: $(cat /tmp/agent-fence.out)"
 if matches '^OPENED' /tmp/agent-fence.out; then fail "something of the portal's is open to fff-agent: $(cat /tmp/agent-fence.out)"; fi
+# From inside an fff-agent@ instance (w5841), where the views show the portal's files as fff-agent's: the login and the
+# push key are hidden (InaccessiblePaths=), and it runs in its own pid namespace (PrivatePIDs=).
+matches -x '== inside fff-agent@ as fff-agent (w5841)' /tmp/agent-fence.out || fail "fence-check did not probe from inside fff-agent@: $(cat /tmp/agent-fence.out)"
+for f in "the vault key" "a Claude login in the portal's home" "the push private key"; do
+  matches -F "refused: $f (" /tmp/agent-fence.out || fail "$f is not refused inside fff-agent@: $(cat /tmp/agent-fence.out)"
+done
+matches -x 'its own pid namespace: yes' /tmp/agent-fence.out || fail "fff-agent@ does not run in its own pid namespace: $(cat /tmp/agent-fence.out)"
+echo "ok: inside fff-agent@ a Claude login in the portal's home and the push key are refused, in its own pid namespace"
 # A file fff-agent writes through a view is the portal's (fff) on disk, so the portal reads its agents' transcripts.
 g 'sudo systemd-run --quiet --wait --collect -p User=fff-agent -p BindPaths=/run/fff-agent-views/claude:/mnt/ci-claude touch /mnt/ci-claude/ci-agent-probe' || fail "fff-agent cannot write Claude Code's folder through its view"
 [ "$(g 'sudo stat -c %U /srv/fff/home/.claude/ci-agent-probe')" = fff ] || fail "a file fff-agent wrote through its view is not fff's on disk"
@@ -345,8 +359,9 @@ sid=$(printf '%s\n' "$out" | sed -n 's/^session: //p')
 [ "$(g "sudo find /srv/fff/home/.claude/projects -name '$sid.jsonl' -printf '%u\n'")" = fff ] || fail "the turn's transcript $sid.jsonl is not in the portal's Claude folder as fff's"
 echo "ok: a real agent turn ran as fff-agent: an MCP call back to the portal's process, a permission ask, a memory write and a transcript stored as fff's, a resume and an interrupt"
 # The portal stopped mid-turn (the review's gap (b)): fff-portal.service stops every fff-agent@ instance (ExecStopPost=,
-# ExecStartPre=), so a restarted portal never meets a turn of its old self. Then a measurement, not a gate: how long an
-# instance lives on once the process that started it ends (its socket closes) with the portal still up.
+# ExecStartPre=), so a restarted portal never meets a turn of its old self. Then, with the portal still up, an instance
+# ends once the process that started it ends (its socket hangs up): fff-agent-launch's watcher (w5841; before it, 3 of 3
+# runs measured one still running 120 s on).
 hang() { g "nohup $as_portal node $drv hang $cimem /srv/fff/base >/tmp/ci-hang.out 2>&1 </dev/null &"; }
 hang
 wait_for 60 "an agent instance mid-turn" agent_running
@@ -362,9 +377,11 @@ g 'sudo pkill -TERM -f "fff-agent-turn[.]driver"'
 t0=$(date +%s)
 until no_agent || [ $(($(date +%s) - t0)) -ge 120 ]; do sleep 5; done
 if no_agent; then echo "measured: an agent instance ended $(($(date +%s) - t0)) s after the process that started it ended"; else
-  echo "measured: an agent instance still ran 120 s after the process that started it ended (the portal's stop and start end it)"
+  agent_journal
   g "sudo systemctl stop 'fff-agent@*.service'"
+  fail "an agent instance still ran 120 s after the process that started it ended (its socket hung up)"
 fi
+g "sudo journalctl -t fff-agent --no-pager -n 40 -o cat" | matches -F 'the portal hung up: ending Claude Code' || fail "the instance did not end through fff-agent-launch's hang-up watcher"
 # The ops worker's switch (the review's (b)): no orchestrator and no person. Off: every agent starts as the portal's
 # account and fff-agent.socket stops; warn: as the portal's account, with a check of the socket in the background.
 out=$(g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl agents off 2>&1') || fail "the ops worker's fffctl agents off: $out"

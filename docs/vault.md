@@ -108,7 +108,11 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   `FFF_AGENT_SOCKET` in its unit (`portal_unit_back`) and ignores the setting; `ci-vm-e2e.sh` rolls back a broken update
   with `agentAccount` `"on"`. The agents end with the portal: `fff-portal.service` stops every `fff-agent@` instance when
   it stops (`ExecStopPost=`) and before it starts (`ExecStartPre=`), so a restarted portal never meets a turn of its old
-  self (`ci-vm-e2e.sh` restarts it mid-turn).
+  self (`ci-vm-e2e.sh` restarts it mid-turn). An instance also ends once the portal's side of its connection hangs up
+  (the SDK's process ended, or a stall's fallback dropped it): `fff-agent-launch` runs Claude Code as a child beside a
+  watcher that polls the socket for its hang-up only, and ends it then (w5841; before, 3 of 3 e2e runs measured an
+  instance still running 120 s later). Each instance has its own pid namespace (`PrivatePIDs=`, systemd 257+), so one
+  person's orchestrator cannot see another's processes, which `ProtectProc=invisible` alone did not hide.
   **Three modes, warn first** (w5651, the lockout review): `"off"` starts every agent as `fff`; `"warn"`, the default
   while `agentAccount` is unset, starts every agent as `fff` and, at most once per 30 minutes, checks in the background
   that the socket starts Claude Code as `fff-agent` (`--version`, a dummy token), logging `agent account (warn): the
@@ -122,8 +126,9 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   `off` and `warn`.
   **What is left.** The data folder is as readable to `fff-agent` as it was to `fff` (its sessions and logins files; the
   read guard keeps them closed to the Read tool); the vault there is sealed with the key the agents cannot open. A
-  `.credentials.json` in the portal's `home/.claude`, if a person ever logged in there, is in the agents' view, as it was
-  before. The usage probe (`fetchPlanUsage`, no tools) still runs as `fff`, its token on fd 3. While the agents fall back,
+  `.credentials.json` in the portal's `home/.claude` (if a person ever logged in there) and the push private key
+  `data/vapid.json` are hidden inside `fff-agent@` (`InaccessiblePaths=`, w5841); `config/config.json` is in the
+  read-only config view, as it was to `fff`. The usage probe (`fetchPlanUsage`, no tools) still runs as `fff`, its token on fd 3. While the agents fall back,
   the w5506 fences alone hold: the read guard's `/proc` rule and no shell for orchestrators.
   **Check it:** `fffctl fence-check` (the ops worker may run it) probes as `fff`, outside the portal's tree. For the key,
   the credentials folder and the portal's `environ`, `mem` and `fd`, it prints `refused` with the kernel's reason or
@@ -131,7 +136,11 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
   value. It exits 1 if the key, the portal's memory or a Claude token is open. Then, as `fff-agent` (w5598): the key,
   the portal's `environ`, `mem` and `fd`, a stand-in for the portal's git (a process of `fff` holding a dummy
   `GH_TOKEN`, which `fff` itself may open) and every `fff` process's environ must each be `refused`; it exits 1 on any
-  `OPENED`. Without the account it says `absent:`.
+  `OPENED`. Without the account it says `absent:`. Then from inside an `fff-agent@` instance (w5841): one connection to
+  `fff-agent.socket` with the header `{"v":1,"fence":true}`, on which `fff-agent-launch` opens fixed paths and answers
+  per path, never a content: the key, a Claude login in the portal's home (`.credentials.json`) and the push private key
+  (`vapid.json`) must be `refused` (absent is fine), and `its own pid namespace: yes`. With the socket stopped (`fffctl
+  agents off`) it says `absent:`; no answer is `unchecked:` and exits 1.
 - **Elsewhere** (a portal still on Windows, the e2e tests): config `vault.keyFile`. `loadConfig` refuses one inside
   `data/`; `readKey` refuses one that any group or other user can read (Linux, macOS).
 - **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. A Claude process then does not
