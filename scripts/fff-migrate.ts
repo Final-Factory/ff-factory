@@ -41,6 +41,7 @@ import {
   type HistoryMove,
   type ManifestEntry,
 } from '../server/vmMigration.ts';
+import { hostOf, isPinned, pinnedHosts } from '../machine/portalPin.ts';
 
 type Json = Record<string, unknown>;
 export type Mode = 'key' | 'dry-run-copy' | 'rollback-dry-run' | 'cut-over';
@@ -63,6 +64,11 @@ export interface Options {
   user?: string;
   /** The URL the daemons and people reach the VM's portal at; default its config.json publicUrl. */
   publicUrl?: string;
+  /**
+   * --pinned-host: hosts every machine's daemon.json already pins by hand (`pinnedPortalHosts`), besides the built-in
+   * PINNED_PORTAL_HOSTS (w5715): a cut-over to any other host is refused before anything is touched.
+   */
+  pinnedHosts?: string[];
   drainMinutes: number;
   healthSeconds: number;
   daemonSeconds: number;
@@ -1088,10 +1094,27 @@ export class Migration {
   }
 
   /** The copy rewritten for this VM, in migrate/next: config/config.json and data/. */
-  rewrite(): { next: string; publicUrl: string } {
-    const vm = this.vmTemplate();
+  /** The URL the daemons will be sent to: --public-url, else the VM's config.json publicUrl. */
+  targetUrl(vm: Json = this.vmTemplate()): string {
     const publicUrl = (this.o.publicUrl ?? String(vm.publicUrl ?? '')).trim().replace(/\/+$/, '');
     if (!/^https?:\/\/[^/\s?#]+$/.test(publicUrl)) throw new Error(`no public URL for the VM's portal (${publicUrl || 'config.json publicUrl is empty'}): pass --public-url https://<node>.<tailnet>.ts.net, or set it with fffctl configure --public-url`);
+    return publicUrl;
+  }
+
+  /**
+   * Why the daemons would refuse a relocate to `publicUrl` (w5715, enforce mode: machine/portalPin.ts), or undefined when
+   * its host is pinned. A cut-over to it would stop BEAST's portal with every daemon still dialling it.
+   */
+  pinProblem(publicUrl: string): string | undefined {
+    const hosts = pinnedHosts(this.o.pinnedHosts);
+    if (isPinned(publicUrl, hosts)) return undefined;
+    const h = hostOf(publicUrl) ?? publicUrl;
+    return `${h} is not a pinned portal host (${hosts.join(', ')}), so every machine daemon would refuse the relocate and be left dialling a stopped portal (w5715, docs/portal-pin.md "Moving the portal"). Add it to PINNED_PORTAL_HOSTS in machine/portalPin.ts, merge, and let every machine update first; if every machine's daemon.json already pins it by hand, pass --pinned-host ${h}`;
+  }
+
+  rewrite(): { next: string; publicUrl: string } {
+    const vm = this.vmTemplate();
+    const publicUrl = this.targetUrl(vm);
     const beastCfg = readJson(path.join(this.stage, 'beast', 'config.json'));
     const next = path.join(this.dir, 'next');
     fs.rmSync(next, { recursive: true, force: true });
@@ -1369,6 +1392,13 @@ export class Migration {
     const hello = await this.connect();
     this.say(`BEAST answers over ssh: ${hello}`);
     if (this.o.tailscale && (await this.sys.funnelState()) !== 'funnel') throw new Error(`the Funnel is not on (tailscale funnel status), so the daemons and people could not reach this portal: fffctl tailscale-join, or tailscale funnel --bg http://127.0.0.1:${this.o.port}; --no-tailscale skips this check when the portal is reached some other way`);
+    // w5715: the daemons follow a relocate only to a pinned host; refused before anything is copied, drained or stopped.
+    const unpinned = this.pinProblem(this.targetUrl());
+    if (unpinned) {
+      this.say(`refused, nothing on BEAST or here was touched: ${unpinned}`);
+      this.writeReport('cut-over-refused');
+      return 4;
+    }
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
     // 1. The first copy while BEAST still runs, so the stop waits only for what changes after it; rewritten once to check
     // it before anything is touched.
@@ -1415,6 +1445,10 @@ export class Migration {
     // Code from before the cut-over's relocate (w499, 2/3) drains and holds but moves no daemon, and writes no result.
     if (!rest.trim()) return giveUp("BEAST's portal drained but wrote no relocate result: it runs code from before w499 (2/3), which cannot send its daemons here. Deploy it there first; its hold gives up by itself after 5 minutes", false);
     for (const m of relocated) this.say(`  ${m.ok ? 'relocated' : 'NOT relocated'}: ${m.machine}${m.ok ? '' : ` (${m.note}): redeploy it from here once it is up (machine_daemon redeploy)`}`);
+    // w5715: a daemon that refused for its pin list (one that pins other hosts than this script) would keep dialling a
+    // stopped portal, with no update to reach it: BEAST's portal is not stopped.
+    const pinRefused = relocated.filter((m) => !m.ok && /not a portal host this machine follows/.test(m.note ?? ''));
+    if (pinRefused.length) return giveUp(`${pinRefused.map((m) => m.machine).join(', ')} refused the relocate: ${hostOf(publicUrl) ?? publicUrl} is not a portal host ${pinRefused.length === 1 ? 'it follows' : 'they follow'} (w5715); BEAST's portal holds drained until its hold gives up by itself, within 5 minutes`, relocated.some((m) => m.ok));
     // 3. Stop BEAST's portal for good; its task disabled, so nothing starts it again.
     const st = await this.beast.ps(stopPs(this.o.beastRoot, this.o.beastTask, beastPort), undefined, 5 * 60_000);
     for (const l of st.stdout.trim().split('\n').filter(Boolean)) this.say(`  BEAST ${l}`);
@@ -1573,6 +1607,7 @@ export const USAGE = `fffctl migrate --key | --dry-run-copy | --rollback-dry-run
   options: --ssh USER@HOST (BEAST, default ${DEFAULTS.ssh})  --beast-ssh-host H (what this portal deploys to BEAST by, default --ssh)
            --beast-root DIR (${DEFAULTS.beastRoot})  --beast-claude-dir DIR (${DEFAULTS.beastClaudeDir})  --beast-task NAME (${DEFAULTS.beastTask})
            --public-url URL (default config.json publicUrl)  --drain-minutes N (${DEFAULTS.drainMinutes})  --no-resume-check
+           --pinned-host HOST (a host every machine's daemon.json pins by hand; a cut-over to an unpinned host is refused, w5715)
            --snapshot auto|vss|copy (how BEAST's files are held still while copied: a VSS shadow copy, else a staged copy)
            --compress auto|zstd|gzip|bzip2|none (zstd level 3 by default, falling back to the next one either side lacks)
   (docs/portal-on-ffbox-host.md 7.2, 7.3; deploy/vm/RUNBOOK.md "Dry run" and "Cut-over")`;
@@ -1601,6 +1636,7 @@ export function parseArgs(argv: string[], base: Omit<Options, 'mode'> = DEFAULTS
       case '--beast-claude-dir': o.beastClaudeDir = need(i++); break;
       case '--beast-task': o.beastTask = need(i++); break;
       case '--public-url': o.publicUrl = need(i++); break;
+      case '--pinned-host': o.pinnedHosts = [...(o.pinnedHosts ?? []), need(i++)]; break;
       case '--root': o.root = need(i++); break;
       case '--port': o.port = Number(need(i++)); break;
       case '--user': o.user = need(i++) || undefined; break;

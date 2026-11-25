@@ -13,7 +13,8 @@ lothsahn; they come from finding 1 of the w5450 network audit.
   installs only a commit published on GitHub's ff-factory `main`; `checkPublished` in `machine/selfUpdate.ts` checks
   that on the machine itself (w5516). No signing key is involved. Signed updates were put off by lothsahn on
   2026-11-25 ("Drop build signing for now, remind me in 1 week").
-- **One machine's extra hosts.** daemon.json's `pinnedPortalHosts` (a list of names) adds hosts on one machine. A
+- **One machine's extra hosts.** daemon.json's `pinnedPortalHosts` (a list of names) adds hosts on one machine; an
+  entry written as a URL or `host:port` counts as its host, and a trailing dot is ignored (`pinnedHostOf`). A
   person or the ops worker edits it by hand over ssh: no installer flag writes it; an installer update (`-Update`/`--update`, a reinstall or a migration) keeps it; a full install rerun drops it. Nothing sent over the link can: `patchDaemonConfig` takes only `portalUrl`,
   `previousPortalUrl` and `relocatedAt`, and a link update's `LinkUpdateFlags` carry no portal field.
 - **Why a host name, not an IP or a certificate pin.** The tailnet name is what every daemon.json already holds. Node
@@ -30,12 +31,14 @@ whole rollback; the rollout takes it to every machine like any other merge.
 |---|---|---|---|
 | Daemon start | `portalUrl` and `previousPortalUrl` in daemon.json | logged, kept, reported; dialled | the same: **a dial is never refused** (see "Recovery") |
 | `relocate` (w466) | the new URL's host | logged, kept, reported; followed | refused: `relocate_result` is `ok:false` and says why; daemon.json, the link and the portal it dials stay as they were |
-| A fetch from the portal (attachments, review uploads, the update bundle) | a response that came through a redirect to an unpinned host | logged, kept, reported; used | that fetch fails and its answer is dropped; a redirect between pinned hosts is used |
+| A fetch from the portal: attachments, review uploads | each redirect hop, checked before it is followed (`portalFetch`, `redirect:'manual'`) | logged, kept, reported; followed | refused before the hop: nothing is sent to that host, and the fetch fails at once, never retried; a hop to a pinned host, or within the host already dialled, is followed |
+| A fetch from the portal: the update bundle | each redirect hop | logged, kept, reported; followed | **never refused**: logged, kept, reported and followed, since the size, SHA-256 and published-commit check decide what installs, and a pin must never stop a machine's updates (w5726) |
 | The `/machine` WebSocket | a redirect answer | not followed (`ws` follows none), as before; now also reported | the same |
 
 - **Where warnings go.** Each warning is a log line. Warn mode wrote
   `portal pin (w5576, warn): would refuse, allowed in warn mode: …`; enforce mode writes
-  `portal pin (w5576, enforce): REFUSED: …` for a relocate or a redirect, and
+  `portal pin (w5576, enforce): REFUSED: …` for a relocate or a refused redirect,
+  `portal pin (w5576, enforce): followed, an update download is never refused: …` for an update's redirect, and
   `portal pin (w5576, enforce): dialled anyway, a dial is never refused: …` for an unpinned `portalUrl`. Each is also
   kept in `portal-pin.json` beside daemon.json (the last 20, kept across restarts) and sent in the hello as `portalPin`.
 - **What list_machines shows.** One line per online machine: `portal pin (w5576): enforce mode; dials <host> (pinned);
@@ -44,9 +47,10 @@ whole rollback; the rollout takes it to every machine like any other merge.
   machine's entry in `relocate.result.json` says `ok:false` with the daemon's reason, and the drain-and-hold goes on to
   `drain.done` and the hold as with an accepted one (`server/relocate.test.ts`, "a refused relocate still releases the
   drain-and-hold"). The refused machine stays on the old portal.
-- **A refused redirect on an update.** It fails that one download at once (no retry inside the attempt); the next
-  update check tries again. The bundle is in any case checked against the size and SHA-256 the portal sent on the link,
-  and the commit against GitHub's `main` (w5516).
+- **Redirects.** `portalFetch` (machine/portalPin.ts) follows at most 5 redirects itself. The token goes only to the
+  host it was meant for, never across a hop to another host; a 303, or a 301/302 of a POST, becomes a GET with no body.
+  An update bundle is checked against the size and SHA-256 the portal sent on the link, and the commit against GitHub's
+  `main` (w5516), wherever it came from.
 - **Failures in the check itself.** A pin check never throws. A warning file that cannot be read or written is logged
   and skipped.
 
@@ -66,7 +70,10 @@ and in its daemon log:
 1. Add the new host to `PINNED_PORTAL_HOSTS` and merge.
 2. Let the rollout put that on every machine. Check with `list_machines`: each machine's pin line says which hosts it
    follows.
-3. Only then move the portal: `relocate_machines`, as in [machines.md](machines.md), "Moving the portal".
+3. Only then move the portal: `relocate_machines`, as in [machines.md](machines.md), "Moving the portal". The BEAST
+   cut-over (`fffctl migrate --cut-over`) refuses an unpinned target before it copies, drains or stops anything (exit
+   4); `--pinned-host <host>` names a host every machine's daemon.json already pins by hand. If a daemon still refuses
+   the relocate, the cut-over gives up and BEAST's portal keeps running (`scripts/fff-migrate-cutover.test.ts`).
 4. Once every machine dials the new host, drop the old one in a later merge.
 
 Never in the other order: in enforce mode, a relocate to a host the daemon does not yet follow is refused. The machine
@@ -88,7 +95,7 @@ But that old name stops resolving, so the machine is offline until route 2 in "R
 ## Recovery
 
 - **Warn mode can strand nothing.** It only logs.
-- **Enforce mode gates only changes of address** (relocates and fetch redirects). A daemon always dials the `portalUrl` in its daemon.json, and the
+- **Enforce mode gates only changes of address** (relocates, and review and attachment redirects to another host). A daemon always dials the `portalUrl` in its daemon.json, and the
   `previousPortalUrl` fallback while a relocation is unsettled. A machine therefore loses its portal through pinning
   only if the portal moved to an unpinned host and the old host is gone. If that happens, take the first route that
   reaches the machine:

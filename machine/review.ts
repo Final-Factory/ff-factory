@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { REVIEW_CHUNK, REVIEW_TYPES, publishedText, sha256Of } from '../server/review.ts';
-import { notePortalRedirect, refusedRedirect } from './portalPin.ts';
+import { portalFetch } from './portalPin.ts';
 
 export interface PublishOptions {
   /** Attempts per chunk, each after asking the portal where to resume. Default 4. */
@@ -76,14 +76,13 @@ export async function sendChunks(url: string, token: string, file: string, size:
       let body: Record<string, unknown> & { received?: number; error?: string } = {};
       let status = 0;
       try {
-        const res = await doFetch(`${url}?offset=${offset}`, { method: 'PUT', headers: { ...auth, 'content-type': 'application/octet-stream' }, body: buf });
-        if (!notePortalRedirect(`${url}?offset=${offset}`, res)) {
-          await res.body?.cancel();
-          throw refusedRedirect(url, res);
-        }
+        // w5715 (w5726 review, finding 3): a redirect to a host this daemon does not follow is refused before the chunk
+        // goes there, and that refusal is final: trying again would only be refused again.
+        const res = await portalFetch(`${url}?offset=${offset}`, { method: 'PUT', headers: { ...auth, 'content-type': 'application/octet-stream' }, body: buf }, { fetch: doFetch });
         status = res.status;
         body = (await res.json().catch(() => ({}))) as typeof body;
       } catch (e) {
+        if ((e as { final?: boolean }).final) throw new Error(`${path.basename(file)}: ${(e as Error).message}`);
         body = { error: (e as Error).message };
       }
       if (status === 200) {
@@ -99,9 +98,8 @@ export async function sendChunks(url: string, token: string, file: string, size:
       }
       if ([400, 401, 404, 413, 415, 422].includes(status) || ++failures >= (o.tries ?? 4)) throw new Error(`${path.basename(file)}: ${body.error ?? `the portal answered HTTP ${status}`}`);
       await new Promise((r) => setTimeout(r, (o.backoffMs ?? 2000) * 2 ** (failures - 1)));
-      const st = await doFetch(url, { headers: auth }).catch(() => undefined);
-      const usable = st && notePortalRedirect(url, st) ? st : undefined;
-      const s = usable?.ok ? ((await usable.json().catch(() => ({}))) as { received?: number }) : {};
+      const st = await portalFetch(url, { headers: auth }, { fetch: doFetch }).catch(() => undefined);
+      const s = st?.ok ? ((await st.json().catch(() => ({}))) as { received?: number }) : {};
       if (typeof s.received === 'number') offset = s.received;
     }
   } finally {

@@ -33,19 +33,29 @@ export const PINNED_PORTAL_HOSTS: readonly string[] = ['fff.tailedfcad.ts.net', 
 /** Loopback is the machine itself: the portal's own host dials it, and so do the tests. */
 const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
 
-/** The host of a URL, lower case, without port; undefined when it is no URL. */
+/** The host of a URL, lower case, without port or a trailing dot (`fff.tailedfcad.ts.net.` is the same host); undefined when it is no URL. */
 export function hostOf(url: string): string | undefined {
   try {
-    return new URL(url).hostname.toLowerCase() || undefined;
+    return new URL(url).hostname.toLowerCase().replace(/\.$/, '') || undefined;
   } catch {
     return undefined;
   }
 }
 
-/** The hosts this daemon follows: the built-in list and daemon.json's `pinnedPortalHosts`, lower case. */
+/**
+ * One `pinnedPortalHosts` entry as a host (w5726 review): a bare host, `host:port` or a whole URL all name the same host,
+ * lower case, without a trailing dot. Undefined when it names none.
+ */
+export function pinnedHostOf(entry: string): string | undefined {
+  const e = entry.trim();
+  if (!e) return undefined;
+  return hostOf(/^[a-z][a-z0-9+.-]*:\/\//i.test(e) ? e : `http://${e}`);
+}
+
+/** The hosts this daemon follows: the built-in list and daemon.json's `pinnedPortalHosts`, normalised by pinnedHostOf. */
 export function pinnedHosts(extra?: unknown): string[] {
-  const more = Array.isArray(extra) ? extra.filter((h): h is string => typeof h === 'string' && h.trim() !== '') : [];
-  return [...new Set([...PINNED_PORTAL_HOSTS, ...more].map((h) => h.trim().toLowerCase()))];
+  const more = Array.isArray(extra) ? extra.filter((h): h is string => typeof h === 'string') : [];
+  return [...new Set([...PINNED_PORTAL_HOSTS, ...more].map(pinnedHostOf).filter((h): h is string => !!h))];
 }
 
 /** Whether `url` names a pinned host (or loopback). */
@@ -118,8 +128,20 @@ export class PortalPin {
     return !refused;
   }
 
-  warn(kind: PortalPinWarning['kind'], what: string, refused = this.mode === 'enforce' && kind !== 'dial') {
-    const how = refused ? 'REFUSED' : this.mode === 'enforce' ? 'dialled anyway, a dial is never refused' : 'would refuse, allowed in warn mode';
+  /**
+   * A redirect of a portal fetch from `from` to another host `to` (portalFetch's sink, wired by the daemon). `refusable`:
+   * checked as any redirect (refused in enforce mode when unpinned). Not refusable (the update bundle): an unpinned one is
+   * only logged, kept and reported, and followed.
+   */
+  redirect(from: string, to: string, refusable: boolean): boolean {
+    const why = `the portal redirected ${hostOf(from) ?? from} to ${to}`;
+    if (refusable) return this.check('redirect', to, why);
+    if (!this.pinned(to)) this.warn('redirect', `${why}: ${hostOf(to) ?? to} is not a pinned portal host (${this.hosts.join(', ')})`, false, 'followed, an update download is never refused');
+    return true;
+  }
+
+  warn(kind: PortalPinWarning['kind'], what: string, refused = this.mode === 'enforce' && kind !== 'dial', followed?: string) {
+    const how = refused ? 'REFUSED' : followed ?? (this.mode === 'enforce' ? 'dialled anyway, a dial is never refused' : 'would refuse, allowed in warn mode');
     this.log(`portal pin (w5576, ${this.mode}): ${how}: ${what}`);
     this.warnings = [...this.warnings, { at: new Date().toISOString(), kind, what }].slice(-KEEP);
     try {
@@ -151,24 +173,64 @@ export function describePortalPin(p: PortalPinStatus | undefined): string {
 }
 
 /**
- * Where a fetch to the portal reports a redirect (the daemon sets it; none in tests or the update job). It answers whether
- * the response may be used: false refuses it (enforce mode, an unpinned host).
+ * Where portalFetch asks about a redirect to another host (the daemon sets it to PortalPin.redirect; none in tests or the
+ * update job, which then follow every redirect). It answers whether to follow it: false refuses it (enforce mode, an
+ * unpinned host, a refusable fetch).
  */
-let redirectSink: ((from: string, to: string) => boolean | void) | undefined;
+export type PortalRedirectSink = (from: string, to: string, refusable: boolean) => boolean | void;
+let redirectSink: PortalRedirectSink | undefined;
 
-export function onPortalRedirect(sink: ((from: string, to: string) => boolean | void) | undefined) {
+export function onPortalRedirect(sink: PortalRedirectSink | undefined) {
   redirectSink = sink;
 }
 
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 5;
+
 /**
- * After a fetch to the portal: a response that came through a redirect is reported. True: use it. False: the redirect
- * went to a host this daemon does not follow (enforce mode), and the caller drops the response and fails that one fetch
- * (an attachment, a review upload, one update attempt; the next update check tries again). A redirect to a pinned host,
- * and every direct answer, is used: a portal that redirects within its own pinned hosts locks nobody out.
+ * fetch for a portal URL that follows redirects itself (w5715; w5726 review, finding 3): each hop is checked BEFORE it is
+ * followed, so no token and no upload body goes to a host this daemon does not follow.
+ * - A hop to the host being fetched is always followed (http to https, a slash added): a machine whose daemon.json
+ *   portalUrl is not pinned (recovery route 2(b)) must still reach its portal (w5726 finding 2).
+ * - A hop to another host asks the sink: refused (throws refusedRedirect with `final: true`, nothing sent there) when
+ *   it answers false and `refuse` is not false.
+ * - `refuse: false` (the update bundle): an unpinned hop is only reported, then followed. The bundle is checked against
+ *   the SHA-256 its link message carries and the commit against GitHub main (selfUpdate.ts), so a redirect cannot change
+ *   what installs, and a pin must never stop the update link (lothsahn, w5576: no machine may be locked out of updates).
+ * As fetch does: a 303, and a 301/302 of a POST, become a GET without a body; 307 and 308 keep both; the Authorization
+ * header goes on only to the same host.
  */
-export function notePortalRedirect(requested: string, res: { redirected?: boolean; url?: string }): boolean {
-  if (!res.redirected || !res.url || res.url === requested) return true;
-  return redirectSink?.(requested, res.url) !== false;
+export async function portalFetch(url: string, init: RequestInit = {}, o: { fetch?: typeof fetch; refuse?: boolean } = {}): Promise<Response> {
+  const doFetch = o.fetch ?? fetch;
+  const first = hostOf(url);
+  let cur = url;
+  let req: RequestInit = init;
+  for (let hop = 0; ; hop++) {
+    const res = await doFetch(cur, { ...req, redirect: 'manual' });
+    const loc = REDIRECT_STATUS.has(res.status) ? res.headers?.get?.('location') : null;
+    if (!loc) return res;
+    await res.body?.cancel().catch(() => undefined);
+    if (hop >= MAX_REDIRECTS) throw new Error(`the portal redirected ${hostOf(url) ?? url} more than ${MAX_REDIRECTS} times`);
+    let next: string;
+    try {
+      next = new URL(loc, cur).toString();
+    } catch {
+      throw new Error(`the portal redirected ${hostOf(cur) ?? cur} to ${loc}, which is no URL`);
+    }
+    const to = hostOf(next);
+    const sameHost = !!to && (to === hostOf(cur) || to === first);
+    if (!sameHost && redirectSink?.(cur, next, o.refuse !== false) === false && o.refuse !== false) {
+      throw Object.assign(refusedRedirect(url, { url: next }), { final: true });
+    }
+    const method = (req.method ?? 'GET').toUpperCase();
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) req = { ...req, method: method === 'HEAD' ? 'HEAD' : 'GET', body: undefined };
+    if (to !== hostOf(cur)) {
+      const h = new Headers(req.headers);
+      h.delete('authorization');
+      req = { ...req, headers: h };
+    }
+    cur = next;
+  }
 }
 
 /** The error a caller throws for a refused redirect. */

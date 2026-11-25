@@ -1,5 +1,6 @@
 // w5576/w5715 (machine/portalPin.ts, docs/portal-pin.md): the portal hosts a daemon follows. Stage 1 warned only; stage 2
-// (w5715) enforces: a relocate or a fetch redirect to an unpinned host is refused, and a dial of the daemon's own
+// (w5715) enforces: a relocate, or a review or attachment fetch's redirect, to an unpinned host is refused (an update
+// bundle's redirect is only reported), and a dial of the daemon's own
 // portalUrl or previousPortalUrl never is (logged, kept, reported).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -7,8 +8,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { PINNED_PORTAL_HOSTS, PORTAL_PIN_MODE, PortalPin, describePortalPin, hostOf, isPinned, notePortalRedirect, onPortalRedirect, pinnedHosts, refusedRedirect } from '../machine/portalPin.ts';
+import { PINNED_PORTAL_HOSTS, PORTAL_PIN_MODE, PortalPin, describePortalPin, hostOf, isPinned, onPortalRedirect, pinnedHosts, portalFetch } from '../machine/portalPin.ts';
 import { downloadBundle } from '../machine/selfUpdate.ts';
+import { sendChunks } from '../machine/review.ts';
 
 const tmpDir = (t: { after: (fn: () => unknown) => void }) => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-pin-'));
@@ -23,6 +25,14 @@ test('w5715: stage 2 ships in enforce mode, and every portal host in use today i
   for (const url of ['https://fff.tailedfcad.ts.net', 'https://beast.tailedfcad.ts.net', 'https://FFF.tailedfcad.ts.net:443']) assert.ok(isPinned(url, pinnedHosts()), url);
   // The machine itself: the portal's own host dials loopback, and so do the tests.
   for (const url of ['http://127.0.0.1:8790', 'http://localhost:1', 'http://[::1]:2']) assert.ok(isPinned(url, pinnedHosts()), url);
+});
+
+test('w5715 (w5726 nits): a pinnedPortalHosts entry as a URL or host:port, and a trailing-dot host, all match', () => {
+  const hosts = pinnedHosts(['https://New.Example:8443/x', 'other.example:8790', ' plain.example ', '', 7, 'http://']);
+  for (const h of ['new.example', 'other.example', 'plain.example']) assert.ok(hosts.includes(h), h);
+  assert.ok(!hosts.includes(''), 'nothing empty');
+  for (const url of ['https://new.example', 'http://other.example:1', 'https://plain.example.', 'https://fff.tailedfcad.ts.net.']) assert.ok(isPinned(url, hosts), url);
+  assert.equal(hostOf('https://fff.tailedfcad.ts.net./x'), 'fff.tailedfcad.ts.net');
 });
 
 test('w5576: what is not pinned, and daemon.json adding hosts', () => {
@@ -81,51 +91,95 @@ test('w5576: a warning file that cannot be read or written never stops a daemon;
   assert.match(lines.at(-1)!, /could not keep the warning/);
 });
 
-test('w5576: a fetch that came through a redirect is reported; a direct one is not', (t) => {
-  const seen: string[] = [];
-  onPortalRedirect((from, to) => void seen.push(`${from} -> ${to}`));
-  t.after(() => onPortalRedirect(undefined));
-  assert.equal(notePortalRedirect('https://fff.tailedfcad.ts.net/machine/update/x', { redirected: false, url: 'https://fff.tailedfcad.ts.net/machine/update/x' }), true);
-  assert.equal(notePortalRedirect('https://fff.tailedfcad.ts.net/machine/update/x', { redirected: true, url: 'https://evil.example/x' }), true, 'a sink that answers nothing refuses nothing');
-  assert.deepEqual(seen, ['https://fff.tailedfcad.ts.net/machine/update/x -> https://evil.example/x']);
-});
+// A fake portal for portalFetch: each URL answers a redirect (to its Location) or a body; every request is recorded.
+const fakeFetch = (routes: Record<string, { status: number; location?: string; body?: string | Buffer }>, seen: { url: string; method: string; auth: string | null; body: boolean }[]) =>
+  (async (u: string | URL, init?: RequestInit) => {
+    const url = String(u);
+    seen.push({ url, method: init?.method ?? 'GET', auth: new Headers(init?.headers).get('authorization'), body: init?.body != null });
+    assert.equal(init?.redirect, 'manual', 'portalFetch follows redirects itself');
+    const r = routes[url.replace(/\?.*$/, '')];
+    if (!r) return new Response('no route', { status: 404 });
+    return new Response((r.body ?? null) as BodyInit | null, { status: r.status, headers: r.location ? { location: r.location } : {} });
+  }) as unknown as typeof fetch;
 
-test('w5715: enforce mode refuses a fetch a redirect took to an unpinned host, and uses one to a pinned host', (t) => {
+test('w5715 (w5726 finding 3): a redirect to an unpinned host is refused before it is followed; nothing is sent there', async (t) => {
   const lines: string[] = [];
   const pin = new PortalPin(pinnedHosts(), undefined, (l) => lines.push(l), 'enforce');
   // As the daemon wires it (machine/daemon.ts constructor).
-  onPortalRedirect((from, to) => pin.check('redirect', to, `the portal redirected ${hostOf(from) ?? from} to ${to}`));
+  onPortalRedirect((from, to, refusable) => pin.redirect(from, to, refusable));
   t.after(() => onPortalRedirect(undefined));
-  const u = 'https://fff.tailedfcad.ts.net/machine/update/x';
-  assert.equal(notePortalRedirect(u, { redirected: true, url: 'https://evil.example/x' }), false);
+  const seen: Parameters<typeof fakeFetch>[1] = [];
+  const u = 'https://fff.tailedfcad.ts.net/machine/attachments/x';
+  const f = fakeFetch({ [u]: { status: 307, location: 'https://evil.example/x' }, 'https://evil.example/x': { status: 200, body: 'stolen' } }, seen);
+  const e = await portalFetch(u, { method: 'PUT', headers: { authorization: 'Bearer tok' }, body: 'data' }, { fetch: f }).then(() => undefined, (x: Error & { final?: boolean }) => x);
+  assert.ok(e, 'refused');
+  assert.equal(e.final, true, 'final: trying again would be refused again');
+  assert.match(e.message, /redirect to evil\.example, not a pinned portal host \(w5715/);
+  assert.deepEqual(seen.map((s) => s.url), [u], 'the unpinned host never got a request');
   assert.match(lines.at(-1)!, /REFUSED: the portal redirected fff\.tailedfcad\.ts\.net to https:\/\/evil\.example\/x/);
-  assert.equal(notePortalRedirect(u, { redirected: true, url: 'https://beast.tailedfcad.ts.net/machine/update/x' }), true, 'within the pinned hosts');
-  assert.equal(notePortalRedirect(u, { redirected: false, url: u }), true);
-  assert.match(refusedRedirect(u, { url: 'https://evil.example/x' }).message, /redirect to evil\.example, not a pinned portal host \(w5715/);
 });
 
-test('w5715: an unpinned redirect fails that one update bundle download at once, keeping nothing; a pinned one downloads', async (t) => {
-  const dir = tmpDir(t);
+test('w5715: a redirect within the pinned hosts is followed, the token only to the same host; a 303 becomes a GET', async (t) => {
   const pin = new PortalPin(pinnedHosts(), undefined, () => undefined, 'enforce');
-  onPortalRedirect((from, to) => pin.check('redirect', to, `the portal redirected ${from} to ${to}`));
+  onPortalRedirect((from, to, refusable) => pin.redirect(from, to, refusable));
+  t.after(() => onPortalRedirect(undefined));
+  const seen: Parameters<typeof fakeFetch>[1] = [];
+  const u = 'https://fff.tailedfcad.ts.net/a';
+  const f = fakeFetch({ [u]: { status: 302, location: '/b' }, 'https://fff.tailedfcad.ts.net/b': { status: 303, location: 'https://beast.tailedfcad.ts.net/c' }, 'https://beast.tailedfcad.ts.net/c': { status: 200, body: 'ok' } }, seen);
+  const res = await portalFetch(u, { method: 'PUT', headers: { authorization: 'Bearer tok' }, body: 'data' }, { fetch: f });
+  assert.equal(await res.text(), 'ok');
+  assert.deepEqual(seen.map((s) => [s.url, s.method, s.auth, s.body]), [
+    [u, 'PUT', 'Bearer tok', true],
+    ['https://fff.tailedfcad.ts.net/b', 'PUT', 'Bearer tok', true],
+    ['https://beast.tailedfcad.ts.net/c', 'GET', null, false],
+  ]);
+});
+
+test('w5715 (w5726 finding 2): a daemon whose portalUrl is not pinned (recovery route 2(b)) follows a redirect within that host', async (t) => {
+  const lines: string[] = [];
+  const pin = new PortalPin(pinnedHosts(), undefined, (l) => lines.push(l), 'enforce');
+  onPortalRedirect((from, to, refusable) => pin.redirect(from, to, refusable));
+  t.after(() => onPortalRedirect(undefined));
+  const seen: Parameters<typeof fakeFetch>[1] = [];
+  const u = 'http://10.1.0.100:8790/machine/review/r';
+  const f = fakeFetch({ [u]: { status: 308, location: 'https://10.1.0.100/machine/review/r' }, 'https://10.1.0.100/machine/review/r': { status: 200, body: '{}' } }, seen);
+  const res = await portalFetch(u, { headers: { authorization: 'Bearer tok' } }, { fetch: f });
+  assert.equal(res.status, 200);
+  assert.equal(seen[1].auth, 'Bearer tok', 'the same host keeps the token');
+  assert.deepEqual(lines, [], 'nothing to warn about: the host it dials');
+});
+
+test('w5715 (w5726 finding 2): an update bundle follows even an unpinned redirect, reported only; its SHA-256 decides', async (t) => {
+  const dir = tmpDir(t);
+  const lines: string[] = [];
+  const pin = new PortalPin(pinnedHosts(), undefined, (l) => lines.push(l), 'enforce');
+  onPortalRedirect((from, to, refusable) => pin.redirect(from, to, refusable));
   t.after(() => onPortalRedirect(undefined));
   const body = Buffer.from('bundle bytes');
-  let calls = 0;
-  const mk = (finalUrl: string): typeof fetch => (async (u: string | URL) => {
-    calls++;
-    const r = new Response(body, { status: 200 });
-    Object.defineProperty(r, 'redirected', { value: finalUrl !== String(u) });
-    Object.defineProperty(r, 'url', { value: finalUrl });
-    return r;
-  }) as unknown as typeof fetch;
   const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
   const portal = 'https://fff.tailedfcad.ts.net';
   const url = `${portal}/machine/update/${b.sha256}`;
-  await assert.rejects(downloadBundle(portal, 'tok', b, path.join(dir, 'a'), mk('https://evil.example/b')), /not a pinned portal host \(w5715/);
-  assert.equal(calls, 1, 'refused at once, not retried within the attempt');
-  assert.deepEqual(fs.readdirSync(path.join(dir, 'a')), [], 'nothing of the unpinned answer kept');
-  const got = await downloadBundle(portal, 'tok', b, path.join(dir, 'b'), mk(url.replace('fff.', 'beast.')));
+  const seen: Parameters<typeof fakeFetch>[1] = [];
+  const got = await downloadBundle(portal, 'tok', b, path.join(dir, 'a'), fakeFetch({ [url]: { status: 302, location: 'https://cdn.example/b' }, 'https://cdn.example/b': { status: 200, body } }, seen));
   assert.equal(fs.readFileSync(got, 'utf8'), 'bundle bytes');
+  assert.equal(seen[1].auth, null, 'no token to another host');
+  assert.match(lines.at(-1)!, /portal pin \(w5576, enforce\): followed, an update download is never refused: the portal redirected fff\.tailedfcad\.ts\.net to https:\/\/cdn\.example\/b/);
+  // A redirected bundle that is not the one the link named installs nothing.
+  await assert.rejects(downloadBundle(portal, 'tok', b, path.join(dir, 'b'), fakeFetch({ [url]: { status: 302, location: 'https://cdn.example/b' }, 'https://cdn.example/b': { status: 200, body: Buffer.from('bundle bytez') } }, [])));
+});
+
+test('w5715 (w5726 finding 3): a review upload redirected to an unpinned host is refused once, not retried, and its chunk never goes there', async (t) => {
+  const dir = tmpDir(t);
+  const pin = new PortalPin(pinnedHosts(), undefined, () => undefined, 'enforce');
+  onPortalRedirect((from, to, refusable) => pin.redirect(from, to, refusable));
+  t.after(() => onPortalRedirect(undefined));
+  const file = path.join(dir, 'still.png');
+  fs.writeFileSync(file, 'png bytes');
+  const seen: Parameters<typeof fakeFetch>[1] = [];
+  const u = 'https://fff.tailedfcad.ts.net/machine/review/r1';
+  const f = fakeFetch({ [u]: { status: 307, location: 'https://evil.example/r1' } }, seen);
+  await assert.rejects(sendChunks(u, 'tok', file, 9, undefined, { fetch: f, tries: 4, backoffMs: 1 }, () => true), /still\.png: .*not a pinned portal host \(w5715/);
+  assert.deepEqual(seen.map((s) => s.url), [`${u}?offset=0`], 'one try, and nothing to evil.example');
 });
 
 test('w5576: list_machines says the mode, the host and the newest warnings; an older daemon says it reports none', () => {

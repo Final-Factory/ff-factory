@@ -686,12 +686,13 @@ export class Daemon {
   constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => LiveDeps) {
     this.cfg = cfg;
     // w5576/w5715: the portal hosts it follows. Its own portalUrl and previousPortalUrl are always dialled (an unpinned
-    // one is logged, kept and reported); a relocate or a fetch redirect to an unpinned host is refused (enforce mode).
+    // one is logged, kept and reported); a relocate, or a review or attachment fetch's redirect, to an unpinned host is refused
+    // (enforce mode); an update bundle's redirect is only reported (portalPin.ts portalFetch).
     this.pin = new PortalPin(pinnedHosts(cfg.pinnedPortalHosts), PortalPin.fileFor(cfg.configFile), (line) => log(line));
     for (const [url, what] of [[cfg.portalUrl, 'the portal URL in daemon.json'], [cfg.previousPortalUrl, 'the portal URL before a relocate, in daemon.json']] as const) {
       if (url) this.pin.check('dial', url, what);
     }
-    onPortalRedirect((from, to) => this.pin.check('redirect', to, `the portal redirected ${hostOf(from) ?? from} to ${to}`));
+    onPortalRedirect((from, to, refusable) => this.pin.redirect(from, to, refusable));
     this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
     this.fence = new FenceGate({ wanted: fenceWanted(cfg, process.platform), kind: fenceKindFor(process.platform), machine: cfg.id, changed: (r) => this.send({ type: 'worker_fence', fence: r }) });
