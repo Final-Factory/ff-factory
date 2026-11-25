@@ -1052,8 +1052,12 @@ cmd_backup_config() {
 # each probe only opens a path (into nothing) and says "refused" with the kernel's reason or "OPENED"; an agent process's
 # environment is read through a pipe that only counts the credential variables' names. Exits 1 if the key, the portal's
 # memory or a Claude credential is open to the account. The FENCE_* variables are deploy/vm/test/fff-fence-check.test.sh's
-# (FENCE_USER: run the probes as the caller, unprivileged).
-fence_as() { if [ -n "${FENCE_USER:-}" ]; then "$@"; return; fi; setpriv --reuid="${FENCE_USER:-$FFF_USER}" --regid="${FENCE_USER:-$FFF_USER}" --init-groups --inh-caps=-all -- "$@"; }
+# (FENCE_USER: the account to probe as instead of the portal's; the caller's own runs the probes directly, unprivileged).
+fence_as() {
+  local u=${FENCE_USER:-$FFF_USER}
+  if [ "$u" = "$(id -un)" ]; then "$@"; return; fi
+  setpriv --reuid="$u" --regid="$(id -g "$u")" --init-groups --inh-caps=-all -- "$@"
+}
 # fence_open WHAT PATH: opens PATH (a folder: lists it) as the account, reads nothing.
 fence_open() {
   local err

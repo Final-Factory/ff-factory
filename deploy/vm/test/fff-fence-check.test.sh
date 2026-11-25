@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# `fffctl fence-check` (w5506), unprivileged, as the caller instead of the portal's account (FENCE_USER); no root and no VM:
+# `fffctl fence-check` (w5506), as the caller instead of the portal's account (FENCE_USER), or as nobody when run as root (CI); no VM:
 # run by lint.sh. What it checks:
 #   a key file the account may not open is "refused", one it may is "OPENED" and fails the check;
 #   a process running an execute-only node (deploy/vm/guest/units/fff-portal.service's node-portal) is not dumpable: its
@@ -24,22 +24,32 @@ oat="sk-ant-oat01-$(printf 'Q%.0s' {1..60})"
 ghp="ghp_$(printf 'r%.0s' {1..36})"
 printf 'a2V5LWJ5dGVzLW5vdC1hLXJlYWwta2V5LXctNTUwNg==\n' >"$tmp/vault.key"
 chmod 000 "$tmp/vault.key"
+# As root (CI's lint job) the probes run as nobody, who also owns the processes they look at: root opens any file.
+if [ "$(id -u)" = 0 ]; then
+  who=nobody
+  chmod 0711 "$tmp"
+  chown nobody "$tmp/vault.key"
+  as_who() { exec setpriv --reuid=nobody --regid="$(id -g nobody)" --clear-groups -- "$@"; }
+else
+  who=$(id -un)
+  as_who() { exec "$@"; }
+fi
 printf 'FFF_ROOT=%s\nFFF_USER=fff-no-such-user-w5506\n' "$tmp" >"$tmp/fff.conf"
 # The portal: an execute-only copy of node, as fff-portal.service's ExecStartPre makes it.
 cp "$(command -v node)" "$tmp/node-portal"
 chmod 0111 "$tmp/node-portal"
-FAKE_PORTAL_MARKER=$oat "$tmp/node-portal" -e 'setTimeout(() => {}, 60000)' &
+FAKE_PORTAL_MARKER=$oat as_who "$tmp/node-portal" -e 'setTimeout(() => {}, 60000)' &
 portal=$!
 pids+=("$portal")
-env -i PATH="$PATH" CLAUDE_CODE_OAUTH_TOKEN="$oat" sleep 60 &
+as_who env -i PATH="$PATH" CLAUDE_CODE_OAUTH_TOKEN="$oat" sleep 60 &
 claude=$!
 pids+=("$claude")
-env -i PATH="$PATH" GH_TOKEN="$ghp" sleep 60 &
+as_who env -i PATH="$PATH" GH_TOKEN="$ghp" sleep 60 &
 gh=$!
 pids+=("$gh")
 sleep 0.5
 
-ctl() { FFF_TEST_NOROOT=1 FFF_LIB=$G FFF_CONF=$tmp/fff.conf FENCE_USER=$(id -un) FENCE_KEY=$tmp/vault.key FENCE_CREDENTIALS=$tmp/no-credentials FENCE_PORTAL_PID=$portal bash $G/fffctl fence-check "$@" 2>&1; }
+ctl() { FFF_TEST_NOROOT=1 FFF_LIB=$G FFF_CONF=$tmp/fff.conf FENCE_USER=$who FENCE_KEY=$tmp/vault.key FENCE_CREDENTIALS=$tmp/no-credentials FENCE_PORTAL_PID=$portal bash $G/fffctl fence-check "$@" 2>&1; }
 noval() { if printf '%s' "$1" | matches -e "$oat" -e "$ghp" -e 'a2V5LWJ5'; then fail "fence-check printed a value: $1"; fi; }
 
 rc=0
