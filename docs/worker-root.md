@@ -386,7 +386,7 @@ when a new place in the daemon names the home folder, AppData or the system temp
 | A sandbox editor's temp files | `%LOCALAPPDATA%\Temp` | `/var/folders/...` | `/tmp` | **fixed** on Windows (`tmp/unity`); **exception** on macOS and Linux until the licensing client's socket is checked there |
 | Agents' temp | — | — | — | already inside: `tmp/ffa-<session>` |
 | Claude Code's folder (transcripts, plugins, settings) | `%USERPROFILE%\.claude` | `~/.claude` | `~/.claude` | **fixed** (w5305): `claude/`, once the tools publish has installed the plugins there ([2.8](#28-claude-codes-folder-w5305)); the machine's own login and registerAgents.sh's marker stay (**exception**) |
-| The game's data folder (saves, settings, AgentControl, desync reports, playtest sessions, timed runs' save copy) | `AppData\LocalLow\Never Games\finalfactory` | `~/Library/Application Support/Never Games/finalfactory` | `~/.config/unity3d/Never Games/finalfactory` | **fixed** (w5306): the daemon sets `FF_GAME_DATA_DIR=<root>/gamedata` (`rootEnv`, `machine/gameData.ts`), which `GameDataPaths.Root` takes since game PR #4237, and so do the game's `scripts/game_data.py where` and `player_slots.py` (`FF_GAME_DATA_ROOT` first, then `FF_GAME_DATA_DIR`, w5307). A branch or player build from before #4237 ignores it and still writes the old folder, so the daemon's readers look in both: the live view's session files (`machine/live.ts` `agentControlDirs`, the override first) and the timed run's save copy (`machine/timedRunner.ts`: `savesDirsFor` reads each build's `FFCore.dll` for the variable's literal and copies the save where that build loads it, both folders when it cannot tell) |
+| The game's data folder (saves, settings, AgentControl, desync reports, playtest sessions, timed runs' save copy) | `AppData\LocalLow\Never Games\finalfactory` | `~/Library/Application Support/Never Games/finalfactory` | `~/.config/unity3d/Never Games/finalfactory` | **fixed** (w5306): the daemon sets `FF_GAME_DATA_DIR=<root>/gamedata` (`rootEnv`, `machine/gameData.ts`), which `GameDataPaths.Root` takes since game PR #4237; since w5557 a sandbox's editor and agent get their own `<root>/gamedata/sandboxes/<sandbox>` (`sandboxGameDataEnv`: the editor's launch env in `machine/sandboxes.ts`, the agent's in `slotEnv`, so the players and batch runs it starts inherit it), while timed and nightly runs keep `<root>/gamedata`; the daemon's readers and clean-up list each sandbox's folder (`gameDataRoots`), and so do the game's `scripts/game_data.py where` and `player_slots.py` (`FF_GAME_DATA_ROOT` first, then `FF_GAME_DATA_DIR`, w5307). A branch or player build from before #4237 ignores it and still writes the old folder, so the daemon's readers look in both: the live view's session files (`machine/live.ts` `agentControlDirs`, the override first) and the timed run's save copy (`machine/timedRunner.ts`: `savesDirsFor` reads each build's `FFCore.dll` for the variable's literal and copies the save where that build loads it, both folders when it cannot tell) |
 | A slot player's `Player.log` | `LocalLow\...\Player.log` | `~/Library/Logs/Never Games/...` | `~/.config/unity3d/.../Player.log` | **fixed** (game PR #4237): `player_slots.py launch` passes `-logFile` under the worker's temp folder when `FF_WORKER_ROOT` is set and the caller gave none |
 | watch_video's cache and spend file | `~/.cache/watch_video`, `~/.config/ff-watch-video/spend.json` | same | same | **fixed** (w5307, final-factory-agents#1026): `cache/watch_video`, `cache/ff-watch-video/spend.json` when `FF_WORKER_ROOT` is set; the key file `gemini.env` stays in `~/.config/ff-watch-video`, a person's own secret |
 | honest-coop `agent_http` screenshots | beside the script in the plugin cache | same | same | **fixed** (w5307): the temp folder |
@@ -663,8 +663,9 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 **As built (w5377, 2026-11-24).** `daemon.json` `"workerIntegrity": "low"` (set remotely by `machine_update worker_fence`,
 4.3), Windows only, off when absent. Where it differs from the plan above:
 
-- `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; agents start unfenced until
-  it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
+- `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; sandbox agents wait until
+  it finishes, and are held, with the reason in `logs/daemon.log` (`worker integrity: ...`) and a portal alert, if any
+  step fails (w5555, 4.3 "When the fence fails").
   - It labels Low only the root's folders workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, `lowTargets`,
     `labelLow`; w5539), plus the root child that holds a configured temp or sandboxes folder. Every other child stays
     Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets`, the daemon's own
@@ -674,6 +675,14 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
     roots, the temp and sandbox folders where they are elsewhere, and only what `daemon.json` `workerIntegrityAllow`
     lists, which is the person's decision.
+  - The owner's own game folder (w5557, lothsahn: workers must not touch the owner's saves or Steam Cloud). Windows
+    labels `AppData\LocalLow` Low, so `LocalLow\Never Games\finalfactory`, the owner's saves and settings, inherits Low
+    and a Low worker could write it although every other folder of the profile refuses it. With `daemon.json`
+    `workerIntegrityLockGameData: true` the daemon gives that folder an explicit `(OI)(CI)medium` label when it is still
+    Low (labelLow's `medium` list) and reads it back (`ownerGameDataLock`, logged as "the owner's game folder ... is
+    Medium; a Low worker's write there is refused"). The owner's game runs at Medium and is unaffected. Opt-in per
+    machine because it changes a label on C:: set on BEAST; on LothDesktop the C: rule (lothsahn, w1755) keeps the
+    daemon and workers off C:, and the per-sandbox redirect below is the protection there.
   - Setting a label needs WRITE_OWNER, which an owner lacks by right (it has READ_CONTROL and WRITE_DAC). Where the
     account writes the root only through a group ACE, `icacls /setintegritylevel` answers "Access is denied" (BEAST,
     w5402: `F:fw` inherits `Authenticated Users:(M)` from the drive, and the daemon's token is not elevated, so
@@ -910,19 +919,47 @@ after it.
   Windows, the systemd user unit on Linux, the LaunchAgent on a Mac; the installer made it). On Windows the Low labels
   left on the root's folders need no undoing: they only stop Low processes writing up, and Medium ones are unaffected.
 
-**The fallback when a fence cannot apply** (`machine/fenceProbe.ts`). Before the daemon puts its first sandbox agent
-inside a fence, it runs a no-op inside the same fence once (Mac: `sandbox-exec -p <profile> /usr/bin/true`; Linux:
-`python3 ff-landlock.py <rules> -- /bin/true`; Windows: the Low copy of claude with `--version`, after its folders are
-labelled, 4.1 "As built"). If that does not exit 0 within 15 s (60 s on Windows) (a kernel without Landlock, a profile
-the kernel refuses, python3 missing, a folder that could not be labelled), the daemon logs
-`worker fence: ... could not run a no-op (...); agents run unfenced` (or `write lock: ...`) and runs its agents
-unfenced. Nothing in the fence code can throw out of the daemon's start or an agent's spawn: the fence never fails
-the daemon, it fails open to the pre-fence behaviour and says so in `logs/daemon.log`. The daemon itself never runs
-inside a fence, so a fence change cannot stop it starting.
+**When the fence fails: it fails closed** (`machine/fenceGate.ts`, w5555; lothsahn: "File it: the fence fails closed,
+with a portal alert"). Before the daemon puts its first sandbox agent inside a fence, it runs a no-op inside the same
+fence once (`machine/fenceProbe.ts`; Mac: `sandbox-exec -p <profile> /usr/bin/true`; Linux: `python3 ff-landlock.py
+<rules> -- /bin/true`; Windows: the Low copy of claude with `--version`, after its folders are labelled, 4.1 "As
+built"), in the background at the daemon's start (`Daemon.fenceSetup`). Until w5555 a failed probe ran the agents
+unfenced; now, when daemon.json turns this OS's fence on:
+
+- **While the setup runs**, a sandbox agent's start waits for it (the `send` is chained on `FenceGate.decided`) rather
+  than starting unfenced or failing.
+- **When the probe fails** (a kernel without Landlock, a profile the kernel refuses, python3 missing, a folder that could
+  not be labelled, a Low claude that does not run), the daemon logs `worker fence: ...`, `write lock: ...` or `worker
+  integrity: ...; sandbox workers are held (w5555)` and `worker fence FAILED (...)`, and refuses every sandbox agent's
+  start on that machine with the probe's error (`startRefusal`; `runSpec` throws too, so an agent host restarting a
+  session cannot start it unfenced either). Agents already running keep the fence they started in.
+- **The portal** gets a `worker_fence` report (sent on the change and on every reconnect's welcome) and keeps it on the
+  machine record (`Machine.fence`). On the change to failed it alerts once, naming the machine and the probe's error, to
+  the orchestrator and the host's devices (`machines.fenceAlert`, wired in `server/index.ts`), and once more when the
+  fence is on or off again. The machine's panel shows a red banner, and placement counts it busy (`worker fence failed:
+  <why>` in `busyReasons` and `agentBusyReasons`), so requests go to other machines.
+- **To clear it**: fix the cause and restart the daemon (it probes again at every start), or switch the fence off on
+  purpose (`ops_worker machine_update worker_fence off`, above). With the key absent the daemon starts workers unfenced,
+  as before the fence.
+
+Nothing in the fence code throws out of the daemon's start: a failed fence holds sandbox workers, never the daemon, its
+link, its updates or its standing agents. The daemon itself never runs inside a fence, so a fence change cannot stop it
+starting.
+
+**Who runs outside the fence on purpose** (w5555 census, 2026-11-25). Only agents with a sandbox (`LaunchSpec.sandbox`)
+are fenced, and every worker has one (`server/agents.ts` `machineSandboxSpec`; a worker spec without one throws). The
+agents without one stay at the daemon's level (Medium on Windows) and never wait for or are held by the fence:
+
+| Agent | Where | Why it stays outside |
+|---|---|---|
+| Standing agents | worker machines, `<app_dir>/agents/<id>` (`server/standing.ts`) | they keep watch over the machine and its tools; a held fence must not stop them |
+| The ops worker | the portal's VM, `/srv/fff-ops/scratch` (`server/opsWorker.ts`) | it repairs machines (the emergency route above), so it must run when a fence is broken |
+| Orchestrators (the dispatcher, each person's) | the portal's VM | they run no worker code and write no worker root |
+| The bug-thread ack judge | the portal's VM (`server/bugThreads.ts`) | no tools |
 
 **What a code rollback does not undo.** The link update rolls back the code when a new daemon does not come up
 (`linkJob.ts` `putBack`), but it does not revert daemon.json. That is intended: a bad fence does not stop the daemon
-(the fallback above), so a daemon that fails after an update failed for another reason, and the fence setting stays
+(it fails closed above, holding only sandbox workers), so a daemon that fails after an update failed for another reason, and the fence setting stays
 as the update set it.
 
 ## 5. Migration

@@ -5,8 +5,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { buildOptions, type LaunchSpec } from './launch.ts';
-import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, seatbeltProfile, type WorkerFence } from './workerFence.ts';
+import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, ownTranscriptOf, seatbeltProfile, sessionIdOf, type WorkerFence } from './workerFence.ts';
 import { ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
+import { projectSlug } from './claudeHome.ts';
 
 const F: WorkerFence = { kind: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p', darwinTemp: '/private/var/folders/xx/T', darwinCache: '/private/var/folders/xx/C' };
 
@@ -173,6 +174,75 @@ test('w5546: writeInPlace keeps the file (same inode), so a Landlock grant or a 
   assert.equal(fs.existsSync(readFenceModeFile(dir)), false);
   ensureReadBackDirs(dir);
   for (const d of ['logs', 'rpc', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions']) assert.ok(fs.statSync(path.join(dir, d)).isDirectory(), d);
+});
+
+test('w5563: sessionIdOf reads the conversation a claude argv runs', () => {
+  assert.equal(sessionIdOf(['--output-format', 'stream-json', '--resume', 'abcdef12-3456']), 'abcdef12-3456');
+  assert.equal(sessionIdOf(['--session-id', '4476260e-3192-4e62-b3ac-23e3de4f85e4', '--verbose']), '4476260e-3192-4e62-b3ac-23e3de4f85e4');
+  assert.equal(sessionIdOf(['--resume=abcdef12-3456']), 'abcdef12-3456');
+  assert.equal(sessionIdOf(['--resume', '../../x"y']), undefined, 'no id that is not a file name (nor a regex)');
+  assert.equal(sessionIdOf(['--verbose']), undefined);
+});
+
+test("w5563: the profile takes the Claude home's transcripts back after the root, but this conversation's own, and before the read-only folders", () => {
+  const sid = '4476260e-3192-4e62-b3ac-23e3de4f85e4';
+  const p = seatbeltProfile(F, { projects: '/Users/p/ffw/claude/projects', sid });
+  const at = (s: string) => {
+    const i = p.indexOf(s);
+    assert.ok(i >= 0, `missing: ${s}`);
+    return i;
+  };
+  const root = at('(allow file-write* (subpath "/Users/p/ffw"))');
+  const deny = at('(deny file-write* (subpath "/Users/p/ffw/claude/projects"))');
+  const own = at(`(allow file-write* (regex #"^/Users/p/ffw/claude/projects/[^/]+/${sid}\\.jsonl$") (regex #"^/Users/p/ffw/claude/projects/[^/]+/${sid}(/|$)"))`);
+  assert.ok(root < deny && deny < own && own < at('(subpath "/Users/p/ffw/daemon")'), 'later rules win');
+  assert.ok(!seatbeltProfile(F).includes('claude/projects'), 'no conversation named: no transcript rule');
+  // regex characters in the path are escaped
+  assert.ok(seatbeltProfile(F, { projects: '/Users/p.q/ffw/claude/projects', sid }).includes('^/Users/p\\.q/ffw/claude/projects/'));
+});
+
+test("w5563: ownTranscriptOf names the conversation in a Claude home inside the root, and makes the cwd's project folder first", (t) => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fence-own-')));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const f: WorkerFence = { ...F, root };
+  const cwd = path.join(root, 'sandboxes', 's1');
+  const env = { CLAUDE_CONFIG_DIR: path.join(root, 'claude') };
+  const own = ownTranscriptOf(f, { args: ['--session-id', 'abcdef12-3456'], cwd, env });
+  assert.deepEqual(own, { projects: path.join(root, 'claude', 'projects'), sid: 'abcdef12-3456' });
+  assert.ok(fs.statSync(path.join(root, 'claude', 'projects', projectSlug(cwd))).isDirectory());
+  assert.equal(ownTranscriptOf(f, { args: ['--session-id', 'abcdef12-3456'], cwd, env: { CLAUDE_CONFIG_DIR: '/elsewhere/claude' } }), undefined, 'a home outside the root is refused whole already');
+  assert.equal(ownTranscriptOf(f, { args: [], cwd, env }), undefined);
+});
+
+test("live w5563: a fenced process writes its own conversation's transcript and folder, and no other's", { skip: (!mac && 'needs macOS sandbox-exec') || (nested && 'already inside a sandbox (a fenced worker): sandbox-exec cannot nest') }, () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'fence-tx-')));
+  try {
+    const sid = '11111111-2222-4333-8444-555555555555';
+    const other = '99999999-2222-4333-8444-555555555555';
+    const f: WorkerFence = { kind: 'seatbelt', root, home: fs.realpathSync(os.homedir()), darwinTemp: path.join(root, 'no-darwin-temp'), darwinCache: path.join(root, 'no-darwin-cache') };
+    const cwd = path.join(root, 'sandboxes', 's1');
+    fs.mkdirSync(cwd, { recursive: true });
+    const env = { CLAUDE_CONFIG_DIR: path.join(root, 'claude') };
+    const dir = path.join(root, 'claude', 'projects', projectSlug(cwd));
+    const own = ownTranscriptOf(f, { args: ['--resume', sid], cwd, env });
+    fs.writeFileSync(path.join(dir, `${other}.jsonl`), 'theirs\n');
+    const sh = (cmd: string) => {
+      const [c, ...a] = fencedArgv(f, '/bin/sh', ['-c', cmd], own);
+      return spawnSync(c, a, { encoding: 'utf8', cwd });
+    };
+    assert.equal(sh(`echo mine >> "${dir}/${sid}.jsonl"`).status, 0, 'its own transcript');
+    assert.equal(sh(`mkdir -p "${dir}/${sid}/subagents" && echo x > "${dir}/${sid}/subagents/a.jsonl"`).status, 0, 'its own folder');
+    assert.notEqual(sh(`echo planted >> "${dir}/${other}.jsonl"`).status, 0, "another conversation's transcript");
+    assert.notEqual(sh(`rm "${dir}/${other}.jsonl"`).status, 0);
+    assert.notEqual(sh(`mv "${dir}/${other}.jsonl" "${root}/stolen"`).status, 0);
+    assert.notEqual(sh(`echo planted > "${dir}/new-conv-1234.jsonl"`).status, 0, 'a planted conversation');
+    assert.notEqual(sh(`mkdir "${dir}/memory"`).status, 0, 'memory');
+    assert.notEqual(sh(`mv "${root}/claude/projects" "${root}/claude/p2"`).status, 0, 'the projects folder itself');
+    assert.equal(fs.readFileSync(path.join(dir, `${other}.jsonl`), 'utf8'), 'theirs\n');
+    assert.equal(sh(`echo ok > "${root}/elsewhere"`).status, 0, 'the rest of the root as before');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('w5562: the profile refuses signals except to the fence\'s own processes, after the file rules', () => {

@@ -27,6 +27,10 @@
 #                            origin/<branch>) and print the release folder.
 #   fff-update init [REF]    the first release (install.sh).
 set -o errexit -o nounset -o pipefail
+# What root writes here is for fff to read (the clone's objects: the bundles a machine updates from; the releases fff runs).
+# activate runs inside fff-portal.service, whose UMask=0077 a "+" ExecStartPre keeps, so without this its fetch wrote
+# objects only root could read and every machine's update bundle failed (w5593). Private files set their own mode.
+umask 022
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
@@ -88,7 +92,8 @@ ensure_repo() {
     log "replaced fff's clone with root's"
   fi
   chown -R -h root:root "$REPO"
-  chmod -R go-w "$REPO"
+  # a+rX: fff's git reads every object (bundles, version); this also mends what a run under umask 077 wrote (w5593).
+  chmod -R go-w,a+rX "$REPO"
   git_root -C "$REPO" remote set-url origin "$FFF_REPO_URL"
   # git 2.46 or later reads a trailing /* (Ubuntu 26.04 has it).
   for w in "$REPO" "$RELEASES/*"; do

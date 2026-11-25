@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isLabelledLow, labelLow, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 
 /**
@@ -312,4 +312,31 @@ test('w5546 lockout review B1, B3: off takes only the NR labels still there off 
   assert.ok(scripts[0].includes("'F:\\ffw\\daemon', 'S:(ML;OICI;NW;;;ME)'") && !scripts[0].includes('NWNR'), scripts[0]);
   const none: Exec = async (cmd) => (cmd === 'icacls' ? { code: 0, stdout: 'x Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', stderr: '' } : assert.fail('nothing to set'));
   assert.deepEqual(await openNoReadUp(t, none, () => {}, { systemDrive: () => false }), [], 'never labelled: nothing walked');
+});
+
+test('w5557: the owner game folder lock reads back Medium, and says so when it is still Low or missing', async () => {
+  const dir = 'C:\\Users\\p\\AppData\\LocalLow\\Never Games\\finalfactory';
+  // icacls' own words (measured on LothDesktop for Low, w5333; Medium is the same line with "Medium").
+  const medium = `${dir} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n    Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)\n`;
+  const low = `${dir} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n    Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)\n`;
+  const exec = (out: string): Exec => async () => ({ code: 0, stdout: out, stderr: '' }) as never;
+  assert.ok(isLabelledMedium(medium) && !isLabelledMedium(low));
+  assert.match(await ownerGameDataLock(dir, exec(medium), () => true), /is Medium; a Low worker's write there is refused/);
+  assert.match(await ownerGameDataLock(dir, exec(low), () => true), /is NOT Medium/);
+  assert.match(await ownerGameDataLock(dir, exec(medium), () => false), /does not exist yet/);
+});
+
+test('w5557: labelLow keeps an inherited-Low owner game folder Medium when it is in the medium list', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ownergd-'));
+  try {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return { code: 0, stdout: args.length === 1 ? `${args[0]} Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)` : '', stderr: '' } as never;
+    };
+    assert.equal(await labelLow({ dirs: [], files: [], medium: [dir] }, exec, () => {}), true);
+    assert.deepEqual(calls.find((c) => c.includes("/setintegritylevel")), ["icacls", dir, "/setintegritylevel", "(OI)(CI)medium"], JSON.stringify(calls));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

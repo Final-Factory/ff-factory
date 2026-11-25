@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { checkArray, readJsonDurable, writeJsonDurable } from './durable.ts';
 
 /**
- * Device approval (docs/identity.md, "Device approval"): with config `deviceApproval` "members", a member's right password
+ * Device approval (docs/identity.md, "Device approval"; owners: "Owner device approval", w5524): with config `deviceApproval` "members", a member's right password
  * on a browser an owner has not approved for them opens no session; the login waits as a request an owner approves or
  * denies in the portal. A browser is known by a random 256-bit id in its own cookie (ffsb_device); only the id's SHA-256 is
  * kept (data/devices.json), per login, so one browser shared by two people is approved for each of them separately. A
@@ -12,6 +12,16 @@ import { checkArray, readJsonDurable, writeJsonDurable } from './durable.ts';
  */
 export type DeviceApproval = 'off' | 'members';
 export const DEVICE_APPROVALS: readonly DeviceApproval[] = ['off', 'members'];
+/**
+ * New-device approval for owner logins (w5524, docs/identity.md "Owner device approval"), config `ownerDeviceApproval`:
+ * "off", nothing recorded; "advisory" (the default), an owner's login from a browser no owner approved for them outside
+ * the tailnet is let in, but a request is shown to the owners and the login is written to the device log as one that would
+ * need approval. Over the tailnet an owner's login approves its browser. Nothing here holds or refuses an owner's login:
+ * enforcement is a later change (lothsahn, w5524: advisory only while the owners travel).
+ */
+export type OwnerDeviceApproval = 'off' | 'advisory';
+export const OWNER_DEVICE_APPROVALS: readonly OwnerDeviceApproval[] = ['off', 'advisory'];
+export const OWNER_DEVICE_APPROVAL_DEFAULT: OwnerDeviceApproval = 'advisory';
 export const DEVICE_COOKIE = 'ffsb_device';
 /** Browsers cap a cookie's life at 400 days. */
 const DEVICE_COOKIE_MAX_AGE_S = 400 * 24 * 3600;
@@ -35,9 +45,11 @@ export interface DeviceRecord {
   ip: string;
   createdAt: string;
   decidedAt?: string;
-  /** The owner who decided, or "set-password link". */
+  /** The owner who decided, "set-password link", or "tailnet login" (an owner's login over the tailnet approves its browser). */
   decidedBy?: string;
   lastSeenAt?: string;
+  /** A pending request whose login was let in anyway (ownerDeviceApproval "advisory"): it would need approval. */
+  advisory?: boolean;
 }
 
 export type DeviceView = Omit<DeviceRecord, 'sha256'>;
@@ -84,7 +96,7 @@ export class Devices {
    * The record for this browser and login, made `status` when there is none (a new request, or an approval by link).
    * An existing record keeps its status unless `status` is "approved" by link; its last-seen time is updated.
    */
-  upsert(username: string, sha256: string, req: http.IncomingMessage, ip: string, status: DeviceStatus, decidedBy?: string): DeviceRecord {
+  upsert(username: string, sha256: string, req: http.IncomingMessage, ip: string, status: DeviceStatus, decidedBy?: string, advisory = false): DeviceRecord {
     const list = this.all();
     const now = new Date().toISOString();
     const old = list.find((d) => d.username === username && d.sha256 === sha256);
@@ -93,10 +105,12 @@ export class Devices {
       old.lastSeenAt = now;
       old.ip = ip;
       if (status === 'approved' && old.status !== 'approved') Object.assign(old, { status, decidedAt: now, decidedBy });
+      if (old.status === 'pending' && advisory) old.advisory = true;
+      else delete old.advisory;
       this.write(list);
       return old;
     }
-    const rec: DeviceRecord = { id: `d${randomBytes(6).toString('base64url')}`, username, sha256, status, label: deviceLabel(ua), userAgent: ua, ip, createdAt: now, lastSeenAt: now, ...(status !== 'pending' ? { decidedAt: now, decidedBy } : {}) };
+    const rec: DeviceRecord = { id: `d${randomBytes(6).toString('base64url')}`, username, sha256, status, label: deviceLabel(ua), userAgent: ua, ip, createdAt: now, lastSeenAt: now, ...(status !== 'pending' ? { decidedAt: now, decidedBy } : {}), ...(status === 'pending' && advisory ? { advisory: true } : {}) };
     this.write([...list, rec]);
     return rec;
   }
@@ -117,9 +131,65 @@ export class Devices {
     if (action === 'revoke') this.write(list.filter((x) => x !== d));
     else {
       Object.assign(d, { status: action === 'approve' ? 'approved' : 'denied', decidedAt: new Date().toISOString(), decidedBy: by });
+      delete d.advisory;
       this.write(list);
     }
     return d;
+  }
+}
+
+/**
+ * The owner logins advisory device approval let in that would need approval (w5524): one line per such login, kept 180
+ * days and at most 2000 lines in data/device-log.json, so the owners can see over time who enforcement would lock out
+ * before it exists (the dashboard's Settings > Devices list, GET /api/devices `log`). Never a cookie or its hash.
+ */
+export type DeviceLogOutcome = 'would-need-approval' | 'would-be-refused';
+
+export interface DeviceLogEntry {
+  at: string;
+  username: string;
+  /** The device record's public id. */
+  device: string;
+  label: string;
+  ip: string;
+  userAgent: string;
+  mode: OwnerDeviceApproval;
+  outcome: DeviceLogOutcome;
+}
+
+const LOG_TTL_MS = 180 * 24 * 3600 * 1000;
+const LOG_MAX = 2000;
+const LOG_REPEAT_MS = 30 * 60_000;
+
+export class DeviceLog {
+  private readonly file: string;
+
+  constructor(dataDir: string) {
+    this.file = path.join(dataDir, 'device-log.json');
+  }
+
+  /** The lines still kept, oldest first. */
+  list(now = Date.now()): DeviceLogEntry[] {
+    return (readJsonDurable<DeviceLogEntry[]>(this.file, { check: checkArray }) ?? []).filter((e) => now - Date.parse(e.at) < LOG_TTL_MS);
+  }
+
+  /**
+   * Write a line, unless the same device had the same outcome in the last 30 minutes (a held login page asks again every
+   * 10 seconds): the line kept is returned either way.
+   */
+  add(e: Omit<DeviceLogEntry, 'at'>, now = Date.now()): DeviceLogEntry {
+    const all = this.list(now);
+    const recent = all.findLast((x) => x.device === e.device && x.username === e.username);
+    if (recent && recent.outcome === e.outcome && now - Date.parse(recent.at) < LOG_REPEAT_MS) return recent;
+    const entry: DeviceLogEntry = { at: new Date(now).toISOString(), ...e };
+    writeJsonDurable(this.file, [...all, entry].slice(-LOG_MAX), { indent: 1 });
+    return entry;
+  }
+
+  removeUser(username: string) {
+    const all = this.list();
+    const keep = all.filter((e) => e.username !== username);
+    if (keep.length !== all.length) writeJsonDurable(this.file, keep, { indent: 1 });
   }
 }
 

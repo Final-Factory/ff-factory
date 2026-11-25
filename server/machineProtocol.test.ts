@@ -155,7 +155,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // `LaunchSpec.fence.readAllowed`/`readOff`. The portal sends a read-fence action only to a daemon whose hello offers the
 // switch (an older one took any action but restart as an unload), `read-fence-warn` among them (lockout review); an older portal ignores the hello field; an older agent
 // host ignores the fence's read fields and runs the write fence alone.
-const DECIDED = { protocol: 9, fingerprint: '3ca4cf0b05af281d' };
+// w5555 (no bump): `worker_fence`, the daemon's worker fence state. An older portal's switch has no case for it and drops
+// it (the fence then holds workers without the alert); an older daemon never sends it.
+// Both of the above together (w5546 merged with w5555).
+const DECIDED = { protocol: 9, fingerprint: '4785c6d9bc65cb4a' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
