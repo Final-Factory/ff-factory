@@ -21,14 +21,38 @@ Under the worker install folder (`FF_WORKER_ROOT`: `F:\ffw` on BEAST, `V:\ffw` o
 | `ffu-sandboxes/slots.json` | each slot's holder (the session id), branch and last use |
 | `ffu-sandboxes/.lock` | a folder made atomically around every change; another worker takes it over after 15 min |
 
-The cargo registry and git cache stay in the machine's `CARGO_HOME`, which already holds one per machine. On BEAST that
-is `~/.cargo`; on LothDesktop it is `V:/ffw/tools/cargo`. A cold fetch of ffu's crates took 22 s and 1.1 GB (measured,
-BEAST).
+The cargo registry, its index and git dependencies are one `CARGO_HOME` per machine, inside the install folder (w5501),
+shared by every slot and every worker's cargo:
+
+- **Where.** The daemon sets `CARGO_HOME=<root>/cache/cargo` in its own environment at start, so every agent, script and
+  build it starts inherits it, and `ffu-slot take` (and `where`) also prints `export CARGO_HOME=...`. A `CARGO_HOME` the
+  daemon's environment already gives inside the root stays where it is (LothDesktop's `V:/ffw/tools/cargo`), unless it
+  sits in `daemon`, `secrets` or `ffu-runners`, which a fenced worker cannot write. Code: `machine/sharedCaches.ts`
+  `workerCargoHome`, `machine/daemon.ts` (the start, before `rootEnv`), `machine/ffuSlots.ts` `envLines`.
+- **Why.** On BEAST it used to be the person's `~/.cargo` on C:. A worker under the Windows Low-integrity fence cannot write
+  there, so a `cargo fetch` of a crate not yet downloaded failed with "Access is denied (os error 5)" (measured
+  2026-11-24, w5499); building with crates already fetched worked.
+- **Writable under every fence.** `cache` is a root child: on Windows the daemon labels it Low with `(OI)(CI)`
+  (`machine/lowIntegrity.ts` `lowTargets`), so `cache/cargo` and all cargo writes in it inherit Low; Linux Landlock and
+  macOS Seatbelt open every root child except `daemon` and `secrets`. The daemon makes the folder before it labels or starts
+  an agent.
+- **Seeded, read only.** When the home moved (from `~/.cargo`, or a `CARGO_HOME` outside the root), the daemon copies in
+  the background, once, what the old one has and the new one lacks: `registry/index`, `registry/cache` (the downloaded
+  `.crate` files), `git/db` and `config.toml`/`config`. Not `bin` (the person's installed tools stay where `PATH` finds
+  them), `registry/src` (cargo unpacks it again from the cache) or `credentials*` (a login). Each piece is copied into
+  `cache/cargo/.seed` and renamed into place, so cargo never sees half of one; a piece cargo made first is kept and the copy
+  dropped. The old home is only read: nothing on C: is written, moved or deleted. The daemon log says what it seeded
+  (`cargo home: ...`). A seed that cannot read the old home is said there too; cargo then downloads (a cold fetch of ffu's
+  crates: 22 s and 1.1 GB, measured on BEAST).
+- **Not the runners'.** The ffu CI runners keep their own `<root>/ffu-runners/cargo` (Medium on Windows, not a worker's).
+- `cargo install` now lands in `cache/cargo/bin`, which is not on `PATH`; tools a person installed before stay in the old
+  home's `bin`, still on `PATH`.
+- Tests: `server/cargoHome.test.ts`.
 
 ## Use (a worker)
 
 ```sh
-eval "$(ffu-slot take --branch my-branch)"   # sets FFU_SLOT, FFU_DIR, CARGO_TARGET_DIR and cds into the checkout
+eval "$(ffu-slot take --branch my-branch)"   # sets FFU_SLOT, FFU_DIR, CARGO_TARGET_DIR, CARGO_INCREMENTAL=0, CARGO_HOME and cds into the checkout
 cargo test --workspace --all-features --no-run
 ffu-slot release                             # once the work is pushed (a stopped worker's pushed slot frees itself)
 ffu-slot list                                # every slot, its branch, and why it is or is not free

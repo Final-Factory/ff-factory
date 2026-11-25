@@ -61,6 +61,79 @@ export function editorTempEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform 
 }
 
 /**
+ * The machine's cargo home inside the install folder (w5501): the crates registry, its index and git checkouts every ffu
+ * slot and every worker's cargo shares. Before it, BEAST's agents used the person's `~/.cargo` on C:, where a worker under
+ * the Windows Low-integrity fence cannot write: a `cargo fetch` of a crate not yet downloaded failed with "Access is denied
+ * (os error 5)" (measured 2026-11-24, w5499). `cache` is a root child, so every fence lets a worker write it: Windows labels
+ * it Low with (OI)(CI) and what is made in it inherits Low (lowIntegrity.ts lowTargets), and Seatbelt and Landlock open
+ * the whole root except `daemon` and `secrets`.
+ */
+export const workerCargoHomeDir = (root: string) => path.join(sharedCacheDir(root), 'cargo');
+/** Root children a cargo home already set there may not stay in: the daemon's and the secrets (no worker writes them) and the CI runners' (Medium on Windows, lowIntegrity.ts CI_CHILDREN). */
+const CARGO_HOME_NOT_UNDER = ['daemon', 'secrets', 'ffu-runners'];
+
+/**
+ * The CARGO_HOME the daemon gives its agents, and the old one to seed it from. A CARGO_HOME already inside the root and
+ * writable for a worker stays (LothDesktop's `V:/ffw/tools/cargo`, set in its environment); anything else (unset, so
+ * cargo's `~/.cargo`, or a folder outside the root) moves to `<root>/cache/cargo`, seeded from the old one. Exported for tests.
+ */
+export function workerCargoHome(root: string, env: NodeJS.ProcessEnv, home: string, p: typeof path = path): { home: string; seedFrom?: string } {
+  const now = env.CARGO_HOME?.trim();
+  if (now) {
+    const rel = p.relative(p.resolve(root), p.resolve(now));
+    const first = rel.split(/[\\/]/)[0]?.toLowerCase() ?? '';
+    if (rel && !rel.startsWith('..') && !p.isAbsolute(rel) && !CARGO_HOME_NOT_UNDER.includes(first)) return { home: p.resolve(now) };
+  }
+  const to = p.join(root, 'cache', 'cargo');
+  const from = now ? p.resolve(now) : p.join(home, '.cargo');
+  return p.resolve(from).toLowerCase() === p.resolve(to).toLowerCase() ? { home: to } : { home: to, seedFrom: from };
+}
+
+/** What a seed copies from the old cargo home: the registry's index and downloaded crates, git dependencies' bare clones, and its config. Not `bin` (the person's installed tools, found on PATH where they are), `registry/src` (unpacked again from the cache), nor `credentials*` (a login). */
+export const CARGO_SEED_PIECES = [['registry', 'index'], ['registry', 'cache'], ['git', 'db'], ['config.toml'], ['config']];
+
+/**
+ * Seeds a new cargo home from the old one (w5501), so the first build after the move downloads nothing: each piece of
+ * CARGO_SEED_PIECES that the old home has and the new one lacks is copied into `<to>/.seed` and renamed into place, so
+ * cargo never sees half a piece (a worker's cargo that made a piece first keeps its own; the copy is dropped). Reads the
+ * old home only: nothing there is written, moved or deleted. Never throws; answers a line for the daemon's log.
+ */
+export async function seedCargoHome(from: string, to: string, o: { cp?: (a: string, b: string) => Promise<void> } = {}): Promise<string> {
+  const cp = o.cp ?? ((a: string, b: string) => fs.promises.cp(a, b, { recursive: true, errorOnExist: false, force: false, preserveTimestamps: true }));
+  const holds = (a: string, b: string) => {
+    const x = path.relative(path.resolve(a), path.resolve(b));
+    return x === '' || (!x.startsWith('..') && !path.isAbsolute(x));
+  };
+  if (holds(from, to) || holds(to, from)) return `cargo home: not seeding ${to} from ${from}: one holds the other`;
+  const done: string[] = [];
+  const failed: string[] = [];
+  const stage = path.join(to, '.seed');
+  for (const piece of CARGO_SEED_PIECES) {
+    const src = path.join(from, ...piece);
+    const dst = path.join(to, ...piece);
+    const name = piece.join('/');
+    try {
+      if (!fs.existsSync(src) || fs.existsSync(dst)) continue;
+      const tmp = path.join(stage, piece.join('-'));
+      await fs.promises.rm(tmp, { recursive: true, force: true });
+      await fs.promises.mkdir(stage, { recursive: true });
+      await cp(src, tmp);
+      await fs.promises.mkdir(path.dirname(dst), { recursive: true });
+      if (fs.existsSync(dst)) await fs.promises.rm(tmp, { recursive: true, force: true });
+      else {
+        await fs.promises.rename(tmp, dst);
+        done.push(name);
+      }
+    } catch (e) {
+      failed.push(`${name} (${(e as Error).message.slice(0, 160)})`);
+    }
+  }
+  await fs.promises.rm(stage, { recursive: true, force: true }).catch(() => undefined);
+  if (!done.length && !failed.length) return `cargo home: ${to} (nothing to seed from ${from})`;
+  return `cargo home: ${to}${done.length ? `, seeded ${done.join(', ')} from ${from}` : ''}${failed.length ? `; could not copy ${failed.join('; ')} (cargo downloads them)` : ''}`;
+}
+
+/**
  * A batch Unity run under `unity-slot run` that names no `-logFile` wrote the person's own Editor.log
  * (`%LOCALAPPDATA%\Unity\Editor`, `~/Library/Logs/Unity`, `~/.config/unity3d`), over the one their own editor keeps (w5297).
  * Such a run gets `-logFile <TMPDIR>/unity-<label>-<time>.log`, the worker's own temp folder; anything else is left as given.
