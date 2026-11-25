@@ -1197,7 +1197,7 @@ A repository-set `url.<base>.insteadOf` cannot be overridden by value (the longe
 wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). Not covered: `lfs.url`
 in a repository's config (git-lfs would send LFS objects there; the GitHub token's helper answers only github.com).
 
-`worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools/final-factory-agents` to origin/master, but
+`worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools-medium/final-factory-agents` (w5597: in a root child only Medium writes; it was `<root>/tools`, which workers write) to origin/master with every hook off, but
 runs `registerAgents.sh` from a fresh shallow clone in a new temp folder, made with no global config, no system config
 (but on Windows) and the fence, and removed after; the script, hooks and config in the root's checkout never run.
 `server/safeGit.test.ts` fails on a git spawn that skips the helper and shows with a marker file that the daemon's status,

@@ -110,7 +110,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `~/.claude/` (`projects/` = transcripts and memory, `plugins/`, `settings.json`) | Claude Code's config and history; `CLAUDE_CONFIG_DIR` is **unset** for BEAST workers today (measured) | Claude Code, `registerAgents.sh` | M | 3.8 GB (`projects` 3.7 GB, `plugins` 124 MB, 63 cached ff-agents versions) | **yes** (`.credentials.json` on Windows) | `server/usage.ts:195`; `server/secretGuard.ts:167-177` |
 | `~/.claude.json` (+ `.backup`, `.tmp.*`) | per-project MCP servers (the daemon reads the UnityMCP entry from it) | Claude Code | M | small | no (but guarded) | `machine/unityMcp.ts:29-32` |
 | `~/.claude-worker-token` (BEAST) | a token file (config `claudeTokenFile` until w1078, which retired the key and the "tokenfile" account; nothing reads the file now) | a person | M | tiny | **yes** | `server/config.ts:195`, `server/appConfig.ts:312-315` (as measured before w1078) |
-| `~/final-factory-agents/` | a person's checkout of final-factory-agents (publish-skills edits it; `registerAgents.sh` ran from it). Claude Code installs from its own marketplace clone, `~/.claude/plugins/marketplaces/final-factory-agents`, not from here. FF Factory never touches it: its agent tools publish runs from `<root>/tools/final-factory-agents` (w1476, [worker-install.md](worker-install.md#the-agent-tools-w1476)) | a person | M | 3.8 MB | no | CLAUDE.md of the game repo; `server/agentTools.ts` |
+| `~/final-factory-agents/` | a person's checkout of final-factory-agents (publish-skills edits it; `registerAgents.sh` ran from it). Claude Code installs from its own marketplace clone, `~/.claude/plugins/marketplaces/final-factory-agents`, not from here. FF Factory never touches it: its agent tools publish runs from a fresh clone beside `<root>/tools-medium/final-factory-agents` (w1476, w5597, [worker-install.md](worker-install.md#the-agent-tools-w1476)) | a person | M | 3.8 MB | no | CLAUDE.md of the game repo; `server/agentTools.ts` |
 | `~/.local/bin/` (`claude.exe`, the `unity` CLI shim) | Claude Code's native binary; the editor-ops fallback | installers | M | 236 MB | no | `server/machineDeployWin.ts:269,354`; ff-agents `editor-ops/references/recovery.md:193` |
 | `~/.gitconfig` | user git config; on BEAST its GitHub credential helper is `gh auth git-credential` (measured) | a person | M | tiny | no | — |
 | gh's token: Windows Credential Manager (BEAST: "keyring", measured), `~/.config/gh` on a Mac, `%APPDATA%\GitHub CLI` | GitHub API and git pushes | `gh auth login` | M | — | **yes** | `server/secretGuard.ts:173-176` |
@@ -175,7 +175,11 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   cache/uv-tools/                sandbox agents' and editors' UV_TOOL_DIR (uvx's temp files, w5693, w5745)
   cache/uv-bin/                  sandbox agents' and editors' UV_TOOL_BIN_DIR (`uv tool install`'s commands, w5745)
   steam/                         steamcmd, its config and cached login, FFBox's release scripts: the daemon's alone (w5551, steam-upload.md)
-  tools/final-factory-agents/    FF Factory's own checkout the agent tools publish runs registerAgents.sh from (w1476)
+  tools-medium/final-factory-agents/  FF Factory's own checkout of final-factory-agents, taken forward by the agent tools
+                                 publish (w1476), which runs registerAgents.sh from a fresh clone beside it (w5573): read-only
+                                 to workers (MEDIUM_ONLY_CHILDREN, w5597)
+  tools/final-factory-agents/    where that checkout was before w5597, which workers write: no longer run or taken forward,
+                                 left as it is and read only as a fallback until the new one exists
   home/                          GIT_CONFIG_GLOBAL (.gitconfig), GH_CONFIG_DIR (.config/gh), .ssh/config
   cache/                         UPM_CACHE_ROOT, npm and pip caches
 ```
@@ -704,7 +708,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - It labels Low only the root's folders workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, `lowTargets`,
     `labelLow`; w5539), plus the root child that holds a configured temp or sandboxes folder. Every other child stays
     Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets`, the daemon's own
-    folder and the Medium-only `claude-medium` (w5543) and `cache-medium` (w5565) are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
+    folder and the Medium-only `claude-medium` (w5543), `cache-medium` (w5565) and `tools-medium` (w5597) are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
     portals, and any folder added later are kept Medium. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
     is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
@@ -859,7 +863,7 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 
 | Path | Why |
 |---|---|
-| the root's folders workers write: `WORKER_CHILDREN` (`machine/lowIntegrity.ts` `openChildren`, w5569), plus the root folder that holds a configured `tempDir` or sandboxes folder, never `daemon`, `secrets`, `claude-medium`, `cache-medium` (the Medium agents' Claude folder, w5543, 2.8, and uv cache, w5565) or the daemon's own folder | the work. `repo` must stay writable: sandbox worktrees keep their git data there. A listed folder missing when the agent starts is skipped, so read-only for that agent |
+| the root's folders workers write: `WORKER_CHILDREN` (`machine/lowIntegrity.ts` `openChildren`, w5569), plus the root folder that holds a configured `tempDir` or sandboxes folder, never `daemon`, `secrets`, `claude-medium`, `cache-medium`, `tools-medium` (the Medium agents' Claude folder, w5543, 2.8, their uv cache, w5565, and FF Factory's final-factory-agents checkout, w5597) or the daemon's own folder | the work. `repo` must stay writable: sandbox worktrees keep their git data there. A listed folder missing when the agent starts is skipped, so read-only for that agent |
 | `extraRoots` | folders of the install that live outside the root |
 | the Unity slots mailbox, only where `daemon.json` puts it outside the root | the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps it inside (`<root>/unity-slots`, w5377), so it needs no rule. The Max events file gets no rule on purpose: it is the daemon's (`<daemon>/max/max-events.jsonl`, w5552) and refused like its folder |
 | `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |

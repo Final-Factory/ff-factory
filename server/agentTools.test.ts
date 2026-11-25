@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, prependPath, publishAgentTools, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
+import { EXIT, checkoutProblem, formatVersions, installedVersions, marketplaceVersions, parseVersions, legacyToolsCheckout, prependPath, publishAgentTools, readableToolsCheckout, staleAfter, toolsCheckout, type Ran } from './agentTools.ts';
+import { toolsResult } from './machineRollout.ts';
 
 /** The agent tools publish on a machine (w1476, server/agentTools.ts; docs/worker-install.md "The agent tools"). */
 
@@ -32,6 +33,10 @@ interface Machine {
   installs?: Record<string, string>;
   /** The checkout exists before the run (else the run clones it). */
   existing?: boolean;
+  /** w5597: an old-layout machine: FF Factory's checkout in <root>/tools, which workers write, named by the marker. */
+  legacy?: boolean;
+  /** The clone of the lasting checkout fails (w5597: a warning, the publish goes on). */
+  coCloneCode?: number;
   /** publish-skills' marker before the run (a person's checkout). */
   marker?: string;
   claudeConfigDir?: boolean;
@@ -62,6 +67,10 @@ function machine(o: Machine = {}) {
     fs.writeFileSync(path.join(dir, '.claude-plugin', 'marketplace.json'), JSON.stringify(marketplaceJson(v)));
   };
   if (o.existing) writeCheckout({ 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2', 'ff-discord': '1.17.6' });
+  if (o.legacy) {
+    writeCheckout({ 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2', 'ff-discord': '1.17.6' }, legacyToolsCheckout(root));
+    fs.writeFileSync(marker, `${legacyToolsCheckout(root)}\n`);
+  }
   const calls: { cmd: string; args: string[]; cwd?: string; env?: NodeJS.ProcessEnv }[] = [];
   const lines: string[] = [];
   const ok = (stdout = ''): Ran => ({ code: 0, stdout, stderr: '' });
@@ -71,6 +80,7 @@ function machine(o: Machine = {}) {
       const a = args.filter((s, i) => !(s === '-c' || args[i - 1] === '-c'));
       if (a[0] === 'clone') {
         if (o.runCloneCode && a.includes('--depth')) return { code: o.runCloneCode, stdout: '', stderr: 'fatal: unable to access' };
+        if (o.coCloneCode && !a.includes('--depth')) return { code: o.coCloneCode, stdout: '', stderr: 'fatal: unable to access' };
         writeCheckout(LATEST, a.at(-1));
         return ok();
       }
@@ -115,7 +125,7 @@ const ran = (m: ReturnType<typeof machine>, what: string) => m.calls.filter((c) 
 test("a first run clones FF Factory's own checkout in the root, runs registerAgents.sh from it, and verifies every plugin is on master", async () => {
   const m = machine({ marker: 'C:/Users/rydin/final-factory-agents\n' });
   assert.equal(await m.run('/home/x/.local/bin/claude'), EXIT.ok);
-  assert.equal(m.co, path.join(m.root, 'tools', 'final-factory-agents'), 'inside the worker root');
+  assert.equal(m.co, path.join(m.root, 'tools-medium', 'final-factory-agents'), 'w5597: inside the worker root, in the child only Medium writes');
   const clone = ran(m, 'clone')[0];
   assert.ok(clone.args.includes('https://github.com/Final-Factory/final-factory-agents.git') && clone.args.includes(m.co));
   assert.deepEqual(clone.args.slice(0, 4), ['-c', 'credential.helper=', '-c', 'credential.interactive=never'], 'anonymous: an ssh session reaches no keychain');
@@ -130,6 +140,7 @@ test("a first run clones FF Factory's own checkout in the root, runs registerAge
   assert.deepEqual(m.lines.filter((l) => l.startsWith('Agent tools')), [
     'Agent tools before: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed',
     'Agent tools latest: final-factory-agents a8449abd8457: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord 1.17.7',
+    `Agent tools checkout: ${m.co} at a8449abd8457`,
     'Agent tools after: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed',
     'Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.',
   ]);
@@ -145,7 +156,7 @@ test('a later run fast-forwards its checkout and touches nothing else; with no m
   assert.ok(m.lines.some((l) => l.includes(`checkout marker now names ${m.co} (there was none)`)));
 });
 
-test('its checkout dirty, on another branch, from another repo or diverged: NOT PUBLISHED, nothing overwritten, registerAgents.sh not run', async () => {
+test('w5597: its checkout dirty, on another branch, from another repo or diverged: nothing overwritten, a WARNING, and the publish goes on from the fresh clone', async () => {
   for (const [o, why] of [
     [{ porcelain: ' M plugins/ff-agents/skills/x/SKILL.md\n?? notes.txt\n' }, /has uncommitted changes \(2 paths\)/],
     [{ branch: 'w1258-ab-leg' }, /is on w1258-ab-leg, not master/],
@@ -153,11 +164,12 @@ test('its checkout dirty, on another branch, from another repo or diverged: NOT 
     [{ mergeCode: 128 }, /has commits origin\/master does not \(it cannot fast-forward\)/],
   ] as [Machine, RegExp][]) {
     const m = machine({ existing: true, ...o });
-    assert.equal(await m.run(), EXIT.notPublished);
-    assert.match(m.lines.find((l) => l.startsWith('NOT PUBLISHED:'))!, why);
-    assert.match(m.lines.find((l) => l.startsWith('NOT PUBLISHED:'))!, /nothing in it was overwritten/);
-    assert.ok(m.lines.includes('Agent tools after: ff-agents 1.29.19, ff-speckit 1.0.2, ff-discord not installed (unchanged)'));
-    assert.equal(m.calls.filter((c) => c.cmd === 'sh').length, 0);
+    assert.equal(await m.run(), EXIT.ok);
+    assert.match(m.lines.find((l) => l.startsWith('WARNING:'))!, why);
+    assert.match(m.lines.find((l) => l.startsWith('WARNING:'))!, /nothing in it was overwritten; this run publishes from a fresh clone/);
+    assert.ok(m.lines.includes('Agent tools after: ff-agents 1.29.20, ff-speckit 1.0.2, ff-discord not installed'));
+    assert.equal(m.calls.filter((c) => c.cmd === 'sh').length, 1);
+    assert.equal(toolsResult(0, m.lines.join('\n')).warnings?.length, 1, 'the rollout report carries the warning');
     assert.equal(ran(m, 'reset').length + ran(m, 'stash').length + ran(m, 'checkout').length + ran(m, 'clean').length, 0);
   }
 });
@@ -166,15 +178,19 @@ test('a folder in the way that is not a checkout is left alone', async () => {
   const m = machine();
   fs.mkdirSync(m.co, { recursive: true });
   fs.writeFileSync(path.join(m.co, 'keep.txt'), 'x');
-  assert.equal(await m.run(), EXIT.notPublished);
+  assert.equal(await m.run(), EXIT.ok, 'w5597: the publish goes on from the fresh clone');
   assert.equal(fs.readFileSync(path.join(m.co, 'keep.txt'), 'utf8'), 'x');
-  assert.equal(ran(m, 'clone').length, 0);
+  assert.equal(ran(m, 'clone').filter((c) => c.args.includes(m.co)).length, 0);
+  assert.ok(m.lines.some((l) => l.startsWith(`WARNING: ${m.co} holds files but no git checkout; it is left as it is`)));
+  assert.ok(m.lines.some((l) => l.startsWith('Agent tools checkout: none (')));
+  assert.equal(m.marker(), undefined, "no marker naming the run's temp folder, which is gone");
 });
 
 test('a fetch or registerAgents.sh failure, or a plugin left behind master, fails and says which', async () => {
+  // w5597: the lasting checkout's fetch is a warning; the fresh clone the plugins come from decides.
   const f = machine({ existing: true, fetchCode: 128 });
-  assert.equal(await f.run(), EXIT.failed);
-  assert.match(f.lines.at(-1)!, /^FAILED: could not fetch final-factory-agents \(fatal: unable to access\)/);
+  assert.equal(await f.run(), EXIT.ok);
+  assert.ok(f.lines.some((l) => /^WARNING: could not fetch final-factory-agents into .* \(fatal: unable to access\); this run publishes from a fresh clone/.test(l)));
   const s = machine({ shCode: 1, installs: { 'ff-agents': '1.29.19', 'ff-speckit': '1.0.2' } });
   assert.equal(await s.run(), EXIT.failed);
   assert.match(s.lines.at(-1)!, /^FAILED: registerAgents\.sh exited 1: claude CLI not on PATH/);
@@ -283,4 +299,60 @@ test("w5543: one run installs the plugins into the workers' folder and the Mediu
   const bad = machine({ claudeConfigDir: true, medium: true, mediumShCode: 1 });
   assert.equal(await bad.run(), EXIT.failed);
   assert.ok(bad.lines.some((l) => l.startsWith(`FAILED (Medium agents, ${bad.mediumDir}): registerAgents.sh exited 1`)));
+});
+
+test('w5597: an old-layout machine migrates: the new checkout is cloned, the old one is never run, fetched or written, and the marker moves', async () => {
+  const m = machine({ legacy: true });
+  const old = legacyToolsCheckout(m.root);
+  // What a fenced worker could plant in the old checkout: a script and a hook.
+  fs.writeFileSync(path.join(old, 'registerAgents.sh'), 'touch planted\n');
+  fs.mkdirSync(path.join(old, '.git', 'hooks'), { recursive: true });
+  fs.writeFileSync(path.join(old, '.git', 'hooks', 'post-merge'), '#!/bin/sh\ntouch planted\n');
+  assert.equal(await m.run(), EXIT.ok);
+  for (const c of m.calls) {
+    assert.ok(!(c.cwd ?? '').startsWith(old), `nothing runs in the old checkout: ${c.cmd} ${c.args.join(' ')} in ${c.cwd}`);
+    assert.ok(!c.args.some((a) => a.startsWith(old)), `no git names the old checkout: ${c.args.join(' ')}`);
+  }
+  assert.ok(ran(m, 'clone').some((c) => c.args.at(-1) === m.co), 'the new checkout is cloned');
+  assert.equal(fs.readFileSync(path.join(old, 'registerAgents.sh'), 'utf8'), 'touch planted\n', 'the old checkout is left as it is');
+  assert.ok(m.lines.some((l) => l.startsWith(`Cloned final-factory-agents into ${m.co} (FF Factory's own checkout, which no worker can write; the old ${old} is no longer used`)));
+  assert.equal(m.marker(), `${m.co}\n`, "publish-skills' marker moves with the checkout");
+  assert.ok(m.lines.includes(`publish-skills' checkout marker now names ${m.co} (it named the old ${old}).`));
+  // The rollout still reads the run.
+  const t = toolsResult(0, m.lines.join('\n'));
+  assert.equal(t.status, 'ok');
+  assert.equal(t.latestSha, SHA.slice(0, 12));
+  assert.equal(t.checkout, `${m.co} at a8449abd8457`);
+});
+
+test('w5597: every git the publish runs reads hooks from an empty folder of its own; the lasting clone failing is a warning, not a failed publish', async () => {
+  const m = machine({ existing: true });
+  assert.equal(await m.run(), EXIT.ok);
+  const gits = m.calls.filter((c) => c.cmd === 'git');
+  assert.ok(gits.length >= 6);
+  const hooks = new Set<string>();
+  for (const c of gits) {
+    const i = c.args.findIndex((a) => a.startsWith('core.hooksPath='));
+    assert.ok(i > 0 && c.args[i - 1] === '-c', `hooksPath on: ${c.args.join(' ')}`);
+    hooks.add(c.args[i].slice('core.hooksPath='.length));
+    assert.ok(c.env?.GIT_CONFIG_GLOBAL, 'an empty global config of its own');
+  }
+  assert.equal(hooks.size, 1);
+  const h = [...hooks][0];
+  assert.equal(path.dirname(path.dirname(h)), m.tmpdir, "the run's own folder");
+  assert.equal(fs.existsSync(h), false, 'removed with the run');
+
+  const f = machine({ coCloneCode: 128 });
+  assert.equal(await f.run(), EXIT.ok);
+  assert.ok(f.lines.some((l) => l.startsWith(`WARNING: could not clone https://github.com/Final-Factory/final-factory-agents.git into ${f.co}`)));
+  assert.equal(f.calls.filter((c) => c.cmd === 'sh').length, 1);
+});
+
+test('w5597: readers take the new checkout, else the old one until it moves', () => {
+  const root = path.join(os.tmpdir(), 'r');
+  const rel = path.join('plugins', 'ff-agents', 'skills');
+  const has = (...dirs: string[]) => (p: string) => dirs.some((d) => p === path.join(d, rel));
+  assert.equal(readableToolsCheckout(root, rel, has(toolsCheckout(root), legacyToolsCheckout(root))), toolsCheckout(root));
+  assert.equal(readableToolsCheckout(root, rel, has(legacyToolsCheckout(root))), legacyToolsCheckout(root));
+  assert.equal(readableToolsCheckout(root, rel, has()), undefined);
 });
