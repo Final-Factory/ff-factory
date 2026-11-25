@@ -44,7 +44,7 @@ export const CI_CHILDREN = ['ffu-runners'];
  * tool writes: docs/worker-root.md 2.1 and 4.1 say which.
  */
 export const WORKER_CHILDREN = [
-  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'max', 'nightly', 'nightly-history',
+  'agents', 'cache', 'claude', 'ffu-sandboxes', 'gamedata', 'home', 'logs', 'nightly', 'nightly-history',
   'player-cache', 'players', 'release-records', 'repo', 'sandboxes', 'scratch', 'seed', 'steam', 'steam-lobby-gate',
   'test-history', 'tmp', 'tools', 'unity-slots', 'voice',
 ];

@@ -156,8 +156,10 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
  * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
  * portal re-emits it with no listener, and an older daemon or host never sends it.
+ * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended }
+ * (machine/workerCaps.ts); an older portal ignores it.
  */
-export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize';
+export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
 
 /** The refusal of unity and switch on a machine's main clone, by the portal and by the daemon (w536). */
 export const MAIN_CLONE_NO_AGENTS = "a machine's main clone takes no agents (w536): give a sandbox";

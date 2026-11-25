@@ -108,6 +108,8 @@ redact() {
 }
 
 ssh_as_fff() { runuser -u "$FFF_USER" -- "$FFF_LIB/fff-ops-ssh" "$@"; }
+# cat_as_fff FILE: FILE read as the portal's account, so a link it put there leads only to what it could read (w5531).
+cat_as_fff() { runuser -u "$FFF_USER" -- cat -- "$1"; }
 # fff-machine-ssh as the portal's account, with the installed machines.ssh (it refuses root). It reads and writes only
 # the portal account's ~/.ssh; it prints the public key line, never the private key.
 machine_ssh() { runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" "$FFF_LIB/fff-machine-ssh" "$@"; }
@@ -194,19 +196,22 @@ apikey_issue() {
   tmp=$(mktemp -d)
   # shellcheck disable=SC2064 # expanded now, on purpose (a local, like credential_issue's: w734)
   trap "rm -rf -- '$tmp'" EXIT
-  chown "$FFF_USER" "$tmp" # fffctl apikey runs as the portal's account and writes the key here
-  chmod 700 "$tmp"
-  local args=(apikey issue "$name" --user "$user" --out "$tmp/key")
+  # fffctl apikey runs as the portal's account and writes the key in a folder of fff's inside this root one (w5531): root
+  # writes only where fff cannot ($tmp/issued), and reads the key as fff, so a link fff put in place of it leads nowhere
+  # fff could not read itself.
+  chmod 711 "$tmp"
+  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$tmp/fff"
+  local args=(apikey issue "$name" --user "$user" --out "$tmp/fff/key")
   [ "$create" = 0 ] || args+=(--create-member)
   [ "$have_display" = 0 ] || args+=(--display-name "$display")
   "$FFFCTL" "${args[@]}" >"$tmp/issued" 2>&1 || refuse "fffctl apikey issue $name failed: $(redact <"$tmp/issued" | tail -n 3)"
-  [ -s "$tmp/key" ] || refuse "fffctl apikey issue $name wrote no key"
+  [ -s "$tmp/fff/key" ] || refuse "fffctl apikey issue $name wrote no key"
   if [ "$platform" = posix ]; then
     # shellcheck disable=SC2088 # the machine's ~, expanded by its shell
     case "$dest" in /*) ;; *) dest="~/$dest" ;; esac
     dir=${dest%/*}
     [ -n "$dir" ] || dir=/
-    out=$(ssh_as_fff "$target" "umask 077 && mkdir -p $dir && cat > $dest.tmp && chmod 600 $dest.tmp && mv -f $dest.tmp $dest && echo stored $dest" <"$tmp/key" 2>&1) || {
+    out=$(cat_as_fff "$tmp/fff/key" | ssh_as_fff "$target" "umask 077 && mkdir -p $dir && cat > $dest.tmp && chmod 600 $dest.tmp && mv -f $dest.tmp $dest && echo stored $dest" 2>&1) || {
       "$FFFCTL" apikey revoke "$name" >/dev/null 2>&1 || true
       refuse "the key was issued but could not be written on $target: $(printf '%s' "$out" | redact | head -c 300). It was revoked again; run this again"
     }
@@ -214,7 +219,7 @@ apikey_issue() {
     # A relative path is in the user's profile folder. Base64 UTF-16LE (-EncodedCommand) so cmd.exe or PowerShell pass it on unchanged.
     ps="\$f = '$dest'; if (-not [IO.Path]::IsPathRooted(\$f)) { \$f = Join-Path \$env:USERPROFILE \$f }; \$f = [IO.Path]::GetFullPath(\$f); New-Item -ItemType Directory -Force -Path (Split-Path \$f) | Out-Null; [IO.File]::WriteAllText(\$f, [Console]::In.ReadToEnd().Trim()); 'stored ' + \$f"
     enc=$(printf '%s' "$ps" | iconv -t UTF-16LE | base64 -w0)
-    out=$(ssh_as_fff "$target" "powershell -NoProfile -NonInteractive -EncodedCommand $enc" <"$tmp/key" 2>&1) || {
+    out=$(cat_as_fff "$tmp/fff/key" | ssh_as_fff "$target" "powershell -NoProfile -NonInteractive -EncodedCommand $enc" 2>&1) || {
       "$FFFCTL" apikey revoke "$name" >/dev/null 2>&1 || true
       refuse "the key was issued but could not be written on $target: $(printf '%s' "$out" | redact | head -c 300). It was revoked again; run this again"
     }
@@ -227,6 +232,8 @@ apikey_issue() {
 # (ops_worker ASKED_VIA). Removed here before anything runs, whatever follows; sets GRANT_BY to who asked.
 take_grant() {
   local grant=$1 what=$2 via=$3 owner expires
+  # A symbolic link fff put there is no grant, and root does not read through it (w5531).
+  [ ! -L "$grant" ] || { rm -f "$grant"; refuse "the $what grant is a symbolic link: refused"; }
   [ -f "$grant" ] || refuse "no $what was asked for: only Lothsahn or Ben ask for one, in a turn of their own, through their orchestrator's $via (good for 15 minutes, once)"
   owner=$(stat -c %U "$grant")
   GRANT_BY=$(jq -r '.by // ""' "$grant" 2>/dev/null || true)
