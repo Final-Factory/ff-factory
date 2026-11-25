@@ -280,6 +280,10 @@ console.log(out.join('; '))`,
     home,
   );
   t.diagnostic(`at Low under the lock: ${res}`);
+  // DIAG w5703: what the Low child holds, and whether a write without backup semantics (cmd's >>) is refused too.
+  t.diagnostic(`DIAG priv at Low: ${atLow(`const cp=require('child_process');const w=require('path').join(process.env.SystemRoot,'System32','whoami.exe');const nl=String.fromCharCode(10);console.log(cp.execFileSync(w,['/priv','/fo','csv','/nh'],{encoding:'utf8'}).split(nl).join(' ')+' | '+cp.execFileSync(w,['/groups'],{encoding:'utf8'}).split(nl).filter(l=>l.includes('Mandatory Label')).join(' '))`)}`);
+  t.diagnostic(`DIAG cmd append at Low: ${atLow(`const cp=require('child_process');try{cp.execFileSync('cmd.exe',['/d','/c','echo x>>"'+process.argv[1]+'"'],{stdio:'pipe',windowsVerbatimArguments:true});console.log('WRITTEN')}catch(e){console.log('refused '+String(e.stderr).trim())}`, other)}`);
+  t.diagnostic(`DIAG priv at host: ${execFileSync(path.join(process.env.SystemRoot ?? '', 'System32', 'whoami.exe'), ['/priv', '/fo', 'csv', '/nh'], { encoding: 'utf8' }).split(String.fromCharCode(10)).join(' ')}`);
   for (const w of ['append other', 'truncate other', 'plant', 'mkdir', 'plant in other folder', 'rename other', 'rename other to its folder', 'delete other', 'delete other folder', 'new project folder', 'undo deny on projects', 'label projects low']) assert.match(res, new RegExp(`${w} E(ACCES|PERM)`), w);
   assert.match(res, /append own WRITTEN/);
   assert.match(res, /own folder WRITTEN/);
