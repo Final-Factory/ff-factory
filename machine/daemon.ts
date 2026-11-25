@@ -96,7 +96,8 @@ import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from '.
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
-import { benchTicketFor, queueTickets, type QueueTicket } from './benchQueue.ts';
+import { benchTicketFor, pythonExe, queueTickets, type QueueTicket } from './benchQueue.ts';
+import { runSteamJob } from './steamUpload.ts';
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
 import { TestHistorySpool } from './testHistorySpool.ts';
@@ -2075,6 +2076,7 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      ...(this.cfg.root ? { steamUpload: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
       // It updates, restarts and unloads itself on the portal's word over this link (w1596): a worker root install.
@@ -3688,6 +3690,20 @@ export class Daemon {
       case 'lab_fixture_upload':
         void this.labFixture(msg);
         return;
+      case 'steam_upload': {
+        // w5551 (machine/steamUpload.ts): the urgent lane's Steam step, with the credential no worker holds.
+        if (!this.cfg.root) return this.send({ type: 'steam_upload_state', id: msg.id, state: 'failed', error: 'this daemon has no worker root' });
+        const sb = msg.sandbox ? this.pool.pathOf(msg.sandbox) : undefined;
+        void runSteamJob(msg, {
+          root: this.cfg.root,
+          allowedRoots: [...(sb ? [sb] : []), sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.session)],
+          python: pythonExe(process.env),
+          gitEnv: githubNetEnv(msg.githubToken),
+          send: (m) => this.send(m),
+          log: (line) => log(line),
+        });
+        return;
+      }
       case 'bench_revoke':
         // w3715: a worker's idle background work holds the bench lock; give its ticket back, and end its helper if it will not
         if (!this.cfg.root) log(`bench revoke ${msg.ticket}: no worker root here`);
