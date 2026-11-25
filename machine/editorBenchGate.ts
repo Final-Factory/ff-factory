@@ -19,6 +19,7 @@
  */
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { benchTicketFor, type TicketState } from './benchQueue.ts';
+import { trustedAppDir } from './evidenceGate.ts';
 import { ownTimedHold } from './benchLock.ts';
 
 /** Unity MCP tools that compile, import or run tests in the editor (mcp-for-unity's names). */
@@ -87,7 +88,7 @@ export function editorBenchGate(o: EditorBenchGateOptions): { hook: HookCallback
   const ownHold = o.ownHold ?? (() => ownTimedHold(o.root, o.env?.FF_SESSION_ID || undefined));
   const ticketFor =
     o.ticketFor ??
-    ((what: string) => benchTicketFor({ mode: 'shared', what, checkouts: [o.sandboxPath], root: o.root, env: o.env, maxMin: 30 }));
+    ((what: string) => benchTicketFor({ mode: 'shared', what, checkouts: [o.sandboxPath], root: o.root, env: o.env, maxMin: 30, trusted: { appDir: trustedAppDir() } }));
   let ticket: GateTicket | undefined;
   let granted = false;
   let lastUse = 0;

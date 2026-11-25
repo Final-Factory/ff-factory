@@ -106,6 +106,7 @@ import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
 import { originOf, tailnetDeviceAddress, tailnetOnly } from './remoteChat.ts';
 import { OWNER_DEVICE_APPROVAL_DEFAULT } from './devices.ts';
+import { clientAddress, configureClientAddress } from './clientAddress.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
 import { slugify } from './sandboxes.ts';
@@ -474,6 +475,8 @@ const auth = new Auth(cfg.dataDir, {
   ownerDeviceApproval: () => cfg.ownerDeviceApproval ?? OWNER_DEVICE_APPROVAL_DEFAULT,
   onTailnet: (req) => tailnetOnly(req) === undefined,
 });
+// Every client address the portal takes comes from server/clientAddress.ts, with trustProxy read live (w5535).
+configureClientAddress({ trustProxy: () => cfg.trustProxy });
 // Who is who (docs/identity.md): the logins in data/users.json, and who automatic work is billed to.
 const identity = new Identity(cfg, () => auth.userInfos());
 const agents = new Agents(cfg, store, sessions, machines, identity);
@@ -2554,24 +2557,18 @@ server.on('upgrade', (req, socket, head) => {
   // attacker-supplied Origin ("null", garbage) must never be able to throw.
   if (parseUrl(req.url)?.pathname === '/provider') {
     // FFBox's connector (docs/ffbox-connector-contract.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    providers.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    providers.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const livePath = /^\/machine\/live\/([\w-]{1,80})$/.exec(parseUrl(req.url)?.pathname ?? '');
   if (livePath) {
     // A daemon's live frame socket (w1398, docs/live-view.md): the machine token, as /machine.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgradeLive(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer, livePath[1]);
+    machines.upgradeLive(req, socket, head, clientAddress(req), livePath[1]);
     return;
   }
   if (parseUrl(req.url)?.pathname === '/machine') {
     // A machine daemon (docs/machines.md): its own token, no browser session.
-    const fwd = String(req.headers['x-forwarded-for'] ?? '').split(',')[0].trim();
-    const peer = req.socket.remoteAddress ?? '';
-    machines.upgrade(req, socket, head, cfg.trustProxy && /^(::1|127\.|::ffff:127\.)/.test(peer) && fwd ? fwd : peer);
+    machines.upgrade(req, socket, head, clientAddress(req));
     return;
   }
   const origin = req.headers.origin;
