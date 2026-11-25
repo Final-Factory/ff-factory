@@ -1,6 +1,7 @@
 import type http from 'node:http';
 import { defaultLimits, joinRefusal, parseFacts, WORKER_TAG, type JoinCodes, type JoinLimits, type JoinRecords, type TailnetDevice } from './machineJoin.ts';
-import { clientAddress, tailnetOnly } from './remoteChat.ts';
+import { tailnetOnly } from './remoteChat.ts';
+import { clientAddress } from './clientAddress.ts';
 import type { MachinePlatform } from '../shared/types.ts';
 
 /** The bootstrap's `os` fact as the record's platform (w1603: the record says what the PC is from its redeem on). */
