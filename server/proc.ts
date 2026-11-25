@@ -2,6 +2,7 @@ import { execFile, spawn } from 'node:child_process';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import { gitFence, isGit } from './safeGit.ts';
 
 export const isWindows = process.platform === 'win32';
 
@@ -24,12 +25,14 @@ export interface RunOptions {
   signal?: AbortSignal;
 }
 
-export function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+export async function run(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+  // w5541: git runs no program the checkout's own config names (server/safeGit.ts).
+  const f = isGit(cmd) ? await gitFence(args, { cwd: opts.cwd, env: opts.env }) : { args, env: opts.env ?? process.env };
   return new Promise((resolve) => {
     execFile(
       cmd,
-      args,
-      { cwd: opts.cwd, timeout: opts.timeoutMs ?? 0, maxBuffer: 64 * 1024 * 1024, env: opts.env ?? process.env, windowsHide: true, signal: opts.signal },
+      f.args,
+      { cwd: opts.cwd, timeout: opts.timeoutMs ?? 0, maxBuffer: 64 * 1024 * 1024, env: f.env, windowsHide: true, signal: opts.signal },
       (err, stdout, stderr) => {
         // err.code is the exit status for a program that ran, or a string like ENOENT when it could not start.
         const raw = (err as { code?: unknown } | null)?.code;

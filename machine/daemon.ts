@@ -32,6 +32,7 @@ import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
+import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts';
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
 export const DAEMON_YIELD_EXIT = 75;
@@ -237,6 +238,11 @@ export interface DaemonConfig {
    */
   previousPortalUrl?: string;
   relocatedAt?: string;
+  /**
+   * w5576 (machine/portalPin.ts, docs/portal-pin.md): portal hosts this machine follows beside the built-in list
+   * (PINNED_PORTAL_HOSTS). Written by the installer (the ops worker's ssh route), never by a message over the link.
+   */
+  pinnedPortalHosts?: string[];
   /** The daemon.json this config was read from (set by the entry point, never written): where a relocate is kept. */
   configFile?: string;
   /**
@@ -653,8 +659,17 @@ export class Daemon {
    */
   fence: FenceGate;
 
+  /** The portal hosts it follows (w5576). */
+  private readonly pin: PortalPin;
+
   constructor(cfg: DaemonConfig, makeSession?: SessionFactory, probes: Probes = REAL_PROBES, poolDeps?: PoolDeps, guardEffects?: MachineGuardEffects, voiceDeps?: Partial<ConstructorParameters<typeof DaemonVoice>[2]>, reaperDeps?: ReaperDeps, leftoverDeps?: Partial<LeftoverDeps>, liveDeps?: (sandbox: string) => LiveDeps) {
     this.cfg = cfg;
+    // w5576: the portal hosts it follows. Stage 1 warns only: what pinning would refuse is logged, kept and reported.
+    this.pin = new PortalPin(pinnedHosts(cfg.pinnedPortalHosts), PortalPin.fileFor(cfg.configFile), (line) => log(line));
+    for (const [url, what] of [[cfg.portalUrl, 'the portal URL in daemon.json'], [cfg.previousPortalUrl, 'the portal URL before a relocate, in daemon.json']] as const) {
+      if (url) this.pin.check('dial', url, what);
+    }
+    onPortalRedirect((from, to) => void this.pin.check('redirect', to, `the portal redirected ${hostOf(from) ?? from} to ${to}`));
     this.liveDeps = liveDeps;
     this.guardEffects = guardEffects;
     this.fence = new FenceGate({ wanted: fenceWanted(cfg, process.platform), kind: fenceKindFor(process.platform), machine: cfg.id, changed: (r) => this.send({ type: 'worker_fence', fence: r }) });
@@ -1767,6 +1782,10 @@ export class Daemon {
     if (bad) return this.send({ type: 'relocate_result', id, ok: false, error: bad });
     const before = this.cfg.portalUrl.replace(/\/+$/, '');
     if (url === before) return this.send({ type: 'relocate_result', id, ok: true });
+    // w5576: a portal moves only to a pinned host (warn mode: an unpinned one is logged, kept and reported, and followed).
+    if (!this.pin.check('relocate', url, `a relocate from ${before} to ${url}`)) {
+      return this.send({ type: 'relocate_result', id, ok: false, error: `${hostOf(url) ?? url} is not a portal host this machine follows (w5576, docs/portal-pin.md): add it to PINNED_PORTAL_HOSTS and roll that out first` });
+    }
     const fields = { portalUrl: url, previousPortalUrl: before, relocatedAt: new Date().toISOString() };
     try {
       // Kept first: a daemon restart (a reboot) after the answer must dial the new URL too.
@@ -1832,6 +1851,17 @@ export class Daemon {
       // With this listener, ws leaves the aborting to us: without it each refused attempt (a 502 while the
       // portal restarts) hung until the handshake timeout, and a restart took 40 s to get over.
       log(`portal refused the connection: HTTP ${res.statusCode}`);
+      // ws follows no redirect (followRedirects is off): it is refused here as before, and reported (w5576).
+      const loc = res.headers.location;
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && typeof loc === 'string') {
+        let to = loc;
+        try {
+          to = new URL(loc, url.replace(/^ws/, 'http')).href;
+        } catch {
+          // as given
+        }
+        if (!this.pin.pinned(to)) this.pin.warn('redirect', `the portal's /machine link answered a redirect to ${to}; not followed`);
+      }
       res.resume();
       req.destroy();
       ws.terminate();
@@ -2055,6 +2085,8 @@ export class Daemon {
       ...(selfUpdate ? { selfUpdate: SELF_UPDATE_VERSION } : {}),
       // w5546: it takes daemon_control read-fence-off / -warn / -on (an older daemon would read any other action as uninstall).
       readFenceSwitch: true,
+      // The portal hosts it follows and what pinning would have refused (w5576).
+      portalPin: this.pin.status(this.cfg.portalUrl),
       // A worker root install (w513): its folders, for a record the portal never deployed.
       ...(this.cfg.root
         ? { layout: { root: this.cfg.root, appDir: appDirOfConfig(this.cfg), repoPath: this.cfg.repoPath, tempDir: this.cfg.tempDir, sandboxes: this.cfg.sandboxes ?? null, ...installSshOf(this.cfg.root) } }

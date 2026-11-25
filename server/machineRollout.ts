@@ -64,10 +64,21 @@ export const ROLLOUT_LIMITS = {
   benchWaitMs: 45 * 60_000,
   /** w4421: times one rollout sends an update again that a full disk refused, each once the disk is back over its line. */
   diskFullRetries: 3,
+  /** w5593: times one rollout sends an update or tools run again whose bundle download was cut, each cutRetryMs after it failed. */
+  cutRetries: 3,
+  cutRetryMs: 5 * 60_000,
 };
 
 /** w4421: an update that failed because the machine's disk was full (ENOSPC on Linux and macOS, Windows' own words). */
 export const DISK_FULL = /ENOSPC|no space left on (the )?device|not enough space on the disk|disk (is )?full/i;
+
+/**
+ * w5593: the daemon gave up on the bundle's download (machine/selfUpdate.ts downloadBundle: too slow for its 480 s, stalled,
+ * or broken) and changed nothing. BEAST 2026-11-25 08:20:52Z: 13754368 of 29217059 bytes in 480 s (35 KB/s) over a relayed
+ * link, and every other machine waited for the next deploy; on 2026-11-25 06:27Z a send two minutes after such a cut went out
+ * at 8048 KB/s. A link's slow spell passes, so the same update is sent again.
+ */
+export const CUT_DOWNLOAD = /the bundle's download (did not finish in|stalled|broke)/i;
 
 export interface RolloutMachine {
   id: string;
@@ -157,6 +168,8 @@ export interface MachineOutcome {
   held?: boolean;
   /** w4421: the update failed on a full disk: sent again by itself once the disk is back over its line, up to diskFullRetries. */
   diskFull?: { at: string; retries: number };
+  /** w5593: its update's (or tools run's) bundle download was cut: sent again by itself cutRetryMs later, up to cutRetries. */
+  cutDownload?: { at: string; retries: number };
 }
 
 export interface RolloutState {
@@ -354,6 +367,7 @@ export class MachineRollout {
       for (const m of this.d.host.machines()) {
         const o = (this.state.machines[m.id] ??= { status: 'pending' });
         this.retryDiskFull(m.id, o);
+        this.retryCutDownload(m.id, o);
         if (o.status !== 'pending') {
           if (this.toolsDue(m, o)) await this.publishTools(m, o);
           this.save();
@@ -414,6 +428,31 @@ export class MachineRollout {
     Object.assign(o, { status: 'pending', note: `its disk is back (${room}): the update its full disk refused is sent again (try ${o.diskFull.retries} of ${this.lim.diskFullRetries})` });
     delete o.told;
     console.log(`machine rollout: ${id}: ${o.note}`);
+  }
+
+  /**
+   * w5593: an update, or a tools run, whose bundle download was cut is sent again by itself, cutRetryMs after it failed, while
+   * the machine is online, up to cutRetries in one rollout. The daemon changed nothing (selfUpdate.ts throws before it
+   * unpacks), so sending the same job again is what the next deploy would have done, sooner.
+   */
+  private retryCutDownload(id: string, o: MachineOutcome): void {
+    const c = o.cutDownload;
+    if (!c || c.retries >= this.lim.cutRetries || !this.d.host.online(id) || this.now() - Date.parse(c.at) < this.lim.cutRetryMs) return;
+    const toolsCut = o.tools?.status === 'failed' && CUT_DOWNLOAD.test(o.tools.note ?? '');
+    let what: string;
+    if (o.status === 'failed' && CUT_DOWNLOAD.test(o.note ?? '')) {
+      what = 'update';
+      c.retries++;
+      Object.assign(o, { status: 'pending', note: `its update's download was cut: sent again (try ${c.retries} of ${this.lim.cutRetries})` });
+      // Its tools run comes after the update again.
+      if (toolsCut || o.tools?.status === 'skipped') delete o.tools;
+    } else if (toolsCut && o.status !== 'failed') {
+      what = 'agent tools';
+      c.retries++;
+      delete o.tools;
+    } else return;
+    delete o.told;
+    console.log(`machine rollout: ${id}: the download of its ${what} was cut: sent again (try ${c.retries} of ${this.lim.cutRetries})`);
   }
 
   /** A commit that is not known counts as outdated (w970), unlike the nag in machines.ts that leaves it alone: the update fixes it. */
@@ -524,6 +563,10 @@ export class MachineRollout {
       o.diskFull = { at: o.at, retries: o.diskFull?.retries ?? 0 };
       if (o.diskFull.retries < this.lim.diskFullRetries) o.note = `${o.note}; its disk was full: sent again by itself once the disk is back over its warning line`;
     } else if (o.status !== 'failed') delete o.diskFull;
+    if (o.status === 'failed' && CUT_DOWNLOAD.test(o.note ?? '')) {
+      o.cutDownload = { at: o.at, retries: o.cutDownload?.retries ?? 0 };
+      if (o.cutDownload.retries < this.lim.cutRetries) o.note = `${o.note}; sent again by itself in ${Math.round(this.lim.cutRetryMs / 60_000)} min`;
+    }
     // Were the agents taken back by the new daemon? Its hello after the update says what it runs.
     if (agentsBefore.length && o.status !== 'pending') await this.checkAdoption(m.id, o, agentsBefore, startedAt);
     console.log(`machine rollout: ${m.id}: ${o.status}${o.note ? ` (${o.note})` : ''}`);
@@ -640,6 +683,10 @@ export class MachineRollout {
       Object.assign(t, { status: 'failed', note: (e as Error).message });
     }
     t.at = new Date(this.now()).toISOString();
+    if (t.status === 'failed' && CUT_DOWNLOAD.test(t.note ?? '')) {
+      o.cutDownload = { at: t.at, retries: o.cutDownload?.retries ?? 0 };
+      if (o.cutDownload.retries < this.lim.cutRetries) t.note = `${t.note}; sent again by itself in ${Math.round(this.lim.cutRetryMs / 60_000)} min`;
+    }
     console.log(`machine rollout: ${m.id}: agent tools ${t.status}${t.note ? ` (${t.note})` : ''}`);
   }
 

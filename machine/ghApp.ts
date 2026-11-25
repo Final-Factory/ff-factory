@@ -18,6 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../server/safeGit.ts';
 import { appNamesOf, appTokenFor, ghRepoOf, gitRemoteRepo, repoKey, type GhAppToken } from '../shared/githubAppRoute.ts';
 
 export const GH_APP_DIR = 'gh-app';
@@ -263,7 +264,7 @@ export function ghAppSessionSetup(o: { setup: GhAppSetup | undefined; sessions: 
 
 /** `git config --get-regexp` of the remotes' URLs in `cwd`, or nothing. */
 export const remotesOf = (cwd: string) => () => {
-  const r = spawnSync('git', ['config', '--get-regexp', '^remote\\..*\\.url$'], { cwd, encoding: 'utf8', windowsHide: true, timeout: 10_000 });
+  const r = gitSpawnSync(['config', '--get-regexp', '^remote\\..*\\.url$'], { cwd, encoding: 'utf8', windowsHide: true, timeout: 10_000 });
   return r.status === 0 ? r.stdout : '';
 };
 

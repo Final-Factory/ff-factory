@@ -31,6 +31,27 @@ run_cmd() {
   fi
 }
 
+# key_primary_fprs FILE: the fingerprint of every primary key in an OpenPGP key file (armored or not), one per line.
+# Subkeys' fingerprints are left out: a vendor pins its primary keys.
+key_primary_fprs() {
+  gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }'
+}
+
+# verify_key_fprs FILE FPR...: dies unless FILE holds at least one key and every primary key in it is one of the pinned
+# fingerprints (w5530: an apt signing key fetched over the network is trusted only by its fingerprint). An unlisted key,
+# an extra key in the file, an unreadable file and a wrong fingerprint all fail, naming what was found.
+verify_key_fprs() {
+  local file=$1 found f p ok
+  shift
+  found=$(key_primary_fprs "$file")
+  [ -n "$found" ] || die "apt key check FAILED: $file holds no readable OpenPGP key"
+  for f in $found; do
+    ok=0
+    for p in "$@"; do [ "$f" = "$p" ] && ok=1; done
+    [ "$ok" = 1 ] || die "apt key check FAILED: $file has the key $f, expected one of: $* (the vendor's key changed, or the download was tampered with; nothing was installed)"
+  done
+}
+
 # write_file PATH MODE [OWNER]: stdin to PATH when it differs; prints "changed" when it wrote (or would).
 write_file() {
   local path=$1 mode=$2 owner=${3:-root:root} tmp

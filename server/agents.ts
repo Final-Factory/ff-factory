@@ -1,4 +1,5 @@
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
+import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
 import { untimedText } from '../shared/benchGlance.ts';
 import { modelChoices, workerModelChoice } from './workerModel.ts';
@@ -7388,6 +7389,8 @@ ${w.repo ?? ''}
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : m.noSsh ? 'no ssh (joined with -NoSsh: updated over its link, w4674)' : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? (m.pause?.paused ? PAUSED_STATE : 'online') : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}${this.machines.isOnline(m.id) && m.pause?.paused ? ` (${pauseHold(m.pause, Date.now())}): nothing is placed, queued or planned here, and what waits here moves, as for an offline computer; only work pinned here waits, Blocked` : `; ${m.status}`}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; screen: ${desktopLabel(m.desktop)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
+      // The portal hosts its daemon follows (w5576): online machines only.
+      ...(this.machines.isOnline(m.id) ? [`  ${describePortalPin(this.machines.portalPinOf(m.id))}`] : []),
       sandboxes,
       // A person playing Final Factory there (w1894): why it is busy and until when.
       ...(this.machines.personPlayOf(m.id) ? [`  playing: ${playLine(this.machines.personPlayOf(m.id)!)}`] : []),
