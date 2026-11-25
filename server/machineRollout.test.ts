@@ -486,6 +486,19 @@ test('w1742: a tools run that published but warned (a firewall rule it could not
   assert.equal(toolsResult(0, toolsOut()).warnings, undefined);
 });
 
+test("w5597: a run that names where FF Factory's checkout lives is read with it; an older daemon's output without that line still reads", () => {
+  const old = toolsResult(0, toolsOut());
+  assert.equal(old.checkout, undefined);
+  assert.equal(old.latestSha, 'a8449abd8457');
+  const co = '/home/x/ffw/tools-medium/final-factory-agents';
+  const now = toolsResult(0, `${toolsOut()}\nAgent tools checkout: ${co} at a8449abd8457\n`);
+  assert.equal(now.status, 'ok');
+  assert.deepEqual(now.before, old.before);
+  assert.deepEqual(now.after, old.after);
+  assert.equal(now.checkout, `${co} at a8449abd8457`);
+  assert.match(toolsLine(now), new RegExp(`\\(final-factory-agents a8449abd8; checkout ${co} at a8449abd8457\\)`));
+});
+
 test('the state survives a restart: a run cut off by it is looked at again', async () => {
   const w = world([mac('m5')]);
   fs.writeFileSync(path.join(w.dir, ROLLOUT_FILE), JSON.stringify({ sha: NEW, verifiedAt: '2026-10-10T18:00:00.000Z', machines: { m5: { status: 'updating' } } }));

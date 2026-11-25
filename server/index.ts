@@ -2830,6 +2830,7 @@ server.on('error', (e) => {
 process.on('uncaughtException', (e) => console.error('UNCAUGHT (kept running):', e));
 process.on('unhandledRejection', (e) => console.error('UNHANDLED REJECTION (kept running):', e));
 
+if (cfg.hostWarning) console.warn(cfg.hostWarning);
 server.listen(cfg.port, cfg.host, () => {
   // Port 0 (a test's, w1095): the one the OS gave, for this line, which the test reads, and every later use of cfg.port.
   cfg.port = (server.address() as { port: number }).port;

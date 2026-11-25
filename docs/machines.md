@@ -679,8 +679,14 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   flagged injected; `PostMessage` (`scripts/agent/post_key.py`) never reaches a hook; Unity MCP drives the game inside the
   editor and sends no OS input. Moving the mouse does not count. **A held key's auto-repeat does not count either**, nor a key
   already down when the hooks start: beast had its Left Ctrl held down (607 repeats in 20 s, no release, no mouse movement),
-  which would otherwise have paused it for good. Windows drops a low-level hook that answers slowly without saying so, so the
-  app installs both hooks again every 30 minutes.
+  which would otherwise have paused it for good. Windows calls a low-level hook inside the `GetMessage` of the thread that set
+  it, and skips it (since Windows 7 removes it, untold) when that thread does not answer within `LowLevelHooksTimeout` (at
+  most 1 s). So both hooks run on a thread of their own that only pumps (w5743, `StartHooks`/`HookLoop` in
+  `machine/tray/FFFactoryTray.cs`), the app says hello only once that thread pumps, and it installs both hooks again there
+  every 30 minutes. Before w5743 they ran on the window thread: with it busy 1.2 s, the CI runner's tray counted neither an
+  injected key nor click (run 45643653098; the flake in run 45638958877), and a person's input would be lost the same way.
+  The real-tray test in `server/machineDeployWin.test.ts` injects a key and a click while the window thread is busy (the
+  tray's test-only `busy` message) and feeds a person's key and click through the hook procedures (`selftest`). It injects only on a CI runner (`onWindowsCi`): a plain `npm test` on a person's Windows PC must not press keys or buttons into their focused window (w5754); the selftest runs anywhere.
 - **On the portal a paused machine is held** (`Agents.placement()`, `pauseHolds` in `server/machinePause.ts`): it joins
   `placement.hold` with "paused from its tray app: someone is using it (w1532)", so no new work is placed there, the Capacity
   block reads `ROOM n% but HELD (…)`, nothing resumes there (w1376), and it is no capacity ping's room. The machines view
@@ -1203,7 +1209,7 @@ A repository-set `url.<base>.insteadOf` cannot be overridden by value (the longe
 wins a tie), so a fetch, push, clone or ls-remote in a checkout that sets one is refused (w5573). Not covered: `lfs.url`
 in a repository's config (git-lfs would send LFS objects there; the GitHub token's helper answers only github.com).
 
-`worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools/final-factory-agents` to origin/master, but
+`worker.ts tools` (w5573, `server/agentTools.ts`) still brings `<root>/tools-medium/final-factory-agents` (w5597: in a root child only Medium writes; it was `<root>/tools`, which workers write) to origin/master with every hook off, but
 runs `registerAgents.sh` from a fresh shallow clone in a new temp folder, made with no global config, no system config
 (but on Windows) and the fence, and removed after; the script, hooks and config in the root's checkout never run.
 `server/safeGit.test.ts` fails on a git spawn that skips the helper and shows with a marker file that the daemon's status,

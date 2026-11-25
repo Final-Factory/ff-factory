@@ -233,3 +233,9 @@ test('live w5676: a locked worker writes in an open root folder the daemon made,
   assert.ok(fs.existsSync(path.join(root, 'voice', 'x')));
   assert.notEqual(spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'touch', path.join(root, 'daemon', 'x')]).status, 0, 'daemon stays locked');
 });
+
+test('w5559: readLockArgs closes a Claude login file given with the secrets', () => {
+  const login = '/home/x/.claude/.credentials.json';
+  const a = readLockArgs({ root: '/home/x/ffw', noRead: [login] });
+  assert.ok(a.join(' ').includes(`--no-read ${login}`), a.join(' '));
+});

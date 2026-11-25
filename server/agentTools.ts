@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
 
 /**
  * The agent tools publish (w1476; lothsahn, 2026-10-18: "Please create a new work item that deploying the latest tools is
@@ -12,15 +13,17 @@ import path from 'node:path';
  * deploy"). What it does:
  *
  * - Reads the versions Claude Code has installed (`<CLAUDE_CONFIG_DIR or ~/.claude>/plugins/installed_plugins.json`).
- * - Brings FF Factory's OWN checkout, `<root>/tools/final-factory-agents`, to origin/master (a clone the first time, then a
- *   fast-forward only). A person's checkout (BEAST's `~/final-factory-agents`, docs/worker-root.md) is never touched: the
- *   plugins Claude Code loads come from its managed marketplace clone, which `registerAgents.sh` refreshes from GitHub, so
- *   the script only has to run from an up-to-date copy. Its own checkout dirty, on another branch or diverged: nothing is
- *   overwritten, the run stops and says why.
- * - Runs `sh registerAgents.sh --claude`, not from that checkout (a worker writes the root, so its script, its hooks and its git
- *   config could be planted, w5573) but from a fresh shallow clone of origin/master in a new temp folder, made by git with no
- *   global config, no system config (but on Windows, whose TLS backend lives there) and server/safeGit.ts's fence (w5541),
- *   and removed after: the marketplace refreshed, every plugin the machine remembers updated (a
+ * - Brings FF Factory's OWN checkout, `<root>/tools-medium/final-factory-agents` (w5597: a root child no worker fence lets a
+ *   worker write; it was `<root>/tools/final-factory-agents`, which workers write, so a planted hook ran at the daemon's level
+ *   on the next fetch), to origin/master (a clone the first time, then a fast-forward only). A person's checkout (BEAST's
+ *   `~/final-factory-agents`, docs/worker-root.md) is never touched: the plugins Claude Code loads come from its managed
+ *   marketplace clone, which `registerAgents.sh` refreshes from GitHub. The old checkout is never run, fetched or written
+ *   again (it stays, readable, as the readers' fallback). Its own checkout missing, dirty, on another branch or diverged:
+ *   nothing is overwritten, a WARNING says why and the publish goes on, since nothing below runs from it.
+ * - Runs every git with `core.hooksPath` on an empty folder of the run's own, no global config, no system config (but on
+ *   Windows, whose TLS backend lives there) and server/safeGit.ts's fence (w5541).
+ * - Runs `sh registerAgents.sh --claude`, not from that checkout (w5573) but from a fresh shallow clone of origin/master in
+ *   a new folder in `<root>/tools-medium`, removed after: the marketplace refreshed, every plugin the machine remembers updated (a
  *   bare run keeps the machine's set: ff-agents and ff-speckit everywhere, ff-discord where a person asked for it). Claude
  *   Code fetches the marketplace over HTTPS only, with a longer git timeout (REGISTER_ENV), and a failed run is run once
  *   more (w1895).
@@ -55,10 +58,23 @@ export const REGISTER_ENV = { CLAUDE_CODE_PLUGIN_PREFER_HTTPS: '1', CLAUDE_CODE_
 export type Versions = Record<string, string | undefined>;
 
 /** The lines `worker.ts tools` prints and the machine rollout reads back. */
-export const LINE = { before: 'Agent tools before:', after: 'Agent tools after:', latest: 'Agent tools latest:' } as const;
+export const LINE = { before: 'Agent tools before:', after: 'Agent tools after:', latest: 'Agent tools latest:', checkout: 'Agent tools checkout:' } as const;
 
-/** FF Factory's own checkout of final-factory-agents in a worker root. */
-export const toolsCheckout = (root: string) => path.join(root, 'tools', MARKETPLACE);
+/**
+ * FF Factory's own checkout of final-factory-agents in a worker root: `<root>/tools-medium/final-factory-agents` (w5597), in
+ * a root child only Medium writes (claudeHome.ts MEDIUM_ONLY_CHILDREN), so no worker can plant a hook or a script in it.
+ */
+export const toolsCheckout = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, MARKETPLACE);
+/** Where it was before w5597, `<root>/tools/final-factory-agents`, which workers write: never run or taken forward again, only read as a fallback. */
+export const legacyToolsCheckout = (root: string) => path.join(root, 'tools', MARKETPLACE);
+/** The checkout readers use: the new one once it has `rel`, else the old one while it has it, else undefined. */
+export function readableToolsCheckout(root: string, rel: string, exists: (p: string) => boolean = fs.existsSync): string | undefined {
+  return [toolsCheckout(root), legacyToolsCheckout(root)].find((c) => exists(path.join(c, rel)));
+}
+const samePath = (a: string, b: string) => {
+  const r = (p: string) => path.resolve(p).replace(/[\\/]+$/, '');
+  return process.platform === 'win32' || /^[a-z]:/i.test(a) ? r(a).toLowerCase() === r(b).toLowerCase() : r(a) === r(b);
+};
 
 const NOT_INSTALLED = 'not installed';
 
@@ -189,66 +205,66 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   if (o.claude && path.isAbsolute(o.claude)) prependPath(env, path.dirname(o.claude), d.platform);
   // final-factory-agents is public: no credential helper, no prompt (an ssh session reaches no keychain, w613).
   const anon = ['-c', 'credential.helper=', '-c', 'credential.interactive=never'];
-  const git = (args: string[], cwd?: string) => d.exec('git', [...anon, ...args], { env, timeoutMs: 5 * 60_000, ...(cwd ? { cwd } : {}) });
 
+  // w5597: FF Factory's checkout and this run's fresh clone live in <root>/tools-medium, a root child no worker fence lets a
+  // worker write (claudeHome.ts MEDIUM_ONLY_CHILDREN). The old <root>/tools/final-factory-agents, which workers can write, is
+  // never run, read by git or written again: it stays as it is, readable, and the readers fall back to it until a run has
+  // made the new one (pluginPaths.ts, evidenceGate.ts). Nothing about the lasting checkout can stop a publish: the plugins
+  // come from the fresh clone, so a checkout that cannot be made or taken forward is a WARNING and the run goes on.
   const co = toolsCheckout(root);
-  if (!fs.existsSync(path.join(co, '.git'))) {
-    if (fs.existsSync(co) && fs.readdirSync(co).length) {
-      d.say(`NOT PUBLISHED: ${co} holds files but no git checkout; it is left as it is. Move it aside and run this again.`);
-      return EXIT.notPublished;
-    }
-    fs.mkdirSync(path.dirname(co), { recursive: true });
-    const r = await git(['clone', '--quiet', '--branch', BRANCH, AGENTS_REPO_URL, co]);
-    if (r.code !== 0) {
-      d.say(`FAILED: could not clone ${AGENTS_REPO_URL} into ${co}: ${tail(r)}`);
-      return EXIT.failed;
-    }
-    d.say(`Cloned ${MARKETPLACE} into ${co} (FF Factory's own checkout; a person's is never used).`);
-  } else {
-    const [st, br, url] = await Promise.all([git(['status', '--porcelain'], co), git(['rev-parse', '--abbrev-ref', 'HEAD'], co), git(['config', '--get', 'remote.origin.url'], co)]);
-    const problem = st.code !== 0 ? `could not be read (git status: ${tail(st)})` : checkoutProblem({ porcelain: st.stdout, branch: br.stdout.trim().replace(/^HEAD$/, ''), origin: url.stdout });
-    if (problem) {
-      d.say(`NOT PUBLISHED: ${co} ${problem}; nothing in it was overwritten.`);
-      d.say(`${LINE.after} ${formatVersions(before)} (unchanged)`);
-      return EXIT.notPublished;
-    }
-    const f = await git(['fetch', '--quiet', 'origin', BRANCH], co);
-    if (f.code !== 0) {
-      d.say(`FAILED: could not fetch ${MARKETPLACE} (${tail(f)}); the plugins stay as they were.`);
-      return EXIT.failed;
-    }
-    const m = await git(['merge', '--ff-only', '--quiet', `origin/${BRANCH}`], co);
-    if (m.code !== 0) {
-      d.say(`NOT PUBLISHED: ${co} has commits origin/${BRANCH} does not (it cannot fast-forward); nothing in it was overwritten.`);
-      d.say(`${LINE.after} ${formatVersions(before)} (unchanged)`);
-      return EXIT.notPublished;
-    }
-  }
-  const head = (await git(['rev-parse', 'HEAD'], co)).stdout.trim().slice(0, 12);
-  const latest = marketplaceVersions(readJson(path.join(co, '.claude-plugin', 'marketplace.json')));
-  d.say(`${LINE.latest} ${MARKETPLACE} ${head}: ${formatVersions(latest)}`);
-
-  // registerAgents.sh records the checkout it ran from in $HOME/.claude for publish-skills; that stays the person's.
-  const marker = path.join(d.env.HOME || d.home, '.claude', `${MARKETPLACE}-checkout`);
-  const sh = await shell(d);
-  // w5573: the script runs from a clone nothing else wrote, not from the checkout in the worker root. It goes beside the
-  // checkout, inside the worker root (w5583: not the system temp, outsideWrites.test.ts).
-  const tmp = fs.mkdtempSync(path.join(d.tmpdir ?? path.dirname(co), 'ff-agents-run-'));
+  const legacy = legacyToolsCheckout(root);
+  const base = path.dirname(co);
+  fs.mkdirSync(base, { recursive: true });
+  const tmp = fs.mkdtempSync(path.join(d.tmpdir ?? base, 'ff-agents-run-'));
   try {
+    // Every git call: no hooks (an empty folder of this run's own, w5597), no global config, no system config but on Windows
+    // (whose TLS backend lives there), no replace refs, no templates; worker.ts exec adds server/safeGit.ts's fence (w5541).
+    const noHooks = path.join(tmp, 'no-hooks');
+    fs.mkdirSync(noHooks);
     const emptyGlobal = path.join(tmp, 'gitconfig');
     fs.writeFileSync(emptyGlobal, '');
     const cleanEnv: NodeJS.ProcessEnv = { ...env, GIT_CONFIG_GLOBAL: emptyGlobal, GIT_NO_REPLACE_OBJECTS: '1', GIT_TEMPLATE_DIR: '', ...(d.platform === 'win32' ? {} : { GIT_CONFIG_NOSYSTEM: '1' }) };
+    const git = (args: string[], cwd?: string, timeoutMs = 5 * 60_000) => d.exec('git', [...anon, '-c', `core.hooksPath=${noHooks}`, ...args], { env: cleanEnv, timeoutMs, ...(cwd ? { cwd } : {}) });
+
+    const fresh = '; this run publishes from a fresh clone';
+    if (!fs.existsSync(path.join(co, '.git'))) {
+      if (fs.existsSync(co) && fs.readdirSync(co).length) {
+        d.say(`WARNING: ${co} holds files but no git checkout; it is left as it is${fresh}.`);
+      } else {
+        const r = await git(['clone', '--quiet', '--branch', BRANCH, AGENTS_REPO_URL, co]);
+        if (r.code !== 0) d.say(`WARNING: could not clone ${AGENTS_REPO_URL} into ${co} (${tail(r)})${fresh}.`);
+        else d.say(`Cloned ${MARKETPLACE} into ${co} (FF Factory's own checkout, which no worker can write${fs.existsSync(legacy) ? `; the old ${legacy} is no longer used and is left as it is` : ''}).`);
+      }
+    } else {
+      const [st, br, url] = await Promise.all([git(['status', '--porcelain'], co), git(['rev-parse', '--abbrev-ref', 'HEAD'], co), git(['config', '--get', 'remote.origin.url'], co)]);
+      const problem = st.code !== 0 ? `could not be read (git status: ${tail(st)})` : checkoutProblem({ porcelain: st.stdout, branch: br.stdout.trim().replace(/^HEAD$/, ''), origin: url.stdout });
+      if (problem) d.say(`WARNING: ${co} ${problem}; nothing in it was overwritten${fresh}.`);
+      else {
+        const f = await git(['fetch', '--quiet', 'origin', BRANCH], co);
+        if (f.code !== 0) d.say(`WARNING: could not fetch ${MARKETPLACE} into ${co} (${tail(f)})${fresh}.`);
+        else if ((await git(['merge', '--ff-only', '--quiet', `origin/${BRANCH}`], co)).code !== 0) d.say(`WARNING: ${co} has commits origin/${BRANCH} does not (it cannot fast-forward); nothing in it was overwritten${fresh}.`);
+      }
+    }
+    const coHead = fs.existsSync(path.join(co, '.git')) ? (await git(['rev-parse', 'HEAD'], co, 60_000)).stdout.trim() : '';
+
+    // registerAgents.sh records the checkout it ran from in $HOME/.claude for publish-skills; that stays the person's.
+    const marker = path.join(d.env.HOME || d.home, '.claude', `${MARKETPLACE}-checkout`);
+    const sh = await shell(d);
+    // w5573: the script runs from a clone nothing else wrote, made in this run's own folder.
     const run = path.join(tmp, MARKETPLACE);
-    const c = await d.exec('git', [...anon, 'clone', '--quiet', '--depth', '1', '--single-branch', '--branch', BRANCH, AGENTS_REPO_URL, run], { env: cleanEnv, timeoutMs: 5 * 60_000 });
-    const runHead = c.code === 0 ? (await d.exec('git', ['-C', run, 'rev-parse', 'HEAD'], { env: cleanEnv, timeoutMs: 60_000 })).stdout.trim() : '';
+    const c = await git(['clone', '--quiet', '--depth', '1', '--single-branch', '--branch', BRANCH, AGENTS_REPO_URL, run]);
+    const runHead = c.code === 0 ? (await git(['-C', run, 'rev-parse', 'HEAD'], undefined, 60_000)).stdout.trim() : '';
     if (!/^[0-9a-f]{40,64}$/.test(runHead)) {
       d.say(`FAILED: could not make a fresh clone of ${AGENTS_REPO_URL} to run registerAgents.sh from (${tail(c)}); the plugins stay as they were.`);
       return EXIT.failed;
     }
-    if (runHead.slice(0, 12) !== head) d.say(`registerAgents.sh runs from origin/${BRANCH} ${runHead.slice(0, 12)} (a fresh clone; the checkout is at ${head}).`);
-    const runLatest = marketplaceVersions(readJson(path.join(run, '.claude-plugin', 'marketplace.json')));
+    const latest = marketplaceVersions(readJson(path.join(run, '.claude-plugin', 'marketplace.json')));
+    d.say(`${LINE.latest} ${MARKETPLACE} ${runHead.slice(0, 12)}: ${formatVersions(latest)}`);
+    d.say(`${LINE.checkout} ${/^[0-9a-f]{40,64}$/.test(coHead) ? `${co} at ${coHead.slice(0, 12)}` : `none (${co} could not be made; see the WARNING above)`}`);
+    const keepCo = /^[0-9a-f]{40,64}$/.test(coHead) ? co : undefined;
     // The workers' folder first (its lines are the ones the rollout reads, machineRollout.ts), then the Medium agents' one.
-    const code = await registerInto(root, d, { co, run, env, sh, marker, claudeDir, latest: runLatest, label: '' });
+    const x = { co: keepCo, legacy, base, run, env, sh, marker, latest };
+    const code = await registerInto(root, d, { ...x, claudeDir, label: '' });
     if (code !== EXIT.ok) return code;
     const medium = o.medium && path.resolve(o.medium) !== path.resolve(claudeDir) ? o.medium : undefined;
     if (medium) {
@@ -256,7 +272,7 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
       const mBefore = installedVersions(readJson(path.join(medium, 'plugins', 'installed_plugins.json')));
       const label = ` (Medium agents, ${medium})`;
       d.say(`${LINE.before.replace(/:$/, label + ':')} ${formatVersions(mBefore)}`);
-      const m = await registerInto(root, d, { co, run, env: { ...env, CLAUDE_CONFIG_DIR: medium }, sh, marker, claudeDir: medium, latest: runLatest, label });
+      const m = await registerInto(root, d, { ...x, env: { ...env, CLAUDE_CONFIG_DIR: medium }, claudeDir: medium, label });
       if (m !== EXIT.ok) return m;
     }
   } finally {
@@ -267,8 +283,12 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
 }
 
 /** One Claude Code folder's part of a publish: registerAgents.sh into it, then the check that every plugin is on master's version. */
-async function registerInto(root: string, d: PublishDeps, x: { co: string; run: string; env: NodeJS.ProcessEnv; sh: string; marker: string; claudeDir: string; latest: Versions; label: string }): Promise<number> {
-  const { co, run, env, sh, marker, claudeDir, latest, label } = x;
+async function registerInto(
+  root: string,
+  d: PublishDeps,
+  x: { co: string | undefined; legacy: string; base: string; run: string; env: NodeJS.ProcessEnv; sh: string; marker: string; claudeDir: string; latest: Versions; label: string },
+): Promise<number> {
+  const { co, legacy, base, run, env, sh, marker, claudeDir, latest, label } = x;
   const installed = path.join(claudeDir, 'plugins', 'installed_plugins.json');
   const markerBefore = readText(marker);
   const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
@@ -283,20 +303,26 @@ async function registerInto(root: string, d: PublishDeps, x: { co: string; run: 
     d.say(`registerAgents.sh exited ${r.code} (${tail(r)}); running it once more.`);
     r = await register();
   }
-  if (markerBefore !== undefined && readText(marker) !== markerBefore) {
-    fs.writeFileSync(marker, markerBefore);
-    d.say(`publish-skills' checkout marker kept on ${markerBefore.trim()}.`);
-  } else if (markerBefore === undefined) {
+  // w5597: a marker that names FF Factory's old checkout moves with it (that one is no longer taken forward).
+  const markerKeep = markerBefore !== undefined && co && markerBefore.trim() && samePath(markerBefore.trim(), legacy) ? `${co}\n` : markerBefore;
+  if (markerKeep !== undefined && readText(marker) !== markerKeep) {
+    fs.writeFileSync(marker, markerKeep);
+    d.say(markerKeep === markerBefore ? `publish-skills' checkout marker kept on ${markerKeep.trim()}.` : `publish-skills' checkout marker now names ${co} (it named the old ${legacy}).`);
+  } else if (markerKeep === undefined && co) {
     // The script ran from a temp folder, which it does not record (or did): the marker names the lasting checkout.
     fs.mkdirSync(path.dirname(marker), { recursive: true });
     fs.writeFileSync(marker, `${co}\n`);
     d.say(`publish-skills' checkout marker now names ${co} (there was none).`);
+  } else if (markerKeep === undefined) {
+    // No lasting checkout this run: no marker naming the run's temp folder, which is removed after.
+    fs.rmSync(marker, { force: true });
   }
   if (d.giveTo) {
     const plugins = path.join(claudeDir, 'plugins');
     try {
-      // w5305: <root>/claude itself and its settings.json too, when the run made them (an elevated run on Windows)
-      await d.giveTo([co, path.join(plugins, 'marketplaces', MARKETPLACE), path.join(plugins, 'cache', MARKETPLACE), installed, path.join(plugins, 'known_marketplaces.json'), marker, ...(path.resolve(claudeDir).startsWith(path.resolve(root)) ? [claudeDir] : [])]);
+      // w5305: <root>/claude itself and its settings.json too, when the run made them (an elevated run on Windows). w5597:
+      // the whole <root>/tools-medium, the checkout in it.
+      await d.giveTo([base, path.join(plugins, 'marketplaces', MARKETPLACE), path.join(plugins, 'cache', MARKETPLACE), installed, path.join(plugins, 'known_marketplaces.json'), ...(fs.existsSync(marker) ? [marker] : []), ...(path.resolve(claudeDir).startsWith(path.resolve(root)) ? [claudeDir] : [])]);
     } catch (e) {
       d.say(`WARNING: could not give what the run made to the daemon's user: ${(e as Error).message}`);
     }
