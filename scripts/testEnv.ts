@@ -9,3 +9,6 @@ import { secretEnvNames } from '../shared/secretShapes.ts';
 for (const name of secretEnvNames(process.env)) delete process.env[name];
 // Tests never scrub the real Claude Code transcripts (server/cliScrub.ts, w1688); a test that checks it turns it on.
 process.env.FF_CLI_SCRUB ??= 'off';
+// w5545: a test's unity-slot or bench ticket never asks the worker's real daemon (its token would file a real request).
+delete process.env.FF_DAEMON_RPC;
+delete process.env.FF_DAEMON_TOKEN;

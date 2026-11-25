@@ -233,6 +233,9 @@ export const api = {
   toggleNightly: (which: 'enabled' | 'run' | 'review', on: boolean) => request<{ key: string; before: boolean; after: boolean }>('POST', '/api/intake/nightly/toggle', { which, on }),
   /** A request's priority (w2049): frantic (w4620, named release until w4710), urgent, high, normal or low. */
   setWorkPriority: (id: string, priority: WorkPriority) => request<{ id: string; priority: WorkPriority }>('POST', `/api/work/${encodeURIComponent(id)}/priority`, { priority }),
+  /** w5577: a hand-up's card: file its follow-ups (through the viewer's own orchestrator) or drop them. */
+  fileHandUps: (id: string) => request<{ id: string; text: string; left: number }>('POST', `/api/work/${encodeURIComponent(id)}/handups/file`, {}),
+  dropHandUps: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/handups/drop`, { note }),
   declineWork: (id: string, note?: string) => request<{ id: string; status: string }>('POST', `/api/work/${encodeURIComponent(id)}/decline`, { note }),
   /** A sandbox on this host's own daemon (docs/beast-machine.md), which is making it; the portal holds none itself (w510). */
   createSandbox: (req: CreateSandboxRequest) => request<{ machine: string; id: string; note: string }>('POST', '/api/sandboxes', req),

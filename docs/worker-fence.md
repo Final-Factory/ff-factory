@@ -67,7 +67,7 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 | the worker root | the point |
 | `/dev/null`, `/dev/tty*`, `/dev/fd/*`, ... | every shell |
 | `getconf DARWIN_USER_TEMP_DIR` / `_CACHE_DIR` | system frameworks (Metal shader cache, CoreServices) write there with no setting |
-| `~/.ff-factory/unity-slots`, `~/.unity-mcp` | named exceptions with no setting (docs/worker-root.md 2.7); a worker root's mailbox is `<root>/unity-slots` since w5377, so the first is left for installs without one |
+| `~/.ff-factory/unity-slots`, `~/.unity-mcp` | named exceptions with no setting (docs/worker-root.md 2.7); a worker root's mailbox is `<root>/unity-slots` since w5377, so the first is left for installs without one. w5545: requests are no longer files there; the arbiter reads `<app_dir>/slot-queue`, which no worker writes (docs/unity-lifecycle.md, "Asking the daemon") |
 | `/tmp/Unity-Upm-<pid>.sock` | Unity's Package Manager: "listen EPERM /tmp/Unity-Upm-<pid>.sock" |
 | `/tmp/ilpp.sock-<hash>` | IL post-processing: "ILPPTrigger: Can't find file /tmp/ilpp.sock-..." |
 | `/tmp/Unity-ShaderCompilerIPC-<pid>-<n>.sock`/`.lock`, `/tmp/unitypreflock` | shader compiler: "Failed to listen on local IPC stream (Name in use)", then a fatal abort |
@@ -108,6 +108,25 @@ Measured with the generated profile unless noted:
 - `sandbox-exec` is marked deprecated by Apple but ships in macOS 26.4 and is what Chromium, Bazel and Claude Code's own
   sandbox use.
 - A person's own editor and the daemon are never fenced.
+
+## Signals and launchd jobs (w5562)
+
+lothsahn (w5562): "probe, then block signals and launchctl/systemd-run escapes on Mac and Linux". From the rogue-worker
+audit w5451, items 22 and 23.
+
+- **Signals.** Before w5562 a fenced worker could signal any process of its user: on m5, 2026-11-25, `kill -0` from
+  inside the fence reached the daemon's agent host and Finder (only launchd, pid 1, answered EPERM). The profile now ends
+  with `(deny signal)` and `(allow signal (target self) (target children) (target same-sandbox))` (`SIGNAL_RULES` in
+  `server/workerFence.ts`): a worker signals itself and what it started, which inherits its sandbox, and nothing else.
+  Signal 0 counts, so a liveness check of an outside process answers EPERM, which our checks read as alive
+  (`isAlive` in `machine/unitySlots.ts`, `bench_queue.py`, `player_slots.py`). What a worker needs ended outside its tree
+  (its editor, a daemon job) goes through the daemon (`mcp__machine__unity`, `unity-slot`), as before.
+- **launchd jobs.** No rule is needed: launchd refuses job submission from a sandboxed caller. Measured on m5 from inside
+  the fence (2026-11-25): `launchctl submit -l <label> -- <cmd>` exits 1 ("Operation not permitted"),
+  `launchctl bootstrap gui/<uid> <plist>` fails "5: Input/output error", and neither job ever ran. That goes over the
+  bootstrap port, not a `mach-lookup` name a profile could deny.
+- Still open: `open`/LaunchServices and Apple events (`osascript` telling Terminal to run a script) start programs
+  outside the fence; untried.
 
 ## Setuid programs: ps, top (w5397)
 

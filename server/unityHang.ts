@@ -90,8 +90,34 @@ export function restartAllowed(recent: { at: string; auto?: boolean }[], now: nu
 
 export const normProject = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').replace(/\/Assets$/i, '').toLowerCase();
 
-/** The bridge's port and reloading flag for a project, from ~/.unity-mcp (unity-mcp-status-*, unity-mcp-port-*). */
-export function bridgeInfo(project: string, dir = path.join(os.homedir(), '.unity-mcp')): { port?: number; reloading?: boolean } {
+/**
+ * The folders editors write their bridge status in: ~/.unity-mcp, and (w5540) the root's `home\.unity-mcp` once the daemon
+ * starts fenced editors there (addMcpStatusDir). A Low-integrity editor cannot write ~/.unity-mcp on C:, so it is given
+ * UNITY_MCP_STATUS_DIR in the root; the daemon reads both.
+ */
+const statusDirs: string[] = [path.join(os.homedir(), '.unity-mcp')];
+export const mcpStatusDirs = (): string[] => [...statusDirs];
+export function addMcpStatusDir(dir: string) {
+  if (!statusDirs.some((d) => path.resolve(d).toLowerCase() === path.resolve(dir).toLowerCase())) statusDirs.push(dir);
+}
+
+/**
+ * The bridge's port and reloading flag for a project, from the status folders (unity-mcp-status-*, unity-mcp-port-*).
+ * Several folders (w5540): the one holding the project's newest status file answers, so a fenced editor's live file in
+ * the root wins over what an unfenced one left in ~/.unity-mcp.
+ */
+export function bridgeInfo(project: string, dir: string | string[] = mcpStatusDirs()): { port?: number; reloading?: boolean } {
+  if (Array.isArray(dir)) {
+    if (dir.length === 1) return bridgeInfo(project, dir[0]);
+    let best: { at: number; info: { port?: number; reloading?: boolean } } | undefined;
+    for (const d of dir) {
+      const info = bridgeInfo(project, d);
+      if (info.port === undefined && info.reloading === undefined) continue;
+      const at = newestStatus(project, d);
+      if (!best || at > best.at) best = { at, info };
+    }
+    return best?.info ?? {};
+  }
   const want = normProject(project);
   let names: string[] = [];
   try {
@@ -124,7 +150,8 @@ export function bridgeInfo(project: string, dir = path.join(os.homedir(), '.unit
  * writes the status file when it starts and again every ~5 s, never during the boot. No `since`: the port alone (an
  * editor the daemon found running when it started).
  */
-export function bridgeUpSince(project: string, since: number | undefined, dir = path.join(os.homedir(), '.unity-mcp')): boolean {
+export function bridgeUpSince(project: string, since: number | undefined, dir: string | string[] = mcpStatusDirs()): boolean {
+  if (Array.isArray(dir)) return dir.some((d) => bridgeUpSince(project, since, d));
   if (!bridgeInfo(project, dir).port) return false;
   if (since === undefined) return true;
   const want = normProject(project);
@@ -146,6 +173,29 @@ export function bridgeUpSince(project: string, since: number | undefined, dir = 
     }
   }
   return false;
+}
+
+/** The mtime of the project's newest status file in `dir`, 0 when it has none (bridgeInfo across folders). */
+function newestStatus(project: string, dir: string): number {
+  const want = normProject(project);
+  let at = 0;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  for (const n of names) {
+    if (!/^unity-mcp-status-.+\.json$/.test(n)) continue;
+    try {
+      const f = path.join(dir, n);
+      const j = JSON.parse(fs.readFileSync(f, 'utf8').replace(/^﻿/, '')) as { project_path?: string };
+      if (j.project_path && normProject(j.project_path) === want) at = Math.max(at, fs.statSync(f).mtimeMs);
+    } catch {
+      // being written; next look
+    }
+  }
+  return at;
 }
 
 /**
