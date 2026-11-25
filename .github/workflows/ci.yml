@@ -29,7 +29,9 @@ env:
   # Every unit-test run: a test that runs 5 min fails by name (none takes over 70 s; the few longer ones set their own
   # timeout), and scripts/test-watchdog.ts ends a run that outlives its deadline, naming the tests still running and the
   # processes under it. Before, a hung run was cancelled at the job's timeout with its whole log lost (w906).
-  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout
+  # scripts/test-file-times.ts records each file's time; the step after the tests fails on a file whose process lives on
+  # past its tests (an open handle: w5619, two such files took the run past its watchdog).
+  TEST_FLAGS: --test-timeout=300000 --test-reporter=spec --test-reporter-destination=stdout --test-reporter=./scripts/test-inflight-reporter.ts --test-reporter-destination=stdout --test-reporter=./scripts/test-file-times.ts --test-reporter-destination=stdout
 
 # WHERE THESE JOBS RUN (w1194, lothsahn 2026-10-13: "I'd like to move the ff-factory CI processes off githubrunner and
 # back to hosted githubrunner processes"). Every job runs on GitHub's hosted runners, which cost this public repository
@@ -74,11 +76,22 @@ jobs:
       - name: Unit tests with coverage
         timeout-minutes: 11
         shell: bash
+        env:
+          FF_TEST_FILE_TIMES: ${{ runner.temp }}/file-times.json
         run: |
           set -o pipefail
           # npm run test:coverage, with TEST_FLAGS: node takes options only before the files. PowerShell 7 (pwsh, on
           # the runner) runs the scripts' tests that need no Windows (server/testPowershell.ts).
           node scripts/test-watchdog.ts --minutes 10 -- node --test $TEST_FLAGS --experimental-test-coverage --test-coverage-exclude='**/*.test.ts' --test-coverage-exclude='e2e/**' --test-coverage-exclude='node_modules/**' server/*.test.ts scripts/*.test.ts 2>&1 | tee coverage.txt
+      - name: Test files' time (a file whose process outlives its tests fails here)
+        if: always()
+        shell: bash
+        run: |
+          rc=0
+          node scripts/test-file-times.ts --check "$RUNNER_TEMP/file-times.json" > file-times.txt || rc=$?
+          cat file-times.txt
+          { echo '### Test files'; echo '```'; cat file-times.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
       - name: Coverage summary
         if: always()
         shell: bash

@@ -116,6 +116,15 @@ Known causes, so a future failure can be named at once:
   at 10 minutes (a run takes 220 s median, 283 s at most) listing nearly every file's tests in flight since about 176 s
   in, so no single test hung; the cause is unknown (a guess: the runner itself stalled). Re-run it; if it comes back,
   look at what the files in flight share, not at the first one named.
+- **Linux unit runs past the 10-minute watchdog, 2026-11-25** (w5619): a test file whose process outlives its tests holds
+  one of the runner's 3 test workers (`node --test` runs availableParallelism-1 files at once) until it exits.
+  `attachmentFlow.test.ts` lived 282 s past its 3 s of tests (a daemon download's 4 tries of a 60 s idle timer, after the
+  test stopped the portal under it) and `procsBroker.test.ts` 61 s (a real 60 s SIGKILL timer), on a suite whose run had
+  grown from 376 s median (2026-11-01, 339 files) to about 550 s (489 files), measured. The spec output is ordered by file,
+  so the watchdog's in-flight list shows many files "running" behind a slow one: read the "Test files' time" step
+  instead. It lists the slowest files (wall, their tests, the time after their tests) and fails on more than 45 s after
+  a file's tests (`scripts/test-file-times.ts --check`): close the handle in the test (`t.mock.timers`, or wait for what
+  the test started). Raise the watchdog only when the honest run (no file over the limit) passes it.
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 
