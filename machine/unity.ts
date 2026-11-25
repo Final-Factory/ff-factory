@@ -39,12 +39,12 @@ export interface UnityDeps {
   /** Why the signal could not be sent, when the platform says; nothing when sent or already gone (w1983). */
   kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
   /** Start the editor detached; its pid (the Windows launch goes through PowerShell, so it may be a promise). */
-  launch(bin: string, args: string[], cwd: string): number | Promise<number>;
+  launch(bin: string, args: string[], cwd: string, env?: Record<string, string>): number | Promise<number>;
   /**
    * w5540: start the editor detached through `fence.launcher`, a Low-labelled program that starts it at Low integrity
    * (Windows only; machine/lowIntegrity.ts). Absent: fenced launches are not possible here and the editor starts unfenced.
    */
-  launchFenced?(fence: EditorFence, bin: string, args: string[], cwd: string): Promise<number>;
+  launchFenced?(fence: EditorFence, bin: string, args: string[], cwd: string, env?: Record<string, string>): Promise<number>;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -319,6 +319,8 @@ export class MacUnity {
   readonly platform: UnityPlatform;
   /** The editor's own log (-logFile), for a sandbox editor (machine/sandboxes.ts); unset: Unity's default Editor.log. */
   readonly logFile?: string;
+  /** w5557: variables the editor starts with on top of the daemon's (a sandbox editor's own FF_GAME_DATA_DIR). */
+  readonly env: Record<string, string>;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
   /** w5270: what the last start() found of the Burst EditorPref when it was off (undefined: it was on). */
@@ -328,11 +330,12 @@ export class MacUnity {
   /** w5540: whether the last start() was fenced, and why not when it was not. */
   fenced?: { on: boolean; why?: string };
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined } = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.logFile = opts.logFile;
     this.fence = opts.fence;
+    this.env = opts.env ?? {};
     this.d = deps ?? realDeps(platform);
     this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
   }
@@ -432,13 +435,13 @@ export class MacUnity {
     let pid: number;
     if (fence && fencedBin && this.d.launchFenced) {
       bin = fencedBin;
-      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo);
+      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, this.env);
       this.fenced = { on: true };
     } else {
       // A fence the editor cannot use (no junction for its version, a unity_path not shaped <version>\Editor\Unity.exe):
       // it starts unfenced, as agents do when their fence cannot be set up, and says so.
       this.fenced = fence ? { on: false, why: !fencedBin ? `no junction under ${fence.unityDir} for ${bin}` : 'no fenced launcher here' } : undefined;
-      pid = await this.d.launch(bin, args, this.repo);
+      pid = await this.d.launch(bin, args, this.repo, this.env);
     }
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
@@ -518,9 +521,9 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
   if (platform === 'linux') {
     const { noAppNap: _n, ...linux } = base;
     // Each editor in a systemd scope of its own, out of the daemon's cgroup (machine/linuxScope.ts, w2474).
-    return { ...linux, launch: (bin, args, cwd) => {
+    return { ...linux, launch: (bin, args, cwd, env) => {
       const cmd = scoped('unity', path.basename(cwd), bin, args, { platform: 'linux' });
-      return base.launch(cmd.bin, cmd.args, cwd);
+      return base.launch(cmd.bin, cmd.args, cwd, env);
     } };
   }
   if (platform !== 'win32') return base;
@@ -540,20 +543,20 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       const why = `${r.stderr ?? ''} ${r.stdout ?? ''}`.replace(/\s+/g, ' ').trim() || (r.error ? String(r.error.message) : `taskkill exit ${r.status}`);
       return /not found/i.test(why) ? undefined : `taskkill: ${why}`;
     },
-    launch: async (bin, args, cwd) => {
+    launch: async (bin, args, cwd, env) => {
       // w5297: the editor's temp files in the install folder, not the person's %LOCALAPPDATA%\Temp (Start-Process passes PowerShell's environment on).
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
-      const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winLaunchScript(bin, args, cwd)], { timeoutMs: 60_000, env: { ...process.env, ...temp } });
+      const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winLaunchScript(bin, args, cwd)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...env } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
       return pid;
     },
-    launchFenced: async (fence, bin, args, cwd) => {
+    launchFenced: async (fence, bin, args, cwd, env) => {
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
       for (const k of ['APPDATA', 'LOCALAPPDATA', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
-      const r = await run(fence.launcher, ['-e', FENCED_LAUNCH_SCRIPT, bin, cwd, JSON.stringify(args)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...fence.env } });
+      const r = await run(fence.launcher, ['-e', FENCED_LAUNCH_SCRIPT, bin, cwd, JSON.stringify(args)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...fence.env, ...env } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin} at Low integrity: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
       return pid;
@@ -586,8 +589,8 @@ function realDepsMac(): UnityDeps {
         if (code && code !== 'ESRCH') return `kill: ${code}`;
       }
     },
-    launch: (bin, args, cwd) => {
-      const child = spawn(bin, args, { cwd, detached: true, stdio: 'ignore' });
+    launch: (bin, args, cwd, env) => {
+      const child = spawn(bin, args, { cwd, detached: true, stdio: 'ignore', env: { ...process.env, ...env } });
       child.unref();
       if (!child.pid) throw new Error(`could not start ${bin}`);
       return child.pid;

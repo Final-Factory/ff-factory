@@ -11,6 +11,7 @@ import { recordForeign, saveWork, someFiles, type SaveResult } from '../server/s
 import { readGitStatus } from '../server/gitStatus.ts';
 import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeUpSince } from '../server/unityHang.ts';
+import { sandboxGameDataEnv } from './gameData.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
 import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
@@ -319,7 +320,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     },
     procs,
     editor: (sb, logFile, report) => {
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence });
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: sandboxGameDataEnv(process.env, sb.id) });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),

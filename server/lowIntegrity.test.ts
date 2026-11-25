@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { currentAccount, ghConfigDirFor, isLabelledLow, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { currentAccount, ghConfigDirFor, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -233,4 +233,31 @@ test('strayLowServers: a Low compiler server on the install path is ended, one t
     { pid: 4, rid: 0x1000, dll: '' },
   ];
   assert.deepEqual(strayLowServers(servers, R), [1]);
+});
+
+test('w5557: the owner game folder lock reads back Medium, and says so when it is still Low or missing', async () => {
+  const dir = 'C:\\Users\\p\\AppData\\LocalLow\\Never Games\\finalfactory';
+  // icacls' own words (measured on LothDesktop for Low, w5333; Medium is the same line with "Medium").
+  const medium = `${dir} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n    Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)\n`;
+  const low = `${dir} NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n    Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)\n`;
+  const exec = (out: string): Exec => async () => ({ code: 0, stdout: out, stderr: '' }) as never;
+  assert.ok(isLabelledMedium(medium) && !isLabelledMedium(low));
+  assert.match(await ownerGameDataLock(dir, exec(medium), () => true), /is Medium; a Low worker's write there is refused/);
+  assert.match(await ownerGameDataLock(dir, exec(low), () => true), /is NOT Medium/);
+  assert.match(await ownerGameDataLock(dir, exec(medium), () => false), /does not exist yet/);
+});
+
+test('w5557: labelLow keeps an inherited-Low owner game folder Medium when it is in the medium list', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ownergd-'));
+  try {
+    const calls: string[][] = [];
+    const exec: Exec = async (cmd, args) => {
+      calls.push([cmd, ...args]);
+      return { code: 0, stdout: args.length === 1 ? `${args[0]} Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)` : '', stderr: '' } as never;
+    };
+    assert.equal(await labelLow({ dirs: [], files: [], medium: [dir] }, exec, () => {}), true);
+    assert.deepEqual(calls.find((c) => c.includes("/setintegritylevel")), ["icacls", dir, "/setintegritylevel", "(OI)(CI)medium"], JSON.stringify(calls));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
