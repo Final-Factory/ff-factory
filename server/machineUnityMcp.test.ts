@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { McpScopes, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp } from '../machine/unityMcp.ts';
+import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp } from '../machine/unityMcp.ts';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { realPoolDeps } from '../machine/sandboxes.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
@@ -63,7 +63,10 @@ test("machine unity mcp: the server is daemon.json's, else the machine's own Cla
   assert.match(resolveUnityMcpServer(undefined, 'D:\\work\\mainrepo', path.join(dir, 'missing.json')).source, /no .*missing\.json/);
 
   // Scoped: the place's own status folder, the entry's env kept.
-  assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1').env, { A: '1', UNITY_MCP_STATUS_DIR: path.join('D:\\ff', 'unity-mcp', 'sb1') });
+  const d = path.join('D:\\ff', 'unity-mcp', 'sb1');
+  assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1', false).env, { A: '1', UNITY_MCP_STATUS_DIR: d }, 'w5650 off: the env before it');
+  assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1').env, { A: '1', UNITY_MCP_STATUS_DIR: d, USERPROFILE: d, HOME: d }, "w5650: Path.home()/.unity-mcp is its own editor's copy");
+  assert.equal(mcpHomeStatusDir('D:\\ff', 'sb1'), path.join(d, '.unity-mcp'));
 });
 
 test("machine unity mcp: each place's folder holds only its own editor's status file, and only one written since that editor started", (t) => {
@@ -77,7 +80,7 @@ test("machine unity mcp: each place's folder holds only its own editor's status 
     fs.writeFileSync(f, JSON.stringify({ unity_port: port, project_path: `${project}/Assets` }));
     fs.utimesSync(f, mtime / 1000, mtime / 1000);
   };
-  const files = (place: string) => fs.readdirSync(mcpStatusDir(app, place)).sort();
+  const files = (place: string) => fs.readdirSync(mcpStatusDir(app, place)).filter((n) => n !== '.unity-mcp').sort();
   const port = (place: string) => JSON.parse(fs.readFileSync(path.join(mcpStatusDir(app, place), 'unity-mcp-port.json'), 'utf8')).unity_port;
   const scopes = new McpScopes(home);
 
@@ -94,6 +97,10 @@ test("machine unity mcp: each place's folder holds only its own editor's status 
   assert.deepEqual(files('sb1'), ['unity-mcp-port.json', 'unity-mcp-status-bbbb.json']);
   assert.equal(port('sb1'), 6401);
   assert.deepEqual(files('sb2'), ['unity-mcp-port.json'], 'a stopped editor: nothing to find');
+  for (const pl of ['sb0', 'sb1', 'sb2']) {
+    const home = fs.readdirSync(mcpHomeStatusDir(app, pl)).sort();
+    assert.deepEqual(home, files(pl).filter((n) => n !== '.unity-mcp'), `w5650: ${pl}'s home copy holds the same files`);
+  }
   assert.equal(port('sb2'), 0, "and the fallback never reaches another editor's port");
 
   // sb1's editor crashed and a new one started (pid 12) after the last look: its crashed predecessor's file is not
@@ -131,13 +138,16 @@ test('machine unity mcp: the daemon gives an agent that asks for it the bridge o
   t.after(() => daemon.shutdown());
   assert.equal(daemon.stdioMcpFor({ unityMcp: false, sandbox: 'sb1' }), undefined, 'not asked (an older portal): none');
   const sb = daemon.stdioMcpFor({ unityMcp: true, sandbox: 'sb1' })!;
-  assert.deepEqual(sb.UnityMCP, { ...UVX, env: { UNITY_MCP_STATUS_DIR: mcpStatusDir(app, 'sb1') } });
-  assert.equal(fs.existsSync(mcpStatusDir(app, 'sb1')), true, 'its folder exists before the server starts');
+  const scoped = { UNITY_MCP_STATUS_DIR: mcpStatusDir(app, 'sb1'), USERPROFILE: mcpStatusDir(app, 'sb1'), HOME: mcpStatusDir(app, 'sb1') };
+  assert.deepEqual(sb.UnityMCP, { ...UVX, env: scoped }, 'w5650: its home is its status folder');
+  assert.equal(fs.existsSync(mcpHomeStatusDir(app, 'sb1')), true, 'its folders exist before the server starts');
+  assert.equal(daemon.slotEnv({ sandbox: 'sb1', cwd: dir }).UNITY_MCP_STATUS_DIR, mcpStatusDir(app, 'sb1'), "w5650: the agent's shell bridge reads the same folder");
+  assert.equal(daemon.slotEnv({ cwd: dir }).UNITY_MCP_STATUS_DIR, undefined, 'none outside a sandbox');
   assert.equal(daemon.stdioMcpFor({ unityMcp: true }), undefined, 'outside a sandbox (a standing agent): none (w536)');
 
   const spec: LaunchSpec = { cwd: dir, settingSources: [], append: '', strictMcp: false, guard: { id: 'sb1', ownPath: dir, protectedPaths: [], gameRepos: [] }, stdioMcp: sb, mcp: { server: 'machine', tools: [{ name: 'set_label', description: 'd' }] } };
   const o = buildOptions(spec, {});
-  assert.deepEqual(o.mcpServers?.UnityMCP, { type: 'stdio', ...UVX, env: { UNITY_MCP_STATUS_DIR: mcpStatusDir(app, 'sb1') } });
+  assert.deepEqual(o.mcpServers?.UnityMCP, { type: 'stdio', ...UVX, env: scoped });
   assert.ok(o.mcpServers?.machine, 'beside the in-process tools');
 });
 
