@@ -98,3 +98,41 @@ test('live: a fenced shell writes in the root and is refused outside it and in t
     fs.rmSync(outside, { recursive: true, force: true });
   }
 });
+
+test('w5546: the profile closes the daemon folder, secrets and root.json to reads, then gives back what workers read there', () => {
+  const p = seatbeltProfile({ ...F, appDir: '/Users/p/ffw/daemon', readAllowed: ['/Users/p/ffw/daemon/gh-app/sessions/s1.json'] });
+  const deny = p.indexOf('(deny file-read-data');
+  const allow = p.indexOf('(allow file-read-data');
+  assert.ok(deny > 0 && allow > deny, 'the read allow comes after the read deny (later rules win)');
+  const denied = p.slice(deny, allow);
+  for (const s of ['(subpath "/Users/p/ffw/daemon")', '(subpath "/Users/p/ffw/secrets")', '(literal "/Users/p/ffw/root.json")']) assert.ok(denied.includes(s), s);
+  const back = p.slice(allow);
+  for (const s of ['(subpath "/Users/p/ffw/daemon/logs")', '(subpath "/Users/p/ffw/daemon/src")', '(subpath "/Users/p/ffw/daemon/gh-app/bin")', '(subpath "/Users/p/ffw/daemon/unity-mcp")', '(literal "/Users/p/ffw/daemon/sandboxes.json")', '(literal "/Users/p/ffw/daemon/gh-app/sessions/s1.json")'])
+    assert.ok(back.includes(s), s);
+  for (const s of ['tokens.json', 'daemon.json', '"/Users/p/ffw/daemon/hosts', 'root.json', 'root-backup.json', 'secrets']) assert.ok(!back.includes(s), `never given back: ${s}`);
+  // Only file contents: stat and realpath of the closed paths still work (file-read-metadata is not denied).
+  assert.ok(!p.includes('(deny file-read*'));
+  // A daemon folder outside the root is closed to reads and writes too.
+  const out = seatbeltProfile({ ...F, appDir: '/Users/p/.ff-factory' });
+  assert.ok(out.slice(out.indexOf('(deny file-read-data'), out.indexOf('(allow file-read-data')).includes('(subpath "/Users/p/.ff-factory")'));
+  assert.ok(out.includes('(allow file-read-data\n  (literal "/Users/p/.ff-factory")') || out.includes('(literal "/Users/p/.ff-factory")'));
+});
+
+test('live w5546: a fenced shell cannot read secrets, root.json or a closed daemon file, and reads the given-back ones', { skip: (!mac && 'needs macOS sandbox-exec') || (nested && 'already inside a sandbox (a fenced worker): sandbox-exec cannot nest') }, () => {
+  const tmp = fs.realpathSync(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(tmp, 'fence-read-'));
+  try {
+    const d = path.join(root, 'daemon');
+    for (const x of ['secrets', 'daemon/logs', 'daemon/gh-app/sessions']) fs.mkdirSync(path.join(root, x), { recursive: true });
+    for (const x of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/logs/daemon.log', 'daemon/gh-app/sessions/s1.json', 'daemon/gh-app/sessions/s2.json', 'daemon/sandboxes.json']) fs.writeFileSync(path.join(root, x), 'x');
+    const f: WorkerFence = { kind: 'seatbelt', root, home: fs.realpathSync(os.homedir()), darwinTemp: path.join(root, 'no-t'), darwinCache: path.join(root, 'no-c'), appDir: d, readAllowed: [path.join(d, 'gh-app/sessions/s1.json')] };
+    const reads = (rel: string) => {
+      const [c, ...a] = fencedArgv(f, '/bin/sh', ['-c', `cat "${path.join(root, rel)}" > /dev/null`]);
+      return spawnSync(c, a, { encoding: 'utf8' }).status === 0;
+    };
+    for (const rel of ['secrets/machine-token', 'root.json', 'daemon/daemon.json', 'daemon/gh-app/tokens.json', 'daemon/gh-app/sessions/s2.json']) assert.equal(reads(rel), false, `refused: ${rel}`);
+    for (const rel of ['daemon/logs/daemon.log', 'daemon/sandboxes.json', 'daemon/gh-app/sessions/s1.json']) assert.equal(reads(rel), true, `read: ${rel}`);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

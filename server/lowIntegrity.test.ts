@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { currentAccount, ghConfigDirFor, isLabelledLow, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isLabelledLow, labelLow, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { FENCE_READ_ALLOW } from './daemonReads.ts';
 
 /**
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
@@ -212,4 +213,67 @@ test('strayLowServers: a Low compiler server on the install path is ended, one t
     { pid: 4, rid: 0x1000, dll: '' },
   ];
   assert.deepEqual(strayLowServers(servers, R), [1]);
+});
+
+test('w5546: No-Read-Up on the daemon folder, secrets and root.json; the worker reads in the daemon folder given back', () => {
+  const app = path.join(R, 'daemon');
+  const there = new Set([app, path.join(R, 'secrets'), path.join(R, 'root.json'), path.join(app, 'logs'), path.join(app, 'src'), path.join(app, 'sandboxes.json'), path.join(app, 'gh-app', 'sessions')]);
+  const files = new Set([path.join(R, 'root.json'), path.join(app, 'sandboxes.json')]);
+  const t = noReadUpTargets({ root: R, appDir: app, allowBack: FENCE_READ_ALLOW, extraBack: [path.join(app, 'gh-app', 'sessions')], stat: (p) => (there.has(p) ? (files.has(p) ? 'file' : 'dir') : undefined) });
+  assert.deepEqual(t, [
+    { path: app, sddl: NO_READ_UP.dir },
+    { path: path.join(R, 'secrets'), sddl: NO_READ_UP.dir },
+    { path: path.join(R, 'root.json'), sddl: NO_READ_UP.file },
+    { path: path.join(app, 'logs'), sddl: READ_BACK.dir },
+    { path: path.join(app, 'src'), sddl: READ_BACK.dir },
+    { path: path.join(app, 'sandboxes.json'), sddl: READ_BACK.file },
+    { path: path.join(app, 'gh-app', 'sessions'), sddl: READ_BACK.dir },
+  ]);
+  assert.equal(NO_READ_UP.dir, 'S:(ML;OICI;NWNR;;;ME)');
+  assert.ok(!t.some((x) => /tokens\.json|hosts|daemon\.json/.test(x.path)));
+});
+
+test('w5546: labelNoReadUp skips the system drive and labels already set, sets the rest through SetNamedSecurityInfoW, and retries a WRITE_OWNER refusal after the grant', async () => {
+  const calls: { cmd: string; args: string[] }[] = [];
+  const t = [
+    { path: 'C:\\ffw-anchor\\secrets', sddl: NO_READ_UP.dir },
+    { path: 'F:\\ffw\\daemon', sddl: NO_READ_UP.dir },
+    { path: 'F:\\ffw\\daemon\\src', sddl: READ_BACK.dir },
+    { path: 'F:\\ffw\\root.json', sddl: NO_READ_UP.file },
+  ];
+  let first = true;
+  const exec: Exec = async (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === 'icacls' && args.length === 1) return { code: 0, stdout: args[0].endsWith('src') ? `${args[0]} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)` : '', stderr: '' };
+    if (cmd === 'icacls') return { code: 0, stdout: '', stderr: '' };
+    const script = Buffer.from(args[args.length - 1], 'base64').toString('utf16le');
+    assert.match(script, /SetNamedSecurityInfoW\(path, 1, 0x10,/);
+    const n = (script.match(/\[FfLabel\]::Set\(/g) ?? []).length;
+    if (first) {
+      first = false;
+      assert.ok(script.includes("'F:\\ffw\\daemon', 'S:(ML;OICI;NWNR;;;ME)'") && script.includes("'F:\\ffw\\root.json', 'S:(ML;;NWNR;;;ME)'"));
+      return { code: 0, stdout: 'ok 0\r\nerr 1 5\r\n', stderr: '' };
+    }
+    assert.equal(n, 1);
+    return { code: 0, stdout: 'ok 0\r\n', stderr: '' };
+  };
+  const said: string[] = [];
+  assert.equal(await labelNoReadUp(t, exec, (l) => void said.push(l), { account: 'me', systemDrive: (p) => p.startsWith('C:') }), true);
+  assert.ok(said.some((l) => l.includes('C:\\ffw-anchor\\secrets') && l.includes('system drive')));
+  assert.ok(!calls.some((c) => c.args.some((a) => a.startsWith('C:'))), 'nothing on C: is touched');
+  assert.ok(calls.some((c) => c.cmd === 'icacls' && c.args[0] === 'F:\\ffw\\root.json' && c.args[1] === '/grant'));
+  assert.equal(calls.filter((c) => c.cmd === 'powershell.exe').length, 2);
+  const bad: Exec = async (cmd, args) => (cmd === 'icacls' ? { code: 0, stdout: '', stderr: '' } : { code: 1, stdout: '', stderr: 'boom' });
+  assert.equal(await labelNoReadUp([t[1]], bad, () => {}, { systemDrive: () => false }), false);
+});
+
+test('w5546: hasLabel reads icacls for an explicit Medium label with or without NR; an inherited one does not count', () => {
+  assert.equal(hasLabel('x Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW,NR)', NO_READ_UP.dir), true);
+  assert.equal(hasLabel('x Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', NO_READ_UP.dir), false);
+  assert.equal(hasLabel('x Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)', READ_BACK.dir), true);
+  assert.equal(hasLabel('x Mandatory Label\\Medium Mandatory Level:(I)(OI)(CI)(NW,NR)', NO_READ_UP.dir), false);
+  assert.equal(hasLabel('x Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)', READ_BACK.dir), false);
+  assert.equal(onSystemDrive('C:\\ffw', 'C:', (p) => p), true);
+  assert.equal(onSystemDrive('F:\\ffw\\daemon', 'C:', () => 'C:\\ffw-anchor\\daemon'), true, 'a junction into C:');
+  assert.equal(onSystemDrive('F:\\ffw\\daemon', 'C:', (p) => p), false);
 });

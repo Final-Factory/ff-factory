@@ -16,7 +16,7 @@ import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { ghConfigDirFor, labelLow, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -24,7 +24,8 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
-import { FF_LANDLOCK, writeLockArgs } from './writeLock.ts';
+import { FF_LANDLOCK, readLockArgs, writeLockArgs } from './writeLock.ts';
+import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, pidAlive, readHostState } from './agentHost.ts';
 import { SelfUpdater } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -78,7 +79,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { ghAppPaths, ghAppRunEnv, installGhAppShims, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
+import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensFile, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
 import { postImagesFromFiles, postTextFromFile } from '../server/ffboxPostFile.ts';
@@ -2823,10 +2824,19 @@ export class Daemon {
     const slot = this.slotEnv(spec);
     // GitHub Apps (w1519): the gh shim's folder goes before the unity-slot one, on the same PATH key.
     const pathKey = Object.keys(slot).find((k) => k.toUpperCase() === 'PATH') ?? Object.keys(process.env).find((k) => k.toUpperCase() === 'PATH') ?? 'PATH';
-    const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey]);
+    // w5547: the run's own tokens file, with only the apps its spec (the portal) named; never the machine's tokens.json.
+    let own: string | undefined;
+    try {
+      own = ghAppSessionSetup({ setup: this.ghApp, sessions: ghAppPaths(appDirOfConfig(this.cfg)).sessions, sessionId: info.id, specEnv: spec.env });
+    } catch (e) {
+      log(`github apps: could not write ${info.id}'s tokens file: ${(e as Error).message}`);
+    }
+    const app = ghAppRunEnv(spec.env, this.ghApp, pathKey, slot[pathKey] ?? process.env[pathKey], own);
+    // w5546: the fences close the daemon's folder, secrets and root.json to reads; the run's own tokens file is given back.
     const lockArgs = spec.sandbox ? this.writeLock : undefined;
-    const lock = lockArgs ? { writeLock: lockArgs } : {};
-    const fence = spec.sandbox ? this.workerFence : undefined;
+    const lock = lockArgs ? { writeLock: own ? [...lockArgs, '--read', own] : lockArgs } : {};
+    const baseFence = spec.sandbox ? this.workerFence : undefined;
+    const fence = baseFence && own ? { ...baseFence, readAllowed: [...(baseFence.readAllowed ?? []), own] } : baseFence;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
@@ -2845,6 +2855,7 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       try {
         fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME });
+        if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg) };
         if (this.cfg.workerFence && !fence) log(`worker fence: "${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only); agents run unfenced`);
         if (fence) {
           const probe = probeFence(fencedArgv(fence, '/usr/bin/true', []));
@@ -2906,6 +2917,18 @@ export class Daemon {
       if (!(await labelLow(targets, exec, say))) {
         log('worker integrity: not every folder could be labelled Low; agents run unfenced');
         return;
+      }
+      // w5546: the read half: No-Read-Up on the daemon's folder, secrets and root.json, with what workers read there given
+      // back (and the runs' own GitHub App token files, w5547). Again at every start: a self-update's new folders inherit NR.
+      // A failure leaves the write fence on and is said; it does not turn agents unfenced.
+      try {
+        const appDir = appDirOfConfig(this.cfg);
+        const sessions = ghAppPaths(appDir).sessions;
+        fs.mkdirSync(sessions, { recursive: true });
+        // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
+        if (!(await labelNoReadUp(noReadUpTargets({ root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [sessions] }), exec, say))) log('worker integrity: not every read label could be set; Low workers may still read there');
+      } catch (e) {
+        log(`worker integrity: read labels: ${(e as Error).message}`);
       }
       // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
       for (const exe of await lowRunners(root, exec)) log(`worker integrity: CI runner job exe ${exe} is still labelled Low, so its jobs start at Low and Git Bash dies (0xC0000022); label its folder Medium`);
@@ -3006,7 +3029,11 @@ export class Daemon {
       let args: string[] | undefined;
       try {
         if (this.cfg.writeLock && process.platform === 'linux' && this.cfg.root) {
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: this.maxEventsFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra });
+          args = [
+            ...writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, maxEventsFile: this.maxEventsFile, unitySlots: this.slots.dir, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra }),
+            // w5546: and the read half (the daemon's folder, secrets, root.json closed; what workers read there given back).
+            ...readLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg) }),
+          ];
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, '--', '/bin/true']);
           if (probe.ok) log('write lock: landlock is on for sandbox agents');
           else {
@@ -3529,6 +3556,8 @@ export class Daemon {
         } catch (e) {
           log(`github apps: could not write the tokens' file: ${(e as Error).message}`);
         }
+        // w5547: and each live run's own file, with its own apps' tokens only.
+        refreshSessionTokens(ghAppPaths(appDirOfConfig(this.cfg)).sessions, msg.tokens, (id) => this.entries.has(id), (line) => log(line));
         break;
       }
       case 'save_work': {
@@ -3616,6 +3645,9 @@ export class Daemon {
         e?.s.dispose?.();
         this.entries.delete(msg.sessionId);
         this.awake();
+        // Its own GitHub App tokens file goes too (w5547).
+        const own = sessionTokensFile(ghAppPaths(appDirOfConfig(this.cfg)).sessions, msg.sessionId);
+        if (own) fs.rmSync(own, { force: true });
         // Its own temp folder goes with it (docs/self-recovery.md "Per-agent hygiene"), unless it became Git Bash's /tmp (w603).
         // /tmp is looked up again first: it moves to the first bash's TMP whenever the user's MSYS processes all ended, and a
         // value up to 5 minutes old removed a folder that had just become /tmp (w3559: every bash on LothDesktop, ffu's CI

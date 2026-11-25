@@ -14,6 +14,7 @@ import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
+import { FENCE_READ_ALLOW } from './daemonReads.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -27,6 +28,12 @@ export interface WorkerFence {
   darwinCache: string;
   /** More folders a worker may write (the Unity slots mailbox when it is not in the root). */
   extraWritable?: string[];
+  /** The daemon's folder when it is not `<root>/daemon` (an install whose daemon lives elsewhere): read-denied too. */
+  appDir?: string;
+  /** Per run, more paths no worker may read (resolved; a folder covers all below it): w5548's gh login, for example. */
+  readDenied?: string[];
+  /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens file, w5547). */
+  readAllowed?: string[];
 }
 
 /** An SBPL string literal. */
@@ -38,6 +45,14 @@ const lit = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
  * failed on `repo/worktrees/<name>/index.lock` (w5333; the Linux lock leaves it writable for the same reason).
  */
 export const READ_ONLY_IN_ROOT = { subpaths: ['daemon', 'secrets'], files: ['root.json'] };
+
+/**
+ * w5546 (lothsahn: "workers can't read the secrets and daemon folders on any OS"): the same three are closed to reads as
+ * well, except what a worker legitimately reads in the daemon's folder (FENCE_READ_ALLOW: its logs and code, the shims).
+ * `file-read-data` only: a stat of a path, which node's module loader and git make up every parent, stays allowed; the
+ * daemon's folder may be listed (names, never contents, as server/daemonReads.ts allows).
+ */
+export const READ_DENIED_IN_ROOT = READ_ONLY_IN_ROOT;
 
 export function seatbeltProfile(f: WorkerFence): string {
   const home = (p: string) => path.join(f.home, p);
@@ -74,8 +89,33 @@ export function seatbeltProfile(f: WorkerFence): string {
     '(deny file-write*',
     ...READ_ONLY_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
     ...READ_ONLY_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
+    ...(f.appDir && f.appDir !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(f.appDir)})`] : []),
     ')',
+    ...readRules(f),
   ].join('\n');
+}
+
+/** The read half (w5546, w5547): deny reads of the closed folders, then give back what workers read there. */
+function readRules(f: WorkerFence): string[] {
+  const daemon = f.appDir ?? path.join(f.root, 'daemon');
+  const spot = (p: string) => (/\.[a-z]+$/i.test(p) ? 'literal' : 'subpath');
+  const denied = [
+    ...READ_DENIED_IN_ROOT.subpaths.map((p) => `  (subpath ${lit(path.join(f.root, p))})`),
+    ...READ_DENIED_IN_ROOT.files.map((p) => `  (literal ${lit(path.join(f.root, p))})`),
+    ...(daemon !== path.join(f.root, 'daemon') ? [`  (subpath ${lit(daemon)})`] : []),
+    ...(f.readDenied ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
+  ];
+  return [
+    ';; reads: the daemon\'s folder, the secrets and the root\'s record are closed (w5546), except what workers read there',
+    '(deny file-read-data',
+    ...denied,
+    ')',
+    '(allow file-read-data',
+    `  (literal ${lit(daemon)})`,
+    ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
+    ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (literal ${lit(p)})`),
+    ')',
+  ];
 }
 
 const real = (p: string) => {

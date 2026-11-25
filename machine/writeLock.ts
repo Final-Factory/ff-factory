@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
+import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 
 /** The launcher beside this file. */
 export const FF_LANDLOCK = path.join(import.meta.dirname, 'ff-landlock.py');
@@ -38,6 +39,19 @@ export interface WriteLockPaths {
   home?: string;
   /** More writable folders, each with its reason in daemon.json (`writeLockExtra`). */
   extra?: string[];
+}
+
+/**
+ * w5546: the read half. The daemon's folder, `secrets` and `root.json` are closed to reads; what workers read in the
+ * daemon's folder (FENCE_READ_ALLOW: logs, code, the gh shim, Unity MCP status) is given back. Per run, `noRead` closes
+ * more (w5548's gh login) and `read` gives back one path inside a closed folder (the run's own GitHub App tokens, w5547).
+ */
+export function readLockArgs(p: { root: string; appDir?: string; noRead?: string[]; read?: string[] }): string[] {
+  const root = path.resolve(p.root);
+  const app = p.appDir ? path.resolve(p.appDir) : path.join(root, 'daemon');
+  const closed = [...new Set([app, path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), ...(p.noRead ?? [])])];
+  const back = [...FENCE_READ_ALLOW.map((a) => path.join(app, a)), ...(p.read ?? [])];
+  return [...closed.flatMap((c) => ['--no-read', c]), ...back.flatMap((b) => ['--read', b])];
 }
 
 /** ff-landlock.py's arguments for a worker (everything before `--`). */

@@ -34,6 +34,13 @@ add".
   person's run, on their Claude pool, and the ledger counts it for them. Only the GitHub credential for those repositories
   differs. On GitHub, pushes and PRs made with the app token show as the app (`<slug>[bot]`); the commits keep the author
   git was given.
+- **Each run gets only its own apps' tokens** (w5547, lothsahn: workers never choose their App tokens). The daemon keeps every
+  app's tokens in `gh-app/tokens.json`, which no worker reads (docs/worker-fence.md, "Reads"). At a run's start it writes the
+  run's own file, `gh-app/sessions/<session>.json` (0600), with only the apps the portal named in that run's spec
+  (`FF_GH_APP_NAMES` as the spec carried it), and rewrites it when new tokens come; the file goes when the session is
+  removed, and a gone session's file after a day. The run's environment points at it (`FF_GH_APP_SESSION_FILE`); there is
+  no `FF_GH_APP_FILE` any more. The helper and the shim still narrow to `FF_GH_APP_NAMES`, but a worker that sets it to
+  another app's name finds no token for it in its file and gets its own `GH_TOKEN` (test: githubApps.test.ts, "w5547").
 - **Which runs get it.** The entry's grants decide, like any vault entry: roles, machines, and `share` (its owner's work
   only, or anyone's). The app is used only on machines where `machines.githubFromVault` is on, and only by runs that also
   got a vault GitHub token: the routing helper replaces the machine's own git helpers, so a run on the machine's own gh
@@ -44,7 +51,7 @@ add".
 
 ## What a worker runs (w2755)
 
-A worker mints nothing and reads no file: its git and gh already use the app's token for a covered repository. It checks
+A worker mints nothing and reads no file itself (its git helper and gh shim read its own session file): its git and gh already use the app's token for a covered repository. It checks
 that its run may use the app (`echo "$FF_GH_APP_NAMES"` names `app-gherik`), then:
 
 ```sh

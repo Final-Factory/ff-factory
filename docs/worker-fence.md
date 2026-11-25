@@ -39,6 +39,35 @@ there. With `repo` read-only (the first version of #1115), a fenced commit in a 
 in `server/workerFence.test.ts` now commits in a worktree). The harness's own guard still keeps agents' tools off it. The agent's environment adds `CLAUDE_CODE_TMPDIR=<root>/tmp/claude-code` (Claude Code's task output
 and its `/tmp/cc-socks` messaging socket move there) and `DISABLE_AUTOUPDATER=1` (the updater writes `~/.local/share/claude`).
 
+## Reads: the daemon's folder, secrets and root.json are closed (w5546, every OS)
+
+lothsahn (w5546): "workers can't read the secrets and daemon folders on any OS". The fences that refuse a worker's writes
+also refuse its reads of `<root>/secrets`, `<root>/root.json` and the daemon's folder (its own `appDir`, and
+`<root>/daemon` where that differs). What workers read or run in the daemon's folder is given back, from one list,
+`FENCE_READ_ALLOW` (server/daemonReads.ts): the guard's diagnostic reads (`DAEMON_READ_ALLOW`: logs, the code in `src` and
+`app`, sandboxes.json, the clean-up files, ...), the gh shim (`gh-app/bin`) and the Unity MCP status files (`unity-mcp`). Never
+given back: `daemon.json`, `hosts` (other sessions' specs and environments), `gh-app/tokens.json` (every app's tokens),
+`root.json` and `root-backup.json` (dropped from the guard's list too). A run's own GitHub App tokens file
+(`gh-app/sessions/<session>.json`, w5547, docs/github-apps.md) is given back to that run only (macOS, Linux).
+
+| OS | How | Where |
+|---|---|---|
+| macOS | `(deny file-read-data ...)` on the closed paths, then `(allow file-read-data ...)` on the given-back ones (later rules win). Only contents: stat and realpath of a closed path still work. | `seatbeltProfile` `readRules` (server/workerFence.ts); per run `readAllowed` |
+| Linux | Landlock only grants, so ff-landlock.py handles read too (`--no-read`, `--read`): it grants read on everything but the closed paths (every sibling off the chain of each closed path's parents; the parents list names only) and the given-back ones. Symbolic links are not followed. | `readLockArgs` (machine/writeLock.ts), `read_grants` (machine/ff-landlock.py) |
+| Windows | A Medium mandatory label with No-Read-Up, `S:(ML;OICI;NWNR;;;ME)` on folders (`S:(ML;;NWNR;;;ME)` on files), set with `SetNamedSecurityInfoW` (icacls cannot set NR); the given-back paths get an explicit `S:(ML;OICI;NW;;;ME)`, which overrides the inherited one. Set at every daemon start when `workerIntegrity` is `low` (a self-update's new `app` folder inherits NR), skipping a label already in place. Never on the system drive: a target on C:, or a junction into it, is skipped and logged. | `noReadUpTargets`, `labelNoReadUp` (machine/lowIntegrity.ts), `lowSetup` (machine/daemon.ts) |
+
+Limits:
+
+- **Linux**: a file made directly in one of the closed paths' parent folders after the run started (a new file straight in
+  `$HOME` or the root, or one rewritten there by rename) is not readable by that run; one made below a granted sibling is.
+- **Windows**: every Low worker shares one Low token, so the `gh-app/sessions` folder is readable by all of them: each file
+  holds only the apps that run was given, but a worker could read another run's file on the same machine. macOS and Linux
+  give each run only its own.
+- **Windows, BEAST**: its `daemon` and `secrets` are junctions into `C:\ffw-anchor`, which the fence does not touch, so they
+  stay readable there until a person decides otherwise.
+- Same as the write half: the guard (server/daemonReads.ts) still decides what a worker's own tools may read; the fence
+  is what holds for every process the worker starts.
+
 ## Trial results (m5, macOS 26.4, 2026-11-23)
 
 Measured with the generated profile unless noted:

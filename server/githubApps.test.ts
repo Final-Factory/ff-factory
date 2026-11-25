@@ -12,7 +12,7 @@ import { machineRunEnv } from './secrets.ts';
 import { githubCredentialEnv, GITHUB_HELPER } from './launch.ts';
 import { GITHUB_APP_PERMISSIONS } from '../shared/githubRequirements.ts';
 import { appTokenFor, ghRepoOf, gitRemoteRepo, repoKey, repoOfUrl, type GhAppToken } from '../shared/githubAppRoute.ts';
-import { credentialAnswer, findRealGh, ghAppRunEnv, ghEnvFor, installGhAppShims, readGhAppTokens, writeGhAppTokens } from '../machine/ghApp.ts';
+import { credentialAnswer, findRealGh, ghAppRunEnv, ghAppSessionSetup, ghEnvFor, installGhAppShims, readGhAppTokens, refreshSessionTokens, sessionApps, sessionTokensFile, writeGhAppTokens, writeSessionTokens } from '../machine/ghApp.ts';
 import type { RunOptions, RunResult } from './proc.ts';
 
 /**
@@ -337,7 +337,10 @@ test('the daemon side: the tokens file round trip (0600), the run environment on
   const setup = { bin: path.join(dir, 'gh-app', 'bin'), file, helper: '!helper credential' };
   assert.deepEqual(ghAppRunEnv({ GH_TOKEN: LOTH }, setup, 'PATH', '/usr/bin'), {});
   assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a' }, setup, 'PATH', '/usr/bin'), {}, 'no vault GitHub token: nothing');
-  assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x'), { FF_GH_APP_FILE: file, FF_GH_APP_HELPER: '!helper credential', Path: [setup.bin, 'C:\\x'].join(path.delimiter) });
+  assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x'), {}, 'no session file: nothing (w5547)');
+  const own = path.join(dir, 'gh-app', 'sessions', 's1.json');
+  assert.deepEqual(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'Path', 'C:\\x', own), { FF_GH_APP_SESSION_FILE: own, FF_GH_APP_HELPER: '!helper credential', Path: [setup.bin, 'C:\\x'].join(path.delimiter) });
+  assert.ok(!Object.values(ghAppRunEnv({ FF_GH_APP_NAMES: 'a', GH_TOKEN: LOTH }, setup, 'PATH', '', own)).includes(file), 'the machine file is never in a run environment (w5547)');
   // gh: the first one on PATH that is not in the shim's folder.
   const real = path.join(dir, 'real');
   fs.mkdirSync(real);
@@ -346,6 +349,40 @@ test('the daemon side: the tokens file round trip (0600), the run environment on
   for (const d of [setup.bin, real]) fs.writeFileSync(path.join(d, exe), '', { mode: 0o755 });
   assert.equal(findRealGh([setup.bin, real].join(path.delimiter), setup.bin), path.join(real, exe));
   assert.equal(findRealGh(setup.bin, setup.bin), undefined);
+});
+
+test('w5547: a run gets its own file with only the apps its spec named; naming another app in its shell gets nothing', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-s-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'gh-app', 'tokens.json');
+  writeGhAppTokens(file, HELD);
+  const setup = { bin: path.join(dir, 'gh-app', 'bin'), file, helper: '!helper credential' };
+  const sessions = path.join(dir, 'gh-app', 'sessions');
+  assert.equal(sessionTokensFile(sessions, '../x'), undefined, 'an id that is not a plain name gets no file');
+  assert.equal(sessionTokensFile(sessions, '..'), undefined);
+  assert.equal(ghAppSessionSetup({ setup, sessions, sessionId: 's0', specEnv: { GH_TOKEN: LOTH } }), undefined, 'no apps: no file');
+  const own = ghAppSessionSetup({ setup, sessions, sessionId: 's1', specEnv: { FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH } });
+  assert.equal(own, path.join(sessions, 's1.json'));
+  if (process.platform !== 'win32') assert.equal(fs.statSync(own!).mode & 0o777, 0o600);
+  const held = readGhAppTokens(own);
+  assert.deepEqual(held.map((h) => h.app), ['app-gherik'], 'only the app the spec named');
+  assert.deepEqual(sessionApps(own!), ['app-gherik']);
+  // The worker sets FF_GH_APP_NAMES to the other app: its file has no token for it, so it gets its own GH_TOKEN, never the app's.
+  const forged = { FF_GH_APP_NAMES: 'other-app', GH_TOKEN: LOTH };
+  assert.equal(credentialAnswer('get', 'protocol=https\nhost=github.com\npath=someone/anything.git\n', forged, held, NOW), `username=x-access-token\npassword=${LOTH}\n`);
+  assert.equal(ghEnvFor(['pr', 'list', '-R', 'someone/anything'], forged, held, () => '', NOW).GH_TOKEN, LOTH);
+  const both = { FF_GH_APP_NAMES: 'app-gherik,other-app', GH_TOKEN: LOTH };
+  assert.equal(credentialAnswer('get', 'protocol=https\nhost=github.com\npath=someone/anything.git\n', both, held, NOW), `username=x-access-token\npassword=${LOTH}\n`, 'adding a name does not widen it');
+  assert.equal(credentialAnswer('get', 'protocol=https\nhost=github.com\npath=Gherik1/ItemCannon.git\n', both, held, NOW), `username=x-access-token\npassword=${ghs('a')}\n`, 'its own app still works');
+  // New tokens: each live run's file is written again with its own apps; a day-old file of a gone run is removed.
+  const fresh = HELD.map((h) => ({ ...h, token: `${h.token}x` }));
+  const gone = path.join(sessions, 'gone.json');
+  writeSessionTokens(gone, ['other-app'], HELD);
+  const old = (Date.now() - 2 * 24 * 3_600_000) / 1000;
+  fs.utimesSync(gone, old, old);
+  refreshSessionTokens(sessions, fresh, (id) => id === 's1');
+  assert.deepEqual(readGhAppTokens(own), [fresh[0]]);
+  assert.equal(fs.existsSync(gone), false);
 });
 
 test('git config: with apps the helper is the daemon\'s and git sends the path (useHttpPath); without, the GH_TOKEN helper as before', () => {
@@ -365,10 +402,10 @@ test('real git: `git credential fill` through the installed helper answers the a
   if (spawnSync('git', ['--version']).status !== 0) return t.skip('no git');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ghapp-git-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  const file = path.join(dir, 'tokens.json');
-  writeGhAppTokens(file, [{ ...HELD[0], expiresAt: iso(Date.now() + 3_600_000) }]);
+  const file = path.join(dir, 'sessions', 's1.json');
+  writeSessionTokens(file, ['app-gherik'], [{ ...HELD[0], expiresAt: iso(Date.now() + 3_600_000) }]);
   const helper = installGhAppShims(path.join(dir, 'bin'));
-  const env = { ...process.env, ...githubCredentialEnv({ FF_GH_APP_HELPER: helper }), FF_GH_APP_FILE: file, FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
+  const env = { ...process.env, ...githubCredentialEnv({ FF_GH_APP_HELPER: helper }), FF_GH_APP_SESSION_FILE: file, FF_GH_APP_NAMES: 'app-gherik', GH_TOKEN: LOTH, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', HOME: dir, XDG_CONFIG_HOME: dir, GIT_CONFIG_NOSYSTEM: '1' };
   const fill = (url: string) => spawnSync('git', ['credential', 'fill'], { input: `url=${url}\n\n`, env, encoding: 'utf8', timeout: 60_000 });
   const app = fill('https://github.com/Gherik1/ItemCannon.git');
   assert.equal(app.status, 0, app.stderr);
@@ -377,6 +414,12 @@ test('real git: `git credential fill` through the installed helper answers the a
   const other = fill('https://github.com/Final-Factory/FinalFactory.git');
   assert.equal(other.status, 0, other.stderr);
   assert.match(other.stdout, new RegExp(`^password=${LOTH}$`, 'm'));
+  // w5547: the file holds only app-gherik's token, so a run that names other-app in its shell gets GH_TOKEN for its repository.
+  writeSessionTokens(file, ['app-gherik'], HELD.map((h) => ({ ...h, expiresAt: iso(Date.now() + 3_600_000) })));
+  env.FF_GH_APP_NAMES = 'other-app';
+  const forged = fill('https://github.com/someone/anything.git');
+  assert.equal(forged.status, 0, forged.stderr);
+  assert.match(forged.stdout, new RegExp(`^password=${LOTH}$`, 'm'));
 });
 
 test('docs/github-apps.md lists exactly the permissions of GITHUB_APP_PERMISSIONS, with their access', () => {
