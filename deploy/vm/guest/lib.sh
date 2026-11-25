@@ -120,6 +120,57 @@ as_fff() { as_fff_in / "$@"; }
 # as_fff_in DIR CMD...: the same, started in DIR.
 as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@"); }
 
+# The release build's account (w5523): FFF_BUILD_USER with its own home, or fff when that account cannot be made fit
+# (pick_builder, fff-update). as_build_in DIR CMD... runs CMD in DIR as it, with a clean environment: its PATH
+# (lib.sh's fixed one), its home (its TMPDIR too, not a /tmp fff shares) and nothing of the caller's (NODE_ENV=production from fff-portal.service's ExecStartPre
+# would leave out the web build's tools).
+BUILD_AS= BUILD_HOME=
+as_build_in() {
+  local dir=$1; shift
+  (cd "$dir" && runuser -u "${BUILD_AS:-$FFF_USER}" -- env -i PATH="$PATH" HOME="${BUILD_HOME:-$FFF_ROOT/home}" TMPDIR="${BUILD_HOME:-$FFF_ROOT/home}" LANG=C.UTF-8 \
+    npm_config_update_notifier=false GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
+
+# ensure_build_user: FFF_BUILD_USER is there and fit to build a release, made when missing: an account of its own (not
+# root, not fff, not in fff's group, no password, no login shell), its home (FFF_BUILD_HOME: its npm cache) its own and
+# closed (0700) in a folder root's and closed to fff's writes, so fff cannot plant an .npmrc or a cached package there;
+# and an ACL entry on $FFF_ROOT (root:fff 1770) that lets it pass through to $RELEASES and read nothing there. Prints why
+# it is not fit, and fails.
+ensure_build_user() {
+  local b=${FFF_BUILD_USER:-} h=${FFF_BUILD_HOME:-} uid
+  case $b in '' | root | "$FFF_USER") echo "FFF_BUILD_USER is '$b': it must be an account of its own"; return 1 ;; esac
+  [[ $h == /?* ]] && [[ $h != */ ]] || { echo "FFF_BUILD_HOME '$h' is not an absolute folder"; return 1; }
+  case "$h/" in "$FFF_ROOT"/*) echo "FFF_BUILD_HOME $h is inside $FFF_ROOT, where fff makes folders"; return 1 ;; esac
+  root_owned "$(dirname "$h")" || { echo "$(dirname "$h") is not root's, or is writable by others"; return 1; }
+  if ! id "$b" >/dev/null 2>&1; then
+    useradd --system --user-group --home-dir "$h" --no-create-home --shell /usr/sbin/nologin --comment 'FF Factory release builds (w5523)' "$b" >&2 ||
+      { echo "useradd $b failed"; return 1; }
+    log "made the build account $b"
+  fi
+  uid=$(id -u "$b") || { echo "no account $b"; return 1; }
+  [ "$uid" != 0 ] || { echo "$b has uid 0"; return 1; }
+  [ "$uid" != "$(id -u "$FFF_USER")" ] || { echo "$b has $FFF_USER's uid"; return 1; }
+  if id -nG "$b" | tr ' ' '\n' | matches -xF "$FFF_USER"; then echo "$b is in $FFF_USER's group"; return 1; fi
+  passwd -l "$b" >/dev/null 2>&1 || true
+  [ ! -L "$h" ] || { echo "$h is a symbolic link"; return 1; }
+  install -d -m 0700 -o "$b" -g "$b" "$h" || { echo "could not make $h"; return 1; }
+  chown "$b:$b" "$h" && chmod 0700 "$h" || { echo "could not make $h $b's alone"; return 1; }
+  command -v setfacl >/dev/null || { echo "setfacl is missing (the acl package: the guest install.sh installs it)"; return 1; }
+  setfacl -m "u:$b:--x" "$FFF_ROOT" || { echo "setfacl on $FFF_ROOT failed"; return 1; }
+  runuser -u "$b" -- sh -c 'cd "$1"' _ "$RELEASES" 2>/dev/null || { echo "$b cannot reach $RELEASES"; return 1; }
+  if runuser -u "$b" -- sh -c 'ls "$1" || test -w "$1"' _ "$FFF_ROOT" >/dev/null 2>&1; then echo "$b can read or write $FFF_ROOT"; return 1; fi
+}
+
+# end_build_processes: whatever the build account still runs after a build (a watcher npm left behind) is ended, so
+# nothing of it writes into the release once it is root's. Only for the build account, never fff, whose portal runs.
+end_build_processes() {
+  local i
+  [ -n "$BUILD_AS" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 0
+  pkill -KILL -u "$BUILD_AS" 2>/dev/null || true
+  for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -u "$BUILD_AS" >/dev/null 2>&1 || return 0; sleep 0.5; done
+  warn "the build account $BUILD_AS still runs: $(pgrep -u "$BUILD_AS" -l | head -n 3 | paste -sd' ' -)"
+}
+
 # data_write NAME: stdin to $DATA/NAME, whole (a temp file and a rename) and owned by fff, which the server needs to
 # read and remove it.
 data_write() {

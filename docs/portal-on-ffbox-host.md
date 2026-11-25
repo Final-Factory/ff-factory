@@ -523,7 +523,8 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
 ### The update flow
 
 1. **Request.** `request_app_update`, or `fffctl update`, writes `data/update.wanted` (`{ drainMinutes, reason, at }`).
-   `fff-update.path` starts `fff-update request` as root; git runs as root, `npm` as `fff` (w5505).
+   `fff-update.path` starts `fff-update request` as root; git runs as root, `npm` as the build account `fffbuild`
+   (w5505, w5523).
 2. **Build while the old portal runs.** It fetches `origin/main` into `app/repo.git` and adds a worktree
    `app/releases/<sha12>` at that commit. There it runs `npm ci` and `npm --prefix web ci`, then the web build. Nobody
    edits these worktrees, so `update-steps.ps1`'s fast-forward, republish and rewrite checks reduce to "a fresh worktree
@@ -546,7 +547,7 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
   read-only release folders"). `activate` runs as root, so it trusts nothing `fff` can write:
   - `/srv/fff` is `root:fff 1770` (sticky: `fff` cannot rename `app/`), `app/`, `app/releases/` and `app/repo.git` are
     `root:root 0755`. `fff` reads them through `safe.directory` entries in its git config.
-  - After `npm` (as `fff`) the release is handed to root: `chown -R root:root`, `chmod -R go-w`, setuid bits cleared,
+  - After `npm` (as `fffbuild`) the release is handed to root: `chown -R root:root`, `chmod -R go-w`, setuid bits cleared,
     tracked files rewritten (`git checkout-index -af`) and no process may still hold a writable file or shared map in it
     (`writers_in`, from `/proc`). A `.ready` file names the commit.
   - Before `activate` switches, and before `rollback`, `release_problem` (`deploy/vm/guest/lib.sh`) checks: the folder is
@@ -557,10 +558,25 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
   - **One-time migration**: the first update to this code runs the release's `install.sh`, which runs `fff-update init`:
     it moves `fff`'s `repo.git` aside, clones it again as root, and rebuilds the new release as root's. Rolling back to a
     release `fff` built before it is refused ("not fit to run"); a disk snapshot (`vm-rollback.sh`) is the way back.
-  - **Not yet covered**: `node_modules` is still built by `fff` (`npm ci`), and root runs node from `current/` in
-    `fffctl vault`, `scrub-secrets`, `app-config` and `fff-migrate`, so a package `fff` could plant there before the
-    hand-over runs as root. A file descriptor passed between processes (`SCM_RIGHTS`) during the hand-over is not seen
-    by `writers_in`. Tests: `deploy/vm/test/fff-update.test.sh` (root, in the lint job) and the e2e's ownership checks.
+  - **Built by an account of its own** (w5523, lothsahn: "build node_modules as a dedicated build user, not fff"). Root
+    runs node from `current/` (`fffctl vault`, `scrub-secrets`, `app-config`, `fff-migrate`), so `fff` must not be able
+    to change a release's `node_modules` or `web/dist` while it is built either. `fff-update` makes the system account
+    `FFF_BUILD_USER` (`fffbuild`, `fff.conf`) itself on its first build: no login shell, a locked password, not `fff`,
+    not root, not in `fff`'s group, its home `FFF_BUILD_HOME` (`/var/lib/fff-build`, `fffbuild:fffbuild 0700`, its npm
+    cache and TMPDIR) outside `/srv/fff`. An ACL gives it only `--x` on `/srv/fff` (`root:fff 1770`), so it reaches
+    `app/releases/` and nothing of `fff`'s. The release folder is `fffbuild`'s during the build (`fff` reads it and
+    cannot write); `npm ci` and the web build run under `env -i` (no `NODE_ENV` from the unit); whatever `fffbuild`
+    still runs afterwards is killed (`end_build_processes`) before the hand-over to root.
+  - **If the build account is not fit** (it cannot be made, `setfacl` is missing, it is in `fff`'s group…),
+    `ensure_build_user` (`deploy/vm/guest/lib.sh`) says why, and the release is built as `fff`, as before w5523, so
+    updates and fixes keep deploying with nobody at the VM. Every such build logs `SECURITY: the build account … is not
+    fit` in `journalctl -u fff-update` and tells the dispatcher. `fff` cannot cause it: the account, its home and the ACL
+    are root's. A failed `npm ci` or web build as `fffbuild` fails the build like any other: the running release stays.
+  - **The first deploy of this change** is still built by the old `fff-update`, as `fff`; its `install.sh` then installs
+    the new scripts and the `acl` package, so the deploy after it is the first one `fffbuild` builds.
+  - **Not covered**: a file descriptor passed between processes (`SCM_RIGHTS`) during the hand-over is not seen by
+    `writers_in`; the build account's own processes are killed first. Tests: `deploy/vm/test/fff-update.test.sh` (root,
+    in the lint job) and the e2e's ownership and build-account checks (`ci-vm-e2e.sh`).
 - **An update cut off by a crash** (`server/index.ts:1690-1695`): after an unclean stop with an update pending, the
   server writes `update.request` and exits 0. With no prepared release, `activate` builds one then, while the portal
   is down, and switches. No code change needed.

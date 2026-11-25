@@ -214,7 +214,7 @@ health
 g 'sudo fffctl status'
 # Production timing only: the idle memory needs a minute to settle; the fast run measures it at once.
 [ "$TIMING" != production ] || sleep 60
-g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo sh -c "du -sh /srv/fff/app/releases/*/" | head -n 1)"; echo "MEASURE npm cache: $(sudo du -sh /srv/fff/home/.npm | cut -f1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
+g 'echo "MEASURE guest memory (MiB), portal idle with empty data:"; free -m; echo "MEASURE node server RSS (KiB): $(ps -o rss= -p $(systemctl show -p MainPID --value fff-portal))"; echo "MEASURE release on disk: $(sudo sh -c "du -sh /srv/fff/app/releases/*/" | head -n 1)"; echo "MEASURE npm cache: $(sudo du -sh /var/lib/fff-build/.npm | cut -f1)"; echo "MEASURE bare repo: $(sudo du -sh /srv/fff/app/repo.git | cut -f1)"; echo "MEASURE root filesystem:"; df -h /'
 deploy/vm/host/install.sh --guest-only --yes --guest-repo-bundle /tmp/ff.bundle 2>&1 | tail -n 12
 echo "ok: the guest install ran twice"
 g 'sudo fffctl base-clone' && g 'sudo systemctl start fff-base-refresh.service && sudo journalctl -u fff-base-refresh -n 3 --no-pager'
@@ -598,6 +598,22 @@ ok_tree=$(g 'sudo bash -c ". /usr/local/lib/fff/lib.sh; load_conf; d=\$(readlink
 [ -z "$ok_tree" ] || fail "the current release is not fit to run: $ok_tree"
 [ "$(g 'sudo -u fff env HOME=/srv/fff/home git -C /srv/fff/app/current rev-parse --short=7 HEAD')" = "$want" ] || fail "fff's git does not read the root's release (safe.directory)"
 echo "ok: the clone, the releases and the links are root's and read-only to fff, and the current release is clean at $want"
+# w5523: the release was built by the build account, not fff: what fff can write in the running release's dependencies
+# and web build is nothing, the account is its own (not in fff's group, no shell), and its home (npm's cache) is closed.
+printf '%s\n' "$out" | matches -F 'web build as fffbuild' || g 'sudo journalctl -u fff-update.service --no-pager -o cat' | matches -F 'web build as fffbuild' ||
+  fail "the update's web build did not run as fffbuild: $(g 'sudo journalctl -u fff-update.service --no-pager -o cat | grep -E "as (fff|fffbuild)$|SECURITY" | tail -n 4')"
+if g 'sudo journalctl --no-pager -o cat' | matches -F 'SECURITY: the build account'; then fail "an update fell back to building as fff: $(g 'sudo journalctl --no-pager -o cat | grep -F "SECURITY: the build account" | tail -n 1')"; fi
+g 'id fffbuild && getent passwd fffbuild | cut -d: -f7 | grep -qx /usr/sbin/nologin && ! id -nG fffbuild | tr " " "\n" | grep -qx fff' || fail "fffbuild is missing, has a login shell, or is in fff's group"
+[ "$(g 'sudo stat -c "%U:%G %a" /var/lib/fff-build')" = "fffbuild:fffbuild 700" ] || fail "/var/lib/fff-build is not fffbuild's 0700"
+g 'sudo test -d /var/lib/fff-build/.npm' || fail "npm's cache is not in the build account's home"
+w=$(g 'sudo -u fff find /srv/fff/app/current/ /srv/fff/app/current/node_modules/ /srv/fff/app/current/web/node_modules/ /srv/fff/app/current/web/dist/ /var/lib/fff-build -writable -print -quit 2>/dev/null; true')
+[ -z "$w" ] || fail "fff can write $w"
+for p in node_modules/w5523 web/node_modules/w5523 web/dist/w5523 web/dist/index.html; do
+  if g "sudo -u fff sh -c 'echo x >>/srv/fff/app/current/$p'" 2>/dev/null; then fail "fff could write /srv/fff/app/current/$p"; fi
+done
+if g 'sudo -u fff touch /var/lib/fff-build/.npmrc' 2>/dev/null; then fail "fff could write the build account's .npmrc"; fi
+[ -z "$(g 'pgrep -u fffbuild -l; true')" ] || fail "the build account still runs after the build: $(g 'pgrep -u fffbuild -l')"
+echo "ok: the release was built as fffbuild, fff can write nothing in its node_modules, web build or the build account's home"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 # A verified update leaves the marker the portal's machine rollout reads (server/machineRollout.ts, w887); the server
 # retires it to update.verified.done.json once it has taken it, so either file counts.
