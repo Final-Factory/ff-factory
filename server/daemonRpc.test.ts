@@ -44,7 +44,7 @@ async function slotDaemon(t: { after: (fn: () => void) => void }) {
   const queue = path.join(dir, 'slot-queue');
   fs.mkdirSync(queue);
   const slots = new UnitySlots({ dir: queue, platform: 'linux', procs: async () => [], alive: () => true, now: () => Date.now(), limit: () => 1, places: () => [], ramPct: () => undefined });
-  const rpc = new DaemonRpc({ key, infoFile: path.join(dir, 'rpc.json'), handlers: slotRpcHandlers(queue) });
+  const rpc = new DaemonRpc({ key, infoFile: path.join(dir, 'rpc.json'), alsoInfoFile: path.join(dir, 'old', 'rpc.json'), handlers: slotRpcHandlers(queue) });
   await rpc.start();
   t.after(() => rpc.close());
   const timer = setInterval(() => void slots.tick().catch(() => undefined), 10);
@@ -83,6 +83,7 @@ test('w5545: a call with no token or a forged one is refused, and files nothing'
   }
   assert.deepEqual(fs.readdirSync(queue).filter((n) => n.startsWith('req-')), []);
   assert.ok(fs.existsSync(path.join(dir, 'rpc.json')));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'old', 'rpc.json'), 'utf8')).port, JSON.parse(fs.readFileSync(path.join(dir, 'rpc.json'), 'utf8')).port, 'w5546: the old place too, for agents that name it');
 });
 
 test('w5545: a request file a worker drops in the old unity-slots mailbox is no request: the arbiter reads only its own queue', async (t) => {

@@ -930,6 +930,9 @@ machine, and what does not".
 | Linux | Landlock (`machine/writeLock.ts`, 4.2) | `"writeLock": true` (`writeLockExtra` is kept either way) | key absent |
 | Windows | Low integrity (4.1) | `"workerIntegrity": "low"` | key absent |
 
+Each fence also closes the daemon's folder, `secrets` and `root.json` to reads, with what workers read there given back
+(w5546; docs/worker-fence.md, "Reads"). The same setting turns both halves on and off.
+
 **Off from the portal, nobody at the machine (the normal route).** The orchestrator or ops worker runs
 `ops_worker machine_update` with `machine: <id>` and `worker_fence: "off"` (or `"on"`). It goes the machine update's
 usual way: over the machine agent's link as `self_update` with the flag (`server/machines.ts` `linkUpdate`), or, when
