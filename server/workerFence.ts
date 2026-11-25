@@ -18,6 +18,7 @@ import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sd
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
 import { projectSlug } from './claudeHome.ts';
+import { STORE_CHILD } from '../machine/storeLock.ts';
 
 export const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 
@@ -221,14 +222,15 @@ const confstr = (name: string) => execFileSync('/usr/bin/getconf', [name], { enc
  * The fence for this daemon's agents, or undefined when it is off: daemon.json `workerFence` is not "seatbelt", the
  * machine is not a Mac, it has no worker root, or sandbox-exec is missing.
  */
-export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; prefDeny?: boolean; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
+export function fenceFor(o: { setting?: string; root?: string; platform?: NodeJS.Platform; home: string; extraWritable?: string[]; workFolders?: (string | undefined)[]; prefDeny?: boolean; lockStore?: boolean; exists?: (p: string) => boolean; getconf?: (name: string) => string }): WorkerFence | undefined {
   if (o.setting !== 'seatbelt' || (o.platform ?? process.platform) !== 'darwin' || !o.root) return undefined;
   if (!(o.exists ?? fs.existsSync)(SANDBOX_EXEC)) return undefined;
   const get = o.getconf ?? confstr;
   return {
     kind: 'seatbelt',
     root: real(o.root),
-    open: openChildren(o.root, o.workFolders, READ_ONLY_IN_ROOT.subpaths),
+    // w5614: with the store lock, the main clone (`repo`) is read-only too (machine/storeLock.ts).
+    open: openChildren(o.root, o.workFolders, o.lockStore ? [...READ_ONLY_IN_ROOT.subpaths, STORE_CHILD] : READ_ONLY_IN_ROOT.subpaths),
     home: real(o.home),
     darwinTemp: real(get('DARWIN_USER_TEMP_DIR')),
     darwinCache: real(get('DARWIN_USER_CACHE_DIR')),

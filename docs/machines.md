@@ -1152,8 +1152,30 @@ older daemon ignores it and keeps making worktrees.
   it (its branches and stash are kept in the clone, above) and creating it again (the w5614 test "the way back").
   Do that before a daemon older than w5614 runs on the machine: its delete removes a slot repo's folder without
   keeping its branches, and its dev-drive move and rehome would leave the alternates naming the old path.
-- **Not in stage 1**: a sandbox can still write the clone's files and another sandbox's `.git` (no ACL or integrity
-  label yet); stage 2 (w5615) locks the clone down and stage 3 (w5616) the other slots.
+- **The store lock** (`machine/storeLock.ts`): once every sandbox is a slot repo, no worker needs to write the clone,
+  so the worker fences stop letting them. `ops_worker` `machine_update` `store_lock` (daemon.json `storeLock`, every OS):
+  - `off` (the default): nothing changes.
+  - `warn`: nothing is refused. The daemon watches the clone's git folder and logs each write it did not make itself,
+    once per path an hour: "store lock (warn): … changed while the daemon ran no git". At start it also logs whether
+    `on` would apply now, or what holds it off.
+  - `on`: the lock applies only when nothing needs the clone writable: every sandbox a slot repo, no worktree of the
+    clone left, and the clone at `<root>/repo`. Otherwise it stays off, says why, and warns as `warn` does.
+  - While it holds:
+    - macOS Seatbelt (`fenceFor`) and Linux Landlock (`writeLockArgs`) leave `repo` out of the write set.
+    - On Windows, the clone's git folder is labelled Medium instead of Low (`lowTargets` `medium`; integrity labels
+      only, no ACEs, the w5599 lesson), so a Low worker reads the objects and LFS files and cannot write them.
+    - New sandboxes are slot repos whatever `slot_repos` says.
+  - The daemon writes the clone as before, unfenced: the fetch before a new sandbox, kept branches and stash, the
+    prune guard.
+  - Like the fences, it is decided once per daemon process.
+  - Way back: `store_lock off` (or `worker_fence off`) and the daemon restart that the update makes. The next workers'
+    fences open `repo` again, and on Windows `lowSetup` labels its git folder Low again.
+  - It touches neither the daemon's self-update nor the bundles the portal sends. Its switch rides `machine_update`, so
+    it ships `warn` first (lothsahn's lockout rule).
+  - Tests: `server/storeLock.test.ts`. Its live legs run in CI: Landlock on Linux; on Windows a Low `cmd.exe` writing
+    into the Medium clone. Both commit in a slot repo, and both see the clone's config, refs and objects refused.
+- **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
+  per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 
 ### Git in a worker's checkout runs no program the worker named (w5541)
 

@@ -197,7 +197,7 @@ function deps(repoPath: string, o: { free?: () => number | undefined; copyBytes?
 
 const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean; awaitConfigure?: boolean } = {}) {
+function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean; awaitConfigure?: boolean; storeLocked?: () => boolean } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -224,6 +224,7 @@ function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined;
       ...(o.warm ? { warm: o.warm } : {}),
       librarySeedGB: 1,
       ...(o.awaitConfigure ? { awaitConfigure: true } : {}),
+      ...(o.storeLocked ? { storeLocked: o.storeLocked } : {}),
       ...(o.bootTicket ? { bootTicket: o.bootTicket } : {}),
       ...(o.slots ? { editorSlot: (id: string) => o.slots!().startRefusal(`sandbox:${id}`), slotsStatus: async () => (await o.slots!().tick(), o.slots!().describe()) } : {}),
     },
@@ -1906,6 +1907,20 @@ test('w4925: a repeat pair run for the same request carries the sandboxes its la
 });
 
 // ---------------------------------------------------------------- w5614: slot repos (machine/slotRepo.ts)
+
+test('w5614: while the store lock holds, a new sandbox is a slot repo even with slot_repos unset; an explicit setting still wins', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  let locked = true;
+  const { p } = pool(r, { storeLocked: () => locked });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  assert.ok(isSlotRepo(path.join(r.sbRoot, 'sb1')), 'locked: a worktree would need the store writable');
+  locked = false;
+  await p.create({ id: 'sb2', branch: 'sandbox/sb2', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb2');
+  assert.ok(!isSlotRepo(path.join(r.sbRoot, 'sb2')), 'unlocked and unset: a worktree, as before');
+});
 
 test('w5614: slot repos: a new sandbox is its own repo that borrows the clone\'s objects; its commits write nothing into the clone; a switch to a branch another sandbox holds is refused; a delete keeps its branches in the clone', async (t) => {
   const r = repos();

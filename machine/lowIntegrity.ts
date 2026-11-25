@@ -77,6 +77,11 @@ export interface LowTargetsInput {
   /** Extras the daemon owns that a worker must write although they sit in the daemon's folder (the Unity slots mailbox). */
   allowInAppDir?: (string | undefined)[];
   exists?: (p: string) => boolean;
+  /**
+   * w5614: the store lock holds (machine/storeLock.ts): the main clone's git folder is labelled Medium (No-Write-Up), so Low
+   * workers read it (the slot repos' borrowed objects) and cannot write it. Off, it is labelled Low as before.
+   */
+  lockStore?: boolean;
 }
 
 const inside = (child: string, parent: string) => {
@@ -100,6 +105,7 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // Root children no worker writes (the instances, demos and instance portals on BEAST, CI runners, anything new): kept
   // Medium where an earlier rollout labelled them Low (labelLow touches only those that inherited Low).
   const fenced: string[] = [];
+  const lockedStore: string[] = [];
   for (const c of i.children) {
     if (!c.dir) continue;
     if (!write.has(c.name.toLowerCase())) {
@@ -111,8 +117,8 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
       // as Landlock and Seatbelt already let workers write it. A clone with a working tree: only its .git.
       const repo = path.join(i.root, c.name);
       const git = path.join(repo, '.git');
-      if (exists(git)) dirs.push(git);
-      else if (exists(path.join(repo, 'HEAD'))) dirs.push(repo);
+      const store = exists(git) ? git : exists(path.join(repo, 'HEAD')) ? repo : undefined;
+      if (store) (i.lockStore ? lockedStore : dirs).push(store);
       continue;
     }
     dirs.push(path.join(i.root, c.name));
@@ -130,7 +136,7 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // would crash (0xC0000022 on msys' shared object directory; measured w5377). A Low agent's node is Low anyway (a Low
   // parent starts Low children), and a worker cannot rewrite the shared node.
   const medium = dirs.some((d) => same(d, path.join(i.root, 'tools'))) ? [path.join(i.root, 'tools', 'node')] : [];
-  medium.push(...fenced);
+  medium.push(...fenced, ...lockedStore);
   return { dirs, files, medium };
 }
 

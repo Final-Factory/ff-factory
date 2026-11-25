@@ -30,6 +30,8 @@ import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from '
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, sayReadProbe, secretsDirs, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
+import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
+import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -240,6 +242,12 @@ export interface DaemonConfig {
    * Off when unset; set remotely by `ops_worker machine_update transcript_lock`, and `worker_fence off` lifts it with the lock.
    */
   transcriptLock?: 'on' | 'off';
+  /**
+   * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
+   * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
+   * unset; decided once per daemon process; set remotely by `ops_worker machine_update store_lock`.
+   */
+  storeLock?: 'off' | 'warn' | 'on';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -1020,6 +1028,8 @@ export class Daemon {
         idleStopMinutes: cfg.sandboxIdleStopMinutes,
         activity: (id) => this.sandboxActivity(id),
         liveAgents: (id) => this.liveIn(id),
+        // w5614: while the store lock holds, a new sandbox is a slot repo whatever slot_repos says (a worktree's git data is in the store).
+        storeLocked: () => this.storeLockMemo?.locked === true,
         trim: cfg.sandboxCacheTrim,
         // w1668: urgent releases build in slot1 of a build computer (placement.build's default list): its caches stay warm.
         warm: DEFAULT_BUILD.includes(cfg.id.toLowerCase()) ? [RELEASE_SANDBOX] : [],
@@ -3131,6 +3141,23 @@ export class Daemon {
     }
   }
 
+  private storeLockMemo?: StoreLockDecision;
+  /**
+   * w5614: whether the store lock holds for this daemon process (machine/storeLock.ts), decided at its first use (the fence
+   * set-up or the first fenced worker) and kept, as the fences it changes are. "warn", or "on" held off, starts the watch.
+   */
+  private get storeLock(): StoreLockDecision {
+    if (!this.storeLockMemo) {
+      const d = decideStoreLock({ setting: this.cfg.storeLock, root: this.cfg.root, repoPath: this.cfg.repoPath, sandboxes: this.pool.list().map((s) => ({ id: s.id, path: s.path })), isSlotRepo });
+      this.storeLockMemo = d;
+      const line = storeLockLine(d);
+      if (line) log(line);
+      if (d.watch && d.gitDir) this.stopStoreWatch = watchStore(d.gitDir, (l) => log(l));
+    }
+    return this.storeLockMemo;
+  }
+  private stopStoreWatch?: () => void;
+
   private fenceMemo?: { fence?: WorkerFence; why?: string };
   /**
    * The worker write fence for sandbox agents, or undefined when daemon.json leaves it off (w5333). Probed once
@@ -3142,7 +3169,7 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       let why: string | undefined;
       try {
-        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true });
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true, lockStore: this.storeLock.locked });
         if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg), secretsDirs: this.secretsDirs };
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
@@ -3187,6 +3214,8 @@ export class Daemon {
    */
   private async fenceSetup(): Promise<void> {
     try {
+      // w5614: the store lock is decided before any sandbox is made, so one made after it is a slot repo when it holds.
+      void this.storeLock;
       if (process.platform === 'win32') await this.lowSetup();
       if (this.fence.state.state !== 'setting_up') return;
       if (process.platform === 'win32') {
@@ -3247,6 +3276,7 @@ export class Daemon {
         extra: [...(this.cfg.extraRoots ?? []), this.cfg.tempDir, this.sandboxRoot(), ...allow.filter((a) => !isFile(a))],
         files: allow.filter(isFile),
         allowInAppDir: allow,
+        lockStore: this.storeLock.locked,
       });
       // w5557: the owner's own game folder inherits Low from LocalLow; an explicit Medium label refuses a Low worker's write.
       const ownerGameData = this.cfg.workerIntegrityLockGameData ? legacyGameDataRoot('win32') : undefined;
@@ -3499,7 +3529,7 @@ export class Daemon {
           waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
           if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts });
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg));
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
