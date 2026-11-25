@@ -34,6 +34,8 @@ import { meterStates } from '../server/meterStates.ts';
 import { sealStore } from '../server/transcriptSeal.ts';
 import { scopeEndCause, scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
+import { capNote, capsFor, startWorkerCaps, type CapHit } from './workerCaps.ts';
+import { pushCapNote } from '../server/workerCapNotes.ts';
 
 export { pidAlive };
 
@@ -84,7 +86,7 @@ export function cpuSince(before: Map<string, number>, after: Map<string, number>
   return ms;
 }
 
-const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize'];
+const SIGNALS: SignalName[] = ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap'];
 
 export const hostsDir = (appDir: string) => path.join(appDir, 'hosts');
 
@@ -302,7 +304,9 @@ export function launchHost(dir: string, start: HostStart, env: NodeJS.ProcessEnv
   const log = fs.openSync(f.log, 'a');
   try {
     // Not in its own folder (w799): Windows refuses to delete a folder a live process works in, and the daemon removes it.
-    const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir]);
+    // A worker's scope holds its caps (w5554, machine/workerCaps.ts) where the user manager delegates memory and pids.
+    const caps = start.info.kind === 'worker' ? capsFor() : undefined;
+    const cmd = scoped('agent', path.basename(dir), process.execPath, [...hostNodeArgs(), path.join(import.meta.dirname, 'agentHost.ts'), dir], caps ? { limits: { memoryBytes: caps.memoryBytes, tasks: caps.tasks } } : {});
     // Its systemd scope's name (w2884): read when the host dies, for why (an OOM kill names itself in that scope's journal).
     if (cmd.unit) fs.writeFileSync(f.scope, cmd.unit);
     const child = spawn(cmd.bin, cmd.args, {
@@ -983,6 +987,28 @@ export const readHostState = (dir: string) => readJson<Extract<HostMessage, { op
 /** When the agent host in `dir` started (ms, its host.json), or undefined (w3673: what an earlier host left is older). */
 export const hostStartedAt = (dir: string) => Date.parse(readJson<HostRecord>(hostFiles(dir).host)?.startedAt ?? '') || undefined;
 
+/** The worker's temp folder (<root>/tmp/ffa-<session>) from its env, or undefined. */
+export function workerTempDir(env: Record<string, string | undefined> | undefined): string | undefined {
+  for (const k of ['TMPDIR', 'TEMP', 'TMP']) {
+    const t = env?.[k];
+    if (t && path.isAbsolute(t) && /^ffa-/i.test(path.basename(t)) && fs.existsSync(t)) return t;
+  }
+  return undefined;
+}
+
+/** A worker host's caps (w5554), started; never fails the host: without them it runs as before, and says so in host.log. */
+async function workerCapsFor(dir: string, env: Record<string, string | undefined> | undefined, onCap: (h: CapHit) => void): Promise<(() => Promise<void>) | undefined> {
+  const log = (m: string) => console.log(new Date().toISOString(), m);
+  try {
+    // <appDir>/hosts/<id>
+    const appDir = path.dirname(path.dirname(path.resolve(dir)));
+    return await startWorkerCaps({ caps: capsFor(), tempDir: workerTempDir(env), appDir, onCap, log });
+  } catch (e) {
+    log(`worker caps: not started: ${(e as Error).message}`);
+    return undefined;
+  }
+}
+
 /** A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. */
 export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string }>(hostFiles(dir).place);
 
@@ -1062,6 +1088,12 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
     // w5563: beside them, in the daemon's folder, which every fence keeps read-only to workers
     seals: sealStore(path.join(path.dirname(path.dirname(path.resolve(dir))), 'transcript-seals')),
   } as SessionSink;
+  // w5554: a worker's caps (machine/workerCaps.ts) hold before its claude starts: on Windows the job is made around this host
+  // first, so every process the session starts is in it.
+  const stopCaps = start.info.kind === 'worker' ? await workerCapsFor(dir, spec.env, (h) => {
+    pushCapNote(capNote(h));
+    events.emit('workerCap', s, h);
+  }) : undefined;
   s = new AgentSession(start.info, sink, () => buildOptions(spec, handlers, process.env, spec.sandbox ? () => editorUp : undefined), events);
   const session = s;
   bus.on('event', (e) => {
@@ -1083,6 +1115,7 @@ export async function runHost(dir: string, start: HostStart): Promise<void> {
       out({ op: 'closed', consumed });
       clearInterval(beatTimer);
       clearInterval(pollTimer);
+      void stopCaps?.();
       setTimeout(() => process.exit(0), 200);
     }, CLOSE_GRACE_MS);
   };

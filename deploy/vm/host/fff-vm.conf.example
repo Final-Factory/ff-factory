@@ -53,7 +53,7 @@ PORTAL_PORT=8790
 WATCH_INTERVAL_SEC=60
 # A check fails when the guest agent does not answer AND the portal's /api/health does not either.
 WATCH_FAILS_BEFORE_RESET=3
-# No checks this long after the VM's QEMU process started (boot, cloud-init, the portal's start).
+# No checks this long after the VM's QEMU process started or the guest last rebooted (boot, cloud-init, the portal's start).
 WATCH_BOOT_GRACE_SEC=300
 # The agent answers but the portal has not for this long: an alert; with PORTAL_DOWN_RESET_MIN (0 = never) a reset.
 WATCH_PORTAL_ALERT_MIN=20

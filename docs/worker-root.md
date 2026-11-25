@@ -691,10 +691,11 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     inherit Low).
   - What workers write for the daemon is inside the root, so it needs no exception (w5377, lothsahn's rule from w5297:
     "under no circumstances should workers write outside of ffw"): a worker root's Unity slots mailbox is
-    `<root>\unity-slots` and its Max events file `<root>\max\max-events.jsonl` (`withRootDefaults`; `daemon.json`'s own
-    paths still win). The daemon makes both folders before it labels the root's children, and keeps reading the old
-    events file (`<daemon>\max-events.jsonl`, `maxEventsLegacy`) for agents started before the move; such an agent's
-    `unity-slot run` finds no arbiter in the old mailbox and runs ungated (`machine/unitySlots.ts` `acquire`).
+    `<root>\unity-slots` (`withRootDefaults`; `daemon.json`'s own path still wins). The daemon makes it before it
+    labels the root's children; an agent started before the move finds no arbiter in the old mailbox and its
+    `unity-slot run` runs ungated (`machine/unitySlots.ts` `acquire`). The Max events file is no longer a worker's to
+    write (w5552): it is `<daemon>\max\max-events.jsonl`, Medium like the daemon's folder, and sandbox agents get no
+    `FF_MAX_EVENTS` (docs/max.md, "How activity gets here").
     `slotsDir()` finds `$FF_WORKER_ROOT/unity-slots` before the pointer, and the daemon sets `FF_UNITY_SLOTS` for all it
     starts. A mailbox still outside the root and not allowed is logged at start.
   - It makes a Low-labelled copy of the SDK's `claude.exe` in `<root>\tools\low` (named by size and mtime) and runs it
@@ -825,7 +826,7 @@ not restricted. Writes are allowed only in (`writeLockArgs`):
 |---|---|
 | every child folder of the root except `daemon`, `secrets`, `claude-medium` and `cache-medium` | the work; the Medium agents' Claude folder (w5543, 2.8) and uv cache (w5565), the daemon's folder (or `appDir` if it sits in the root under another name) and the secrets stay read-only. `repo` must stay writable: sandbox worktrees keep their git data in it |
 | `extraRoots` | folders of the install that live outside the root |
-| `maxEventsFile` and the Unity slots mailbox, only where `daemon.json` puts them outside the root | ffdiscord appends Max's events (`FF_MAX_EVENTS`); the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps both inside it (`<root>/max`, `<root>/unity-slots`, w5377), so they need no rule |
+| the Unity slots mailbox, only where `daemon.json` puts it outside the root | the unity-slot mailbox (`FF_UNITY_SLOTS`). A worker root keeps it inside (`<root>/unity-slots`, w5377), so it needs no rule. The Max events file gets no rule on purpose: it is the daemon's (`<daemon>/max/max-events.jsonl`, w5552) and refused like its folder |
 | `$XDG_RUNTIME_DIR/cc-socks` (sockets only) | Claude Code binds its socket there |
 | `~/.config/unity3d`, `~/.local/share/unity3d` | Unity's editor and player prefs, `upm.log` and CoreBusinessMetrics. Moving them with XDG_CONFIG_HOME would also hide the licence from Unity |
 | `/tmp`, create-only (w5561) | Unity ignores TMPDIR for its Package Manager socket (`/tmp/Unity-Upm-<pid>.sock`: without it the editor exits 1), its shader compiler's socket and lock (`/tmp/Unity-ShaderCompilerIPC-*`), the IL post-processor's socket (`/tmp/ilpp.sock-<hash>`) and the .NET runtime's socket. `--create` grants only new regular files and sockets and removing files: no write, truncate, folder or link, so a file already there cannot be changed. The shader compiler's lock is opened `O_RDONLY\|O_CREAT` and flock'd, so needs no write |

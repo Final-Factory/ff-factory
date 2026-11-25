@@ -707,8 +707,8 @@ export function daemonJson(o: InstallOptions, l: Layout, id: string, claude: str
     appDir: l.daemon,
     tempDir: l.tmp,
     // The Unity slots mailbox and the Max events file are left to the daemon's root defaults (machine/daemon.ts
-    // withRootDefaults, w5377): both inside the root, `<root>/unity-slots` and `<root>/max/max-events.jsonl`, so no fence
-    // needs an exception for them; the old `<daemon>/max-events.jsonl` is drained while it exists (maxEventsLegacy).
+    // withRootDefaults): the mailbox inside the root, `<root>/unity-slots` (w5377), so no fence needs an exception for it;
+    // the events file in the daemon's own folder, `<daemon>/max/max-events.jsonl`, which no fence lets a worker write (w5552).
     ...(o.unitySlotsDir ? { unitySlotsDir: o.unitySlotsDir } : {}),
     ...(o.unityEditorRoot ? { unityEditorRoot: o.unityEditorRoot } : {}),
     ...(o.unityPath ? { unityPath: o.unityPath } : {}),

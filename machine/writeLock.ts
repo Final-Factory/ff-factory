@@ -31,8 +31,6 @@ export interface WriteLockPaths {
   appDir?: string;
   /** Folders of the install outside its root (DaemonConfig.extraRoots). */
   extraRoots?: string[];
-  /** The ffdiscord CLI appends here (FF_MAX_EVENTS, inside the daemon's folder): this one file only. */
-  maxEventsFile?: string;
   /** The Unity slots mailbox (FF_UNITY_SLOTS, `~/.ff-factory/unity-slots`): unity-slot requests and job logs. */
   unitySlots?: string;
   /** $XDG_RUNTIME_DIR: Claude Code binds its socket in `cc-socks` there (measured, w5333). */
@@ -58,7 +56,6 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // /dev: null, tty, shm, the GPU. /proc: a process's own oom_score_adj (Unity sets it); file modes still decide the rest.
   const args = ['--rw', '/dev', '--rw', '/proc', '--rw-children', root, ...[...except].sort().flatMap((n) => ['--except', n])];
   for (const r of p.extraRoots ?? []) args.push('--rw', r);
-  if (p.maxEventsFile) args.push('--rw', p.maxEventsFile);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
   if (p.runtimeDir) args.push('--sock', path.join(p.runtimeDir, 'cc-socks'));
   // w5562: the user bus and the systemd user manager's own sockets, through which `systemd-run --user` starts a job
@@ -83,8 +80,9 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
 
 /**
  * Options.spawnClaudeCodeProcess that starts claude under ff-landlock.py with these arguments. The folders a rule names
- * must exist when it starts (a missing one is skipped, so it stays unwritable): the max events file, cc-socks and the
- * .NET runtime's /tmp/.dotnet/shm (mode 1777, as the runtime makes it) are made here first.
+ * must exist when it starts (a missing one is skipped, so it stays unwritable): cc-socks and the .NET runtime's
+ * /tmp/.dotnet/shm (mode 1777, as the runtime makes it) are made here first. The Max
+ * events file is no longer granted (w5552): it is the daemon's, read-only for workers like the rest of its folder.
  */
 export function writeLockSpawner(args: string[], o: { python?: string; script?: string } = {}) {
   return (s: SpawnOptions): SpawnedProcess => {
@@ -92,7 +90,6 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
       try {
         if (args[i] === '--sock') fs.mkdirSync(args[i + 1], { recursive: true, mode: 0o700 });
         else if (args[i] === '--rw' && path.basename(args[i + 1]) === DOTNET_DIR) makeDotnetShm(args[i + 1]);
-        else if (args[i] === '--rw' && args[i + 1].endsWith('.jsonl') && !fs.existsSync(args[i + 1])) fs.writeFileSync(args[i + 1], '');
       } catch {
         /* the rule is skipped and the write refused: the agent says so */
       }
