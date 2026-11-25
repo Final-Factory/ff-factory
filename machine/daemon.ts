@@ -61,7 +61,7 @@ import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, biggestConsumers, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
-import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers } from '../server/installLeftovers.ts';
+import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
@@ -1028,6 +1028,7 @@ export class Daemon {
               scope: 'cargo-cap',
               closed: this.closedSessionDirs(),
             }),
+          busyNow: runnerBusyNow(() => this.procs()),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);

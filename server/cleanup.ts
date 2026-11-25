@@ -118,6 +118,8 @@ export interface CleanupItem {
    * one item and one log line for thousands of files, each removed on its own, and one in use skipped alone.
    */
   members?: string[];
+  /** An ffu-runner-work item: its runner's folder, so a job started since the plan is found again right before the rename (w5502). */
+  runner?: string;
 }
 
 export interface CleanupRun {
@@ -937,13 +939,19 @@ export async function planCleanup(opts: {
  * skipped whole instead of half deleted. A removal that fails after the rename leaves `<name>.ffclean-<n>`,
  * which the next pass removes.
  */
-export async function runCleanup(items: CleanupItem[], guard: CleanupGuard): Promise<CleanupRun> {
+export async function runCleanup(items: CleanupItem[], guard: CleanupGuard, busyNow?: (it: CleanupItem) => Promise<string | undefined>): Promise<CleanupRun> {
   const out: CleanupRun = { removed: [], failed: [], bytes: 0 };
   for (const it of items) {
     const g = it.base ? relaxFor(it.base, guard) : guard;
     const no = it.rule === 'leftover' ? undefined : neverDelete(it.path, it.inSession ? sessionRelaxed(it.inSession, g) : g);
     if (no) {
       out.failed.push({ path: it.path, why: `refused: ${no}` });
+      continue;
+    }
+    // A job handed out since the plan (endStrays and the awaits before it take time) must not lose its checkout (w5502).
+    const busy = busyNow ? await busyNow(it).catch((e) => `the re-check failed (${(e as Error).message})`) : undefined;
+    if (busy) {
+      out.failed.push({ path: it.path, why: `kept: ${busy}` });
       continue;
     }
     await removeRenamed(it, out);
