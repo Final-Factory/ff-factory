@@ -185,7 +185,7 @@ sandbox is touched. The reason goes into the request's log (`started worker ... 
 every leg included, and the reply says the model either way (`... on opus, requested by ...`). A person's own start
 (`from: human`, a portal button or `/mcp`) names a model with no reason. A standing agent's suggested model and a review
 job's `Model:` line stay suggestions under the same test. Tests: `server/workerModel.test.ts`, and the two w2010 tests in
-`server/orchestrators.test.ts`.
+`server/orchestrators*.test.ts`.
 
 Opus workers in turn hand small, well-specified pieces to a Sonnet implementer subagent: that guidance is the game repo's
 (its `CLAUDE.md` "Delegation agents"), not this portal's.
@@ -419,7 +419,7 @@ fewest timed legs queued, then `placement.prefer`. A one-worker computer ranks f
   words; and a note or brief that denies timing ("not a timing run", "needs no bench lock", `TIMED_DENIAL`) wins over the
   older words that named it, newest first. A request whose words read as timed though it times nothing: decide_work with
   `timed: false` and no action (w4634: an action is never picked just to carry the flag; the request's log is stamped). Tests: `server/w3720PairNotTimed.test.ts` (w3705's real text)
-  and the w3720 case in `server/orchestrators.test.ts`.
+  and the w3720 case in `server/orchestrators*.test.ts`.
 - **The ranking is the default, unless a machine is named** (lothsahn: "If a worker requests a specific machine for a
   reason, it does need to follow the workers request or the orchestrator's request for that placement. In absence of any
   preference, it should use this list"). Work whose brief or worker names a computer for a reason (a platform, a pairing, the
@@ -497,7 +497,7 @@ request stays open with its status unchanged; the sender is off it, the other pe
 told with a `[dispatch]` line and the sender's note, and the dispatcher hears of it. If the sender had filed it, the
 receiver becomes its filer, since its workers run for the filer's account. If the receiver is already on it, the sender
 just comes off. `assign_to` stands alone: with `close`, `reopen` or `priority` it is refused, and a person who is not on the
-request cannot hand it on. Tests: `server/orchestrators.test.ts` ("w1511").
+request cannot hand it on. Tests: `server/orchestrators*.test.ts` ("w1511").
 
 **Owners close each other's requests** (w402, Lothsahn: "ben and I can close each other's requests if we explicitly
 ask"; w677: "I don't want that guard between me and ben"). A person with the `owner` role (docs/identity.md; Ben and
@@ -563,7 +563,7 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   moves it, as a note in their turn does). The log quotes the acting owner's own message (`Lothsahn (an owner, on Ben's
   request, in their own words: "…")`), and the request's people get `[from another owner] Lothsahn answered the question
   on it: <note>, on your w1 "…"` with those words. A non-owner's request, and a question that waits on a non-owner,
-  stay theirs. Tests: `w3606:` in `server/orchestrators.test.ts`.
+  stay theirs. Tests: `w3606:` in `server/orchestrators*.test.ts`.
 - **One click on the other owner's question** (w4238, lothsahn: "Alter ff portal so that I can click answers for Ben's
   questions"). An owner's Waiting tab lists the other owners' open questions under "Waiting on <owner>"
   (`shared/waiting.ts` `ownerAnswersFor`; `owners` in the app state, sent to owners only), and the request's row in the
@@ -575,7 +575,7 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   person's chat; `/api/sessions/<id>/message` refuses it), a wait naming a non-owner, a release-branch ask, a standing
   agent's delegation. The note and the `[needs you]` answer carry `for: [the asked owners]`, so the live state
   (`personWaitSettled`) counts the answer as theirs and the card leaves the Waiting tab for both owners at once.
-  Tests: `server/ownerAnswers.test.ts`, `w4238:` in `server/workState.test.ts` and `server/orchestrators.test.ts`,
+  Tests: `server/ownerAnswers.test.ts`, `w4238:` in `server/workState.test.ts` and `server/orchestrators*.test.ts`,
   `e2e/waitingCards.spec.ts`.
 - **A resume held by its computer's hold moves** (w4238, w4125: worker fb20b1ad was answered at 20:02 UTC and released
   from BEAST, then its resume queued for 5 h behind BEAST's crash hold, shown Waiting on input). A queued resume whose
@@ -1145,7 +1145,7 @@ without one means it is off or failing, worth a person's look.
       target, the dispatcher gets a `[work update]` to start legs up to it, naming the rows a worker last handed it, else
       to start a short planning leg. Once per 30 minutes at most, and again within 4 hours only when it lost a leg
       (`WorkItem.fanOut`). An "aim for 6–8" is no standing ask. Tests: `w2956FanOut.test.ts`, and "w2956: the w2895
-      stall" in `orchestrators.test.ts`.
+      stall" in `orchestrators*.test.ts`.
     - **Follow-up requests a worker wrote reach its person's orchestrator, and its DONE waits for them** (w2969, Ben:
       "Also fix the harness for whatever caused the dragon work to not start"). Workers cannot file requests. w2194's
       worker c68864ef wrote five build briefs after Ben's approval and reported at 20:27 UTC on 2026-10-29 "I couldn't
@@ -1161,7 +1161,7 @@ without one means it is off or failing, worth a person's look.
       and the request records `WorkItem.handedUp`. Its DONE is kept but refused while any is unfiled
       (`ledgerRules.ts` `handUpProblem`); the cleanup neither asks "is it done?" nor stalls it. Each request filed with
       `related_ids` naming it counts as one (`countFiledFollowUp`); the last one closes it on that DONE; not wanted, its
-      person closes it by hand. Tests: `w2969HandUp.test.ts`, and "w2969: the w2194 dragon case" in `orchestrators.test.ts`.
+      person closes it by hand. Tests: `w2969HandUp.test.ts`, and "w2969: the w2194 dragon case" in `orchestrators*.test.ts`.
     - **Handed-up briefs are filed in one call, as written** (w5222, lothsahn: "It took you a while to answer a single
       question from me"). Measured on lothsahn's orchestrator on 2026-11-23, 07:08 to 07:11 UTC (`agent_transcript
       timing`): filing 21 follow-ups one `request_work` at a time took 125 s, of which 122 s was the model, in 24 steps that
@@ -1194,7 +1194,7 @@ without one means it is off or failing, worth a person's look.
       way nothing is pending after it and the request closes on its kept DONE (`recheckDone`). Only the person it was
       handed up to (`handedUp.to`) may click; their orchestrator can still file them (`file_follow_ups`) or close the
       request meanwhile. Records with `handedUp.autoFiled` from before w5577 still read as settled. Tests: "w5577: unfiled
-      handed-up follow-ups ..." in `orchestrators.test.ts`, and the w5577 and w4352 tests in `w2969HandUp.test.ts`.
+      handed-up follow-ups ..." in `orchestrators*.test.ts`, and the w5577 and w4352 tests in `w2969HandUp.test.ts`.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
@@ -1738,7 +1738,7 @@ Discord bug or request thread, FFBox work that read players' words), whatever th
 people's sessions, unreleased work, team discussion, a secret `redactSecrets` does not recognise), and it can post out:
 as Max in its thread, in a public PR. That is the combination a prompt injection needs to exfiltrate, so the tools stay
 closed to it, and its brief and the refusal say why. A trusted intake source (a nightly run, a release, a master batch:
-`untrusted: false`) is no bar. Tested in `server/orchestrators.test.ts` ("w4528").
+`untrusted: false`) is no bar. Tested in `server/orchestrators*.test.ts` ("w4528").
 
 **Turn timing** (w5222, lothsahn: "Are the tool calls slow or your model calls slow?"). A worker's `agent_transcript`
 takes `since` and `until` (ISO times with a zone, at most 24 h apart) to read a window instead of the last events, each
@@ -2472,7 +2472,7 @@ On a phone under 520 px wide the box takes the whole width, with the mic and Sen
   lay over the message box on a phone, w1831's first critic).
 - A message cleared or answered meanwhile (another tab, the phone) is refused with 409, and nothing is sent.
 
-Tests: `server/orchestrators.test.ts` ("reply from the bubble"), `server/replies.test.ts`, `e2e/orchestrators.spec.ts`
+Tests: `server/orchestrators*.test.ts` ("reply from the bubble"), `server/replies.test.ts`, `e2e/orchestrators.spec.ts`
 (dictated reply, Enter, the 375 and 390 px phone widths).
 
 ### A reply shows the message it answers (w2758)
@@ -2510,7 +2510,7 @@ orchestrator reads.
 - **The tool belt has a character budget** (the "w1158: what a coordinator carries" test): message_person's
   description stays short, and the guidance on answering lives in the `[person message]` footer and the brief.
 
-Tests: `server/orchestrators.test.ts` ("message_person (w2758)", "personMessage and splitAnswered (w2758)", "reply
+Tests: `server/orchestrators*.test.ts` ("message_person (w2758)", "personMessage and splitAnswered (w2758)", "reply
 from the bubble"), `e2e/orchestrators.spec.ts` ("w2758: a reply to your message shows it quoted").
 
 ### Your orchestrator's `[for you]` messages (w3253)
@@ -2829,7 +2829,7 @@ backups (`orchestrator-memory.backup/`) and its git folder.
   (`uploads/`, `voice-debug/`, `tools/`) are closed anyway.
 - **No write path.** Orchestrators have no shell (`tools: Read, Glob, Grep, Write, Edit`, `orchestratorOptions`), and
   `memoryGuard` refuses `Write` and `Edit` outside the orchestrator's own memory folder and every other write tool.
-  Tests: `server/secretGuard.test.ts` (w650), `server/orchestrators.test.ts` (w650, end to end).
+  Tests: `server/secretGuard.test.ts` (w650), `server/orchestrators*.test.ts` (w650, end to end).
 
 ### What Lothsahn's and Ben's orchestrators read in config.json (w1078)
 
@@ -3138,7 +3138,7 @@ page clears. Never answer it for them. …
   …`. An orchestrator's `ask_person`, and the dispatcher's `decide_work ask`, that repeat a question of a `[needs you]` the
   person already answered (`asksSame`: the same words, or two of the same answers) are refused once with the person's words
   (`Orchestrators.repeatRefusal`); the same call again goes through, for a new question that only looks the same. Tests:
-  `server/orchestrators.test.ts` ("w1812"), `server/workState.test.ts` ("w1812").
+  `server/orchestrators*.test.ts` ("w1812"), `server/workState.test.ts` ("w1812").
 - **A new question an earlier decision settles is held** (w2085; Ben, 2026-10-24: "i already answered this. you keep asking
   me questions i already answered"). The w1812 check holds the SAME question; on w1958 Ben decided the low-ore wording at
   04:59 and a fresh session asked at 16:32 whether game PR #2395, which only added it, could merge as it looked. Pure parts
@@ -3155,7 +3155,7 @@ page clears. Never answer it for them. …
     `decided_override` (what the note leaves open) lets it through, logged. A diff that cannot be read refuses nothing.
   - **The fresh session after a merge** (w2043) is told its people's notes (they come whole with the request as filed) are
     decisions, and gets theirs on its related requests.
-  Tests: `server/priorDecisions.test.ts`, `server/orchestrators.test.ts` and `server/freshAfterMerge.test.ts` ("w2085"),
+  Tests: `server/priorDecisions.test.ts`, `server/orchestrators*.test.ts` and `server/freshAfterMerge.test.ts` ("w2085"),
   with w1958's replay against PR #2395's diff (`server/fixtures/w2085-pr2395.diff`).
 - **A question the person's own notes may settle is refused once** (w2756; Ben, 2026-11-01: "didnt i already talk to you
   about this above?"). On w2651 Ben's 20:51 note said the right rail, behind its toggle, the hover card left of the rail
@@ -3170,7 +3170,7 @@ page clears. Never answer it for them. …
   `ask_person` refuses the same way for a request it names (`request` or a wNNN in the words); `notes_leave_open`
   lets it through, logged. What a note leaves open in other words (w2651's "keep the Deck rail wide", against a brief's
   goal) is not caught: that stays the asker's to read. Tests: `server/priorDecisions.test.ts` and
-  `server/orchestrators.test.ts` ("w2756"), with w2651's 04:57 questions and Ben's 20:51 note
+  `server/orchestrators*.test.ts` ("w2756"), with w2651's 04:57 questions and Ben's 20:51 note
   (`server/priorDecisions.fixtures.ts`).
 - **The digest.** 3 minutes after the portal starts (`NEEDS_YOU_DIGEST_MS`, once the machines' workers have reported in),
   every wait on a person the ledger shows whose key was never sent goes as one `[needs you] digest` per person, and is
@@ -3257,7 +3257,7 @@ permission cards stay on the card (they are the answer).
 - **A click answers exactly as typed words do** (`answerMessage`): the label (several questions: each question with its answer,
   numbered) goes to the person's own orchestrator as "Answer on wNNN (title). It asked: … Please put this on wNNN as my answer
   (update_work note).", which records it in their turn, and `answerNeedsYou` resumes the waiting worker. Tests:
-  `server/questionCard.test.ts`, `server/orchestrators.test.ts` ("w1597"), `e2e/intake.spec.ts` (a click and the same words
+  `server/questionCard.test.ts`, `server/orchestrators*.test.ts` ("w1597"), `e2e/intake.spec.ts` (a click and the same words
   typed send the same message).
 
 ### What a waiting card says: six parts (w1868, w1871)
@@ -3340,10 +3340,10 @@ quote still shows above the bubble, and the remote session's recap (`server/remo
 The typed routes pass their text: the page, FFBox operator words, the remote Claude Code key, `askOrchestrator`. This covers the
 answer that leads to no filing. (2) `request_work` and `update_work` in a turn the person started end their result with the
 open questions asked before that message that are still open (`Orchestrators.withOpenCards`), once per turn. The brief says the
-same. Tests: `orchestrators.test.ts` "w1955" (two).
+same. Tests: `orchestrators*.test.ts` "w1955" (two).
 
 `list_work` shows each waiting request's six parts under its line (`Agents.waitSummaryOf`, `summaryText`). Tests:
-`server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators.test.ts` ("w1868"),
+`server/waitSummary.test.ts` (today's cases in `server/fixtures/waitingCards.ts`), `server/orchestrators*.test.ts` ("w1868"),
 `e2e/waitingCards.spec.ts` (the cards with a still and a playing clip, desktop and narrow; five orchestrator questions, each
 answered by a click; "w2856": the question first and the order, desktop and phone), `server/waitOrder.test.ts`.
 
@@ -3611,7 +3611,7 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   `dispatcherHeardPerson`. A refusal inside `request_work`/`update_work` stays a `GateRefused`, so it is held and
   offered again on their next message (w830); `request_work` in a relayed turn files the request but not as their ask.
   Kept on turn origin, deliberately: memory writes (`memoryGuard`: a Write has no words), the bench ticket's stop, a
-  conditional's cancel and the report `asked` mark. Tests: the w5507 cases in `orchestrators.test.ts`, `ask.test.ts`, `opsWorker.test.ts` and `sessions.test.ts`.
+  conditional's cancel and the report `asked` mark. Tests: the w5507 cases in `orchestrators*.test.ts`, `ask.test.ts`, `opsWorker.test.ts` and `sessions.test.ts`.
 
 ### A per-turn budget (w2007)
 

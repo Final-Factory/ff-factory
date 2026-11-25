@@ -1103,7 +1103,7 @@ VM shows its side, and `journalctl -u fff-ops.socket` any dropped connection.
   (only in the person's own turn, the grant, the report after the restart) and a plain restart (w974, [Restarts](#restarts-w974)),
   and its timers (w1106): a timer set in a job carries that job's person and requests, a fire reopens the job (a fresh
   conversation when it had ended), the guard refuses background polls.
-- `server/orchestrators.test.ts`, "w1106": a repeating ops-worker timer set through its own belt, the portal restarted on
+- `server/orchestrators*.test.ts`, "w1106": a repeating ops-worker timer set through its own belt, the portal restarted on
   the same data folder (a new Store, SessionManager and Agents) with a fire due meanwhile: the next fire is delivered once,
   as lothsahn's job for its request, and the one after it on schedule.
 - `server/timers.test.ts`: fires of two people's timers go in two messages, each with its own authority.

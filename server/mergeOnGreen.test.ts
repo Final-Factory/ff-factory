@@ -9,7 +9,7 @@ import type { Config } from './config.ts';
 
 /**
  * w2045 (lothsahn: "Have FF Factory merge green PRs itself with no model; the worker reports before the wait"): the pilot's
- * split and the green reading it merges on. The merge itself, end to end: orchestrators.test.ts, "w2045".
+ * split and the green reading it merges on. The merge itself, end to end: orchestrators*.test.ts, "w2045".
  */
 
 const worker = (p: number | undefined) => ({ worker: { mergeOnGreenPilotPercent: p } as Config['worker'] });

@@ -98,7 +98,7 @@ flag `diskCleanup` (WorkItem.diskCleanup, `{ machine, by, at }`), and its worker
 - **Who sets it**: the person's orchestrator, `request_work` (or `update_work`) with `disk_cleanup: "<machine id>"`
   (`false` takes it back), or the dispatcher, `start_agent` with `work_id` and `disk_cleanup: true`, which marks the
   request for the sandbox's machine. Never the title or the brief: a request titled "clean-up" without the flag waits at
-  the gate like any other (server/orchestrators.test.ts, the w3328 test). The orchestrator's and dispatcher's low-disk
+  the gate like any other (server/orchestrators*.test.ts, the w3328 test). The orchestrator's and dispatcher's low-disk
   rules (server/agents.ts, the `disk` rule) tell them to set it on every clean-up they file or start.
 - **How it reaches the gate**: `machineSandboxSpec` (server/agents.ts) puts `diskCleanup: true` in the worker's
   LaunchSpec when a request it serves, open or stalled, is a clean-up of that machine; the daemon's `startRefusal`

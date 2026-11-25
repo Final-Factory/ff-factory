@@ -2,7 +2,7 @@
 // 05:10 note found every worker stopped) and on 2026-11-03, when planning worker 2d1ac9f7 ended its turn at 05:14 UTC with
 // ten startable rows and "the dispatcher starts the ten rows above", and nothing started until lothsahn's review note at
 // 11:57. Its [worker update] went to Ben's orchestrator only, and the capacity ping names queued requests only, so the
-// dispatcher had no turn for it. These pin the two readers; the message flow is in orchestrators.test.ts ("w2956: …").
+// dispatcher had no turn for it. These pin the two readers; the message flow is in orchestrators*.test.ts ("w2956: …").
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatcherAskIn, orchestratorAskIn, otherWorkWait, standingTargetOf } from '../shared/workState.ts';

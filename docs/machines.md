@@ -734,7 +734,7 @@ hand their jobs back to the dispatcher to be scheduled on other computers."). Wi
   worker's temp folder, and spares a person's own game and an interactive editor (w1894); the editors closed are the
   sandboxes' own, never the main clone's. Tests: `server/machinePause.test.ts` (the notice, a nonresponsive worker
   interrupted at 60 s and stopped at 75 s), `server/pauseStop.test.ts` (timed runs at once, a worker that ignores the stop, an
-  editor and leftovers at 90 s, a real three-process tree ended whole), `server/orchestrators.test.ts` "w2443".
+  editor and leftovers at 90 s, a real three-process tree ended whole), `server/orchestrators*.test.ts` "w2443".
 - **Its requests wait Blocked on the pause and resume in their own sandboxes** (`Orchestrators.pausedOff`,
   `WorkBlocker.pause`). When a worker's turn ends on a paused machine (or its process is gone, or it was between turns with nothing pending to resume it: on LothLaptop's live check, 2026-10-29, a target that had ended its turn with a background job going was stopped and saved but left Stalled, so nothing resumed it), its sandbox's uncommitted work
   is saved on its branch and pushed (w656's `save_work`; while the daemon still sees its agent running there and refuses,
@@ -1415,7 +1415,7 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
      process ends when the leftovers sweep ends the stopped session's processes.
   `placement.prefer` plays no part in timed placement (`timedEligible` reads hold and avoid only): LothLaptop is left out of
   prefer on purpose and is still first for timed work. Tests: `server/w2168TimedPlacement.test.ts`, and the w2168 test in
-  `server/orchestrators.test.ts`.
+  `server/orchestrators*.test.ts`.
 - **Timed requests move too, a fallback "here" expires, and an idle small computer is kept for timed work** (w2277;
   lothsahn, 2026-10-26: "Why are we doing timed runs on beast when LothLaptop is idle?"). From the journal of 2026-10-26:
   w2257 heard timed_place "here" on BEAST at 06:27Z as w2048's fallback (LothLaptop was paused from its tray), and that
@@ -1437,7 +1437,7 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
      `timedLegRelocateFor` would move there, or a fallback "here" it would withdraw.
   4. An unpause from the tray kicks the blocker watch at once, so the steps above look straight away, not up to 60 s later.
   5. `TIMED_WORDS` (`shared/capacity.ts`) also matches profiling, p95/p99 frames, and FPS drops or before/after.
-  Tests: the w2277 test in `server/orchestrators.test.ts`.
+  Tests: the w2277 test in `server/orchestrators*.test.ts`.
 - **How long "offline" is waited for** (w2048, `unavailableWait`; lothsahn: "If the fleet is idle it should wait far less
   than if the fleet is busy"). The load is the agents mid-turn plus the requests Queued, over the online computers' agent
   slots (`fleetLoad`). At 50% load or less the wait is 5 minutes, at 100% or more 60 minutes, and between the two it grows
@@ -1471,7 +1471,7 @@ and w1891 waited behind it there, and w1789 waited on LothDesktop behind shared 
   the idle rule with "needs LothLaptop's G-SYNC panel" in its what; w2499 ("Must run on LothLaptop ...; no other
   machine" in its constraints) was moved to m3 by the room move, which read only `queuedFor.needs`; w2448's worker on
   biscuit put "Must run on LothLaptop" in `same_machine` and heard "here". Tests: `w2521MachinePin.test.ts` and the w2521
-  case in `orchestrators.test.ts`.
+  case in `orchestrators*.test.ts`.
 - **A result follows its request** (w2411; lothsahn: "File a fix so timed-run results follow the request to its new
   worker"). A run's messages go to the worker that filed it only while that worker still holds one of the run's requests;
   once FF Factory has moved the request off it, they go to the request's newest live worker (`server/timedDelivery.ts`
@@ -1835,7 +1835,7 @@ LothDesktop and Beast, not just when BEAST is full").
     (`BuildPlans`' release target) counts as urgent: what reaches players is never kept off a computer by a reservation,
     and a computer cleared for it is held anyway.
   - Tests: `server/w1643MinPriority.test.ts` (each level, no overflow, a priority change, resumes, the Capacity block),
-    `server/orchestrators.test.ts` ("w1643: …": start_agent, message_agent, decide_work queue, the WRONG flag),
+    `server/orchestrators*.test.ts` ("w1643: …": start_agent, message_agent, decide_work queue, the WRONG flag),
     `server/appConfig.test.ts` (set and clear).
 - **Work that needs no Unity editor is placed by agent slot alone** (w1098, lothsahn, 2026-10-12: "Yes, please tell the
   dispatcher that.  Please update the rules to also indicate that--FFBox and FF Factory updates don't need unity editors").
@@ -1914,7 +1914,7 @@ LothDesktop and Beast, not just when BEAST is full").
     writing, so the brief says what to do if GitHub refuses the push anyway.
   - **Fixing a machine:** on it, as its user, `gh auth refresh -h github.com -s workflow` (a browser sign-in); the daemon
     sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
-    `server/orchestrators.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,
+    `server/orchestrators*.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,
     start_agent and the brief).
 - **Work that needs a Live view goes to BEAST first** (w1600, Ben, 2026-10-19: "can you prioritize beast for stuff that
   needs live view? live view is often too slow"; the w1466 Siege Carapace view had run at about 3 fps on lothdesktop). A
@@ -1958,7 +1958,7 @@ LothDesktop and Beast, not just when BEAST is full").
     `player_slots.py` (every scripted launch) and ff-agents `record_clip` check the same lock and can wait
     (`--bench-wait`, `FF_BENCH_WAIT_S`): the game repo's `Documentation/Bench-Lock.md`, "No players or clips beside a timed
     run". Tests: `server/benchBusy.test.ts`.
-  - Tests: `server/placement.test.ts`, `server/benchLock.test.ts`, the w1600 case in `server/orchestrators.test.ts`.
+  - Tests: `server/placement.test.ts`, `server/benchLock.test.ts`, the w1600 case in `server/orchestrators*.test.ts`.
 - **Builds run on BEAST first, and a coming build clears it** (w1606, Ben, 2026-10-20: "when you know builds are coming
   up, we also prioritize using beast for builds because its faster. so when it's coming time, move work off beast, or
   when apropriate, pause work and finish the build, then resume. make this a rule of FFF").
@@ -1976,7 +1976,7 @@ LothDesktop and Beast, not just when BEAST is full").
     to pause at a safe point; `build_plan start` goes at once (w1656: the paused workers' editors are stopped; the release's bench tickets go at its request's priority, `frantic` first after the turn running now, w4620, docs/orchestrators.md); `done`
     resumes them. The paused workers' resumes are held by `machineHold` (`BuildPlans.resumeHold`), not by the computer's
     hold, so the builder and a running Live view go on. Details: [orchestrators.md](orchestrators.md), "Builds clear BEAST".
-  - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators.test.ts`,
+  - Tests: `server/buildPlans.test.ts`, the w1606 cases in `server/placement.test.ts` and `server/orchestrators*.test.ts`,
     `server/w1628Placement.test.ts`.
 - **A leg for a named computer is its own queue entry** (w1863, lothsahn, 2026-10-23: "Why did they hang if the m5 was
   free?"). That morning the dispatcher queued three m5 timing legs (w1789, w1785, w1788) while each request's own worker
@@ -1999,7 +1999,7 @@ LothDesktop and Beast, not just when BEAST is full").
   - The Capacity block names it on the computer's line ("the ledger holds a leg for it: w1789 (since 06:45Z)"). "Next
     timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
     start it now" where its computer has room.
-  - Tests: the two w1863 cases in `server/orchestrators.test.ts`.
+  - Tests: the two w1863 cases in `server/orchestrators*.test.ts`.
 - **Pair runs are placed as one unit** (w1945, lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues
   work properly that requires running together across multiple machines and doesn't waste slots?"). That evening w665's
   worker d558ba14 held m3's only sandbox (so m3 took no work, and 15 requests read "WRONG: m3 has room") while the
@@ -2124,7 +2124,7 @@ LothDesktop and Beast, not just when BEAST is full").
       it (`moveDecision`: it stays, "a pair run under way (w2304)"; once its sandbox went to other work anyway, `requeuePair`
       decision: the whole run is re-queued and its message is not delivered). A paused computer's hand-back (w1532) of a leg
       re-queues the whole run too. Once a leg has reported, the run is over and these rules no longer apply.
-    - Tests: the four w2304 cases in `server/orchestrators.test.ts` (the yield, the cap, the kept sandbox, the move), the
+    - Tests: the four w2304 cases in `server/orchestrators*.test.ts` (the yield, the cap, the kept sandbox, the move), the
       w2304 case in `server/resumeMove.test.ts`, and the w2305 replays of w2298 and w2276 (no release, no re-queue) and the
       old legs' stop.
   - **One pair run per pull request and commit, and its result reaches whoever waits on it** (w2057, lothsahn, 2026-10-24).
@@ -2151,7 +2151,7 @@ LothDesktop and Beast, not just when BEAST is full").
       reads every status line (`statusLinesIn`: still-open and "ready for" lines) with `pairStepLine`; a worker told once that
       stops again with none filed goes to the dispatcher (`Orchestrators.pairStepToDispatcher`, "PAIR RUN NOT FILED").
       `Agents.readyLegQueue` queues a "ready for stills, needs a non-m3 computer" leg on the other game computers
-      (`otherComputerOf`, `queueReadyLeg`). Test: `orchestrators.test.ts` "w4225: w4207 as it happened".
+      (`otherComputerOf`, `queueReadyLeg`). Test: `orchestrators*.test.ts` "w4225: w4207 as it happened".
     - **The dispatcher drops a repeat.** `decide_work queue` with `pair_legs` is refused on a request that repeats a finished
       run of the same PR and commit (and notes a finished run of the PR on another commit). `pair_legs 0` clears the mark of
       a pair run whose legs never started (with `queue` on a Queued one it stays Queued as single work). `done` on a pair run
@@ -2234,7 +2234,7 @@ LothDesktop and Beast, not just when BEAST is full").
     w1970 and then w1981, while lothsahn's w1789 ("Move one timed run to LothLaptop") waited for it. A pair that can start
     now is held whatever the time: start its legs first.
   - Tests: `server/w1945PairRuns.test.ts` (the room rules, the Queued line), the w1983 hold case and the w1945 cases in
-    `server/orchestrators.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
+    `server/orchestrators*.test.ts` (request_pair blocks the asking worker and its sandbox is released, both legs start
     together and never one alone, a Mac is no client, message_pair, the hold, the WRONG flag and the queue; w2041: a retry of
     a spent run, `retry: true` and `avoid`; w2057: joining an open run of the PR, the finished-run answer, the result reaching a
     worker that filed nothing and one gated on its run, `pair_legs 0` and a repeat closed as done, the pair-wait nudge),
