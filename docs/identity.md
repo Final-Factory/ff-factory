@@ -61,7 +61,7 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   right password on a browser no owner approved for them opens no session: the login answers 202 and waits as a request,
   the owners get a push notice ("Cassidy asks to sign in from a new device"), and every owner's page shows a bar with
   the browser ("Safari on iPhone"), its address and **Approve** / **Deny**. The member's login page asks again every 10
-  seconds for up to 30 minutes and signs in once an owner approves. Owners are never held.
+  seconds for up to 30 minutes and signs in once an owner approves. This setting never holds an owner (owners: "Owner device approval" below).
   - A browser is known by a random 256-bit id in its own cookie (`ffsb_device`, HttpOnly, SameSite=Strict, 400 days);
     only its SHA-256 is kept, per login, in `data/devices.json` (`server/devices.ts`). Clearing the cookies, a private
     window or another browser is a new device.
@@ -73,6 +73,40 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   - Turn it on with set_app_config `deviceApproval` `"members"` (an owner's setting). A portal behind Tailscale Funnel
     wants `trustProxy` true (also an owner's setting now) so the bar shows the member's real address and the cookies
     are `Secure`.
+
+- **Owner device approval** (w5524, from finding 15 of the w5452 security audit; config `ownerDeviceApproval`, default
+  `"advisory"`). The dashboard is public through Funnel, so a phished or reused owner password alone would let anyone in.
+  This first step only records: an owner's right password on a browser no owner approved for that login, from **outside
+  the tailnet**, is a new device, and the login **always goes through**. Nothing in it can refuse or hold an owner's
+  login: an error in the check itself (the device store, the log, the setting) is written to the portal log and the
+  login goes on as with it off, and no notification is sent for an owner's new device. Holding such logins
+  ("enforce") is a later change, after the owners are back (lothsahn, w5524: "make it advisory for now so we can make
+  sure people won't get locked out. We'll turn it on later"); set_app_config refuses `"enforce"` until then.
+  - `"advisory"` (the default): the owners see a request in the bar above every page ("Ben signed in from a new device
+    (advisory, let in)"), the portal log says `owner login for "ben" from <address> would need approval ... let in
+    (ownerDeviceApproval advisory)`, and the login is written to the device log as **would need approval** (or **would
+    be refused**, for a browser an owner denied).
+  - `"off"`: nothing is recorded. Any other value in config.json reads as advisory.
+  - **The tailnet bypass.** A login that did not come through Funnel (no `Tailscale-Funnel-Request` header, and a
+    tailnet or local address: `server/remoteChat.ts` `tailnetOnly`, the same test `/mcp` uses) approves its browser
+    (`decidedBy` "tailnet login") and is not logged. So a browser an owner signs in on once over the tailnet is known
+    when it later comes through Funnel.
+  - The device cookie is the members' one (`ffsb_device`, HttpOnly, SameSite=Strict, Secure behind HTTPS, 400 days):
+    a random 256-bit id, of which the portal keeps only the SHA-256. It cannot be forged without the portal's file: an id
+    the portal has no record of is a new device, so it needs no signature on top.
+  - **Seeing who would be locked out.** Settings (This device) > **Devices**, for owners only: every browser approved,
+    waiting or refused for a login, with **Approve**, **Deny**, **Revoke** (forget it and end its sessions; its next login
+    outside the tailnet is a new device again, and still let in), and **Would have needed approval**: each such login of
+    the last 180 days (time, who, browser, address, outcome; the User-Agent on hover). The same is `GET /api/devices`
+    `log`, and `data/device-log.json` on the portal (no cookie or hash in it; the same browser's repeat within 30 minutes
+    is one line). Before enforcement exists, approve the browsers you know (or sign in once on each over the tailnet) so
+    that list shows only the ones that would really be locked out.
+  - **The way back in, once enforcement exists** (kept here for that change): sign in over the tailnet (the portal's
+    `https://<host>.<tailnet>.ts.net` address from a device on the tailnet, not the Funnel address); it approves that
+    browser, which can then approve the others. Without a tailnet device: on the VM, set `"ownerDeviceApproval": "off"`
+    in the portal's config.json (where `sudo fffctl config` reads it) and `sudo fffctl restart`; or have an owner's
+    Claude Code on the tailnet call set_app_config `ownerDeviceApproval` `"off"` over `/mcp` with their key. A forgotten
+    password is the set-password link above, which also approves the browser that redeems it.
 
 - `/mcp` API keys can be bound to a login: `node server/apikey.ts loth-laptop --user lothsahn`. Everything
   that key's tools start is requested by that person, and its `for_user` cannot name anyone else. A key

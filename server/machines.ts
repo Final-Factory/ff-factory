@@ -31,7 +31,7 @@ import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
 import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary, WorkerFenceReport } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
@@ -690,6 +690,29 @@ export class MachineManager {
   offlineAlert?: (machineId: string, title: string, text: string) => void;
   /** The machines offlineAlert told about, with when they went offline, until they are back. */
   private offlineAlerted = new Map<string, number>();
+  /**
+   * A machine's worker fence failed, or is back (w5555; wired by index.ts like offlineAlert: the orchestrator and a push).
+   * Called once per failure: on the change to failed, and once more when a failed fence is on or off again.
+   */
+  fenceAlert?: (machineId: string, title: string, text: string) => void;
+
+  /** Its daemon's worker fence report (w5555, machine/fenceGate.ts): stored on the machine, alerted when it fails. */
+  takeFence(id: string, raw: unknown): void {
+    const f = fenceReportOf(raw);
+    if (!f) return;
+    const m = this.store.machines.get(id);
+    if (!m) return;
+    const was = m.fence?.state;
+    this.update(id, { fence: f });
+    const name = m.name ?? id;
+    if (f.state === 'failed' && was !== 'failed') {
+      console.log(`machine ${id}: worker fence FAILED (${f.why ?? 'no reason given'}): its sandbox workers are held`);
+      this.fenceAlert?.(id, `${name}: worker fence failed`, `[machine ${id}] The worker fence on ${name} failed: ${f.why ?? 'no reason given'}. Its daemon holds every sandbox worker so none starts unfenced, and placement sends work to other machines. Fix the fence (its daemon log says why; a daemon restart probes again) or switch it off on purpose with ops_worker machine_update worker_fence off (docs/worker-root.md, "When the fence fails").`);
+    } else if (was === 'failed' && (f.state === 'on' || f.state === 'off')) {
+      console.log(`machine ${id}: worker fence ${f.state} again: its sandbox workers start`);
+      this.fenceAlert?.(id, `${name}: worker fence ${f.state}`, `[machine ${id}] The worker fence on ${name} is ${f.state === 'on' ? 'on again' : 'switched off'}: its sandbox workers start again.`);
+    }
+  }
 
   // ---------------------------------------------------------------- agents cut off by a dropped link
 
@@ -2661,6 +2684,9 @@ export class MachineManager {
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
         return;
+      case 'worker_fence':
+        this.takeFence(id, msg.fence);
+        return;
       case 'self_update_offer': {
         // w4672: the hello offered no update over the link (its root.json unreadable then); the daemon offers it now.
         const h = this.hellos.get(id);
@@ -3488,4 +3514,19 @@ export function daemonBehind(h: { daemon?: string }, portalHead: string | undefi
   if (!d || !p || !/^[0-9a-f]{7,40}$/.test(d)) return undefined;
   if (!p.startsWith(d) && !d.startsWith(p)) return `it runs ${d.slice(0, 9)}, this portal ${p.slice(0, 9)}`;
   return undefined;
+}
+
+const FENCE_STATES = new Set<WorkerFenceReport['state']>(['off', 'setting_up', 'on', 'failed']);
+const FENCE_KINDS = new Set<NonNullable<WorkerFenceReport['kind']>>(['seatbelt', 'landlock', 'low']);
+
+/** A daemon's worker_fence report, checked field by field (w5555); undefined when it is not one. */
+export function fenceReportOf(raw: unknown): WorkerFenceReport | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Record<string, unknown>;
+  if (!FENCE_STATES.has(r.state as WorkerFenceReport['state'])) return undefined;
+  const out: WorkerFenceReport = { state: r.state as WorkerFenceReport['state'] };
+  if (FENCE_KINDS.has(r.kind as NonNullable<WorkerFenceReport['kind']>)) out.kind = r.kind as WorkerFenceReport['kind'];
+  if (typeof r.why === 'string' && r.why) out.why = r.why.slice(0, 600);
+  if (typeof r.since === 'string' && !Number.isNaN(Date.parse(r.since))) out.since = r.since;
+  return out;
 }
