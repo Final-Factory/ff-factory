@@ -113,22 +113,24 @@ export const KEYCHAIN_MACH_SERVICES = ['com.apple.authd', 'com.apple.SecuritySer
 /**
  * The owner-secret paths a fenced run may not read, for this run. The gh login's folder is left out only for a run that
  * has no GitHub token at all (no vault token and the daemon read no machine token): that run still reads the login
- * itself, as before (w5548 "Keep it only for the runs that have no vault token"). Windows gets none: every path is on the
+ * itself, as before (w5548 "Keep it only for the runs that have no vault token"). With them, ownerReadMore's paths
+ * (w5749's enforce PR). Windows gets none: every path is on the
  * system drive, where the fence writes no label (w5548 "Never touch C: on Windows"; handed up, docs/worker-fence.md).
  */
 export function ownerReadDenied(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
   if (o.platform === 'win32') return [];
-  return ownerSecretPaths(o)
+  const main = ownerSecretPaths(o)
     .filter((s) => o.hasToken || s.kind !== 'gh')
     .map((s) => realOr(s.path));
+  return [...new Set([...main, ...ownerReadMore(o)])];
 }
 
 /**
- * w5749 (from w5733's review of #1232): owner secrets the fence leaves open on macOS and Linux, in their WARN stage
- * (lothsahn's lockout rule: warn-only first, enforce in a separate PR). They are not in ownerReadDenied yet: the daemon
- * only says, with the read fence's probe, which of them exist on the machine and that `on` would close them once the
- * enforce PR lands. Each can stop a tool a worker runs (uv and curl read ~/.netrc; git's `store` helper reads
- * ~/.git-credentials), which is what the warn stage is for.
+ * w5749 (from w5733's review of #1232): owner secrets beyond ownerSecretPaths, closed with them on macOS and Linux
+ * (ownerReadDenied). They had a warn stage first (#1248, lothsahn's lockout rule: warn-only first, enforce in a separate
+ * PR); now they are in the owner rules, so `warn` lists them in sayOwnerRules' line before any machine runs `on`. Each can
+ * stop a tool a worker runs under `on` (uv and curl read ~/.netrc; git's `store` helper reads ~/.git-credentials), which
+ * the per-machine warn verdicts before `on` are for.
  * - git and curl's stored passwords: `~/.netrc`, `~/.git-credentials` and git's XDG `git/credentials` (git-credential-store(1)).
  * - gh's other config folders: gh reads only one (ghConfigFolder), but a login left in another (`~/.config/gh` when the
  *   daemon has GH_CONFIG_DIR or XDG_CONFIG_HOME set elsewhere) is one `GH_CONFIG_DIR=` away for a worker.
@@ -137,7 +139,7 @@ export function ownerReadDenied(o: { platform: NodeJS.Platform; home: string; en
  * Windows: none. Every such path is in the owner's profile on the system drive, which the fence never labels (handed up to
  * lothsahn as a decision, docs/worker-fence.md "Owner secrets").
  */
-export function ownerSecretPathsWarn(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): OwnerSecret[] {
+export function ownerSecretPathsMore(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv }): OwnerSecret[] {
   const { platform, home, env } = o;
   if (platform === 'win32') return [];
   const p = path.posix;
@@ -165,38 +167,18 @@ export function ownerSecretPathsWarn(o: { platform: NodeJS.Platform; home: strin
 }
 
 /**
- * The warn-stage paths of a run, as ownerReadDenied would give them once enforced: gh's other folders stay open to a run
- * with no GitHub token at all, as the gh folder does.
+ * ownerSecretPathsMore's paths for a run, as ownerReadDenied closes them: gh's other folders stay open to a run with no
+ * GitHub token at all, as the gh folder does.
  */
-export function ownerReadWarn(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
+export function ownerReadMore(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; hasToken: boolean }): string[] {
   // Windows first: nothing below may even resolve a path on the system drive (w5757's review).
   if (o.platform === 'win32') return [];
   // A folder linked to the gh folder a run uses is that folder: never closed through its other name.
   const active = realOr(ghConfigFolder(o.env, o.platform, o.home));
-  return ownerSecretPathsWarn(o)
+  return ownerSecretPathsMore(o)
     .filter((s) => o.hasToken || s.kind !== 'gh')
     .map((s) => realOr(s.path))
     .filter((p) => p !== active);
-}
-
-/**
- * The daemon's log line for the warn stage (w5749), or undefined when there is nothing to say (Windows, or no such path
- * here). Names only paths that exist, never their contents. `exists` is for tests.
- */
-export function sayOwnerWarnStage(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; mode: string; exists?: (p: string) => boolean }): string | undefined {
-  if (o.platform === 'win32') return undefined;
-  const exists = o.exists ?? fs.existsSync;
-  const all = ownerReadWarn({ ...o, hasToken: true });
-  if (!all.length) return undefined;
-  const here = all.filter((p) => {
-    try {
-      return exists(p);
-    } catch {
-      return false;
-    }
-  });
-  if (!here.length) return undefined;
-  return `owner secrets (${o.mode}, w5749): warn stage only, not closed yet: ${here.join(', ')} exist here, and the read fence would close them once their enforce PR lands; a worker tool that needs one fails then`;
 }
 
 /** A path resolved through its links when it exists (Seatbelt and Landlock match resolved paths), else as given. */
