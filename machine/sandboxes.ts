@@ -314,6 +314,24 @@ export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: 
   return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...editorTmpdirEnv(root, sandbox, tmpdir, platform) };
 }
 
+/**
+ * w5833 (review F1): the environment an editor launches with, worked out at each start. Its TMPDIR folder is made then
+ * (a folder deleted since the last start comes back); when it cannot be made or written, the editor starts without
+ * TMPDIR (the system temp folder, as with the switch off) and the reason is logged, so a bad folder never stops an editor.
+ */
+export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typeof fs.mkdirSync; accessSync: typeof fs.accessSync }, log: (line: string) => void): Record<string, string> {
+  if (!env.TMPDIR) return env;
+  try {
+    f.mkdirSync(env.TMPDIR, { recursive: true });
+    f.accessSync(env.TMPDIR, fs.constants.W_OK);
+    return env;
+  } catch (e) {
+    log(`editor TMPDIR ${env.TMPDIR} is not usable (${(e as Error).message}): it starts with the system temp folder`);
+    const { TMPDIR: _, ...rest } = env;
+    return rest;
+  }
+}
+
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
 export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string, editorTmpdir = false): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
@@ -341,8 +359,8 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     procs,
     editor: (sb, logFile, report) => {
       const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform);
-      if (env.TMPDIR) fs.mkdirSync(env.TMPDIR, { recursive: true });
-      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env });
+      if (editorTmpdir && platform !== 'win32' && !env.TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
+      const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
     bridgeUp: (project, since) => bridgeUpSince(project, since),

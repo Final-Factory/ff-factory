@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { rootEnv } from '../machine/daemon.ts';
-import { sandboxEditorEnv } from '../machine/sandboxes.ts';
+import { editorLaunchEnv, sandboxEditorEnv } from '../machine/sandboxes.ts';
 import { EDITOR_TMPDIR_MAX, batchUnityLogFile, editorTempEnv, editorTmpdirEnv, workerToolCacheEnv } from '../machine/sharedCaches.ts';
 
 // w5297 (lothsahn: "under no circumstances should workers write outside of ffw"): every folder the daemon hands its
@@ -52,6 +52,27 @@ test('w5833: a sandbox editor on macOS and Linux gets TMPDIR in the root only wi
   assert.equal(sandboxEditorEnv({}, 'slot1', root, true, 'linux').TMPDIR, path.join(root, 'tmp', 'editor-slot1'));
   assert.equal('TMPDIR' in sandboxEditorEnv({}, 'slot1', root, false, 'linux'), false);
   assert.equal('TMPDIR' in sandboxEditorEnv({}, 'slot1', root), false, 'default off');
+});
+
+test('w5833 (review F1): the editor makes its TMPDIR at each start, and starts with the system temp when it cannot', () => {
+  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'w5833-f1-'));
+  const lines: string[] = [];
+  const t = path.join(dir, 'tmp', 'editor-slot1');
+  const env = { A: '1', TMPDIR: t };
+  assert.deepEqual(editorLaunchEnv(env, fs, (l) => lines.push(l)), env, 'made when missing');
+  assert.ok(fs.statSync(t).isDirectory());
+  fs.rmSync(t, { recursive: true });
+  assert.deepEqual(editorLaunchEnv(env, fs, (l) => lines.push(l)), env, 'deleted since the last start: made again');
+  assert.ok(fs.statSync(t).isDirectory());
+  assert.equal(lines.length, 0);
+  const fail = { mkdirSync: (() => { throw new Error('EACCES'); }) as unknown as typeof fs.mkdirSync, accessSync: fs.accessSync };
+  assert.deepEqual(editorLaunchEnv(env, fail, (l) => lines.push(l)), { A: '1' }, 'cannot be made: no TMPDIR');
+  const ro = { mkdirSync: fs.mkdirSync, accessSync: (() => { throw new Error('EROFS'); }) as unknown as typeof fs.accessSync };
+  assert.deepEqual(editorLaunchEnv(env, ro, (l) => lines.push(l)), { A: '1' }, 'not writable: no TMPDIR');
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /EACCES/);
+  assert.deepEqual(editorLaunchEnv({ A: '1' }, fail, (l) => lines.push(l)), { A: '1' }, 'switch off: nothing made');
+  fs.rmSync(dir, { recursive: true });
 });
 
 test('outside writes: a batch Unity run without -logFile gets one in the worker\'s temp folder', () => {
