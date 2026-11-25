@@ -30,8 +30,9 @@ import type { CrashHoldMark } from '../shared/types.ts';
  * This is a SEATBELT, not a security boundary: it catches the mistakes a well-meaning agent makes
  * (pushing to master, killing the wrong Unity, editing the live checkout) by pattern-matching tool
  * input. A determined or prompt-injected agent can get around it (a script file, execute_code in
- * its own editor, a junction). The real boundaries are GitHub branch rules and, if ever needed, a
- * separate low-privilege Windows account for sandboxes. Keep the rules simple and legible.
+ * its own editor, a junction). The real protection is the OS write fences (Windows Low integrity, macOS
+ * Seatbelt, Linux Landlock), the read blocks and the daemon-side checks, and GitHub branch rules; what each covers and
+ * what is still open: docs/worker-fence.md, "What protects a machine, and what does not". Keep the rules simple and legible.
  *
  * Rules:
  *   - git, every repo: no force pushes (--force-with-lease is allowed), no remote branch deletion,

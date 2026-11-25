@@ -19,6 +19,12 @@ worker then runs on that person's Claude account when FF Factory holds one for t
   hash buckets, so flooding the table with made-up names cannot reset a targeted name's backoff. Every login answer
   (unknown name, wrong or right password, throttled) is held to one time, measured on the machine: the slowest of
   its recent logins plus a tenth and 3 ms (`LoginTimer`), waited on a timer.
+- The client address, for the login throttle and every other caller (join codes, the /provider, /machine and
+  /machine/live sockets, page sockets, the tailnet-only checks, logs), comes from one helper,
+  `server/clientAddress.ts` (w5535): X-Forwarded-For is believed only with `trustProxy` on and only from a connection
+  out of this machine (Tailscale Serve and Funnel) or a configured proxy, and only its last entry, the one the proxy
+  added; the entries before it are whatever the client wrote. The Funnel header is checked before any address, and a
+  proxied request is not taken for this machine when `trustProxy` is off.
 - Roles: `owner` (Ben, who runs the portal) and `member` (a teammate). The first login is the owner and
   later ones are members. A `users.json` written before roles existed reads every login as the owner.
   **Roles are recorded, and enforced in a few places so far:** an owner may close or reopen another person's request
