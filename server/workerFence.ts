@@ -38,6 +38,11 @@ export interface WorkerFence {
   readDenied?: string[];
   /** Per run, paths inside a read-denied folder this run may read (its own GitHub App tokens folder, w5547); a folder covers all below it. */
   readAllowed?: string[];
+  /**
+   * The owner-secret rules (w5553, w5560): no Keychain mach services (ownerSecrets.ts KEYCHAIN_MACH_SERVICES) and no
+   * preference writes through cfprefsd. Set with the owner paths in readDenied, never alone; off with the read fence.
+   */
+  ownerSecrets?: { mach: string[] };
   /** The read fence is switched off on this machine (daemon_control read-fence-off, w5546): no read rules, writes as before. */
   readOff?: boolean;
   /** Secrets folders outside `<root>/secrets` (a Dev Drive install's host folder, readFence.ts secretsDirs): read-denied too. */
@@ -165,7 +170,8 @@ export function seatbeltProfile(f: WorkerFence, own?: OwnTranscript): string {
     ')',
     ...(f.readOff ? [";; reads: the read fence is switched off on this machine (daemon_control read-fence-off, w5546)"] : readRules(f)),
     ...SIGNAL_RULES,
-    ...(f.prefDeny ? PREF_RULES : []),
+    // One preference rule for both switches: w5659's workerPrefFence, or the owner-secret rules under the read fence (w5560).
+    ...(f.prefDeny || (f.ownerSecrets && !f.readOff) ? PREF_RULES : []),
   ].join('\n');
 }
 
@@ -190,6 +196,15 @@ function readRules(f: WorkerFence): string[] {
     ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(path.join(daemon, p))})`),
     ...(f.readAllowed ?? []).filter((p) => path.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
     ')',
+    ...(f.ownerSecrets ? ownerSecretRules(f.ownerSecrets.mach) : []),
+  ];
+}
+
+/** w5560: the Keychain's mach services, for a run whose owner paths are read-denied (probe 4, m5). Its preference-write deny is PREF_RULES, added once in seatbeltProfile. */
+function ownerSecretRules(mach: string[]): string[] {
+  return [
+    ';; owner secrets (w5553, w5560): no Keychain service (a write would raise a dialog on the person\'s screen)',
+    ...(mach.length ? [`(deny mach-lookup ${mach.map((n) => `(global-name ${lit(n)})`).join(' ')})`] : []),
   ];
 }
 
