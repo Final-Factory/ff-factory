@@ -65,7 +65,10 @@ test("machine unity mcp: the server is daemon.json's, else the machine's own Cla
   // Scoped: the place's own status folder, the entry's env kept.
   const d = path.join('D:\\ff', 'unity-mcp', 'sb1');
   assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1', false).env, { A: '1', UNITY_MCP_STATUS_DIR: d }, 'w5650 off: the env before it');
-  assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1').env, { A: '1', UNITY_MCP_STATUS_DIR: d, USERPROFILE: d, HOME: d }, "w5650: Path.home()/.unity-mcp is its own editor's copy");
+  assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1', true, 'win32').env, { A: '1', UNITY_MCP_STATUS_DIR: d, USERPROFILE: d, HOME: d }, "w5650: Path.home()/.unity-mcp is its own editor's copy");
+  for (const plat of ['darwin', 'linux'] as const) {
+    assert.deepEqual(scopedUnityMcp({ ...UVX, env: { A: '1' } }, 'D:\\ff', 'sb1', true, plat).env, { A: '1', UNITY_MCP_STATUS_DIR: d }, `w5677: ${plat} keeps its home (uv finds its Pythons and config under $HOME)`);
+  }
   assert.equal(mcpHomeStatusDir('D:\\ff', 'sb1'), path.join(d, '.unity-mcp'));
 });
 
@@ -138,7 +141,7 @@ test('machine unity mcp: the daemon gives an agent that asks for it the bridge o
   t.after(() => daemon.shutdown());
   assert.equal(daemon.stdioMcpFor({ unityMcp: false, sandbox: 'sb1' }), undefined, 'not asked (an older portal): none');
   const sb = daemon.stdioMcpFor({ unityMcp: true, sandbox: 'sb1' })!;
-  const scoped = { UNITY_MCP_STATUS_DIR: mcpStatusDir(app, 'sb1'), USERPROFILE: mcpStatusDir(app, 'sb1'), HOME: mcpStatusDir(app, 'sb1') };
+  const scoped = { UNITY_MCP_STATUS_DIR: mcpStatusDir(app, 'sb1'), ...(process.platform === 'win32' ? { USERPROFILE: mcpStatusDir(app, 'sb1'), HOME: mcpStatusDir(app, 'sb1') } : {}) };
   assert.deepEqual(sb.UnityMCP, { ...UVX, env: scoped }, 'w5650: its home is its status folder');
   assert.equal(fs.existsSync(mcpHomeStatusDir(app, 'sb1')), true, 'its folders exist before the server starts');
   assert.equal(daemon.slotEnv({ sandbox: 'sb1', cwd: dir }).UNITY_MCP_STATUS_DIR, mcpStatusDir(app, 'sb1'), "w5650: the agent's shell bridge reads the same folder");

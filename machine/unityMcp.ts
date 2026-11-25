@@ -80,12 +80,15 @@ function unityMcpFrom(claudeJson: string, repoPath: string): { server?: StdioSer
 
 /**
  * The server an agent in `place` runs: `server`, confined to that place's status folder. `home` (w5650, default on):
- * its USERPROFILE and HOME are that folder too, so the preflight's Path.home()/.unity-mcp is mcpHomeStatusDir; false
- * keeps the person's own home (the path before w5650, daemon.json unityMcpScopedHome: false).
+ * on Windows its USERPROFILE and HOME are that folder too, so the preflight's Path.home()/.unity-mcp is
+ * mcpHomeStatusDir; false keeps the person's own home (the path before w5650, daemon.json unityMcpScopedHome: false).
+ * Windows only (w5677's review): there uv reads %APPDATA%, not the home, so its Pythons and config stay found; on Mac
+ * and Linux uv finds both under $HOME (~/.local/share/uv/python, ~/.config/uv), the w5402 failure, and only Windows
+ * editors run fenced with another home.
  */
-export function scopedUnityMcp(server: StdioServer, appDir: string, place: string, home = true): StdioServer {
+export function scopedUnityMcp(server: StdioServer, appDir: string, place: string, home = true, platform: NodeJS.Platform = process.platform): StdioServer {
   const dir = mcpStatusDir(appDir, place);
-  return { command: server.command, args: server.args, env: { ...server.env, UNITY_MCP_STATUS_DIR: dir, ...(home ? { USERPROFILE: dir, HOME: dir } : {}) } };
+  return { command: server.command, args: server.args, env: { ...server.env, UNITY_MCP_STATUS_DIR: dir, ...(home && platform === 'win32' ? { USERPROFILE: dir, HOME: dir } : {}) } };
 }
 
 /**
@@ -112,10 +115,13 @@ export class McpScopes {
       st.pid = p.pid;
       st.lookedAt = now;
       this.seen.set(p.place, st);
-      try {
-        for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) syncStatusDir(dir, p.project, p.pid ? { since: st.since } : undefined, files);
-      } catch (e) {
-        log(`unity mcp ${p.place}: status folder: ${(e as Error).message}`);
+      // Each folder on its own: a failed first one must not leave the home copy with a stale `reloading: true` (w5677).
+      for (const dir of [mcpStatusDir(appDir, p.place), mcpHomeStatusDir(appDir, p.place)]) {
+        try {
+          syncStatusDir(dir, p.project, p.pid ? { since: st.since } : undefined, files);
+        } catch (e) {
+          log(`unity mcp ${p.place}: status folder ${dir}: ${(e as Error).message}`);
+        }
       }
     }
     // A deleted sandbox: its folder goes too.
