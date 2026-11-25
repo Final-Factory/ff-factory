@@ -190,6 +190,20 @@ test('steam install: no account in the setting or config.json installs nothing, 
   await assert.rejects(installSteamcmd(root, ACCT, v.run, { download: v.download, platform: 'aix' }), /no steamcmd for aix/);
 });
 
+test('steam check: the account config.json names is not said back when the portal sends none', async (t) => {
+  const root = path.join(tmp(t), 'root');
+  setUp(root);
+  const run: Runner = async (_cmd, args) => {
+    if (args.some((a) => a.endsWith('ffsteam.py'))) return { code: 0, out: 'ffsteam: acct_one logs in.' };
+    if (args.includes('-c')) return { code: 0, out: '{"main": ["windows"]}' };
+    return { code: 0, out: '' };
+  };
+  const sent: { state: string; error?: string }[] = [];
+  await runSteamJob({ type: 'steam_upload', id: 'c0', action: 'check', session: 's', secrets: { FFSTEAM_PASSWORD: 'pw' } }, { root, allowedRoots: [], python: 'py', send: (m) => sent.push(m), log: () => {}, run });
+  assert.equal(sent.at(-1)!.state, 'done', sent.at(-1)!.error ?? '');
+  assert.ok(!JSON.stringify(sent).includes('acct_one'), JSON.stringify(sent));
+});
+
 test('steam install: a check on a fresh computer sets it up first, then logs in', async (t) => {
   const root = path.join(tmp(t), 'root');
   const v = fakeValve();

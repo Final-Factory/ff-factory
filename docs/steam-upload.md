@@ -39,7 +39,7 @@ sets the folder up itself (`machine/steamUpload.ts` `installSteamcmd`), on `stea
 The account is a setting, never a name in code (lothsahn, w1639: "It should not be hardcoded in the code"): the portal's
 `steamBuildAccount` in its `config.json`, sent with each job as `account`. Without it the account config.json names already is
 kept (BEAST and LothDesktop were set up by w1639's steam-install); with neither, nothing is installed and the job says so. No
-output repeats the account: the daemon redacts it like a secret. The password stays in the vault (`FFSTEAM_PASSWORD`, which
+output repeats the account, the setting's or the one config.json names: the daemon redacts both like secrets (one under 8 characters, `MIN_SECRET_LENGTH`, stays visible). The password stays in the vault (`FFSTEAM_PASSWORD`, which
 the vault keeps from every run). The portal sends `install` only to a daemon whose hello offered `steamInstall`. Tests:
 `machine/steamUpload.test.ts`, "steam install: ...".
 
