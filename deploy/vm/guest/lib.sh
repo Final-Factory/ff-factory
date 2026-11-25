@@ -149,7 +149,10 @@ ensure_build_user() {
   case "$h/" in "$FFF_ROOT"/*) echo "FFF_BUILD_HOME $h is inside $FFF_ROOT, where fff makes folders"; return 1 ;; esac
   root_owned "$(dirname "$h")" || { echo "$(dirname "$h") is not root's, or is writable by others"; return 1; }
   if ! id "$b" >/dev/null 2>&1; then
-    useradd --system --user-group --home-dir "$h" --no-create-home --shell /usr/sbin/nologin --comment 'FF Factory release builds (w5523)' "$b" >&2 ||
+    # A group of its name may be left from an earlier account (userdel keeps a group with other members): use it.
+    local grp=(--user-group)
+    if getent group "$b" >/dev/null 2>&1; then grp=(-g "$b"); fi
+    useradd --system "${grp[@]}" --home-dir "$h" --no-create-home --shell /usr/sbin/nologin --comment 'FF Factory release builds (w5523)' "$b" >&2 ||
       { echo "useradd $b failed"; return 1; }
     log "made the build account $b"
   fi
@@ -383,7 +386,7 @@ release_ok() {
 # its .git link is rewritten, and DIR.ready names SHA. Fails, saying why, unless release_problem then finds nothing.
 harden_release() {
   local dir=$1 sha=$2 admin p
-  rm -f "$dir.ready"
+  rm -f "$dir.ready" "$dir.builder"
   chown -R -h -P root:root "$dir"
   chmod -R go-w,ug-s "$dir"
   admin=$(release_admin "$dir")

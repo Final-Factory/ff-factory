@@ -580,6 +580,12 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
     are root's. A failed `npm ci` or web build as `fffbuild` fails the build like any other: the running release stays.
   - **The first deploy of this change** is still built by the old `fff-update`, as `fff`; its `install.sh` then installs
     the new scripts and the `acl` package, so the deploy after it is the first one `fffbuild` builds.
+  - **Reused `node_modules` only from `fffbuild`**: a release records who built it in root's `<release>.builder`, and
+    `deps_from` links the running release's `node_modules` only when both it and the new build are `fffbuild`'s. So
+    the first `fffbuild` build runs a full `npm ci` (about 15 s), and no `node_modules` `fff` built (before w5523, or in
+    a fall back) reaches a release `fffbuild` builds.
+  - **A rollback builds as `fff` again**: `fffctl rollback` to a release from before w5523 installs that release's
+    scripts (`refresh_scripts`), which build as `fff`, until a release with w5523 is deployed again.
   - **Not covered**: a file descriptor passed between processes (`SCM_RIGHTS`) during the hand-over is not seen by
     `writers_in`; the build account's own processes are killed first. Tests: `deploy/vm/test/fff-update.test.sh` (root,
     in the lint job) and the e2e's ownership and build-account checks (`ci-vm-e2e.sh`).

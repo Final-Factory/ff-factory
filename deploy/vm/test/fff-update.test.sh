@@ -155,6 +155,7 @@ git -C "$T/src.git" update-ref refs/heads/main "$S2"
 upd prepare origin/main >/dev/null
 R1=$(r "$S1") R2=$(r "$S2")
 [ "$(stat -c %i "$R1/node_modules/dep/index.js")" = "$(stat -c %i "$R2/node_modules/dep/index.js")" ] || fail "node_modules was not reused"
+[ "$(cat "$R1.builder")" = "$B" ] && [ "$(cat "$R2.builder")" = "$B" ] && [ "$(stat -c %U "$R2.builder")" = root ] || fail "the releases built as $B do not record it in root's .builder"
 [ -z "$(problem "$R2" "$S2")" ] || fail "the second release is not fit: $(problem "$R2" "$S2")"
 
 # ---- 4. release_problem: each change is refused, and undoing it makes the release fit again.
@@ -264,4 +265,22 @@ matches -F "web build as $U" "$T/fb.log" || { cat "$T/fb.log"; fail "with an unf
 grep -lF 'SECURITY (w5523)' "$R"/data/orchestrator-inbox/*.txt >/dev/null 2>&1 || fail "the dispatcher was not told of the fall back to fff"
 [ -z "$(problem "$(r "$S5")" "$S5")" ] || fail "the release built as fff is not fit: $(problem "$(r "$S5")" "$S5")"
 ok "an unfit build account: the release is built as fff, made root's, and the fall back is said to the journal and the dispatcher"
+[ "$(cat "$(r "$S5").builder")" = "$U" ] && [ "$(stat -c %U "$(r "$S5").builder")" = root ] || fail "the release built as fff does not record root's .builder $U"
+
+# ---- 9. node_modules fff built are not carried into a release the build account builds (w5523 B1): S5 (built as fff)
+# runs, S6 has the same lockfiles, the build account is fit again; S6 gets its own npm ci, not links to S5's files.
+sed -i "s|^FFF_BUILD_USER=.*|FFF_BUILD_USER=$B|" "$T/fff.conf"
+ln -sfn "$(r "$S5")" "$CURRENT"
+gs commit -q --allow-empty -m s6
+S6=$(gs rev-parse HEAD)
+git -C "$T/src" push -q "$T/src.git" "$S6:refs/heads/main"
+upd prepare origin/main >/dev/null 2>"$T/b1.log" || { cat "$T/b1.log"; fail "the build of S6 as $B failed"; }
+if matches -F 'node_modules reused' "$T/b1.log"; then cat "$T/b1.log"; fail "S6 reused node_modules from fff's build of S5"; fi
+for sub in . web; do
+  [ "$(stat -c %i "$(r "$S5")/$sub/node_modules/dep/index.js")" != "$(stat -c %i "$(r "$S6")/$sub/node_modules/dep/index.js")" ] ||
+    fail "$sub/node_modules of S6 are links to fff's build of S5"
+done
+[ "$(cut -d' ' -f1 "$(r "$S6")/node_modules/dep/builder")" = "$B" ] || fail "S6's node_modules were not built by $B"
+[ "$(cat "$(r "$S6").builder")" = "$B" ] || fail "S6 does not record $B in .builder"
+ok "node_modules fff built are never reused by a build of the build account"
 echo "fff-update.test.sh: all passed"

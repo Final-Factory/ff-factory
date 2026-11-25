@@ -94,8 +94,8 @@ log "3/10 packages"
 pkgs=(nodejs git git-lfs gh python3 openssh-client openssh-server tailscale age rsync jq curl ca-certificates nftables util-linux unattended-upgrades zstd bzip2 e2fsprogs ffmpeg acl)
 missing=()
 for p in "${pkgs[@]}"; do dpkg-query -W -f='${Status}' "$p" 2>/dev/null | matches 'install ok installed' || missing+=("$p"); done
-if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -q; fi
-if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}"; fi
+if [ -n "$c" ] || [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 update -q; fi
+if [ ${#missing[@]} -gt 0 ]; then run_cmd env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=300 install -y -q --no-install-recommends "${missing[@]}"; fi
 if [ "$DRY_RUN" != 1 ]; then
   have=$(node -p 'process.versions.node.split(".")[0]')
   [ "$have" = "$NODE_MAJOR" ] || die "node is $have, not $NODE_MAJOR (another nodejs package won?)"

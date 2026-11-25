@@ -49,9 +49,13 @@ current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 # The old release must be a checked root's one; the links are root's (the kernel's protected_hardlinks refuses the
 # build account a link to root's file), and only the folders become the build account's for the build (prepare), so
 # it can add files but change none of them. Run while NEW is still root's (w5531).
+# Only from a release the build account built (its root's OLD.builder names it), into one it builds now: node_modules
+# fff built (before w5523, or in a fall back) are never carried into a release the build account builds (w5523 B1).
 deps_from() {
   local old=$1 new=$2 sub=$3 f
   [ -n "$old" ] && release_ok "$old" && [ -d "$old/$sub/node_modules" ] && [ ! -L "$old/$sub/node_modules" ] || return 1
+  [ -n "${FFF_BUILD_USER:-}" ] && [ "$BUILD_AS" = "$FFF_BUILD_USER" ] && [ "$BUILD_AS" != "$FFF_USER" ] || return 1
+  root_owned "$old.builder" && [ "$(cat "$old.builder")" = "$FFF_BUILD_USER" ] || return 1
   for f in package.json package-lock.json; do cmp -s "$old/$sub/$f" "$new/$sub/$f" || return 1; done
   rm -rf "$new/$sub/node_modules"
   cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
@@ -65,6 +69,7 @@ deps_from() {
 pick_builder() {
   local why
   if why=$(ensure_build_user 2>&1); then
+    [ -z "$why" ] || printf '%s\n' "$why" >&2
     BUILD_AS=$FFF_BUILD_USER BUILD_HOME=$FFF_BUILD_HOME
     return 0
   fi
@@ -143,13 +148,14 @@ prepare() {
   [ ! -e "$dir" ] || log "release ${sha:0:12}: $(release_problem "$dir" "$sha"); building it again"
   log "building ${sha:0:12} ($ref) in $dir"
   t=$(date +%s)
-  rm -f "$dir.ready"
+  rm -f "$dir.ready" "$dir.builder"
   if [ -e "$dir" ] || [ -L "$dir" ]; then
     [ "$(current_dir)" != "$dir" ] || die "$dir is the running release and not fit to run; not removing it under the portal"
     rm -rf "$dir"
   fi
   git_root -C "$REPO" worktree prune >&2 || true
   git_root -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
+  pick_builder
   cur=$(current_dir)
   reused=" "
   for sub in . web; do
@@ -161,7 +167,6 @@ prepare() {
   # The build account builds it (npm ci, the web build), in a folder fff cannot write (w5523); harden_release makes it
   # root's afterwards. Given to it from the bottom up (-depth, chown -h), so each folder above the one root changes is
   # still root's and it cannot have swapped it for a link (w5531); the files of the reused node_modules stay root's links.
-  pick_builder
   find "$dir" -depth \( -type d -o \( ! -path "$dir/node_modules/*" ! -path "$dir/web/node_modules/*" \) \) \
     -exec chown -h "$BUILD_AS:$BUILD_AS" {} +
   for sub in . web; do
@@ -173,6 +178,10 @@ prepare() {
   as_build_in "$dir" npm --prefix web run build --silent >&2 || { end_build_processes; die "the web build failed"; }
   end_build_processes
   harden_release "$dir" "$sha" >&2 || die "release ${sha:0:12} could not be made root's and read-only"
+  # Who built it, root's like .ready: deps_from reuses only node_modules the build account built (w5523).
+  printf '%s\n' "$BUILD_AS" >"$dir.builder.new"
+  chmod 0644 "$dir.builder.new"
+  mv -f "$dir.builder.new" "$dir.builder"
   log "release ${sha:0:12} built in $(($(date +%s) - t)) s, as $BUILD_AS"
   echo "$dir"
 }
@@ -190,7 +199,7 @@ prune() {
     [ "$n" -gt "$RELEASES_KEEP_EXTRA" ] || continue
     log "removing old release $(basename "$d")"
     rm -rf "$d"
-    rm -f "$d.ready"
+    rm -f "$d.ready" "$d.builder"
   done
   git_root -C "$REPO" worktree prune
 }
