@@ -56,7 +56,7 @@ scp ./install.ps1 rydin@beast:                  # a file from its scratch to a m
 scp m5:/tmp/install.log ./                      # a log back into its scratch
 sftp -b cmds m5                                 # sftp with a batch of put/get lines (no terminal)
 fffctl status                                   # the portal: release, health, Tailscale, backups
-fffctl logs 300                                 # the portal's journal, secrets redacted
+fffctl logs 300                                 # the portal's journal, redacted as read (server/redactLogsCli.ts, w5525)
 fffctl config --check                           # config.json and its saved versions hold no secret; FFBox's hash file (w1078)
 fffctl disk-usage            # where the VM's disk went: sizes, counts, dates and paths only (w2267)
 fffctl approvals --since 2026-10-05 --split 2026-10-13  # the permission prompts people answered, counts only (w1097)

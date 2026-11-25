@@ -1,3 +1,5 @@
+// First (w5525): everything the portal prints reaches the journal redacted (server/journalRedact.ts).
+import './journalRedactStart.ts';
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
