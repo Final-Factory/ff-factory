@@ -31,6 +31,27 @@ run_cmd() {
   fi
 }
 
+# key_primary_fprs FILE: the fingerprint of every primary key in an OpenPGP key file (armored or not), one per line.
+# Subkeys' fingerprints are left out: a vendor pins its primary keys.
+key_primary_fprs() {
+  gpg --batch --show-keys --with-colons "$1" 2>/dev/null | awk -F: '$1 == "pub" { p = 1; next } $1 == "fpr" && p { print $10; p = 0 }'
+}
+
+# verify_key_fprs FILE FPR...: dies unless FILE holds at least one key and every primary key in it is one of the pinned
+# fingerprints (w5530: an apt signing key fetched over the network is trusted only by its fingerprint). An unlisted key,
+# an extra key in the file, an unreadable file and a wrong fingerprint all fail, naming what was found.
+verify_key_fprs() {
+  local file=$1 found f p ok
+  shift
+  found=$(key_primary_fprs "$file")
+  [ -n "$found" ] || die "apt key check FAILED: $file holds no readable OpenPGP key"
+  for f in $found; do
+    ok=0
+    for p in "$@"; do [ "$f" = "$p" ] && ok=1; done
+    [ "$ok" = 1 ] || die "apt key check FAILED: $file has the key $f, expected one of: $* (the vendor's key changed, or the download was tampered with; nothing was installed)"
+  done
+}
+
 # write_file PATH MODE [OWNER]: stdin to PATH when it differs; prints "changed" when it wrote (or would).
 write_file() {
   local path=$1 mode=$2 owner=${3:-root:root} tmp
@@ -54,7 +75,7 @@ install_scripts() {
   local src=$1 f c=""
   run_cmd install -d -m 0755 "$FFF_LIB"
   for f in lib.sh fff.conf.example config.vm.example.json machines.ssh; do [ -z "$(write_file "$FFF_LIB/$f" 0644 <"$src/$f")" ] || c+=" $f"; done
-  for f in fff-update fff-health fff-watchdog fff-backup fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
+  for f in fff-update fff-health fff-watchdog fff-backup fff-backup-drill fff-base-refresh fff-migrate fff-machine-ssh fff-ops-launch fff-ops-priv fff-ops-ssh fff-ops-scp-ssh fff-ops-sync; do [ -z "$(write_file "$FFF_LIB/$f" 0755 <"$src/$f")" ] || c+=" $f"; done
   # The orchestration worker's PATH (w597): its ssh and fffctl, each one sudo call to a wrapper above; its scp and sftp
   # (w612), /usr/bin/scp and sftp as itself over fff-ops-scp-ssh; its fff-machine-ssh (w676), through fff-ops-priv.
   for f in ssh fffctl scp sftp fff-machine-ssh; do [ -z "$(write_file "$FFF_LIB/ops-bin/$f" 0755 <"$src/ops-bin/$f")" ] || c+=" ops-bin/$f"; done
@@ -74,7 +95,7 @@ tailnet_url() {
 # when it is empty or another ts.net address (a renamed node, a copy from another portal). A URL off ts.net was set by
 # a person on purpose and stays. Succeeds when it changed the file, so the caller restarts the portal.
 sync_public_url() {
-  local cfg=$FFF_ROOT/config/config.json want have tmp
+  local cfg=$FFF_ROOT/config/config.json want have
   [ -f "$cfg" ] || return 1
   want=$(tailnet_url)
   if [ -z "$want" ]; then log "publicUrl: Tailscale has not joined yet, so it stays as it is (fffctl tailscale-join sets it)"; return 1; fi
@@ -86,12 +107,12 @@ sync_public_url() {
     return 1
   fi
   if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would set config.json publicUrl to $want (was ${have:-empty})"; return 1; fi
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  jq --arg url "$want" '.publicUrl = $url' "$cfg" >"$tmp" || { rm -f "$tmp"; warn "could not edit $cfg"; return 1; }
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  cp -p "$cfg" "$cfg.prev"
-  mv -f "$tmp" "$cfg"
+  # fff edits its own config (w5531: root writing in fff's folder would follow a link fff put there).
+  no_link "$cfg" "setting publicUrl" || return 1
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  as_fff sh -c 'umask 077 && t=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg url "$2" ".publicUrl = \$url" "$1" >"$t" &&
+    cp -p --remove-destination "$1" "$1.prev" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$want" ||
+    { warn "could not edit $cfg"; return 1; }
   log "publicUrl: set to $want (was ${have:-empty})"
 }
 
@@ -110,7 +131,7 @@ load_conf() {
   # Read by the scripts that source this.
   # shellcheck disable=SC2034
   DATA=$FFF_ROOT/data APP=$FFF_ROOT/app REPO=$FFF_ROOT/app/repo.git RELEASES=$FFF_ROOT/app/releases \
-    CURRENT=$FFF_ROOT/app/current PREVIOUS=$FFF_ROOT/app/previous
+    CURRENT=$FFF_ROOT/app/current PREVIOUS=$FFF_ROOT/app/previous PREPARED=$FFF_ROOT/app/update.prepared.json
 }
 
 # as_fff CMD...: run as the service account, in its home, with git's LFS smudge off (no LFS downloads anywhere here).
@@ -118,35 +139,87 @@ load_conf() {
 # stat ("fatal: failed to stat '/home/fffadmin/ff-factory': Permission denied" from fffctl gh-login).
 as_fff() { as_fff_in / "$@"; }
 # as_fff_in DIR CMD...: the same, started in DIR.
-as_fff_in() { local dir=$1; shift; (cd "$dir" && runuser -u "$FFF_USER" -- env HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@"); }
+# Already the service account (the unit tests, which run as themselves): no runuser, which refuses a caller that is not root.
+as_fff_in() {
+  local dir=$1 run=(runuser -u "$FFF_USER" --)
+  shift
+  [ "$(id -un)" != "$FFF_USER" ] || run=()
+  (cd "$dir" && "${run[@]}" env PATH="$PATH" HOME="$FFF_ROOT/home" GIT_LFS_SKIP_SMUDGE=1 GIT_TERMINAL_PROMPT=0 "$@")
+}
 
-# data_write NAME: stdin to $DATA/NAME, whole (a temp file and a rename) and owned by fff, which the server needs to
-# read and remove it.
+# ---------------------------------------------------------------- root in fff's folders (w5531)
+# fff owns $DATA, config, home and its other folders, and can rename anything in them (and them, in the sticky $FFF_ROOT)
+# and put a symbolic link in its place, at any moment. Root that wrote, chowned or chmodded there by name would follow
+# the link to whatever it points at (/etc/shadow, /root/.ssh): so root does none of that. What lands in fff's folders is
+# written by fff (as_fff, through fff's own permissions, so a link only leads fff to what fff could reach anyway); root
+# changes only the owner of a folder, with chown -h from inside its checked parent; and a symbolic link on the way is
+# refused and logged first, so a swap shows in the journal.
+
+# real_dir DIR: DIR is a folder reached through no symbolic link (DIR itself included).
+real_dir() { [ "$(cd -P -- "$1" 2>/dev/null && pwd -P)" = "$1" ]; }
+
+# no_link PATH WHAT: PATH and every folder above it are no symbolic link (PATH may be missing); else logs and fails.
+no_link() {
+  local p=$1 up=${1%/*}
+  [ -L "$p" ] || ! real_dir "$up" || return 0
+  if [ ! -L "$p" ] && [ ! -e "$up" ] && [ ! -L "$up" ]; then
+    warn "$2 refused: $up does not exist"
+  else
+    warn "$2 refused: $p, or a folder above it, is a symbolic link (to $(readlink -m -- "$p" 2>/dev/null || echo '?')), which root does not follow into fff's folders (w5531)"
+  fi
+  return 1
+}
+
+# fff_dir DIR...: each DIR a folder of fff's with mode 0700, made in order (a parent before its child), never by root
+# following a link: a symbolic link at DIR or above it is refused (no_link); a folder there that is not fff's gets fff
+# as owner by root's chown -h from inside its parent (checked real, so a later swap of a folder above changes nothing);
+# fff makes it and sets its mode.
+fff_dir() {
+  local d p
+  for d in "$@"; do
+    if [ "$DRY_RUN" = 1 ]; then log "DRY-RUN would make $d fff's folder (0700)"; continue; fi
+    no_link "$d" "making $d fff's folder" || return 1
+    p=${d%/*}
+    if [ -e "$d" ] && [ -z "$(find "$d" -maxdepth 0 -user "$FFF_USER" 2>/dev/null)" ]; then
+      (cd -P -- "$p" && [ "$(pwd -P)" = "$p" ] && chown -h "$FFF_USER:$FFF_USER" -- "./${d##*/}") || { warn "could not give $d to $FFF_USER"; return 1; }
+    fi
+    as_fff mkdir -p -- "$d"
+    as_fff chmod 0700 -- "$d"
+  done
+}
+
+# fff_write FILE: stdin to FILE, in a folder of fff's, whole (a temp file and a rename), 0600, written by fff (w5531:
+# root writes nothing in fff's folders). Fails, logged, when FILE or a folder above it is a symbolic link.
+fff_write() {
+  no_link "$1" "writing $1" || return 1
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  as_fff sh -c 'umask 077 && t=$(mktemp "${1%/*}/.${1##*/}.XXXXXX") && cat >"$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$1"
+}
+
+# data_write NAME: stdin to $DATA/NAME (fff_write), which the server needs to read and remove.
 data_write() {
-  local tmp
-  tmp=$(mktemp "$DATA/.$1.XXXXXX")
-  cat >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  chmod 0600 "$tmp"
-  mv -f "$tmp" "$DATA/$1"
+  [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "data_write: not a file name: $1"
+  fff_write "$DATA/$1"
 }
 
 # tell_dispatcher TEXT: a system message to the dispatcher through data/orchestrator-inbox (server/index.ts reads
 # *.txt there every 5 s and sends each once), for what happens outside the server: a failed build, a rollback.
+# fff makes the folder and writes the file (w5531: root's install -d -o fff and chown there followed a link fff could
+# have put in place of the folder or of the temp file).
 tell_dispatcher() {
-  local dir=$DATA/orchestrator-inbox name tmp
-  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$dir"
-  name="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  tmp="$dir/.$name.tmp"
-  printf '%s\n' "$1" >"$tmp"
-  chown "$FFF_USER:$FFF_USER" "$tmp"
-  mv -f "$tmp" "$dir/$name.txt"
+  local dir=$DATA/orchestrator-inbox
+  fff_dir "$dir" || return 1
+  printf '%s\n' "$1" | fff_write "$dir/$(date -u +%Y%m%dT%H%M%SZ)-$$.txt"
 }
 
 health_json() { curl -fsS -m 10 "http://127.0.0.1:$FFF_PORT/api/health"; }
 # As fff: root running git in fff's repository trips git's safe.directory check.
 # Empty (and status 0) when there is no such release, so an assignment from it never stops a set -e script.
-release_sha() { if [ -n "$1" ]; then as_fff git -C "$1" rev-parse HEAD 2>/dev/null || true; fi; }
+# A root-owned release (w5505) is read by root, an older one fff made by fff.
+release_sha() {
+  [ -n "$1" ] || return 0
+  if root_owned "$1"; then git_root -C "$1" rev-parse HEAD 2>/dev/null || true; else as_fff git -C "$1" rev-parse HEAD 2>/dev/null || true; fi
+}
 portal_active() { sc is-active --quiet fff-portal.service; }
 
 # ---------------------------------------------------------------- the critical units (w698)
@@ -201,4 +274,191 @@ render_unit() {
     die "$file: no value for $(printf '%s' "$text" | grep -Eo '@[A-Z_]+@' | sort -u | paste -sd' ' -)"
   fi
   printf '%s\n' "$text"
+}
+
+# ---------------------------------------------------------------- release trees root runs code from (w5505)
+# fff-update runs as root and runs a release's guest install.sh and installs its fffctl and helpers (fff-update activate,
+# rollback, request). So the record of the prepared release, the bare clone, the release folders and the current and
+# previous links are root's and read-only to fff ($APP, 0755), and root takes a release only after release_problem finds
+# nothing wrong with it: code running as fff (the portal, its agents) can ask for an update of a commit on
+# origin/$FFF_BRANCH (data/update.wanted, fff-update.path) and nothing more. docs/portal-on-ffbox-host.md, "Releases".
+
+# git_root ARGS...: git as root, in root's clone and release trees only, with no hooks and no fsmonitor command.
+git_root() { git -c core.hooksPath=/dev/null -c core.fsmonitor=false "$@"; }
+
+# root_owned PATH...: each exists, is root's and is writable by nobody else (a symbolic link: root's).
+# FFF_TRUSTED_UID: the tests' stand-in for root's uid 0.
+root_owned() {
+  local p uid=${FFF_TRUSTED_UID:-0}
+  for p in "$@"; do
+    if [ -L "$p" ]; then
+      [ -n "$(find "$p" -maxdepth 0 -user "$uid" 2>/dev/null)" ] || return 1
+    else
+      [ -e "$p" ] || return 1
+      [ -n "$(find "$p" -maxdepth 0 -user "$uid" ! -perm -020 ! -perm -002 2>/dev/null)" ] || return 1
+    fi
+  done
+}
+
+# release_admin DIR: the name of DIR's worktree folder in the bare clone ($REPO/worktrees/NAME, whose gitdir names
+# DIR/.git), or nothing.
+release_admin() {
+  local w
+  for w in "$REPO"/worktrees/*; do
+    [ -f "$w/gitdir" ] && [ "$(cat "$w/gitdir")" = "$1/.git" ] && { basename "$w"; return 0; }
+  done
+  return 0
+}
+
+# release_problem DIR SHA: what makes DIR not the release of commit SHA that root may run code from, or nothing (and
+# status 0) when it is: the folder of that commit under $RELEASES with no symbolic link on the way, root's and read-only
+# to everyone else throughout, marked ready for SHA by root, a worktree of root's bare clone at SHA, and clean (nothing
+# changed, added or ignored beyond the dependencies and the web build).
+release_problem() {
+  local dir=$1 sha=$2 admin gitdir bad head st
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "no full commit id was recorded for it (${sha:-none})"; return 0; }
+  [ "$dir" = "$RELEASES/${sha:0:12}" ] || { echo "$dir is not $RELEASES/${sha:0:12}, the folder of ${sha:0:12}"; return 0; }
+  [ -d "$dir" ] && [ ! -L "$dir" ] || { echo "$dir is not a folder"; return 0; }
+  [ "$(readlink -f "$dir")" = "$dir" ] || { echo "$dir leads through a symbolic link (to $(readlink -f "$dir"))"; return 0; }
+  [ "$(readlink -f "$REPO")" = "$REPO" ] || { echo "$REPO leads through a symbolic link"; return 0; }
+  for bad in "$APP" "$RELEASES" "$REPO" "$dir" "$dir/.git" "$dir.ready"; do
+    root_owned "$bad" || { echo "$bad is missing, not root's, or writable by others"; return 0; }
+  done
+  [ "$(cat "$dir.ready")" = "$sha" ] || { echo "$dir.ready does not name $sha"; return 0; }
+  bad=$(find "$dir" \( ! -user "${FFF_TRUSTED_UID:-0}" -o \( ! -type l \( -perm -020 -o -perm -002 -o -perm -4000 -o -perm -2000 \) \) \) -print -quit 2>/dev/null) ||
+    { echo "$dir cannot be read through"; return 0; }
+  [ -z "$bad" ] || { echo "$bad is not root's, or is writable by others or setuid"; return 0; }
+  # A link may lead only inside the release (node_modules/.bin has many), never to a file fff can change.
+  bad=$(find "$dir" -type l -exec realpath -m -- {} + 2>/dev/null | grep -vE "^$dir(/|$)" | head -n 1) || true
+  [ -z "$bad" ] || { echo "a symbolic link in $dir leads out of it, to $bad"; return 0; }
+  admin=$(release_admin "$dir")
+  if [ -z "$admin" ] || ! root_owned "$REPO/worktrees/$admin"; then echo "$dir is not a worktree of $REPO"; return 0; fi
+  gitdir=$(cat "$dir/.git")
+  [ "$gitdir" = "gitdir: $REPO/worktrees/$admin" ] || { echo "$dir/.git does not point at $REPO/worktrees/$admin"; return 0; }
+  head=$(git_root -C "$dir" rev-parse --verify --quiet 'HEAD^{commit}' 2>/dev/null) || head=""
+  [ "$head" = "$sha" ] || { echo "$dir is at ${head:-no commit}, not $sha"; return 0; }
+  st=$(git_root -C "$dir" status --porcelain=v1 --ignored --untracked-files=normal 2>&1) || { echo "git status in $dir failed: $st"; return 0; }
+  st=$(printf '%s\n' "$st" | grep -vxE '!! (node_modules|web/node_modules|web/dist)/' | grep . | head -n 5 | paste -sd' ' -) || true
+  [ -z "$st" ] || { echo "$dir is not clean: $st"; return 0; }
+}
+
+# release_ok DIR: DIR passes release_problem for the commit its root-owned .ready names.
+release_ok() {
+  [ -n "$1" ] && root_owned "$1.ready" && [ -z "$(release_problem "$1" "$(cat "$1.ready")")" ]
+}
+
+# harden_release DIR SHA: after the build (fff's npm ci and web build), DIR becomes root's and read-only to everyone
+# else, every tracked file is written again by root (a new file, so nothing fff opened during the build writes into it),
+# its .git link is rewritten, and DIR.ready names SHA. Fails, saying why, unless release_problem then finds nothing.
+harden_release() {
+  local dir=$1 sha=$2 admin p
+  rm -f "$dir.ready"
+  chown -R -h -P root:root "$dir"
+  chmod -R go-w,ug-s "$dir"
+  admin=$(release_admin "$dir")
+  [ -n "$admin" ] || { log "ERROR: $dir is not a worktree of $REPO"; return 1; }
+  rm -f "$dir/.git"
+  printf 'gitdir: %s\n' "$REPO/worktrees/$admin" >"$dir/.git"
+  chmod 0644 "$dir/.git"
+  git_root -C "$dir" checkout-index --force --all || { log "ERROR: could not write $dir's tracked files again"; return 1; }
+  git_root -C "$dir" update-index -q --refresh >/dev/null 2>&1 || true
+  p=$(writers_in "$dir")
+  [ -z "$p" ] || { log "ERROR: $p still writes into $dir, opened before it became root's"; return 1; }
+  printf '%s\n' "$sha" >"$dir.ready.new"
+  chmod 0644 "$dir.ready.new"
+  mv -f "$dir.ready.new" "$dir.ready"
+  p=$(release_problem "$dir" "$sha")
+  [ -z "$p" ] || { rm -f "$dir.ready"; log "ERROR: release ${sha:0:12} is not fit to run: $p"; return 1; }
+}
+
+# writers_in DIR: a process that holds a file under DIR open for writing, or mapped shared and writable, or nothing.
+# Write access is checked when a file is opened, so one fff opened during the build would outlast harden_release.
+writers_in() {
+  local fd pid fl
+  while IFS= read -r fd; do
+    case $(readlink "$fd" 2>/dev/null) in *' (deleted)') continue ;; esac
+    pid=${fd#/proc/}; pid=${pid%%/*}
+    fl=$(sed -n 's/^flags:[[:space:]]*//p' "/proc/$pid/fdinfo/${fd##*/}" 2>/dev/null) || continue
+    [ -n "$fl" ] && [ $((8#$fl & 3)) -ne 0 ] || continue
+    echo "process $pid ($(cat "/proc/$pid/comm" 2>/dev/null))"
+    return 0
+  done < <(find /proc/[0-9]*/fd -maxdepth 1 -lname "$1/*" 2>/dev/null)
+  for fd in /proc/[0-9]*/maps; do
+    grep -qF " $1/" "$fd" 2>/dev/null || continue
+    if awk -v d="$1/" '$2 ~ /^.w.s/ && index($6, d) == 1 { f = 1 } END { exit !f }' "$fd" 2>/dev/null; then
+      pid=${fd#/proc/}; echo "process ${pid%%/*} (a shared writable mapping)"; return 0
+    fi
+  done
+}
+
+# own_app: $FFF_ROOT root's with fff's group and the sticky bit (1770: fff makes its own folders there, and cannot rename
+# or replace $APP), $APP and $RELEASES root's (0755), and nothing in $APP left that fff made before w5505 except the
+# release folders: the current and previous links made again as root's, anything else (a record, a log, a link left in
+# place of one) removed, so root never writes through a symbolic link fff put there.
+own_app() {
+  local e t
+  [ ! -L "$FFF_ROOT" ] && [ ! -L "$APP" ] || die "$FFF_ROOT or $APP is a symbolic link: not touching it"
+  chown "root:$FFF_USER" "$FFF_ROOT"
+  chmod 1770 "$FFF_ROOT"
+  install -d -m 0755 -o root -g root "$APP" "$RELEASES"
+  chown root:root "$APP" "$RELEASES"
+  chmod 0755 "$APP" "$RELEASES"
+  for e in "$APP"/* "$APP"/.[!.]*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    [ "$e" != "$RELEASES" ] && [ "$e" != "$REPO" ] || continue
+    root_owned "$e" && continue
+    if [ "$e" = "$CURRENT" ] || [ "$e" = "$PREVIOUS" ]; then
+      t=$(readlink "$e" 2>/dev/null || true)
+      rm -f "$e"
+      [ -z "$t" ] || ln -s "$t" "$e"
+    else
+      rm -rf "$e"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------- backups (fff-backup, fff-backup-drill; w5529)
+# What the backup and the drill wrote last, read by fffctl status and the portal's system_status (server/backupStatus.ts):
+# root-owned, world-readable, no secrets in them.
+FFF_STATE_DIR=${FFF_STATE_DIR:-/var/lib/fff}
+# The backup target's pinned host key: root:root, not group- or other-writable, one line "fff-backup-target <type> <key>"
+# (fffctl backup-config --host-key). ssh checks the target against it under that alias and nothing else; a changed key
+# fails the backup loudly and is never re-trusted by itself.
+FFF_BACKUP_KNOWN_HOSTS=${FFF_BACKUP_KNOWN_HOSTS:-/etc/fff/backup_known_hosts}
+FFF_BACKUP_HOST_ALIAS=fff-backup-target
+
+# backup_pin_problem: why the pinned host key cannot be used (one line), or nothing when it can.
+backup_pin_problem() {
+  local kh=$FFF_BACKUP_KNOWN_HOSTS perm
+  if [ ! -f "$kh" ]; then echo "no pinned host key for the backup target ($kh is missing; sudo fffctl backup-config --host-key FILE)"; return; fi
+  if [ "${FFF_TEST_NOROOT:-}" != 1 ] && [ "$(stat -c %u "$kh")" != 0 ]; then echo "$kh is not owned by root"; return; fi
+  perm=$(stat -c %a "$kh")
+  if (((8#$perm & 8#022) != 0)); then echo "$kh can be written by others than root (mode $perm)"; return; fi
+  grep -q "^$FFF_BACKUP_HOST_ALIAS " "$kh" || echo "no pinned host key for the backup target in $kh (sudo fffctl backup-config --host-key FILE)"
+}
+
+# backup_sftp BATCH ERR: one sftp batch file to BACKUP_SSH_TARGET, checked only against the pinned key; stderr to ERR.
+backup_sftp() {
+  sftp -q -b "$1" -i "$BACKUP_SSH_KEY" -o BatchMode=yes -o HostKeyAlias="$FFF_BACKUP_HOST_ALIAS" \
+    -o StrictHostKeyChecking=yes -o UpdateHostKeys=no -o CheckHostIP=no \
+    -o UserKnownHostsFile="$FFF_BACKUP_KNOWN_HOSTS" -o GlobalKnownHostsFile=/dev/null "$BACKUP_SSH_TARGET" 2>"$2"
+}
+
+# backup_sftp_why ERR: one line saying why an sftp batch failed; a host key that changed is said so plainly.
+backup_sftp_why() {
+  if grep -qE 'REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed|No [A-Za-z0-9-]+ host key is known' "$1" 2>/dev/null; then
+    echo "the backup target's host key does not match the pinned one in $FFF_BACKUP_KNOWN_HOSTS: check the target's key out of band and re-pin it (sudo fffctl backup-config --host-key FILE); it is never re-trusted by itself"
+  else
+    echo "sftp to $BACKUP_SSH_TARGET failed: $(grep -v '^sftp>' "$1" 2>/dev/null | tail -n 1 | cut -c1-200)"
+  fi
+}
+
+# state_write NAME: stdin (JSON) to $FFF_STATE_DIR/NAME, whole, 0644 root.
+state_write() {
+  local tmp
+  install -d -m 0755 "$FFF_STATE_DIR"
+  tmp=$(mktemp "$FFF_STATE_DIR/.$1.XXXXXX")
+  cat >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$FFF_STATE_DIR/$1"
 }

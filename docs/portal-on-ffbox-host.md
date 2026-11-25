@@ -386,18 +386,46 @@ cloud-init (a NoCloud seed ISO from `cloud-localds`, read at the first boot only
 | Space | Reserved in full in the pool (not sparse): neither side fills the other | Grows as written; a quota needs a dataset of its own |
 | Nightly snapshot (VM off) | `zfs snapshot …@fff-nightly-<time>`, the last 7 kept | `qemu-img snapshot -c`, internal, the last 7 kept |
 | Rollback | `vm-rollback.sh`: clone, rename, promote; the state before is kept as `disk0-before-rollback-<time>` | `qemu-img snapshot -a`; the state before is kept as a snapshot |
-| Off the host | the guest's encrypted backup (below); a `zfs send` of a snapshot is possible but unencrypted unless piped through `age` | the same |
+| Off the host | the host's own off-site backup copies its whole disk, these snapshots included (lothsahn, 2026-11-25, w5566: "The VM host off-site backup is the entire disk"); the guest's encrypted backup (below) is the second copy, on BEAST | the same |
 
 The host has ZFS *(sourced: [ffbox.md](ffbox.md), "Where")*. So the zvol is the recommendation: a fixed reservation,
 cheap snapshots, and no double copy-on-write of qcow2 on ZFS. CI tests both modes.
 
-**The guest's backup** (`fff-backup`, daily at 11:15 UTC, before the nightly restart) archives `config`, `data`,
-`agents` and `home`, leaving out caches and the Claude CLI's own versions. Review media is included only if
-`BACKUP_INCLUDE_REVIEW=yes`. The archive is encrypted with `age -R` to the public keys in
-`/etc/fff/backup-recipients.txt` and sent with sftp, as `<name>.part` then renamed, to `BACKUP_SSH_TARGET` with the
-VM's own backup key; the newest 14 are kept there. Recommended target: a Windows account on BEAST used for nothing
-else, reached over the tailnet ([D17](#8-risks-and-open-decisions)). A failure messages the dispatcher. Restore, with
-the portal stopped: `age -d -i key.txt <file> | tar -xz -C /srv/fff`. The dry run restores one ([7.2](#72-dry-run-in-the-vm), check 12).
+**Two copies, two places** (w5566; lothsahn: "We just need backups in both places"). The host's nightly snapshots of
+the VM's disk (above) go off-site with the host's whole disk, and the VM cannot delete them. The guest's own backup
+goes to BEAST. Neither needs the other.
+
+**The guest's backup** (`fff-backup`, daily at 11:15 UTC, before the nightly restart) archives `config`, `data` (the
+vault's `data/vault.json` included since w5529), `agents`, `home` and `secrets`, leaving out caches and the Claude CLI's
+own versions. Review media is included only if `BACKUP_INCLUDE_REVIEW=yes`. The archive is encrypted with `age -R` to
+the public keys in `/etc/fff/backup-recipients.txt` (whose private keys are kept by people, off the host: RUNBOOK,
+"The backups' age keys") and sent with sftp to `BACKUP_SSH_TARGET` with the VM's own backup key; the newest 14 are kept
+there. Recommended target: a Windows account on BEAST used for nothing else, reached over the tailnet
+([D17](#8-risks-and-open-decisions)).
+
+- **The vault key is never in it.** It lives in `/etc/fff/vault.key`, outside `/srv/fff`; `fff-backup` refuses to run
+  if the key's path is inside `/srv/fff` or a file named `vault.key*`/`vault-key*` is among what it archives. Its only
+  spare is `/etc/fff-vm/secrets/vault.key` on the FFBox host (docs/vault.md, section 8), which the host's off-site
+  backup carries. A restored vault opens only once that key is put back.
+- **The target's host key is pinned** in `/etc/fff/backup_known_hosts` (root, 0644) under the alias
+  `fff-backup-target`, with `StrictHostKeyChecking=yes`: `sudo fffctl backup-config --host-key FILE` writes it (a
+  `type key` line or a `known_hosts` line, checked with `ssh-keygen -l`). Without a pin the backup does not run; a
+  changed key fails it, says so, and is never trusted by itself.
+- **Every upload is checked.** It goes up as `<name>.part`; the size on the target is compared, then (default
+  `BACKUP_VERIFY=hash`) it is read back and its sha256 compared, and only then renamed into place. A mismatch removes
+  the partial copy and fails.
+- **What happened is visible.** `/var/lib/fff/backup.json` holds the last run (ok, failed or off, why, size, sha256,
+  how it was checked); `fffctl status` and the portal's `system_status` (the dashboard) show it, a failure as a
+  `PROBLEM:` line and a record over 26 h old as a `WARNING:`. A failure also messages the dispatcher.
+- **The monthly restore drill.** On the FFBox host, a person holding one of the age private keys runs
+  `sudo fff-vm backup-drill --identity KEY [NAME]` with the key file brought for it (deleted afterwards). The VM sends
+  the newest (or NAME) encrypted archive back from the target (`fffctl backup-fetch`), the host decrypts it in a pipe,
+  and the VM checks the plain archive (`fffctl backup-drill`): it unpacks in a scratch folder, every JSON file parses,
+  `data/state.json` holds its sessions, every vault entry opens with the VM's own key (`vaultCli verify`, counts only),
+  and no file in it is the vault key; the scratch folder is deleted. The result goes to `/var/lib/fff/backup-drill.json`,
+  shown beside the backup's; the drill shows **DUE** 31 days after the last. Nothing decrypted is written on the host.
+- Restore by hand, with the portal stopped: `age -d -i key.txt <file> | tar -xz -C /srv/fff`, then the vault key from
+  the host's spare. The dry run restores one ([7.2](#72-dry-run-in-the-vm), check 12).
 
 ### 2.3 Inside the guest
 
@@ -523,14 +551,14 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
 ### The update flow
 
 1. **Request.** `request_app_update`, or `fffctl update`, writes `data/update.wanted` (`{ drainMinutes, reason, at }`).
-   `fff-update.path` starts `fff-update request` as root; git and npm run as `fff`.
+   `fff-update.path` starts `fff-update request` as root; git runs as root, `npm` as `fff` (w5505).
 2. **Build while the old portal runs.** It fetches `origin/main` into `app/repo.git` and adds a worktree
    `app/releases/<sha12>` at that commit. There it runs `npm ci` and `npm --prefix web ci`, then the web build. Nobody
    edits these worktrees, so `update-steps.ps1`'s fast-forward, republish and rewrite checks reduce to "a fresh worktree
    at origin's commit". The unit tests for that commit already ran in CI. If the build fails, the dispatcher gets a
    message saying why and nothing restarts. If origin is at the running commit, it says "already up to date" and
    nothing restarts.
-3. **Hand-off.** It writes `data/update.prepared.json`, then `data/restart.request` with
+3. **Hand-off.** It writes the record `app/update.prepared.json` (root's; a copy in `data/` for `fffctl` to read), then `data/restart.request` with
    `{ drain: "auto", drainMinutes, update: true, reason: "update to <sha> (…)" }`. The server drains as it does today,
    writes `data/update.request` and `resume.json`, and exits 0.
 4. **Switch.** systemd starts it again. `ExecStartPre=+fff-update activate` sees `update.request`, swaps the `current`
@@ -542,6 +570,31 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
    `ok: false, "rolled back: …"`, the dispatcher is told, and the portal restarts *(measured in CI: a commit that throws
    at start rolls back by itself)*.
 
+- **Releases are root's, read-only to `fff`** (w5505, lothsahn: "root-owned release record, verified clean tree,
+  read-only release folders"). `activate` runs as root, so it trusts nothing `fff` can write:
+  - `/srv/fff` is `root:fff 1770` (sticky: `fff` cannot rename `app/`), `app/`, `app/releases/` and `app/repo.git` are
+    `root:root 0755`. `fff` reads them through `safe.directory` entries in its git config.
+  - **Readable by `fff`, whatever umask root runs under** (w5593): `fff`'s git reads `repo.git`'s objects to make the
+    bundle every machine updates from (`server/machineLink.ts`). `activate` runs in `fff-portal.service`, whose
+    `UMask=0077` its `+` `ExecStartPre` keeps, so `fff-update` sets `umask 022` itself, and `ensure_repo` runs
+    `chmod -R go-w,a+rX` on the clone at every `prepare` and `init`, which mends objects an earlier run left `0400` in
+    `0700` folders. Without it (2026-11-25, 06:03Z) one `activate` build wrote such objects and every daemon's rollout
+    failed with `git bundle failed (128): error: unable to open loose object ...: Permission denied`.
+  - After `npm` (as `fff`) the release is handed to root: `chown -R root:root`, `chmod -R go-w`, setuid bits cleared,
+    tracked files rewritten (`git checkout-index -af`) and no process may still hold a writable file or shared map in it
+    (`writers_in`, from `/proc`). A `.ready` file names the commit.
+  - Before `activate` switches, and before `rollback`, `release_problem` (`deploy/vm/guest/lib.sh`) checks: the folder is
+    `app/releases/<sha12>` and no symlink, git HEAD is the record's commit, the tree is clean (`git status --ignored`
+    allows only `node_modules/`, `web/dist/`, `web/node_modules/`), no symlink leads out, everything is root's and not
+    group- or world-writable. A record `fff` could have written (`data/update.prepared.json`) is never taken; with no
+    root record `activate` builds `origin/main` itself, as for a crash.
+  - **One-time migration**: the first update to this code runs the release's `install.sh`, which runs `fff-update init`:
+    it moves `fff`'s `repo.git` aside, clones it again as root, and rebuilds the new release as root's. Rolling back to a
+    release `fff` built before it is refused ("not fit to run"); a disk snapshot (`vm-rollback.sh`) is the way back.
+  - **Not yet covered**: `node_modules` is still built by `fff` (`npm ci`), and root runs node from `current/` in
+    `fffctl vault`, `scrub-secrets`, `app-config` and `fff-migrate`, so a package `fff` could plant there before the
+    hand-over runs as root. A file descriptor passed between processes (`SCM_RIGHTS`) during the hand-over is not seen
+    by `writers_in`. Tests: `deploy/vm/test/fff-update.test.sh` (root, in the lint job) and the e2e's ownership checks.
 - **An update cut off by a crash** (`server/index.ts:1690-1695`): after an unclean stop with an update pending, the
   server writes `update.request` and exits 0. With no prepared release, `activate` builds one then, while the portal
   is down, and switches. No code change needed.
@@ -576,7 +629,12 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
    - **Neither answers 3 times in a row:** `virsh reset`, logged and alerted.
    - **Never during the first boot**, before the agent has answered once (cloud-init installs it, then upgrades and may
      reboot): an alert after 30 minutes, never a reset.
-   - **Never within 5 minutes of QEMU's start, nor during the nightly cycle.**
+   - **Never within 5 minutes of QEMU's start or of the guest's last reboot, nor during the nightly cycle.** A reboot
+     inside a running QEMU (cloud-init's after its first upgrade, a reset) restarts the grace: `fff-vm events` notes
+     libvirt's `reboot` event (w5608: the watch reset a guest 11 s into the reboot cloud-init asked for, and its ssh
+     then hung for the e2e's whole 900 s wait).
+   - **Checks are spaced from the end of the last one** (`OnUnitInactiveSec`): a check that waits out its 10 s timeouts
+     no longer starts the next one at once, so "N in a row" spans at least N intervals.
    - **At most 3 resets in 6 hours;** after that only alerts, since a VM that keeps dying needs a person.
 4. **The watchdog is the second layer.** If the guest's kernel or PID 1 hangs, nobody pets `i6300esb` and QEMU resets
    the VM *(measured in CI: a guest that stops petting it is reset; `fff-vm-events` reports the watchdog event)*. A

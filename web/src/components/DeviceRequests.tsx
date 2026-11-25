@@ -24,8 +24,10 @@ export function DeviceRequests({ app }: { app: AppState }) {
         const r = await api.devices();
         if (stop) return 5 * 60_000;
         setDevices(r.devices);
-        setOn(r.deviceApproval === 'members');
-        return r.deviceApproval === 'members' || r.devices.some((d) => d.status === 'pending') ? 20_000 : 5 * 60_000;
+        // w5524: owners' logins are never held (advisory only); their requests show within 5 minutes.
+        const held = r.deviceApproval === 'members';
+        setOn(held);
+        return held || r.devices.some((d) => d.status === 'pending') ? 20_000 : 5 * 60_000;
       },
       document,
       window,
@@ -54,11 +56,13 @@ export function DeviceRequests({ app }: { app: AppState }) {
   return (
     <>
       {pending.map((d) => {
-        const text = `${d.displayName} asks to sign in from a new device: ${d.label}, from ${d.ip}, ${fmtRelative(d.lastSeenAt ?? d.createdAt, Date.now())}.${on ? '' : ' (Device approval is off now.)'}`;
+        // w5524: an owner's login let in by advisory mode; it would need approval once enforcement exists.
+        const head = d.advisory ? `${d.displayName} signed in from a new device (advisory, let in):` : `${d.displayName} asks to sign in from a new device:`;
+        const text = `${head} ${d.label}, from ${d.ip}, ${fmtRelative(d.lastSeenAt ?? d.createdAt, Date.now())}.${on || d.advisory ? '' : ' (Device approval is off now.)'}`;
         return (
           <div key={d.id} className="gbar gbar-warn" role="status" data-device={d.id}>
             <span className="gbar-text" title={`${text}\n${d.userAgent}`}>
-              <b>{d.displayName} asks to sign in from a new device:</b> {d.label}, from {d.ip}, {fmtRelative(d.lastSeenAt ?? d.createdAt, Date.now())}.
+              <b>{head}</b> {d.label}, from {d.ip}, {fmtRelative(d.lastSeenAt ?? d.createdAt, Date.now())}.
             </span>
             <button type="button" className="btn btn-sm btn-primary gbar-x" disabled={busy === d.id} onClick={() => void decide(d, 'approve')}>
               Approve

@@ -19,7 +19,7 @@ function setup(t: { name?: string; info?: Record<string, unknown>; granted?: boo
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'revoke-'));
   roots.push(root);
   const name = t.name ?? 't00000042';
-  const dir = path.join(root, 'tmp', 'bench.queue', name);
+  const dir = path.join(root, 'daemon', 'bench.queue', name);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 'info.json'), JSON.stringify({ pid: 4242, owner_pid: 4000, session: SESSION, what: 'player build', mode: 'exclusive', ...t.info }));
   if (t.granted !== false) fs.writeFileSync(path.join(dir, 'granted'), JSON.stringify({ at: 'x', ts: NOW / 1000 }));

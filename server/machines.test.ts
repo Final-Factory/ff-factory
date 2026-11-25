@@ -12,7 +12,7 @@ import type { Duplex } from 'node:stream';
 import { Store } from './store.ts';
 import { QUEUE_HOLD_MS, SessionManager, snapshotOf, type SessionHandle, type SessionSink } from './sessions.ts';
 import { collectResume } from './restart.ts';
-import { HOST_DIED, HOST_DIED_RESUME_MS, INTERRUPT_ANSWER_MS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
+import { HOST_DIED, HOST_DIED_RESUME_MS, INTERRUPT_ANSWER_MS, DAEMON_RUN_FIELDS, MachineManager, RESUME_DELAY_MS, RemoteSession, cutOffMidTurn, daemonBehind, daemonRunState, enrolledMachines, issueMachineToken, minutesText, revokeMachineToken } from './machines.ts';
 import { OLDEST_DAEMON_PROTOCOL, PROTOCOL_VERSION, protocolProblem } from './machineProtocol.ts';
 import { buildOptions } from './launch.ts';
 import { HOST_LOGIN } from './usage.ts';
@@ -1804,4 +1804,74 @@ test('w4619: a daemon whose link drops mid-switch (its update over the link) ans
   await until('back with hello', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
   const again = await settled(mm.switchBranch('mx', 'feature/z', undefined, 'sb'));
   assert.doesNotMatch(again.ok ? '' : again.e.message, /w4619|10 minutes/);
+});
+
+// w5515 (lothsahn, finding 10 of the w5452 security audit): "strip the identity fields machines send". A daemon's report
+// of its own session sets only its run state (DAEMON_RUN_FIELDS); who the session is for, what it may do and which account
+// its spend goes on stay the portal's records, so a compromised machine cannot pass its sessions off as another person's
+// or an orchestrator's in mayAct or in the cost ledger.
+test('w5515: a daemon report carrying forged identity, authorization and account fields leaves the stored ones unchanged', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  daemon();
+  await until('online', () => mm.isOnline('mx') && !!store.machines.get('mx')?.info);
+  const h = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  const lothsahn = { userId: 'u-loth', displayName: 'lothsahn' };
+  Object.assign(h.info, { requestedBy: lothsahn, lastRequestedBy: lothsahn, account: 'token:aaaa', ranAs: 'vault token a …AAAA', ranFor: 'lothsahn', costUsd: 1.5 });
+  store.putSession(h.info);
+  const before = structuredClone(store.sessions.get(h.info.id)!);
+  const ben = { userId: 'u-ben', displayName: 'Ben' };
+  const forged = {
+    ...h.info,
+    requestedBy: ben,
+    lastRequestedBy: ben,
+    orchestratorRole: 'dispatcher',
+    account: 'token:bbbb',
+    permissionMode: 'bypassPermissions',
+    effort: 'max',
+    followUpOn: { id: 'w1', at: new Date().toISOString(), by: 'Ben' },
+    openAsks: [{ id: 'x' }],
+    peopleMessaged: { Ben: 9 },
+    kind: 'orchestrator',
+    ranAs: 'vault token b …BBBB',
+    ranFor: 'Ben',
+    someFutureField: 'x',
+  };
+  const onMessage = (msg: unknown) => (mm as unknown as { onMessage(id: string, msg: unknown): void }).onMessage('mx', msg);
+  onMessage({ type: 'session', info: { ...forged, status: 'idle', turns: 3, costUsd: 2.25, lastResult: 'done' }, live: true });
+  const after = store.sessions.get(h.info.id)!;
+  for (const k of ['requestedBy', 'lastRequestedBy', 'orchestratorRole', 'account', 'permissionMode', 'effort', 'followUpOn', 'openAsks', 'peopleMessaged', 'kind', 'ranAs', 'ranFor'] as const) {
+    assert.deepEqual(after[k], before[k], `${k} stays the portal's`);
+  }
+  assert.equal((after as unknown as Record<string, unknown>).someFutureField, undefined, 'a field not on the list is dropped');
+  // Its run state is still the daemon's, its own spend included (attributed by the portal's requestedBy above).
+  assert.equal(after.status, 'idle');
+  assert.equal(after.turns, 3);
+  assert.equal(after.costUsd, 2.25);
+  assert.equal(after.lastResult, 'done');
+});
+
+test('w5515: every field a daemon report may set is a SessionInfo field the portal does not own', () => {
+  const portalOwned = ['id', 'kind', 'machineId', 'standingId', 'sandboxId', 'title', 'createdAt', 'label', 'labelAt', 'requestedBy', 'lastRequestedBy', 'orchestratorRole', 'account', 'ranAs', 'ranFor', 'ranOn', 'permissionMode', 'effort', 'followUpOn', 'openAsks', 'personMessages', 'forYou', 'peopleMessaged', 'waitingOn', 'wakeAt', 'wakeNote', 'queuedSend', 'queuedOn', 'timedVerdict', 'activeTool', 'hostFailure'];
+  for (const k of portalOwned) assert.equal((DAEMON_RUN_FIELDS as readonly string[]).includes(k), false, `${k} is the portal's`);
+  const run = daemonRunState({ id: 'x', kind: 'worker', status: 'idle', costUsd: 1, requestedBy: { userId: 'u', displayName: 'u' } } as unknown as SessionInfo);
+  assert.deepEqual(run, { status: 'idle', costUsd: 1 });
+});
+
+test('w5515: a Mac agent reporting an account the portal never handed it keeps the account the portal recorded', async (t) => {
+  const { mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  // A compromised daemon names another person's token as the one its process started on.
+  class Forger extends FakeAgent {
+    override send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[]) {
+      this.info.account = 'token:someone-elses';
+      return super.send(text, from, uuid, images);
+    }
+  }
+  daemon(undefined, Forger);
+  await until('online', () => mm.isOnline('mx') && mm.protocolOf('mx') !== undefined);
+  const s = mm.createSession('mx', { kind: 'worker', sandbox: 'sb', title: 'w', permissionMode: 'default' });
+  s.send('hello');
+  await until('its turn ran', () => s.info.status === 'idle' && s.info.turns > 0);
+  assert.equal(s.info.account, undefined, 'the forged account is not taken');
 });

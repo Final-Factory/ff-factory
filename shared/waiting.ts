@@ -3,7 +3,7 @@
 // live states (shared/workState.ts), so the sidebar, the phone's bell and the tab all count the same items.
 import { FLAG_LABEL, questionFor, WORK_OPEN, type OpenAsk, type SessionInfo, type WorkItem } from './types.ts';
 import { openAsksOf, sameAsk, sameWords } from './waitSummary.ts';
-import type { WorkLive } from './workState.ts';
+import { handUpCardOf, type WorkLive } from './workState.ts';
 
 const OPEN = new Set<string>(WORK_OPEN);
 
@@ -138,7 +138,7 @@ export function waitAge(since: string, now: number): 'fresh' | 'old' | 'stale' {
 }
 
 /** An approval, a question or a design question: something a person decides, whatever else the request is doing. */
-const isDecision = (w: WorkItem) => w.approval?.state === 'pending' || !!w.question || !!w.flag;
+const isDecision = (w: WorkItem) => w.approval?.state === 'pending' || !!w.question || !!w.flag || handUpCardOf(w);
 
 export interface Decision {
   w: WorkItem;
@@ -167,6 +167,8 @@ export function decisionsOn(work: readonly WorkItem[], me: WaitingViewer): Decis
     } else if (w.flag) {
       if (w.flag.for.some((r) => same(r.userId, me.userId))) out.push({ w, ask: 'answer', at: w.flag.at, text: `Answer ${w.id}: ${clip(w.flag.text, 90)}` });
     }
+    // w5577: a hand-up left unfiled 12 h is its person's card: file or drop the follow-ups.
+    else if (handUpCardOf(w) && (w.handedUp?.to ?? []).some((u) => same(u, me.userId))) out.push({ w, ask: 'answer', at: w.handedUp!.card!, text: `File or drop ${w.id}'s handed-up follow-ups` });
   }
   return out.sort((a, b) => a.at.localeCompare(b.at));
 }

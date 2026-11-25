@@ -9,7 +9,8 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
 import {
@@ -56,7 +57,7 @@ import { autoApproveProblem, cleanBlock, cleanLine, crashFacts, crashKinship, cr
 import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { findingTargets, recordFinding } from './findings.ts';
-import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_AUTOFILE_MS, HAND_UP_RESEND_MS, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
+import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_CARD_MS, HAND_UP_RESEND_MS, handUpPerson, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
 import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn, warmText } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, needsWindow, saysNone } from '../shared/desktop.ts';
@@ -87,9 +88,10 @@ import { permissionAccess, permissionWhat, type PermissionAccess } from '../shar
 import { OPS_ID, OPS_PEOPLE } from './opsWorker.ts';
 import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPersonForWork } from './vault.ts';
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
+import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
-import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
+import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
 import { failureLine, failureOf, failurePriority, kindOfKey, structuredFailure, wordFailure, type Failure } from './failurePriority.ts';
 import { openQuestionsOf } from './reports.ts';
@@ -656,6 +658,8 @@ export interface WorkInput {
   repo?: string;
   /** w1098: what it needs of a computer when `repo` does not say: `game` (a game sandbox with an editor) or `agent` (only an agent slot). */
   needs?: 'game' | 'agent';
+  /** w5507: in a turn a relayed message joined, the person's own words that ask for it, quoted from their message. */
+  words?: string;
 }
 
 /** An operator's ffdev turn FFBox handed over (server/devRequests.ts), its files already in the attachment store. */
@@ -1051,7 +1055,8 @@ export class Orchestrators {
     const now = this.now().getTime();
     const owners = ownersPair(owner.userId, to.userId);
     // Between owners only turns no person started count, and only within the hour (w627).
-    const loop = owners && !own && chat.turnFrom !== 'human' ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
+    // w5507: a turn a relayed message joined counts too: its text may be what asks for the message.
+    const loop = owners && !own && !this.turnOwnWords(chat).own ? (this.ownerLoop.get(key) ?? []).filter((at) => now - at < 3_600_000) : undefined;
     if (loop && loop.length >= OWNER_LOOP_MESSAGES_PER_HOUR) {
       throw new Error(
         `${OWNER_LOOP_MESSAGES_PER_HOUR} messages to ${to.displayName} in the last hour in turns no person started (a [person message], a report, a timer): the loop guard between ${owner.displayName}'s and ${to.displayName}'s orchestrators (w627). ` +
@@ -1622,120 +1627,99 @@ It is for your part of the work, not an answer to another worker's question.`;
    * w4352: the ledger cleanup's step for a request whose handed-up follow-ups are not filed (w2969). About 20 requests, most
    * of them Ben's, sat 5 h to 8 days with their PRs merged, waiting on an orchestrator that had been told once and reminded
    * once at 6 h; a stalled request was never reminded at all. Now its requester's orchestrator is sent them again 2 h after
-   * the hand-up (once), and 12 h after it FF Factory files them itself (autoFileHandUps) and closes the request on its kept DONE.
+   * the hand-up (once), and 12 h after it they become a Waiting-on-input card for that person (once): File them or Drop them
+   * (fileHandUps, dropHandUps). w5577 (rogue-worker audit w5451, item 19; lothsahn: "File it: after 12 h an unfiled hand-up
+   * becomes a card for me, never files itself"): until then FF Factory filed them itself here, so a hijacked or careless
+   * worker's hand-up could start paid work with no person or orchestrator choosing it.
    */
-  handUpStep(w: WorkItem): 'resent' | 'filed' | undefined {
+  handUpStep(w: WorkItem): 'resent' | 'card' | undefined {
     const h = w.handedUp;
     if (!h || !handUpsPending(w)) return undefined;
     const age = this.now().getTime() - (Date.parse(h.at) || 0);
-    if (age >= HAND_UP_AUTOFILE_MS) {
-      this.autoFileHandUps(w);
-      return 'filed';
+    const hours = Math.round(age / 3_600_000);
+    const person = handUpPerson(w);
+    if (age >= HAND_UP_CARD_MS) {
+      if (h.card) return undefined;
+      h.card = this.now().toISOString();
+      this.stamp(w, `${HAND_UP_TAG} ${handUpsPending(w)} still not filed ${hours} h after the hand-up: a card for ${person.displayName} now, to file or drop them; FF Factory files nothing by itself (w5577)`);
+      this.store.putWork(w);
+      console.log(`ledger: ${HAND_UP_TAG} ${w.id}: a card for ${person.userId} (${handUpsPending(w)} unfiled, ${hours} h; w5577)`);
+      return 'card';
     }
     if (age < HAND_UP_RESEND_MS || h.remindedAt) return undefined;
     const to = [w.requestedBy, ...w.requesters].filter((r) => h.to.includes(r.userId)).slice(0, 1);
     h.remindedAt = this.now().toISOString();
-    const hours = Math.round(age / 3_600_000);
-    this.stamp(w, `${HAND_UP_TAG} sent again to ${to[0]?.displayName ?? 'nobody'}'s orchestrator: ${handUpsPending(w)} still not filed ${hours} h after the hand-up; FF Factory files them itself at 12 h (w4352)`);
+    this.stamp(w, `${HAND_UP_TAG} sent again to ${to[0]?.displayName ?? 'nobody'}'s orchestrator: ${handUpsPending(w)} still not filed ${hours} h after the hand-up; at 12 h they become a card for ${person.displayName} (w5577)`);
     this.store.putWork(w);
     if (!to.length) return undefined;
     this.toPeople(
       to,
       `${handUpText(w, h.worker, to[0].displayName, { count: h.count, items: h.items, line: h.line }, '')}\n\n` +
         `Sent again: ${handUpsPending(w)} of them are still not filed, ${hours} h after the hand-up. File or drop them now. ` +
-        `Left unfiled 12 h after the hand-up, FF Factory files them itself as ${to[0].displayName}'s low-priority requests, drops any that open or recently done work already covers, and closes ${w.id} (w4352).`,
+        `Left unfiled 12 h after the hand-up, they become a card for ${to[0].displayName} on the Waiting on input tab to file or drop; FF Factory never files them by itself (w5577).`,
     );
     return 'resent';
   }
 
+  /** w5577: the hand-up's card is for the person it was handed up to: the request and its pending hand-up, or why not. */
+  private handUpCardFor(id: string, by: Requester): { w: WorkItem; h: WorkHandedUp } {
+    const w = this.store.work.get(id.trim().toLowerCase());
+    const h = w?.handedUp;
+    if (!w || !h || !handUpsPending(w)) throw new Error(`${w?.id ?? id} has no handed-up follow-ups waiting to be filed or dropped`);
+    if (!h.to.some((u) => same(u, by.userId))) throw new Error(`${w.id}'s follow-ups were handed up to ${handUpPerson(w).displayName}, who files or drops them`);
+    return { w, h };
+  }
+
   /**
-   * w4352: files the handed-up follow-ups a requester's orchestrator left unfiled 12 h: each as that person's request at low
-   * priority, related to the source request, unless open or recently done work covers it. The duplicate check is the FFBox
-   * dev request's (rankBoard over its title, and over its title with its brief, within intake.lookbackDays: a high-band open,
-   * stalled or done request covers it); the source request itself never counts. A covered one is dropped, with a note on
-   * both requests naming what covers it. Then the source request closes on its kept DONE (recheckDone); with no DONE kept,
-   * the ledger cleanup goes on with it as with any merged request.
+   * w5577: the hand-up card's File: its person's click files the follow-ups through their own orchestrator's file_follow_ups
+   * (or, with no briefs, one request_work that points at the report), so every request_work limit holds: the filing budget,
+   * a repeat of an open request, a gated call. A follow-up filed already returns as the repeat it is, never twice.
    */
-  private autoFileHandUps(w: WorkItem) {
-    const h = w.handedUp!;
-    const owner = [w.requestedBy, ...w.requesters].find((r) => h.to.includes(r.userId)) ?? w.requestedBy;
-    const hours = Math.round((this.now().getTime() - (Date.parse(h.at) || 0)) / 3_600_000);
-    // A hand-up read from a report has no briefs, only its line: one request that points at the report.
-    const items = h.items.length
-      ? h.items
-      : [
-          {
-            title: `Follow-ups of ${w.id}: ${clip(w.title, 90)}`,
-            brief: `Worker ${h.worker} on ${w.id} "${clip(w.title, 100)}" wrote ${h.count} follow-up request${h.count === 1 ? '' : 's'} it could not file, in its report: "${clip(h.line ?? '', 600)}". Read ${w.id}'s findings (read_work) for the briefs, and do each.`,
-          },
-        ];
-    const lookback = this.d.cfg.intake?.lookbackDays ?? 14;
-    const filed: string[] = [];
-    const dropped: { title: string; by: string; why: string }[] = [];
-    for (const i of items) {
-      const title = clip(i.title.replace(/\s+/g, ' ').trim(), 120);
-      const ranked = [...this.rankBoard({ keys: [], title }, lookback, DEFAULT_THRESHOLDS), ...this.rankBoard({ keys: [], title, summary: clip(i.brief, 1500) }, lookback, DEFAULT_THRESHOLDS)];
-      const cover = ranked
-        .filter((x) => x.band === 'high' && x.w.id !== w.id && (isOpen(x.w) || x.w.status === 'stalled' || x.w.status === 'done'))
-        .sort((a, b) => b.score - a.score || a.w.id.localeCompare(b.w.id))[0];
-      if (cover) {
-        dropped.push({ title, by: cover.w.id, why: cover.why });
-        this.stamp(cover.w, `covers follow-up "${clip(title, 80)}" handed up on ${w.id}, so FF Factory did not file it again (${cover.why}; w4352)`);
-        this.store.putWork(cover.w);
-        continue;
-      }
-      const now = this.now().toISOString();
-      const brief = clip(
-        `${i.brief}\n\nHanded up by worker ${h.worker} on ${w.id} "${clip(w.title, 100)}" (w2969) and filed by FF Factory at low priority: ${owner.displayName}'s orchestrator had not filed it ${hours} h after the hand-up (w4352). The brief is the worker's words. Raise its priority, or close it if it is not wanted.`,
-        8000,
-      );
-      const placed = resolveNeeds({ ...(w.repo ? { repo: w.repo } : {}), title, brief }, repoSlug(this.d.cfg.repo.url));
-      const f: WorkItem = {
-        id: `w${++this.store.workSeq}`,
-        title,
-        brief,
-        priority: 'low',
-        relatedIds: [w.id],
-        keys: textKeys(title, this.knownBranches()),
-        requestedBy: owner,
-        requesters: [owner],
-        humanAsked: false,
-        status: 'new',
-        createdAt: now,
-        updatedAt: now,
-        sessionIds: [],
-        needs: placed.needs,
-        ...(w.repo ? { repo: w.repo } : {}),
-        overlaps: [],
-        asks: 0,
-        log: [],
-      };
-      f.overlaps = findOverlaps({ keys: f.keys, title: f.title }, this.pool(f.id)).filter((o) => o.ref !== w.id);
-      this.stamp(f, `filed by FF Factory for ${owner.displayName} at low priority: a follow-up worker ${h.worker} handed up on ${w.id}, unfiled ${hours} h (w4352); needs ${placed.needs === 'agent' ? 'an agent slot only' : 'a game sandbox'} (${placed.how})`);
-      this.store.putWork(f);
-      this.gatherForDispatcher(owner, requestNotice(f));
-      filed.push(f.id);
-    }
-    this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
-    h.filed.push(...filed);
-    h.autoFiled = { at: this.now().toISOString(), filed, dropped };
-    const what = [
-      filed.length ? `filed ${filed.join(', ')} at low priority` : '',
-      dropped.length ? `dropped ${dropped.map((d) => `"${clip(d.title, 60)}" (covered by ${d.by}: ${d.why})`).join('; ')}` : '',
-    ]
-      .filter(Boolean)
-      .join('; ');
-    this.stamp(w, `${HAND_UP_TAG} not filed by ${owner.displayName}'s orchestrator ${hours} h after the hand-up: FF Factory ${what} (w4352)`);
+  fileHandUps(id: string, by: Requester): { text: string; left: number } {
+    const { w, h } = this.handUpCardFor(id, by);
+    this.stamp(w, `${by.displayName} chose File on the card for its ${handUpsPending(w)} handed-up follow-ups (w5577)`);
     this.store.putWork(w);
-    console.log(`ledger: ${HAND_UP_TAG} ${w.id}: auto-filed ${filed.join(', ') || 'none'}, dropped ${dropped.length} (w4352)`);
-    if (h.to.length) {
-      this.toPeople(
-        [owner],
-        `[follow-ups filed] ${w.id} "${clip(w.title, 120)}": the follow-ups its worker ${h.worker} handed up were not filed ${hours} h after the hand-up, so FF Factory ${what}. ` +
-          `Nothing to do unless ${owner.displayName} wants them otherwise: raise one's priority or close it with update_work. Don't file them again (w4352).`,
-      );
+    const chat = this.personalFor(by);
+    let text: string;
+    if (h.items.length) {
+      text = this.fileFollowUps(chat, { request: w.id });
+    } else {
+      // A hand-up read from a report has no briefs, only its line: one request that points at the report.
+      const input = {
+        title: `Follow-ups of ${w.id}: ${clip(w.title, 90)}`,
+        brief: `Worker ${h.worker} on ${w.id} "${clip(w.title, 100)}" wrote ${h.count} follow-up request${h.count === 1 ? '' : 's'} it could not file, in its report: "${clip(h.line ?? '', 600)}". Read ${w.id}'s findings (read_work) for the briefs, and do each.`,
+        related_ids: [w.id],
+      };
+      try {
+        text = this.file(chat, input);
+      } catch (e) {
+        text = `refused: ${e instanceof Error ? e.message : String(e)}`;
+      }
+      // One request stands for every follow-up the report named: once it is filed (countFiledFollowUp), the hand-up is settled.
+      const cur = this.store.work.get(w.id) ?? w;
+      const after = cur.handedUp;
+      if (after?.filed.length && handUpsPending(cur)) {
+        this.stamp(cur, `${after.filed.at(-1)} stands for the ${after.count} follow-ups its report named (w5577)`);
+        after.count = after.filed.length;
+        this.store.putWork(cur);
+        this.recheckDone(w.id, 'its follow-up request is filed (w5577)');
+      }
     }
-    this.recheckDone(w.id, 'FF Factory filed its handed-up follow-ups itself (w4352)');
+    const left = handUpsPending(this.store.work.get(w.id) ?? w);
+    console.log(`ledger: ${HAND_UP_TAG} ${w.id}: ${by.userId} chose File; ${left} left (w5577)`);
+    return { text, left };
+  }
+
+  /** w5577: the hand-up card's Drop: its person does not want the follow-ups; nothing is pending after it, and the request may close on its kept DONE. */
+  dropHandUps(id: string, by: Requester, note?: string): WorkItem {
+    const { w, h } = this.handUpCardFor(id, by);
+    const left = handUpsPending(w);
+    h.dropped = { at: this.now().toISOString(), by: by.displayName, ...(note?.trim() ? { note: clip(note.trim(), 300) } : {}) };
+    this.stamp(w, `${by.displayName} dropped its ${left} unfiled handed-up follow-up${left === 1 ? '' : 's'}${h.dropped.note ? `: "${h.dropped.note}"` : ''} (w5577)`);
+    this.store.putWork(w);
+    console.log(`ledger: ${HAND_UP_TAG} ${w.id}: ${by.userId} dropped ${left} (w5577)`);
+    this.recheckDone(w.id, `${by.displayName} dropped its handed-up follow-ups (w5577)`);
+    return this.store.work.get(w.id) ?? w;
   }
 
   /**
@@ -1950,10 +1934,14 @@ It is for your part of the work, not an answer to another worker's question.`;
     throw new Error('say whom this is for: pass work_id (the request it serves), or for_user (someone the conversation shows asking, or the system payer for work nobody asked for)');
   }
 
-  /** Whether the dispatcher's current turn was started by a person writing to it (the owner, in its chat). */
+  /**
+   * Whether the dispatcher's current turn was started by a person writing to it (the owner, in its chat), and no relayed
+   * message (a [worker update], a [dispatch]) joined it since (w5507): the dispatcher's tools take no quoted words, so
+   * such a turn acts for a request its person asked for (humanAsked) instead.
+   */
   dispatcherHeardPerson(): boolean {
     const h = this.dispatcherId ? this.sessions.sessions.get(this.dispatcherId) : undefined;
-    return !!h && (h.turnFrom ?? h.lastFrom) === 'human';
+    return !!h && this.turnOwnWords(h).own;
   }
 
   // ---------------------------------------------------------------- the ledger
@@ -2386,8 +2374,10 @@ It is for your part of the work, not an answer to another worker's question.`;
     const title = input.title.replace(/\s+/g, ' ').trim();
     const brief = input.brief.trim();
     if (!title || !brief) throw new Error('give a title and a brief');
-    const human = (chat.turnFrom ?? chat.lastFrom) === 'human';
-    const cloneMachine = input.main_clone ? this.mainCloneMachine(owner, input.main_clone, human) : undefined;
+    // w5507: theirs only as their own words: a turn they started that nothing relayed joined, or their words quoted.
+    const mine = this.turnOwnWords(chat, input.words);
+    const human = mine.own;
+    const cloneMachine = input.main_clone ? this.mainCloneMachine(owner, input.main_clone, human, mine.hint) : undefined;
     const cleanupMachine = input.disk_cleanup?.trim() ? this.machineIdOf('disk_cleanup', input.disk_cleanup) : undefined;
     const repeat = repeatOf(this.store.work.values(), owner, title);
     if (repeat) {
@@ -2470,7 +2460,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.gatherForDispatcher(owner, requestNotice(w));
     const overlap = w.overlaps.length ? ` Possible overlap: ${w.overlaps.slice(0, 3).map(overlapLine).join('; ')}. Tell ${owner.displayName}; the dispatcher decides.` : '';
     const urgent = failure && priority !== (input.priority ?? 'normal') ? ` Filed urgent: it is a ${failure.kind} (${failure.why}); desyncs, crashes and hangs are urgent (w4810). Lower it with update_work only if it is not one.` : '';
-    return `Filed ${id} with the dispatcher${w.report ? (w.report.asked === false ? `; marked ${w.report.kind}, but not asked by a person: a worker note, no report for people and no DONE gate (w5223; mark it from a turn of their own words)` : `; its result is a report (${w.report.kind}), which its worker files with file_report`) : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
+    const relayed = !human && (chat.turnFrom ?? chat.lastFrom) === 'human' ? ` Filed as not ${owner.displayName}'s own ask${mine.hint} (w5507): the tools that need their ask refuse it until update_work with their words.` : '';
+    return `${relayed ? relayed.trim() + ' ' : ''}Filed ${id} with the dispatcher${w.report ? (w.report.asked === false ? `; marked ${w.report.kind}, but not asked by a person: a worker note, no report for people and no DONE gate (w5223; mark it from a turn of their own words)` : `; its result is a report (${w.report.kind}), which its worker files with file_report`) : ''}.${overlap} You get a [dispatch] message with its decision.${urgent}`;
   }
 
   /**
@@ -2720,7 +2711,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * `alreadyAsked`: they have it already). Their note answers it; a note by anyone else keeps it with them, and the
    * undecided re-offer (w2217) passes it by, as it does every question. Handed back to the requester, a note of theirs answers it.
    */
-  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean, forOwner = false, before: Requester[] = questionFor(w)): string {
+  private handQuestion(chat: SessionHandle, w: WorkItem, from: Requester, toName: string, note: string | undefined, alreadyAsked?: boolean, forOwner = false, before: Requester[] = questionFor(w), words?: string): string {
     const to = this.personNamed(toName, `to hand ${w.id}'s question to`);
     if (!forOwner && !isFor(w, from.userId) && !questionFor(w).some((r) => same(r.userId, from.userId)) && !this.reviewers().some((r) => same(r.userId, from.userId))) throw new Error(`${w.id} is not ${from.displayName}'s request, nor is its question theirs to hand on`);
     if (!['new', 'question', 'stalled'].includes(w.status)) throw new Error(`${w.id} is ${w.status}: question_for hands on a question it waits on (new, question or stalled). A worker's own wait goes to a person through that worker (message_agent).`);
@@ -2730,7 +2721,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const asks = w.question?.asks ?? open?.asks;
     const at = this.now().toISOString();
     if (note) w.notes = [...(w.notes ?? []), { at, by: from.displayName, text: note.slice(0, 2000) }].slice(-20);
-    w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    w.humanAsked = this.turnOwnWords(chat, words).own;
     w.status = 'question';
     w.stalled = undefined;
     w.flag = undefined;
@@ -2790,7 +2781,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // MAIN-CLONE WORK (w936): grant or take back; with nothing else asked, that is the whole update.
     if (input.main_clone !== undefined) {
-      const cloneLine = this.setMainCloneAccess(chat, owner, w, input.main_clone);
+      const cloneLine = this.setMainCloneAccess(chat, owner, w, input.main_clone, input.words);
       if (!input.note?.trim() && !input.priority && !input.close && !input.reopen && !input.subjects?.length && !input.approve && !input.decline) return cloneLine;
     }
     // SUBJECTS ADDED LATER (w502): the threads and reports a request turned out to be the work for, open or closed.
@@ -2811,7 +2802,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // message (a relayed report, a worker's words) cannot approve anything.
     if (input.approve || input.decline) {
       if (input.approve && input.decline) throw new Error('approve or decline, not both');
-      const turn = this.reactionTurn(chat, { verb: input.approve ? 'approve' : 'decline', refs: [w.id] });
+      const turn = this.reactionTurn(chat, { verb: input.approve ? 'approve' : 'decline', refs: [w.id] }, input.words);
       if (!turn.own) throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}. A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
       const done = input.approve ? this.approveIntake(w.id, owner) : this.declineIntake(w.id, owner, input.note);
       if (turn.words) {
@@ -2851,12 +2842,13 @@ It is for your part of the work, not an answer to another worker's question.`;
         if (!this.isOwnerRole(to.userId)) throw new Error(`${w.id} is ${names(w.requesters)}'s request: another owner moves its question only to an owner, and ${to.displayName} is not one (w3606)`);
         this.stamp(w, `${owner.displayName} (an owner, on ${names(w.requesters)}'s request) moved its question from ${names(asked)} to ${to.displayName}, in their own words: ${this.ownWords(chat, note)}`);
       }
-      const moved = this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked, forOwner, asked);
+      const moved = this.handQuestion(chat, w, owner, input.question_for, note, input.already_asked, forOwner, asked, input.words);
       if (forOwner) this.tellOwnersOfAct(w, owner, `moved the question on it from ${names(asked)} to ${names(w.question?.for ?? [])}`, this.ownWords(chat, note));
       return moved;
     }
-    // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn.
-    w.humanAsked = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn, and
+    // in a turn a relayed message joined only with their words quoted (w5507).
+    w.humanAsked = this.turnOwnWords(chat, input.words).own;
     const what: string[] = [];
     let settledFor: { asked: Requester[]; line: string } | undefined;
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
@@ -3345,16 +3337,47 @@ It is for your part of the work, not an answer to another worker's question.`;
    * #22038: "...close w983 as handled..."`; `use` marks it spent once the action went through, so one click does each
    * thing once. A click that covers nothing here leaves `hint` for the refusal.
    */
-  private reactionTurn(chat: SessionHandle, need: GateNeed): { own: boolean; words?: string; use: () => void; hint: string } {
-    if ((chat.turnFrom ?? chat.lastFrom) === 'human') return { own: true, use: () => {}, hint: '' };
+  private reactionTurn(chat: SessionHandle, need: GateNeed, quoted?: string): { own: boolean; words?: string; use: () => void; hint: string } {
+    const mine = this.turnOwnWords(chat, quoted);
+    if (mine.own) return { own: true, ...(mine.words ? { words: mine.words } : {}), use: () => {}, hint: '' };
     const now = this.now().getTime();
     const live = (this.grants.get(chat.info.id) ?? []).filter((g) => now - g.at < GRANT_MS);
     for (const g of live) {
       const sentence = grantCovers(g, need);
       if (sentence) return { own: true, words: grantWords(g, sentence), use: () => void g.used.push(grantKey(need)), hint: '' };
     }
-    const hint = live.length ? ` (${live.map((g) => `${g.emoji} on #${g.seq}`).join(', ')} covers only the action and the requests one sentence of that message proposes together; none of them proposes this)` : '';
+    const hint = mine.hint + (live.length ? ` (${live.map((g) => `${g.emoji} on #${g.seq}`).join(', ')} covers only the action and the requests one sentence of that message proposes together; none of them proposes this)` : '');
     return { own: false, hint, use: () => {} };
+  }
+
+  /**
+   * Whether this turn is its person's own by their words (w5507): a turn they started that nothing else joined, or one
+   * that a message not theirs joined (SessionHandle.turnRelayed: a [worker update], a [dispatch], an FFBox relay) when
+   * `quoted` is found verbatim in a message of theirs in this turn. A turn the harness started is never theirs here
+   * (reactionTurn adds a click). `words` is the record to keep for a quote; `hint` says why a relayed turn fell short.
+   */
+  turnOwnWords(chat: SessionHandle, quoted?: string): { own: boolean; words?: string; hint: string } {
+    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') return { own: false, hint: '' };
+    if (!chat.turnRelayed) return { own: true, hint: '' };
+    const n = this.ownerOf(chat.info)?.displayName ?? 'your person';
+    if (quoted?.trim() && inPersonWords(quoted, this.turnPersonMessages(chat))) return { own: true, words: `"${clip(quoted.trim(), 300)}"`, hint: '' };
+    return {
+      own: false,
+      hint: quoted?.trim()
+        ? `; words "${clip(quoted, 120)}" is not in ${n}'s own message in this turn: quote them verbatim (at least a few words), never your summary or a relayed message's`
+        : `; a message that is not ${n}'s own (a worker update, a dispatch notice or a relayed text) joined this turn, so this needs ${n}'s own words from this turn quoted in \`words\` (verbatim, at least a few words), or their click on a card (w5507)`,
+    };
+  }
+
+  /** The person's own messages in the current turn (w5507): from the one that opened it on, `from` 'human' only. */
+  private turnPersonMessages(chat: SessionHandle): string[] {
+    const events = this.store.readTranscript(chat.info.id, 400);
+    const start = chat.turnId ? events.findIndex((e) => e.kind === 'user' && e.uuid === chat.turnId) : -1;
+    return events
+      .slice(Math.max(start, 0))
+      .filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human')
+      .slice(start >= 0 ? 0 : -1)
+      .map((e) => e.text);
   }
 
   /** Whether a click of the person's covers `need` now, spending it: the ops worker's gates (server/opsWorker.ts) ask this. */
@@ -3858,7 +3881,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * a request that explicitly asks for work in that clone, and never on one from the intake (its text is not a person's).
    * Taking it back needs no turn: it narrows. A running worker's guard changes with its next message.
    */
-  private setMainCloneAccess(chat: SessionHandle, owner: Requester, w: WorkItem, machine: string | false): string {
+  private setMainCloneAccess(chat: SessionHandle, owner: Requester, w: WorkItem, machine: string | false, words?: string): string {
     if (!isFor(w, owner.userId)) throw new Error(`${w.id} is not ${owner.displayName}'s request: only its own people grant its workers a machine's main clone`);
     if (machine === false || machine === '') {
       if (!w.mainCloneAccess) return `${w.id} grants no main-clone work.`;
@@ -3869,7 +3892,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       return `${w.id}: main-clone work on ${was} taken back (a running worker's guard changes with its next message).`;
     }
     if (w.source) throw new Error(`${w.id} came from the intake (${w.source.kind}): its text is not a person's own, so it never grants work in a main clone`);
-    const turn = this.reactionTurn(chat, { verb: 'main_clone', refs: [w.id], also: [machine] });
+    const turn = this.reactionTurn(chat, { verb: 'main_clone', refs: [w.id], also: [machine] }, words);
     const id = this.mainCloneMachine(owner, machine, turn.own, turn.hint);
     if (w.mainCloneAccess?.machine === id) return `${w.id} already grants work in ${id}'s main clone.`;
     w.mainCloneAccess = { machine: id, by: owner.displayName, at: this.now().toISOString() };
@@ -3888,7 +3911,7 @@ It is for your part of the work, not an answer to another worker's question.`;
    * alone is noteForOther's (w677: another owner's request only). The request's people hear who did it and why; the
    * dispatcher hears a cancel or a reopen, as for their own.
    */
-  private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; question_for?: string }): string {
+  private closeForOther(chat: SessionHandle, by: Requester, w: WorkItem, input: { note?: string; priority?: WorkPriority; close?: 'done' | 'cancelled'; reopen?: boolean; question_for?: string; words?: string }): string {
     const whose = `${names(w.requesters)}'s`;
     const refused = `${w.id} is ${whose} request, not ${by.displayName}'s`;
     if (!this.isOwnerRole(by.userId)) throw new Error(`${refused}; only an owner closes or reopens another person's request, or adds a note to another owner's`);
@@ -3900,7 +3923,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // reopens as one's own does, on the orchestrator's judgment in any turn (a timer, a [ledger cleanup] follow-up). A
     // member's request still needs the owner's own words in this turn.
     // w1039: a click of theirs on the orchestrator's proposal to close it is their own words for the close (not for a reopen).
-    const turn = this.reactionTurn(chat, input.close ? { verb: input.close === 'done' ? 'close_done' : 'close_cancelled', refs: [w.id] } : { verb: 'job' });
+    const turn = this.reactionTurn(chat, input.close ? { verb: input.close === 'done' ? 'close_done' : 'close_cancelled', refs: [w.id] } : { verb: 'job' }, input.words);
     const own = turn.own;
     const betweenOwners = this.isOwnerRole(w.requestedBy.userId);
     if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}`);
@@ -3951,10 +3974,12 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (!answer && !input.priority && !input.question_for) return false;
     const whose = `${names(w.requesters)}'s`;
     const act = input.question_for ? 'moves its question' : input.priority ? 'changes its priority' : 'answers its question';
-    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') {
-      // A note alone outside their turn stays a note (w677); a priority or a move waits for their own words.
+    const mine = this.turnOwnWords(chat, input.words);
+    if (!mine.own) {
+      // A note alone outside their turn stays a note (w677); a priority or a move waits for their own words. A turn a
+      // relayed message joined takes their words quoted (w5507).
       if (answer) return false;
-      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only in a turn ${by.displayName} started with their own words, and this turn is not theirs (a check-in, a timer, a worker's report or a relayed message) (w3606)`);
+      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only in a turn ${by.displayName} started with their own words, and this turn is not theirs (a check-in, a timer, a worker's report or a relayed message) (w3606)${mine.hint}`);
     }
     if (input.priority && input.question_for) throw new Error('question_for stands alone (a note giving the reason is fine): it hands the open question on and keeps the request open');
     const asked = questionFor(w);
@@ -5860,7 +5885,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return out;
   }
 
-  workerBlocked(sessionId: string, a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; disk?: boolean; what: string; head?: string; mergeOnGreen?: string }): string {
+  workerBlocked(
+    sessionId: string,
+    a: { request?: string; requests?: string[]; reports?: string[]; prs?: string[]; deploys?: string[]; disk?: boolean; what: string; head?: string; mergeOnGreen?: string; prHeads?: ReadonlyMap<string, PrHealth | undefined> },
+  ): string {
     const w = this.workerRequest(sessionId, a.request, 'blocked_on', { reopen: true });
     const what = (a.what ?? '').split(/ +/).join(' ').trim();
     if (!what) throw new Error('say what it waits for (what), for example: w727 PR 1291 and w752 fix merged into master');
@@ -5904,7 +5932,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const gates = asked.map((b) => this.makeGate(b, now.toISOString(), `worker ${sessionId}`)).filter((g, i, all) => all.findIndex((x) => sameGate(x, g)) === i);
     const before = gatesOf(w);
     if (gates.length > MAX_GATES) throw new Error(`at most ${MAX_GATES} things at once`);
-    const pilot = this.mergeOnGreenAsk(w, sessionId, gates, a.head, a.mergeOnGreen);
+    const pilot = this.mergeOnGreenAsk(w, sessionId, gates, a.head, a.mergeOnGreen, a.prHeads);
     // w2153: this worker's wait replaces its own gates and the dispatcher's, never another worker's on the same request.
     const kept = othersGates(w, sessionId).filter((k) => !gates.some((g) => sameGate(g, k)));
     const all = [...kept, ...gates];
@@ -6260,7 +6288,14 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * that does not fit (out of the arm, other gates, no head, no DONE line for this request), the wait is set without it and
    * the worker hears why. The report's DONE is checked when it is filed (doneMarkers), as any report's is.
    */
-  private mergeOnGreenAsk(w: WorkItem, sessionId: string, gates: WorkBlocker[], head: string | undefined, report: string | undefined): { merge?: true; rearmed?: true; note?: string } {
+  private mergeOnGreenAsk(
+    w: WorkItem,
+    sessionId: string,
+    gates: WorkBlocker[],
+    head: string | undefined,
+    report: string | undefined,
+    prHeads?: ReadonlyMap<string, PrHealth | undefined>,
+  ): { merge?: true; rearmed?: true; note?: string } {
     const inArm = this.d.mergeOnGreenPilot?.(w.id) === true;
     const ciOnly = gates.length === 1 && gates[0].kind === 'ci';
     // w3906: a report kept from a merge GitHub refused as not mergeable re-arms the same pull request's merge when none is given.
@@ -6286,10 +6321,27 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
             ? `the report has no "DONE: ${w.id}" line, nor "LEG DONE: ${w.id} <your leg>" for one leg of it (work left after the merge: leave out merge_on_green)`
             : undefined;
     if (why) return { note: `merge_on_green ignored: ${why}; you are resumed when CI finishes, as usual.` };
-    gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId };
+    // w5549: only the worker's own pull request, by its head as GitHub reads it (Agents.declareBlocked), never the worker's word.
+    const ref = gates[0].ref!;
+    const pr = prHeads?.get(ref);
+    const notOwn = mergeOwnerProblem(ref, pr, this.mergeOwnerOf(w, sessionId));
+    if (notOwn) throw new Error(mergeOwnerRefusal(ref, notOwn));
+    gates[0].mergeOnGreen = { head: head!.trim().toLowerCase(), report: text.slice(0, MERGE_ON_GREEN_REPORT_CHARS), session: sessionId, headRef: pr!.headRef! };
     w.keptMergeReport = undefined;
     this.stamp(w, `${MERGE_ON_GREEN_MARK}: worker ${sessionId} ${kept ? `re-armed with the report kept from the refused merge at ${kept.head.slice(0, 12)} (w3906)` : 'left its after-merge report'} (${clip(firstLine(text), 160)}); FF Factory merges ${gates[0].ref} on green at ${head!.trim().slice(0, 12)}`);
     return { merge: true, ...(kept ? { rearmed: true as const } : {}) };
+  }
+
+  /** w5549: what FF Factory's own records say is the worker's: its sandbox's branch, the request's own branch, the game repo. */
+  private mergeOwnerOf(w: WorkItem, sessionId: string): MergeOwner {
+    const i = this.store.sessions.get(sessionId);
+    const sb = i?.machineId && i.machineSandbox ? this.store.machines.get(i.machineId)?.sandboxes?.find((x) => x.id === i.machineSandbox) : undefined;
+    return {
+      request: w.id,
+      sandboxBranches: i ? [workerBranch(i, sb), sb?.branch] : [],
+      ...(repoSlug(this.d.cfg.repo.url) ? { gameRepo: repoSlug(this.d.cfg.repo.url)! } : {}),
+      ...(w.source?.branch ? { sourceBranch: w.source.branch } : {}),
+    };
   }
 
   /**

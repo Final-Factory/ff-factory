@@ -13,9 +13,13 @@
   where player_slots.py finds the slots outside the daemon (a CI runner, a person's shell).
 
   -AgentNode names the agents' node (<root>\tools\node\node.exe, server/agentNode.ts, w1742): one inbound allow rule
-  for that exact path, every profile, in the group "Final Factory agent node", the same as a player folder's. Its own
+  for that exact path, any protocol, every profile, from Tailscale only (100.64.0.0/10 and fd7a:115c:a1e0::/48;
+  loopback is never filtered), in the group "Final Factory agent node" (w5581; before it, from any address). Its own
   listeners bind 127.0.0.1 (ff-factory's server/listenLoopback.test.ts), which never prompts; the rule is for any other
-  node listen, so it never prompts either. -StaleUnder (the root's tmp folder) deletes the rules earlier prompts left for programs
+  node listen, so it never prompts either: on BEAST the instance portals (docs/instances.md) run on this node and their
+  daemons and people reach them over the tailnet. It names no port: a new instance takes a new one (scripts/instance/new.ts
+  --port). Back to any address (the revert, docs/worker-install.md "The agent node's firewall rule"):
+  Get-NetFirewallRule -Group 'Final Factory agent node' | Set-NetFirewallRule -RemoteAddress Any, elevated. -StaleUnder (the root's tmp folder) deletes the rules earlier prompts left for programs
   under it: a worker's own node copies, each in a session temp folder the harness has since removed.
 
   -FfuServer names ffu-server's paths in the ffu slots (machine/ffuSlots.ts ffuServerExes, w5442): one inbound TCP allow
@@ -61,18 +65,22 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
-function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One, [switch]$Tailnet) {
+function Add-Allow([string]$exe, [string]$name, [string]$group, [string]$why, [switch]$One, [switch]$Tailnet, [string]$Protocol = 'TCP') {
     # A Block rule an earlier, dismissed prompt left for this exact path (outside our groups) would win over ours.
-    # Allow rules people made stay: an uninstall then leaves the path as it found it.
+    # Allow rules people made stay: an uninstall then leaves the path as it found it. Except for a tailnet-only path
+    # (-Tailnet, w5581): there an inbound Allow from outside our groups (an "allow access" prompt's, any address) would
+    # undo the narrowing, and these are the install's own programs at its own paths, so it goes too.
     $stale = @(Get-NetFirewallApplicationFilter -Program $exe -ErrorAction SilentlyContinue |
-               Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Group -ne $FfuGroup -and $_.Action -eq 'Block' })
+               Get-NetFirewallRule -ErrorAction SilentlyContinue | Where-Object { $_.Group -ne $SlotGroup -and $_.Group -ne $UnityGroup -and $_.Group -ne $FfuGroup -and $_.Group -ne $NodeGroup -and
+                   ($_.Action -eq 'Block' -or ($Tailnet -and $_.Action -eq 'Allow' -and [string]$_.Direction -eq 'Inbound')) })
     if ($stale.Count) {
-        Say "  ${name}: removing $($stale.Count) earlier Block rule(s) for $exe"
+        Say "  ${name}: removing $($stale.Count) earlier rule(s) for $exe outside the install's groups"
         $stale | Remove-NetFirewallRule
     }
     if ($Tailnet) {
-        # ffu-server (w5442): inbound TCP from the tailnet only, every profile.
-        New-NetFirewallRule -DisplayName $name -Group $group -Direction Inbound -Program $exe -Protocol TCP `
+        # ffu-server (w5442, TCP) and the agents' node (w5581, any protocol): inbound from the tailnet only, every
+        # profile. Loopback is never filtered, so local callers still reach them.
+        New-NetFirewallRule -DisplayName $name -Group $group -Direction Inbound -Program $exe -Protocol $Protocol `
             -RemoteAddress $script:Tailnet -Action Allow -Profile Any -Description $why | Out-Null
         return 1
     }
@@ -118,7 +126,7 @@ try {
         }
     }
     if ($AgentNode) {
-        $made += Add-Allow $AgentNode 'Final Factory agent node' $NodeGroup "The agents' node at its one fixed path (server/agentNode.ts, w1742)" -One
+        $made += Add-Allow $AgentNode 'Final Factory agent node' $NodeGroup "The agents' node at its one fixed path, from Tailscale only (server/agentNode.ts, w1742, w5581)" -Tailnet -Protocol Any
     }
     $ffu = 0
     foreach ($exe in @($FfuServer -split ';' | Where-Object { $_ })) {
@@ -144,7 +152,7 @@ try {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Config) | Out-Null
         [IO.File]::WriteAllText($Config, (@{ root = $Root; layout = 'sandbox-pairs'; count = $Pairs } | ConvertTo-Json))
     }
-    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($AgentNode) { ", one for the agents' node $AgentNode" } else { '' })$(if ($ffu) { ", $ffu for ffu-server in the ffu slots (Tailscale only)" } else { '' })$(if ($staleGone) { "; removed $staleGone rule(s) earlier prompts left under $StaleUnder" } else { '' })$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
+    Say "OK: $made allow rule(s): $Root\slot1-0..slot$Pairs-1 ($(2 * $Pairs) player folders, one rule each) and $editors Unity editor(s)$(if ($AgentNode) { ", one for the agents' node $AgentNode (Tailscale only)" } else { '' })$(if ($ffu) { ", $ffu for ffu-server in the ffu slots (Tailscale only)" } else { '' })$(if ($staleGone) { "; removed $staleGone rule(s) earlier prompts left under $StaleUnder" } else { '' })$(if ($GroupSuffix) { ' (test groups; no slot config)' } else { "; slot root recorded in $Config" })."
 } catch {
     Say "FAILED: $($_.Exception.Message)"
     exit 1

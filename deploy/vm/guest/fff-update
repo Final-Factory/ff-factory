@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
 # fff-update: the portal VM's updater (deploy/vm/guest; /usr/local/lib/fff/fff-update), in place of supervise.ps1,
-# update.ps1 and update-steps.ps1. Root; git and npm run as fff.
+# update.ps1 and update-steps.ps1. Root; npm and the web build run as fff, in a release that is not yet ready.
 #
 # Releases are git worktrees of one bare clone, $FFF_ROOT/app/releases/<sha12>, each with its own node_modules and
 # web build; $FFF_ROOT/app/current is the one fff-portal.service runs, previous the one before it. So the new code is
 # built while the old one runs, and the switch at the restart takes a second.
+#
+# Root runs a release's own install.sh and installs its scripts, so the clone, the release folders, the links and the
+# record of the prepared release ($APP/update.prepared.json) are root's and read-only to fff (w5505): a release is built
+# as fff, then made root's (harden_release), and root takes one only when release_problem (lib.sh) finds nothing wrong.
 #
 #   fff-update request       fff-update.path started it: data/update.wanted is there (request_app_update, "fffctl
 #                            update" or the portal's automatic deploy, w1634). Builds origin/<branch> (or the commit its
@@ -23,6 +27,10 @@
 #                            origin/<branch>) and print the release folder.
 #   fff-update init [REF]    the first release (install.sh).
 set -o errexit -o nounset -o pipefail
+# What root writes here is for fff to read (the clone's objects: the bundles a machine updates from; the releases fff runs).
+# activate runs inside fff-portal.service, whose UMask=0077 a "+" ExecStartPre keeps, so without this its fetch wrote
+# objects only root could read and every machine's update bundle failed (w5593). Private files set their own mode.
+umask 022
 # shellcheck source=lib.sh
 . "${FFF_LIB:-/usr/local/lib/fff}/lib.sh"
 need_root
@@ -35,52 +43,116 @@ current_dir() { readlink -e "$CURRENT" 2>/dev/null || true; }
 # deps_from OLD NEW SUB: NEW/SUB/node_modules as hard links of OLD's when SUB's package.json and package-lock.json are
 # the same in both, which is what npm ci would install anyway (seconds instead of half a minute). The caches tools write
 # into node_modules are left out, so nothing writes through a link into the running release's files.
+# The old release must be a checked root's one; the links are root's (the kernel's protected_hardlinks refuses fff a
+# link to root's file), and only the folders become fff's for the build (prepare), so fff can add files but change none
+# of them. Run while NEW is still root's (w5531).
 deps_from() {
   local old=$1 new=$2 sub=$3 f
-  [ -n "$old" ] && [ -f "$old.ready" ] && [ -d "$old/$sub/node_modules" ] || return 1
+  [ -n "$old" ] && release_ok "$old" && [ -d "$old/$sub/node_modules" ] && [ ! -L "$old/$sub/node_modules" ] || return 1
   for f in package.json package-lock.json; do cmp -s "$old/$sub/$f" "$new/$sub/$f" || return 1; done
   rm -rf "$new/$sub/node_modules"
-  as_fff cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
+  cp -al "$old/$sub/node_modules" "$new/$sub/node_modules" || { rm -rf "$new/$sub/node_modules"; return 1; }
   rm -rf "$new/$sub/node_modules/.cache" "$new/$sub/node_modules/.vite" "$new/$sub/node_modules/.tmp"
+}
+
+# ensure_repo: root's bare clone of $FFF_REPO_URL. One fff made (before w5505) is replaced by a new clone, since fff
+# could have changed its config, hooks or objects; the releases fff built from it keep their worktree records (HEAD,
+# commondir and gitdir, checked), so fff's own git there still reads their commit until they are pruned. fff's git
+# reads root's clone and releases (the server's version, bundles) through its safe.directory entries.
+ensure_repo() {
+  local old="" w n h g
+  if [ -e "$REPO" ] || [ -L "$REPO" ]; then
+    if [ -L "$REPO" ] || ! root_owned "$REPO"; then
+      old=$(mktemp -d "$APP/.repo-fff.XXXXXX")
+      mv -T "$REPO" "$old/repo.git"
+    fi
+  fi
+  if [ ! -d "$REPO" ]; then
+    log "cloning $FFF_REPO_URL (root's clone)"
+    rm -rf "$REPO.new"
+    git_root clone --bare --quiet "$FFF_REPO_URL" "$REPO.new" >&2 || { rm -rf "$REPO.new"; die "git clone of $FFF_REPO_URL failed"; }
+    git_root -C "$REPO.new" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+    git_root -C "$REPO.new" fetch --quiet origin >&2 || { rm -rf "$REPO.new"; die "git fetch of $FFF_REPO_URL failed"; }
+    mv -T "$REPO.new" "$REPO"
+  fi
+  if [ -n "$old" ]; then
+    for w in "$old"/repo.git/worktrees/*; do
+      [ -d "$w" ] && [ ! -L "$w" ] || continue
+      n=$(basename "$w")
+      h=$(head -c 100 "$w/HEAD" 2>/dev/null | tr -d '\n') || h=""
+      g=$(head -c 300 "$w/gitdir" 2>/dev/null | tr -d '\n') || g=""
+      [[ $h =~ ^[0-9a-f]{40}$ ]] && [[ $n =~ ^[0-9a-zA-Z._-]+$ ]] && [[ $g =~ ^$RELEASES/[0-9a-f]{12}/\.git$ ]] || continue
+      [ ! -e "$REPO/worktrees/$n" ] || continue
+      install -d -m 0755 "$REPO/worktrees" "$REPO/worktrees/$n"
+      printf '%s\n' "$h" >"$REPO/worktrees/$n/HEAD"
+      printf '../..\n' >"$REPO/worktrees/$n/commondir"
+      printf '%s\n' "$g" >"$REPO/worktrees/$n/gitdir"
+    done
+    rm -rf "$old"
+    log "replaced fff's clone with root's"
+  fi
+  chown -R -h root:root "$REPO"
+  # a+rX: fff's git reads every object (bundles, version); this also mends what a run under umask 077 wrote (w5593).
+  chmod -R go-w,a+rX "$REPO"
+  git_root -C "$REPO" remote set-url origin "$FFF_REPO_URL"
+  # git 2.46 or later reads a trailing /* (Ubuntu 26.04 has it).
+  for w in "$REPO" "$RELEASES/*"; do
+    as_fff git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$w" || as_fff git config --global --add safe.directory "$w"
+  done
 }
 
 # prepare [REF]: build REF beside the running release and print its folder. Every step is checked here: this runs in
 # $(...) and under "if", where bash ignores errexit, so a failed npm ci would otherwise still mark the release ready.
 prepare() {
-  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t
+  local ref=${1:-origin/$FFF_BRANCH} on_branch=${2:-} sha dir cur sub t reused
   log "fetching $ref"
   t=$(date +%s)
-  as_fff git -C "$REPO" fetch --prune --quiet origin >&2 || die "git fetch of $FFF_REPO_URL failed"
-  sha=$(as_fff git -C "$REPO" rev-parse --verify --quiet "$ref^{commit}") || die "no commit $ref in $FFF_REPO_URL"
+  own_app
+  ensure_repo
+  git_root -C "$REPO" fetch --prune --quiet origin >&2 || die "git fetch of $FFF_REPO_URL failed"
+  sha=$(git_root -C "$REPO" rev-parse --verify --quiet "$ref^{commit}") || die "no commit $ref in $FFF_REPO_URL"
   # A commit an automatic deploy names (w1634) is only ever one already merged into the branch.
-  if [ "$on_branch" = --on-branch ] && ! as_fff git -C "$REPO" merge-base --is-ancestor "$sha" "origin/$FFF_BRANCH"; then
+  if [ "$on_branch" = --on-branch ] && ! git_root -C "$REPO" merge-base --is-ancestor "$sha" "origin/$FFF_BRANCH"; then
     die "${sha:0:12} is not on origin/$FFF_BRANCH; only merged code is deployed"
   fi
   dir=$RELEASES/${sha:0:12}
   log "fetched ${sha:0:12} in $(($(date +%s) - t)) s"
-  if [ -f "$dir.ready" ] && [ -e "$dir/.git" ]; then
+  if [ -z "$(release_problem "$dir" "$sha")" ]; then
     log "release ${sha:0:12} is already built"
     echo "$dir"
     return 0
   fi
+  [ ! -e "$dir" ] || log "release ${sha:0:12}: $(release_problem "$dir" "$sha"); building it again"
   log "building ${sha:0:12} ($ref) in $dir"
   t=$(date +%s)
   rm -f "$dir.ready"
-  if [ -e "$dir" ]; then as_fff git -C "$REPO" worktree remove --force "$dir" >&2 2>/dev/null || rm -rf "$dir"; fi
-  as_fff git -C "$REPO" worktree prune >&2 || true
-  as_fff git -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
+  if [ -e "$dir" ] || [ -L "$dir" ]; then
+    [ "$(current_dir)" != "$dir" ] || die "$dir is the running release and not fit to run; not removing it under the portal"
+    rm -rf "$dir"
+  fi
+  git_root -C "$REPO" worktree prune >&2 || true
+  git_root -C "$REPO" worktree add --detach --quiet "$dir" "$sha" >&2 || die "git worktree add $dir failed"
   cur=$(current_dir)
+  reused=" "
   for sub in . web; do
     if [ "$cur" != "$dir" ] && deps_from "$cur" "$dir" "$sub"; then
       log "building ${sha:0:12}: $sub dependencies unchanged, node_modules reused from $(basename "$cur")"
-    else
-      log "building ${sha:0:12}: npm ci ($sub)"
-      as_fff_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || die "npm ci in $sub failed"
+      reused+="$sub "
     fi
+  done
+  # fff builds it (npm ci, the web build); harden_release makes it root's afterwards. Given to fff from the bottom up
+  # (-depth, chown -h), so each folder above the one root changes is still root's and fff cannot have swapped it for a
+  # link (w5531); the files of the reused node_modules stay root's links.
+  find "$dir" -depth \( -type d -o \( ! -path "$dir/node_modules/*" ! -path "$dir/web/node_modules/*" \) \) \
+    -exec chown -h "$FFF_USER:$FFF_USER" {} +
+  for sub in . web; do
+    case $reused in *" $sub "*) continue ;; esac
+    log "building ${sha:0:12}: npm ci ($sub)"
+    as_fff_in "$dir/$sub" npm ci --no-audit --no-fund --loglevel=error >&2 || die "npm ci in $sub failed"
   done
   log "building ${sha:0:12}: web build"
   as_fff_in "$dir" npm --prefix web run build --silent >&2 || die "the web build failed"
-  as_fff touch "$dir.ready" || die "could not mark $dir ready"
+  harden_release "$dir" "$sha" >&2 || die "release ${sha:0:12} could not be made root's and read-only"
   log "release ${sha:0:12} built in $(($(date +%s) - t)) s"
   echo "$dir"
 }
@@ -89,7 +161,7 @@ prepare() {
 prune() {
   local keep cur prev prepared d n=0
   cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
-  prepared=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
+  prepared=$(jq -r '.dir // empty' "$PREPARED" 2>/dev/null || true)
   keep=" $cur $prev $prepared "
   for d in $(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p
 ' | sort -rn | cut -d' ' -f2-); do
@@ -97,10 +169,10 @@ prune() {
     n=$((n + 1))
     [ "$n" -gt "$RELEASES_KEEP_EXTRA" ] || continue
     log "removing old release $(basename "$d")"
-    as_fff git -C "$REPO" worktree remove --force "$d" 2>/dev/null || rm -rf "$d"
+    rm -rf "$d"
     rm -f "$d.ready"
   done
-  as_fff git -C "$REPO" worktree prune
+  git_root -C "$REPO" worktree prune
 }
 
 # refresh_scripts DIR: fffctl and the helper scripts from release DIR (install_scripts), so they move with the portal's
@@ -150,8 +222,19 @@ switch_to() {
   [ -z "$cur" ] || mv -Tf "$PREVIOUS.new" "$PREVIOUS"
   ln -sfn "$dir" "$CURRENT.new"
   mv -Tf "$CURRENT.new" "$CURRENT"
-  chown -h "$FFF_USER:$FFF_USER" "$CURRENT" "$PREVIOUS" 2>/dev/null || true
 }
+
+# record_prepared SHA DIR | clear_prepared: the prepared release, root's ($PREPARED: activate takes it from there only),
+# with a copy in data/update.prepared.json for the portal's restart summary and logs (root never reads that one).
+record_prepared() {
+  local tmp
+  tmp=$(mktemp "$APP/.prepared.XXXXXX")
+  jq -n --arg sha "$1" --arg dir "$2" --arg at "$(date -u +%FT%TZ)" '{sha: $sha, dir: $dir, at: $at}' >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$PREPARED"
+  data_write update.prepared.json <"$PREPARED"
+}
+clear_prepared() { rm -f "$PREPARED" "$DATA/update.prepared.json"; }
 
 # not_done WHAT: an update that stopped before any restart: recorded for the portal (update.result.json, which the
 # automatic deploy reads, w1634) and told to the dispatcher with the build log's last lines; the running version stays.
@@ -180,8 +263,10 @@ cmd_request() {
   log "update requested ($reason): building $what beside the running server"
   # The build's output goes to the journal as it happens (fffctl update shows each step from there) and to the build
   # log, whose last lines a failure reports.
-  local buildlog=$APP/last-build.log out=$APP/.prepared-dir
-  rm -f "$out"
+  own_app
+  local buildlog=$APP/last-build.log out
+  out=$(mktemp "$APP/.prepared-dir.XXXXXX")
+  rm -f "$buildlog"
   if ! prepare "$ref" --on-branch 2>&1 >"$out" | tee "$buildlog" >&2; then
     not_done "building $what failed"
   fi
@@ -198,25 +283,33 @@ cmd_request() {
     tell_dispatcher "[app update] Already up to date at ${sha:0:9} (origin/$FFF_BRANCH); nothing was restarted."
     return 0
   fi
-  jq -n --arg sha "$sha" --arg dir "$dir" --arg at "$(date -u +%FT%TZ)" '{sha: $sha, dir: $dir, at: $at}' | data_write update.prepared.json
+  record_prepared "$sha" "$dir"
   jq -n --argjson m "$drain" --arg r "update to ${sha:0:9} ($reason)" --argjson auto "$auto" '{drain: "auto", drainMinutes: $m, reason: $r, update: true, hold: false, auto: $auto}' |
     data_write restart.request
   log "built ${sha:0:12}; asked the server to drain (up to $drain min) and restart"
 }
 
 cmd_activate() {
-  local req=$DATA/update.request dir="" before after err=""
+  local req=$DATA/update.request dir="" sha="" p before after err=""
   [ -f "$req" ] || exit 0
   rm -f "$req"
   before=$(release_sha "$(current_dir)")
-  dir=$(jq -r '.dir // empty' "$DATA/update.prepared.json" 2>/dev/null || true)
-  if [ -z "$dir" ] || [ ! -f "$dir.ready" ]; then
+  # Only root's record names the release; data/update.prepared.json is fff's copy and never read here (w5505).
+  if [ ! -L "$APP" ] && root_owned "$APP" "$PREPARED" && [ ! -L "$PREPARED" ]; then
+    dir=$(jq -r '.dir // empty' "$PREPARED" 2>/dev/null || true)
+    sha=$(jq -r '.sha // empty' "$PREPARED" 2>/dev/null || true)
+    p=$(release_problem "$dir" "$sha")
+    if [ -n "$p" ]; then warn "the prepared release is not taken: $p"; dir=""; fi
+  elif [ -f "$DATA/update.prepared.json" ]; then
+    warn "no prepared release recorded by root ($PREPARED); data/update.prepared.json is not taken"
+  fi
+  if [ -z "$dir" ]; then
     # An update the server handed over without a prepared release: one cut off by a crash (server/index.ts), or an
     # old-style request. Build it now, while the portal is down.
     log "no prepared release: building origin/$FFF_BRANCH now (the portal is down meanwhile)"
     dir=$(prepare "origin/$FFF_BRANCH") || { dir=""; err="building origin/$FFF_BRANCH failed (journalctl -u fff-portal in the VM)"; }
   fi
-  rm -f "$DATA/update.prepared.json"
+  clear_prepared
   if [ -n "$dir" ]; then
     switch_to "$dir"
     refresh_scripts "$dir"
@@ -238,29 +331,49 @@ cmd_activate() {
 # back there from its file in the secrets folder (the start of a newer release moves it out again). Nothing else needs
 # undoing: config keeps claudeAccounts.orchestrator "vault", which those releases read too.
 restore_inline_hash() {
-  local cfg=$FFF_ROOT/config/config.json f h tmp
+  local cfg=$FFF_ROOT/config/config.json f h
   [ -f "$1/server/configMigration.ts" ] && return 0
   f=$(jq -r '.providers.ffbox.tokenSha256File // ""' "$cfg" 2>/dev/null) || return 0
   [ -n "$f" ] && [ -s "$f" ] || return 0
-  h=$(tr -d '[:space:]' <"$f")
+  # fff reads the file config.json names and edits its own config (w5531: root would follow a link fff put there).
+  h=$(as_fff cat -- "$f" | tr -d '[:space:]') || h=""
   [[ $h =~ ^[0-9a-f]{64}$ ]] || { warn "$f does not hold one SHA-256: FFBox's connector hash not put back into config.json"; return 0; }
-  tmp=$(mktemp "$FFF_ROOT/config/.config.XXXXXX")
-  if ! jq --arg h "$h" '.providers.ffbox.tokenSha256 = $h' "$cfg" >"$tmp"; then rm -f "$tmp"; warn "could not put FFBox's connector hash back into config.json"; return 0; fi
-  chown --reference="$cfg" "$tmp"
-  chmod --reference="$cfg" "$tmp"
-  mv -f "$tmp" "$cfg"
+  no_link "$cfg" "putting FFBox's connector hash back into config.json" || return 0
+  # shellcheck disable=SC2016 # expands in the inner sh, as fff
+  if ! as_fff sh -c 't=$(mktemp "${1%/*}/.config.XXXXXX") && jq --arg h "$2" ".providers.ffbox.tokenSha256 = \$h" "$1" >"$t" &&
+    chmod --reference="$1" "$t" && mv -f "$t" "$1" || { rm -f "$t"; exit 1; }' _ "$cfg" "$h"; then
+    warn "could not put FFBox's connector hash back into config.json"; return 0
+  fi
   log "FFBox's connector hash put back into config.json for $(basename "$1"), a release from before w1078"
+}
+
+# portal_unit_back DIR: a rollback keeps the newer system setup (refresh_scripts), except fff-portal.service, which says
+# how the code gets its vault key: OpenFile= since w5506, LoadCredential= before (docs/vault.md). Code from before w5506
+# under the newer unit would find no key and its vault would hand out nothing, so the older release's own unit goes back.
+portal_unit_back() {
+  local u=$1/deploy/vm/guest/units/fff-portal.service
+  [ -f "$u" ] || return 0
+  cmp -s "$u" /etc/systemd/system/fff-portal.service && return 0
+  if install -m 0644 "$u" /etc/systemd/system/fff-portal.service && systemctl daemon-reload; then
+    log "fff-portal.service from $(basename "$1") put back, so its code gets its vault key the way it expects (w5506)"
+  else
+    warn "putting back fff-portal.service from $(basename "$1") failed: its vault may find no key"
+  fi
 }
 
 cmd_rollback() {
   local why=${1:-asked for by hand} cur prev cur_sha prev_sha
   cur=$(current_dir); prev=$(readlink -e "$PREVIOUS" 2>/dev/null || true)
   if [ -z "$prev" ] || [ ! -f "$prev.ready" ]; then die "no previous release to go back to"; fi
+  # Only to a root's release that passes the checks (one fff built before w5505 does not).
+  root_owned "$PREVIOUS" || die "$PREVIOUS is not root's; not going back through it"
+  release_ok "$prev" || die "the previous release $(basename "$prev") is not fit to run: $(release_problem "$prev" "$(cat "$prev.ready" 2>/dev/null)")"
   cur_sha=$(release_sha "$cur"); prev_sha=$(release_sha "$prev")
   ln -sfn "$prev" "$CURRENT.new" && mv -Tf "$CURRENT.new" "$CURRENT"
   ln -sfn "$cur" "$PREVIOUS.new" && mv -Tf "$PREVIOUS.new" "$PREVIOUS"
   restore_inline_hash "$prev"
   refresh_scripts "$prev"
+  portal_unit_back "$prev"
   rm -f "$DATA/update.verifying.json"
   jq -n --arg at "$(date -u +%FT%TZ)" --arg b "$cur_sha" --arg a "$prev_sha" --arg e "rolled back: $why" \
     '{ok: false, at: $at, error: $e, headBefore: $b, headAfter: $a}' | data_write update.result.json
@@ -289,13 +402,8 @@ cmd_verify() {
 
 cmd_init() {
   local ref=${1:-origin/$FFF_BRANCH} dir
-  install -d -m 0700 -o "$FFF_USER" -g "$FFF_USER" "$APP" "$RELEASES"
-  if [ ! -d "$REPO" ]; then
-    log "cloning $FFF_REPO_URL"
-    as_fff git clone --bare --quiet "$FFF_REPO_URL" "$REPO"
-    as_fff git -C "$REPO" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
-  fi
-  as_fff git -C "$REPO" remote set-url origin "$FFF_REPO_URL"
+  own_app
+  ensure_repo
   dir=$(prepare "$ref")
   if [ -z "$(current_dir)" ]; then switch_to "$dir"; log "current release: $(basename "$dir")"; else log "a current release exists ($(basename "$(current_dir)")); updates go through fffctl update"; fi
 }

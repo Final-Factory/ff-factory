@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
@@ -9,7 +10,7 @@ import { homeSecrets, readProblem, readTargets, realReadFs, type ReadCtx, type S
  * apply unchanged). Like that one it is a seatbelt, not a boundary: it keeps a well-meaning agent
  * inside its charter's tool groups (docs/standing-agents.md).
  *
- *   - Write/Edit only inside the agent's own folder.
+ *   - Write/Edit only inside the agent's own folder (its real path), never into a `.git` (w5514).
  *   - Shell (Bash/PowerShell) only with a shell group, and then only allowlisted commands: read-only
  *     git and gh, simple read utilities, and with github_comment the comment-only gh calls. No command
  *     substitution, heredocs or output redirection (they would smuggle in commands or writes the
@@ -19,7 +20,6 @@ export function standingGuard(opts: { folder: string; groups: StandingToolGroup[
   const deny = (reason: string) => ({
     hookSpecificOutput: { hookEventName: 'PreToolUse' as const, permissionDecision: 'deny' as const, permissionDecisionReason: reason },
   });
-  const own = normPath(opts.folder);
   // FF Factory's secrets (w467): the portal's (opts.secrets, from where it runs) and this computer's home secrets.
   const secrets = withHomeSecrets(opts.secrets);
   const ctx: ReadCtx = { platform: process.platform, home: os.homedir(), cwd: opts.folder, fsx: realReadFs };
@@ -32,9 +32,8 @@ export function standingGuard(opts: { folder: string; groups: StandingToolGroup[
       if (why) return deny(why);
     }
     if (tool === 'Write' || tool === 'Edit' || tool === 'MultiEdit' || tool === 'NotebookEdit') {
-      const target = String(args.file_path ?? args.notebook_path ?? '');
-      const t = normPath(path.isAbsolute(target) || /^[a-zA-Z]:[\\/]/.test(target) ? target : path.join(opts.folder, target));
-      if (t !== own && !t.startsWith(own + '/')) return deny(`A standing agent writes only inside its own folder (${opts.folder}); ${target} is outside it.`);
+      const why = standingWriteProblem(String(args.file_path ?? args.notebook_path ?? ''), opts.folder, ctx.fsx);
+      if (why) return deny(why);
     }
     if (tool === 'Bash' || tool === 'PowerShell') {
       const reason = checkStandingShell(String(args.command ?? ''), { groups: opts.groups, folder: opts.folder, offLimits: opts.offLimits, secrets, read: ctx });
@@ -42,6 +41,61 @@ export function standingGuard(opts: { folder: string; groups: StandingToolGroup[
     }
     return {};
   };
+}
+
+/** A path written as a whole: its deepest existing folder's real path (symlinks resolved) plus the rest of it. */
+function realWritePath(abs: string, fsx: Pick<ReadCtx['fsx'], 'realpath'>, hops = 0): string {
+  // A drive-letter path judged on another OS (tests, a spec read elsewhere) stays as written.
+  if (!path.isAbsolute(abs)) return abs;
+  const rest: string[] = [];
+  let p = abs;
+  for (;;) {
+    const real = fsx.realpath(p);
+    if (real) return rest.length ? path.join(real, ...rest.reverse()) : real;
+    // A symlink to nothing yet (`cfg -> .git/config`): writing it creates its target, so judge the target.
+    const link = hops < 8 ? readLink(p) : undefined;
+    if (link !== undefined) return realWritePath(path.join(path.resolve(path.dirname(p), link), ...rest.reverse()), fsx, hops + 1);
+    const up = path.dirname(p);
+    if (up === p) return abs;
+    rest.push(path.basename(p));
+    p = up;
+  }
+}
+
+const readLink = (p: string): string | undefined => {
+  try {
+    return fs.readlinkSync(p);
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * A folder segment git takes as its own metadata (w5514): `.git`, also as Windows and macOS would read it (any case,
+ * trailing dots or spaces dropped, the 8.3 short name `GIT~1`).
+ */
+const GIT_SEGMENT = /^(\.git[. ]*|git~\d+)$/i;
+
+/**
+ * Why a standing agent may not Write or Edit `target`, or undefined (w5514). It writes only inside its own folder, judged on
+ * the real path, so a symlink a cloned repository checked out (`x -> /etc`, `x -> .git`) cannot carry a write out of the
+ * folder or into git's metadata. Nothing under a `.git` segment, nor a `.git` file (a gitfile pointing elsewhere): git
+ * runs programs a repository's config names (`core.fsmonitor`, `diff.<driver>.textconv`, `filter.<driver>.clean`,
+ * hooks), and only some of those keys can be overridden from the environment (launch.ts standingGitEnv). A folder shaped
+ * like a bare repository is left to that environment's `safe.bareRepository=explicit`.
+ */
+export function standingWriteProblem(target: string, folder: string, fsx: Pick<ReadCtx['fsx'], 'realpath'> = realReadFs): string | undefined {
+  const abs = path.isAbsolute(target) || /^[a-zA-Z]:[\\/]/.test(target) ? target : path.join(folder, target);
+  // As written, against the folder as written; resolved, against the folder's real path (macOS's /tmp is /private/tmp).
+  for (const [t, own] of [
+    [normPath(abs), normPath(folder)],
+    [normPath(realWritePath(abs, fsx)), normPath(fsx.realpath(folder) ?? folder)],
+  ]) {
+    if (t !== own && !t.startsWith(own + '/')) return `A standing agent writes only inside its own folder (${folder}); ${target} is outside it.`;
+    if (t.slice(own.length).split('/').some((seg) => GIT_SEGMENT.test(seg)))
+      return `A standing agent never writes git's own files (.git): a repository's config or hooks can name a program git would run. ${target} is one.`;
+  }
+  return undefined;
 }
 
 /** The rules plus this computer's home secrets (~/.ssh, Claude's and gh's credentials), expanded where the agent runs. */

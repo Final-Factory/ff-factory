@@ -26,7 +26,19 @@ ROOT=$PWD
 [ -n "${CI:-}" ] || [ "${FFF_E2E_I_AM_A_THROWAWAY:-}" = yes ] || { echo "refusing outside CI (set FFF_E2E_I_AM_A_THROWAWAY=yes on a throwaway machine)"; exit 1; }
 
 step() { printf '\n==== %s %s\n' "$(date -u +%T)" "$*"; }
-fail() { echo "FAIL: $*"; exit 1; }
+fail() {
+  echo "FAIL: $*"
+  # What names the cause, read without ssh (w5608: a 900 s wait on ssh into the guest ended with only "not within").
+  if [ -x /usr/local/sbin/fff-vm ] && virsh domstate "$VM" >/dev/null 2>&1; then
+    echo "---- fff-vm status"
+    /usr/local/sbin/fff-vm status 2>&1 || true
+    echo "---- the host's watch and events (last 40 lines)"
+    journalctl --no-pager -u fff-vm-watch -u fff-vm-events | grep -v 'Deactivated successfully\|Starting fff-vm-watch\|Finished fff-vm-watch' | tail -n 40 || true
+    echo "---- fff-vm guest-logs (through the guest agent)"
+    timeout 180 /usr/local/sbin/fff-vm guest-logs 2>&1 || true
+  fi
+  exit 1
+}
 # matches ARGS...: grep that reads all of its input. "grep -q" stops at the first match, and the writer of a pipe into it
 # then dies of SIGPIPE, which pipefail turns into a failure (nft 1.1 on Ubuntu 26.04 hit it).
 matches() { grep "$@" >/dev/null; }
@@ -50,26 +62,6 @@ wait_for() { # SECONDS DESCRIPTION CMD...
   echo "ok: $what ($(($(date +%s) - t0)) s)"
 }
 boot_id() { g cat /proc/sys/kernel/random/boot_id; }
-# vault_key_probe (w736): the portal's own view of its vault key. The deployed release's readKey, run as the portal's account
-# (fff) on the live credential file of the running fff-portal.service ($CREDENTIALS_DIRECTORY as the portal sees it), the way
-# server/index.ts does: keySource, then readKey with the credentials folder. systemd writes that file 0400 root with an ACL entry
-# for fff, which stat shows as 0440; before w736 readKey refused it ("readable by other users (mode 440)") and the vault could
-# not be used. Prints the file's mode, owner and ACL (MEASURE), then KEY-OK or the error: a message holds a path and a mode,
-# never the key.
-vault_key_probe() {
-  local js
-  js=$(base64 -w0 <<'JS'
-import { keySource, readKey } from '/srv/fff/app/current/server/vault.ts';
-const s = keySource({ dataDir: '/srv/fff/data' }, process.env);
-if (!s.file) { console.log('NO-KEY ' + s.why); process.exit(1); }
-try { const k = readKey(s.file, { credentialsDir: s.credentialsDir }); console.log('KEY-OK ' + k.length + ' bytes, credential=' + (s.credentialsDir ? 'yes' : 'no')); }
-catch (e) { console.log('KEY-ERR ' + e.message); process.exit(1); }
-JS
-)
-  g "echo $js | base64 -d | sudo tee /tmp/vault-probe.mjs >/dev/null && sudo chmod 0644 /tmp/vault-probe.mjs"
-  echo "MEASURE the portal's credential file: $(g 'sudo stat -c "mode=%a owner=%U:%G" /run/credentials/fff-portal.service/fff-vault-key; command -v getfacl >/dev/null && sudo getfacl -p /run/credentials/fff-portal.service/fff-vault-key | grep -E "^(user|group|mask|other)" | tr "\n" " "' || true)"
-  g 'sudo -u fff env CREDENTIALS_DIRECTORY=/run/credentials/fff-portal.service node /tmp/vault-probe.mjs'
-}
 # rebooted_since BOOT_ID: the guest answers with another boot id. Each look has 20 s: an ssh that is open when the VM
 # is reset can hear nothing more and wait on TCP for minutes (hang detection took 382-988 s in 6 of 61 runs, against
 # 99-120 s in the rest; w636).
@@ -162,6 +154,12 @@ wait_for 900 "ssh as the admin user" g true
 # 0 done, 2 done with recoverable warnings, 1 failed.
 wait_for 900 "cloud-init done" g 'cloud-init status --wait >/dev/null; test $? -ne 1'
 g cloud-init status --long || true
+# The reboot cloud-init asks for after its first upgrade is not a hang: the watch's boot grace starts again on it
+# (w5608: it reset the guest 11 s into that reboot, CI run 45567844311).
+first_boot_watch=$(journalctl -u fff-vm-watch --no-pager)
+if grep 'resetting' <<<"$first_boot_watch"; then fail "the watch reset the guest during its first boot"; fi
+grep 'booting (' <<<"$first_boot_watch" | tail -n 3 || true
+echo "ok: the watch left the first boot alone"
 wait_for 300 "watchdog0 armed by PID 1" g 'test "$(cat /sys/class/watchdog/watchdog0/state)" = active'
 g 'cat /sys/class/watchdog/watchdog0/identity /sys/class/watchdog/watchdog0/timeout'
 
@@ -247,14 +245,23 @@ echo "$out"
 printf '%s' "$out" | matches '^config.json: no secret' || fail "fffctl config --check does not check config.json: $out"
 if g 'sudo fffctl claude-token --file /dev/null' >/dev/null 2>&1; then fail "fffctl claude-token still exists (w1078 removed it)"; fi
 echo "ok: fffctl config shows the settings, and config.json holds no secret"
-# The token vault (w512, docs/vault.md): the key is root's alone and reaches the portal as a systemd credential; a value
-# added with fffctl is never printed, sealed on disk, and the vault file stays the portal user's.
+# The token vault (w512, docs/vault.md): the key is root's alone and reaches the portal as a descriptor systemd opened
+# (OpenFile=, w5506), never as a file the portal's account may read; a value added with fffctl is never printed, sealed on
+# disk, and the vault file stays the portal user's.
 [ "$(g 'sudo stat -c "%a %U" /etc/fff/vault.key')" = "600 root" ] || fail "the vault key is not 0600 root"
 if g 'sudo -u fff cat /etc/fff/vault.key' >/dev/null 2>&1; then fail "the fff user can read the vault key file"; fi
-g 'sudo test -s /run/credentials/fff-portal.service/fff-vault-key' || fail "the portal did not get the vault key as a credential"
-out=$(vault_key_probe 2>&1) || fail "the portal's account cannot use the vault key credential (w736): $out"
+if g 'sudo test -e /run/credentials/fff-portal.service/fff-vault-key'; then fail "the portal still has the vault key as a credential file its account may read (w5506)"; fi
+g 'sudo journalctl -u fff-portal.service -b --no-pager -o cat' | matches -F 'vault key: from the descriptor systemd opened (fff-vault-key)' || fail "the portal did not load the vault key from the descriptor systemd opened (w5506): $(g 'sudo journalctl -u fff-portal.service -b --no-pager -o cat | grep "vault key" | tail -n 3')"
+# No process of the portal's account reads the key or the portal's memory (w5506): the portal runs an execute-only node,
+# which is not dumpable where fs.suid_dumpable is 0 or 2 (1 would leave it dumpable).
+[ "$(g 'cat /proc/sys/fs/suid_dumpable')" != 1 ] || fail "fs.suid_dumpable is 1: the portal's execute-only node stays dumpable"
+[ "$(g 'sudo stat -c "%a %U" /usr/local/lib/fff/node-portal')" = "111 root" ] || fail "the portal's node is not 0111 root"
+[ "$(g 'sudo readlink /proc/$(systemctl show -p MainPID --value fff-portal.service)/exe')" = /usr/local/lib/fff/node-portal ] || fail "the portal does not run the execute-only node"
+out=$(g 'sudo fffctl fence-check' 2>&1) || fail "fffctl fence-check (w5506): $out"
 echo "$out"
-printf '%s' "$out" | matches -F 'KEY-OK 32 bytes, credential=yes' || fail "the vault key probe: $out"
+for f in environ mem fd; do printf '%s' "$out" | matches -E "^refused: the portal's $f " || fail "the portal's $f is open to its account (w5506): $out"; done
+printf '%s' "$out" | matches -E '^refused: the vault key ' || fail "the vault key is open to the portal's account: $out"
+printf '%s' "$out" | matches -x 'fence: holds' || fail "fffctl fence-check: $out"
 out=$(g 'printf "ci-vault-secret-QRST\n" >/tmp/v && sudo fffctl vault add --name ci-env --kind env --env CI_E2E_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v')
 echo "$out"
 if printf '%s' "$out" | matches 'ci-vault-secret'; then fail "fffctl vault add printed the value"; fi
@@ -390,6 +397,7 @@ g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl status' | matches '^portal:
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl logs 5' >/dev/null || fail "the worker's fffctl logs does not work"
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl config' | jq -e '.ownerName == "CI"' >/dev/null || fail "the worker's fffctl config does not show config.json (w1078)"
 g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl config --check' >/dev/null || fail "the worker's fffctl config --check does not work (w1078)"
+g 'sudo -u fff-ops /usr/local/lib/fff/ops-bin/fffctl fence-check' | matches -x 'fence: holds' || fail "the worker's fffctl fence-check does not work (w5506)"
 # The read-only forms of the vault and the rest (w745): the worker's fffctl lists the entries (name, last four characters,
 # fingerprint), never a value, and changes nothing.
 g 'printf "ci-ops-secret-ZYXW\n" >/tmp/v && sudo fffctl vault add --name ci-ops-env --kind env --env CI_OPS_TOKEN --share anyone --file /tmp/v; rm -f /tmp/v' >/dev/null
@@ -596,6 +604,18 @@ until [ "$(health 2>/dev/null | jq -r .sha 2>/dev/null)" = "$want" ]; do
 done
 echo "MEASURE update: $(($(date +%s) - t0)) s from fffctl update to the new version answering; health unanswered for about $down s of it"
 g 'sudo cat /srv/fff/data/update.result.json' | jq -e --arg w "$want" '.ok == true and (.headAfter | startswith($w)) and (.headBefore | length) > 0' || fail "update.result.json does not record the switch to $want"
+# w5505: what root runs code from is root's and read-only to fff: the clone, the releases, the links; $FFF_ROOT root:fff
+# 1770, so fff cannot rename /srv/fff/app away; the release is clean and at its commit.
+owners=$(g 'sudo stat -c "%U:%G %a %n" /srv/fff /srv/fff/app /srv/fff/app/releases /srv/fff/app/repo.git /srv/fff/app/current/ /srv/fff/app/current/server')
+echo "$owners"
+[ "$(printf '%s\n' "$owners" | sed -n 1p | cut -d' ' -f1-2)" = "root:fff 1770" ] || fail "/srv/fff is not root:fff 1770"
+[ "$(printf '%s\n' "$owners" | sed 1d | cut -d' ' -f1-2 | sort -u)" = "root:root 755" ] || fail "the app folder, the releases, the clone or the release are not root's 0755"
+g 'sudo sh -c "find /srv/fff/app/current/ ! -user root -print -quit | grep . && exit 1; test \"\$(stat -c %U /srv/fff/app/current)\" = root"' || fail "something in the current release, or the link, is not root's"
+if g 'sudo -u fff touch /srv/fff/app/current/server/w5505 /srv/fff/app/update.prepared.json' 2>/dev/null; then fail "fff could write into the release or the app folder"; fi
+ok_tree=$(g 'sudo bash -c ". /usr/local/lib/fff/lib.sh; load_conf; d=\$(readlink -e \$CURRENT); release_problem \$d \$(cat \$d.ready)"')
+[ -z "$ok_tree" ] || fail "the current release is not fit to run: $ok_tree"
+[ "$(g 'sudo -u fff env HOME=/srv/fff/home git -C /srv/fff/app/current rev-parse --short=7 HEAD')" = "$want" ] || fail "fff's git does not read the root's release (safe.directory)"
+echo "ok: the clone, the releases and the links are root's and read-only to fff, and the current release is clean at $want"
 wait_for 300 "the update verified" g 'test ! -e /srv/fff/data/update.verifying.json'
 # A verified update leaves the marker the portal's machine rollout reads (server/machineRollout.ts, w887); the server
 # retires it to update.verified.done.json once it has taken it, so either file counts.
@@ -742,10 +762,10 @@ wait_for 120 "fff-health restarts the stopped fff-ops.socket" g 'systemctl is-ac
 g 'sudo jq -e "[.events[] | select(.unit == \"fff-ops.socket\" and .action == \"restart\")] | length > 0" /srv/fff/data/unit-watchdog.json' >/dev/null || fail "the watchdog's file has no restart of fff-ops.socket: $(g 'sudo cat /srv/fff/data/unit-watchdog.json')"
 g 'sudo journalctl -t fff-watchdog --no-pager -n 20' | matches 'restarted fff-ops.socket' || fail "the restart is not in the journal (tag fff-watchdog)"
 g 'sudo fffctl status' | matches -F 'fff-ops.socket restart (attempt 1)' || fail "fffctl status does not show the restart"
-# The vault key opens after this cold restart too (w736): systemd made the credential afresh at this boot.
-out=$(vault_key_probe 2>&1) || fail "the vault key is not usable after the cold restart (w736): $out"
-printf '%s' "$out" | matches -F 'KEY-OK 32 bytes, credential=yes' || fail "the vault key probe after the cold restart: $out"
-echo "ok: the portal's account opens the vault key credential after the cold restart"
+# The vault key loads after this cold restart too (w736, w5506): systemd opened the key afresh at this boot, and the fence holds.
+g 'sudo journalctl -u fff-portal.service -b --no-pager -o cat' | matches -F 'vault key: from the descriptor systemd opened (fff-vault-key)' || fail "the portal did not load the vault key after the cold restart"
+out=$(g 'sudo fffctl fence-check' 2>&1) || fail "fffctl fence-check after the cold restart: $out"
+echo "ok: the portal loads the vault key from its descriptor after the cold restart, and its account still opens neither the key nor the portal's memory"
 # A disabled critical unit is enabled again (a restart of the VM would have left it down).
 g 'sudo systemctl disable fff-update.path'
 wait_for 120 "fff-health enables the disabled fff-update.path" g 'systemctl is-enabled fff-update.path | grep -qx enabled'
