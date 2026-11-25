@@ -74,9 +74,12 @@ To update a machine's worker install, it runs the update there (w613, [worker-in
 daemon; and says what changed and what the portal sees:
 
 ```bash
-ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --update --root /Users/Shared/ffw'
-ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Update -Root C:\ffw"'
+ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --update --ref <commit> --root /Users/Shared/ffw'
+ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Update -Ref <commit> -Root C:\ffw"'
 ```
+
+`<commit>` is the portal's full commit, the `commit` field of `/api/health` (w5516): never `main`, whose head may be code
+nobody verified. `machine_update` writes it in itself ([worker-install.md](worker-install.md), "Updating").
 
 An update needs no new credential: never `fffctl credential issue` for one (issuing cuts the running daemon off).
 
@@ -851,9 +854,10 @@ plugin's version before and after, per machine.
 - **By hand**, between deploys (a plugin release the machines should load now): the same command over ssh is ops-worker
   work, as for an update ([Updating and re-running a machine's installer](#updating-and-re-running-a-machines-installer-w855)):
   `ssh <target> 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm
-  https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.ps1))) -Tools -Root <root>"'`
+  https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Tools -Ref <commit> -Root <root>"'`
   on Windows, `ssh <target> 'bash -c "$(curl -fsSL
-  https://raw.githubusercontent.com/Final-Factory/ff-factory/main/scripts/worker/install.sh)" -- --tools --root <root>'`
+  https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --tools --ref <commit> --root <root>'`
+  (`<commit>`: the portal's full commit from `/api/health`, w5516)
   elsewhere. FFBox needs none of this (below).
 - **FFBox's `/opt/final-factory-agents`** (read-only look, ffbox `scripts/update_ffbox.sh` and `systemd/ffbox-update.timer`):
   FFBox is not a worker machine and updates itself. Its `ffbox-update.timer` runs every 3 minutes (`OnCalendar=*:0/3`);

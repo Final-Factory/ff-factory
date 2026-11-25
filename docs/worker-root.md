@@ -632,8 +632,11 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 
 - `Daemon.lowSetup` (`machine/daemon.ts`) runs once at the daemon's start, in the background; agents start unfenced until
   it finishes, and stay unfenced, with the reason in `logs/daemon.log` (`worker integrity: ...`), if any step fails.
-  - It labels the root's folders Low (`machine/lowIntegrity.ts` `lowTargets`, `labelLow`): every child except `daemon`,
-    `secrets`, the daemon's own folder and the CI runners' `ffu-runners` (`CI_CHILDREN`, kept Medium: w5440). `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
+  - It labels Low only the root's folders workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, `lowTargets`,
+    `labelLow`; w5539), plus the root child that holds a configured temp or sandboxes folder. Every other child stays
+    Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets` and the daemon's own
+    folder are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
+    portals, and any folder added later are kept Medium. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
     is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra
     roots, the temp and sandbox folders where they are elsewhere, and only what `daemon.json` `workerIntegrityAllow`
@@ -706,6 +709,14 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   checks every `<runner>\bin\Runner.Worker.exe` (`lowRunners`) and logs `CI runner job exe ... is still labelled Low`
   if one is. A new runner folder inside the root goes in `CI_CHILDREN`. The game repo's Windows runners are not inside
   any worker root.
+- **Only the folders workers write are Low; a new root folder is Medium until listed** (w5539, from the w5451 audit).
+  Until then every root child but `daemon` and `secrets` was labelled Low, and on BEAST that reached
+  `F:fw\instances` (its `update-all.ts` runs every 5 minutes at Medium from the scheduled task
+  `ff-instances-update`), `demos` and the instance portals `ben-factory` and `lens-factory`, whose config holds vault,
+  ledger and Claude keys: one edit from a Low worker ran at Medium there. lothsahn: "File it: make the BEAST instances
+  folder unwritable by workers". `lowTargets` now labels only `WORKER_CHILDREN` and keeps the rest Medium; a folder a
+  worker tool needs to write is added to that list in the same change that makes the tool write there, never by
+  labelling it by hand. The Landlock and Seatbelt fences (4.2) still open every child but `daemon` and `secrets`.
 - **A Low process sees only Low processes.** tasklist, Get-Process and CIM list about 24 rows: no daemon, and no Medium
   editor or node. Never judge from inside a worker whether a Medium process is running.
 - **The firewall cmdlets are denied** (`Get-NetFirewallApplicationFilter`: "Access is denied", PermissionDenied). The

@@ -8,7 +8,7 @@ import { AGENT_PLUGINS, EXIT, LINE, parseVersions, type Versions } from './agent
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { jobSection, settingsOfLog } from './updateLog.ts';
 import { UpdateNotReached } from './machineLink.ts';
-import { diskAboveLine } from '../shared/blockers.ts';
+import { diskAboveLine, sameCommit } from '../shared/blockers.ts';
 
 /**
  * The machine rollout (w887, lothsahn 2026-10-10: "Update FFFactory so that after updating the portal and validating, it
@@ -18,6 +18,10 @@ import { diskAboveLine } from '../shared/blockers.ts';
  *
  * - The person's deploy approval covers it. No request, no ops job, no Claude session: the command is the one
  *   ops_worker machine_update writes (workerUpdateRemote), with no setting named, so every limit stays.
+ * - Exactly the verified commit (w5516, the w5452 audit's finding 11): the installer is fetched at that commit and told to
+ *   install it (`--ref <sha>`, `-Ref <sha>`), never main's head, and refuses a commit it cannot check out. Over the daemon's
+ *   link the portal sends that commit and the daemon checks it is on GitHub's main (machine/selfUpdate.ts). An update
+ *   whose daemon says hello on another commit is a failure (checkEnded).
  * - An update stops only the daemon; agents in agent hosts are adopted by the new one (docs/worker-install.md, "An update
  *   does not stop running work", w605). So nothing is drained or waited for. Each machine's agents are counted before
  *   and compared with what its daemon says it took back (its hello), and any that ended are named in the report.
@@ -198,6 +202,7 @@ export function timedRunText(bench: BenchState | undefined, at: number, now = Da
 }
 
 const SHA = /^[0-9a-f]{7,40}$/i;
+const FULL_SHA = /^[0-9a-f]{40}$/;
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /**
@@ -421,7 +426,7 @@ export class MachineRollout {
   private async updateOverSsh(m: RolloutMachine, o: MachineOutcome, sha: string, before: string | undefined): Promise<void> {
     const host = this.d.host;
     try {
-      const r = await host.ssh(m.target, this.installCommand(m), this.lim.installMs);
+      const r = await host.ssh(m.target, this.installCommand(m, sha), this.lim.installMs);
       const out = `${r.stdout}\n${r.stderr}`;
       o.summary = installerSummary(out);
       const changed = changedSettings(out);
@@ -429,10 +434,10 @@ export class MachineRollout {
       if (r.code === 0) {
         Object.assign(o, { status: 'ok', after: host.daemon(m.id) ?? sha.slice(0, 12) });
       } else {
-        await this.afterFailure(m, o, before, `the installer exited ${r.code}`);
+        await this.afterFailure(m, o, sha, before, `the installer exited ${r.code}`);
       }
     } catch (e) {
-      await this.afterFailure(m, o, before, (e as Error).message);
+      await this.afterFailure(m, o, sha, before, (e as Error).message);
     }
   }
 
@@ -460,7 +465,7 @@ export class MachineRollout {
         return;
       }
       if (/refused it:/.test(why)) Object.assign(o, { status: 'failed', note: `${why}; nothing was changed, and the daemon keeps working` });
-      else await this.afterFailure(m, o, before, why);
+      else await this.afterFailure(m, o, sha, before, why);
       return;
     }
     // Only this job's settings (w5394): an older daemon's log holds earlier jobs' too.
@@ -476,10 +481,29 @@ export class MachineRollout {
     Object.assign(o, { status: 'failed', after: r.after, note: `its update job (over the daemon's link) ${r.note ?? `exited ${r.exit}`}${r.rollback === 'failed' ? ' (OFFLINE or broken: it needs a person)' : ''}` });
   }
 
-  private installCommand(m: RolloutMachine, daemonRef?: string): string {
-    // No setting is named, so the installer carries every limit as it is. A rollback names the commit it goes back to.
+  /**
+   * The installer of the verified commit, told to install exactly that commit (w5516): never main's head, which may have
+   * moved past what the portal checked. No setting is named, so the installer carries every limit as it is. A rollback
+   * names the commit it goes back to, with the verified commit's installer.
+   */
+  private installCommand(m: RolloutMachine, sha: string, daemonRef?: string): string {
     const flag = daemonRef ? (m.platform === 'win32' ? `-DaemonRef ${daemonRef}` : `--daemon-ref ${daemonRef}`) : '';
-    return workerUpdateRemote({ root: m.root!, platform: m.platform }, flag);
+    return workerUpdateRemote({ root: m.root!, platform: m.platform }, sha, flag);
+  }
+
+  /**
+   * w5516: an update counts only when the daemon then says hello on the verified commit. One that comes back on another
+   * commit (an installer that took a branch's head) is a failure, named, and left running: it is online.
+   */
+  private async checkEnded(id: string, o: MachineOutcome, sha: string): Promise<void> {
+    let now = this.d.host.daemon(id);
+    for (let i = 0; now && !sameCommit(now, sha) && i < 6; i++) {
+      await this.sleep(Math.min(5_000, this.lim.settleMs));
+      now = this.d.host.daemon(id);
+    }
+    if (!now) return;
+    o.after = now;
+    if (!sameCommit(now, sha)) Object.assign(o, { status: 'failed', note: `its daemon came back on ${now.slice(0, 12)}, not on the verified commit ${sha.slice(0, 12)}` });
   }
 
   /** Update one machine, never throwing: its outcome is recorded whatever happens. */
@@ -491,8 +515,10 @@ export class MachineRollout {
     Object.assign(o, { status: 'updating', note: undefined, before, agentsBefore: agentsBefore.length });
     this.save();
     console.log(`machine rollout: updating ${m.id} (${before ?? 'unknown'} -> ${sha.slice(0, 9)}; ${agentsBefore.length} agent(s) alive${this.viaLink(m.id) ? "; over its daemon's link" : ''})`);
-    if (this.viaLink(m.id)) await this.updateOverLink(m, o, sha, before);
+    if (!FULL_SHA.test(sha)) Object.assign(o, { status: 'failed', note: `the verified commit "${sha}" is not a full 40-character sha, so no installer can be pinned to it; nothing was changed` });
+    else if (this.viaLink(m.id)) await this.updateOverLink(m, o, sha, before);
     else await this.updateOverSsh(m, o, sha, before);
+    if (o.status === 'ok') await this.checkEnded(m.id, o, sha);
     o.at = new Date(this.now()).toISOString();
     if (o.status === 'failed' && DISK_FULL.test([o.note, ...(o.summary ?? [])].join('\n'))) {
       o.diskFull = { at: o.at, retries: o.diskFull?.retries ?? 0 };
@@ -508,7 +534,7 @@ export class MachineRollout {
    * daemon running, so a machine seen online is simply kept as it was. One that stays offline or outdated is put back on
    * the commit it ran before, with the same installer.
    */
-  private async afterFailure(m: RolloutMachine, o: MachineOutcome, before: string | undefined, why: string) {
+  private async afterFailure(m: RolloutMachine, o: MachineOutcome, sha: string, before: string | undefined, why: string) {
     const host = this.d.host;
     const waited = await this.waitOnline(m.id);
     if (waited) {
@@ -517,7 +543,7 @@ export class MachineRollout {
     }
     if (before && SHA.test(before)) {
       try {
-        const r = await host.ssh(m.target, this.installCommand(m, before), this.lim.installMs);
+        const r = await host.ssh(m.target, this.installCommand(m, sha, before), this.lim.installMs);
         o.summary = [...(o.summary ?? []), ...installerSummary(`${r.stdout}\n${r.stderr}`).map((l) => `rollback: ${l}`)].slice(-18);
         const back = r.code === 0 || (await this.waitOnline(m.id));
         o.rollback = back ? 'ok' : 'failed';
@@ -596,7 +622,7 @@ export class MachineRollout {
         if (m.platform === 'win32' && SAFE_TARGET.test(m.target) && !this.d.host.noSsh?.(m.id) && t.status === 'ok' && warned.some((w) => w.includes('Windows Firewall'))) {
           console.log(`machine rollout: ${m.id}: a firewall rule is missing; the tools run again over ssh, elevated`);
           try {
-            const s = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
+            const s = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }, this.state.sha!), this.lim.toolsMs);
             const again = toolsResult(s.code, `${s.stdout}\n${s.stderr}`);
             t.warnings = again.status === 'ok' ? again.warnings : [...warned, `WARNING: the tools run over ssh, for the firewall rules, ${again.status}: ${again.note ?? ''}`];
             if (!t.warnings?.length) delete t.warnings;
@@ -607,7 +633,7 @@ export class MachineRollout {
       } else if (this.d.host.linkProblem?.(m.id)) {
         Object.assign(t, { status: 'failed', note: this.d.host.linkProblem(m.id) });
       } else {
-        const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }), this.lim.toolsMs);
+        const r = await this.d.host.ssh(m.target, workerToolsRemote({ root: m.root!, platform: m.platform }, this.state.sha!), this.lim.toolsMs);
         Object.assign(t, toolsResult(r.code, `${r.stdout}\n${r.stderr}`));
       }
     } catch (e) {
