@@ -182,7 +182,7 @@ test('w5676: on a fresh root the daemon makes every open root folder before a lo
   assert.ok(!fs.existsSync(path.join(root, 'sandboxes')), 'the sandboxes folder is never made: its absence means a drive gone');
   for (const c of LOCKED_CHILDREN) if (c !== 'daemon') assert.ok(!fs.existsSync(path.join(root, c)), `${c} is not made`);
   assert.ok(!fs.existsSync(outside), 'a rule outside the root makes nothing');
-  assert.deepEqual(makeOpenRootChildren(root, args), [], 'a second start makes nothing');
+  assert.deepEqual(makeOpenRootChildren(root, args, path.join(root, 'daemon'), [path.join(root, 'sandboxes')]), [], 'a second start makes nothing');
 });
 
 test('live w5676: a locked worker writes in an open root folder the daemon made, and could not before', { skip: !landlock && 'needs Linux with Landlock' }, (t) => {
