@@ -743,6 +743,20 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
 - The root's Git is PortableGit 2.56.1 at `<root>\tools\git`, pinned by SHA-256 (`server/agentGit.ts`). `worker.ts tools`
   installs it on every Windows rollout and runs its first bash login at Medium: run first at Low, it could not make its
   links (measured).
+  Since w5717 nothing at Medium or elevated runs the installed Git: whether it is current comes from its stamp,
+  `<root>\tools\git.json` (the version and the SHA-256 of `cmd\git.exe` and `bin\bash.exe` when `tools` put it
+  there). A stamp that does not match is a Git put there again, from the pinned download unpacked into the run's own
+  folder and labelled Low before the swap. The daemon's Low fence probe runs the agent bash with only `SystemRoot`,
+  `windir` and `SystemDrive` (`bareEnv`, `machine/maxEventsFence.ts`), so a planted bash sees no token.
+- **`<root>\tools` is Medium; each folder in it but `node` is Low on its own** (w5717). Before, `tools` was Low, and a
+  Low folder's FILE_DELETE_CHILD let a Low worker rename the Medium `tools\node` aside and put its own `node.exe` there,
+  which Medium agents (their PATH), BEAST's instance portals, the updater task and the elevated `worker.ts tools` run.
+  The daemon lists `tools` at start (`toolsChildren` in `lowTargets`), labels each child `(OI)(CI)low` first, then
+  raises `tools` to Medium and reads the children again; a child it could not label keeps `tools` Low and says so.
+  `tools\node` keeps its path, so the firewall rule "Final Factory agent node" still names it. A Low worker can no
+  longer make a new folder in `tools`; a tool that needs one makes it from the daemon or `worker.ts tools`. A daemon
+  from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
+  `server/toolsLabelsWin.test.ts` on the Windows runner.
 - **The sandbox editors the daemon starts are Low too** (w5540, lothsahn: "run sandbox editors fenced, staged per
   OS"). Before, they stayed Medium, and an editor compiles and runs whatever C# a worker writes (and `execute_code`), so
   it was a one-step way out of the fence. `MacUnity.start` (`machine/unity.ts`) now starts a Windows sandbox editor
@@ -780,7 +794,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - a slot player, windowed, quitting by itself;
   - `ff-leftovers list` and `end`.
 - **Refused, as intended:** writes to `%USERPROFILE%`, `C:\ProgramData`, a drive's root, `<root>\secrets` and
-  `<root>\tools\node`.
+  `<root>\tools\node` (since w5717 also renaming `tools\node` or making a new folder in `tools`).
 - **The label of an exe sets the integrity of whoever starts it.** Windows starts a Low-labelled exe at Low from any
   parent. Labelling `<root>\tools` made the agents' `node` Low even in Medium agents, and Git's MSYS `sh.exe` started
   from it crashed (`NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`). `labelLow` gives

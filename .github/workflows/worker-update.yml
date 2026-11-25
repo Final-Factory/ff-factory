@@ -63,6 +63,10 @@ jobs:
       - name: The leftover reaper on a real Mac
         if: runner.os == 'macOS'
         run: node --test --test-timeout=300000 server/leftovers.test.ts
+      # w5717: the tools-folder labels are Windows only; on a real Mac the fence's open children and the agent tools stay as they were.
+      - name: The worker fence's tools folder on a real Mac (w5717)
+        if: runner.os == 'macOS'
+        run: node --test --test-timeout=300000 server/lowIntegrity.test.ts server/agentGit.test.ts server/agentNode.test.ts server/toolsLabelsWin.test.ts
       - name: Install a test root, tune it, update it as over ssh, and check what the update promises
         run: node scripts/worker/test/update-e2e.ts "${{ runner.temp }}/w613-update" 8797
       - name: The test daemon's log

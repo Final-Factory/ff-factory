@@ -15,7 +15,7 @@ import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFac
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
-import { maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
+import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { ghConfigDirFor, labelLow, labelNoReadUp, noReadUpTargets, openNoReadUp, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
@@ -3067,7 +3067,7 @@ export class Daemon {
    * w5552: that `fence` refuses a worker's write to the Max events file, checked once with `argv` (machine/maxEventsFence.ts)
    * and said in the log. The file is made first, by the daemon, so the check opens the file itself.
    */
-  private checkMaxEventsFence(fence: string, argv: (file: string) => string[]) {
+  private checkMaxEventsFence(fence: string, argv: (file: string) => string[], env?: NodeJS.ProcessEnv) {
     const file = this.maxEventsFile;
     if (!file) return;
     try {
@@ -3077,7 +3077,7 @@ export class Daemon {
       log(`max events: could not make ${file}: ${(e as Error).message}`);
       return;
     }
-    log(probeMaxEvents(fence, argv(file), file).line);
+    log(probeMaxEvents(fence, argv(file), file, env ? { env } : {}).line);
   }
 
   /**
@@ -3200,10 +3200,18 @@ export class Daemon {
       // w5377: the Unity slots mailbox workers write exists before the root's children are listed, so it is labelled.
       fs.mkdirSync(this.slotMailbox, { recursive: true });
       const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
+      // w5717: tools turns Medium with each child folder but node Low on its own (lowTargets).
+      let toolsChildren: { name: string; dir: boolean }[] | undefined;
+      try {
+        toolsChildren = fs.readdirSync(path.join(root, 'tools'), { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
+      } catch {
+        toolsChildren = undefined;
+      }
       const targets = lowTargets({
         root,
         appDir: appDirOfConfig(this.cfg),
         children,
+        toolsChildren,
         extra: [...(this.cfg.extraRoots ?? []), this.cfg.tempDir, this.sandboxRoot(), ...allow.filter((a) => !isFile(a))],
         files: allow.filter(isFile),
         allowInAppDir: allow,
@@ -3263,7 +3271,9 @@ export class Daemon {
       this.low = { claude, ...(git ? { git } : {}), ...(versions.length ? { unity: lowUnityDir(root) } : {}), ...(gh ? { gh } : {}), ...(editor ? { editor } : {}) };
       log(`worker integrity: Low is on for sandbox agents (claude ${claude}; git ${git ?? 'none'}; Unity junctions ${versions.join(', ') || 'none'}; gh login ${gh ?? 'none'}); sandbox editors ${editor ? `start at Low too (launcher ${editor.launcher}), from their next start` : this.cfg.editorFence === false ? 'stay Medium (editorFence false)' : 'stay Medium (no Low launcher or no Unity junction)'}`);
       await this.lowGhSelfTest(root, gh, exec, say);
-      if (git) this.checkMaxEventsFence('Low integrity', (file) => maxProbeArgv(agentGitBash(root), file));
+      // w5717: the agent Git sits in a folder Low workers write, so its bash runs here with nothing of the daemon's
+      // environment (it starts at Low anyway, by its label).
+      if (git) this.checkMaxEventsFence('Low integrity', (file) => maxProbeArgv(agentGitBash(root), file), bareEnv());
       // w5402: Low agents run the Unity MCP server under the root's APPDATA (lowEnv), where uv resolves it again; fill
       // the cache for that too, or they get no bridge (BEAST: Python 3.10 from PATH needed packages the cache lacked).
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
