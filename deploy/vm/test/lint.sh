@@ -75,6 +75,8 @@ if [ "$units" = 1 ]; then
   for f in fff-update fff-health fff-backup fff-base-refresh fff-ops-launch fff-ops-sync; do install -m 0755 "deploy/vm/guest/$f" /usr/local/lib/fff/; done
   install -m 0755 deploy/vm/host/fff-vm /usr/local/sbin/fff-vm
   install -m 0755 deploy/vm/guest/fffctl /usr/local/sbin/fffctl
+  # fff-portal.service runs the execute-only node its ExecStartPre installs (w5506); verify wants it there now.
+  install -m 0111 "$(readlink -f "$(command -v node)")" /usr/local/lib/fff/node-portal
   tmp=$(mktemp -d)
   id fff-ops >/dev/null 2>&1 || useradd --system --user-group fff-ops
   # The guest's units as install.sh writes them (the templates rendered), then the host's.
