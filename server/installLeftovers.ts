@@ -187,7 +187,7 @@ export interface ProcLite {
 /**
  * Why the timed runner's folders (`<install>/timing/cache` and `builds`) must stay now, or undefined when they may go (w3502):
  * a timed run in flight (`inFlight`, the daemon's TimedRunner.busy()), or a bench ticket with reason timing held or waiting in
- * this install's queue (`<install>/tmp/bench.queue/t*`, its helper alive): every timing measurement takes one, the timed
+ * this install's queue (`<install>/daemon/bench.queue/t*`, w5545, its helper alive): every timing measurement takes one, the timed
  * runner's own (timedRunner.ts takeTicket) and bench_queue.py's `timed` alike.
  */
 export function timingHeld(root: string, inFlight?: string, alive: (pid: number) => boolean = pidAlive): string | undefined {

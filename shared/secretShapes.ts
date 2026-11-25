@@ -43,13 +43,36 @@ const PRIVATE_KEY_HEAD = /-----BEGIN ([A-Z0-9 ]*)PRIVATE KEY-----(?:(?:\\[rn]|\s
  */
 const GITHUB_TOKEN_ANYWHERE = /(gh[pousr]_|github_pat_)[A-Za-z0-9_]{30,}/g;
 
+/**
+ * Shapes that only the portal's log view knew until w5526 (security audit w5452, finding 17), now masked on every path
+ * (transcripts, reports, the data-folder scrub, the journal, `fffctl logs`). Each is narrow enough for transcripts full
+ * of code, commits and game data: a commit SHA, a URL without credentials and base64 stay (shared/secretShapes.test.ts).
+ *
+ * A JWT: base64url of a JSON header (`{"` encodes to `eyJ`), a payload and a signature, dot-separated.
+ */
+const JWT_ANYWHERE = /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g;
+/** An AWS access key id (AKIA, long-lived) or a temporary one (ASIA): the prefix and 16 capitals or digits, whole. */
+const AWS_KEY_ANYWHERE = /\b(AKIA|ASIA)[0-9A-Z]{16}\b/g;
+/** A Slack token: xoxb- (bot), xoxp- (user), xoxa-, xoxr- (refresh), xoxs-, xoxe- (rotating), with a digit in it. */
+const SLACK_TOKEN_ANYWHERE = /\b(xox[abeprs]-)(?=[A-Za-z0-9-]*\d)[A-Za-z0-9-]{10,}/g;
+/**
+ * A bearer credential (`Authorization: Bearer …`, `-H "Bearer …"`): 16 or more token characters with a digit among them,
+ * so prose ("Bearer authentication", "the Bearer header") stays.
+ */
+const BEARER_ANYWHERE = /\b([Bb]earer|BEARER)\s+(?=[A-Za-z0-9._~+/=-]*\d)([A-Za-z0-9._~+/-]{16,}=*)/g;
+/** A password in a URL, `scheme://user:password@host`: the password goes, the user and host stay. */
+const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/)([^\s/:@"'\\]*):([^\s/@"'\\]+)@/gi;
+/** A bare token as a URL's user (`https://<token>@github.com/…`): 24 or more token characters before the @. */
+const URL_TOKEN_USER = /(\b[a-z][a-z0-9+.-]*:\/\/)([A-Za-z0-9._~-]{24,})@/gi;
+
 /** Whether `text` may hold a token this module redacts by shape (a cheap check before the regexes). */
 export const maybeTokenShape = (text: string) =>
-  /sk-ant-|ffpv1_|ffm_|ffsb_|tskey-|AGE-SECRET-KEY-|PRIVATE KEY-----|DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_/.test(text);
+  /sk-ant-|ffpv1_|ffm_|ffsb_|tskey-|AGE-SECRET-KEY-|PRIVATE KEY-----|DISCORD|\.[A-Za-z0-9_-]{6}\.|gh[pousr]_|github_pat_|eyJ|AKIA|ASIA|xox|earer|EARER|:\/\//.test(text);
 
 /**
  * `text` with every token shape masked to its last four characters: `github_pat_[redacted …yVC9]`,
- * `sk-ant-oat01-[redacted …abcd]`, `[redacted Discord token …abcd]`, `[redacted OPENSSH private key]`. Masking is
+ * `sk-ant-oat01-[redacted …abcd]`, `[redacted Discord token …abcd]`, `[redacted OPENSSH private key]`,
+ * `[redacted JWT …abcd]`, `AKIA[redacted …abcd]`, `xoxb-[redacted …abcd]`, `Bearer [redacted …abcd]`, `https://user:[redacted]@host`. Masking is
  * idempotent: a masked form is never masked again.
  */
 export function redactTokenShapes(text: string): string {
@@ -64,6 +87,12 @@ export function redactTokenShapes(text: string): string {
     .replace(AGE_KEY_ANYWHERE, () => 'AGE-SECRET-KEY-[redacted]')
     .replace(PRIVATE_KEY_BLOCK, (_m, kind: string) => `[redacted ${kind}private key]`)
     .replace(PRIVATE_KEY_HEAD, (_m, kind: string) => `[redacted ${kind}private key]`)
+    .replace(JWT_ANYWHERE, (m) => `[redacted JWT …${lastFour(m)}]`)
+    .replace(AWS_KEY_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
+    .replace(SLACK_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
+    .replace(BEARER_ANYWHERE, (_m, scheme: string, token: string) => `${scheme} [redacted …${lastFour(token)}]`)
+    .replace(URL_PASSWORD, (m, scheme: string, user: string, pass: string) => (pass.startsWith('[redacted') ? m : `${scheme}${user}:[redacted]@`))
+    .replace(URL_TOKEN_USER, (_m, scheme: string, token: string) => `${scheme}[redacted …${lastFour(token)}]@`)
     .replace(PROVIDER_TOKEN_ANYWHERE, (m) => `ffpv1_[redacted …${lastFour(m)}]`)
     .replace(GITHUB_TOKEN_ANYWHERE, (m, prefix: string) => `${prefix}[redacted …${lastFour(m)}]`)
     .replace(DISCORD_ASSIGNMENT, (_m, name: string, sep: string, value: string) => (value.startsWith('[redacted') ? _m : `${name}${sep}[redacted …${lastFour(value)}]`))

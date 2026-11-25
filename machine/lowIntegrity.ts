@@ -17,12 +17,16 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
 /** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
 export const MEDIUM_LABEL = '(OI)(CI)medium';
-/** Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record). */
-export const MEDIUM_CHILDREN = ['daemon', 'secrets'];
+/**
+ * Root children that stay Medium (writeLock.ts LOCKED_CHILDREN, plus the root's own record), the Medium agents' Claude Code
+ * folder among them (w5543): a Low worker must not plant a hook or plugin that a Medium agent loads.
+ */
+export const MEDIUM_CHILDREN = ['daemon', 'secrets', ...MEDIUM_ONLY_CHILDREN];
 /**
  * Root children that hold CI runners, which are not worker agents (w5440): they stay Medium, explicitly where an earlier
  * rollout labelled them Low. A runner's Runner.Worker.exe is started per job from its bin folder, and a process started
@@ -330,4 +334,19 @@ export async function lowUnityJunctions(root: string, editors: { version: string
 export function strayLowServers(servers: { pid: number; rid: number; dll: string }[], root: string): number[] {
   const under = lowUnityDir(root).toLowerCase();
   return servers.filter((s) => s.rid > 0 && s.rid < 0x2000 && s.dll && !path.resolve(s.dll).toLowerCase().startsWith(under)).map((s) => s.pid);
+}
+
+/** Whether icacls says this path carries a Medium mandatory label. Exported for tests. */
+export const isLabelledMedium = (icaclsOut: string) => /Mandatory Label\\Medium Mandatory Level/i.test(icaclsOut);
+
+/**
+ * w5557: reads back the owner's game folder's label after labelLow kept it Medium (daemon.json
+ * `workerIntegrityLockGameData`) and says what a Low worker meets there: a Medium label refuses its writes (no-write-up),
+ * a Low one lets them through. A folder that does not exist yet is said as such; the next start labels it.
+ */
+export async function ownerGameDataLock(dir: string, exec: Exec, exists: (p: string) => boolean = fs.existsSync): Promise<string> {
+  if (!exists(dir)) return `worker integrity: the owner's game folder ${dir} does not exist yet; it is kept Medium on the next start after it does`;
+  const r = await exec('icacls', [dir], { timeoutMs: 60_000 });
+  if (r.code === 0 && isLabelledMedium(r.stdout) && !isLabelledLow(r.stdout)) return `worker integrity: the owner's game folder ${dir} is Medium; a Low worker's write there is refused`;
+  return `worker integrity: the owner's game folder ${dir} is NOT Medium (${r.code === 0 ? 'icacls shows no Medium label' : (r.stderr || r.stdout).trim().slice(-200)}); a Low worker could write the owner's saves`;
 }
