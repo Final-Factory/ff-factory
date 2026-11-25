@@ -205,22 +205,27 @@ test('fenced ff-leftovers lists and ends what its session left, through the daem
   }
 });
 
-test('stopTree: when ps is refused (it prints nothing), pgrep -P finds the tree', () => {
+test('stopTree: when ps is refused (it prints nothing), pgrep -P finds the tree', (t) => {
+  // w5619: stopTree's SIGKILL timer, mocked here. A real one kept this file's process up 60 s on CI, then sent SIGKILL
+  // to pids 10-13 of the runner with process.kill restored.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const calls: string[] = [];
   const kids: Record<string, string> = { '10': '11\n12\n', '11': '13\n', '12': '', '13': '' };
   const sh = (c: string, a: string[]) => {
     calls.push([c, ...a].join(' '));
     return c === 'pgrep' ? (kids[a[1]] ?? '') : '';
   };
-  const signalled: number[] = [];
+  const signalled: [number, string | number | undefined][] = [];
   const real = process.kill;
-  process.kill = ((pid: number) => (signalled.push(pid), true)) as typeof process.kill;
+  process.kill = ((pid: number, sig?: string | number) => (signalled.push([pid, sig]), true)) as typeof process.kill;
   try {
     stopTree(10, 'darwin', 60_000, sh);
+    assert.deepEqual(signalled.map(([p]) => p), [10, 11, 12, 13]);
+    t.mock.timers.tick(60_000);
   } finally {
     process.kill = real;
   }
-  assert.deepEqual(signalled, [10, 11, 12, 13]);
+  assert.deepEqual(signalled, [10, 11, 12, 13].map((p) => [p, 'SIGTERM']).concat([10, 11, 12, 13].map((p) => [p, 'SIGKILL'])));
   assert.ok(calls.includes('pgrep -P 10'));
 });
 

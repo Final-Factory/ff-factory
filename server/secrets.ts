@@ -144,6 +144,9 @@ export function secretValueStats(): { values: number; forms: number; version: nu
 /** The version of the set of values (bumped by each new one). */
 export const secretValuesVersion = () => valuesVersion;
 
+/** Every value known now: what a thread of this process that masks text must register too (server/scrubThread.ts). */
+export const knownSecretValues = (): readonly string[] => knownValues;
+
 /**
  * The values learnt after `version`, and whether every one of them was minted just now (`recent`): what a back-scan of
  * files already read must look for. `undefined` when that version is too old to tell: look for every value.

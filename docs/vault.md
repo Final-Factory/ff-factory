@@ -36,7 +36,7 @@ Paths and code come from w511's map (`docs/worker-root.md`, ff-factory #135, mea
 | Unity's licence activation | the editors | each machine | **Stays**: Unity binds it to the machine |
 | The self-hosted GitHub runner's registration (BEAST, `finalfactory-mode2-windows`) | the game repo's CI | `C:\Users\rydin\actions-runner-finalfactory-mode2\` | **Stays**: GitHub's runner, outside FF Factory |
 | steamcmd's login cache (M5, `~/.steamcmd-home`) | last-resort manual uploads (`mp-beta-deploy`) | the M5 | **Stays**: a person's own login, used by a person (w511 5.1); releases go through ffbox CI |
-| The Steam build account `Lothsahn_FFBox`'s password (w1639), and its Steam Guard authenticator's `shared_secret` if it ever has one | the urgent release lane on BEAST, else LothDesktop: FFBox's `ffsteam.py` logs the account in by itself from the password when steamcmd's cached token is gone, making a Guard code (TOTP) from the secret only when there is one (ffbox 971cd6f, 74083e4) | nowhere before: a person typed the password at each computer's steamcmd once | **New**: an entry of kind `env`, `FFSTEAM_PASSWORD`, roles `workers`, machines `beast, lothdesktop`, shared with any run (an urgent release may be Ben's or lothsahn's); `FFSTEAM_GUARD_SECRET` the same way only if the account gets an authenticator (lothsahn: "Let's assume no authenticator for now"). The daemon masks their values because the launch spec lists them as the vault's (`secretEnv`, w1688), whatever they are called. FFBox keeps its own copy in its `secrets.env` ("nothing shared with FFBox"). Design: the game repo's `Documentation/Release-Lanes.md`, "Steam credentials" |
+| The Steam build account `Lothsahn_FFBox`'s password (w1639), and its Steam Guard authenticator's `shared_secret` if it ever has one | the urgent release lane on BEAST, else LothDesktop: FFBox's `ffsteam.py` logs the account in by itself from the password when steamcmd's cached token is gone, making a Guard code (TOTP) from the secret only when there is one (ffbox 971cd6f, 74083e4) | nowhere before: a person typed the password at each computer's steamcmd once | **New**: an entry of kind `env`, `FFSTEAM_PASSWORD`, roles `workers`, machines `beast, lothdesktop`, shared with any run (an urgent release may be Ben's or lothsahn's); `FFSTEAM_GUARD_SECRET` the same way only if the account gets an authenticator (lothsahn: "Let's assume no authenticator for now"). The daemon masks their values because the launch spec lists them as the vault's (`secretEnv`, w1688), whatever they are called. FFBox keeps its own copy in its `secrets.env` ("nothing shared with FFBox"). Design: the game repo's `Documentation/Release-Lanes.md`, "Steam credentials". **Since w5551 no run gets it**: `DAEMON_ONLY_ENV` (`server/vault.ts`) keeps these variables out of every run whatever the roles, and the portal reads them (`releaseSecrets`) only for the daemon's `steam_upload` job; the role for such entries is `releases`, which no run has ([steam-upload.md](steam-upload.md)) |
 | FFBox's config and secrets (`~/.config/ffbox`, its connector token) | FFBox | FFBox's host, LothDesktop | **Stays, never shared**: the "nothing shared with FFBox" rule (D8) |
 | `AgentControl/session-*.json` bearer tokens | the game's agent automation | the game's data folder | **Stays**: the game makes one per session, for local use only |
 | The portal's own: its GitHub token (D7; since w868 its reads for a request use that request's person's vault token where `machines.githubFromVault` has `portal` on, section 13), its Discord token copy, web-push keys, API keys | the portal | `/srv/fff/secrets`, `/srv/fff/home`, `data/` | **Stay as they are**: no worker uses them. (Lothsahn's subscription token for the orchestrators, D4, was `/srv/fff/secrets/claude-oauth-token`; w1078 moved every orchestrator onto vault tokens and the portal deletes that file, [section 4](#4-which-claude-token-a-run-gets).) |
@@ -95,7 +95,9 @@ so a removed value leaves no copy) under a lock file, and re-read when its modif
 - **No key, or the wrong one:** the vault still lists, but hands out nothing it cannot open. A Claude process then does not
   start, and says why (section 4; before w1078 it fell back to the host token or a login), and `system_status` names the
   entries sealed with another key. Rotating an entry re-seals it with the current key.
-- **Never in a backup:** `fff-backup` packs `/srv/fff` only (`tar -C "$FFF_ROOT"`, `deploy/vm/guest/fff-backup:36`).
+- **The key is never in a backup:** `fff-backup` packs `/srv/fff` only (`tar -C "$FFF_ROOT"`), and refuses to run if the
+  key's path is inside it or a file named `vault.key*` is among what it packs (`deploy/vm/guest/fff-backup`, w5529). The
+  vault itself (`data/vault.json`, sealed values) is in the backup since w5529.
 
 **Adding, rotating and removing.** There are two ways in, and neither goes through chat:
 
@@ -708,8 +710,10 @@ work is the risk; lothsahn decided each person's tokens serve only their own wor
 - **The FFBox host is where the tokens live** (lothsahn, 2026-10-06; [section 11](#11-the-tokens-on-the-ffbox-host)).
   The VM's vault is filled from there by `fff-vm vault-sync`, so a rebuilt or moved VM gets them back from the host.
   What is added in the VM is copied to the host every night, so the host is the full backup ([section 12](#12-adding-in-the-vm-and-the-nightly-copy-to-the-host-w749)).
-- **Not in the VM's daily backup:** `fff-backup` leaves `data/vault.json` out (`--exclude='data/vault.json*'`), and the
-  key was never in it (`/etc/fff` is not under `/srv/fff`).
+- **In the VM's daily backup, without its key** (w5529): `fff-backup` packs `data/vault.json` (its `.prev` and other
+  `vault.json.*` copies left out), never the key (`/etc/fff` is not under `/srv/fff`, and the script refuses a key file
+  among what it packs). A backup's vault opens only with the key below; the monthly restore drill checks that it does
+  (docs/portal-on-ffbox-host.md, 2.2).
 - **The key's spare copy** is `/etc/fff-vm/secrets/vault.key` on the host, kept in step with the VM's key by every
   `fff-vm vault-sync` (the one before kept as `.prev`). Entries added by hand in the VM (Max's Discord token, say) are
   copied to the host's `vault-extra/` at night and put back by the sync; they open again after a rebuild once root puts that
@@ -1493,7 +1497,11 @@ the model (the tool result) and Claude Code's own transcript on the worker's mac
   (`github_pat_[redacted …yVC9]`). The GitHub shapes had a look-behind that let a token through after a JSON `\n` or a
   terminal colour code; that is gone.
 - **The scrub** (`server/scrubSecrets.ts`) masks what is already on disk. The portal runs it over its data folder at start,
-  once per `SCRUB_VERSION` (`<dataDir>/secret-scrub.json` records it), logging paths and counts. By hand:
+  once per `SCRUB_VERSION` (`<dataDir>/secret-scrub.json` records it), logging paths and counts. It reads and masks on a
+  thread of its own (`server/scrubThread.ts`, w5613: on the portal's thread, scrub version 3 held the event loop up to 10 s
+  over one big transcript); the portal's thread only swaps each masked file in, in one turn, keeping what was appended since
+  the read (`commitScrubbed`). Its last line says how long the longest piece on the portal's thread took: the number to
+  check after a `SCRUB_VERSION` bump. By hand:
 
   ```sh
   sudo fffctl scrub-secrets --dry-run   # counts only; the ops worker may run this one

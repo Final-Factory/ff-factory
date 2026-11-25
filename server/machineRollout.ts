@@ -459,7 +459,7 @@ export class MachineRollout {
   private cutNext(retries: number): string {
     return retries < this.lim.cutRetries
       ? `sent again by itself in ${Math.round(this.lim.cutRetryMs / 60_000)} min`
-      : `its ${this.lim.cutRetries} resends were cut too: its link to the portal stays slow, so it waits for the next deploy (needs a look)`;
+      : `its ${this.lim.cutRetries} resends were cut too: its link to the portal is slow, stalls or drops, so it waits for the next deploy (needs a look)`;
   }
 
   /** A commit that is not known counts as outdated (w970), unlike the nag in machines.ts that leaves it alone: the update fixes it. */

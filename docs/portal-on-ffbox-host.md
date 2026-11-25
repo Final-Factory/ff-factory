@@ -386,18 +386,46 @@ cloud-init (a NoCloud seed ISO from `cloud-localds`, read at the first boot only
 | Space | Reserved in full in the pool (not sparse): neither side fills the other | Grows as written; a quota needs a dataset of its own |
 | Nightly snapshot (VM off) | `zfs snapshot …@fff-nightly-<time>`, the last 7 kept | `qemu-img snapshot -c`, internal, the last 7 kept |
 | Rollback | `vm-rollback.sh`: clone, rename, promote; the state before is kept as `disk0-before-rollback-<time>` | `qemu-img snapshot -a`; the state before is kept as a snapshot |
-| Off the host | the guest's encrypted backup (below); a `zfs send` of a snapshot is possible but unencrypted unless piped through `age` | the same |
+| Off the host | the host's own off-site backup copies its whole disk, these snapshots included (lothsahn, 2026-11-25, w5566: "The VM host off-site backup is the entire disk"); the guest's encrypted backup (below) is the second copy, on BEAST | the same |
 
 The host has ZFS *(sourced: [ffbox.md](ffbox.md), "Where")*. So the zvol is the recommendation: a fixed reservation,
 cheap snapshots, and no double copy-on-write of qcow2 on ZFS. CI tests both modes.
 
-**The guest's backup** (`fff-backup`, daily at 11:15 UTC, before the nightly restart) archives `config`, `data`,
-`agents` and `home`, leaving out caches and the Claude CLI's own versions. Review media is included only if
-`BACKUP_INCLUDE_REVIEW=yes`. The archive is encrypted with `age -R` to the public keys in
-`/etc/fff/backup-recipients.txt` and sent with sftp, as `<name>.part` then renamed, to `BACKUP_SSH_TARGET` with the
-VM's own backup key; the newest 14 are kept there. Recommended target: a Windows account on BEAST used for nothing
-else, reached over the tailnet ([D17](#8-risks-and-open-decisions)). A failure messages the dispatcher. Restore, with
-the portal stopped: `age -d -i key.txt <file> | tar -xz -C /srv/fff`. The dry run restores one ([7.2](#72-dry-run-in-the-vm), check 12).
+**Two copies, two places** (w5566; lothsahn: "We just need backups in both places"). The host's nightly snapshots of
+the VM's disk (above) go off-site with the host's whole disk, and the VM cannot delete them. The guest's own backup
+goes to BEAST. Neither needs the other.
+
+**The guest's backup** (`fff-backup`, daily at 11:15 UTC, before the nightly restart) archives `config`, `data` (the
+vault's `data/vault.json` included since w5529), `agents`, `home` and `secrets`, leaving out caches and the Claude CLI's
+own versions. Review media is included only if `BACKUP_INCLUDE_REVIEW=yes`. The archive is encrypted with `age -R` to
+the public keys in `/etc/fff/backup-recipients.txt` (whose private keys are kept by people, off the host: RUNBOOK,
+"The backups' age keys") and sent with sftp to `BACKUP_SSH_TARGET` with the VM's own backup key; the newest 14 are kept
+there. Recommended target: a Windows account on BEAST used for nothing else, reached over the tailnet
+([D17](#8-risks-and-open-decisions)).
+
+- **The vault key is never in it.** It lives in `/etc/fff/vault.key`, outside `/srv/fff`; `fff-backup` refuses to run
+  if the key's path is inside `/srv/fff` or a file named `vault.key*`/`vault-key*` is among what it archives. Its only
+  spare is `/etc/fff-vm/secrets/vault.key` on the FFBox host (docs/vault.md, section 8), which the host's off-site
+  backup carries. A restored vault opens only once that key is put back.
+- **The target's host key is pinned** in `/etc/fff/backup_known_hosts` (root, 0644) under the alias
+  `fff-backup-target`, with `StrictHostKeyChecking=yes`: `sudo fffctl backup-config --host-key FILE` writes it (a
+  `type key` line or a `known_hosts` line, checked with `ssh-keygen -l`). Without a pin the backup does not run; a
+  changed key fails it, says so, and is never trusted by itself.
+- **Every upload is checked.** It goes up as `<name>.part`; the size on the target is compared, then (default
+  `BACKUP_VERIFY=hash`) it is read back and its sha256 compared, and only then renamed into place. A mismatch removes
+  the partial copy and fails.
+- **What happened is visible.** `/var/lib/fff/backup.json` holds the last run (ok, failed or off, why, size, sha256,
+  how it was checked); `fffctl status` and the portal's `system_status` (the dashboard) show it, a failure as a
+  `PROBLEM:` line and a record over 26 h old as a `WARNING:`. A failure also messages the dispatcher.
+- **The monthly restore drill.** On the FFBox host, a person holding one of the age private keys runs
+  `sudo fff-vm backup-drill --identity KEY [NAME]` with the key file brought for it (deleted afterwards). The VM sends
+  the newest (or NAME) encrypted archive back from the target (`fffctl backup-fetch`), the host decrypts it in a pipe,
+  and the VM checks the plain archive (`fffctl backup-drill`): it unpacks in a scratch folder, every JSON file parses,
+  `data/state.json` holds its sessions, every vault entry opens with the VM's own key (`vaultCli verify`, counts only),
+  and no file in it is the vault key; the scratch folder is deleted. The result goes to `/var/lib/fff/backup-drill.json`,
+  shown beside the backup's; the drill shows **DUE** 31 days after the last. Nothing decrypted is written on the host.
+- Restore by hand, with the portal stopped: `age -d -i key.txt <file> | tar -xz -C /srv/fff`, then the vault key from
+  the host's spare. The dry run restores one ([7.2](#72-dry-run-in-the-vm), check 12).
 
 ### 2.3 Inside the guest
 
