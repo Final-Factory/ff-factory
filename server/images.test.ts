@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { inRoots, listImages, readImage } from './images.ts';
+import { CASE_INSENSITIVE_FS, inRoots, listImages, readImage } from './images.ts';
+import { reportImageSrc } from '../shared/imagePaths.ts';
 import { Store } from './store.ts';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
@@ -186,4 +187,20 @@ test('message images: copied into the store as the message arrives, and recorded
   assert.deepEqual(await keepMessageImages(store, 's1', plain, read), []);
   assert.deepEqual(await keepMessageImages(store, 's1', store.append('s1', { kind: 'system', text: `![x](${shot})` }), read), []);
   store.flush();
+});
+
+test('inRoots: case-sensitive where the file system is (Linux), insensitive on Windows and macOS', () => {
+  assert.ok(!inRoots('/srv/x/logs/a.png', ['/srv/x/Logs'], false), 'Linux: another case is another folder');
+  assert.ok(inRoots('/srv/x/Logs/a.png', ['/srv/x/Logs'], false));
+  assert.ok(inRoots('/srv/x/logs/a.png', ['/srv/x/Logs'], true), 'Windows and macOS ignore case');
+  assert.equal(CASE_INSENSITIVE_FS, process.platform === 'win32' || process.platform === 'darwin');
+});
+
+test('report images: only the reports API media path is an image source', () => {
+  const via = (p: string) => `/api/file?p=${p}`;
+  assert.equal(reportImageSrc('/api/reports/r12/media/shot-1.png', via), '/api/reports/r12/media/shot-1.png');
+  for (const bad of ['/api/reports/r12/media/../../../x.png', '/api/reports/search?q=x', '/api/reports/r12', '/api/reports/r12/media/a/b.png', '/api/reports/rx/media/a.png', '/api/reports/r1/media/a.png?x=1', '/api/image?p=/etc/x.png']) {
+    assert.equal(reportImageSrc(bad, via), '', bad);
+  }
+  assert.equal(reportImageSrc('/srv/fff/review/a.png', via), via('/srv/fff/review/a.png'), 'a local path is still read through its session');
 });

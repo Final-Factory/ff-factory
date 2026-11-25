@@ -16,7 +16,7 @@ import { MachineManager } from './machines.ts';
 import { PendingCalls, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { ANSWERS, SelfUpdater, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -82,7 +82,7 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
     fs.rmSync(root, { recursive: true });
     fs.writeFileSync(root, 'not a drive');
   }
-  const config: DaemonConfig = { portalUrl: url, id: 'mx', token, repoPath: tmp, ...(o.root !== false ? { root } : {}), appDir, claude: 'no-such-claude', maxEventsFile: null, cleanup: { everyMinutes: 0 } } as DaemonConfig;
+  const config: DaemonConfig = { portalUrl: url, id: 'mx', token, repoPath: tmp, ...(o.root !== false ? { root } : {}), appDir, claude: 'no-such-claude', maxEventsFile: null, cleanup: { everyMinutes: 0 }, updateOrigin: { url: repo.root, branch: git(repo.root, 'branch', '--show-current') } } as DaemonConfig;
   RECONNECT_MS.value = 200;
   REOFFER_MS.value = 200;
   const d = new Daemon(config, undefined, PROBES);
@@ -182,6 +182,19 @@ test('w1596: the bundle goes only to the machine it was offered to, with its own
   assert.equal(git(src, 'rev-parse', 'HEAD'), s.repo.commit);
   fs.writeFileSync(path.join(s.tmp, 'junk.bundle'), 'not a bundle');
   await assert.rejects(checkoutFromBundle(src, path.join(s.tmp, 'junk.bundle'), s.repo.commit), /not one git can read/);
+
+  // w5516: the daemon takes a commit only when it is on the published branch, whatever the portal said.
+  const branch = git(s.repo.root, 'branch', '--show-current');
+  await checkPublished(src, s.repo.commit, { url: s.repo.root, branch });
+  await assert.rejects(checkPublished(src, other.commit, { url: s.repo.root, branch }), /commit .* is not on .* refused, nothing was changed/);
+  await assert.rejects(checkPublished(src, s.repo.commit, { url: path.join(s.tmp, 'nowhere'), branch }), /could not read .* nothing was changed/);
+  await assert.rejects(checkPublished(src, s.repo.commit, { url: s.repo.root, branch: 'main;rm' }), /not a branch name/);
+  const before = git(src, 'rev-parse', 'HEAD');
+  const unpublished = portalRepo(path.join(s.tmp, 'portal3'), 'three');
+  const ub = path.join(s.tmp, 'unpublished.bundle');
+  git(unpublished.root, 'bundle', 'create', '-q', ub, 'HEAD');
+  await assert.rejects(checkoutFromBundle(src, ub, unpublished.commit, (dir) => checkPublished(dir, unpublished.commit, { url: s.repo.root, branch })), /is not on/);
+  assert.equal(git(src, 'rev-parse', 'HEAD'), before, 'an unpublished commit is never checked out');
 
   assert.match(selfUpdateProblem({ commit: 'abc', bundle: { sha256: sha, size: 1 } }) ?? '', /full git commit/);
   assert.match(selfUpdateProblem({ commit: s.repo.commit, bundle: { sha256: 'x', size: 1 } }) ?? '', /SHA-256/);
