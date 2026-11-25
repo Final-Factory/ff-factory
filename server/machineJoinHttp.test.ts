@@ -220,3 +220,16 @@ test('join http: the redeem brings the person\'s vault GitHub token for the clon
   assert.equal(pr.body.playOnly, true);
   assert.equal(pr.body.githubToken, undefined, 'a play-only computer clones nothing');
 });
+
+test('w5516: the bootstrap is served with the portal\'s full commit written in, so it installs exactly that; a portal that cannot say it writes none', async (t) => {
+  const commit = '3f1c2a9b8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a';
+  const script = (kind: string) => (kind === 'windows' ? "$PortalUrl = '__FF_PORTAL_URL__'; $PortalCommit = '__FF_PORTAL_COMMIT__'\n" : undefined);
+  const s = await serve({ script, commit: () => commit });
+  t.after(s.close);
+  assert.equal(await (await fetch(`${s.base}/join/windows.ps1`)).text(), `$PortalUrl = 'https://fff.tail1234.ts.net'; $PortalCommit = '${commit}'\n`);
+  for (const bad of [undefined, 'main', commit.slice(0, 12), `${commit}'; evil`]) {
+    const u = await serve({ script, commit: () => bad });
+    t.after(u.close);
+    assert.equal(await (await fetch(`${u.base}/join/windows.ps1`)).text(), "$PortalUrl = 'https://fff.tail1234.ts.net'; $PortalCommit = ''\n", String(bad));
+  }
+});
