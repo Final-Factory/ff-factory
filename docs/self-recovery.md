@@ -412,6 +412,11 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
     clean-up log gets a `cutOff: true` entry.
   - The summary and the log carry `passMs` and `phasesMs`, which time each step: `regular`, `stale` or `cap`, `own`,
     `listed` (sizing what is kept for a person), `remove` and `ownRemove`.
+  - The marker carries the step in flight and the steps done, so a cut-off pass names the step that held it: `clean-up:
+    the previous hourly pass, started ..., was cut off 61 min later, in its stale step (57 min in it), ...; steps done
+    before: stray temp 0 min, regular 4 min`. The steps: `quick`, `stray temp`, `regular`, `stale` (stale output),
+    `stale (install leftovers)`, `cap`, `own`, `listed`, `remove`, `ownRemove`. The first pass on this code (LothDesktop,
+    2026-11-25 19:54Z) was cut off by an update after 61 min and could not say where its hour went.
   - A low pass first plans the quick scope: the cargo-target cap with the low-space rules
     (`planInstallLeftovers` scope `cargo-cap`, `low: true`), which covers unheld FFU slot targets and closed workers'
     cargo. It reports what that would free and how long it took to plan, as `quick` in the summary and the

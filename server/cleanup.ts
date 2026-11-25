@@ -1142,7 +1142,10 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
       try {
         const m = JSON.parse(fs.readFileSync(file, 'utf8'));
         const at = Date.parse(m.startedAt);
-        return Number.isFinite(at) && typeof m.trigger === 'string' ? { startedAt: at, trigger: m.trigger } : undefined;
+        if (!Number.isFinite(at) || typeof m.trigger !== 'string') return undefined;
+        const stepAt = Date.parse(m.stepAt);
+        const done = m.done && typeof m.done === 'object' ? Object.fromEntries(Object.entries(m.done).filter(([, v]) => typeof v === 'number')) as Record<string, number> : undefined;
+        return { startedAt: at, trigger: m.trigger, ...(typeof m.step === 'string' && Number.isFinite(stepAt) ? { step: m.step, stepAt } : {}), ...(done && Object.keys(done).length ? { done } : {}) };
       } catch {
         return undefined;
       }
@@ -1150,7 +1153,16 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
     save: (m) => {
       try {
         fs.mkdirSync(dir, { recursive: true });
-        fs.writeFileSync(file, JSON.stringify({ startedAt: new Date(m.startedAt).toISOString(), trigger: m.trigger, pid: process.pid }));
+        fs.writeFileSync(
+          file,
+          JSON.stringify({
+            startedAt: new Date(m.startedAt).toISOString(),
+            trigger: m.trigger,
+            pid: process.pid,
+            ...(m.step && m.stepAt !== undefined ? { step: m.step, stepAt: new Date(m.stepAt).toISOString() } : {}),
+            ...(m.done ? { done: m.done } : {}),
+          }),
+        );
       } catch {
         // best-effort: a cut-off pass then goes unreported
       }
@@ -1165,10 +1177,25 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
   };
 }
 
-/** The words for a pass a daemon start found cut off (passMarkerFile). */
-export function describeCutOff(m: { startedAt: number; trigger: string }, now: number): string {
-  const min = Math.max(0, Math.round((now - m.startedAt) / 60_000));
-  return `clean-up: the previous ${m.trigger} pass, started ${new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')}Z, was cut off ${min} min later, before it finished: nothing it had planned was removed (w5795)`;
+/** A pass in flight as passMarkerFile keeps it: when and why it started, the step it is in, and the steps it has done. */
+export interface PassMarker {
+  startedAt: number;
+  trigger: string;
+  /** The step in flight (cleanupPass's phase names, `quick`, or the daemon's own) and when it began. */
+  step?: string;
+  stepAt?: number;
+  /** The steps done so far, in ms. */
+  done?: Record<string, number>;
+}
+
+const minutes = (ms: number) => Math.max(0, Math.round(ms / 60_000));
+
+/** The words for a pass a daemon start found cut off (passMarkerFile): with the step it was in, and the steps it had done. */
+export function describeCutOff(m: PassMarker, now: number): string {
+  const min = minutes(now - m.startedAt);
+  const step = m.step && m.stepAt !== undefined ? `, in its ${m.step} step (${minutes(now - m.stepAt)} min in it)` : '';
+  const done = m.done && Object.keys(m.done).length ? `; steps done before: ${Object.entries(m.done).map(([k, v]) => `${k} ${minutes(v)} min`).join(', ')}` : '';
+  return `clean-up: the previous ${m.trigger} pass, started ${new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')}Z, was cut off ${min} min later${step}, before it finished: nothing it had planned was removed${done} (w5795)`;
 }
 
 // ---------------------------------------------------------------- the runner
@@ -1221,6 +1248,11 @@ export interface PassOptions {
   dryRun: boolean;
   /** Below the critical line (CleanupSettings.criticalFreeGB, or a 'critical' trigger): the last-resort rules too. */
   critical?: boolean;
+  /**
+   * A step of the pass begins (w5795): its name and the steps done so far, in ms. The runner keeps them in the pass marker,
+   * so a pass a restart cuts off says which step held it.
+   */
+  step?(name: string, done: Record<string, number>): void;
 }
 
 /**
@@ -1307,11 +1339,11 @@ export interface CleanupRunnerDeps {
    * The pass in flight, kept on disk (passMarkerFile, w5795): a start that finds one says the last pass was cut off. Absent:
    * not tracked.
    */
-  marker?: { load(): { startedAt: number; trigger: string } | undefined; save(m: { startedAt: number; trigger: string }): void; clear(): void };
+  marker?: { load(): PassMarker | undefined; save(m: PassMarker): void; clear(): void };
   /** A pass starts (not a dry run): said, so a pass a restart cuts off still shows in the log (w5795). */
   started?(trigger: CleanupSummary['trigger'], low: boolean): void;
   /** The words for a pass this start found cut off (describeCutOff), said once at construction. */
-  cutOff?(text: string, m: { startedAt: number; trigger: string }): void;
+  cutOff?(text: string, m: PassMarker): void;
   /**
    * A low pass's quick plan (w5795, report-only for now): what the cargo-target cap with the low-space rules alone would
    * remove, measured. Planned and timed first; the summary carries it; nothing of it is removed apart from the full pass.
@@ -1424,17 +1456,21 @@ export class CleanupRunner {
       }
       const critical = trigger === 'critical' || (before !== undefined && s.criticalFreeGB !== undefined && before < s.criticalFreeGB * GB);
       const t0 = Date.now();
+      const startedAt = this.now();
       if (!dryRun) {
         this.d.started?.(trigger, low);
-        this.d.marker?.save({ startedAt: this.now(), trigger });
+        this.d.marker?.save({ startedAt, trigger });
       }
+      // Each step said in the marker, with the steps done (w5795): a pass cut off mid-plan then names the step that held it.
+      const step = dryRun ? undefined : (name: string, done: Record<string, number>) => this.d.marker?.save({ startedAt, trigger, step: name, stepAt: this.now(), done });
       let quick: CleanupSummary['quick'];
       if (low && !dryRun && this.d.quick) {
+        step?.('quick', {});
         const q0 = Date.now();
         const q = await this.d.quick().catch(() => undefined);
         if (q) quick = { items: q.length, bytes: q.reduce((n, x) => n + x.bytes, 0), ms: Date.now() - q0, top: [...q].sort((a, b) => b.bytes - a.bytes).slice(0, 5) };
       }
-      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}) });
+      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}), ...(step ? { step: (name, done) => step(name, { ...(quick ? { quick: quick.ms } : {}), ...done }) } : {}) });
       const passMs = Date.now() - t0;
       const vols = await this.volumes();
       const after = vols.free;

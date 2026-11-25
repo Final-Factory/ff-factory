@@ -1136,6 +1136,10 @@ export class Daemon {
       statfs: volumeStat,
       pass: async (low, opts) => {
         await this.ensureBashTmp();
+        // w5795: the daemon's own steps said too, the last steps done carried (cleanupPass reports its own).
+        let lastDone: Record<string, number> = {};
+        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d) => ((lastDone = d), opts.step!(n, d)) } : opts;
+        passOpts.step?.('stray temp', {});
         await this.sweepStrayTemp(opts.dryRun);
         const guard = this.cleanupGuard();
         const root = this.sandboxRoot();
@@ -1151,14 +1155,16 @@ export class Daemon {
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
         if (!opts.dryRun) void this.mediumUvPruner?.maybe(low);
         return cleanupPass({
-          opts,
+          opts: passOpts,
           guard,
           mode: settings.mode,
           regular: () => planCleanup({ rules, guard, low, critical: opts.critical, libraries: { roots: onInstallDrive(HOME, this.cfg.root) ? [HOME] : [], deleteDays: DEFAULT_CLEANUP.libraryDeleteDays } }),
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
-          stale: async () =>
-            mergePlans(
-              await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard }),
+          stale: async () => {
+            const output = await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard });
+            passOpts.step?.('stale (install leftovers)', lastDone);
+            return mergePlans(
+              output,
               await planInstallLeftovers({
                 root: this.cfg.root,
                 sandboxes: this.pool.list().map((x) => x.path),
@@ -1177,7 +1183,8 @@ export class Daemon {
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
               }),
-            ),
+            );
+          },
           cap: async () =>
             planInstallLeftovers({
               root: this.cfg.root,
