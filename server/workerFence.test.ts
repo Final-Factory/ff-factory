@@ -355,3 +355,18 @@ test('w5546 lockout review B1: the probe opens each path without reading it and 
     assert.deepEqual(judgeReadProbe(real, f.stdout), { wronglyRefused: [], leftOpen: [], unknown: [] }, f.stdout + f.stderr);
   }
 });
+
+test('seatbeltProfile: owner secrets deny the Keychain mach services and preference writes, and go with readOff (w5560)', () => {
+  const base = fenceFor({ setting: 'seatbelt', root: '/Users/p/ffw', platform: 'darwin', home: '/Users/p', exists: () => true, getconf: (n) => `/t/${n}` })!;
+  const f: WorkerFence = { ...base, readDenied: ['/Users/p/Library/Keychains'], ownerSecrets: { mach: ['com.apple.authd', 'com.apple.SecurityServer'] } };
+  const on = seatbeltProfile(f);
+  assert.match(on, /\(deny mach-lookup \(global-name "com\.apple\.authd"\) \(global-name "com\.apple\.SecurityServer"\)\)/);
+  assert.match(on, /\(deny user-preference-write\)/);
+  assert.match(on, /\(subpath "\/Users\/p\/Library\/Keychains"\)/);
+  const off = seatbeltProfile({ ...f, readOff: true });
+  assert.doesNotMatch(off, /mach-lookup|user-preference-write|Library\/Keychains/);
+  assert.doesNotMatch(seatbeltProfile(base), /user-preference-write/);
+  // With w5659's workerPrefFence as well, the rule is written once; with the read fence off, workerPrefFence alone keeps it.
+  assert.equal(seatbeltProfile({ ...f, prefDeny: true }).match(/deny user-preference-write/g)?.length, 1);
+  assert.match(seatbeltProfile({ ...f, prefDeny: true, readOff: true }), /\(deny user-preference-write\)/);
+});

@@ -85,6 +85,7 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
+import { hasOwnGithub, KEYCHAIN_MACH_SERVICES, machineGhEnv, machineGhToken, ownerReadDenied, workerGhConfigDir } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -3059,17 +3060,45 @@ export class Daemon {
     // Its own folder, not the file: a rewrite of the file keeps the grant (lockout review of #1193).
     const ownDir = own ? path.dirname(own) : undefined;
     const readOff = !this.readFenceEnforced();
-    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
+    // w5548: a fenced run gets the machine's gh login only when it has no vault token, and then as GH_TOKEN read by the
+    // daemon (machineGh), never as the login's folder: GH_CONFIG_DIR is only the fallback when the daemon read no token.
+    const ghMachine = spec.sandbox && !hasOwnGithub(spec.env) ? this.machineGh() : {};
+    // w5553/w5560: the owner's secrets (gh login, ~/.ssh, browser profiles, the Keychain) are closed with the read fence,
+    // on its own off switch; the gh folder stays open only to a run with no GitHub token at all (ownerReadDenied).
+    const owner = spec.sandbox && !readOff ? ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: hasOwnGithub(spec.env) || !!ghMachine.GH_TOKEN }) : [];
+    const lock = lockArgs ? { writeLock: readOff ? lockArgs : [...lockArgs, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(ownDir ? ['--read', ownDir] : [])], ...(this.lockMemo?.transcripts ? { writeLockTranscripts: this.lockMemo.transcripts } : {}) } : {};
     const baseFence = spec.sandbox ? this.workerFence : undefined;
-    const fence = baseFence && readOff ? { ...baseFence, readOff: true } : baseFence && ownDir ? { ...baseFence, readAllowed: [...(baseFence.readAllowed ?? []), ownDir] } : baseFence;
+    const readFence = baseFence && owner.length ? { ...baseFence, readDenied: [...(baseFence.readDenied ?? []), ...owner], ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : baseFence;
+    const fence = readFence && readOff ? { ...readFence, readOff: true } : readFence && ownDir ? { ...readFence, readAllowed: [...(readFence.readAllowed ?? []), ownDir] } : readFence;
     const low = spec.sandbox ? this.low : undefined;
     const lowPath = app[pathKey] ?? slot[pathKey] ?? process.env[pathKey];
-    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, low.gh), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
+    const ghDir = spec.sandbox && !hasOwnGithub(spec.env) && !ghMachine.GH_TOKEN ? low?.gh : undefined;
+    // w5548 probe (m5, 2026-11-25): with the owner's gh folder denied, gh refuses to start even with a token ("failed to
+    // load config: open ~/.config/gh/config.yml: operation not permitted"), so a token-holding fenced run on macOS or Linux
+    // gets an empty gh folder of its own in the root. Windows already moves gh's APPDATA into the root (lowEnv).
+    const ghOwn: Record<string, string> = spec.sandbox && this.cfg.root && process.platform !== 'win32' && (hasOwnGithub(spec.env) || ghMachine.GH_TOKEN) ? { GH_CONFIG_DIR: workerGhConfigDir(this.cfg.root) } : {};
+    const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, ghDir), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
     const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+  }
+
+  private ghMemo?: { at: number; token?: string };
+  /**
+   * w5548: the machine's gh login's token for fenced runs with no vault token (ownerSecrets.ts machineGhEnv), read with
+   * `gh auth token` outside every fence and kept 30 minutes. Its value is never logged; only whether there was one.
+   */
+  private machineGh(): Record<string, string> {
+    const now = Date.now();
+    if (!this.ghMemo || now - this.ghMemo.at > 30 * 60_000) {
+      const had = this.ghMemo ? Boolean(this.ghMemo.token) : undefined;
+      const token = machineGhToken();
+      this.ghMemo = { at: now, token };
+      if (had !== Boolean(token)) log(token ? 'owner secrets: runs with no vault GitHub token get the machine gh login as GH_TOKEN (w5548)' : "owner secrets: gh auth token gave no machine login token; runs with no vault GitHub token fall back to the login's folder (w5548)");
+    }
+    return machineGhEnv({}, this.ghMemo.token);
   }
 
   /**

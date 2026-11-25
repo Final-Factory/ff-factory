@@ -1,0 +1,1 @@
+- Worker caps, warn mode on Windows: the job no longer allows breakaway, so what a worker runs through Git Bash stays in its job and is counted in the warn peaks (w5554).
