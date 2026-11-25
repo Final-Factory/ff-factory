@@ -40,7 +40,7 @@ check (w925)
 ### Unit tests
 
 ```bash
-npm test                  # node --test server/*.test.ts scripts/*.test.ts
+npm test                  # node --test server/*.test.ts scripts/*.test.ts machine/*.test.ts
 npm run test:coverage     # the same, with a coverage table (node's built-in coverage)
 node --test server/guard.test.ts    # one file
 ```
