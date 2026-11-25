@@ -289,7 +289,7 @@ export function trustedEvidenceRun(o: {
 export type GitRun = (cmd: string, args: string[], opts?: { timeoutMs?: number; env?: NodeJS.ProcessEnv }) => Promise<{ code: number; stdout: string; stderr: string }>;
 
 export interface PortalEvidenceDeps {
-  /** The portal's data folder: its checkout is `<dataDir>/tools/final-factory-agents`, where findPrEvidence's `root` looks. */
+  /** The portal's data folder: its own checkout is `<dataDir>/tools/final-factory-agents` (the portal's, not a worker root's; findPrEvidence no longer looks there, w5597). */
   dataDir: string;
   run: GitRun;
   env?: NodeJS.ProcessEnv;

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { MAX_EVENTS_PROBE, maxProbeArgv, probeMaxEvents } from '../machine/maxEventsFence.ts';
+import { MAX_EVENTS_PROBE, bareEnv, maxProbeArgv, probeMaxEvents } from '../machine/maxEventsFence.ts';
 import { daemonMaxEventsFile, withRootDefaults, withoutMaxEvents } from '../machine/daemon.ts';
 import { lowTargets } from '../machine/lowIntegrity.ts';
 import { READ_ONLY_IN_ROOT, seatbeltProfile } from './workerFence.ts';
@@ -58,4 +58,12 @@ test('a sandbox agent gets no FF_MAX_EVENTS, whatever its spec carried; other ag
   assert.deepEqual(withoutMaxEvents({ FF_MAX_EVENTS: '/host/max-events.jsonl', FF_SESSION_ID: 's' }, true), { FF_SESSION_ID: 's' });
   assert.deepEqual(withoutMaxEvents({ FF_MAX_EVENTS: '/f', A: 'b' }, false), { FF_MAX_EVENTS: '/f', A: 'b' });
   assert.equal(withoutMaxEvents(undefined, true), undefined);
+});
+
+test('w5717: the Low probe runs the agent Git bash with none of the daemon environment', () => {
+  const env = bareEnv({ SystemRoot: 'C:/Windows', windir: 'C:/Windows', GH_TOKEN: 'secret', ANTHROPIC_API_KEY: 'k', PATH: '/x' });
+  assert.deepEqual(env, { SystemRoot: 'C:/Windows', windir: 'C:/Windows' });
+  let got: NodeJS.ProcessEnv | undefined;
+  probeMaxEvents('Low integrity', ['bash.exe', '-c', 'x'], 'f', { env, run: (_c, _a, _t, e) => ((got = e), { status: 0, stdout: 'REFUSED' }) });
+  assert.deepEqual(got, env);
 });
