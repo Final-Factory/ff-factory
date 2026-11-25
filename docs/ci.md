@@ -135,6 +135,11 @@ Known causes, so a future failure can be named at once:
   323 s, then 227 s and 319 s (measured): node deals the
   files out in turn, not by time. The other route, `--test-concurrency=4` on one runner, saved 60-100 s (measured in
   w5619's experiment; 8 failed): not enough for 150 s of headroom. If a shard nears 400 s, go to three.
+  A file that alone takes most of a shard is split by topic, since node shards whole files (w5826): orchestrators.test.ts
+  (481.7 s on Windows) became nine `server/orchestrators*.test.ts` of 44-110 s and machineSandboxes.test.ts (199.2 s) three
+  of 75-91 s (measured, Windows run 45700790046). The helpers go to an exported `*TestKit.ts`, which, as a non-test file,
+  needs its os.tmpdir use in `server/outsideWrites.test.ts`'s KNOWN list, and a Windows-listed file's pieces go into
+  `.github/windows-tests.txt` and windows.yml's paths (`scripts/windows-tests.test.ts` checks both).
 - **gitleaks `generic-api-key` in a test or doc**: every one in the window was a fake key in a fixture; add it to
   `.gitleaksignore` or make the fixture not look like a key.
 
