@@ -507,6 +507,7 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
       return -1;
     };
     const look = () => {
+      // memory.peak counts page cache too, so warn mode reads high against MemoryMax (which reclaims cache first): a warning, never a stop.
       const mem = readFirst('memory.peak', 'memory.current');
       const tasks = readFirst('pids.peak', 'pids.current');
       peaks.memory = Math.max(peaks.memory, mem);

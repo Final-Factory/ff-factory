@@ -87,6 +87,7 @@ static class FfJob
     const int BasicAccountingInformation = 1;
     const uint LimitActiveProcess = 0x8;
     const uint LimitJobMemory = 0x200;
+    const uint LimitBreakawayOk = 0x800;
     const uint SetQuota = 0x0100, Terminate = 0x0001, QueryLimited = 0x1000;
     const uint MsgActiveProcessLimit = 3, MsgJobMemoryLimit = 10;
 
@@ -175,6 +176,11 @@ static class FfJob
             lim.Basic.ActiveProcessLimit = processes;
             lim.JobMemoryLimit = new UIntPtr(memory);
         }
+        else
+        {
+            // Warn: a child started with CREATE_BREAKAWAY_FROM_JOB may leave the job, so the job never refuses a start (w5554 review).
+            lim.Basic.LimitFlags = LimitBreakawayOk;
+        }
         if (!SetInformationJobObject(job, ExtendedLimitInformation, ref lim, Marshal.SizeOf(typeof(ExtendedLimit)))) return Fail("SetInformationJobObject");
         IntPtr port = CreateIoCompletionPort(new IntPtr(-1), IntPtr.Zero, IntPtr.Zero, 1);
         if (port == IntPtr.Zero) return Fail("CreateIoCompletionPort");
@@ -218,7 +224,8 @@ static class FfJob
                 foreach (var p in Pids(job))
                 {
                     uint parent;
-                    if (p == host || (parents.TryGetValue(p, out parent) && parent == host)) continue;
+                    // A pid missing from the snapshot started after it (it may be the host's new claude): spared, as toolsToEnd does.
+                    if (p == host || !parents.TryGetValue(p, out parent) || parent == host) continue;
                     IntPtr h = OpenProcess(Terminate | QueryLimited, false, p);
                     if (h == IntPtr.Zero) continue;
                     // The pid may have been reused by a process outside the job since the list was read.

@@ -124,7 +124,7 @@ export interface LinkUpdateFlags {
   devDrive?: boolean;
   moveToDevDrive?: boolean;
   devDriveMaxGB?: number;
-  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it ignores it. */
+  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it passes it on to linkJob unchanged, and a linkJob that predates it does not write it. */
   workerFence?: 'on' | 'off';
   /** The worker caps' mode (w5554, docs/worker-caps.md): daemon.json `workerCaps`; unset: carried. A daemon that predates it ignores it. */
   workerCaps?: 'off' | 'warn' | 'enforce';
