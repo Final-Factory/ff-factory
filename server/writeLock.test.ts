@@ -4,8 +4,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { FF_LANDLOCK, makeDotnetShm, writeLockArgs } from '../machine/writeLock.ts';
-import { WORKER_CHILDREN } from '../machine/lowIntegrity.ts';
+import { FF_LANDLOCK, LOCKED_CHILDREN, makeDotnetShm, makeOpenRootChildren, writeLockArgs } from '../machine/writeLock.ts';
+import { WORKER_CHILDREN, openChildren } from '../machine/lowIntegrity.ts';
 import { maxProbeArgv, probeMaxEvents } from '../machine/maxEventsFence.ts';
 
 // w5333: the Linux write lock's rules (machine/writeLock.ts) and, where the kernel has Landlock, that the launcher refuses.
@@ -164,4 +164,38 @@ test('live w5562: --deny-unix refuses connecting to a socket made outside the lo
     for (const s of servers) s.kill('SIGKILL');
     fs.rmSync(base, { recursive: true, force: true });
   }
+});
+
+test('w5676: on a fresh root the daemon makes every open root folder before a locked worker starts; never a locked one, nothing outside', (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w5676-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const root = path.join(base, 'ffw');
+  const outside = path.join(base, 'outside');
+  fs.mkdirSync(path.join(root, 'daemon'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'tmp'));
+  // A daemon.json extra naming a locked folder must not make it either.
+  const args = writeLockArgs({ root, extra: [outside, path.join(root, 'secrets')] });
+  const made = makeOpenRootChildren(root, args, path.join(root, 'daemon'), [path.join(root, 'sandboxes')]);
+  const open = openChildren(root, [], LOCKED_CHILDREN);
+  assert.deepEqual(made.map((m) => path.basename(m)).sort(), open.filter((c) => c !== 'tmp' && c !== 'sandboxes'), 'every missing open folder, and only those');
+  for (const c of open.filter((c) => c !== 'sandboxes')) assert.ok(fs.statSync(path.join(root, c)).isDirectory(), c);
+  assert.ok(!fs.existsSync(path.join(root, 'sandboxes')), 'the sandboxes folder is never made: its absence means a drive gone');
+  for (const c of LOCKED_CHILDREN) if (c !== 'daemon') assert.ok(!fs.existsSync(path.join(root, c)), `${c} is not made`);
+  assert.ok(!fs.existsSync(outside), 'a rule outside the root makes nothing');
+  assert.deepEqual(makeOpenRootChildren(root, args, path.join(root, 'daemon'), [path.join(root, 'sandboxes')]), [], 'a second start makes nothing');
+});
+
+test('live w5676: a locked worker writes in an open root folder the daemon made, and could not before', { skip: !landlock && 'needs Linux with Landlock' }, (t) => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w5676-live-'));
+  t.after(() => fs.rmSync(base, { recursive: true, force: true }));
+  const root = path.join(base, 'ffw');
+  fs.mkdirSync(path.join(root, 'daemon'), { recursive: true });
+  const args = writeLockArgs({ root });
+  const write = () => spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'bash', '-c', `mkdir -p ${JSON.stringify(path.join(root, 'voice'))} && touch ${JSON.stringify(path.join(root, 'voice', 'x'))}`], { encoding: 'utf8' });
+  assert.notEqual(write().status, 0, 'missing at start: the rule is skipped and the root is read-only');
+  makeOpenRootChildren(root, args, path.join(root, 'daemon'));
+  const r = write();
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(fs.existsSync(path.join(root, 'voice', 'x')));
+  assert.notEqual(spawnSync('python3', [FF_LANDLOCK, ...args, '--', 'touch', path.join(root, 'daemon', 'x')]).status, 0, 'daemon stays locked');
 });
