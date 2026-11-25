@@ -38,7 +38,9 @@ LothDesktop):
 | Any OS | | a worker is not walled off from other workers' sandboxes inside the root (w5451 items 7 and 8) |
 
 **Resource caps** are not a fence, but they bound what one worker can use: memory, processes and temp disk per worker
-(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them).
+(w5554, docs/worker-caps.md, with the ways a hijacked worker can still escape them). They start in warn mode, which measures
+and reports and stops nothing: `ops_worker machine_update worker_caps off` is the switch, as `worker_fence off` is the
+fence's, and enforce waits on a week of warn data and the owner's go.
 
 **Fixes, by state** (a fix is "merged" only when its PR has merged; everything else is in progress):
 

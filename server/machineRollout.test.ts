@@ -758,6 +758,29 @@ test('w5641: two machines: m3 updates in the tick beast is cut; each outcome sta
   r.close();
 });
 
+test('w5628: once its 3 resends were cut too, the report says its link is slow, stalls or drops and it waits for the next deploy', async () => {
+  const cut = "beast refused it: the bundle's download did not finish in 480 s at 13754368 of 29217059 bytes, after 1 attempt(s)";
+  const m = mac('beast', { linkRun: () => ({ throws: cut }) });
+  const w = world([m]);
+  w.verify();
+  const r = w.make();
+  await r.tick();
+  for (let i = 0; i < 5; i++) {
+    w.advance(6 * 60_000);
+    await r.tick();
+  }
+  assert.equal(w.linkCalls.length, 8, 'the first send and 3 resends, each an update and its tools');
+  const ranOut = /its 3 resends were cut too: its link to the portal is slow, stalls or drops, so it waits for the next deploy \(needs a look\)/;
+  const o = r.state.machines.beast;
+  assert.match(o.note!, ranOut);
+  assert.match(o.tools!.note!, ranOut);
+  assert.doesNotMatch(`${o.note} ${o.tools!.note}`, /sent again by itself/);
+  // The follow-up report lifts both notes.
+  const last = w.told.at(-1)!.text;
+  assert.match(last, new RegExp(`- beast: FAILED: .*did not finish in 480 s.*${ranOut.source}`));
+  assert.match(last, new RegExp(`Agent tools FAILED: .*${ranOut.source}`));
+});
+
 test('w2005: a machine that went offline before its update reached it is not called failed, nothing is put back over ssh, and it is updated when it comes back', async () => {
   let tries = 0;
   const asleep = mac('m3', {

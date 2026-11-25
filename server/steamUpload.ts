@@ -128,7 +128,7 @@ export interface SteamJob {
   id: string;
   machine: string;
   key: string;
-  action: 'check' | 'upload';
+  action: 'check' | 'upload' | 'install';
   version?: string;
   app?: SteamApp;
   preview?: boolean;
@@ -160,8 +160,8 @@ export class SteamJobs {
     this.now = now;
   }
 
-  static keyOf(machine: string, action: 'check' | 'upload', version?: string, app?: string, preview?: boolean) {
-    return action === 'check' ? `${machine}:check` : `${machine}:${version}:${app}:${preview ? 'preview' : 'upload'}`;
+  static keyOf(machine: string, action: 'check' | 'upload' | 'install', version?: string, app?: string, preview?: boolean) {
+    return action === 'check' || action === 'install' ? `${machine}:${action}` : `${machine}:${version}:${app}:${preview ? 'preview' : 'upload'}`;
   }
 
   get(key: string): SteamJob | undefined {
@@ -177,6 +177,20 @@ export class SteamJobs {
   runningOn(machine: string): SteamJob | undefined {
     for (const j of this.jobs.values()) if (j.machine === machine && j.state === 'running') return j;
     return undefined;
+  }
+
+  /**
+   * What status with no job answers (w5694): the job running on this computer, else its latest of any action. A check that
+   * ended a second before the ask is still the one the caller means (BEAST, 2026-11-25: "No Steam job" right after it ended).
+   */
+  latestOn(machine: string): SteamJob | undefined {
+    let latest: SteamJob | undefined;
+    for (const j of this.jobs.values()) {
+      if (j.machine !== machine) continue;
+      if (j.state === 'running') return j;
+      if (!latest || j.startedAt >= latest.startedAt) latest = j;
+    }
+    return latest;
   }
 
   /** Whether a login check may run now: at most one per computer every CHECK_EVERY_MS, so a loop never locks the account. */

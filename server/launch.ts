@@ -368,6 +368,7 @@ export const CATALOG = {
     file: z.string().max(260).optional().describe('One file inside the zip, exactly as the report lists it (e.g. "logs/Player.log"). Default: the whole zip.'),
     diagnosis: z.string().max(120).optional().describe('Instead of the zip: one file FFBox\'s diagnosis of the report kept, by its name (e.g. "summary.md"); list_ffbox_files what "diagnosis" lists them.'),
     run: z.number().int().min(1).optional().describe('With diagnosis: which diagnosis run (default the newest that kept the file).'),
+    game: z.enum(['ff', 'ffu']).optional().describe('ff: a Final Factory report (default). ffu: a Final Factory Universe (FFU) report, which FFBox keeps apart.'),
   },
   /** docs/ffbox.md, "Release symbols and diagnosis files" (w1542). The portal asks FFBox; nothing on the machine is read. */
   list_ffbox_files: {
@@ -379,6 +380,7 @@ export const CATALOG = {
     app: z.string().max(16).optional().describe('symbols: main or demo.'),
     id: z.string().max(64).optional().describe('reports: only this report. diagnosis, required: the report id, e.g. 20261003T101500Z-crash-3a9f01c2d4.'),
     kind: z.enum(['any', 'crash', 'desync', 'hang']).optional().describe('reports only (default any).'),
+    game: z.enum(['ff', 'ffu']).optional().describe('reports only: ff, Final Factory\'s reports (default), or ffu, Final Factory Universe\'s (FFU), which FFBox keeps apart.'),
     since: z.string().max(40).optional().describe('reports: received from this ISO time with a zone. threads: created from this ISO time with a zone, e.g. 2026-10-28T22:44:00Z (default 7 days ago).'),
     until: z.string().max(40).optional().describe('reports: received up to this ISO time with a zone. threads: created up to this time (default now).'),
     channel: z.string().max(64).optional().describe('threads and open_threads: one channel by its alias as the list shows it (default every bug channel; open_threads also the feedback channel).'),
@@ -417,7 +419,7 @@ export const CATALOG = {
   },
   /** docs/steam-upload.md (w5551): the daemon runs ffbox ffsteam.py with the build account's credential, which no worker holds. */
   steam_upload: {
-    action: z.enum(['check', 'upload', 'status']).describe('check: can this computer log in to Steam (once every 10 min, or now with guard_code); upload: upload your release build; status: how the job stands.'),
+    action: z.enum(['check', 'upload', 'status', 'install']).describe('check: can this computer log in to Steam (once every 10 min, or now with guard_code); install: set steamcmd up on this computer (a check or upload does it too when it is missing); upload: upload your release build; status: how the job stands.'),
     version: z.string().max(32).optional().describe('upload: the release, e.g. "1.0.0.12".'),
     app: z.enum(['main', 'demo']).optional().describe('upload: which Steam app (default main).'),
     sha: z.string().max(40).optional().describe('upload: the full commit built (the bump carrying cicd/release-lane.json).'),

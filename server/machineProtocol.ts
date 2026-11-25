@@ -52,6 +52,8 @@ import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimed
  * Also (w4922, no bump): `test_history`, a sandbox's local test run for the portal's per-test history, which an older portal
  * drops (the daemon sends it again later), answered by `test_history_ack`, which an older daemon drops.
  * Also (w5576, no bump): `portalPin` in the hello (machine/portalPin.ts), which an older portal ignores.
+ * Also (w5640, no bump): `steamInstall` in the hello, and action `install` and `account` (the build account to set up) in
+ * `steam_upload`, sent only to a daemon that offered it.
  * Also (w5551, no bump): `steamUpload` in the hello and `steam_upload`, sent only to a daemon that offered it, answered by
  * `steam_upload_state`, which an older portal drops.
  */
@@ -122,8 +124,10 @@ export interface LinkUpdateFlags {
   devDrive?: boolean;
   moveToDevDrive?: boolean;
   devDriveMaxGB?: number;
-  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it ignores it. */
+  /** The worker write fence on or off (w5377); unset: carried. A daemon that predates it passes it on to linkJob unchanged, and a linkJob that predates it does not write it. */
   workerFence?: 'on' | 'off';
+  /** The worker caps' mode (w5554, docs/worker-caps.md): daemon.json `workerCaps`; unset: carried. A daemon that predates it ignores it. */
+  workerCaps?: 'off' | 'warn' | 'enforce';
 }
 
 /**
@@ -160,8 +164,10 @@ export type DaemonSandbox = Omit<MachineSandbox, 'purpose' | 'sessionIds'>;
  * rateLimit (protocol 4): an agent there hit a rate limit, so the portal fetches the token's usage sooner.
  * tempSize (w3686, no bump): a worker's temp folder is over its threshold, arg { total, biggest, step } (server/tempSizeHook.ts); an older
  * portal re-emits it with no listener, and an older daemon or host never sends it.
- * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended }
- * (machine/workerCaps.ts); an older portal ignores it.
+ * workerCap (w5554, no bump): a worker's agent host hit one of its caps and ended its tools, arg { kind, limit, seen?, ended,
+ * warn?, kernel? } (machine/workerCaps.ts); `warn`: warn mode, the cap would have been hit and nothing was ended; `kernel`:
+ * Linux, the kernel acted and the host ended nothing. An older portal ignores it, and one that predates the two flags words a
+ * warn hit as an enforced one (its ledger line says "ended 0").
  */
 export type SignalName = 'turnEnd' | 'permission' | 'result' | 'ended' | 'rateLimit' | 'tempSize' | 'workerCap';
 
@@ -309,7 +315,7 @@ export type ToDaemon =
    * FFSTEAM_GUARD_SECRET from the vault, which no agent's environment holds) and `guardCode` in that process only. Answered
    * by steam_upload_state. Sent only to a daemon whose hello offered `steamUpload`.
    */
-  | { type: 'steam_upload'; id: string; action: 'check' | 'upload'; session: string; sandbox?: string; version?: string; app?: 'main' | 'demo'; runs?: Partial<Record<'windows' | 'mac' | 'linux', string>>; live?: string; preview?: boolean; secrets: Record<string, string>; guardCode?: string; githubToken?: string }
+  | { type: 'steam_upload'; id: string; action: 'check' | 'upload' | 'install'; session: string; sandbox?: string; version?: string; app?: 'main' | 'demo'; runs?: Partial<Record<'windows' | 'mac' | 'linux', string>>; live?: string; preview?: boolean; secrets: Record<string, string>; guardCode?: string; githubToken?: string; account?: string }
   /** GitHub App installation tokens for this machine's runs (w1519, docs/github-apps.md): the whole set, each time it changes. */
   | { type: 'gh_app_tokens'; tokens: GhAppToken[] }
   /**
@@ -401,6 +407,8 @@ export type FromDaemon =
       timedActive?: string[];
       /** It runs the urgent lane's Steam check and upload itself (w5551, `steam_upload`). An older portal ignores it. */
       steamUpload?: boolean;
+      /** It runs steam_upload's `install` (w5640). */
+      steamInstall?: boolean;
       /** It holds the nightly lab's fixtures (w3939, `<root>/nightly-history/fixtures`, never on C:) and serves `lab_fixture` and `lab_fixture_upload`. An older portal ignores it. */
       labFixtures?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
