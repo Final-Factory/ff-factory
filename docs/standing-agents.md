@@ -81,6 +81,30 @@ except its own. Permission mode is `bypassPermissions`, bounded by two `PreToolU
    (config.json, data/, the secrets folder, ~/.ssh, Claude's and gh's credentials, a machine daemon's
    daemon.json): [orchestrators.md](orchestrators.md#what-orchestrators-and-standing-agents-may-not-read).
 
+   Since w5504 (the w5452 audit, finding 2) the allowlist also judges each tool's options, since a read-only
+   program can still run code or write a file through one: `git` takes only `-C`, `--no-pager`, pathspec options and
+   `-c` with a color or output-format key (never `core.pager`, `core.fsmonitor`, `core.sshCommand`, `diff.external`,
+   `alias.*`, `--config-env`, `--exec-path`, `--git-dir`), and no `--output`, `--upload-pack`, `--exec`,
+   `--template`, `--ext-diff`, `clone -u/-c`, `grep -O` or `ext::`/`fd::` remotes (long options by any prefix, as git
+   takes abbreviations); `gh api` only GET (the method read as gh reads it, `-iXDELETE` included) or, with
+   `github_comment`, a POST to a comment endpoint, and never `--input`; no `gh auth status --show-token` or `--web`;
+   `sed` only `-n -E -r -s -u -z -e -l` and a script read as sed reads it, with no `e`, `w`, `W`, `r`, `R` command or
+   `s///e`/`s///w` flag; no `sort -o`/`--compress-program`, `rg --pre`/`--hostname-bin`, `find -exec`/`-ok`/`-fprint*`/
+   `-fls`/`-delete`, `tree -o`/`-R`, `uniq IN OUT` or `file -C`. It refuses shell variables and `$'…'` quoting,
+   `VAR=value` except formatting variables (`LC_*`, `TZ`, `GH_REPO`, a pager set to empty or `cat`, …), a glob or brace
+   that could expand into an option of those programs, and a program run from a path other than a system folder.
+   Git also reads the configuration of the repository it runs in, which could name a program (w5514). So a standing
+   agent's process carries command-scope git config that outranks any repository's (`server/launch.ts`
+   `standingGitEnv`): `safe.bareRepository=explicit` (a folder shaped like a bare repository is not taken as one),
+   `core.fsmonitor=false`, `core.hooksPath=/dev/null`, `core.pager=cat`, `protocol.ext.allow=never`, and
+   `GIT_CONFIG_NOSYSTEM=1` except on Windows (Git for Windows keeps its TLS backend and credential manager there).
+   Keys a repository names freely (`diff.<driver>.textconv`, `filter.<driver>.clean`, `gpg.program`) cannot be
+   overridden that way, and `diff.external=` (empty) breaks every `git diff` ("cannot run", git 2.50.1), so Write and
+   Edit never reach git's own files (`standingWriteProblem`): no path with a `.git` segment in any spelling (`.GIT`,
+   `.git.`, `GIT~1`), judged on the real path, so a symlink a cloned repository checked out (`x -> .git`, or out of the
+   folder) does not carry a write there. `server/standingGit.test.ts` spawns git in a crafted repository and shows the
+   programs it names run without the env and not with it.
+
 Tool groups (none by default, so the default is read-only on files only):
 
 | group | adds |

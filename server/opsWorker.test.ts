@@ -588,6 +588,26 @@ test('w1133: a send in its person\'s turn is a new job in a fresh conversation w
   ops.close();
 });
 
+test('w5508: a harness-turn follow-up is accepted at 59 minutes and refused at 61; a person-turn follow_up still works', async () => {
+  const { ops, st, settle } = freshJobRig();
+  const loth = orch('lo', LOTH);
+  ops.send(loth, 'job one');
+  await settle();
+  const t0 = st.clock;
+  st.personTurn = false;
+  st.clock = t0 + 59 * 60_000;
+  assert.doesNotMatch(ops.send(loth, 'check-in at 59 minutes'), /new job/);
+  await settle();
+  st.clock = t0 + 61 * 60_000;
+  assert.throws(() => ops.send(loth, 'check-in at 61 minutes'), /harness turn.*first 60 minutes.*started with a message of their own/);
+  // The person's own turn: follow_up still carries on the job, and a plain send is a new job.
+  st.personTurn = true;
+  assert.match(ops.send(loth, 'person follow-up', false, [], false, true), /follow-up in your open job/);
+  await settle();
+  assert.match(ops.send(loth, 'person new job'), /new job of Lothsahn's/);
+  ops.close();
+});
+
 test('w1133: follow_up needs the caller\'s own open job; fresh and follow_up exclude each other', async () => {
   const { ops, st, settle } = freshJobRig();
   const loth = orch('lo', LOTH);
