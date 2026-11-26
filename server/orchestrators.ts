@@ -90,6 +90,7 @@ import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPerson
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
+import { dataDirClearedText, type DataDirVerdict } from './gameDataDir.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
@@ -5193,7 +5194,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string; data_dir?: DataDirVerdict }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -5214,7 +5215,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const menus = steam || menusNone ? undefined : menusSaid || (mentionsMenus(what, brief) ? MENUS_READ : undefined);
     // w5965: a player from before w5297 goes only where the worker fence is off: said by the worker, or read from its words.
     const legacySaid = String(a.legacy_data ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
-    const legacyData = saysNone(legacySaid) ? undefined : legacySaid || (mentionsLegacyPlayer(what, brief) ? LEGACY_READ : undefined);
+    let legacyData = saysNone(legacySaid) ? undefined : legacySaid || (mentionsLegacyPlayer(what, brief) ? LEGACY_READ : undefined);
     // w4618: 1 leg unless it names a reason to need computers at once; a leg count asked for outright stands (legsSaid).
     const splitSaid = String(a.split ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     const legs = a.legs ?? (pairComputersReason({ title: what, brief, pair: { crossOs, steam, timed: a.timed === true, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined } }) ? 2 : 1);
@@ -5225,6 +5226,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (a.player && given && !a.player.key.startsWith(given)) throw new Error(`player ${a.player.id} is a player of ${a.player.key.slice(0, 10)}, not of commit ${given.slice(0, 10)}: publish the player of the commit the legs run`);
     const commit = given ?? a.player?.key.slice(0, 40);
     if (a.pr?.trim() && !normPr(a.pr)) throw new Error(`pr is the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link), not "${clip(a.pr, 80)}"`);
+    // w6189: decided per commit. A commit whose GameDataPaths.cs reads FF_GAME_DATA_DIR (game PR #4357's backport, checked by
+    // Agents.requestPair through server/gameDataDir.ts) is no pre-w5297 player; one that does not, or that could not be
+    // checked (no commit given, GitHub does not know it, the read failed), keeps the refusal, and its reason says which.
+    let dataDirChecked: string | undefined;
+    if (legacyData) {
+      const v = a.data_dir;
+      if (v?.reads && commit && sameCommit(v.commit, commit)) {
+        dataDirChecked = dataDirClearedText(v.commit);
+        legacyData = undefined;
+      } else {
+        const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)' : v && !v.reads ? v.why : `FF Factory did not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (w6189)`;
+        legacyData = clip(`${legacyData}; ${why}`, 400);
+      }
+    }
     const openPrs = (w.prs ?? []).filter((x) => x.state === 'open');
     const pr = normPr(a.pr) ?? prIn(what) ?? prIn(brief) ?? (openPrs.length === 1 ? `${openPrs[0].repo}#${openPrs[0].number}` : undefined);
     const open = [...this.store.work.values()].find((x) => x.pair?.for === w.id && isOpen(x));
@@ -5283,7 +5298,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
-      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}) });
+      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}), ...(dataDirChecked ? { dataDirChecked } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5293,7 +5308,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
     const steamHeld = steamShort ? ` ${p.id} needs Steam and is ${this.blockOnSteam(p, steamShort, `worker ${sessionId}`)}; it starts by itself once enough are.` : '';
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [p.id], what: `pair run ${p.id}: ${what}` });
-    return `${head}${steamHeld} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
+    return `${head}${dataDirChecked && !open ? ` Not a pre-w5297 run: ${dataDirChecked}.` : ''}${steamHeld} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
   }
 
   /**
@@ -5864,7 +5879,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return last && legs?.length ? { from: last.from, legs } : undefined;
   }
 
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer; legacyData?: string }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer; legacyData?: string; dataDirChecked?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
@@ -5884,6 +5899,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(x.commit ? { commit: x.commit } : {}),
       ...(x.player ? { player: x.player } : {}),
       ...(x.legacyData ? { legacyData: x.legacyData } : {}),
+      ...(x.dataDirChecked ? { dataDirChecked: x.dataDirChecked } : {}),
     };
     const warm = this.warmLegsFor(w.id, x.avoid);
     if (warm) pair.warm = warm;
