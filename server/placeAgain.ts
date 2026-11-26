@@ -60,6 +60,11 @@ const span = (ms: number) => {
   return min < 90 ? `${min} min` : `${(min / 60).toFixed(min < 600 ? 1 : 0)} h`;
 };
 
+/** w5924: a light agent folder younger than this is kept although empty (its new worker's record may not be in it yet). */
+export const LIGHT_GRACE_MS = 15 * 60_000;
+/** w5924: a light folder whose delete was refused (unpushed work in it) is tried again after this. */
+export const LIGHT_RETRY_MS = 6 * 3_600_000;
+
 /** A worker created this recently that has not run a turn yet is about to start (its brief waits for its sandbox). */
 const STARTING_MS = 60 * 60_000;
 
@@ -460,6 +465,8 @@ export interface PlaceAgainDeps {
    */
   light?: (machineId: string) => boolean;
   makeLight?: (machineId: string, why: string) => Promise<MachineSandbox>;
+  /** w5924: delete an empty light folder (MachineManager.deleteLightFolder); its daemon refuses one that holds unpushed work. */
+  dropLight?: (machineId: string, id: string) => Promise<unknown>;
   /** Run the release pass again soon (a worker was just stopped to release its sandbox: w890 frees it within a minute of its turn's end). */
   soon?: () => void;
   /** Runs a release pass (w2026): AgentManager indexes the requests by worker for its length, so workOver, ciWait and waitOn read a worker's own requests, not all of them. */
@@ -566,6 +573,9 @@ export class PlaceAgain {
   private readonly failed = new Map<string, number>();
   /** "<machine>/<sandbox>" saves under way (w656). */
   private readonly saving = new Set<string>();
+  /** w5924: light agent folders being deleted, and when a delete was refused (unpushed work), by "<machine>/<folder>". */
+  private readonly dropping = new Set<string>();
+  private readonly dropRefused = new Map<string, number>();
   /** "<machine>/<sandbox>" to when and why its last save failed. */
   private readonly saveFailed = new Map<string, { at: number; why: string }>();
   /** Saves under way, for tests to wait on. */
@@ -824,6 +834,8 @@ export class PlaceAgain {
       if (!live && s.placeReleased) this.d.liveLost?.(s, s.placeReleased.why);
       else if (!live && s.status === 'stopped' && !(this.now() - Date.parse(s.lastActivityAt) < LIVE_HOLD_MS)) this.d.liveLost?.(s, `nobody came back to it within ${LIVE_HOLD_MS / 3_600_000} h`);
       if (s.placeReleased && staysReleased(s, live, f.now)) continue;
+      // w5924: a light agent folder is its worker's own and holds no game sandbox: nothing to release for other work.
+      if (isLight(sb) && !s.placeReleased) continue;
       const step = releaseStep(s, sb, { ...f, workOver: this.d.workOver(s), ciWait: this.d.ciWait?.(s), waitOn: this.d.waitOn?.(s), keepLive: live ? this.d.keepLive(s.id) : undefined, liveHold: this.d.liveHold?.(s), pairHold: this.d.pairHold?.(s), claimedBy: s.placeReleased ? this.claimedBy(m.id, sb.id) : undefined, reclaim: targets.get(s.id)?.why, keep: s.placeReleased ? undefined : this.keepFor(s) });
       if (!step) continue;
       // Its sessions stay grouped (sessionsMemo): no step moves a worker to another machine or sandbox in the pass.
@@ -866,6 +878,7 @@ export class PlaceAgain {
       }
     }
     this.orphanSave(did);
+    this.lightSweep(did);
     for (const line of did) console.log(`place again: ${line}`);
     // A worker stopped to release its sandbox is released by the next pass: do not leave that a minute away (w890).
     if (stoppedDue) this.d.soon?.();
@@ -1085,6 +1098,52 @@ export class PlaceAgain {
    * much untracked output); a released worker on that branch gets it back when it resumes there. Only with the editor
    * closed (an open one may write again), no Unity batch run, no agent there and no claim on it.
    */
+  /**
+   * w5924: delete the light agent folders nobody needs any more: older than LIGHT_GRACE_MS (a new one waits for its
+   * worker's first turn), not deleting already, and every worker recorded in it stopped with its work over (or none).
+   * Such a worker is marked released first, so a message that reopens its work places it in a new light folder. The
+   * daemon refuses one whose repositories hold unpushed commits, uncommitted files or a stash; that one is kept, said
+   * once, and tried again after LIGHT_RETRY_MS.
+   */
+  private lightSweep(did: string[]) {
+    if (!this.d.dropLight || !this.d.machines) return;
+    const now = this.now();
+    for (const m of this.d.machines()) {
+      if (!this.d.online(m.id) || !this.d.light?.(m.id)) continue;
+      for (const sb of m.sandboxes ?? []) {
+        if (!isLight(sb) || sb.status !== 'ready') continue;
+        const key = `${m.id}/${sb.id}`;
+        if (this.dropping.has(key) || now - Date.parse(sb.createdAt) < LIGHT_GRACE_MS || now - (this.dropRefused.get(key) ?? -Infinity) < LIGHT_RETRY_MS) continue;
+        const here = [...this.d.sessions()].filter((s) => s.machineId === m.id && s.machineSandbox === sb.id);
+        if (here.some((s) => this.d.isLive(s.id) || s.status !== 'stopped' || s.pendingPermissions.length > 0 || !this.d.workOver(s))) continue;
+        for (const s of here) {
+          if (s.placeReleased) continue;
+          s.placeReleased = { at: new Date(now).toISOString(), sandbox: sb.id, branch: '', why: 'its work is over and its light agent folder was deleted (w5924)' };
+          this.d.save(s);
+        }
+        this.dropping.add(key);
+        did.push(`deleting the light agent folder ${key}: ${here.length ? `its worker${here.length > 1 ? 's' : ''} ${here.map((s) => s.id).join(', ')} stopped with ${here.length > 1 ? 'their' : 'its'} work over` : 'no worker is in it'} (w5924)`);
+        const p = this.d
+          .dropLight(m.id, sb.id)
+          .then(() => {
+            this.dropRefused.delete(key);
+            console.log(`place again: deleted the light agent folder ${key}`);
+          })
+          .catch((e) => {
+            const why = (e as Error).message;
+            if (!this.dropRefused.has(key)) this.d.report?.(`[machines] the light agent folder ${key} is kept: ${why}`);
+            this.dropRefused.set(key, this.now());
+            console.warn(`place again: light agent folder ${key} kept: ${why}`);
+          })
+          .finally(() => {
+            this.dropping.delete(key);
+            this.pending.delete(p);
+          });
+        this.pending.add(p);
+      }
+    }
+  }
+
   private orphanSave(did: string[]) {
     if (!this.d.saveWork || !this.d.machines) return;
     for (const m of this.d.machines()) {
@@ -1215,10 +1274,16 @@ export class PlaceAgain {
     // w5924: where its daemon makes light folders, back in its own one, else into a new one of its own.
     if (this.d.light?.(m.id) && this.d.makeLight) {
       const own = m.sandboxes?.find((x) => x.id === info.machineSandbox);
-      if (!(isLight(own) && own!.status === 'ready')) {
-        void this.toLight(info, m);
-        return `being placed in a new light agent folder on ${m.id} (its work needs only an agent slot, w5924)`;
+      if (isLight(own) && own!.status === 'ready') {
+        // Its own folder is still there: it resumes in it, as it left it.
+        this.changes++;
+        delete info.placeReleased;
+        backFrom(info, this.now());
+        this.d.save(info);
+        return undefined;
       }
+      void this.toLight(info, m);
+      return `being placed in a new light agent folder on ${m.id} (its work needs only an agent slot, w5924)`;
     }
     const p = seatFor(info, m, this.facts(m.id), this.d.seats?.(m.id) ?? 2);
     if ('wait' in p) return p.wait;

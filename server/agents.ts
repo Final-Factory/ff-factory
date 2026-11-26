@@ -996,6 +996,7 @@ export class Agents {
       },
       light: (id) => machines.offersLight(id),
       makeLight: (id, why) => machines.createLightFolder(id, why),
+      dropLight: (id, sb) => machines.deleteLightFolder(id, sb),
       soon: () => void setTimeout(() => !this.closed && this.placeAgain.tick(), 5000).unref?.(),
       pass: (run) => {
         this.workByWorker = workByWorker(this.store.work.values());
