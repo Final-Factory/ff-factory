@@ -887,7 +887,17 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     kept in `daemon\agent-node\<zip>` when its SHA-256 is the pinned one (hashed in memory and those same bytes unpacked),
     else downloads it and keeps it (`pinnedZip`), so a rollout needs no network once a machine has it. A Low process that
     puts an empty access list on itself is never listed as Low by the read (w5964's review, N1): the swap does not rest on
-    the read. The rollout log says
+    the read. What the swap costs (w5986, measured on LothDesktop in test folders): `tools\node` is missing between its
+    two renames for 151 µs at the median and 607 µs at most (127 swaps), and 249 node starts while 4 processes started
+    node in a loop all ran; a start that lands in that gap gets ENOENT by full path, or by `PATH` the next node on it (here
+    `C:\Program Files\nodejs`, which Low cannot write). A node still starting holds node.exe open and refuses the
+    first rename (EPERM, 23 of 150 swaps), which is the retry and the busy line below, never a missing node. A Low
+    process holding a write handle to `tools` from before its label was raised cannot create `node` through it in the
+    gap: Windows checks the folder's label as it is now (measured one level down: a thread impersonating Untrusted
+    opened `tools` while it was labelled Untrusted; after the label was raised to Low, creating `node` relative to that
+    handle was refused with 0xC0000022). The label read (`icacls /T`, 5.6 s on LothDesktop's 2459 entries) stays: it
+    is the only check that sees a label any Low process could use, and the holder read now runs after it even when it
+    fails, so the writers of such a node are named for w5952's stage. The rollout log says
     `Agent node: node reinstalled (verified: ...; swapped anyway, ...): ...` for a node that passed every check,
     `Agent node: node reinstalled (<why>): ...` for one that did not, or
     `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or

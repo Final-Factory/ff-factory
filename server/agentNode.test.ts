@@ -327,6 +327,19 @@ test("w5839: a pinned copy whose files carry a Low label or an access entry of t
   });
 });
 
+test('w5986 (N4): a node whose labels let Low write it still has its Low writers named, for the stage that ends them (w5952)', async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    assert.equal(await ensureAgentNode(root, fake(zip).d), 'installed');
+    const f = fake(zip, { own: { 'node.exe': 'Mandatory Label\Low Mandatory Level:(NW)' }, held: [[{ pid: 4242, name: 'claude', path: agentNodeExe(root) }]] });
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.equal(f.reads.length, 1, 'the holder read ran after the label read failed');
+    assert.ok(f.said.some((l) => /^WARNING: Agent node: processes below Medium integrity hold write access .*claude [(]4242[)]/.test(l)), f.said.join('\n'));
+    assert.ok(f.said.at(-1)!.startsWith('Agent node: node reinstalled (its labels let a Low worker write it: '), f.said.at(-1)!);
+  });
+});
+
 test('w5839: icacls output that cannot be read, or that names a failure, counts against the folder; with no node yet the line says so', async () => {
   const zip = Buffer.from('a zip');
   await pinned(zip, async () => {

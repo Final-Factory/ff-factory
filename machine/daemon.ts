@@ -48,6 +48,7 @@ import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
+import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
@@ -2442,7 +2443,7 @@ export class Daemon {
       // Its ffu build slots (w5912): the machine view and list_sandboxes show who holds each, and which holds are stale.
       this.refreshFfuReport();
       const ffuSlots = this.ffuReport;
-      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(ffuSlots ? { ffuSlots } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
+      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(ffuSlots ? { ffuSlots } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}), agents: this.census() });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
@@ -4307,7 +4308,19 @@ export class Daemon {
    * (w384). Idle agents, their process up or not, take no slot; the portal queues a message until one is free.
    */
   private runningIn(sandbox: string | undefined | '*') {
-    return [...this.entries.values()].filter((e) => isMidTurn(e.s.info) && (sandbox === '*' ? !!e.spec?.sandbox : e.spec?.sandbox === sandbox)).length;
+    return this.countedIn(sandbox).length;
+  }
+
+  /** The agents runningIn counts, by id, place and state (w5972): a refusal names them, and the stats carry them (the census). */
+  private countedIn(sandbox: string | undefined | '*'): CensusAgent[] {
+    return [...this.entries]
+      .filter(([, e]) => isMidTurn(e.s.info) && (sandbox === '*' ? !!e.spec?.sandbox : e.spec?.sandbox === sandbox))
+      .map(([id, e]) => ({ id, ...(e.spec?.sandbox ? { sandbox: e.spec.sandbox } : {}), status: e.s.info.status, live: e.s.live }));
+  }
+
+  /** What the agent limits count here, sandboxes' and standing agents together (w5972): sent with every stats report. */
+  private census(): AgentCensus {
+    return { midTurn: [...this.countedIn('*'), ...this.countedIn(undefined)] };
   }
 
   /**
@@ -4332,17 +4345,19 @@ export class Daemon {
     if (!spec.sandbox) {
       // No agent works in the main clone (w536); a standing agent works in its own folder, under the machine's cap.
       if (path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine runs workers in sandboxes only: start it in one of this machine's sandboxes";
-      const all = this.runningIn('*') + this.runningIn(undefined);
-      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions})` : undefined;
+      const counted = this.census().midTurn;
+      const all = counted.length;
+      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions}); counted: ${describeCounted(counted)}` : undefined;
     }
     const sb = this.pool.list().find((s) => s.id === spec.sandbox) ?? (isLightId(spec.sandbox) ? this.light.list().find((s) => s.id === spec.sandbox) : undefined);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
     if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
     if (path.resolve(sb.path).toLowerCase() !== path.resolve(spec.cwd).toLowerCase()) return `sandbox ${sb.id} is at ${sb.path}, not ${spec.cwd}`;
     const max = this.poolSettings?.maxAgentsPerSandbox ?? this.cfg.sandboxes?.maxAgentsPerSandbox ?? 2;
-    if (this.runningIn(sb.id) >= max) return `already ${max} agents mid-turn in sandbox ${sb.id} (max_agents_per_sandbox)`;
-    const inSandboxes = this.runningIn('*');
-    return totalAgentsRefusal(inSandboxes, this.currentPool());
+    const inThis = this.countedIn(sb.id);
+    if (inThis.length >= max) return `already ${max} agents mid-turn in sandbox ${sb.id} (max_agents_per_sandbox); counted: ${describeCounted(inThis)}`;
+    const inSandboxes = this.countedIn('*');
+    return totalAgentsRefusal(inSandboxes.length, this.currentPool(), inSandboxes);
   }
 
   /** The pool settings the portal last sent (welcome). */
@@ -4557,7 +4572,11 @@ export class Daemon {
         const deliver = (attachments?: Awaited<ReturnType<typeof fetchAttachments>>) => {
           try {
             const why = refusal();
-            if (why) throw new Error(why);
+            if (why) {
+              // w5972: which agents a refusal counted, in this log too (the portal's queue line quotes it).
+              log(`start of ${id} refused: ${why}`);
+              throw new Error(why);
+            }
             const e = this.entry(msg.info, msg.lastSeq);
             e.spec = msg.spec;
             // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
