@@ -12,8 +12,8 @@
 // by walking down from the host's own process: the walk never enters the host itself (its heartbeat keeps its priority),
 // another host, the daemon or a runner's tree, and it keeps a child only when its parent started before it (Windows reuses
 // pids and never reparents an orphan, so a parent pid alone can name an unrelated process; leftovers.ts does the same).
-// Editors the daemon starts are not under a host (Start-Process); on LothDesktop they run BelowNormal already
-// (unityBelowNormal), and batch builds go to Idle (lowerBuild).
+// Editors the daemon starts are not under a host (Start-Process) and count as the rest (the pool's belowNormal setting,
+// machine/sandboxes.ts, runs them BelowNormal where it is on); batch builds go to Idle (lowerBuild).
 //
 // This step is warn only (the lockout rule, w6110): nothing is set. The tick logs, while a CI job runs, how many cores
 // the machine, the jobs and each agent's processes used over the last tick, and how many of the agents' processes run
@@ -77,9 +77,9 @@ export interface WinCiFirstResult {
   windowMs?: number;
 }
 
-/** Busy CPU ms of every core so far (os.cpus: user, nice, sys and irq; idle left out). */
-export function machineBusyMs(): number {
-  return os.cpus().reduce((a, c) => a + c.times.user + c.times.nice + c.times.sys + c.times.irq, 0);
+/** Busy CPU ms of every core so far (os.cpus: user, nice, sys; idle left out; on Windows sys already holds irq). */
+export function machineBusyMs(platform: NodeJS.Platform = process.platform): number {
+  return os.cpus().reduce((a, c) => a + c.times.user + c.times.nice + c.times.sys + (platform === 'win32' ? 0 : c.times.irq), 0);
 }
 
 /** os.getPriority's Windows values (libuv maps the priority classes to these). */
@@ -143,7 +143,7 @@ export function agentTrees(roots: number[], procs: Pick<Proc, 'pid' | 'ppid'>[],
 export class WinCiFirst {
   private readonly d: WinCiFirstDeps;
   private jobKey = '';
-  private last?: { at: number; busy: number; cpu: Map<string, number> };
+  private last?: { at: number; since: number; busy: number; cpu: Map<string, number> };
   private warnedAt = 0;
   private listFailing = false;
   private factsFailing = false;
@@ -193,25 +193,28 @@ export class WinCiFirst {
       this.last = undefined;
       return { jobs: 0, above: 0 };
     }
-    // A CI job runs. Its processes: each worker's tree (by parent pid alone: a job is not ours to touch either way).
+    // A CI job runs. Its processes: each worker's tree by parent pid, never into an agent host or the daemon (an adopted
+    // host's parent is the old daemon's pid, which a job's process can get again).
+    const hosts = this.d.hosts();
+    const roots = hosts.map((h) => h.pid);
+    const notJob = new Set<number>([...roots, this.d.self]);
     const kids = new Map<number, number[]>();
     for (const p of procs) if (p.pid !== p.ppid) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
     const jobPids = new Set<number>();
     const queue = census.workers.map((w) => w.pid);
     while (queue.length) {
       const p = queue.shift()!;
-      if (jobPids.has(p)) continue;
+      if (jobPids.has(p) || notJob.has(p)) continue;
       jobPids.add(p);
       queue.push(...(kids.get(p) ?? []));
     }
-    const hosts = this.d.hosts();
-    const roots = hosts.map((h) => h.pid);
     const stop = new Set<number>([...roots, this.d.self, ...jobPids, ...census.listeners.map((l) => l.pid)]);
     // Everything that could be an agent's (by parent pid alone), read once for start times and CPU, then walked again by
     // start time.
     const loose = agentTrees(roots, procs, stop, new Map(procs.map((p) => [p.pid, 0])));
     const want = [...new Set([...roots, ...[...loose.values()].flat(), ...jobPids])];
     let facts: ProcFact[];
+    const readAt = this.d.now();
     try {
       facts = await this.d.facts(want);
       if (this.factsFailing) this.d.log("ci first: the processes' start times and CPU read again");
@@ -220,7 +223,6 @@ export class WinCiFirst {
       if (!this.factsFailing) this.d.log(`ci first: could not read the processes' start times and CPU: ${(e as Error).message.slice(0, 200)}`);
       this.factsFailing = true;
       this.last = undefined;
-      this.jobKey = key;
       return { jobs: census.workers.length, above: 0 };
     }
     const now = this.d.now();
@@ -241,13 +243,14 @@ export class WinCiFirst {
       const ms = now - this.last.at;
       res.windowMs = ms;
       res.machineCores = Math.max(0, busy - this.last.busy) / ms;
-      res.jobCores = cpuBetween(this.last.cpu, jobFacts, this.last.at) / ms;
+      res.jobCores = cpuBetween(this.last.cpu, jobFacts, this.last.since) / ms;
       res.agentCores = {};
-      for (const h of hosts) res.agentCores[h.session] = cpuBetween(this.last.cpu, agentFacts(h.pid), this.last.at) / ms;
+      for (const h of hosts) res.agentCores[h.session] = cpuBetween(this.last.cpu, agentFacts(h.pid), this.last.since) / ms;
     }
     const cpu = new Map<string, number>();
     for (const f of [...jobFacts, ...roots.flatMap(agentFacts)]) if (f.cpuMs !== undefined) cpu.set(keyOf(f), f.cpuMs);
-    this.last = { at: now, busy, cpu };
+    // A process started after readAt is new to the next tick's window (counted in full there); readAt..now is in both.
+    this.last = { at: now, since: readAt, busy, cpu };
 
     const sides = census.workers.map((w) => `${w.root.split('/').pop()} (worker ${w.pid} at ${priorityName(this.d.priorityOf(w.pid))})`).join(', ');
     const would = `${above} of their process(es) run above ${priorityName(s.priority)}, which enforcing would lower (warn only, w6110)`;

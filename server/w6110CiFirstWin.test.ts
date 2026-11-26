@@ -246,3 +246,25 @@ test('cpuBetween: a difference for one read twice, in full for one new in the wi
   ];
   assert.equal(cpuBetween(before, after, 10), 3000 + 9000);
 });
+
+test("an adopted host whose old parent pid a job's process got again stays the agents', not the job's", async () => {
+  // after a daemon restart host 20's parent pid is the old daemon's; a job's rustc now has that pid
+  const procs = BASE.map((p) => (p.pid === 20 ? { ...p, ppid: 77 } : p)).concat([{ pid: 77, ppid: 12, cmd: 'rustc.exe' }]);
+  const r = rig({ procs });
+  r.prio.set(77, P.PRIORITY_NORMAL);
+  assert.equal((await r.cf.tick())?.above, 3);
+  r.advance(60_000);
+  r.burn(22, 60_000 * 8);
+  const res = await r.cf.tick();
+  assert.equal(res?.agentCores?.aaaa1111, 8);
+  assert.equal(res?.jobCores, 0);
+});
+
+test("a job whose first CPU read fails still gets its start line once the read answers", async () => {
+  const r = rig();
+  r.setFactsFail(true);
+  await r.cf.tick();
+  r.setFactsFail(false);
+  await r.cf.tick();
+  assert.equal(r.lines.filter((l) => /CI job\(s\) running/.test(l)).length, 1);
+});

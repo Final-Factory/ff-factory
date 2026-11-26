@@ -303,8 +303,8 @@ CI job runs, each agent host's processes by walking down from the host's own pro
 (Windows reuses pids and does not reparent orphans). This first step sets nothing. It logs a `ci first:` line when a job
 starts or ends, and at most every 5 min while the agents' processes use 4 cores or more: the cores the machine, the jobs,
 each agent and the rest (editors, orphans, processes that ended) used over the last tick, and how many of the agents'
-processes run above BelowNormal. Editors the daemon starts are not under a host; on LothDesktop they run BelowNormal
-already, and batch builds go to Idle. The step that lowers the agents' processes to BelowNormal comes separately, behind
+processes run above BelowNormal. Editors the daemon starts are not under a host and count as the rest (the pool's
+`belowNormal` setting runs them BelowNormal where it is on); batch builds go to Idle. The step that lowers the agents' processes to BelowNormal comes separately, behind
 a daemon.json switch with an undo. Tests: `server/w6110CiFirstWin.test.ts`.
 
 ## 3. The VHDX policy
