@@ -77,6 +77,7 @@ import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } fr
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
 import { runnerHoldText } from '../shared/runnerHold.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
+import { movedAwayVerdict, type HeirFacts, type MovedAwayFacts } from './movedAwayEnforce.ts';
 import { MOVE_AFTER_MS, MoveGuard, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, warmWait, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
@@ -1089,6 +1090,8 @@ export class Agents {
     // w5942: a daemon's refusal at its agent cap keeps room moves off that computer a while (resumeMove.ts MoveGuard).
     machines.capRefused = (id, why) => this.moveGuard.noteRefusal(id, why, Date.now());
     machines.capStarted = (id) => this.moveGuard.startedOn(id);
+    // w5950: config movedAwayWorkers "on": moved-away workers stopped or not resumed, when a started new worker holds their work.
+    machines.enforceMovedAway = (id, sids, how) => this.enforceMovedAway(id, sids, how);
     // w2884: a worker whose agent host died mid-turn, resumed by Machines: said on its requests' logs.
     machines.workerNote = (sid, text) => void this.orchestrators.noteOnHeld(sid, text);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
@@ -1212,7 +1215,7 @@ export class Agents {
         link: (id) => machines.canLink(id),
         linkProblem: (id) => machines.sshProblem(id),
         noSsh: (id) => !!machines.noSshProblem(id),
-        linkUpdate: (id, form, commit) => machines.linkUpdate(id, { form, commit }),
+        linkUpdate: (id, form, commit, timeoutMs) => machines.linkUpdate(id, { form, commit, ...(timeoutMs ? { timeoutMs } : {}) }),
         tell: (person, text) => {
           const to = person ? this.orchestrators.personalFor(person).info.id : store.orchestratorId;
           if (to) void sessions.send(to, text, 'system', undefined, person ? { requestedBy: person } : undefined);
@@ -4328,12 +4331,13 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * old worker's own wait and stays dropped: the worker now on the request sets its own (the w5949 review). Answers the workers
    * it went to.
    */
-  private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend): string[] {
+  private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend, pick?: (w: WorkItem) => SessionInfo | undefined): string[] {
     if (q.resumeOf || /^\[wake_me\]/.test(q.text)) return [];
     const at = `${info.machineId}/${info.machineSandbox}`;
     const heirs = new Map<string, { s: SessionInfo; ids: string[] }>();
     for (const w of ws) {
-      const s = this.heirOf(w, info);
+      // w5950: enforcing names the started worker it checked (movedAwayVerdict); heirOf's fallback is the last one linked.
+      const s = pick ? pick(w) : this.heirOf(w, info);
       if (!s) continue;
       const e = heirs.get(s.id) ?? { s, ids: [] };
       e.ids.push(w.id);
@@ -4352,6 +4356,118 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       }
     }
     return out;
+  }
+
+  /**
+   * w5950 (server/movedAwayEnforce.ts): what enforcing reads of a moved-away worker `info`: its open requests that still list
+   * it (w3425), whether a move of it is under way, and each open request moved off it with the other workers linked to it now.
+   */
+  private movedAwayFacts(info: SessionInfo): { facts: MovedAwayFacts; moved: WorkItem[] } {
+    const items = [...this.store.work.values()];
+    const stillHolds = [...holdsOf(info.id, items).held].filter((id) => {
+      const w = this.store.work.get(id);
+      return !!w && isOpen(w);
+    });
+    const moved = items.filter((w) => isOpen(w) && !!w.movedOff?.[info.id] && !w.sessionIds.includes(info.id));
+    const heirs = (w: WorkItem): HeirFacts[] =>
+      w.sessionIds.flatMap((id) => {
+        const x = this.store.sessions.get(id);
+        if (!x || x.kind !== 'worker' || id === info.id) return [];
+        return [{ id, live: !!this.sessions.sessions.get(id)?.live, turns: x.turns ?? 0, midTurn: isMidTurn(x), status: x.status, ...(x.stoppedOnPurpose ? { stoppedOnPurpose: true } : {}), sameSandbox: x.machineId === info.machineId && x.machineSandbox === info.machineSandbox }];
+      });
+    return { facts: { stillHolds, moving: this.roomMoving.has(info.id) || this.timedMoving.has(info.id), moved: moved.map((w) => ({ id: w.id, heirs: heirs(w) })) }, moved };
+  }
+
+  /**
+   * w5950, config movedAwayWorkers "on" (Machines.movedAwayCheck): moved-away workers `sids` on `machineId` that its daemon
+   * still runs (`live`, at its hello) or that a resume after its drop would wake (`resume`). Each one whose every request a
+   * started new worker holds (movedAwayVerdict) is taken off: stopped (live), its sandbox's work saved to a side branch, its
+   * new workers told, its check-in cancelled and the worker retired (retireMovedAway). The rest are kept and reported with
+   * why. Answers the ones taken, each with its new workers.
+   */
+  enforceMovedAway(machineId: string, sids: string[], how: 'live' | 'resume'): Map<string, string[]> {
+    const taken = new Map<string, string[]>();
+    const kept: string[] = [];
+    for (const sid of sids) {
+      const info = this.store.sessions.get(sid);
+      const m = info?.movedAway;
+      if (!info || !m) continue;
+      const { facts, moved } = this.movedAwayFacts(info);
+      const v = movedAwayVerdict(facts);
+      const name = `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
+      if (v.act === 'undo') {
+        // (a): the w3425 check first: a move that never happened leaves this worker the only one on its requests.
+        const undone = this.awayMoveUndone(info, machineId, how === 'live' ? `its daemon reports it running on ${machineId}` : `a resume on ${machineId} found it holding them`);
+        kept.push(`${name}: kept, ${v.why}${undone ? '; its away mark is cleared' : ''}`);
+        continue;
+      }
+      if (v.act === 'keep') {
+        kept.push(`${name}: kept, ${v.why}`);
+        continue;
+      }
+      const byReq = new Map(v.heirs.map((x) => [x.request, x.heir]));
+      taken.set(sid, [...new Set(v.heirs.map((x) => x.heir))]);
+      void this.retireMovedAway(info, machineId, how, moved, byReq);
+    }
+    if (kept.length) {
+      console.warn(`machines: ${machineId}: moved-away worker(s) kept (w5950): ${kept.join('; ')}`);
+      this.machines.report?.(`[machines] ${machineId}: ${kept.length} worker(s) whose work moved elsewhere ${how === 'live' ? 'still run' : 'resume'}, kept, since enforcing could stop the only copy of the work: ${kept.join('; ')} (w5950).`);
+    }
+    if (taken.size) {
+      const line = [...taken].map(([sid, to]) => `${sid} (its requests are with ${to.join(', ')})`).join(', ');
+      console.log(`machines: ${machineId}: moved-away worker(s) ${how === 'live' ? 'stopped' : 'not resumed'} (w5950): ${line}`);
+      this.machines.report?.(`[machines] ${machineId}: ${taken.size} worker(s) whose work moved elsewhere ${how === 'live' ? 'were still running and are stopped' : 'are not resumed'}: ${line}. Their sandboxes' work goes to a side branch and their new workers are told (w5950).`);
+    }
+    return taken;
+  }
+
+  /**
+   * w5950: takes moved-away worker `info` off `machineId` once movedAwayVerdict said every request of it has a started new
+   * worker (`byReq`): stops its process (live), saves its sandbox's uncommitted work as a WIP commit pushed only to a side
+   * branch (saveWork's holdPush: the new worker carries the branch itself, the w5949 review's (d)), unless another agent works
+   * in that sandbox, then tells each new worker what happened and where that work is (forwardToHeirs).
+   */
+  private async retireMovedAway(info: SessionInfo, machineId: string, how: 'live' | 'resume', moved: WorkItem[], byReq: Map<string, string>) {
+    const at = `${machineId}/${info.machineSandbox}`;
+    const heirs = [...new Set(byReq.values())].join(', ');
+    const to = info.movedAway?.to ?? 'another computer';
+    this.waker.cancel(info.id);
+    const h = this.sessions.sessions.get(info.id);
+    if (how === 'live' && h?.live) {
+      this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its work moved to ${to} and is with ${heirs} now, but ${machineId}'s daemon came back still running it (w5950).` });
+      h.stop(true);
+      for (let n = 0; n < 40 && this.sessions.sessions.get(info.id)?.live; n++) await new Promise((r) => setTimeout(r, 250));
+    } else {
+      this.store.append(info.id, { kind: 'system', text: `Not resumed by FF Factory: its work moved to ${to} and is with ${heirs} now (w5950).` });
+    }
+    let saved: string;
+    const branch = info.placeReleased?.branch ?? this.branchNow(info);
+    const sb = info.machineSandbox ? this.store.machines.get(machineId)?.sandboxes?.find((x) => x.id === info.machineSandbox) : undefined;
+    const others = sb ? this.sessionsOf(sb.sessionIds).filter((s) => s.id !== info.id && occupies(s, !!this.sessions.sessions.get(s.id)?.live)) : [];
+    if (this.sessions.sessions.get(info.id)?.live) saved = `its process on ${at} did not end within 10 s, so nothing was saved; what it wrote stays uncommitted there`;
+    else if (!info.machineSandbox) saved = 'it had no sandbox, so nothing was saved';
+    else if (!branch) saved = `its branch is unknown, so its sandbox ${at} was not saved`;
+    else if (others.length) saved = `its sandbox ${at} was not saved: agent ${others.map((s) => s.id).join(', ')} works there too, so its uncommitted files may not be this worker's`;
+    else if (!this.machines.canSaveWork(machineId)) saved = `its sandbox ${at} could not be saved (${machineId}'s daemon cannot save work now)`;
+    else {
+      try {
+        const hold = `its requests moved to ${heirs}, which carries ${branch} now (w5950)`;
+        const msg = `FF Factory: WIP saved from ${info.id}, which ran on after its work moved to ${to} (w5950)\n\n${moved.map((w) => w.id).join(', ')} are with ${heirs}. This commit is pushed only to a side branch.`;
+        const r = await this.machines.saveWork(machineId, info.machineSandbox, branch, msg, this.githubTokenFor(machineId, info.id, `saving ${info.id}'s work after its move`), hold);
+        saved = r.sha ? `its sandbox's uncommitted work (${r.files} file(s)) was saved as WIP commit ${r.sha.slice(0, 10)}${r.sideRef ? ` on the side branch ${r.sideRef}` : ''}${r.pushed ? '' : `, not pushed (${r.notes.join('; ')})`}` : `its sandbox ${at} had no uncommitted work on ${branch}`;
+      } catch (e) {
+        saved = `its sandbox ${at} could not be saved (${(e as Error).message})`;
+      }
+    }
+    const verb = how === 'live' ? 'ran on after its work moved (its computer came back still running it), and FF Factory stopped it' : `was cut off mid-turn when ${machineId}'s daemon dropped, and FF Factory does not resume it`;
+    const text = `[w5950] Your request's old worker ${info.id} on ${at} ${verb}: ${saved}. If it did anything after the move, look at that and take what you need; otherwise carry on.`;
+    const q: QueuedSend = { uuid: `w5950-${info.id}`, id: info.id, text, from: 'system', at: new Date().toISOString(), why: 'its work moved (w5950)' };
+    const told = this.forwardToHeirs(info, moved, q, (w) => {
+      const id = byReq.get(w.id);
+      return id ? this.store.sessions.get(id) : undefined;
+    });
+    this.store.append(info.id, { kind: 'system', text: `Its requests ${moved.map((w) => w.id).join(', ')} are with ${heirs}: ${saved}; ${told.length ? `told ${told.join(', ')}` : 'its new workers could not be told'} (w5950).` });
+    this.orchestrators.retireWhenFree(info.id);
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */

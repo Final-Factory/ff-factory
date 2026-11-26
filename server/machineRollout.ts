@@ -50,6 +50,14 @@ export const ROLLOUT_LIMITS = {
   installMs: 15 * 60_000,
   /** One agent tools run over ssh (the installer's clone, then registerAgents.sh: a marketplace pull and three plugin installs). */
   toolsMs: 15 * 60_000,
+  /**
+   * w5967: how long the portal waits for a tools job over a daemon's link. Longer than the job's own limit (TOOLS_JOB_MS in
+   * scripts/worker/linkJob.ts, 30 min), so the job's own failed report, with its log, comes first. On 2026-11-26 beast's
+   * tools job 442c5638 ran past 15 min (its runs before: 2 to 12.5 min) while every other machine's update waited behind it.
+   */
+  toolsLinkMs: 35 * 60_000,
+  /** w5967: a tools publish that has not ended this long after it started is failed with the reason, whatever it waits on. */
+  toolsDeadlineMs: 40 * 60_000,
   /** After a failed run, how long the machine gets to be seen online before it counts as left without a daemon. */
   settleMs: 90_000,
   /** The main report waits this long after the verification for machines that are only reconnecting to the new portal. */
@@ -113,7 +121,7 @@ export interface RolloutHost {
   /** Its install has no portal ssh (w4674, server/machines.ts noSshProblem): nothing is run on it over ssh. */
   noSsh?(id: string): boolean;
   /** The installer's form over the daemon's link, to the deployed commit: its update job's report (server/machines.ts linkUpdate). */
-  linkUpdate?(id: string, form: 'update' | 'tools', commit: string): Promise<LinkUpdateReport>;
+  linkUpdate?(id: string, form: 'update' | 'tools', commit: string, timeoutMs?: number): Promise<LinkUpdateReport>;
   /** Send the report to a person's orchestrator, or (no person) the dispatcher. */
   tell(person: Requester | undefined, text: string): void;
   /** Who asked for the deploy that verified at this time (epoch ms), if anyone did through the ops worker. */
@@ -359,6 +367,7 @@ export class MachineRollout {
   async tick(): Promise<void> {
     if (this.busy || !this.d.enabled()) return;
     this.busy = true;
+    const publishing: Promise<void>[] = [];
     try {
       this.takeVerified();
       const sha = this.state.sha;
@@ -371,7 +380,7 @@ export class MachineRollout {
         this.retryDiskFull(m.id, o);
         this.retryCutDownload(m.id, o);
         if (o.status !== 'pending') {
-          if (this.toolsDue(m, o)) await this.publishTools(m, o);
+          if (this.toolsDue(m, o)) publishing.push(this.publishTools(m, o));
           this.save();
           continue;
         }
@@ -404,7 +413,7 @@ export class MachineRollout {
           await this.updateOne(m, o, sha);
         }
         this.save();
-        if (this.toolsDue(m, o)) await this.publishTools(m, o);
+        if (this.toolsDue(m, o)) publishing.push(this.publishTools(m, o));
         this.save();
       }
       this.save();
@@ -414,6 +423,13 @@ export class MachineRollout {
     } finally {
       this.busy = false;
     }
+    // w5967: the tools publishes run beside the next machines' updates, never in front of them, and the next tick runs while
+    // they do (each is a machine of its own: its 'publishing' keeps it from being started twice). This tick's report waits
+    // for them; each ends by toolsDeadlineMs at the latest (publishTools).
+    if (!publishing.length) return;
+    await Promise.all(publishing);
+    this.save();
+    this.report();
   }
 
   /**
@@ -662,10 +678,35 @@ export class MachineRollout {
     const t: ToolsOutcome = (o.tools = { status: 'publishing' });
     this.save();
     console.log(`machine rollout: publishing the agent tools on ${m.id}`);
+    // w5967: whatever the run waits on (a job that never reports, an ssh that never returns), it ends here by toolsDeadlineMs
+    // with the reason; an answer after that changes nothing.
+    const out: ToolsOutcome = { status: 'publishing' };
+    const min = Math.round(this.lim.toolsDeadlineMs / 60_000);
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<'late'>((resolve) => {
+      timer = setTimeout(() => resolve('late'), this.lim.toolsDeadlineMs);
+      timer.unref?.();
+    });
+    const late = (await Promise.race([this.runTools(m, out), deadline])) === 'late';
+    clearTimeout(timer);
+    if (late) {
+      Object.assign(t, { status: 'failed', note: `the agent tools run on ${m.id} did not end within ${min} min, so the rollout stopped waiting for it (w5967); its other machines were not held up` });
+    } else Object.assign(t, out);
+    t.at = new Date(this.now()).toISOString();
+    if (t.status === 'failed' && CUT_DOWNLOAD.test(t.note ?? '')) {
+      o.cutDownload = { at: t.at, retries: o.cutDownload?.retries ?? 0 };
+      t.note = `${t.note}; ${this.cutNext(o.cutDownload.retries)}`;
+    }
+    console.log(`machine rollout: ${m.id}: agent tools ${t.status}${t.note ? ` (${t.note})` : ''}`);
+    this.save();
+  }
+
+  /** The tools run itself (w1476), its outcome written into t; never throws. */
+  private async runTools(m: RolloutMachine, t: ToolsOutcome): Promise<'done'> {
     try {
       if (this.viaLink(m.id)) {
         // Over the daemon's link (w1596): the installer's tools form, run by a job from the deployed commit's checkout.
-        const r = await this.d.host.linkUpdate!(m.id, 'tools', this.state.sha!);
+        const r = await this.d.host.linkUpdate!(m.id, 'tools', this.state.sha!, this.lim.toolsLinkMs);
         Object.assign(t, toolsResult(r.exit, r.log));
         // The link's job runs as the daemon, never elevated, so it can only say a firewall rule is missing (w1742: the agent
         // node's rule never reached lothdesktop or BEAST). The portal's ssh to an administrator's Windows account is
@@ -691,12 +732,7 @@ export class MachineRollout {
     } catch (e) {
       Object.assign(t, { status: 'failed', note: (e as Error).message });
     }
-    t.at = new Date(this.now()).toISOString();
-    if (t.status === 'failed' && CUT_DOWNLOAD.test(t.note ?? '')) {
-      o.cutDownload = { at: t.at, retries: o.cutDownload?.retries ?? 0 };
-      t.note = `${t.note}; ${this.cutNext(o.cutDownload.retries)}`;
-    }
-    console.log(`machine rollout: ${m.id}: agent tools ${t.status}${t.note ? ` (${t.note})` : ''}`);
+    return 'done';
   }
 
   private async waitOnline(id: string): Promise<boolean> {
