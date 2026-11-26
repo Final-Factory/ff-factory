@@ -344,6 +344,8 @@ export interface DrainDeps {
   dataDir: string;
   /** Send every connected machine daemon to the portal at `url` (a request's relocate). Absent: such requests are refused. */
   relocate?(url: string): Promise<RelocateOutcome[]>;
+  /** The drain gave up and the restart did not happen (w5887: the deploy notice says so). Must not throw. */
+  cancelled?(why: string): void;
 }
 
 export function drainMessage(req: RestartRequest, deadline: Date): string {
@@ -536,6 +538,16 @@ export class Drainer {
     this.relocated = false;
     this.drained = new Set();
     this.deps.changed();
+    try {
+      this.deps.cancelled?.(why);
+    } catch {
+      // a notice never holds up the restart's own path
+    }
+  }
+
+  /** The restart taken and not done yet (w5887: a request refused or already pending leaves it as it was). */
+  get requested(): RestartRequest | undefined {
+    return this.req;
   }
 
   get drainedIds(): ReadonlySet<string> {

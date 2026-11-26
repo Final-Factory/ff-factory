@@ -27,7 +27,8 @@ import { BugThreadWatch } from './bugThreads.ts';
 import { FfboxBugThreads } from './ffboxBugThreads.ts';
 import { setAppConfig, toggleNightly } from './appConfig.ts';
 import { LedgerSweep, slugOf } from './ledgerSweep.ts';
-import { AutoDeploy, ghAutoDeploy, heldLine } from './autoDeploy.ts';
+import { AutoDeploy, ghAutoDeploy, heldLine, sameCommit, type BatchPr } from './autoDeploy.ts';
+import { DEPLOY_NOTICE_LIMITS, DeployNotice, prsInRelease } from './deployNotice.ts';
 import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
@@ -2884,6 +2885,7 @@ let stopping = false;
 function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set()) {
   if (stopping) return;
   stopping = true;
+  if (!isDryRun) deployNotice.stopping();
   console.log(`stopping (${req.reason}): stopping the portal's agent processes (the machines' agents and editors are their daemons')`);
   try {
     const f = agents.resumeFile(req, drained, appHead());
@@ -3280,6 +3282,42 @@ usage.start();
 
 /** Backlog step 2: a restart leaves the agents machine daemons run alone (config machines.keepAgentsOnRestart). */
 const keepDaemonAgents = () => cfg.machines?.keepAgentsOnRestart === true;
+// w5887 (server/deployNotice.ts): a restart or deploy says so in every active orchestrator's chat before the portal goes
+// down, and the next server says it is back. A system line, not a message: no turn opens, so no drain waits for it.
+const deployNotice = new DeployNotice({
+  dataDir: cfg.dataDir,
+  orchestrators: () => {
+    const since = Date.now() - DEPLOY_NOTICE_LIMITS.activeMs;
+    return [...sessions.sessions.values()]
+      .map((h) => h.info)
+      .filter((i) => agents.orchestrators.isDispatcher(i) || (agents.orchestrators.isPersonal(i) && Date.parse(i.lastActivityAt) >= since))
+      .map((i) => i.id);
+  },
+  note: (id, text) => sessions.note(id, text),
+});
+/** What a restart request deploys: the prepared release fff-update built, and the pull requests it brings. */
+function deployWhat(req: RestartRequest): { from?: string; to?: string; prs?: BatchPr[] } {
+  if (!req.update) return {};
+  const from = appVersion().sha;
+  let prepared: { sha?: string; dir?: string } = {};
+  try {
+    prepared = JSON.parse(fs.readFileSync(path.join(cfg.dataDir, 'update.prepared.json'), 'utf8').replace(/^\uFEFF/, '')) as typeof prepared;
+  } catch {
+    // not a VM deploy, or not prepared yet
+  }
+  const to = prepared.sha ?? autoDeploy.state.requested?.sha;
+  const asked = autoDeploy.state.requested;
+  if (asked && to && sameCommit(asked.sha, to) && asked.prs.length) return { from, to, prs: asked.prs };
+  let prs: BatchPr[] | undefined;
+  if (prepared.dir && from && to) {
+    try {
+      prs = prsInRelease(prepared.dir, from, to);
+    } catch (e) {
+      console.log(`deploy notice: the pull requests in ${prepared.dir} could not be read: ${(e as Error).message.split('\n')[0]}`);
+    }
+  }
+  return { from, to, prs };
+}
 const drainer = new Drainer({
   dataDir: cfg.dataDir,
   // With keepAgentsOnRestart the daemons' agents are not asked to wrap up: the restart does not stop them.
@@ -3290,11 +3328,22 @@ const drainer = new Drainer({
   log: (line) => console.log(line),
   // The cut-over (w499, docs/portal-on-ffbox-host.md 7.3): restart.request's relocate sends the daemons to the new portal.
   relocate: (url) => machines.relocateAll(url),
+  cancelled: (why) => deployNotice.cancelled(why),
 });
 agents.requestRestart = (req) => {
   // An update survives a power cut or a crash during the drain: the next server retries it (below).
   if (!drainer.status) writePendingRestart(cfg.dataDir, req);
+  const before = drainer.requested;
   const note = drainer.request(req);
+  if (!before && drainer.requested && !isDryRun) {
+    let what: ReturnType<typeof deployWhat> = {};
+    try {
+      what = deployWhat(req);
+    } catch (e) {
+      console.log(`deploy notice: ${(e as Error).message}`);
+    }
+    deployNotice.started(req, what);
+  }
   broadcast({ type: 'host', host: { ...host, drain: drainer.status } });
   return note;
 };
@@ -3485,6 +3534,8 @@ setTimeout(() => {
     }
     const clean = takeResumeFile(cfg.dataDir);
     const pending = takePendingRestart(cfg.dataDir);
+    // w5887: the restart's done line, and its downtime as a sample for the next estimate.
+    deployNotice.booted({ running: appVersion().sha, resumeAt: clean?.at, update: clean?.update });
     if (clean) {
       agents.resumeAfterRestart(clean, cutOff, { head: appHead(), version: appVersion().version }, notes);
       return;

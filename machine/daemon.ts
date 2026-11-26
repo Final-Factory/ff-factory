@@ -126,6 +126,7 @@ import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type Gh
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
+import { planMediumFolders, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
@@ -179,6 +180,12 @@ export interface DaemonConfig {
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
    */
   workerIntegrity?: 'low';
+  /**
+   * w5862: Medium agents' (any launch that is not a sandbox's) own temp root and cargo home, out of the folders workers
+   * write (machine/mediumFolders.ts). Absent or "warn": only a WARNING at start names the exposed folders; "on": Medium
+   * agents get <root>/tmp-medium and <root>/cache-medium/cargo, keeping today's folders with a WARNING when they cannot.
+   */
+  mediumAgentFolders?: MediumFoldersMode;
   /**
    * Paths outside the worker root that Low workers may write, labelled Low with the root (w5377): the person's decision,
    * never a default (lothsahn: "under no circumstances should workers write outside of ffw"). A path that is a file now is
@@ -902,6 +909,7 @@ export class Daemon {
       ready: () => this.welcomed,
       slotRoots,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      mediumTempRoot: () => this.mediumFolders().tempRoot,
       leases: () => readLeases(slotRoots()),
       protectedPaths: () => [cfg.repoPath, appDirOfConfig(cfg), ...(this.currentPool()?.protectedPaths ?? [])],
       places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
@@ -1122,9 +1130,10 @@ export class Daemon {
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      mediumTempRoot: () => this.mediumFolders().tempRoot,
       ready: () => this.welcomed,
       sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live, resumable: this.resumable.has(e.s.info.id) })),
-      dirOf: (id) => sessionTempDir(agentTempRoot(cfg.tempDir), id),
+      dirOf: (id) => this.sessionTemp(id),
       guard: () => this.cleanupGuard(),
       procs: () => this.procs(),
       self: () => [process.pid, process.ppid],
@@ -1182,7 +1191,7 @@ export class Daemon {
               await planInstallLeftovers({
                 root: this.cfg.root,
                 sandboxes: this.pool.list().map((x) => x.path),
-                tempRoots: [agentTempRoot(this.cfg.tempDir)],
+                tempRoots: this.agentTempRoots(),
                 guard,
                 ctx: this.staleCtx,
                 procs: await this.procs().catch(() => undefined),
@@ -1203,7 +1212,7 @@ export class Daemon {
             planInstallLeftovers({
               root: this.cfg.root,
               sandboxes: [],
-              tempRoots: [agentTempRoot(this.cfg.tempDir)],
+              tempRoots: this.agentTempRoots(),
               guard,
               ctx: this.staleCtx,
               procs: await this.procs().catch(() => undefined),
@@ -1314,6 +1323,50 @@ export class Daemon {
   }
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
+  private mediumMemo?: MediumFolders;
+  /** w5862: Medium agents' own temp root and cargo home (machine/mediumFolders.ts), decided and logged once. */
+  mediumFolders(): MediumFolders {
+    if (!this.mediumMemo) {
+      const c = this.cfg;
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()] });
+      for (const line of this.mediumMemo.lines) log(line);
+    }
+    return this.mediumMemo;
+  }
+
+  /** The agents' temp roots: the one every agent had, and Medium agents' own once w5862's switch is on. */
+  private agentTempRoots(): string[] {
+    const m = this.mediumFolders().tempRoot;
+    return [agentTempRoot(this.cfg.tempDir), ...(m ? [m] : [])];
+  }
+
+  /** The temp folder a session uses: a Medium one's in Medium agents' temp root once w5862's switch made it. */
+  private sessionTemp(id: string): string {
+    const m = this.mediumFolders().tempRoot;
+    if (m) {
+      const d = sessionTempDir(m, id);
+      const spec = this.entries.get(id)?.spec;
+      if (spec ? !spec.sandbox : fs.existsSync(d)) return d;
+    }
+    return sessionTempDir(agentTempRoot(this.cfg.tempDir), id);
+  }
+
+  /** Every temp folder a session may have (w5862): what guards and grants name, so a session's is covered either way. */
+  private sessionTemps(id: string): string[] {
+    return this.agentTempRoots().map((t) => sessionTempDir(t, id));
+  }
+
+  /**
+   * A new agent's TMP, TEMP and TMPDIR (cleanup.ts sessionTempEnv) and, for a Medium agent once w5862's switch is on, its
+   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root.
+   */
+  private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
+    const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
+    const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
+    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}) };
+  }
+
   private sandboxRoot(): string | undefined {
     return this.currentPool()?.root;
   }
@@ -1340,13 +1393,13 @@ export class Daemon {
     return {
       keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), this.voice?.v.toolsDir, c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
       inUse: [
-        ...[...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
+        ...[...this.entries.values()].filter((e) => e.s.live).flatMap((e) => this.sessionTemps(e.s.info.id)),
         // Every bash of this user uses it as /tmp, whichever session's folder it was.
-        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), agentTempRoot(c.tempDir)])].filter((x): x is string => !!x),
+        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
       ],
       home: HOME,
       // Before the portal's welcome nobody knows which stopped workers a request waits for (w1379): every worker folder stays.
-      resumable: this.welcomed ? [...this.resumable].map((id) => sessionTempDir(agentTempRoot(c.tempDir), id)) : [agentTempRoot(c.tempDir)],
+      resumable: this.welcomed ? [...this.resumable].flatMap((id) => this.sessionTemps(id)) : this.agentTempRoots(),
     };
   }
 
@@ -1357,7 +1410,7 @@ export class Daemon {
   private finishedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
     const owners = this.owners;
-    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).map((id) => sessionTempDir(agentTempRoot(this.cfg.tempDir), id));
+    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).flatMap((id) => this.sessionTemps(id));
   }
 
   /**
@@ -1367,17 +1420,19 @@ export class Daemon {
    */
   private closedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
-    const t = agentTempRoot(this.cfg.tempDir);
-    let names: string[];
-    try {
-      names = fs.readdirSync(t);
-    } catch {
-      return [];
-    }
-    return names
-      .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
-      .filter((id): id is string => !!id && this.sessionClosed(id))
-      .map((id) => sessionTempDir(t, id));
+    // w5862: and Medium agents' own temp root, once that switch is on.
+    return this.agentTempRoots().flatMap((t) => {
+      let names: string[];
+      try {
+        names = fs.readdirSync(t);
+      } catch {
+        return [];
+      }
+      return names
+        .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
+        .filter((id): id is string => !!id && this.sessionClosed(id))
+        .map((id) => sessionTempDir(t, id));
+    });
   }
 
   /** Worker `id` is stopped, not resumable, and on no request that has not closed (w3656); false before the portal's welcome. */
@@ -1576,7 +1631,7 @@ export class Daemon {
       this.cliScrub = new CliScrubber({
         root: cliProjectsDir(),
         // w5305: the legacy ~/.claude's transcripts too, while agents started before the move (or on the stored login) write there
-        extraRoots: () => [...cliTempFolders(agentTempRoot(this.cfg.tempDir)), ...legacyProjectsDirs(process.env)],
+        extraRoots: () => [...this.agentTempRoots().flatMap((t) => cliTempFolders(t)), ...legacyProjectsDirs(process.env)],
         log: (line) => log(line),
         // the portal keeps it beside the clean-up passes (portal_logs cleanup, this machine): paths and counts only
         report: (r: CliScrubReport) => this.out({ type: 'cleanup_log', entry: { ...r } }),
@@ -3055,7 +3110,7 @@ export class Daemon {
       if (hasFile && typeof rest.text === 'string' && rest.text.trim()) throw new Error('give text or file, not both');
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const roots = [folder, sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId)];
+      const roots = [folder, ...this.sessionTemps(sessionId)];
       const text = hasFile ? await postTextFromFile(folder, file, skip, roots) : rest.text;
       // Images go to FFBox in parts before the post, so the call waits longer (POST_IMAGE_UPLOAD in server/ffboxPost.ts).
       if (!hasImages) return call('post_as_max', 90_000)({ ...rest, text });
@@ -3077,7 +3132,7 @@ export class Daemon {
     all.timed_run = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      const temp = this.sessionTemp(sessionId);
       return timedRunFromMachine({ portalUrl: this.cfg.portalUrl, token: this.cfg.token, roots: [folder, temp, ...(this.cfg.root ? [this.cfg.root] : [])], saveRoots: [folder, temp], cwd: folder, tempDir: temp, args, key: sessionId, rpc: (a) => call('timed_run', 900_000)(a), log: (line) => log(line) });
     };
     // publish_attachment (docs/attachments.md, "Agents' files"): the portal opens an upload for this machine; the file
@@ -3085,7 +3140,7 @@ export class Daemon {
     all.publish_attachment = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      const temp = this.sessionTemp(sessionId);
       const roots = [folder, temp];
       // w4613: a player from this computer's shared player cache, packed into the session's temp folder and sent up.
       if (args.player !== undefined && args.player !== '') {
@@ -3168,7 +3223,7 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   private ghMemo?: { at: number; token?: string };
@@ -4216,7 +4271,7 @@ export class Daemon {
         const sb = msg.sandbox ? this.pool.pathOf(msg.sandbox) : undefined;
         void runSteamJob(msg, {
           root: this.cfg.root,
-          allowedRoots: [...(sb ? [sb] : []), sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.session)],
+          allowedRoots: [...(sb ? [sb] : []), ...this.sessionTemps(msg.session)],
           python: pythonExe(process.env),
           gitEnv: githubNetEnv(msg.githubToken),
           send: (m) => this.send(m),
@@ -4487,7 +4542,7 @@ export class Daemon {
         // /tmp is looked up again first: it moves to the first bash's TMP whenever the user's MSYS processes all ended, and a
         // value up to 5 minutes old removed a folder that had just become /tmp (w3559: every bash on LothDesktop, ffu's CI
         // runners included, lost /tmp at 2026-11-08 03:30Z until the 5-minute check made it again at 03:34Z).
-        const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId);
+        const temp = this.sessionTemp(msg.sessionId);
         const same = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
         void this.ensureBashTmp()
           .catch(() => undefined)
@@ -4507,7 +4562,7 @@ export class Daemon {
         // Only the sandboxes and the standing agents' folders (and, for one session's image, its own temp folder): inline
         // images, nothing else. Not the main clone (w536): no agent works there.
         const roots = [path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
-        if (msg.op === 'read' && msg.sessionId) roots.push(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId));
+        if (msg.op === 'read' && msg.sessionId) roots.push(...this.sessionTemps(msg.sessionId));
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);
@@ -4647,6 +4702,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // w5545: what the daemon starts itself (nightly builds, timed runs, ops) asks for slots and tickets as the daemon.
   Object.assign(process.env, d.rpcEnv(`daemon-${cfg.id}`));
   d.start();
+  // w5862: says at start where Medium agents' temp root and cargo home are exposed to workers, or moves them (mediumAgentFolders).
+  const medium = d.mediumFolders();
+  if (medium.cargoHome && fs.existsSync(path.join(HOME, '.cargo'))) void seedCargoHome(path.join(HOME, '.cargo'), medium.cargoHome).then((m) => log(m));
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
   const quit = () => {
     log('shutting down: agents in agent hosts run on for the next daemon; any others stop');

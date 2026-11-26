@@ -80,6 +80,33 @@ drain message and stops nothing. While the portal is down the daemons queue thei
   not heard from its daemon since (it may still be running there)" (`SessionManager.restore`). Its first report puts
   their real state back. Off (`false`), machine agents are drained and stopped with the portal, and resumed after.
 
+## Deploy notices in the orchestrators' chats (w5887)
+
+lothsahn (2026-11-26): "Please update the portal so when a new deployment is starting it puts a message in all active
+orchestrators. You become unresponsive for 2-3 minutes during updates and it would be good to know why."
+
+Every restart the server takes (the automatic deploy and `fffctl update`, both through fff-update's `restart.request`;
+`fffctl restart`; `request_app_update`) puts one system line in each active orchestrator's chat (each person's
+orchestrator whose chat moved in the last 14 days, and the dispatcher's) when the Drainer takes it, before the server stops:
+
+> [portal] Portal update starting: deploying 1a2b3c4d5 (#1290 Deploy notices). I'll be unresponsive for about 2 minutes
+> (the median of the last 7 restarts, measured).
+
+The next server posts the done line once it starts:
+
+> [portal] Portal update done: now on 1a2b3c4d5, took 2.3 min since the start line, down 1.7 min.
+
+- **A line, not a message** (`SessionManager.note`): the person sees it at once and the orchestrator opens no turn, so an
+  automatic deploy's drain, which waits for coordinator turns, is not held up by it.
+- **The estimate is measured**: each start records its downtime (stopServer's stop to the next server's start, or the
+  resume file's `at` when the old server did not record one) in `data/deploy-notice.json`; the line gives the median of the
+  last ten, of the same kind (update or plain restart) when there are three. With no sample yet it says "a few minutes".
+- **The pull requests** come from the automatic deploy's batch, or else from the prepared release's merge commits
+  (`update.prepared.json`'s folder, `git log` with a 3 s limit).
+- A drain that gives up says "cancelled". An update that did not take says which commit it was to deploy.
+- **It never holds up a restart**: every step catches and logs (`deploy notice:` in the portal's log), and the Drainer
+  calls its `cancelled` hook in a try (`server/deployNotice.ts`, tests in `deployNotice.test.ts`).
+
 ## Who is resumed
 
 `collectResume` in `server/restart.ts` (tests in `restart.test.ts`):

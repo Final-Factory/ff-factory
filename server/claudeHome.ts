@@ -60,8 +60,14 @@ export const STEAM_CHILD = 'steam';
  * may plant a hook or a script in it. Workers read it (the FF_SKILLS fallback, server/pluginPaths.ts).
  */
 export const TOOLS_MEDIUM_CHILD = 'tools-medium';
+/**
+ * The root child that holds Medium agents' own temp folders (w5862, machine/mediumFolders.ts), when daemon.json
+ * `mediumAgentFolders` is "on": `<root>/tmp` is a worker folder, so a Low worker could plant a script or DLL in a Medium
+ * agent's temp folder there that the Medium agent then runs at Medium.
+ */
+export const MEDIUM_TMP_CHILD = 'tmp-medium';
 /** The root's children only Medium writes: kept Medium on Windows, read-only under the Landlock and Seatbelt fences. */
-export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD, TOOLS_MEDIUM_CHILD] as const;
+export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD, TOOLS_MEDIUM_CHILD, MEDIUM_TMP_CHILD] as const;
 /**
  * Root children only the daemon writes, read-only under the Landlock and Seatbelt fences (writeLock.ts LOCKED_CHILDREN,
  * workerFence.ts READ_ONLY_IN_ROOT). On Windows they are no worker child (lowIntegrity.ts WORKER_CHILDREN), so a rollout
