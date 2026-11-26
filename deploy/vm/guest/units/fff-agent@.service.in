@@ -22,9 +22,12 @@ WorkingDirectory=@AGENT_ROOT@
 UMask=0077
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
-# Its own processes alone in /proc; the rest of the file system read-only.
+# Its own processes alone in /proc (ProtectProc=, PrivatePIDs=); the rest of the file system read-only.
 ProtectProc=invisible
 ProtectSystem=strict
+# Its own pid namespace too (systemd 257+; resolute has 259): ProtectProc=invisible hides no fff-agent instance from
+# another, both being @AGENT_USER@'s (w5841). fff-agent-launch is pid 1 there and passes systemd's TERM on.
+PrivatePIDs=yes
 ProtectHome=yes
 PrivateTmp=yes
 ProtectKernelTunables=yes
@@ -37,6 +40,10 @@ ProtectControlGroups=yes
 TemporaryFileSystem=@FFF_ROOT@:mode=0755
 BindReadOnlyPaths=/run/fff-agent-views/app:@FFF_ROOT@/app /run/fff-agent-views/base:@BASE_PATH@ /run/fff-agent-views/config:@FFF_ROOT@/config /run/fff-agent-views/data:@FFF_ROOT@/data
 BindPaths=/run/fff-agent-views/claude:@FFF_ROOT@/home/.claude /run/fff-agent-views/memory:@FFF_ROOT@/data/orchestrator-memory
+# Inside the views, never a Claude login a person may have left in the portal's home (.credentials.json: the claude view
+# is read-write) nor the push private key (vapid.json, in the data view); "-": absent, nothing to hide (w5841).
+# fff-agent-launch's fence probe (fffctl fence-check) opens both from in here.
+InaccessiblePaths=-@FFF_ROOT@/home/.claude/.credentials.json -@FFF_ROOT@/data/vapid.json
 ReadWritePaths=@AGENT_ROOT@ @FFF_ROOT@/home/.claude @FFF_ROOT@/data/orchestrator-memory
 TasksMax=512
 CPUWeight=80
