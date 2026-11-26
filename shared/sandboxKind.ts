@@ -9,3 +9,11 @@ import type { MachineSandbox } from './types.ts';
 export const isLight = (sb: Pick<MachineSandbox, 'kind'> | undefined): boolean => sb?.kind === 'light';
 export const gameSandboxes = <T extends Pick<MachineSandbox, 'kind'>>(list: readonly T[] | undefined): T[] => (list ?? []).filter((s) => !isLight(s));
 export const lightFolders = <T extends Pick<MachineSandbox, 'kind'>>(list: readonly T[] | undefined): T[] => (list ?? []).filter((s) => isLight(s));
+
+/** How a machine's light folders read in list_sandboxes and system_status: how many, how many hold a worker, how many are free. */
+export function lightUseText(busy: readonly boolean[], offers: boolean): string {
+  const inUse = busy.filter(Boolean).length;
+  const made = offers ? 'a new one is made for each agent-only start' : 'its daemon makes no new ones (not updated yet, or offline)';
+  if (!busy.length) return `none now; ${made}`;
+  return `${busy.length} (${inUse} in use, ${busy.length - inUse} free); ${made}`;
+}
