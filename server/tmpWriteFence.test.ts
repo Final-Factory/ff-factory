@@ -145,3 +145,45 @@ test('w6008: the warn-only hook notes and logs a temp write after it ran, and sa
   assert.deepEqual(lines.length, 1);
   assert.doesNotMatch(tmpWriteMessage([{ raw: '/tmp/a', path: '/tmp/a', how: 'redirect' }], LINUX.temp, 'refuse'), /Warn-only/);
 });
+
+test('w6022 review: heredoc text, rsync -t and a tar file named x... are not writes; the misses it found are seen', () => {
+  // A heredoc body is the command's input text (here a PR body quoting w5973's command), not a command line.
+  assert.deepEqual(paths(`cat > "$TMPDIR/body.md" <<'EOF'\nthe bug: git show HEAD:x > /tmp/bq_head.ts\nEOF\nff-pr push --body-file "$TMPDIR/body.md"`, LINUX), []);
+  assert.deepEqual(paths(`git commit -F - <<EOF\ncp a /tmp/b\nEOF`, LINUX), []);
+  // ...but the heredoc's own command line is still read, and a body fed to a shell is commands.
+  assert.deepEqual(paths(`cat <<'EOF' > /tmp/x\nhi\nEOF`, LINUX), ['/tmp/x']);
+  assert.deepEqual(paths(`bash <<'EOF'\necho hi > /tmp/y\nEOF`, LINUX), ['/tmp/y']);
+  // rsync's -t keeps times; cp's and mv's -t is the target folder.
+  assert.deepEqual(paths('rsync -t /tmp/src/ "$TMPDIR/dst/"', LINUX), []);
+  assert.deepEqual(paths('rsync -avt src/ /tmp/dst/', LINUX), ['/tmp/dst']);
+  assert.deepEqual(paths('cp -t "/tmp/d" a b', LINUX), ['/tmp/d']);
+  assert.deepEqual(paths('mv -t /var/tmp/d a', LINUX), ['/var/tmp/d']);
+  // tar's mode is its first word or an option bundle, never a file name that starts with x.
+  assert.deepEqual(paths('tar -czf "$TMPDIR/a.tgz" -C /tmp xfile', LINUX), []);
+  assert.deepEqual(paths('tar -xzf a.tgz -C /tmp', LINUX), ['/tmp']);
+  assert.deepEqual(paths('tar xzf a.tgz -C /tmp', LINUX), ['/tmp']);
+  assert.deepEqual(paths('tar --extract -f a.tar -C /tmp', LINUX), ['/tmp']);
+  // A redirection glued after a quote, and >| (clobber), are redirections.
+  assert.deepEqual(paths("echo 'hi'>/tmp/x", LINUX), ['/tmp/x']);
+  assert.deepEqual(paths('echo hi >| /tmp/x', LINUX), ['/tmp/x']);
+  assert.deepEqual(paths('echo "a > /tmp/q" > "$TMPDIR/o"', LINUX), []);
+  // git clone's flag values do not shift its destination; --separate-git-dir writes too.
+  assert.deepEqual(paths('git clone --depth 1 https://g/x.git /tmp/x', LINUX), ['/tmp/x']);
+  assert.deepEqual(paths('git clone -b main https://g/x.git /tmp/x', LINUX), ['/tmp/x']);
+  assert.deepEqual(paths('git clone -b main https://g/x.git "$TMPDIR/x"', LINUX), []);
+  assert.deepEqual(paths('git clone --separate-git-dir=/tmp/g https://g/x.git "$TMPDIR/x"', LINUX), ['/tmp/g']);
+});
+
+test('w6022 review: a parse that throws notes nothing and logs nothing (the hook never breaks a tool call)', async () => {
+  const lines: string[] = [];
+  const env = new Proxy({} as Record<string, string | undefined>, {
+    get() {
+      throw new Error('boom');
+    },
+  });
+  const hook = tmpWriteHook({ root: LINUX.root, temp: LINUX.temp, sandbox: LINUX.sandbox, env, session: 's', log: (l) => lines.push(l) });
+  assert.throws(() => systemTempWrites('echo hi > /tmp/x', { ...LINUX, env }));
+  const out = await hook({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'echo hi > /tmp/x' }, cwd: LINUX.cwd } as never, undefined, { signal: new AbortController().signal });
+  assert.deepEqual(out, {});
+  assert.deepEqual(lines, []);
+});
