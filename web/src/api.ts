@@ -157,6 +157,8 @@ export const api = {
   logout: () => request<unknown>('POST', '/api/logout'),
   /** `timeoutMs`: give up after it (the socket's failure check, w5318); absent, wait as long as the browser does. */
   state: (timeoutMs?: number) => request<AppState>('GET', '/api/state', undefined, { timeoutMs }),
+  /** w5907: sessions the page's state left out (older finished ones), by id; unknown ids are left out of the answer. */
+  sessions: (ids: string[]) => request<SessionInfo[]>('GET', `/api/sessions?ids=${ids.map(enc).join(',')}`),
   // What work costs (w859, docs/spend.md): each request's cost, one request in full, and the analysis.
   spendSummary: () => request<SpendSummaryReply>('GET', '/api/spend/summary'),
   /** Reports (w2541, docs/reports.md): search them with every filter, and read one at a revision (the latest by default). */
@@ -333,6 +335,8 @@ export interface SocketHandlers {
   onReconnect: () => void;
   /** Fired after a failed attempt; return false to stop reconnecting (e.g. logged out). */
   onFailure: () => Promise<boolean>;
+  /** w5907: the sessionsRev to send on a reconnect after a gap this long (ms), so the server sends only what changed. */
+  have?: (gapMs: number) => string | undefined;
 }
 
 /** Heard nothing (not even the server's ping) for this long: the socket is dead, even if it still reads open. */
@@ -366,6 +370,8 @@ export function connectSocket(h: SocketHandlers): () => void {
     if (lastCode !== undefined) q.set('code', String(lastCode));
     if (lostAt) q.set('gap', String(Date.now() - lostAt));
     if (tries) q.set('tries', String(tries));
+    const have = everOpened && lostAt ? h.have?.(Date.now() - lostAt) : undefined;
+    if (have) q.set('have', have);
     return `${base}?${q}`;
   };
 

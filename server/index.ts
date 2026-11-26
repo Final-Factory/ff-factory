@@ -9,7 +9,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, FINAL_FACTORY_PRODUCT_NAME, brandName, configPath, loadConfig, productName, projectOf, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
-import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
+import { SessionManager, compactCommand, isMidTurn, resumesAnswered, resumesUnanswered, seedSdkCost, snapshotOf } from './sessions.ts';
 import { BenchHolderWatch } from './benchHolders.ts';
 import { BenchStopError } from './benchStop.ts';
 import { TIMER_LIMITS } from './timers.ts';
@@ -124,7 +124,7 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
-import { pageSessions, stateSizes } from './pageState.ts';
+import { pageNamedSessions, pageSession, pageSessions, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
@@ -273,6 +273,13 @@ setGithubTokens(github);
 github.start();
 // w3758: the portal's gh calls by caller, with the token's budget beside them, every 15 minutes (server/ghBudget.ts).
 startGhCallLog(ghRunner(undefined, 'the rate limit read'));
+// w5888: what a start can put off waits until the coordinators resumed after a restart have answered (their first turns waited
+// 2-5 min while these chores held the VM's two vCPUs, measured 2026-11-26), from 30 s after the start (the resumes are asked
+// for at 2 s) and never more than 5 min.
+const startedAt = Date.now();
+const afterResumes: Promise<void> = new Promise<void>((r) => setTimeout(r, 30_000).unref())
+  .then(() => resumesAnswered(5 * 60_000))
+  .then((all) => console.log(`start: ${all ? 'the resumed agents answered' : `${resumesUnanswered()} resumed agent(s) not answered yet`} ${((Date.now() - startedAt) / 1000).toFixed(0)} s after the start; the put-off chores run now (w5888)`));
 // Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
 // per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
 setTimeout(async () => {
@@ -281,8 +288,8 @@ setTimeout(async () => {
   if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
   void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
   // The orchestrators' own Claude Code transcripts on this host (w1688), masked in place as they are written; the first pass
-  // looks through every one of them for the values known now.
-  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start();
+  // looks through every one of them for the values known now, once the resumes have answered (w5888).
+  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start({ backScanAfter: afterResumes });
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 sessions.keepTranscript = (id) => {
@@ -793,8 +800,8 @@ const guardData = async () => {
 setTimeout(() => void guardData(), 3 * 60_000).unref();
 setInterval(() => void guardData(), dataGuardSettings(cfg).everyMinutes * 60_000).unref();
 // The transcript search index (w5111, server/searchIndex.ts) is built in its own thread a little after the start, so the first
-// search_transcripts does not wait for it.
-setTimeout(() => void warmSearchIndex(store.transcriptsDir).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`)), 30_000).unref();
+// search_transcripts does not wait for it; after the resumes (w5888: its thread took one of the two vCPUs for 65 s).
+void afterResumes.then(() => warmSearchIndex(store.transcriptsDir)).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`));
 // Sessions that ran before the spend record existed are read from their transcripts once, then the record's repairs run once per
 // session (w859, w1209, w1160, w2007; docs/spend.md "Backfill", "Corrections to history"). server/spendJobs.ts: read off the main
 // thread and parsed in slices with a pause after each session, so a start never holds the loop (w2026).
@@ -1172,20 +1179,33 @@ function poolPeople(): PoolPerson[] {
   return identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName, hasPool: owners.includes(u.userId.toLowerCase()) }));
 }
 
-/** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
-function appState(user: string | undefined): AppState {
+/** When each session last changed, for a reconnecting page's state (w5907, server/pageState.ts). */
+const sessionRevs = new SessionRevs();
+bus.on('event', (e: ServerEvent) => sessionRevs.note(e));
+
+/**
+ * The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). `have`: the
+ * sessionsRev of the state a reconnecting page holds (w5907): its sessions part then holds only what changed since.
+ */
+function appState(user: string | undefined, have?: string | null): AppState {
   // w5533: only a signed-in login gets a state; a page whose login is gone is closed before it gets here (openPages).
   const me = auth.userInfo(user);
   if (!me) throw new HttpError(401, 'login required');
   const mine = agents.orchestrators.personalFor(me);
   const work = agents.orchestrators.forPage();
+  const standingAgents = agents.standing.list();
+  const machineList = machines.list().map(machineView);
+  const live = liveHub.viewsFor(me.userId);
+  // w5861: without the fields the page never reads; w5907: only the sessions the page shows on open (server/pageState.ts).
+  const named = pageNamedSessions({ work, ids: [mine.info.id, agents.dispatcherId], standing: standingAgents, machines: machineList, live });
+  const kept = pageSessions(store.sessions.values(), named, Date.now());
   return {
     app: appNow(),
-    // w5861: without the fields the page never reads (server/pageState.ts): the whole list had reached 18 MB.
-    sessions: pageSessions(store.sessions.values(), work, Date.now()),
-    standingAgents: agents.standing.list(),
+    ...sessionsPart(kept.sessions, sessionRevs, sessionRevs.since(have)),
+    olderSessions: kept.older,
+    standingAgents,
     delegations: [...store.delegations.values()],
-    machines: machines.list().map(machineView),
+    machines: machineList,
     providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
     ffbox: providers.summary(),
     max: max.summary(),
@@ -1206,7 +1226,7 @@ function appState(user: string | undefined): AppState {
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true }, project: projectView(cfg) },
     settings: store.settings,
     poolPeople: poolPeople(),
-    live: liveHub.viewsFor(me.userId),
+    live,
     // w4238: an owner's page offers the buttons of another owner's waiting question; a member's page never needs the list.
     ...(me.role === 'owner' ? { owners: identity.list().filter((x) => x.role === 'owner').map((x) => ({ userId: x.userId, displayName: x.displayName })) } : {}),
   };
@@ -1256,6 +1276,18 @@ const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, pattern: string, h: Handler) => routes.push([method, new RegExp(`^${pattern}$`), h]);
 
 route('GET', '/api/state', async (req) => appState(auth.user(req)));
+// w5907: sessions the page's state left out (finished, older than its window), as the page gets them, for a view that
+// shows one (a session's page, a sandbox's older agent). At most 200 ids; an unknown id is left out of the answer.
+route('GET', '/api/sessions', async (req, _p, url) => {
+  if (!auth.userInfo(auth.user(req))) throw new HttpError(401, 'login required');
+  const ids = (url.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+  if (!ids.length || ids.length > 200) throw new HttpError(400, '"ids" takes 1 to 200 session ids');
+  const named = new Set(ids);
+  return ids.flatMap((id) => {
+    const s = store.sessions.get(id);
+    return s ? [pageSession(s, named, Date.now())] : [];
+  });
+});
 
 // ---- the live view (w1398, docs/live-view.md): a session's knobs, for its requester and the owners
 const liveFor = (req: http.IncomingMessage, sessionId: string) => {
@@ -2710,14 +2742,14 @@ server.on('upgrade', (req, socket, head) => {
       clients.delete(ws);
     });
     const t0 = performance.now();
-    const state = appState(user);
+    const state = appState(user, new URL(req.url ?? '/', 'http://x').searchParams.get('have'));
     const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
     const built = performance.now() - t0;
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));
@@ -3242,8 +3274,26 @@ const tokenSwitch = new TokenSwitch({
   hold: (s, ref, what) => agents.orchestrators.tokenStopBlocked(s.id, { ref, what }, { stamp: "stopped on its Claude token's usage limit (w1745)", told: "stopped on its Claude token's usage limit" }),
   note: (s, line) => agents.orchestrators.noteOnHeld(s.id, line),
   log: (line) => console.log(line),
+  // w5921: an orchestrator (the dispatcher) stuck on a used-up token tells the operators: the owners and everyone with a Claude
+  // pool (lothsahn's and Ben's orchestrators), never the stuck orchestrator itself.
+  alert: (s, line) => {
+    const own = agents.orchestrators.ownerOf(s)?.userId;
+    const to = identity.list().filter((u) => (u.role === 'owner' || vault.hasClaudeFor(u.userId)) && !(own && u.userId.toLowerCase() === own.toLowerCase()));
+    // Only orchestrators that exist: an alert starts none (a new one would spend a turn, maybe on the same used-up pool).
+    agents.orchestrators.toPeople(to, line, true);
+  },
+  dispatcherId: () => agents.orchestrators.dispatcherId,
+  outUntil: (account) => usage.outOf(account)?.until,
+  dispatcherConfigured: () => {
+    const pinned = pinnedDispatcherEntry(cfg);
+    if (pinned === undefined) return `the system payer's pool (${identity.systemPayer().userId}'s; claudeAccounts.dispatcher unset)`;
+    const got = vault.claudeByName(pinned);
+    return `vault token ${got ? `${got.entry.name} …${got.entry.last4}` : pinned} (claudeAccounts.dispatcher)`;
+  },
 });
 agents.accountMoving = (info, why) => tokenSwitch.moving(info, why);
+// w5921: the ledger says why a request sits undecided when the dispatcher is rate-limited, and does not offer it again then.
+agents.orchestrators.dispatcherLimited = () => tokenSwitch.dispatcherLimited();
 if (!isDryRun) {
   sessions.events.on('rateLimit', (s: { info: SessionInfo }, info: RateLimitInfo) => tokenSwitch.rateLimit(s.info, info));
   // A machine's session reports its last result beside the turn's end: read it a moment later, from the store.

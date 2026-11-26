@@ -503,9 +503,21 @@ config's temp folder is always a fence extra). A fenced worker could plant a scr
 - absent or `"warn"` (today, lothsahn's warn-only-first rule): nothing moves; `logs/daemon.log` carries one line
   `WARNING medium agent folders: Medium agents' TMP/TEMP root ... and CARGO_HOME ... are in folders workers write; ...`.
 - `"on"`: Medium agents get `<root>/tmp-medium/ffa-<session>` and `<root>/cache-medium/cargo` (`Daemon.agentTempEnv` in
-  `runSpec`; seeded from the person's `~/.cargo` config, never from `cache/cargo`); sandbox agents keep theirs.
-  `tmp-medium` is in `MEDIUM_ONLY_CHILDREN`, so all three fences keep it from workers. Clean-up, the session sweep,
-  `ff-leftovers` and the agents' read grants find a session's folder in either root (`Daemon.sessionTemps`).
+  `runSpec`); sandbox agents keep theirs. The cargo home is seeded in the background from the person's `~/.cargo`
+  (`CARGO_SEED_PIECES` in `machine/sharedCaches.ts`: its config, `registry/index`, `registry/cache` and `git/db`), always
+  from `~/.cargo` and never from `cache/cargo`; an agent that starts during the seed sees part of it, which costs only
+  downloads. `tmp-medium` is in `MEDIUM_ONLY_CHILDREN`, so all three fences keep it from workers. Clean-up, the session
+  sweep, `ff-leftovers` and the agents' read grants find a session's folder in either root (`Daemon.sessionTemps`); the
+  age-based clean-up rules (`agent-temp`, `temp-old`, `temp-clones`: `cleanupRules`' `mediumTemp`) and the clean-up facts
+  (`CleanupFacts.mediumTempRoot`, judged by `judgePath` and listed by `planFolders`) cover `tmp-medium` too (w5869).
+  `Daemon.sessionTemp`, the one folder `timed_run`, `publish_attachment` and the sweeper's `dirOf` use, picks a session's
+  `tmp-medium` folder only when it exists and the session is not a sandbox one (w5869, w5871's F1): a Medium agent that
+  started before the switch went on, or whose own folder could not be made, keeps its shared-root folder for its life.
+  After the switch, a resumed Medium worker gets a new, empty `tmp-medium/ffa-<session>`; its old shared-root folder stays
+  until the request-aware clean-up removes it.
+- Exposure is judged by `workerWritable`: a folder inside a root child workers write, a fence extra outside the root, or a
+  folder a fence opens whole wherever it is (`workerIntegrityAllow`, `writeLockExtra`, and `<root>/transcripts` while
+  `transcriptLock` is not on; w5869, w5871's F3).
 - A folder that cannot be made, or one a worker could still write, keeps today's with a `WARNING medium agent folders:
   could not make ...` line, so the switch never stops an agent and needs nobody at the machine. No fence, no change.
 Still Low-writable and not covered: an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`.

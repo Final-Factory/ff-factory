@@ -99,6 +99,34 @@ test('w1688: scrubInPlace overwrites each match with a mask of its length, acros
   assert.ok(!fs.readFileSync(big, 'latin1').includes(v));
 });
 
+test('w5888: with backScanAfter the bytes already there wait for it, while new writes are masked at once', async (t) => {
+  t.after(reset);
+  reset();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const v = fake(30);
+  addSecretValues([v]);
+  const old = path.join(root, 'F--sb', 'a.jsonl');
+  fs.mkdirSync(path.dirname(old), { recursive: true });
+  // the pad: a scan from the size at start starts a value's length back, so it would mask an old value at the very end
+  fs.writeFileSync(old, JSON.stringify({ stdout: `old ${v}`, pad: 'x'.repeat(500) }) + '\n');
+  let go: () => void = () => undefined;
+  const after = new Promise<void>((r) => (go = r));
+  const s = new CliScrubber({ root, log: () => undefined, sweepMs: 3_600_000 }).start({ backScanAfter: after });
+  t.after(() => s.stop());
+  await s.sweep();
+  assert.ok(fs.readFileSync(old, 'utf8').includes(v), 'the old bytes wait for the back-scan');
+  fs.appendFileSync(old, JSON.stringify({ stdout: `new ${v}` }) + '\n');
+  await s.sweep();
+  const text = fs.readFileSync(old, 'utf8');
+  assert.ok(text.includes(`old ${v}`) && !text.includes(`new ${v}`), 'the new write masked at once, from the size at start');
+  go();
+  const end = Date.now() + 5_000;
+  while (fs.readFileSync(old, 'utf8').includes(v) && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+  await s.sweep();
+  assert.ok(!fs.readFileSync(old, 'utf8').includes(v), 'the back-scan masks the old bytes once its promise resolves');
+});
+
 test('w1688: the CliScrubber masks what is already on disk once a value is learnt, and new writes as they come', async (t) => {
   t.after(reset);
   reset();

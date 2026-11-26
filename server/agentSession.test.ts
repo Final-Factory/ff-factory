@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
-import { SessionManager, launchesSettled, restartMarks, setQueryForTesting, snapshotOf, type SessionHandle } from './sessions.ts';
+import { SessionManager, launchesSettled, restartMarks, resumesAnswered, resumesUnanswered, setQueryForTesting, snapshotOf, type SessionHandle } from './sessions.ts';
 import { collectResume, resumeMessage } from './restart.ts';
 import { Store, bus } from './store.ts';
 import type { Config } from './config.ts';
@@ -233,6 +233,42 @@ test('stop and resume: a stopped session restarts on the next message, resuming 
   await launchesSettled();
   assert.equal(seen.at(-1)!.options.resume, sdk);
   await until(() => s.info.status === 'idle', 'idle');
+});
+
+test('w5888: a resumed process counts as unanswered until its first answer, then logs where its launch time went', async (t) => {
+  const { sessions, worker } = setup(t);
+  const s = worker();
+  sessions.send(s.info.id, 'hello');
+  await until(() => s.info.status === 'idle', 'idle');
+  s.stop();
+  const lines: string[] = [];
+  const log = t.mock.method(console, 'log', (...a: unknown[]) => void lines.push(a.join(' ')));
+  assert.equal(await resumesAnswered(1000), true, 'none waiting: at once');
+  sessions.send(s.info.id, 'are you back?');
+  assert.equal(resumesUnanswered(), 1, 'counted from the ask, before its launch');
+  const answered = resumesAnswered(3000);
+  assert.equal(await answered, true);
+  await until(() => s.info.status === 'idle', 'idle again');
+  assert.equal(resumesUnanswered(), 0);
+  log.mock.restore();
+  const line = lines.find((l) => l.startsWith(`resume ${s.info.id} `));
+  assert.ok(line, 'one line for the resume');
+  assert.match(line!, /answered [\d.]+ s after it was asked \(its turn to launch \+[\d.]+ s, seal checked \+[\d.]+ s, tools refreshed \+[\d.]+ s, tally read \+[\d.]+ s, Claude Code started \+[\d.]+ s, answered \+[\d.]+ s/);
+});
+
+test('w5888: a resume stopped before its launch answers nothing, so nothing waits for it', async (t) => {
+  const { sessions, worker } = setup(t);
+  const s = worker();
+  sessions.send(s.info.id, 'hello');
+  await until(() => s.info.status === 'idle', 'idle');
+  s.stop();
+  t.mock.method(console, 'log', () => undefined);
+  sessions.send(s.info.id, 'are you back?');
+  // stopped before its launch: given up, so nothing waits for it
+  s.stop();
+  await launchesSettled();
+  await until(() => resumesUnanswered() === 0, 'the given-up resume released');
+  assert.equal(await resumesAnswered(50), true);
 });
 
 test('images: kept with the message and shown to the agent; tool-result images are kept too', async (t) => {

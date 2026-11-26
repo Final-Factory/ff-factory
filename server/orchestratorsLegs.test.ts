@@ -273,6 +273,29 @@ test('w2217: a request left undecided past the bound is offered to the dispatche
   assert.equal(store.work.get('w1')!.undecided, undefined);
 });
 
+test('w5921: while the dispatcher is rate-limited an undecided request says so and is not offered again to the stuck process', async (t) => {
+  const { store, o, dispatcher, chat, call, heard } = setup(t);
+  await call(chat(BEN).info, 'request_work', { title: 'Page state per connect', brief: 'Send less.' });
+  await until('the dispatcher hears it', () => heard(dispatcher().info.id, '[work request] w1').length === 1);
+  const at = (min: number) => {
+    const when = Date.now() + min * 60_000;
+    (o as unknown as { now: () => Date }).now = () => new Date(when);
+  };
+  let limited: string | undefined = 'the dispatcher is rate-limited on vault-ben-2 …abcd until 2026-11-26 08:00Z';
+  o.dispatcherLimited = () => limited;
+  at(5);
+  assert.deepEqual(o.undecidedBound(), []);
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Working \(undecided for \d+ min: the dispatcher is rate-limited on vault-ben-2 …abcd until 2026-11-26 08:00Z \(w5921\), so nothing decides it before then/);
+  // Past the bound (w5907 sat 30+ min so on 2026-11-26): Stalled with the reason, and not re-offered to the same dead process.
+  at(31);
+  assert.deepEqual(o.undecidedBound(), [], 'not offered again while the dispatcher is rate-limited');
+  assert.match((await call(dispatcher().info, 'list_work', { id: 'w1' })).text, /Stalled \(undecided for 31 min: the dispatcher is rate-limited on vault-ben-2 …abcd until 2026-11-26 08:00Z/);
+  assert.equal(heard(dispatcher().info.id, '[work request] w1').length, 1);
+  // The limit over: offered again at once, as w2217 does.
+  limited = undefined;
+  assert.deepEqual(o.undecidedBound(), ['w1']);
+});
+
 test("w3161: a person's hold note outside their turn keeps the dispatcher's question open: Waiting on input on them, never offered again as undecided", async (t) => {
   const { store, sessions, o, dispatcher, chat, call, heard } = setup(t);
   const ben = chat(BEN);
