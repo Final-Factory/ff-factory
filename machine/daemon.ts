@@ -3481,7 +3481,7 @@ export class Daemon {
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
-      this.lowCopies = new LowCopies(root, say);
+      this.lowCopies ??= new LowCopies(root, say); // w5877: one per daemon run, which never takes over another run's copies
       const claude = this.lowCopies.make(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');

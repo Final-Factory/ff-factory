@@ -424,6 +424,96 @@ test('w5838: isReadOnlyCopy wants the OWNER RIGHTS entry and nothing inherited',
   assert.ok(!isReadOnlyCopy('x BEAST\\rydin:(I)(F)'));
 });
 
+test('w5877: isReadOnlyCopy refuses an access list that still lets anyone but SYSTEM or Administrators write', () => {
+  // What readOnlyGrants leaves, as icacls prints it (measured on BEAST, w5877).
+  const ours = 'F:\\ffw\\tools\\low\\claude-1-2.exe BUILTIN\\Administrators:(F)\n   NT AUTHORITY\\SYSTEM:(F)\n   BEAST\\rydin:(RX)\n   OWNER RIGHTS:(RX)\n   Mandatory Label\\Low Mandatory Level:(NW)\n\nSuccessfully processed 1 files; Failed processing 0 files';
+  assert.ok(isReadOnlyCopy(ours));
+  // The reviewer's measured case: OWNER RIGHTS:(RX) set by a Low worker beside Everyone:(F), nothing inherited.
+  assert.ok(!isReadOnlyCopy('F:\\x\\c.exe OWNER RIGHTS:(RX)\n   Everyone:(F)\n   Mandatory Label\\Low Mandatory Level:(NW)'));
+  assert.ok(!isReadOnlyCopy(ours.replace('BEAST\\rydin:(RX)', 'BEAST\\rydin:(RX,W)')));
+  assert.ok(!isReadOnlyCopy(ours.replace('BEAST\\rydin:(RX)', 'BEAST\\rydin:(M)')));
+});
+
+test('w5877: a copy left by an earlier daemon run is never taken over, even with its source\'s bytes', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'claude.exe');
+  fs.writeFileSync(exe, 'the real claude');
+  const first = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin').make(exe)!;
+  const before = fs.statSync(first, { bigint: true });
+  // The next daemon run (a new LowCopies) finds it there, its bytes right but its access list a Low worker's.
+  const f = icaclsSync();
+  const said: string[] = [];
+  const again = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin').make(exe)!;
+  assert.equal(fs.readFileSync(again, 'utf8'), 'the real claude');
+  const after = fs.statSync(again, { bigint: true });
+  assert.ok(after.ino !== before.ino || after.birthtimeNs !== before.birthtimeNs, 'a new file, not the old one');
+  assert.ok(f.calls.some((c) => c[0] === again && c[1] === '/inheritance:r'), 'locked by this run');
+  assert.ok(said.some((l) => /earlier daemon run; made again, never taken over/.test(l)), said.join('\n'));
+});
+
+test('w5877: a same-size rewrite with its times put back is still caught before the run', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'claude.exe');
+  fs.writeFileSync(exe, 'the real claude');
+  const said: string[] = [];
+  const copies = new LowCopies(root, (l) => void said.push(l), icaclsSync().exec, 'BEAST\\rydin');
+  const copy = copies.make(exe)!;
+  const st = fs.statSync(copy);
+  fs.writeFileSync(copy, 'the evil claude');
+  fs.utimesSync(copy, st.atime, st.mtime);
+  const ran = copies.check(copy)!;
+  assert.equal(fs.readFileSync(ran, 'utf8'), 'the real claude');
+  assert.ok(said.some((l) => /WARNING/.test(l) && /made again/.test(l)), said.join('\n'));
+});
+
+test('w5877: when tools/low is not Medium, a DLL planted after make is swept before the next run, with a WARNING', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'node.exe');
+  fs.writeFileSync(exe, 'node');
+  const dir = path.join(root, 'tools', 'low');
+  const f = icaclsSync();
+  const exec: ExecSync = (cmd, args) => (args.length === 1 && args[0] === dir ? { code: 0, stdout: `${dir} Mandatory Label\\Low Mandatory Level:(I)(OI)(CI)(NW)`, stderr: '' } : f.exec(cmd, args));
+  const said: string[] = [];
+  const copies = new LowCopies(root, (l) => void said.push(l), exec, 'BEAST\\rydin');
+  const copy = copies.make(exe)!;
+  assert.ok(said.some((l) => /WARNING: .* is not labelled Medium/.test(l)), said.join('\n'));
+  fs.writeFileSync(path.join(dir, 'version.dll'), 'evil');
+  assert.equal(copies.check(copy), copy);
+  assert.ok(!fs.existsSync(path.join(dir, 'version.dll')), 'swept before the run');
+});
+
+test('w5877: a Unity junction with a Low label of its own is made again', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowunity-'));
+  const dir = lowUnityDir(root);
+  fs.mkdirSync(dir, { recursive: true });
+  const install = path.join(root, 'install', 'Editor');
+  fs.mkdirSync(install, { recursive: true });
+  fs.writeFileSync(path.join(install, 'Unity.exe'), 'the real Unity');
+  const link = path.join(dir, '6000.1.0f1');
+  fs.symlinkSync(install, link, 'junction');
+  // Node reads a junction whose target it cannot parse (on BEAST, one into F: made from a sandbox reads `Global\F:\...`)
+  // as a plain folder: junctionLeadsTo is false there and this case is never reached.
+  try {
+    fs.readlinkSync(link);
+  } catch {
+    t.skip("this volume's junctions cannot be read back by Node");
+    return;
+  }
+  let made = 0;
+  const said: string[] = [];
+  const exec: Exec = async (cmd, args) => {
+    if (cmd === 'icacls') return { code: 0, stdout: `${args[0]} Mandatory Label\\Low Mandatory Level:(NW)`, stderr: '' };
+    made++;
+    fs.symlinkSync(install, link, 'junction');
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const have = await lowUnityJunctions(root, [{ version: '6000.1.0f1', bin: path.join(install, 'Unity.exe') }], exec, (l) => void said.push(l));
+  assert.deepEqual(have, ['6000.1.0f1']);
+  assert.equal(made, 1, said.join('\n'));
+  assert.ok(said.some((l) => /WARNING: the Unity junction .* Low label of its own/.test(l)), said.join('\n'));
+  assert.equal(fs.readFileSync(path.join(install, 'Unity.exe'), 'utf8'), 'the real Unity');
+});
+
 test('w5838: junctionLeadsTo compares where a junction leads, whatever its prefix or case', () => {
   const target = 'C:\\Program Files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor';
   assert.ok(junctionLeadsTo('L', target, () => '\\\\?\\c:\\program files\\Unity\\Hub\\Editor\\6000.3.19f1\\Editor\\'));

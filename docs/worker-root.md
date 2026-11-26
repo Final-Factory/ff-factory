@@ -755,20 +755,28 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       grant and a new label are refused. Where icacls cannot set that, the log says so and the copy is hashed in full
       before every run instead.
     - `LowCopies.check` runs before every sandbox agent (`runSpec`) and every fenced editor start (`editorFence`): the copy
-      still has its source's bytes (SHA-256, about 250 ms for claude.exe; a read-only copy whose stat is unchanged is
-      trusted, since changing a file's change time needs a right it lacks), else it is made again from the source and the
+      still has its source's bytes (a full SHA-256 every time, about 250 ms for claude.exe; its stat is no proof, since
+      whoever can write a file can put its times back, w5877), else it is made again from the source and the
       log says `WARNING`. A copy that cannot be checked or made again holds the agent (as the fence does) or starts that
       editor Medium (warn-only, as before the fence).
     - The probes of a copy (`claude --version`, the editor launcher, the transcript lock, `gh auth status`) run with
       `bareEnv` (`machine/maxEventsFence.ts`), none of the daemon's tokens; gh gets only its login folder. A probe that
       fails bare is tried once with Windows' own variables (`PROBE_ENV_KEYS`: `PATH`, the profile and temp folders, never a
       token or daemon.json `env`) and logged as a `WARNING`, so no machine loses its fence to this change.
+    - A copy is never taken over from an earlier daemon run (w5877): each run makes and locks its own, since a copy left
+      while the folder was Low may carry a worker's access list (one that passed as read-only beside an `Everyone:(F)`
+      entry, measured by w5877) or an open write handle. One that still runs, and so cannot be removed, leaves the new
+      copy the next name (`<base>-<size>-<mtime>-<n>`). `isReadOnlyCopy` wants every entry but SYSTEM's and
+      Administrators' to be read and run only.
+    - If labelLow cannot keep `tools\low`, `tools\unity-low` or `tools\shims` Medium, the log says `WARNING` and the fence
+      stays on; `tools\low` is then swept before every run of a copy (`LowCopies.folderCheck`).
     - Whatever was planted while the folders were still Low goes at the daemon's start, each with a `WARNING`: in
-      `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `<base>-<size>-<mtime>.exe`), so no DLL beside a copy
+      `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `claude|node|gh-<size>-<mtime>[-<n>].exe`), so no DLL beside a copy
       is loaded by it; a copy's name that cannot be read (a folder, a locked file) is removed and the copy made; in
       `tools\unity-low` everything but the junctions just checked, since the daemon starts `<that folder>\<version>\Unity.exe`
       (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`).
-    - A junction is made again unless it leads to its Unity (`junctionLeadsTo`).
+    - A junction is made again unless it leads to its Unity (`junctionLeadsTo`) and carries no Low label of its own (w5877:
+      a worker could have labelled it while the folder was Low, and turn it later).
     - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to `<root>\tools\shims`,
       not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included; the old `bin` is
       removed.
