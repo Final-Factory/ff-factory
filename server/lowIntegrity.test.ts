@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, lowDiskImageWarning, lowDiskImages, ownerGameDataLock, labelNoReadUp, lowCopy, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -517,4 +517,27 @@ test('w5749: deleteGenericCreds deletes generic entries with CredDeleteW, counts
   let ran = false;
   assert.deepEqual(await deleteGenericCreds([], async () => ((ran = true), { code: 0, stdout: '', stderr: '' })), { deleted: [], failed: [] });
   assert.equal(ran, false);
+});
+
+test("lowDiskImages names each virtual disk in a Low tools child, never node's, and the warning changes nothing (BEAST's ffu-sniper, w5948)", () => {
+  const files: Record<string, string[]> = {
+    [path.join(R, 'tools', 'wsl-ffu-sniper')]: ['ext4.vhdx'],
+    [path.join(R, 'tools', 'node')]: ['disk.vhdx'],
+    [path.join(R, 'tools', 'cargo')]: ['bin', 'notes.vhdx.txt'],
+    [path.join(R, 'tools', 'old')]: ['Disk.VHD'],
+  };
+  const list = (d: string) => files[d] ?? [];
+  const children = [
+    { name: 'wsl-ffu-sniper', dir: true },
+    { name: 'node', dir: true },
+    { name: 'cargo', dir: true },
+    { name: 'old', dir: true },
+    { name: 'git.json', dir: false },
+  ];
+  assert.deepEqual(lowDiskImages(R, children, list), [path.join(R, 'tools', 'wsl-ffu-sniper', 'ext4.vhdx'), path.join(R, 'tools', 'old', 'Disk.VHD')]);
+  assert.deepEqual(lowDiskImages(R, undefined, list), []);
+  const w = lowDiskImageWarning(path.join(R, 'tools', 'wsl-ffu-sniper', 'ext4.vhdx'), R);
+  assert.match(w, /^WARNING worker integrity: /);
+  assert.match(w, /Nothing was changed/);
+  assert.ok(w.includes(path.join(R, 'wsl', '<distro>')), w);
 });
