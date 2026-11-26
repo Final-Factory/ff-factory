@@ -3985,6 +3985,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
 
   /** w2046: resumes being moved to a computer with room: session id to the messages that go with it and where it goes. */
   private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
+  /** w5950: moved-away workers being retired now (retireMovedAway), with their new workers: retired once (the w5975 review). */
+  private readonly retiring = new Map<string, string[]>();
   /** w2046: the last stay or wait reason journalled for a worker whose resume did not move, so each is logged once. */
   private readonly roomKept = new Map<string, string>();
   /** w5260: released urgent or frantic workers whose resume found no computer to move to: their resume may pre-empt at a safe point (PlaceAgainDeps.resumePreempt). */
@@ -4388,10 +4390,16 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   enforceMovedAway(machineId: string, sids: string[], how: 'live' | 'resume'): Map<string, string[]> {
     const taken = new Map<string, string[]>();
     const kept: string[] = [];
+    const busy = new Map<string, string[]>();
     for (const sid of sids) {
       const info = this.store.sessions.get(sid);
       const m = info?.movedAway;
       if (!info || !m) continue;
+      const going = this.retiring.get(sid);
+      if (going) {
+        busy.set(sid, going);
+        continue;
+      }
       const { facts, moved } = this.movedAwayFacts(info);
       const v = movedAwayVerdict(facts);
       const name = `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
@@ -4406,8 +4414,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         continue;
       }
       const byReq = new Map(v.heirs.map((x) => [x.request, x.heir]));
-      taken.set(sid, [...new Set(v.heirs.map((x) => x.heir))]);
-      void this.retireMovedAway(info, machineId, how, moved, byReq);
+      const to = [...new Set(v.heirs.map((x) => x.heir))];
+      taken.set(sid, to);
+      this.retiring.set(sid, to);
+      void this.retireMovedAway(info, machineId, how, moved, byReq).finally(() => this.retiring.delete(sid));
     }
     if (kept.length) {
       console.warn(`machines: ${machineId}: moved-away worker(s) kept (w5950): ${kept.join('; ')}`);
@@ -4418,6 +4428,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       console.log(`machines: ${machineId}: moved-away worker(s) ${how === 'live' ? 'stopped' : 'not resumed'} (w5950): ${line}`);
       this.machines.report?.(`[machines] ${machineId}: ${taken.size} worker(s) whose work moved elsewhere ${how === 'live' ? 'were still running and are stopped' : 'are not resumed'}: ${line}. Their sandboxes' work goes to a side branch and their new workers are told (w5950).`);
     }
+    // The w5975 review's finding 1: a second hello or resume while one is being retired neither stops nor saves it again.
+    for (const [sid, to] of busy) taken.set(sid, to);
     return taken;
   }
 
