@@ -93,6 +93,10 @@ export interface TokenSwitchDeps {
   alert?: (s: SessionInfo, line: string) => void;
   /** w5921: what config says the dispatcher runs on ("vault token vault-ben-3 …abcd (claudeAccounts.dispatcher)"), for its alert. */
   dispatcherConfigured?: () => string | undefined;
+  /** w5921: the dispatcher's session id now: a reset dispatcher is a new session, and the old one's limit is not its own. */
+  dispatcherId?: () => string | undefined;
+  /** w5921: when the token's out mark ends (UsageTracker.outOf, epoch ms), the one time system_status shows; undefined: not out. */
+  outUntil?: (account: string) => number | undefined;
 }
 
 /**
@@ -168,6 +172,8 @@ export class TokenSwitch {
   private readonly streaks = new Map<string, LimitStreak>();
   /** When each out token's refused window resets, as markOut set it (epoch ms), by key. */
   private readonly outUntil = new Map<string, number>();
+  /** w5921: until when an agent's alert for a token holds (that token's reset), by "<session id>|<key>": a flapping token alerts once. */
+  private readonly alertedTill = new Map<string, number>();
 
   constructor(d: TokenSwitchDeps) {
     this.d = d;
@@ -201,18 +207,24 @@ export class TokenSwitch {
     const account = s.account;
     const refusedOn = this.refused.get(s.id);
     this.refused.delete(s.id);
-    if (!account) return;
-    const label = this.d.label(account);
+    const label = account ? this.d.label(account) : undefined;
     const text = (s.lastResult ?? '').trim();
     const limitLine = LIMIT_END.test(text);
-    if (!label || (!limitLine && refusedOn !== account)) {
+    if (!account || !label || (!limitLine && refusedOn !== account)) {
       this.streaks.delete(s.id);
+      // A dispatcher turn that did not end on the limit: no dispatcher of before is limited either (a reset one, a new id).
+      if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') for (const [id, st] of this.streaks) if (st.dispatcher) this.streaks.delete(id);
       return;
     }
     const line = text.replace(/\s+/g, ' ').slice(0, 120);
     if (limitLine) this.markOut(account, label, refusedWindow(undefined, text, this.d.meters(account)), undefined, `${s.kind} ${s.id}'s turn ended on Claude's limit line ("${line}")`);
     const streak = s.kind === 'orchestrator' ? this.count(s, account, label) : undefined;
-    if (MID_TURN.has(s.status)) return; // a message queued behind the turn started the next one: it ends on the limit too, and comes back here
+    if (MID_TURN.has(s.status)) {
+      // A message queued behind the turn started the next one: it ends on the limit too, and comes back here. A backlog keeps
+      // every reading mid-turn, so the alert goes now (it only warns).
+      if (streak) this.alertStreak(s, streak, `nothing yet: messages queued for it start each next turn on ${label} at once, and each ends on the limit too`);
+      return;
+    }
     const who = `${s.kind} ${s.id}`;
     if (s.kind === 'ops' || (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')) {
       this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out; ${s.kind === 'ops' ? 'the ops worker starts a fresh process for every job, on a token with room' : 'the dispatcher stays on its own token'}, so it is not resumed`);
@@ -259,22 +271,35 @@ export class TokenSwitch {
    */
   dispatcherLimited(): string | undefined {
     const now = this.now();
-    for (const st of this.streaks.values()) if (st.dispatcher && st.until > now) return `the dispatcher is rate-limited on ${st.label} until ${hhmm(st.until)}`;
+    const current = this.d.dispatcherId?.();
+    for (const [id, st] of this.streaks) {
+      if (!st.dispatcher || (current !== undefined && id !== current)) continue;
+      const until = this.untilOf(st);
+      if (until > now) return `the dispatcher is rate-limited on ${st.label} until ${hhmm(until)}`;
+    }
     return undefined;
   }
 
   /** Count a turn of an orchestrator that ended on the limit on `account`; the streak once it reaches LIMIT_STREAK and is not alerted yet. */
   private count(s: SessionInfo, account: string, label: string): LimitStreak | undefined {
     const was = this.streaks.get(s.id);
-    const until = this.outUntil.get(account) ?? this.now() + OUT_FALLBACK_MS;
+    const until = this.d.outUntil?.(account) ?? this.outUntil.get(account) ?? this.now() + OUT_FALLBACK_MS;
     const st: LimitStreak = was?.account === account ? { ...was, turns: was.turns + 1, until } : { account, label, turns: 1, until, dispatcher: s.orchestratorRole === 'dispatcher' };
     this.streaks.set(s.id, st);
     return st.turns >= LIMIT_STREAK && !st.alerted ? st : undefined;
   }
 
-  /** Tell the operators, once per streak: the agent, its token (name and last four), the reset and what was done. */
+  /** When a streak's token is out until: the usage tracker's mark (the one system_status shows), else the streak's own. */
+  private untilOf(st: LimitStreak): number {
+    return this.d.outUntil ? (this.d.outUntil(st.account) ?? 0) : st.until;
+  }
+
+  /** Tell the operators, once per streak and at most once per token's window: the agent, its token (name and last four), the reset and what was done. */
   private alertStreak(s: SessionInfo, st: LimitStreak, done: string) {
     st.alerted = true;
+    const key = `${s.id}|${st.account}`;
+    if ((this.alertedTill.get(key) ?? 0) > this.now()) return;
+    this.alertedTill.set(key, st.until);
     const who = st.dispatcher ? 'The dispatcher' : `Orchestrator ${s.id} (${s.title})`;
     const line = `[token alert] ${who} ended ${st.turns} turns in a row on Claude's usage limit, on vault token ${st.label}; Claude counts that token's window used up until ${hhmm(st.until)}. What FF Factory did: ${done}. (w5921; system_status, "Token out")`;
     this.d.log(`token alert (w5921): ${who.toLowerCase()} ${s.id}: ${st.turns} limit turns in a row on ${st.label}, until ${hhmm(st.until)}; told the operators`);
