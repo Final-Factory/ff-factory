@@ -6,3 +6,4 @@
   last wait, a real sandbox switch on the test machine, allows 30 s.
 - **w890's test holds the ledger's status question** (w5915): 3 s after w1's worker ended its turn, the question gave
   it a new turn on a loaded machine, and w3's start beside it was refused as busy (3 of 6 runs at once on BEAST).
+- trustedBench w5572 waits for the bench helper to exit before removing its folder: on Windows its open lock file made the removal EPERM.
