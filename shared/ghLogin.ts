@@ -87,7 +87,7 @@ export function parseGhStatusJson(text: string, now: Date): GhLogin | undefined 
   const source = typeof a.tokenSource === 'string' && SOURCE.test(a.tokenSource) ? a.tokenSource : undefined;
   if (a.state !== 'success' || !login) {
     // gh 2.102.0 on an invalid token (measured by w5932): exit 0, state "error", login "", and an error naming "401 Unauthorized".
-    const why = a.state === 'timeout' ? 'GitHub did not answer gh in time' : typeof a.error === 'string' && /\b401\b/.test(a.error) ? REFUSED_401 : 'GitHub refused the login (gh auth status: not valid)';
+    const why = a.state === 'timeout' ? 'GitHub did not answer gh in time' : source === NO_TOKEN_SOURCE ? REFUSED_NO_TOKEN : typeof a.error === 'string' && /\b401\b/.test(a.error) ? REFUSED_401 : 'GitHub refused the login (gh auth status: not valid)';
     return { checkedAt, ok: false, ...(login ? { account: login } : {}), ...(source ? { source } : {}), error: why };
   }
   return { checkedAt, ok: true, account: login, scopes: scopeList(typeof a.scopes === 'string' ? a.scopes : ''), ...(source ? { source } : {}) };
@@ -106,7 +106,7 @@ export function parseGhStatusText(text: string, now: Date): GhLogin {
   if (!m || !ACCOUNT.test(m[1])) {
     // "X Failed to log in to github.com account bryding (keyring)" / "The token in keyring is invalid." (gh 2.102.0, w5932): a 401.
     const failed = /Failed to log in|invalid|expired/i.test(text);
-    const why = failed && /is invalid|401/i.test(text) ? REFUSED_401 : /not logged in|gh auth login/i.test(text) && !failed ? 'gh is not logged in to github.com' : failed ? 'GitHub refused the login (gh auth status: not valid)' : 'gh auth status named no github.com account';
+    const why = failed && /The token in default is invalid|account [A-Za-z0-9-]+ \(default\)/i.test(text) ? REFUSED_NO_TOKEN : failed && /is invalid|401/i.test(text) ? REFUSED_401 : /not logged in|gh auth login/i.test(text) && !failed ? 'gh is not logged in to github.com' : failed ? 'GitHub refused the login (gh auth status: not valid)' : 'gh auth status named no github.com account';
     const who = /Failed to log in to github\.com account ([A-Za-z0-9-]+)/i.exec(text)?.[1];
     return { checkedAt, ok: false, ...(who && ACCOUNT.test(who) ? { account: who } : {}), error: why };
   }
@@ -117,6 +117,17 @@ export function parseGhStatusText(text: string, now: Date): GhLogin {
 
 /** The error of a login GitHub answered with 401 (w5932): the token is invalid, expired or revoked. */
 export const REFUSED_401 = 'GitHub refused the token (HTTP 401: invalid, expired or revoked)';
+
+/**
+ * gh's token source when it found no token at all for the active account (gh's TokenForUser, `gh.TokenSourceDefault`):
+ * its keyring entry did not answer and hosts.yml holds none, so gh asked GitHub with an empty token and got a 401 (w5546:
+ * the ops worker's ssh session to beast, whose key sign-in cannot read Credential Manager, printed "The token in default
+ * is invalid" while the daemon's own reading of the same login was good).
+ */
+export const NO_TOKEN_SOURCE = 'default';
+
+/** The error of a login whose token gh could not read (w5546): not a revoked token; the store did not answer or is empty. */
+export const REFUSED_NO_TOKEN = 'GitHub refused the login: gh found no token it could read (Credential Manager or Keychain did not answer, or the entry is gone)';
 
 /**
  * Whether a reading says GitHub refused the login (w5932): its token is no good, not gh missing, not logged in or a blip.

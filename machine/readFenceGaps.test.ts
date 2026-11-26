@@ -234,7 +234,7 @@ test('w5968: relabelInside walks only the closed folders off the system drive, s
   const sys = (p: string) => p.startsWith('C:');
   // The script: the walk's arguments in PowerShell, and no `$` in the C# (it sits in an expanding here-string).
   const s = relabelScript(['D:\\w\\daemon'], ['D:\\w\\daemon\\logs'], t.map((x) => x.path), true);
-  assert.ok(s.endsWith("[FfWalk]::Run([string[]]@('D:\\w\\daemon'), [string[]]@('D:\\w\\daemon\\logs'), [string[]]@('D:\\w\\daemon', 'C:\\anchor\\secrets', 'D:\\w\\root.json', 'D:\\w\\daemon\\logs', 'D:\\w\\daemon\\sandboxes.json'), $true)"), s.slice(-300));
+  assert.ok(s.endsWith("[FfWalk]::Run([string[]]@('D:\\w\\daemon'), [string[]]@('D:\\w\\daemon\\logs'), [string[]]@('D:\\w\\daemon', 'C:\\anchor\\secrets', 'D:\\w\\root.json', 'D:\\w\\daemon\\logs', 'D:\\w\\daemon\\sandboxes.json'), $true, '', '')"), s.slice(-300));
   const cs = s.slice(s.indexOf('@"') + 2, s.indexOf('"@'));
   assert.ok(!cs.includes('$') && !cs.includes('`'), 'nothing in the C# that PowerShell would expand');
   assert.ok(!/^"@/m.test(cs.slice(1)), 'nothing that ends the here-string early');
@@ -245,7 +245,7 @@ test('w5968: relabelInside walks only the closed folders off the system drive, s
   assert.ok(script.includes("Run([string[]]@('D:\\w\\daemon'), [string[]]@('D:\\w\\daemon\\logs'),"), 'roots: the closed folders off the system drive; skipped: the read-back folders');
   assert.match(said.at(-1)!, /No-Read-Up added to 1 explicitly labelled path\(s\) inside the closed folders \(9 looked at\)/);
   assert.equal(await relabelInside(t, 'open', fake('err 5 D:\\w\\daemon\\y.json\r\ndone 9 0 1\r\n'), (l) => void said.push(l), { systemDrive: sys }), false);
-  assert.ok(script.endsWith('$false)'));
+  assert.ok(script.endsWith("$false, '', '')"), 'open never takes a stop file (w6120)');
   assert.ok(said.some((l) => l.includes('err 5 D:\\w\\daemon\\y.json')));
   // No answer from PowerShell: not done.
   assert.equal(await relabelInside(t, 'close', fake(''), (l) => void said.push(l), { systemDrive: sys }), false);
@@ -328,6 +328,36 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     assert.match(reverted.line, /0\/1 closed paths refused, 3\/3 given-back paths open/);
   } finally {
     // Labels at Medium do not stop the test (Medium) removing its own folder.
+    fs.rmSync(d, { recursive: true, force: true });
+  }
+});
+
+// w6120: the walk's stop file for real (the C# compiled by Add-Type in Windows PowerShell 5.1): a mode file that does not
+// hold the wanted mode stops the walk at its first path; one that does lets it walk to the end. It only reads labels here
+// (nothing inside carries an explicit label to change), so it runs at any integrity level.
+test('w6120 (Windows): relabelInside stops its walk when the mode file changes, and walks whole while it holds the mode', { skip: process.platform !== 'win32' ? 'not Windows' : false }, async () => {
+  const d = tmp('stop');
+  try {
+    const closed = path.join(d, 'closed');
+    fs.mkdirSync(path.join(closed, 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(closed, 'sub', 'a.txt'), 'x');
+    const file = path.join(d, 'read-fence');
+    const exec = async (cmd: string, args: string[], o?: { timeoutMs?: number }) => {
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: o?.timeoutMs ?? 120_000 });
+      return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+    };
+    const t: LabelTarget[] = [{ path: closed, sddl: NO_READ_UP.dir }];
+    let stops = 0;
+    const said: string[] = [];
+    fs.writeFileSync(file, 'warn\n');
+    assert.equal(await relabelInside(t, 'close', exec, (l) => void said.push(l), { systemDrive: () => false, stopUnless: { file, want: 'on', onStop: () => void stops++ } }), false, said.join('\n'));
+    assert.equal(stops, 1);
+    assert.ok(said.some((l) => /stopped after 0 path\(s\)/.test(l)), said.join('\n'));
+    said.length = 0;
+    fs.writeFileSync(file, 'on\n');
+    assert.equal(await relabelInside(t, 'close', exec, (l) => void said.push(l), { systemDrive: () => false, stopUnless: { file, want: 'on', onStop: () => void stops++ } }), true, said.join('\n'));
+    assert.equal(stops, 1, 'a walk while the file holds the mode does not stop');
+  } finally {
     fs.rmSync(d, { recursive: true, force: true });
   }
 });
