@@ -2472,6 +2472,14 @@ export interface WorkPair {
    * hold it fetches it into its own player cache with fetch_attachment instead of building (shared/capacity.ts fetchPlayerNote).
    */
   player?: PairPlayer;
+  /**
+   * w5965: why its player predates w5297 (request_pair legacy_data, or read from its words: pre-1.0, the 0.50 line): such a
+   * player never reads FF_GAME_DATA_DIR and writes the per-OS data folder in the owner's profile (LocalLow on Windows), which
+   * a fenced worker cannot write (w5944: lothdesktop's Low-integrity worker, 'no host-ready within 420s'). Its legs then go
+   * only on computers whose worker fence is off (shared/capacity.ts unfitWhy), and never on Linux (pre-1.0 has no Linux
+   * multiplayer build).
+   */
+  legacyData?: string;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
   /**
