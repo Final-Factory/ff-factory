@@ -193,6 +193,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.storeLock === 'off' || f.storeLock === 'warn' || f.storeLock === 'on' ? { storeLock: f.storeLock } : {}),
     ...(f.editorTmpdir === 'on' || f.editorTmpdir === 'off' ? { editorTmpdir: f.editorTmpdir } : {}),
     ...(f.pathFence === 'off' || f.pathFence === 'warn' ? { pathFence: f.pathFence } : {}),
+    ...(f.mediumAgentFolders === 'warn' || f.mediumAgentFolders === 'on' ? { mediumAgentFolders: f.mediumAgentFolders } : {}),
   };
 }
 

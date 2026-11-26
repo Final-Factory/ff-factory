@@ -372,6 +372,17 @@ code and covered by `server/tokenSwitch.test.ts`:
   vault-ben-2 …dAAA: vault-ben-1 …nQAA ran out ("You've hit your weekly limit ...")`. `system_status` also lists each token
   out now ("Token out (w1745): ... Still on it: ...") and the moves waiting for their next process, and the last 24 hours of
   switches (`data/token-switches.json` keeps the last 20). A token is only ever named by its vault name and last four characters.
+- **Stuck on the limit: an alert (w5921).** lothsahn, 2026-11-26: "Why was it hung without a decision? Why did it stall?" From
+  03:38Z that day the dispatcher's process stayed on vault-ben-2, which Claude refused (weekly, reset 08:00Z), while its config
+  had moved to vault-ben-3; every turn ended at once on the limit line and nobody was told. Now the dispatcher, or a person's
+  orchestrator, ending `LIMIT_STREAK` (2) turns in a row on Claude's usage limit on one token sends a `[token alert]` line to
+  the operators' orchestrators (the owners and everyone with a Claude pool, never the stuck one itself), once per streak: the
+  token (vault name and last four), when its window resets, and what FF Factory did about it (`TokenSwitch.alertStreak`;
+  journal `token alert (w5921): ...`). While the dispatcher's last turn ended on the limit and the window has not reset,
+  `system_status` says `Dispatcher rate-limited (w5921): The dispatcher is rate-limited on <token> until <time>`, an undecided
+  request's live state gives that as its reason (Working, then Stalled past the 15-minute bound), and the w2217 re-offer waits
+  until the dispatcher runs again instead of going to the same stuck process (`Orchestrators.undecidedBound`). Moving the
+  dispatcher itself off the token is the next change (w5921, w5891).
 **Near a weekly reset (w1539; the w1659 offset retired by w2722).** lothsahn, 2026-10-21: "Instead of having it go first like that, can we just adjust the
 weighting so it gets used sooner? Like subtract 12 or 18 hours from the time remaining so that it starts getting consumed
 first?", then "Let's make the new setting 24 hours, not 12", with his earlier limit (2026-10-19): "We don't want it to always use the token about to expire first, though, as we

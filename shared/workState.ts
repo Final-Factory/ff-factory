@@ -111,6 +111,11 @@ const withMachines = (l: WorkLive, workers: readonly Pick<SessionInfo, 'machineI
 
 export interface WorkLiveFacts {
   session: (id: string) => SessionInfo | undefined;
+  /**
+   * w5921: "the dispatcher is rate-limited on vault-ben-2 …abcd until 2026-11-26 08:00Z" while its turns end at once on Claude's
+   * usage limit (server/tokenSwitch.ts dispatcherLimited); an undecided request names it as the reason. Absent: it is not.
+   */
+  dispatcherLimited?: string;
   /** Every request (open ones are enough): which request a worker linked to several serves is decided across them. */
   items: readonly WorkItem[];
   /**
@@ -1237,7 +1242,13 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
     const again = Date.parse(u?.reofferedAt ?? '');
     if (u && again && f.now - again >= UNDECIDED_STALL_MS) {
       const mins = Math.round((f.now - (Date.parse(u.since) || again)) / 60_000);
-      return { state: 'stalled', why: `undecided for ${mins} min: its [work request] went to the dispatcher when it was filed and again ${ago(u.reofferedAt, f.now)}, and it has not decided it` };
+      return { state: 'stalled', why: `undecided for ${mins} min: ${f.dispatcherLimited ? `${f.dispatcherLimited} (w5921), so nothing decides it before then` : `its [work request] went to the dispatcher when it was filed and again ${ago(u.reofferedAt, f.now)}, and it has not decided it`}` };
+    }
+    // w5921: a dispatcher whose every turn ends on the usage limit decides nothing: say so, past the bound as Stalled.
+    if (f.dispatcherLimited) {
+      const since = Date.parse(u?.since ?? w.updatedAt) || f.now;
+      const mins = Math.round((f.now - since) / 60_000);
+      return { state: since && f.now - since >= UNDECIDED_BOUND_MS ? 'stalled' : 'working', why: `undecided for ${mins} min: ${f.dispatcherLimited} (w5921), so nothing decides it before then` };
     }
     return { state: 'working', why: `the dispatcher has it to decide, since ${ago(w.updatedAt, f.now)}` };
   }

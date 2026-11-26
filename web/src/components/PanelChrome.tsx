@@ -5,7 +5,7 @@
 // whether it was open).
 import { useEffect, useState, type ReactNode } from 'react';
 import type { SessionInfo, UnityBlocked } from '../../../shared/types';
-import { focusPermission } from '../store';
+import { focusPermission, loadSessions } from '../store';
 import { agentView, lsGet, lsSet, sameTitle, useMediaQuery } from '../util';
 import { sortAgents } from '../../../shared/agentState.ts';
 import { summarizeToolInput, toolLabel } from './toolSummary';
@@ -114,6 +114,7 @@ export function AgentPicker({
   onSelect,
   onNew,
   newDisabled,
+  notLoaded,
 }: {
   /** The sandbox's or machine's name: an agent named the same is shown as a count ("2 agents") rather than repeated. */
   place: string;
@@ -122,10 +123,14 @@ export function AgentPicker({
   onSelect: (id: string) => void;
   onNew?: () => void;
   newDisabled?: boolean;
+  /** w5907: this place's older agents the page's state left out; "Show older" fetches them. */
+  notLoaded?: string[];
 }) {
   const [all, setAll] = useState(false);
   if (!sessions.length && !onNew) return null;
-  const { shown: listed, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 100);
+  const recent = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 100);
+  const listed = recent.shown;
+  const older = recent.older + (all ? 0 : (notLoaded?.length ?? 0));
   // Working first, then Waiting, Idle, Stopped; the most recent first in each (w475).
   const shown = sortAgents(listed);
   const text = !selected ? 'No agents yet' : sameTitle(selected.title, place) ? `${sessions.length} ${sessions.length === 1 ? 'agent' : 'agents'}` : selected.title;
@@ -146,6 +151,7 @@ export function AgentPicker({
           } else if (e.target.value === '__all') {
             e.target.value = selected?.id ?? '';
             setAll(true);
+            if (notLoaded?.length) loadSessions(notLoaded);
           } else onSelect(e.target.value);
         }}
       >
@@ -175,21 +181,29 @@ export function AgentTabs({
   onSelect,
   onNew,
   newDisabled,
+  notLoaded,
 }: {
   sessions: SessionInfo[];
   selected?: SessionInfo;
   onSelect: (id: string) => void;
   onNew?: () => void;
   newDisabled?: boolean;
+  /** w5907: this place's older agents the page's state left out; "+N older" fetches them. */
+  notLoaded?: string[];
 }) {
   const [all, setAll] = useState(false);
   if (!sessions.length && !onNew) return null;
-  const { shown: listed, older } = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 12);
+  const recent = all ? { shown: sessions, older: 0 } : recentAgents(sessions, selected, 12);
+  const listed = recent.shown;
+  const older = recent.older + (all ? 0 : (notLoaded?.length ?? 0));
   const shown = sortAgents(listed);
   return (
     <nav className="tabs hide-phone" role="tablist">
       {older > 0 && (
-        <button className="tab tab-older" onClick={() => setAll(true)} title={`Show the ${older} older agents that stopped here as tabs too`}>
+        <button className="tab tab-older" onClick={() => {
+            setAll(true);
+            if (notLoaded?.length) loadSessions(notLoaded);
+          }} title={`Show the ${older} older agents that stopped here as tabs too`}>
           +{older} older
         </button>
       )}
