@@ -737,7 +737,9 @@ for (const how of ['hangs', 'throws'] as const) {
     await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
     p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
     const inner = p as unknown as { convertAtPlacementMs: number; d: { git: (a: string[], o?: { signal?: AbortSignal; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }> } };
-    inner.convertAtPlacementMs = 300;
+    // A throw needs no timeout; a hang needs one long enough to reach the planted fetch (Windows CI's git took over 300 ms
+    // before it, run 45833036898: "timed out after 0 s" with the step never reached).
+    inner.convertAtPlacementMs = how === 'hangs' ? 15_000 : 3 * 60_000;
     const real = inner.d.git;
     let reached = false;
     // The refs fetch into .git.new, after .git.new is written and before the swap: the worst place to be cut.
