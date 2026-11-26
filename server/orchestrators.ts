@@ -3330,7 +3330,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       return true;
     }
     const grant = this.armReaction(sessionId, seq, emoji, by);
-    this.sessions.send(sessionId, reactionText(by.displayName, emoji, quoted, !!grant), 'system', undefined, { requestedBy: by });
+    this.sessions.send(sessionId, reactionText(by.displayName, emoji, quoted, !!grant), 'system', undefined, { requestedBy: by, joins: true });
     return true;
   }
 

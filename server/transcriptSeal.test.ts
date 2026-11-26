@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { SEAL_DAYS, TranscriptHasher, checkSeal, pidGone, sealStore } from './transcriptSeal.ts';
+import { SEAL_DAYS, TranscriptHasher, checkSeal, pidGone, rehashFrom, sealStore } from './transcriptSeal.ts';
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -188,4 +188,27 @@ test('w5563: AgentSession seals a new conversation, resumes it while sealed, and
   assert.ok(err, 'the refusal is in the transcript');
   assert.equal(three.info.sdkSessionId, runs[2].sessionId, 'the session follows the fresh conversation');
   assert.match(fs.readFileSync(file, 'utf8'), /message Z/, 'the edited file is kept for a look');
+});
+
+test('w5931: after a same-length rewrite, the hash goes on from the checkpoint before it and seals as a full pass would', async (t) => {
+  const dir = tmp(t, 'rehash');
+  const file = path.join(dir, 's.jsonl');
+  let body = '';
+  for (let n = 0; body.length < 5000; n++) body += line(n);
+  fs.writeFileSync(file, body);
+  const check = await checkSeal(file, undefined, 1000);
+  assert.ok(check.ok);
+  assert.ok(check.checkpoints.length >= 5, `checkpoints every 1000 bytes: ${check.checkpoints.map((c) => c.at).join(', ')}`);
+  // the tool refresh's kind of edit: the same bytes' length, at 3500
+  const fd = fs.openSync(file, 'r+');
+  fs.writeSync(fd, Buffer.from('XXXX'), 0, 4, 3500);
+  fs.closeSync(fd);
+  const again = (await rehashFrom(file, check.checkpoints, 3500))!;
+  const len = fs.statSync(file).size;
+  assert.ok(again.hashedBytes <= len - 3000 && again.hashedBytes > len - 3500, `hashed ${again.hashedBytes} of ${len}`);
+  const full = await checkSeal(file, undefined);
+  assert.ok(full.ok);
+  assert.equal((await again.hasher.seal(false))!.sha256, (await full.hasher.seal(false))!.sha256);
+  // a rewrite at the start hashes it all
+  assert.equal((await rehashFrom(file, check.checkpoints, 0))!.hashedBytes, len);
 });
