@@ -744,6 +744,8 @@ export class Agents {
    * by index.ts.
    */
   dispatcherAccountMove?: (account: string) => { why: string; out: boolean } | undefined;
+  /** w6093: a token's vault name and last 4 ("vault-ben-3 …CAAA") for an account key, else undefined. Wired by index.ts. */
+  tokenLabel?: (account: string) => string | undefined;
   /** w5921: why the dispatcher would wait if it started now (its pin out, or no token of its pool with room), else undefined. */
   dispatcherHeldWhy?: () => string | undefined;
   /** w5921: a line to the operators' orchestrators (those that exist): the owners and everyone with a Claude pool. */
@@ -3886,6 +3888,28 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       if (held) this.operatorAlert?.(`[token alert] The dispatcher was stopped to apply its account config (${cause}): ${why}. It cannot start yet: ${held}. Nothing to do unless that wait is wrong: \`set_app_config claudeAccounts.dispatcher\` with another pin or pool (or null) applies at once (w5921).`);
     }
     return moved;
+  }
+
+  /**
+   * w6093: what set_app_config claudeAccounts.dispatcher says happens to the dispatcher, given what applyAccountConfig moved.
+   * A mid-turn dispatcher is told it restarts only when a move is due for its current token (dispatcherAccountMove); when its
+   * token already satisfies the setting, nothing restarts, and the answer says so instead of promising a restart.
+   */
+  dispatcherConfigAnswer(moved: string[]): string {
+    if (moved.length) return 'the dispatcher was stopped between turns and its next message starts it there';
+    const id = this.orchestrators.dispatcherId;
+    const h = id ? this.sessions.sessions.get(id) : undefined;
+    const account = h?.live ? h.info.account : undefined;
+    if (!h?.live || !account) return 'the dispatcher already runs there, or starts there at its next message';
+    const move = this.dispatcherAccountMove?.(account);
+    const on = this.tokenLabel?.(account) ?? 'its current token';
+    if (!move) {
+      const pool = this.tokenOwner?.(account);
+      const out = pool ? this.orchestratorTokenOut?.(account, pool) : undefined;
+      return `the dispatcher already runs on ${on}${pool ? ` of ${pool}'s pool` : ''}${out ? `, which is out (${out}), and no other token of that pool has room: it waits for a reset there` : ', which has room'}: nothing to restart`;
+    }
+    if (isMidTurn(h.info) || h.info.backgroundTasks) return `the dispatcher is mid-turn: it restarts within 30 s of that turn ending (never mid-turn), because ${move.why}`;
+    return `the dispatcher restarts before its next turn, because ${move.why}`;
   }
 
   /** A person's orchestrator whose process runs on another pool than their pool setting names now (w1717), else undefined. */
@@ -8186,9 +8210,7 @@ ${w.repo ?? ''}
             // w5921: the dispatcher restarts on the token or pool it names now, between turns (never mid-turn).
             if (key === 'claudeAccounts.dispatcher') {
               const moved = this.applyAccountConfig('config claudeAccounts.dispatcher changed');
-              const id = this.orchestrators.dispatcherId;
-              const busy = id ? this.sessions.sessions.get(id) : undefined;
-              const now = moved.length ? 'the dispatcher was stopped between turns and its next message starts it there' : busy?.live && isMidTurn(busy.info) ? 'the dispatcher is mid-turn: it restarts there within 30 s of that turn ending (never mid-turn)' : 'the dispatcher already runs there, or starts there at its next message';
+              const now = this.dispatcherConfigAnswer(moved);
               const held = this.dispatcherHeldWhy?.();
               return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied at once: ${now} (w5921).${held ? ` WARNING: it cannot start on it now: ${held}; the operators were told.` : ''}`;
             }
