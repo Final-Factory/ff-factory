@@ -1138,7 +1138,8 @@ export class Daemon {
         await this.ensureBashTmp();
         // w5795: the daemon's own steps said too, the last steps done carried (cleanupPass reports its own).
         let lastDone: Record<string, number> = {};
-        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d) => ((lastDone = d), opts.step!(n, d)) } : opts;
+        let lastSoFar: Parameters<NonNullable<typeof opts.step>>[2];
+        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d, s) => ((lastDone = d), (lastSoFar = s), opts.step!(n, d, s)) } : opts;
         passOpts.step?.('stray temp', {});
         await this.sweepStrayTemp(opts.dryRun);
         const guard = this.cleanupGuard();
@@ -1162,7 +1163,7 @@ export class Daemon {
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
           stale: async () => {
             const output = await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard });
-            passOpts.step?.('stale (install leftovers)', lastDone);
+            passOpts.step?.('stale (install leftovers)', lastDone, lastSoFar);
             return mergePlans(
               output,
               await planInstallLeftovers({
