@@ -901,6 +901,11 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
     todo.push(x);
   }
   if (!todo.length) return true;
+  // w5980: the given-back paths first. Setting a closed folder's label walks everything inside it, so a given-back folder
+  // labelled after its closed parent sat closed until the walk reached its own label: on LothDesktop the gh shim's
+  // app\machine\ghApp.ts read as missing to Low workers for minutes (15:54-15:55 UTC, 2026-11-26). A given-back folder that
+  // already carries its explicit label keeps it through the parent's walk (the explicit label comes first and wins).
+  todo.sort((a, b) => Number(a.sddl.includes('NWNR')) - Number(b.sddl.includes('NWNR')));
   const runOnce = async (list: readonly LabelTarget[]) => {
     const script = labelScript(list);
     const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
