@@ -1314,6 +1314,10 @@ older daemon ignores it and keeps making worktrees.
   (`warn` or `on`, every OS) writes daemon.json `mediumAgentFolders`; the daemon restarts with it. `on` moves Medium agents
   to `<root>/tmp-medium` and `<root>/cache-medium/cargo`, `warn` only logs the exposure (docs/worker-root.md, "Medium
   agents' temp folders and cargo home"). There is no `off`: unset is `warn`.
+- **A virtual disk in a Low tools child** (w5959; docs/worker-root.md "The enforce switch"): `ops_worker` `machine_update`
+  `tools_disk_lock` (`warn` or `on`, Windows only) writes daemon.json `toolsDiskLock`; the daemon restarts with it. `on`
+  keeps a `<root>\tools` child that holds a `.vhd`/`.vhdx` Medium, so workers cannot write there; `warn` (unset) only logs it
+  and is the way back.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 

@@ -109,6 +109,9 @@ test('w5554: the worker caps mode goes through to the installer update as named;
   for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { workerCaps: m }), { source: '/src', workerCaps: m });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'off', workerFence: 'on' }), { source: '/src', workerFence: 'on', workerCaps: 'off' });
   assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  // w5959: the tools disk lock, warn or on from the wire; anything else is dropped, never guessed at.
+  for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { toolsDiskLock: m }), { source: '/src', toolsDiskLock: m });
+  assert.deepEqual(updateFlagsOf('/src', { toolsDiskLock: 'off' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'on' as never }), { source: '/src' });
 });
 
