@@ -1207,7 +1207,7 @@ export class Agents {
         link: (id) => machines.canLink(id),
         linkProblem: (id) => machines.sshProblem(id),
         noSsh: (id) => !!machines.noSshProblem(id),
-        linkUpdate: (id, form, commit) => machines.linkUpdate(id, { form, commit }),
+        linkUpdate: (id, form, commit, timeoutMs) => machines.linkUpdate(id, { form, commit, ...(timeoutMs ? { timeoutMs } : {}) }),
         tell: (person, text) => {
           const to = person ? this.orchestrators.personalFor(person).info.id : store.orchestratorId;
           if (to) void sessions.send(to, text, 'system', undefined, person ? { requestedBy: person } : undefined);
