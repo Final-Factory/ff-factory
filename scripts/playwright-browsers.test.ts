@@ -17,7 +17,14 @@ const skip = process.platform === 'win32' ? 'bash stand-ins for apt and dpkg; CI
 
 interface Run { status: number | null; ms: number; calls: string; out: string; ghOutput: string; debs: string[]; mirrors: string }
 
-function run(opts: { hit: boolean; cached?: string[]; uninstalled?: string[]; archiveOkFromTry?: number }): Run {
+function run(opts: {
+  hit: boolean;
+  cached?: string[];
+  uninstalled?: string[];
+  archiveOkFromTry?: number;
+  /** How many `dpkg -i` passes fail, as one refused for a Breaks does (run 45851340689, w6117); from the last one on, `dpkg --audit` names it. */
+  dpkgFails?: number;
+}): Run {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pw-browsers-'));
   const bin = path.join(dir, 'bin');
   const debs = path.join(dir, 'debs');
@@ -30,7 +37,17 @@ function run(opts: { hit: boolean; cached?: string[]; uninstalled?: string[]; ar
   stub('fuser', 'exit 1');
   // The hung archive: exec keeps one pid, so the script's `timeout` ends it.
   stub('apt-get', `echo "apt-get $*" >> "${calls}"; exec sleep 600`);
-  stub('dpkg', `echo "dpkg $*" >> "${calls}"`);
+  stub(
+    'dpkg',
+    [
+      `echo "dpkg $*" >> "${calls}"`,
+      'case "$1" in',
+      `  -i) n=$(( $(cat "${dir}/dpkg-i" 2>/dev/null || echo 0) + 1 )); echo $n > "${dir}/dpkg-i"; [ $n -gt ${opts.dpkgFails ?? 0} ] || { echo "dpkg: error processing archive libfoo_1_amd64.deb (--install):"; exit 1; } ;;`,
+      `  --audit) [ ${opts.dpkgFails ?? 0} -lt 2 ] || echo " libbar  unpacked but not yet configured" ;;`,
+      'esac',
+    ].join('
+'),
+  );
   stub('dpkg-query', `case " ${(opts.uninstalled ?? []).join(' ')} " in *" \${@: -1} "*) exit 1;; esac; echo "install ok installed"`);
   stub(
     'npx',
@@ -119,5 +136,21 @@ test('playwright-browsers: a hit that leaves a package uninstalled falls back to
   assert.equal(r.status, 0, r.out);
   assert.match(r.out, /Not installed after the cached packages: libbar/);
   assert.match(r.calls, /--with-deps/);
+  assert.match(r.ghOutput, /^save=true$/m);
+});
+
+test('playwright-browsers: a hit whose first dpkg pass refuses a Breaks installs on the second, with no apt call', { skip }, () => {
+  const r = run({ hit: true, cached: ['libbar_1_amd64.deb', 'libfoo_1_amd64.deb'], dpkgFails: 1 });
+  assert.equal(r.status, 0, r.out);
+  assert.equal(r.calls.match(/^dpkg -i /gm)?.length, 2, r.calls);
+  assert.doesNotMatch(r.calls, /apt-get/, 'no apt call on a hit');
+  assert.match(r.out, /came from the cache/);
+});
+
+test('playwright-browsers: a hit that leaves dpkg broken has apt repair it before the network install', { skip }, () => {
+  const r = run({ hit: true, cached: ['libbar_1_amd64.deb', 'libfoo_1_amd64.deb'], dpkgFails: 2, archiveOkFromTry: 1 });
+  assert.equal(r.status, 0, r.out);
+  assert.match(r.out, /dpkg: error processing archive/, 'the log shows dpkg's own error, not only its tail');
+  assert.match(r.calls, /apt-get -f install -y[\s\S]*--with-deps/, 'apt-get -f install before the network install');
   assert.match(r.ghOutput, /^save=true$/m);
 });
