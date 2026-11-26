@@ -84,6 +84,34 @@ export function jobInFlight(job: UpdateJob | undefined): boolean {
   return !!job && (job.phase === 'staged' || (job.phase === 'running' && alive(job.pid)));
 }
 
+/**
+ * How long an update job may be in flight (w5938). On beast, 2026-11-26, job 977d56f7 ran 15.5 min (06:11:26-06:26:55 UTC,
+ * its daemon too blocked to be seen online), and the agent tools update the rollout sent at 06:14:31 was refused for it;
+ * the longest of the 179 jobs in the last 6000 lines of its update-job.log. Nothing ends an older one yet: past these the daemon
+ * warns once and its refusal says so (warn first, lothsahn's lockout rule); ending it is a later change.
+ */
+export const JOB_LIMIT = { stagedMs: 10 * 60_000, inFlightMs: 45 * 60_000 };
+
+/** Why a job in flight is past its limit (JOB_LIMIT), or undefined. A staged job is one whose process never took it. */
+export function jobOverdue(job: UpdateJob | undefined, now = Date.now()): string | undefined {
+  if (!job || !jobInFlight(job)) return undefined;
+  const age = now - Date.parse(job.createdAt);
+  const limit = job.phase === 'staged' ? JOB_LIMIT.stagedMs : JOB_LIMIT.inFlightMs;
+  if (!(age > limit)) return undefined;
+  const min = (ms: number) => Math.round(ms / 60_000);
+  const what = job.phase === 'staged' ? 'staged and never taken by its process' : `running (pid ${job.pid})`;
+  return `job ${job.id.slice(0, 8)} (${job.form}) has been ${what} for ${min(age)} min, past its ${min(limit)} min limit`;
+}
+
+/** The refusal while a job is in flight: which job, how long, and whether it is past its limit (w5938). */
+export function inFlightRefusal(job: UpdateJob | undefined, now = Date.now()): string {
+  const base = 'an update job of this machine is still running';
+  if (!job || !jobInFlight(job)) return base;
+  const over = jobOverdue(job, now);
+  if (over) return `${base}: ${over}; nothing ends it yet (warn only, w5938)`;
+  return `${base} (job ${job.id.slice(0, 8)}, ${job.form}, ${Math.round((now - Date.parse(job.createdAt)) / 60_000)} min since it was made)`;
+}
+
 /** The machine's credential never leaves in a report: any ffm_ token in the text is cut down to its id. */
 export const scrub = (s: string) => s.replace(/ffm_([a-z0-9-]+)_[A-Za-z0-9_-]{8,}/g, 'ffm_$1_…');
 
@@ -101,7 +129,7 @@ export function selfUpdateProblem(m: { commit?: unknown; bundle?: { sha256?: unk
  * stopped waiting (5 minutes): a stall is now noticed after `stallMs` and the download resumes where it stopped (the portal
  * answers a Range request, server/index.ts sendStream), at most `attempts` times, all of it within `totalMs`.
  */
-export const DOWNLOAD = { stallMs: 30_000, attempts: 6, totalMs: 8 * 60_000 };
+export const DOWNLOAD = { stallMs: 30_000, attempts: 6, totalMs: 8 * 60_000, lateMs: 10_000 };
 
 /** What a failed fetch says, its cause included (undici's "terminated" hides why: UND_ERR_BODY_TIMEOUT, UND_ERR_SOCKET). */
 export function fetchError(e: unknown): string {
@@ -124,9 +152,10 @@ export async function downloadBundle(
   b: { sha256: string; size: number },
   dir: string,
   doFetch: typeof fetch = fetch,
-  o: { stallMs?: number; attempts?: number; totalMs?: number; log?: (line: string) => void } = {},
+  o: { stallMs?: number; attempts?: number; totalMs?: number; lateMs?: number; log?: (line: string) => void } = {},
 ): Promise<string> {
   const stallMs = o.stallMs ?? DOWNLOAD.stallMs;
+  const lateMs = o.lateMs ?? DOWNLOAD.lateMs;
   const attempts = o.attempts ?? DOWNLOAD.attempts;
   const deadline = Date.now() + (o.totalMs ?? DOWNLOAD.totalMs);
   fs.mkdirSync(dir, { recursive: true });
@@ -146,13 +175,25 @@ export async function downloadBundle(
       const ctl = new AbortController();
       let timedOut: 'stall' | 'total' | undefined;
       let timer: NodeJS.Timeout | undefined;
+      // w5938: a check that comes late is not a stall. beast's daemon blocked its own event loop 40-72 s at a time (LoopWatch,
+      // 2026-11-26 05:38-06:33 UTC); Node runs a due timer before it reads the socket, so the 30 s check fired before the
+      // bytes (or the TLS handshake) that came meanwhile were read, and six "stalled at 0 of 25693 bytes" refused the update
+      // twice while the portal logged no bundle sent. A late check gives the stream a fresh `stallMs`; `totalMs` still ends it.
       const arm = () => {
         clearTimeout(timer);
         const left = deadline - Date.now();
+        const wait = Math.max(1, Math.min(stallMs, left));
+        const due = Date.now() + wait;
         timer = setTimeout(() => {
+          const late = Date.now() - due;
+          if (left > stallMs && late > lateMs && Date.now() < deadline) {
+            o.log?.(`update over the link: the bundle's stall check came ${Math.round(late / 1000)} s late (this daemon's event loop was blocked), at ${size} of ${b.size} bytes: not a stall, the stream gets another ${Math.round(stallMs / 1000)} s`);
+            arm();
+            return;
+          }
           timedOut = left <= stallMs ? 'total' : 'stall';
           ctl.abort();
-        }, Math.max(1, Math.min(stallMs, left)));
+        }, wait);
       };
       arm();
       try {
@@ -359,6 +400,8 @@ export class SelfUpdater {
   private busy = false;
   /** A finished job's task or LaunchAgent being removed: a new job or an unload waits for it rather than being refused (w1596). */
   private removing: Promise<void> | undefined;
+  /** Jobs past their limit already warned of (JOB_LIMIT), so the tick says it once. */
+  private readonly overdueWarned = new Set<string>();
   /** Answers to the portal's calls, kept until the link surely had them (ANSWERS). */
   private readonly answers = new Map<string, { msg: LinkAnswer; at: number; sentAt?: number }>();
   /** Its hands (the job launcher, the fetch); tests replace them. */
@@ -445,7 +488,9 @@ export class SelfUpdater {
     if (why) return refuse(why);
     const f = updateFiles(this.deps.appDir);
     await this.removing;
-    if (this.busy || jobInFlight(readJson<UpdateJob>(f.job))) return refuse('an update job of this machine is still running');
+    if (this.busy) return refuse('an update job of this machine is still running (this daemon is fetching or starting one)');
+    const prior = readJson<UpdateJob>(f.job);
+    if (jobInFlight(prior)) return refuse(inFlightRefusal(prior, this.now()));
     this.busy = true;
     try {
       this.deps.log(`update over the link: ${msg.form} to ff-factory ${msg.commit.slice(0, 12)}; fetching the bundle (${msg.bundle.size} bytes)`);
@@ -488,7 +533,8 @@ export class SelfUpdater {
     if (!inst) return answer(false, this.noInstall());
     if (!fs.existsSync(path.join(updateFiles(this.deps.appDir).src, 'scripts', 'worker', 'linkJob.ts'))) return answer(false, "the install's checkout has no update job (scripts/worker/linkJob.ts): update it first");
     await this.removing;
-    if (this.busy || jobInFlight(readJson<UpdateJob>(updateFiles(this.deps.appDir).job))) return answer(false, 'an update job of this machine is still running');
+    const prior = readJson<UpdateJob>(updateFiles(this.deps.appDir).job);
+    if (this.busy || jobInFlight(prior)) return answer(false, this.busy ? 'an update job of this machine is still running' : inFlightRefusal(prior, this.now()));
     try {
       const how = await this.start(this.job('uninstall', msg.id, inst.service), inst.service);
       this.deps.log(`unload over the link: job ${msg.id} started as ${how}`);
@@ -508,6 +554,11 @@ export class SelfUpdater {
       this.deps.log(`update over the link: job ${r.id} reported (${r.ok ? 'ok' : 'failed'}${r.rollback ? `, put back: ${r.rollback}` : ''})`);
     }
     const job = readJson<UpdateJob>(updateFiles(this.deps.appDir).job);
+    const over = jobOverdue(job, this.now());
+    if (over && job && !this.overdueWarned.has(job.id)) {
+      this.overdueWarned.add(job.id);
+      this.deps.log(`update over the link: WARNING ${over}; updates are refused while it is in flight, and nothing ends it yet (warn only, w5938)`);
+    }
     if (job?.reported && !job.removed && job.phase === 'done' && !alive(job.pid) && !this.busy) {
       // Busy meanwhile, so no new job starts while the old one's task or LaunchAgent is removed (it would be removed too).
       // A daemon restarted right after a job (w1596's Windows CI: a restart, then an unload as the new daemon connected) removes
