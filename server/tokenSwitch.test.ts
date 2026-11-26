@@ -158,6 +158,7 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
   const runEnv = (sid: string, person: string) => machineRunEnv({ machines: [] } as never, { id: 'lothdesktop' } as never, { role: 'workers', requestedBy: { userId: person, displayName: person }, sessionId: sid }, ctx);
   const ownerOf = (account: string) => vault.list().find((x) => `token:${x.fingerprint}` === account)?.owner;
   agents.tokenOwner = ownerOf;
+  agents.tokenLabel = label;
   // The dispatcher's config, as server/index.ts reads claudeAccounts.dispatcher (w5891, w5921); unset: the payer's (Ben's) pool.
   const dispatcherCfg: { now: DispatcherAccount } = { now: { pool: 'ben', named: false } };
   // Room as index.ts's dispatcherRoomIn reads it: another token of the pool not used up, retired, held or capped.
@@ -616,6 +617,35 @@ test('w5921: a change of claudeAccounts.dispatcher (a pin, a pool) or of the pay
   assert.deepEqual(w.agents.applyAccountConfig('set_pool'), ['disp']);
   assert.equal(again.stops, 1);
   assert.match(got.disp.at(-1)!, /the system payer's pool, ben's by their pool setting/);
+});
+
+test('w6093: set_app_config claudeAccounts.dispatcher promises a restart only when one is due', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(10, 10));
+  w.meter(B2, reading(10, 10));
+  w.meter(L1, reading(10, 10));
+  w.store.orchestratorId = 'disp';
+  // As seen live 2026-11-26 14:11:30 UTC: pool:ben set while the dispatcher ran, mid-turn, on a token of Ben's pool with room.
+  w.dispatcherCfg.now = { pool: 'ben', named: true };
+  const busy = w.add(dispatcherOn(key(B1), { lastResult: 'ok', status: 'running' }));
+  const moved = w.agents.applyAccountConfig('config claudeAccounts.dispatcher changed');
+  assert.deepEqual(moved, []);
+  const said = w.agents.dispatcherConfigAnswer(moved);
+  assert.match(said, /^the dispatcher already runs on vault-ben-1 …\w{4} of ben's pool, which has room: nothing to restart$/);
+  assert.doesNotMatch(said, /mid-turn|restarts/);
+  // A pin to the token it runs on: nothing to restart either.
+  w.dispatcherCfg.now = w.pin(B1);
+  assert.match(w.agents.dispatcherConfigAnswer(w.agents.applyAccountConfig('pin')), /already runs on vault-ben-1 …\w{4} of ben's pool, which has room: nothing to restart/);
+  // A move due mid-turn (another pool named): the mid-turn text, with why.
+  w.dispatcherCfg.now = { pool: 'lothsahn', named: true };
+  const mid = w.agents.dispatcherConfigAnswer(w.agents.applyAccountConfig('mid-turn'));
+  assert.match(mid, /^the dispatcher is mid-turn: it restarts within 30 s of that turn ending \(never mid-turn\), because .*claudeAccounts.dispatcher names lothsahn's pool/);
+  assert.equal(busy.stops, 0);
+  // Between turns: stopped at once, and the answer says so.
+  busy.info.status = 'idle';
+  const now = w.agents.applyAccountConfig('idle');
+  assert.deepEqual(now, ['disp']);
+  assert.equal(w.agents.dispatcherConfigAnswer(now), 'the dispatcher was stopped between turns and its next message starts it there');
 });
 
 test("w5921: a person's orchestrator moves at once when their pool setting changes, not at its next message", (t) => {
