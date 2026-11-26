@@ -555,8 +555,9 @@ export const explicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium Ma
 /**
  * The daemon's check after the lock: a Low process (`lowNode`, a Low-labelled copy of node) tries to make a file in
  * `projects` and in a project folder, and to append to an existing transcript there. Answers what it met, one line.
+ * `env` (w5838: bareEnv, as the copy sits in a folder workers once wrote) is all it gets; else the daemon's own.
  */
-export function probeTranscriptLock(lowNode: string, projects: string, runSync = execFileSync): string {
+export function probeTranscriptLock(lowNode: string, projects: string, runSync = execFileSync, env?: NodeJS.ProcessEnv): string {
   const script = [
     "const fs=require('fs'),path=require('path');const p=process.argv[1];const out=[];",
     "const tryIt=(what,f)=>{try{f();out.push(what+' WRITTEN')}catch(e){out.push(what+' refused ('+e.code+')')}};",
@@ -568,7 +569,7 @@ export function probeTranscriptLock(lowNode: string, projects: string, runSync =
     'console.log(out.join("; "))',
   ].join('');
   try {
-    return String(runSync(lowNode, ['-e', script, projects], { encoding: 'utf8', timeout: 60_000, windowsHide: true })).trim();
+    return String(runSync(lowNode, ['-e', script, projects], { encoding: 'utf8', timeout: 60_000, windowsHide: true, ...(env ? { env } : {}) })).trim();
   } catch (e) {
     return `probe failed: ${(e as Error).message.slice(0, 200)}`;
   }

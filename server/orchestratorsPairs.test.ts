@@ -43,7 +43,7 @@ import { PR2395_DIFF, W1958_0459, W1958_1632, W2651_0457, W2651_2051 } from './p
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { doneIdsIn, legDoneIdsIn } from './ledgerRules.ts';
-import { roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
+import { legacyFit, roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
 import { decisionsOn } from '../shared/waiting.ts';
 import { TOOL_MANIFEST, deferredToolsLine, toolsOf } from './toolManifest.ts';
@@ -829,10 +829,19 @@ test('w5965: request_pair marks a pair run of a pre-w5297 player from its words 
   agentsRoom(agents, []);
   putRequests(store, [{ id: 'w5944', by: BEN }, { id: 'w5945', by: BEN }, { id: 'w5946', by: BEN }]);
   const read = await startedFor(env, 'w5944');
+  // w6003: where every computer's agents measure Low (w6002 on lothdesktop), nothing is filed, and it says why.
+  env.machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const before = store.work.size;
+  await assert.rejects(
+    async () => read.h.request_pair!({ what: 'MP-activity-fingerprint on pre-1.0', brief: 'Build the 0.50 line at ac80d7b0 and run MP-activity-fingerprint.' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player .*no Windows sandbox agent has been measured at Medium integrity.*; pc: its sandbox agents were measured at Low integrity \(S-1-16-4096\)/,
+  );
+  assert.equal(store.work.size, before, 'nothing filed');
+  env.machines.update('pc', { platform: 'win32', fence: { state: 'off', agentIntegrity: 'medium' } });
   const out = String(await read.h.request_pair!({ what: 'MP-activity-fingerprint on pre-1.0', brief: 'Build the 0.50 line at ac80d7b0 and run MP-activity-fingerprint.' }));
   const p = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
   assert.equal(p.pair?.legacyData, LEGACY_READ);
-  assert.match(out, /only on computers whose worker fence is off, never Linux \(its player predates w5297/);
+  assert.match(out, /only on Windows computers whose sandbox agents were measured at Medium integrity \(or a Mac whose fence is off\), never Linux \(its player predates w5297/);
   // w5988: its brief says how to check the level, with Windows' whoami.exe (Git Bash's is coreutils).
   assert.ok(p.brief.includes(LEGACY_INTEGRITY_CHECK), p.brief);
   assert.match(LEGACY_INTEGRITY_CHECK, /MSYS2_ARG_CONV_EXCL='\*' "\$SYSTEMROOT\/System32\/whoami\.exe" \/groups/);
@@ -844,20 +853,72 @@ test('w5965: request_pair marks a pair run of a pre-w5297 player from its words 
   assert.equal(store.work.get(/^Filed (w\d+)/.exec(out3)![1])!.pair?.legacyData, undefined);
 });
 
-test('w5965: a pair run of a pre-w5297 player goes only on a computer whose worker fence is off, and never on Linux', () => {
+test('w6003: a pair run of a pre-w5297 player goes on Windows only where its agents MEASURED Medium, never by the fence setting, and never on Linux', () => {
   const w = { needs: 'game' as const, title: 'Pair run for w5944: MP-activity-fingerprint', brief: 'Run it.', pair: { legs: 1, legacyData: LEGACY_READ } };
-  const fit = { lothdesktop: { platform: 'win32', fence: 'on' as const }, beast: { platform: 'win32', fence: 'off' as const }, lothlaptop: { platform: 'win32' }, lin: { platform: 'linux', fence: 'off' as const }, wait: { platform: 'win32', fence: 'setting_up' as const } };
-  assert.match(unfitWhy(w, 'lothdesktop', fit) ?? '', /^lothdesktop's worker fence is on, and this pair run's player predates w5297 \(read from its words.*a fenced worker cannot write \(w5944, w5965\)/);
-  assert.match(unfitWhy(w, 'wait', fit) ?? '', /worker fence is setting up/);
-  assert.match(unfitWhy(w, 'lin', fit) ?? '', /^lin is on Linux.*pre-1\.0 has no Linux multiplayer build/);
+  const fit = {
+    // w6002: lothdesktop's agents measured Low; whatever its fence says, it is refused.
+    lothdesktop: { platform: 'win32', fence: 'on' as const, agentIntegrity: 'low' as const },
+    offlow: { platform: 'win32', fence: 'off' as const, agentIntegrity: 'low' as const },
+    beast: { platform: 'win32', fence: 'off' as const, agentIntegrity: 'medium' as const },
+    high: { platform: 'win32', fence: 'off' as const, agentIntegrity: 'high' as const },
+    lothlaptop: { platform: 'win32' },
+    old: { platform: 'win32', fence: 'off' as const },
+    why: { platform: 'win32', fence: 'on' as const, agentIntegrityWhy: 'bash.exe exit 1: no Mandatory Label line' },
+    lin: { platform: 'linux', fence: 'off' as const, agentIntegrity: 'medium' as const },
+    macOn: { platform: 'darwin', fence: 'on' as const },
+  };
+  assert.match(unfitWhy(w, 'lothdesktop', fit) ?? '', /^lothdesktop: its sandbox agents were measured at Low integrity \(S-1-16-4096\), and this pair run's player predates w5297 \(read from its words.*only a Medium agent can write \(w5944, w6003\)/);
+  assert.match(unfitWhy(w, 'offlow', fit) ?? '', /measured at Low integrity/, 'a fence switched off is not a Medium level: the measurement decides');
   assert.equal(unfitWhy(w, 'beast', fit), undefined);
-  // w5988: on Windows the fence is the integrity level, so an unreported one is not Medium; a Mac's still fits.
-  assert.match(unfitWhy(w, 'lothlaptop', fit) ?? '', /^lothlaptop has not reported its worker fence, so its workers' integrity level is unknown.*\(w5988\)/);
-  assert.doesNotMatch(unfitWhy(w, 'mac', { ...fit, mac: { platform: 'darwin' } }) ?? '', /fence|integrity/, 'a Mac whose fence nobody reported is not refused for it, as no unknown fact is');
-  // A pair run of a current player is untouched by the fence.
+  assert.equal(unfitWhy(w, 'high', fit), undefined, 'High writes a Medium folder too');
+  assert.match(unfitWhy(w, 'lothlaptop', fit) ?? '', /integrity level has not been measured \(its daemon predates w6003 or has not reported\)/);
+  assert.match(unfitWhy(w, 'old', fit) ?? '', /has not been measured/, 'fence off and no measurement (a daemon before w6003): refused');
+  assert.match(unfitWhy(w, 'why', fit) ?? '', /has not been measured \(bash\.exe exit 1: no Mandatory Label line\)/);
+  assert.match(unfitWhy(w, 'lin', fit) ?? '', /^lin is on Linux.*pre-1\.0 has no Linux multiplayer build/);
+  assert.match(unfitWhy(w, 'macOn', fit) ?? '', /worker fence is on/);
+  assert.doesNotMatch(unfitWhy(w, 'mac', { ...fit, mac: { platform: 'darwin' } }) ?? '', /fence|integrity/, 'a Mac whose fence nobody reported is not refused for it');
+  assert.match(unfitWhy(w, 'nobody', fit) ?? '', /^nobody has reported nothing placement reads/, 'unknown facts fit other work, never this');
+  // A pair run of a current player is untouched by the level.
   assert.equal(unfitWhy({ ...w, pair: { legs: 1 } }, 'lothdesktop', fit), undefined);
-  assert.match(pairText(w.pair), /, only on computers whose worker fence is off, never Linux/);
+  assert.match(pairText(w.pair), /, only on Windows computers whose sandbox agents were measured at Medium integrity/);
   assert.deepEqual(pairRoom(w, ['beast'], fit).pick, ['beast']);
+});
+
+// w6003 as it happened (2026-11-26 10:13 UTC): the dispatcher started w6002, a pair run of a 0.50 player, by name on
+// lothdesktop/slot5, and start_agent never asked placement's rule, so its worker (243c0a9d) measured itself at Low and
+// built nothing. start_agent now refuses a leg whose computer's agents measured below Medium, naming each computer.
+test('w6003: start_agent refuses a leg of a pre-w5297 pair run on a computer whose agents measured Low, and starts it where Medium was measured', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, machines } = env;
+  putRequests(store, [{ id: 'w6002', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50' } }]);
+  const start = () => call(dispatcher().info, 'start_agent', { work_id: 'w6002', prompt: 'Run MP-activity-fingerprint on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const low = await start();
+  assert.equal(low.isError, true);
+  assert.match(low.text, /leg 1 \(the host\) on pc\/alpha: pc: its sandbox agents were measured at Low integrity \(S-1-16-4096\).*\. No computer fits a pair run of a pre-w5297 player \(ac80d7b0 is 0\.50\): none fits, and no Windows sandbox agent has been measured at Medium integrity.*Nothing was started\./);
+  assert.deepEqual(store.work.get('w6002')!.sessionIds, [], 'nothing was started');
+  // A fence switched off without a measurement (a daemon before w6003) is no Medium either.
+  machines.update('pc', { platform: 'win32', fence: { state: 'off' } });
+  assert.match((await start()).text, /pc: its sandbox agents' integrity level has not been measured.*Nothing was started\./);
+  machines.update('pc', { platform: 'win32', fence: { state: 'off', agentIntegrity: 'medium' } });
+  const ok = await start();
+  assert.equal(ok.isError, false, ok.text);
+  assert.equal(store.work.get('w6002')!.sessionIds.length, 1);
+});
+
+test('w6003: legacyFit says "no computer fits", naming each computer and why, and plainly when no Windows agent measures Medium', () => {
+  const pc = (id: string, x: Partial<Computer>): Computer => ({ id, online: true, live: 0, cap: 4, sandboxes: 4, ...x }) as Computer;
+  const fleet = [pc('lothdesktop', { platform: 'win32', fence: 'on', agentIntegrity: 'low' }), pc('beast', { platform: 'win32', fence: 'on', agentIntegrity: 'low' }), pc('lothlaptop', { platform: 'win32', online: false }), pc('ffbox', { platform: 'linux' })];
+  const none = legacyFit(fleet, { pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50' } });
+  assert.equal(none.short, true);
+  assert.deepEqual(none.fits, []);
+  assert.match(none.line, /^no computer fits a pair run of a pre-w5297 player \(ac80d7b0 is 0\.50\): none fits, and no Windows sandbox agent has been measured at Medium integrity, so none can run it on Windows now; /);
+  for (const id of ['lothdesktop: its sandbox agents were measured at Low', 'beast: its sandbox agents were measured at Low', 'lothlaptop is offline', 'ffbox is on Linux']) assert.ok(none.line.includes(id), id);
+  const one = legacyFit([...fleet, pc('m5', { platform: 'darwin', fence: 'off' })], { pair: { legs: 2, legacyData: 'x' } });
+  assert.match(one.line, /^no computer fits all 2 legs of .*only m5 fits, and no Windows sandbox agent/);
+  const ok = legacyFit([...fleet, pc('lab', { platform: 'win32', fence: 'off', agentIntegrity: 'medium' })], { pair: { legs: 1, legacyData: 'x' } });
+  assert.equal(ok.short, false);
+  assert.deepEqual(ok.fits, ['lab']);
 });
 
 test('w5965: the words that mark a pre-w5297 player', () => {

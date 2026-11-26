@@ -200,8 +200,9 @@ function within(p: string, dir: string, P: PlatformPath): boolean {
 
 /**
  * w5542: a PATH with no folder a worker can write: every entry inside the worker root is dropped except the daemon's
- * folder (`<root>/unity-slots/bin` comes first in a worker's PATH and is writable, so a planted `python3` or `gh` there
- * would run at the host's level), and so is every relative or empty entry (the working directory).
+ * folder (the shims folder comes first in a worker's PATH: `<root>/unity-slots/bin`, which workers can write, so a planted
+ * `python3` or `gh` there would run at the host's level; on Windows `<root>/tools/shims`, Medium since w5838), and so is
+ * every relative or empty entry (the working directory).
  */
 export function trustedPathValue(value: string | undefined, root: string | undefined, appDir: string, P: PlatformPath = path): string {
   const delim = P === path.win32 ? ';' : ':';
@@ -404,7 +405,7 @@ export async function fetchHudData(repo: string, pr: number | string, run: GitRu
   return { dir };
 }
 
-/** w5542: gh on the agent host's PATH with every folder workers can write left out (<root>/unity-slots/bin comes first there). */
+/** w5542: gh on the agent host's PATH with every folder workers can write left out (the shims folder comes first there: `<root>/tools/shims` on Windows, w5838). */
 export function trustedGh(root: string | undefined = process.env.FF_WORKER_ROOT, appDir: string = trustedAppDir()): string {
   return resolveTrusted('gh', trustedPathValue(process.env.PATH ?? process.env.Path, root, appDir)) ?? 'gh';
 }
