@@ -50,6 +50,11 @@ export interface Computer {
    */
   agentSeats?: number;
   /**
+   * w5924: its daemon makes light agent folders, so agent-only work needs no seat in a game sandbox (agentSeats unset): the
+   * folders there now and how many hold a worker.
+   */
+  light?: { folders: number; inUse: number };
+  /**
    * Whether work placed here may push a change to .github/workflows (w1463): its machine's gh login has the `workflow` scope
    * (true), lacks it (false), or nobody knows (undefined: no report, or a fine-grained login). For one person's work, a vault
    * GitHub token given there (machines.githubFromVault, docs/vault.md section 13) counts as true.
@@ -855,7 +860,9 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
     const verdict = why.length ? `BUSY (${why.join('; ')})` : hold.has(p.id) ? `ROOM ${pctOf(roomOf(p))} but HELD (${hold.get(p.id)}): no new work goes there` : `ROOM ${pctOf(roomOf(p))}${reserved}`;
     // Agent room for non-game work (w1098), beside the game verdict: the dispatcher reads both from the one line.
     const agent = hasAgentRoom(p) ? (hold.has(p.id) ? 'agent slot: free but held' : `agent slot: free (${p.midTurn} of ${p.maxAgents} mid-turn)${m ? `, ${minPriorityText(m)}` : ''}`) : `agent slot: none (${agentBusyReasons(p).join('; ')})`;
-    return `- ${p.id}${tags.length ? ` [${tags.join('; ')}]` : ''}: ${verdict}: ${loadPart(p)}; ${agent}`;
+    // w5924: agent-only work starts there in a new light folder, whatever its game sandboxes hold.
+    const light = p.light ? `; light folders: ${p.light.folders - p.light.inUse} free of ${p.light.folders}, a new one made per agent-only start` : '';
+    return `- ${p.id}${tags.length ? ` [${tags.join('; ')}]` : ''}: ${verdict}: ${loadPart(p)}; ${agent}${light}`;
   });
   // The "Next" lines are for low and normal work (prefs.priority unset); reservedLine says where higher work goes.
   const base = { ...prefs, priority: undefined };
