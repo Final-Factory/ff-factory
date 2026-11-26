@@ -487,3 +487,35 @@ for (const mode of ['on', 'warn'] as const) {
     if (mode === 'on') assert.ok(a.sessionIds.includes('5449aaaa') && !a.handedBack, 'the sibling stays with the old worker');
   });
 }
+
+for (const order of ['resume first', 'resume later'] as const) {
+  test(`w6047 (the w6149 review, ${order === 'resume first' ? '1' : '2'}): only the resume of a request handed back meanwhile goes with its hand-back; a person's message goes back to the old worker (${order})`, async (t) => {
+    const { store, sessions, agents, worker, request, queued, roomMove, settled } = await setup(t, 'on');
+    const tried: string[] = [];
+    failing(agents, 'early', tried);
+    const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+    const resume: QueuedSend = { ...queued('5449aaaa', 'go on', Date.now() - 60_000), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+    const person = queued('5449aaaa', 'lothsahn: also rename the w5869 flag', Date.now() - 50_000, 'human');
+    const [first, later] = order === 'resume first' ? [resume, person] : [person, resume];
+    (agents as unknown as { liveHub: unknown }).liveHub = {
+      endFor: async () => {
+        agents.orchestrators.handBack(store.work.get('w5870')!, store.sessions.get('5449aaaa')!, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+        assert.equal(roomMove(s, later, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+        return undefined;
+      },
+      running: () => false,
+    };
+    request(['5449aaaa'], 'w5869');
+    request(['5449aaaa'], 'w5870');
+    assert.equal(roomMove(s, first, BISCUIT_FULL, Date.now()), true);
+    await settled('5449aaaa');
+    const a = store.work.get('w5869')!, b = store.work.get('w5870')!;
+    assert.ok(a.sessionIds.includes('5449aaaa') && !a.handedBack, 'w5869 stays with the old worker');
+    assert.match(b.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
+    assert.match(b.handedBack?.message ?? '', /^go on$/, 'the resume, and only it, goes with w5870');
+    const back = sessions.queued().filter((m) => m.id === '5449aaaa');
+    assert.equal(back.length, 1, 'one message put back for the old worker');
+    assert.match(back[0]!.text, /^lothsahn: also rename the w5869 flag$/);
+    assert.notEqual(back[0]!.resumeOf?.work, 'w5870', 'no resume of w5870 waits for the old worker');
+  });
+}
