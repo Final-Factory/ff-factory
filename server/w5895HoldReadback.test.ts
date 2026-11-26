@@ -315,3 +315,61 @@ test('w5895: a lift ask of a config-only hold shows NOT SET with who lifts it, a
   asTurn(disp, 'system');
   assert.doesNotMatch((await env.call(disp.info, 'system_status', {})).text, /ASKED, NOT SET/);
 });
+
+// w5978's review of #1307 at ff84e75d: a lift in the person's own turn headlined "LIFT SET" while config placement.hold still
+// held the machine (P1), and a lift asked while nothing held it was never spent, so the guard later let the dispatcher lift
+// someone else's new drain for it (P3).
+test('w5895: a lift in the person\'s own turn while config placement.hold still holds says NOT SET, never "takes new work again" (P1)', async (t) => {
+  const env = await heldScene(t);
+  const disp = env.dispatcher();
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn' })).isError);
+  assert.ok(!(await env.call(disp.info, 'set_app_config', { key: 'placement.hold', value: { pc: { why: 'lothsahn: hold it' } }, user_asked: true })).isError);
+  const loth = env.chat(LOTH);
+  asTurn(loth, 'human');
+  const r = await env.call(loth.info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop' });
+  assert.ok(!r.isError, r.text);
+  assert.match(r.text, /LIFT ASKED, NOT SET: still held by config placement\.hold; set_app_config placement\.hold without pc in this turn/);
+  assert.doesNotMatch(r.text, /LIFT SET|takes new work again/);
+  assert.equal(env.store.machines.get('pc')!.drain, undefined, 'the drain itself is lifted');
+  assert.equal(env.store.work.get('w5814')!.holdAsk?.set, undefined);
+  // P1b: hold_machine's own lift says the same.
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn' })).isError);
+  const l = await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'lift' });
+  assert.ok(!l.isError, l.text);
+  assert.doesNotMatch(l.text, /takes new work again/);
+  assert.match(l.text, /config placement\.hold still holds pc/);
+});
+
+test('w5895: a lift asked while nothing holds the machine is spent at once, so it cannot lift a later drain of someone else\'s (P3)', async (t) => {
+  const env = await heldScene(t);
+  const disp = env.dispatcher();
+  asTurn(env.chat(LOTH), 'system');
+  const ask = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop' });
+  assert.ok(!ask.isError, ask.text);
+  assert.match(ask.text, /LIFT ALREADY IN FORCE on pc/);
+  assert.equal(env.store.work.get('w5814')!.holdAsk?.set?.by, 'already in force when asked');
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'hold', words: 'Ben: hold new work on pc for the build', who: 'Ben' })).isError);
+  asTurn(disp, 'system');
+  assert.doesNotMatch((await env.call(disp.info, 'system_status', {})).text, /ASKED, NOT SET/);
+  const lift = await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
+  assert.ok(lift.isError, `the spent lift ask opens nothing: ${lift.text}`);
+  assert.ok(env.store.machines.get('pc')!.drain, 'the newer drain stays');
+});
+
+test('w5895: an unset lift ask never opens the guard against a drain set after it (P3, the guard)', async (t) => {
+  const env = await heldScene(t);
+  const disp = env.dispatcher();
+  const w = env.store.work.get('w5814')!;
+  w.holdAsk = { machine: 'pc', action: 'lift', words: 'Lift the hold on LothDesktop', who: 'Lothsahn', at: '2000-01-01T00:00:00.000Z' };
+  w.humanAsked = false; // as after a note outside their turn: only the ask could open the guard
+  env.store.putWork(w);
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'hold', words: 'Ben: hold new work on pc for the build', who: 'Ben' })).isError);
+  asTurn(disp, 'system');
+  const lift = await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
+  assert.ok(lift.isError, lift.text);
+  assert.ok(env.store.machines.get('pc')!.drain);
+});

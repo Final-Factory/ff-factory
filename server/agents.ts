@@ -1109,6 +1109,7 @@ export class Agents {
     this.orchestrators = new Orchestrators({
       holdMachine: (a, by, workId) => this.holdMachine(a, by, workId),
       holdReadback: (machine) => this.holdReadbackOf(machine),
+      spendHoldAsk: (workId) => this.spendHoldAskIfInForce(workId),
       cfg,
       store,
       sessions,
@@ -3982,13 +3983,16 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     let said: string;
     if (a.action === 'lift') {
       const was = drainOf(m, now.getTime());
-      if (!m.drain) said = `${m.id} is not drained: nothing to lift.`;
+      // A config placement.hold is not a drain: while it holds the machine, a drain lift does not let new work in (w5978, P1).
+      const config = this.personHeld(m.id).config ? ` config placement.hold still holds ${m.id}: it takes no new work until set_app_config placement.hold is set without ${m.id}.` : '';
+      if (!m.drain) said = `${m.id} is not drained: nothing to lift.${config}`;
       else {
         mm.update(m.id, { drain: undefined });
         mm.syncRunnerHolds(m.id); // w5916: its CI runners take jobs again
         this.orchestrators?.capacityMayHaveFreed(`${m.id}'s drain lifted`);
         console.log(`[machines] ${m.id} drain lifted by ${by}${was ? ` (was: ${was.who}: "${was.words}")` : ''} (w5878)`);
-        said = `${m.id} takes new work again (its drain${was ? ` for ${was.who}'s "${was.words}"` : ''} is lifted).`;
+        const lifted = `its drain${was ? ` for ${was.who}'s "${was.words}"` : ''} is lifted`;
+        said = config ? `${m.id}: ${lifted}, but${config}` : `${m.id} takes new work again (${lifted}).`;
       }
     } else {
       const running = this.heldWorkers(m.id).filter((s) => s.midTurn).map((s) => s.id);
@@ -4050,6 +4054,23 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return !p.drain && !p.config;
     }
     return Object.keys(this.placement().hold ?? {}).some((k) => placeId(k) === placeId(machine));
+  }
+
+  /**
+   * w5895: an ask already in force when it is recorded (a lift while nothing of a person's holds the machine, a hold while
+   * a person's drain or config hold is on) is spent at once, else it stays unset and the dispatcher's guard opens for it
+   * later against someone else's new drain (w5978's review at ff84e75d, probe P3). A pause, a build or a person playing does
+   * not count for a hold: they end by themselves, and the person's hold would go with them.
+   */
+  spendHoldAskIfInForce(workId: string): boolean {
+    const w = this.store.work.get(workId.trim().toLowerCase());
+    const h = w?.holdAsk;
+    if (!w || !h || h.set) return false;
+    const p = this.personHeld(h.machine);
+    if (h.action === 'lift' ? p.drain || p.config : !p.drain && !p.config) return false;
+    w.holdAsk = { ...h, set: { at: (this.orchestrators?.now() ?? new Date()).toISOString(), by: 'already in force when asked' } };
+    this.store.putWork(w);
+    return true;
   }
 
   unsetHoldAsks(machine?: string): string[] {
@@ -8665,7 +8686,11 @@ ${w.repo ?? ''}
     if (!WORK_OPEN.includes(w.status)) return `${w.id} is ${w.status}`;
     // w5895: a hold or lift its person asked for on this request (update_work hold), not set yet: a later note outside their
     // turn (which clears humanAsked) does not undo their ask, so it reaches the one tool that sets it (C1: w5814, 22:08 UTC).
-    if (tool === 'hold_machine' && w.holdAsk && !w.holdAsk.set && w.holdAsk.action === args?.action && typeof args?.machine === 'string' && placeId(args.machine) === placeId(w.holdAsk.machine)) return undefined;
+    // A lift opens only against a drain set before the ask: never someone else's newer drain (w5978, P3).
+    if (tool === 'hold_machine' && w.holdAsk && !w.holdAsk.set && w.holdAsk.action === args?.action && typeof args?.machine === 'string' && placeId(args.machine) === placeId(w.holdAsk.machine)) {
+      const drain = drainOf(this.store.machines.get(placeId(args.machine)), this.orchestrators.now().getTime());
+      if (!(w.holdAsk.action === 'lift' && drain && drain.at > w.holdAsk.at)) return undefined;
+    }
     const n = w.requestedBy.displayName;
     // w5896: what would pass, said exactly.
     if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${n}'s, so ${tool} cannot run for it. What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started, or with ${n}'s own words that decided it quoted verbatim in update_work's \`words\` (from a message of theirs in the last ${DECISION_WORDS_HOURS} hours, at least ${DECISION_WORDS_MIN} words); else ask them (decide_work ask)`;

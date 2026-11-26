@@ -434,6 +434,8 @@ export interface OrchestratorsDeps {
   holdMachine?: (a: HoldInput & { words?: string; who?: string }, by: string, workId?: string) => string;
   /** w5895: machine `id`'s hold read back live (Agents.holdReadbackOf). */
   holdReadback?: (machine: string) => string;
+  /** w5895: spend request `workId`'s hold ask if it is already in force as recorded (Agents.spendHoldAskIfInForce). */
+  spendHoldAsk?: (workId: string) => boolean;
   /** A worker's pending wake_me check-in, if any (w829: kept before a block cancels it). */
   pendingWake?: (sessionId: string) => { at: string; note: string } | undefined;
   /**
@@ -2816,7 +2818,18 @@ It is for your part of the work, not an answer to another worker's question.`;
       const now = this.store.work.get(w.id);
       if (now?.holdAsk) w.holdAsk = now.holdAsk;
       console.log(`ledger: ${w.id} hold ask (${h.action} ${machine}) set in ${owner.displayName}'s own turn (w5895)`);
-      return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} SET on ${machine}: ${back.replace(/\n/g, ' | ')}`;
+      const flat = back.replace(/\n/g, ' | ');
+      // The headline is the ask's own state, read back: a lift while config placement.hold still holds is not set (w5978, P1).
+      if (now?.holdAsk?.set) return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} SET on ${machine}: ${flat}`;
+      if (h.action === 'lift') return `LIFT ASKED, NOT SET: still held by config placement.hold; set_app_config placement.hold without ${machine} in this turn. ${flat}`;
+      return `HOLD ASKED, NOT SET on ${machine}: ${flat}`;
+    }
+    this.store.putWork(w);
+    if (this.d.spendHoldAsk?.(w.id)) {
+      const now = this.store.work.get(w.id);
+      if (now?.holdAsk) w.holdAsk = now.holdAsk;
+      console.log(`ledger: ${w.id} hold ask (${h.action} ${machine}) already in force when recorded: spent (w5895)`);
+      return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} ALREADY IN FORCE on ${machine}: nothing to set, and the ask is spent; ${this.d.holdReadback ? `now: ${this.d.holdReadback(machine).replace(/\n/g, ' | ')}` : ''}`;
     }
     console.log(`ledger: ${w.id} hold ask (${h.action} ${machine}) recorded NOT SET: not ${owner.displayName}'s own turn; the dispatcher sets it (w5895)`);
     return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} ASKED, NOT SET: this turn is not one ${owner.displayName} started with their own message, so the dispatcher sets it (hold_machine machine=${machine} action=${h.action} work_id=${w.id}; it is told now). Do not tell ${owner.displayName} it is held until system_status or list_machines shows ${machine} HELD; ${this.d.holdReadback ? `now: ${this.d.holdReadback(machine).replace(/\n/g, ' | ')}` : ''}`;
