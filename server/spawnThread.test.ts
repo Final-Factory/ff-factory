@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { run } from './proc.ts';
 import { endSpawnThreadForTest, spawnThreadOn, useSpawnThread } from './spawnThread.ts';
 
@@ -75,9 +76,17 @@ test('w6077: a thread that ends answers its programs -1, and the next program ge
   }
 });
 
+/** Whether the program still runs. On Linux an ended child of the dead thread stays a zombie (state Z): nobody reaps it. */
 const alive = (pid: number) => {
   try {
     process.kill(pid, 0);
+    if (process.platform === 'linux') {
+      try {
+        return !/^\d+ \(.*\) Z/.test(fs.readFileSync(`/proc/${pid}/stat`, 'utf8'));
+      } catch {
+        return false;
+      }
+    }
     return true;
   } catch {
     return false;
@@ -89,7 +98,6 @@ test('w6077: a thread that ends takes its running programs with it (no orphan le
   try {
     const pidFile = `${process.env.TMPDIR ?? process.env.TEMP ?? '.'}/w6077-orphan-${process.pid}.txt`;
     const slow = run(node, ['-e', `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 20000)`], { timeoutMs: 30_000 });
-    const fs = await import('node:fs');
     for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50));
     const pid = Number(fs.readFileSync(pidFile, 'utf8'));
     fs.rmSync(pidFile, { force: true });
