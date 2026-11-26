@@ -101,7 +101,7 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
-import { DROPIN_NAME, RunnerUnits, findRunnerUnits } from './runnerUnits.ts';
+import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
@@ -1014,16 +1014,30 @@ export class Daemon {
     const userUnits = path.join(os.homedir(), '.config', 'systemd', 'user');
     this.runnerUnits = new RunnerUnits({
       units: () => (real && process.platform === 'linux' ? findRunnerUnits(userUnits) : []),
-      readDropin: (unit) => {
+      readDropin: (unit, name = DROPIN_NAME) => {
         try {
-          return fs.readFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), 'utf8');
+          return fs.readFileSync(path.join(userUnits, `${unit}.d`, name), 'utf8');
         } catch {
           return undefined;
         }
       },
-      writeDropin: (unit, text) => {
+      writeDropin: (unit, text, name = DROPIN_NAME) => {
         fs.mkdirSync(path.join(userUnits, `${unit}.d`), { recursive: true });
-        fs.writeFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), text);
+        fs.writeFileSync(path.join(userUnits, `${unit}.d`, name), text);
+      },
+      // w5834: each runner's temp folder inside the worker root (runnerTempDir), made here too so its first start finds it
+      tempDir: (u) => {
+        const t = runnerTempDir(u, cfg.root);
+        if (t) fs.mkdirSync(t, { recursive: true });
+        return t;
+      },
+      startedTmpdir: (pid) => {
+        try {
+          const env = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+          return env.find((e) => e.startsWith('TMPDIR='))?.slice('TMPDIR='.length) ?? null;
+        } catch {
+          return undefined;
+        }
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>

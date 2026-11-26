@@ -86,7 +86,9 @@ test('a setting changes through set_app_config, from the owners\' own orchestrat
   const turn = (who: string) => (id: string) => id === who;
   assert.equal(personalSettingProblem(lothsahn, turn('lo')), undefined);
   assert.equal(personalSettingProblem(ben, turn('be')), undefined);
-  assert.match(personalSettingProblem(lothsahn, turn('nobody')) ?? '', /turn Lothsahn started with a message of their own/, "a harness turn (a check-in, a timer, a relayed report) changes nothing");
+  assert.match(personalSettingProblem(lothsahn, turn('nobody')) ?? '', /a setting changes only on Lothsahn's own words: a turn Lothsahn started, or their words that decided it quoted verbatim/, "a harness turn (a check-in, a timer, a relayed report) changes nothing");
+  // w5896: the refusal carries exactly what passes, from the turn check.
+  assert.match(personalSettingProblem(lothsahn, turn('nobody'), () => 'what passes is X') ?? '', /own words: what passes is X$/);
   assert.match(personalSettingProblem(sam, turn('sa')) ?? '', /Lothsahn's and Ben's own orchestrators/);
   assert.match(personalSettingProblem(undefined, () => true) ?? '', /Lothsahn's and Ben's own orchestrators/);
 });

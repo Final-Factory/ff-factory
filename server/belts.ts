@@ -44,6 +44,12 @@ export const USER_ASKED_TOOLS: ReadonlySet<string> = new Set([
   'approve_delegation',
 ]);
 
+/**
+ * w5896: the USER_ASKED_TOOLS that delete or remove something: they run for a request only when its person asked in a
+ * turn of their own, never on an earlier message of theirs quoted later (WorkItem.askedFromRecord).
+ */
+export const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set(['delete_sandbox', 'remove_machine', 'delete_standing_agent']);
+
 export type BeltRole = 'dispatcher' | 'personal' | 'remote' | 'ops';
 
 /**
