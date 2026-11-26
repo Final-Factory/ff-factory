@@ -111,6 +111,7 @@ import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runn
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { WIN_CI_FIRST, WinCiFirst, machineBusyMs, readLowered, writeLowered } from './ciFirstWin.ts';
+import { RunnerPriority, parseProcRows, parseTaskRows, processPriorityScript, runnerPriorityMode, runnerTaskScript } from './runnerPriority.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -300,6 +301,12 @@ export interface DaemonConfig {
    * stops it. Set remotely by `ops_worker machine_update win_ci_first`, read at the daemon's start; "warn" is the recovery.
    */
   winCiFirst?: 'off' | 'warn' | 'enforce';
+  /**
+   * w6163: a Windows machine's CI runners' scheduled tasks and listeners go to Normal priority (machine/runnerPriority.ts).
+   * Unset: "enforce" on the machines RUNNER_PRIORITY_ENFORCE lists (none in the first, warn-only step), "warn" (only logs)
+   * everywhere else, BEAST included; "off" stops it. Read at the daemon's start.
+   */
+  runnerPriority?: 'off' | 'warn' | 'enforce';
   /**
    * w5863, w5899: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "on" (the default
    * when unset) puts the unity-slot shims on every agent's PATH in <root>/tools-medium/shims, which fenced workers cannot
@@ -667,6 +674,7 @@ export class Daemon {
   readonly ciFirst: CiFirst;
   /** w6110: the same on a Windows CI-first machine (WIN_CI_FIRST: lothdesktop), by priority class; warn only so far: it logs. */
   readonly winCiFirst: WinCiFirst;
+  readonly runnerPriority: RunnerPriority;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -1178,6 +1186,19 @@ export class Daemon {
       setPriority: (pid, priority) => setPriorityOf(pid, priority),
       // no worker root, no record: enforce then lowers nothing (nothing a restart could undo)
       record: cfg.root ? { read: () => readLowered(cfg.root!), write: (l) => writeLowered(cfg.root!, l) } : undefined,
+      now: () => Date.now(),
+      log: (line) => log(line),
+    });
+    // w6163: the CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): the machines in
+    // RUNNER_PRIORITY_ENFORCE set them (none in the first, warn-only step), every other Windows machine only logs them (BEAST
+    // stays so: Ben's hold on its system settings)
+    this.runnerPriority = new RunnerPriority({
+      mode: runnerPriorityMode(cfg.id, process.platform, real, cfg.runnerPriority),
+      procs: () => pd.procs(),
+      census: (procs) => runnerCensus(procs),
+      priorityOf: (pid) => priorityOf(pid),
+      raise: async (pids, fix) => parseProcRows(await runnerPowerShell(processPriorityScript(pids, fix))),
+      tasks: async (roots, fix) => parseTaskRows(await runnerPowerShell(runnerTaskScript(roots, fix))),
       now: () => Date.now(),
       log: (line) => log(line),
     });
@@ -2001,6 +2022,16 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
+    if (this.runnerPriority.mode !== 'off') {
+      let tickFailing = false; // said once, not every minute
+      const tick = () =>
+        void this.runnerPriority.tick().then(
+          () => { if (tickFailing) log('runner priority: the tick runs again'); tickFailing = false; },
+          (e) => { if (!tickFailing) log(`runner priority: the tick failed: ${(e as Error).message}`); tickFailing = true; },
+        );
+      this.timers.push(setInterval(loopLabel('timer runnerPriority.tick', tick), 60_000));
+      setTimeout(tick, 15_000).unref();
+    }
     if (this.winCiFirst.enabled) {
       const tick = () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`));
       this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
@@ -5371,4 +5402,11 @@ export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math
 async function winSuspend(pid: number, resume: boolean): Promise<string | undefined> {
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winSuspendScript(pid, resume)], { timeoutMs: 60_000 });
   return r.code !== 0 ? `powershell exited ${r.code}: ${r.stderr.trim().slice(0, 200)}` : r.stdout.trim() || undefined;
+}
+
+/** w6163: one of machine/runnerPriority.ts's PowerShell scripts; its standard output, or an error with what it said. */
+async function runnerPowerShell(script: string): Promise<string> {
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
+  if (r.code !== 0) throw new Error(`powershell exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
+  return r.stdout;
 }
