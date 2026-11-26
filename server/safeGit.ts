@@ -22,6 +22,7 @@
  *   value back, else a neutral one (git-lfs's standard filter for `filter.lfs.*`, so LFS files still check out). A
  *   repository's credential helpers are dropped and the user's and system's added again in their order. This one has a
  *   race: a worker who writes the key between the scan and the call wins it, so it narrows the gap without closing it.
+ *   Subcommands that start none of those programs (rev-parse, merge-base, config, worktree list, ...: NO_SCAN) skip it (w5991).
  * - `diff`, `log`, `show` and `whatchanged` also get `--no-ext-diff --no-textconv`: `diff.external` cannot be overridden
  *   by value (an empty one makes every `git diff` fail, measured by w5514 on git 2.50.1), and the flags need no scan.
  *
@@ -202,6 +203,27 @@ export function fenceArgs(args: string[]): string[] {
   return [...args.slice(0, sub + 1), '--no-ext-diff', '--no-textconv', ...args.slice(sub + 1)];
 }
 
+/**
+ * Subcommands that start no program a scanned key names, so they need no scan (w5991): they read or move refs and read config,
+ * and check out, diff, filter, merge or reach a remote never. The fixed keys still go on every call (an editor, a hook such as
+ * reference-transaction, fsmonitor). `worktree` only as `list` and `prune`: `add` checks files out (filters) and `remove` runs
+ * `git status` in the checkout. Every scan is one more process start, about half of all of ffu-slot's (w5991: 266 of 861 in
+ * server/ffuSlots.test.ts); this keeps the protection and drops the scans that protect nothing. A per-repository cache of the
+ * scan was not taken: the shared ffu clone's config is written by every worker holding a slot, and a cache would let a key
+ * planted after the first call of a run win every later call (take --wait runs for minutes), where the scan's own race is the
+ * gap between two process starts.
+ */
+const NO_SCAN = new Set(['rev-parse', 'merge-base', 'symbolic-ref', 'show-ref', 'for-each-ref', 'config']);
+
+/** Whether a call needs the scan: false only for subcommands that start no program a repository names (NO_SCAN). */
+export function needsScan(args: string[]): boolean {
+  const { sub } = splitGlobal(args);
+  const name = args[sub] ?? '';
+  if (NO_SCAN.has(name)) return false;
+  if (name === 'worktree' && /^(list|prune)$/.test(args[sub + 1] ?? '')) return false;
+  return true;
+}
+
 const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
 
 function fenced(args: string[], env: Env, scanOut: string): { args: string[]; env: Env } {
@@ -237,6 +259,7 @@ const scanEnv = (env: Env) => withConfigFirst({ ...env, GIT_TERMINAL_PROMPT: '0'
 /** The arguments and environment for a git call in a checkout a worker may have written (sync). */
 export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } = {}): { args: string[]; env: Env } {
   const env = opts.env ?? process.env;
+  if (!needsScan(args)) return fenced(args, env, '');
   let out = '';
   try {
     out = execFileSync('git', scanArgs(splitGlobal(args).location), {
@@ -258,6 +281,7 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
 /** The arguments and environment for a git call in a checkout a worker may have written. */
 export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {}): Promise<{ args: string[]; env: Env }> {
   const env = opts.env ?? process.env;
+  if (!needsScan(args)) return Promise.resolve(fenced(args, env, ''));
   return new Promise((resolve) => {
     execFile(
       'git',

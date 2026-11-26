@@ -23,7 +23,7 @@
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { gitSpawnSync } from '../server/safeGit.ts';
+import { gitSpawnSync, splitGlobal } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
@@ -664,6 +664,20 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
   }
 }
 
+/**
+ * The environment of ffu-slot's own git calls (w5991): no hooks but on a push. server/safeGit.ts points core.hooksPath at
+ * git-lfs's hooks; their post-checkout and post-commit start `sh` on every checkout and commit (seconds each on a busy
+ * Windows machine) to do git-lfs locking, which ffu has none of, and ffu-slot never merges. A push keeps them: pre-push
+ * uploads LFS objects, should the rescue branch ever carry any. A core.hooksPath naming a regular file runs no hook
+ * (safeGit.test.ts), and this file is FF Factory's code, which no worker writes. Caller entries come after safeGit's fixed
+ * keys and win.
+ */
+export function slotGitEnv(args: string[], env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (args[splitGlobal(args).sub] === 'push') return env;
+  const n = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
+  return { ...env, GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${n}`]: import.meta.filename };
+}
+
 export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDeps {
   const readFacts = () => {
     try {
@@ -685,7 +699,7 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     readFacts,
     now: () => Date.now(),
     git: (args, cwd) => {
-      const r = gitSpawnSync(args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
+      const r = gitSpawnSync(args, { cwd, env: slotGitEnv(args), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
       return { code: r.status ?? (r.error ? 127 : 1), out: r.stdout ?? '', err: r.stderr ?? (r.error ? r.error.message : '') };
     },
     freeGB: (dir) => {

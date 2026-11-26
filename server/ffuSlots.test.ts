@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, realFfuSlotDeps, slotBin, slotGitEnv, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
@@ -13,6 +13,17 @@ import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
  * w3764: ffu slots, per-machine ffu worktrees with warm cargo targets (machine/ffuSlots.ts), and the clean-up rule for their
  * targets (server/installLeftovers.ts, ffu-slot-target). The leases run real git against a local "origin".
  */
+
+// w5991: no automatic gc or maintenance in the fixture repositories: every fetch and commit started a detached
+// `git maintenance run --auto` (61 git processes in this file), which only made the run slower on a busy machine.
+{
+  const n = Number(process.env.GIT_CONFIG_COUNT ?? 0) || 0;
+  [['maintenance.auto', 'false'], ['gc.auto', '0']].forEach(([k, v], i) => {
+    process.env[`GIT_CONFIG_KEY_${n + i}`] = k;
+    process.env[`GIT_CONFIG_VALUE_${n + i}`] = v;
+  });
+  process.env.GIT_CONFIG_COUNT = String(n + 2);
+}
 
 const NOW = Date.now();
 const HOUR = 3_600_000;
@@ -105,6 +116,16 @@ test("w3764: a stopped holder's slot frees itself when its work is pushed, and w
   const stale = deps(root, 'bbbb2222', { live: ['bbbb2222'], max: 1, factsAt: NOW - 2 * HOUR });
   assert.throws(() => takeSlot(stale, { remote }), /all 1 ffu slots are held/);
   assert.equal(takeSlot(b, { remote }), 'slot1', 'stopped holder, nothing unpushed: the slot is free');
+});
+
+test("w5991: ffu-slot's own git runs no hook but on a push, and keeps the caller's config entries", () => {
+  const env = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' };
+  const e = slotGitEnv(['-C', 'x', 'checkout', '--quiet', 'feat'], env);
+  assert.equal(e.GIT_CONFIG_COUNT, '2');
+  assert.equal(e.GIT_CONFIG_KEY_0, 'a.b');
+  assert.equal(e.GIT_CONFIG_KEY_1, 'core.hooksPath');
+  assert.ok(fs.statSync(e.GIT_CONFIG_VALUE_1 ?? '').isFile(), 'a regular file: git finds no hook there');
+  assert.equal(slotGitEnv(['push', '--quiet', 'origin', 'x'], env), env, "a push keeps git-lfs's pre-push");
 });
 
 test('w3764: no new slot below the free-disk floor, and take prints the lines eval runs', (t) => {

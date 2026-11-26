@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXED_GIT_CONFIG, HOOKS, fenceArgs, gitExecFileSync, isGit, parseScan, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
+import { FIXED_GIT_CONFIG, HOOKS, fenceArgs, gitExecFileSync, isGit, needsScan, parseScan, scannedOverrides, splitGlobal, withConfigFirst } from './safeGit.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { run } from './proc.ts';
 
@@ -200,6 +200,13 @@ test('w5541: the subcommand is found past the global options; diff, log and show
   assert.ok(isGit('git') && isGit('/usr/bin/git') && isGit('C:\\Program Files\\Git\\cmd\\git.exe') && !isGit('gh') && !isGit('git-lfs'));
 });
 
+test('w5991: only subcommands that start no program a repository names skip the scan', () => {
+  for (const a of [['rev-parse', 'HEAD'], ['-C', 'd', 'merge-base', '--is-ancestor', 'a', 'b'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'x.y'], ['-C', 'd', 'worktree', 'list', '--porcelain'], ['worktree', 'prune'], ['for-each-ref'], ['show-ref']])
+    assert.equal(needsScan(a), false, a.join(' '));
+  for (const a of [['status'], ['worktree', 'add', 'x'], ['worktree', 'remove', 'x'], ['worktree'], ['log', '-1'], ['diff'], ['checkout', 'x'], ['fetch'], ['push'], ['cat-file', '--textconv', 'x'], ['branch', '-f', 'x'], ['-c', 'rev-parse', 'status'], []])
+    assert.equal(needsScan(a), true, a.join(' '));
+});
+
 // ---------------------------------------------------------------- planted programs, measured with a marker file
 
 interface Fixture {
@@ -284,6 +291,14 @@ test('w5541: a worktree whose config plants fsmonitor, a filter, a textconv, dif
     const commit = await run('git', ['-C', wt, '-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'commit', '-qam', 'x']);
     assert.equal(commit.code, 0, commit.stderr);
     assert.match(gitExecFileSync(['-C', wt, 'log', '-1', '-p'], { encoding: 'utf8' }), /\+two/);
+    // w5991: the calls that skip the scan still get the fixed keys: a ref update by symbolic-ref runs no planted
+    // reference-transaction hook, and fsmonitor stays off for rev-parse, config and worktree list.
+    touch(wt);
+    assert.equal(gitExecFileSync(['-C', wt, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).trim(), 'sandbox/x');
+    gitExecFileSync(['-C', wt, 'symbolic-ref', 'HEAD', 'refs/heads/sandbox/x'], { encoding: 'utf8' });
+    assert.match(gitExecFileSync(['-C', wt, 'config', '--get', 'filter.x.clean'], { encoding: 'utf8' }), /evil\.sh/);
+    assert.match((await run('git', ['-C', main, 'worktree', 'list', '--porcelain'])).stdout, /branch refs\/heads\/sandbox\/x/);
+    assert.equal((await run('git', ['-C', main, 'worktree', 'prune'])).code, 0);
     assert.equal(f.ran(), '', 'no planted program ran');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
