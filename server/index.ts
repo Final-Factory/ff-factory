@@ -76,8 +76,8 @@ import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf
 import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
-import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
-import { accountSetupLines, addSecretEnv, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
+import { TokenSwitch, dispatcherMove, dispatcherWait, orchestratorOut, type DispatcherAccount, type RateLimitInfo } from './tokenSwitch.ts';
+import { accountSetupLines, addSecretEnv, addSecretValues, dispatcherPoolPerson, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
 import { scrubAtStart } from './scrubSecrets.ts';
 import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
@@ -2959,6 +2959,7 @@ setVaultContext({
   reservedFor,
   payer: () => identity.systemPayer().userId,
   poolOf: (person) => agents.poolOf(person),
+  dispatcherOn: () => dispatcherAccount(),
   githubUsable: github.usable,
   onGithubUse: (e, what) => github.noteUse(e, what),
   onGithubMissing: (person, machineId, what) => {
@@ -3171,8 +3172,30 @@ function refreshTokenWarnings() {
 }
 setInterval(refreshTokenWarnings, 20_000).unref();
 setTimeout(refreshTokenWarnings, 8_000).unref();
-/** The dispatcher's pinned vault token, for its stop line (w1109): its meters' key, its name and whose pool it is in. */
+/** The credential key the dispatcher's process runs on (or last ran on), for its reserve on a pool (w5891). */
+function dispatcherAccount(): string | undefined {
+  const id = agents.orchestrators.dispatcherId;
+  return id ? store.sessions.get(id)?.account : undefined;
+}
+/** The enabled tokens of `person`'s own Claude pool as the gate reads them now (case-insensitive). */
+function poolTokensOf(person: string) {
+  return [...gatePoolsRaw()].find(([who]) => who.toLowerCase() === person.toLowerCase())?.[1] ?? [];
+}
+/**
+ * The dispatcher's vault token for its stop line (w1109): its meters' key, its name and whose pool it is in. Pinned: that
+ * token. On a pool (w5891): the token it runs on, only once no other token of that pool has room below the stop line,
+ * because before then it moves to one (w5921) and its workers need not stop: the stop fires only when the whole pool is out.
+ */
 function dispatcherToken(): { key: string; name: string; owner?: string } | undefined {
+  const pool = dispatcherPoolPerson(cfg);
+  if (pool !== undefined) {
+    const on = dispatcherAccount();
+    const list = poolTokensOf(pool);
+    const mine = list.find((t) => `token:${t.entry.fingerprint}` === on);
+    if (!on || !mine) return undefined;
+    const room = list.some((t) => t !== mine && !usage.outOf(`token:${t.entry.fingerprint}`) && !stopMeters(usage.usageOf(`token:${t.entry.fingerprint}`), poolLimits(cfg)).length && t.view.state !== 'exhausted');
+    return room ? undefined : { key: on, name: `${mine.entry.name} …${mine.entry.last4}`, owner: pool };
+  }
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? vault.claudeByName(pinned) : undefined;
   return got ? { key: `token:${got.entry.fingerprint}`, name: `${got.entry.name} …${got.entry.last4}`, ...(got.entry.owner ? { owner: got.entry.owner } : {}) } : undefined;
@@ -3218,6 +3241,33 @@ const tokenLabel = (account: string) => {
 };
 const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why, ...(t.view.capped ? { capped: true } : {}) }))] as const);
 agents.orchestratorTokenOut = (account, pool) => orchestratorOut(poolViews(), account, pool);
+/**
+ * w5921: why the dispatcher's process on `account` restarts on another token before its next turn, else undefined. Its config
+ * decides (lothsahn, 2026-11-26: "The dispatcher should obey its pool config... If it's out of quota it should pick another
+ * sub within that pool. It shouldn't use a different pool"): pinned ("vault:<name>"), it moves only onto that token; on
+ * "pool:<login>", or unset (the system payer's pool, by their pool setting, w1717), onto a token of that pool when it runs on
+ * another pool's, or off a token that is out when that pool has one with room. Only that one pool is read.
+ */
+function dispatcherMoveWhy(account: string): string | undefined {
+  return dispatcherMove(dispatcherAccountCfg(), poolViews(), account, { label: tokenLabel(account), owner: agents.tokenOwner?.(account) });
+}
+agents.dispatcherAccountMove = dispatcherMoveWhy;
+/** What claudeAccounts.dispatcher names now, as dispatcherMove reads it. */
+function dispatcherAccountCfg(): DispatcherAccount {
+  const pinned = pinnedDispatcherEntry(cfg);
+  if (pinned !== undefined) {
+    const got = vault.claudeByName(pinned);
+    return { pinned: { name: pinned, key: got ? `token:${got.entry.fingerprint}` : undefined, label: got ? `${got.entry.name} …${got.entry.last4}` : undefined }, pool: '', named: false };
+  }
+  const named = dispatcherPoolPerson(cfg);
+  return { pool: named ?? agents.poolOf(identity.systemPayer().userId), named: named !== undefined };
+}
+/** w5921: why the dispatcher waits when no token it may run on has room, with the first reset. */
+function dispatcherWaitWhy(): string {
+  const c = dispatcherAccountCfg();
+  const tokens = c.pinned ? [] : poolTokensOf(c.pool).map((t) => ({ label: `${t.entry.name} …${t.entry.last4}`, until: usage.outOf(`token:${t.entry.fingerprint}`)?.until ?? (t.view.until ? Date.parse(t.view.until) : undefined) }));
+  return dispatcherWait(c, tokens, Date.now());
+}
 const tokenSwitch = new TokenSwitch({
   file: path.join(cfg.dataDir, 'token-switches.json'),
   label: tokenLabel,
@@ -3228,6 +3278,8 @@ const tokenSwitch = new TokenSwitch({
     // A standing agent's new run picks its token at its start, and waits for its pool when no token has room (w1126).
     if (s.kind === 'standing') return true;
     if (s.kind !== 'orchestrator') return limitsClearFor(s);
+    // w5921: the dispatcher's pool (its config's) has a token it would be better on.
+    if (agents.orchestrators.isDispatcher(s)) return !!s.account && !!dispatcherMoveWhy(s.account);
     const person = agents.orchestrators.ownerOf(s)?.userId;
     return !!person && !!s.account && !!orchestratorOut(poolViews(), s.account, agents.poolOf(person));
   },
@@ -3252,16 +3304,14 @@ const tokenSwitch = new TokenSwitch({
   },
   dispatcherId: () => agents.orchestrators.dispatcherId,
   outUntil: (account) => usage.outOf(account)?.until,
-  dispatcherConfigured: () => {
-    const pinned = pinnedDispatcherEntry(cfg);
-    if (pinned === undefined) return `the system payer's pool (${identity.systemPayer().userId}'s; claudeAccounts.dispatcher unset)`;
-    const got = vault.claudeByName(pinned);
-    return `vault token ${got ? `${got.entry.name} …${got.entry.last4}` : pinned} (claudeAccounts.dispatcher)`;
-  },
+  dispatcherWait: dispatcherWaitWhy,
 });
 agents.accountMoving = (info, why) => tokenSwitch.moving(info, why);
 // w5921: the ledger says why a request sits undecided when the dispatcher is rate-limited, and does not offer it again then.
 agents.orchestrators.dispatcherLimited = () => tokenSwitch.dispatcherLimited();
+// w5921: a config change, a vault change or a token that ran out moves an idle dispatcher (and a person's orchestrator whose
+// pool setting changed) at once; one mid-turn moves at the first check after its turn ends. Not in a dry run.
+if (!isDryRun) setInterval(() => agents.applyAccountConfig('the 30-second check'), 30_000).unref();
 if (!isDryRun) {
   sessions.events.on('rateLimit', (s: { info: SessionInfo }, info: RateLimitInfo) => tokenSwitch.rateLimit(s.info, info));
   // A machine's session reports its last result beside the turn's end: read it a moment later, from the store.

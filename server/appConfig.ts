@@ -528,7 +528,8 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       const pool = dispatcherPoolOf(typeof v === 'string' ? v : undefined);
       if (pool !== undefined) {
         if (!POOL_PERSON.test(pool)) throw new Error(`${key} is "${DISPATCHER_POOL_PREFIX}<login>", a login with a Claude pool in the vault, e.g. "pool:ben"`);
-        const known = (users ?? []).find((u) => u.toLowerCase() === pool.toLowerCase());
+        // Without the logins (fffctl conf set, which runs apart from the portal) the shape is checked, as for "vault:<name>".
+        const known = users ? users.find((u) => u.toLowerCase() === pool.toLowerCase()) : pool;
         if (!known) throw new Error(`${key}: no login ${JSON.stringify(pool.slice(0, 40))}; the logins are ${(users ?? []).join(', ') || '(none)'}`);
         const context = vaultContext();
         if (context && !context.vault.hasClaudeFor(known)) throw new Error(`${key}: ${known} has no enabled Claude token in the vault that its key opens (fffctl vault list; docs/vault.md section 10): the dispatcher would not start`);

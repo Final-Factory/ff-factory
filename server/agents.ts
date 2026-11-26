@@ -3811,6 +3811,51 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return `its process runs on ${on}'s Claude pool and ${person}'s pool setting names ${isSamePerson(pool, person) ? 'their own' : `${pool}'s`} now, so it restarts there before this message (w1717)`;
   }
 
+  /** w5921: the last config move sent to each orchestrator (by session id): one line per reason in 10 minutes, never a loop. */
+  private readonly configMoved = new Map<string, { why: string; at: number }>();
+
+  /**
+   * w5921 (lothsahn, 2026-11-26: "Changing that config should take effect immediately. If it requires a restart the dispatcher
+   * should be restarted."): each live orchestrator whose process runs on another token or pool than its config names now is
+   * restarted between turns. The dispatcher: claudeAccounts.dispatcher (a pinned token, one person's pool, or the system
+   * payer's pool by their setting), or its token out while its own pool has one with room. A person's orchestrator: their pool
+   * setting (w1717); its token running out is w1745's, at its turn's end. An idle one is sent one line, and the send stops its
+   * process and starts it again on the right token first (moveFor), its conversation kept. One mid-turn finishes its turn on
+   * the token it started on (a turn is never killed); the next call after it ends moves it: index.ts calls this every 30 s,
+   * and at once after set_app_config claudeAccounts.dispatcher and set_pool. The ids sent.
+   */
+  applyAccountConfig(cause: string): string[] {
+    const sent: string[] = [];
+    const now = Date.now();
+    for (const h of this.sessions.sessions.values()) {
+      const i = h.info;
+      if (i.kind !== 'orchestrator' || !h.live || isMidTurn(i) || !i.account) continue;
+      const dispatcher = i.orchestratorRole === 'dispatcher' && !this.orchestrators.ownerOf(i);
+      const why = dispatcher ? this.orchestratorPoolMove(h) : this.personPoolMove(h);
+      if (!why) {
+        this.configMoved.delete(i.id);
+        continue;
+      }
+      const last = this.configMoved.get(i.id);
+      if (last && last.why === why && now - last.at < 10 * 60_000) continue;
+      this.configMoved.set(i.id, { why, at: now });
+      console.log(`token move (w5921): ${dispatcher ? 'the dispatcher' : `orchestrator ${i.id}`} restarts between turns: ${why} (${cause})`);
+      sent.push(i.id);
+      void this.sessions.send(i.id, `[token move] FF Factory restarted your Claude process on another token before this message, because ${why}. Your conversation is as you left it (w5921, docs/vault.md "When a token runs out"). Nothing to do for this line: carry on with what you have; if nothing is in hand, reply in one line.`, 'system');
+    }
+    return sent;
+  }
+
+  /** A person's orchestrator whose process runs on another pool than their pool setting names now (w1717), else undefined. */
+  private personPoolMove(s: SessionHandle): string | undefined {
+    const person = this.orchestrators.ownerOf(s.info)?.userId;
+    if (!person || !s.info.account) return undefined;
+    const pool = this.poolOf(person);
+    const on = this.tokenOwner?.(s.info.account);
+    if (!on || isSamePerson(on, pool)) return undefined;
+    return `its process runs on ${on}'s Claude pool and ${person}'s pool setting names ${isSamePerson(pool, person) ? 'their own' : `${pool}'s`} now (w1717)`;
+  }
+
   /** Whose Claude pool `person`'s work runs on (w1717, AppSettings.pool): their own unless their setting names another's. */
   poolOf(person: string): string {
     return poolOwnerOf(this.store.settings.pool, person);
@@ -3831,7 +3876,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const pools = withPool(this.store.settings.pool, person, from, people, (u) => this.hasPool?.(u) ?? false);
     this.store.putSettings({ pool: pools });
     const after = this.poolOf(person);
-    if (!isSamePerson(before, after)) console.log(`pool setting (w1717): ${person}'s work now runs on ${isSamePerson(after, person) ? 'their own pool' : `${after}'s pool`} (was ${isSamePerson(before, person) ? 'their own' : `${before}'s`}), set by ${by}`);
+    if (!isSamePerson(before, after)) {
+      console.log(`pool setting (w1717): ${person}'s work now runs on ${isSamePerson(after, person) ? 'their own pool' : `${after}'s pool`} (was ${isSamePerson(before, person) ? 'their own' : `${before}'s`}), set by ${by}`);
+      // w5921: their orchestrator (and the dispatcher, when it runs on the payer's pool) moves now, not at its next message.
+      this.applyAccountConfig(`${person}'s pool setting changed`);
+    }
     return after;
   }
 
@@ -7464,6 +7513,8 @@ ${w.repo ?? ''}
             if (key.startsWith('machines.cleanup.')) this.machines.pushCleanupConfig();
             if (key.startsWith('machines.activityPause.')) this.machines.pushActivityConfig(machine);
             if (key === 'usagePollMinutes') this.usagePollChanged?.();
+            // w5921: the dispatcher restarts on the token or pool it names now, between turns (never mid-turn).
+            if (key === 'claudeAccounts.dispatcher') this.applyAccountConfig('config claudeAccounts.dispatcher changed');
             // w4468: a hold lifted or a reservation changed (placement.hold, holdExcept, minPriority) re-places Queued work now.
             if (key.startsWith('placement.')) this.orchestrators?.capacityMayHaveFreed(`config ${key} changed`);
             if (key === 'live.enabled') await this.liveHub?.switched(after === true);
