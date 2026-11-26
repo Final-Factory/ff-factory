@@ -1318,6 +1318,10 @@ older daemon ignores it and keeps making worktrees.
   `tools_disk_lock` (`warn` or `on`, Windows only) writes daemon.json `toolsDiskLock`; the daemon restarts with it. `on`
   keeps a `<root>\tools` child that holds a `.vhd`/`.vhdx` Medium, so workers cannot write there; `warn` (unset) only logs it
   and is the way back.
+- **CI jobs go first on a Windows CI-first machine** (w6110; docs/self-recovery.md "CI jobs go first on LothDesktop"):
+  `ops_worker` `machine_update` `win_ci_first` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `winCiFirst`;
+  the daemon restarts with it. `enforce` lowers agents' tools to BelowNormal while a CI job runs; `warn` (unset) only logs
+  what they use and raises back anything lowered, the way back.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 

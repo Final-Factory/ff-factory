@@ -110,7 +110,7 @@ import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
-import { WIN_CI_FIRST, WinCiFirst, machineBusyMs } from './ciFirstWin.ts';
+import { WIN_CI_FIRST, WinCiFirst, machineBusyMs, readLowered, writeLowered } from './ciFirstWin.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -293,6 +293,13 @@ export interface DaemonConfig {
    * write there. Set remotely by `ops_worker machine_update tools_disk_lock`, read at the daemon's start; "warn" is the recovery.
    */
   toolsDiskLock?: ToolsDiskLockMode;
+  /**
+   * w6110: CI jobs go first on a Windows CI-first machine (machine/ciFirstWin.ts, WIN_CI_FIRST: lothdesktop): "warn" (the default
+   * when unset) only logs what the agents' processes take beside a CI job; "enforce" lowers the processes agents' tools start to
+   * BelowNormal while a job runs, recorded in <root>/tmp/ci-first-lowered.json and raised back when it is off or warn again; "off"
+   * stops it. Set remotely by `ops_worker machine_update win_ci_first`, read at the daemon's start; "warn" is the recovery.
+   */
+  winCiFirst?: 'off' | 'warn' | 'enforce';
   /**
    * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
    * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
@@ -1164,6 +1171,10 @@ export class Daemon {
       facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
       machineBusyMs: () => machineBusyMs(),
       self: process.pid,
+      mode: cfg.winCiFirst,
+      held: () => !!(this.timedHolderHere() ?? this.personHolder()),
+      setPriority: (pid, priority) => setPriorityOf(pid, priority),
+      record: { read: () => (cfg.root ? readLowered(cfg.root) : {}), write: (l) => cfg.root && writeLowered(cfg.root, l) },
       now: () => Date.now(),
       log: (line) => log(line),
     });

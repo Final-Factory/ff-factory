@@ -15,10 +15,22 @@
 // Editors the daemon starts are not under a host (Start-Process) and count as the rest (the pool's belowNormal setting,
 // machine/sandboxes.ts, runs them BelowNormal where it is on); batch builds go to Idle (lowerBuild).
 //
-// This step is warn only (the lockout rule, w6110): nothing is set. The tick logs, while a CI job runs, how many cores
-// the machine, the jobs and each agent's processes used over the last tick, and how many of the agents' processes run
-// above `priority`, the evidence the enforcing step (a separate PR, with a daemon.json switch and an undo) rests on.
+// daemon.json `winCiFirst` picks what it does (read at the daemon's start; `ops_worker machine_update win_ci_first`):
+// - "warn" (unset): nothing is set. While a CI job runs the tick logs how many cores the machine, the jobs and each
+//   agent's processes used over the last tick, and how many of the agents' tools' processes run above `priority`.
+// - "enforce": while a CI job runs, those processes go to `priority` (BelowNormal), and what they start inherits it. Only
+//   an agent's tools are lowered (what its claude starts: shells, cargo, python): the host and its direct children
+//   (claude) keep their priority, so the agent's loop, its heartbeat and the hang watch's CPU reading are not starved
+//   (and Windows' balance-set manager still boosts a starved thread now and then). No Unity editor, or what one started,
+//   is lowered. Nothing is lowered while a bench or a person's turn holds the machine, and what was lowered is raised
+//   back then, so a timed run measures what it always did; it is raised back too once no CI job runs. Each lowered
+//   process is kept with its old priority in <root>/tmp/ci-first-lowered.json, so a daemon started with "warn" or "off"
+//   raises what is still running (and what it started since, still at the lowered priority) back: that is the recovery,
+//   and it needs nobody at the machine.
+// - "off": nothing is read or logged, beyond raising back what that record holds.
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import type { RunnerCensus } from './benchRunners.ts';
 import type { Proc } from './unity.ts';
 
@@ -42,6 +54,11 @@ export const WIN_CI_FIRST: Record<string, WinCiFirstSettings> = { lothdesktop: L
 
 export type WinProc = Proc;
 
+export type WinCiFirstMode = 'off' | 'warn' | 'enforce';
+
+/** What enforcing lowered, by `pid@start`: the priority it had and when it was lowered. */
+export type Lowered = Record<string, { prev: number; at: number }>;
+
 export interface ProcFact {
   pid: number;
   startedAt?: number;
@@ -62,14 +79,25 @@ export interface WinCiFirstDeps {
   machineBusyMs: () => number;
   /** The daemon's own pid. */
   self: number;
+  /** daemon.json `winCiFirst`; unset is "warn". */
+  mode?: WinCiFirstMode;
+  /** A bench or a person's turn holds this machine now (machine/benchTurn.ts's holder). */
+  held?: () => boolean;
+  /** os.setPriority; false when it could not. Without it nothing is lowered or raised. */
+  setPriority?: (pid: number, priority: number) => boolean;
+  /** The record of what was lowered (<root>/tmp/ci-first-lowered.json). */
+  record?: { read: () => Lowered; write: (l: Lowered) => void };
   now: () => number;
   log: (line: string) => void;
 }
 
 export interface WinCiFirstResult {
   jobs: number;
-  /** Agents' processes above the setting's priority. */
+  /** Agents' tools' processes above the setting's priority (before this tick lowered any). */
   above: number;
+  /** Processes this tick lowered, and raised back. */
+  lowered?: number;
+  raised?: number;
   /** Cores over the last tick, while the same jobs ran and both ticks were read. */
   machineCores?: number;
   jobCores?: number;
@@ -140,6 +168,39 @@ export function agentTrees(roots: number[], procs: Pick<Proc, 'pid' | 'ppid'>[],
   return out;
 }
 
+export const loweredFile = (root: string) => path.join(root, 'tmp', 'ci-first-lowered.json');
+
+/** The record of what enforcing lowered under this worker root ({} when there is none or it does not parse). */
+export function readLowered(root: string): Lowered {
+  try {
+    const v = JSON.parse(fs.readFileSync(loweredFile(root), 'utf8')) as unknown;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+    const out: Lowered = {};
+    for (const [k, l] of Object.entries(v as Record<string, unknown>)) {
+      const r = l as { prev?: unknown; at?: unknown };
+      if (/^\d+@\d+$/.test(k) && typeof r?.prev === 'number' && typeof r?.at === 'number') out[k] = { prev: r.prev, at: r.at };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function writeLowered(root: string, l: Lowered) {
+  const file = loweredFile(root);
+  if (!Object.keys(l).length) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(l));
+  fs.renameSync(tmp, file);
+}
+
+const isUnity = (p: WinProc) => /^unity(\.exe)?$/i.test(p.name ?? '') || /(^|[\\/"])unity\.exe"?(\s|$)/i.test(p.cmd);
+const imageOf = (p: WinProc | undefined) => (p?.name || (p?.cmd ?? '?').trim().replace(/^"/, '').split(/["\s]/)[0].split(/[\\/]/).pop() || '?');
+
 export class WinCiFirst {
   private readonly d: WinCiFirstDeps;
   private jobKey = '';
@@ -148,13 +209,29 @@ export class WinCiFirst {
   private listFailing = false;
   private factsFailing = false;
   private ticking = false;
+  private heldSaid = false;
+  private lowered: Lowered = {};
 
   constructor(d: WinCiFirstDeps) {
     this.d = d;
+    try {
+      this.lowered = d.record?.read() ?? {};
+    } catch {
+      this.lowered = {};
+    }
   }
 
   get enabled(): boolean {
     return !!this.d.settings;
+  }
+
+  get mode(): WinCiFirstMode {
+    return this.d.mode ?? 'warn';
+  }
+
+  /** What enforcing lowered and has not raised back yet. */
+  loweredNow(): Lowered {
+    return { ...this.lowered };
   }
 
   async tick(): Promise<WinCiFirstResult | undefined> {
@@ -166,6 +243,59 @@ export class WinCiFirst {
     } finally {
       this.ticking = false;
     }
+  }
+
+  private save() {
+    try {
+      this.d.record?.write(this.lowered);
+    } catch (e) {
+      this.d.log(`ci first: could not write the record of lowered processes: ${(e as Error).message.slice(0, 200)}`);
+    }
+  }
+
+  /**
+   * Raise back each recorded process still running (the same pid and start time) to the priority it had, and what it
+   * started since it was lowered and still runs at the lowered priority (it inherited it) to that same priority. The record
+   * is emptied: a process that could not be raised is said in the log, not tried again.
+   */
+  private async raise(procs: WinProc[], why: string, s: WinCiFirstSettings): Promise<number> {
+    const keys = Object.keys(this.lowered);
+    if (!keys.length) return 0;
+    if (!this.d.setPriority) return 0;
+    const pids = [...new Set(keys.map((k) => Number(k.split('@')[0])))];
+    const stop = new Set<number>([this.d.self, ...this.d.hosts().map((h) => h.pid)]);
+    const loose = agentTrees(pids, procs, stop, new Map(procs.map((p) => [p.pid, 0])));
+    const facts = await this.d.facts([...new Set([...pids, ...[...loose.values()].flat()])]);
+    const byPid = new Map(facts.map((f) => [f.pid, f]));
+    const alive = pids.filter((p) => byPid.has(p) && this.lowered[keyOf(byPid.get(p)!)] !== undefined);
+    const started = new Map(facts.filter((f) => f.startedAt !== undefined).map((f) => [f.pid, f.startedAt!]));
+    const below = agentTrees(alive, procs, stop, started);
+    let n = 0;
+    let failed = 0;
+    const done = new Set<number>();
+    const up = (pid: number, to: number) => {
+      done.add(pid);
+      if (this.d.priorityOf(pid) !== s.priority) return;
+      if (this.d.setPriority!(pid, to)) n++;
+      else failed++;
+    };
+    for (const pid of alive) {
+      const l = this.lowered[keyOf(byPid.get(pid)!)];
+      up(pid, l.prev);
+      for (const c of below.get(pid) ?? []) {
+        const cf = byPid.get(c);
+        if (done.has(c) || !cf || this.lowered[keyOf(cf)] !== undefined) continue;
+        // Only what it started since it was lowered: a child already there at BelowNormal had that of its own.
+        if ((cf.startedAt ?? 0) + 1_000 < l.at) continue;
+        up(c, l.prev);
+      }
+    }
+    this.lowered = {};
+    this.save();
+    this.d.log(
+      `ci first: raised ${n} process(es) back to the priority they had (${why}; ${keys.length} were recorded as lowered, ${alive.length} of them still run${failed ? `, ${failed} could not be raised` : ''})`,
+    );
+    return n;
   }
 
   private async step(s: WinCiFirstSettings): Promise<WinCiFirstResult | undefined> {
@@ -181,7 +311,32 @@ export class WinCiFirst {
       this.last = undefined;
       return undefined;
     }
+    const enforcing = this.mode === 'enforce' && !!this.d.setPriority;
+    const held = enforcing && (this.d.held?.() ?? false);
+    if (enforcing && held !== this.heldSaid) {
+      this.d.log(
+        held
+          ? "ci first: a bench or a person's turn holds this machine: what was lowered is raised back, and nothing is lowered until the turn ends"
+          : "ci first: the turn holding this machine ended: the agents' tools go below CI jobs again",
+      );
+      this.heldSaid = held;
+    }
     const census = this.d.census(procs);
+    const raiseIf = async (why: string) => {
+      if (!Object.keys(this.lowered).length) return 0;
+      try {
+        return await this.raise(procs, why, s);
+      } catch (e) {
+        this.d.log(`ci first: could not raise the lowered processes back yet (${why}): ${(e as Error).message.slice(0, 200)}`);
+        return 0;
+      }
+    };
+    let raised = 0;
+    if (!enforcing) raised = await raiseIf(`winCiFirst is ${this.mode}`);
+    else if (held) raised = await raiseIf("a bench or a person's turn holds this machine");
+    else if (!census.workers.length) raised = await raiseIf('no CI job runs now');
+    if (this.mode === 'off') return { jobs: 0, above: 0, raised };
+
     const key = census.workers
       .map((w) => w.pid)
       .sort((a, b) => a - b)
@@ -191,7 +346,7 @@ export class WinCiFirst {
       if (changed) this.d.log('ci first: no CI job running now');
       this.jobKey = key;
       this.last = undefined;
-      return { jobs: 0, above: 0 };
+      return { jobs: 0, above: 0, raised };
     }
     // A CI job runs. Its processes: each worker's tree by parent pid, never into an agent host or the daemon (an adopted
     // host's parent is the old daemon's pid, which a job's process can get again).
@@ -223,20 +378,47 @@ export class WinCiFirst {
       if (!this.factsFailing) this.d.log(`ci first: could not read the processes' start times and CPU: ${(e as Error).message.slice(0, 200)}`);
       this.factsFailing = true;
       this.last = undefined;
-      return { jobs: census.workers.length, above: 0 };
+      return { jobs: census.workers.length, above: 0, raised };
     }
     const now = this.d.now();
     const busy = this.d.machineBusyMs();
     const started = new Map(facts.filter((f) => f.startedAt !== undefined).map((f) => [f.pid, f.startedAt!]));
     const trees = agentTrees(roots, procs, stop, started);
     const byPid = new Map(facts.map((f) => [f.pid, f]));
-    let above = 0;
-    for (const pids of trees.values())
+    const procOf = new Map(procs.map((p) => [p.pid, p]));
+    // What enforcing lowers: an agent's tools (what its claude starts), not the host or its own direct children (claude
+    // keeps its priority, so its loop and the hang watch's CPU reading are not starved), and no Unity editor or what one
+    // started (editors keep the pool's own priority; batch builds go to Idle by lowerBuild already).
+    const tools = new Set<number>();
+    for (const [root, pids] of trees) {
+      const unity = new Set<number>();
       for (const pid of pids) {
-        const p = this.d.priorityOf(pid);
-        if (p !== undefined && p < s.priority) above++;
+        const p = procOf.get(pid);
+        if (unity.has(p?.ppid ?? -1) || (p && isUnity(p))) unity.add(pid);
+        else if (p && p.ppid !== root) tools.add(pid);
       }
-    const res: WinCiFirstResult = { jobs: census.workers.length, above };
+    }
+    let above = 0;
+    const lowered: string[] = [];
+    let lowerFailed = 0;
+    for (const pid of tools) {
+      const p = this.d.priorityOf(pid);
+      if (p === undefined || p >= s.priority) continue;
+      above++;
+      const f = byPid.get(pid);
+      if (!enforcing || held || f?.startedAt === undefined) continue;
+      if (this.d.setPriority!(pid, s.priority)) {
+        this.lowered[keyOf(f)] ??= { prev: p, at: now };
+        lowered.push(`${pid} ${imageOf(procOf.get(pid))}`);
+      } else lowerFailed++;
+    }
+    if (lowered.length || lowerFailed) {
+      if (lowered.length) this.save();
+      this.d.log(
+        `ci first: lowered ${lowered.length} of the agents' tools' process(es) to ${priorityName(s.priority)} beside the CI job(s), so the jobs go first (w6110)${lowerFailed ? `; ${lowerFailed} could not be lowered` : ''}${lowered.length ? `: ${lowered.slice(0, 8).join(', ')}${lowered.length > 8 ? ', ...' : ''}` : ''}`,
+      );
+    }
+    const res: WinCiFirstResult = { jobs: census.workers.length, above, lowered: lowered.length, raised };
     const jobFacts = [...jobPids].flatMap((p) => byPid.get(p) ?? []);
     const agentFacts = (root: number) => (trees.get(root) ?? []).flatMap((p) => byPid.get(p) ?? []);
     if (this.last && !changed && now > this.last.at) {
@@ -253,7 +435,12 @@ export class WinCiFirst {
     this.last = { at: now, since: readAt, busy, cpu };
 
     const sides = census.workers.map((w) => `${w.root.split('/').pop()} (worker ${w.pid} at ${priorityName(this.d.priorityOf(w.pid))})`).join(', ');
-    const would = `${above} of their process(es) run above ${priorityName(s.priority)}, which enforcing would lower (warn only, w6110)`;
+    const would =
+      this.mode === 'enforce'
+        ? held
+          ? `none of their tools lowered while a bench or a person's turn holds this machine`
+          : `${Object.keys(this.lowered).length} of their tools' process(es) lowered to ${priorityName(s.priority)} so far`
+        : `${above} of their tools' process(es) run above ${priorityName(s.priority)}, which enforcing would lower (warn only, w6110)`;
     if (changed) {
       this.d.log(`ci first: CI job(s) running: ${sides}; ${hosts.length} agent(s) beside them; ${would}`);
       this.warnedAt = 0;

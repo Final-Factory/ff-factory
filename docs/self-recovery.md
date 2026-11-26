@@ -289,7 +289,7 @@ priority. When a CI job starts or ends the daemon logs a `ci first:` line with b
 `cpu.weight`, and FF Factory's scopes' `cpu.weight` and highest thread priority (`-` means the cpu controller is off
 there, so nice decides). GPU and memory are not shared out by either. Tests: `server/w5322CiFirst.test.ts`.
 
-### CI jobs go first on LothDesktop: warn only so far (w6110)
+### CI jobs go first on LothDesktop (w6110)
 
 On 2026-11-26 from 12:54 to 14:53 UTC a worker's planted CPU hogs (64 to 96 busy loops for w6066's failover test) ran at
 Normal priority on LothDesktop's 16 threads beside its two ffu runners, and their steps ran 10 to 25 times slower: a
@@ -300,12 +300,28 @@ Linux only. Windows has no scopes or nice; it has priority classes, which a chil
 `machine/ciFirstWin.ts` (`WIN_CI_FIRST`: lothdesktop only, ticked once a minute from `machine/daemon.ts`) finds, while a
 CI job runs, each agent host's processes by walking down from the host's own process. The walk never enters the host
 (its heartbeat), another host, the daemon or a runner's tree, and keeps a child only when its parent started before it
-(Windows reuses pids and does not reparent orphans). This first step sets nothing. It logs a `ci first:` line when a job
+(Windows reuses pids and does not reparent orphans). With daemon.json `winCiFirst` unset or `warn` it sets nothing. It logs a `ci first:` line when a job
 starts or ends, and at most every 5 min while the agents' processes use 4 cores or more: the cores the machine, the jobs,
 each agent and the rest (editors, orphans, processes that ended) used over the last tick, and how many of the agents'
-processes run above BelowNormal. Editors the daemon starts are not under a host and count as the rest (the pool's
-`belowNormal` setting runs them BelowNormal where it is on); batch builds go to Idle. The step that lowers the agents' processes to BelowNormal comes separately, behind
-a daemon.json switch with an undo. Tests: `server/w6110CiFirstWin.test.ts`.
+tools' processes run above BelowNormal. Editors the daemon starts are not under a host and count as the rest (the pool's
+`belowNormal` setting runs them BelowNormal where it is on); batch builds go to Idle.
+
+With `winCiFirst` `enforce` (set by `ops_worker machine_update win_ci_first enforce`, Windows only; read at the daemon's
+start) the same tick lowers those tools' processes to BelowNormal while a job runs, and what they start inherits it:
+- **What is lowered**: an agent's tools only, what its claude starts (shells, cargo, rustc, python, players). The host and
+  its direct children (claude) keep their priority, so the agent's own loop and its heartbeat are not starved; nor is the
+  hang watch's reading of claude's CPU (it waits 30 min of silence, and Windows' balance-set manager boosts a starved
+  thread now and then). No Unity editor or what it started is lowered, nor the daemon, another host or a runner's tree.
+- **The record**: each lowered process, by pid and start time, with the priority it had, in
+  `<root>/tmp/ci-first-lowered.json`; each lowering is a `ci first: lowered N ...` line naming the pids and images.
+- **Raised back**: once no CI job runs; while a bench or a person's play turn holds the machine (nothing is lowered then,
+  so a timed run measures what it always did); and by a daemon started with `warn` or `off` while the record holds
+  anything. Each recorded process still running with the same start time goes back to the priority it had, and so does
+  what it started since it was lowered that still runs at BelowNormal; a pid Windows gave to another process is left alone.
+- **Recovery**: `ops_worker machine_update win_ci_first warn` (or `off`, which also stops the logging); the daemon restarts
+  with it and raises everything back, needing nobody at the machine.
+
+Tests: `server/w6110CiFirstWin.test.ts`.
 
 ## 3. The VHDX policy
 

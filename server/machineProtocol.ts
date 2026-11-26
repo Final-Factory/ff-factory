@@ -144,6 +144,8 @@ export interface LinkUpdateFlags {
   daemonTmpdir?: 'on' | 'off';
   /** A virtual disk in a Low tools child, warn or on (w5959, machine/lowIntegrity.ts toolsDiskPlan), Windows only: daemon.json `toolsDiskLock`; unset: carried. A daemon that predates it ignores it. */
   toolsDiskLock?: 'warn' | 'on';
+  /** CI jobs first on a Windows CI-first machine, off, warn or enforce (w6110, machine/ciFirstWin.ts), Windows only: daemon.json `winCiFirst`; unset: carried. A daemon that predates it ignores it. */
+  winCiFirst?: 'off' | 'warn' | 'enforce';
 }
 
 /**

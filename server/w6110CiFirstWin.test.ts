@@ -2,7 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import { runnerCensus } from '../machine/benchRunners.ts';
-import { LOTHDESKTOP_CI_FIRST, WIN_CI_FIRST, WinCiFirst, agentTrees, cpuBetween, priorityName, type ProcFact, type WinCiFirstDeps, type WinCiFirstSettings, type WinProc } from '../machine/ciFirstWin.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  LOTHDESKTOP_CI_FIRST,
+  WIN_CI_FIRST,
+  WinCiFirst,
+  agentTrees,
+  cpuBetween,
+  loweredFile,
+  priorityName,
+  readLowered,
+  writeLowered,
+  type Lowered,
+  type ProcFact,
+  type WinCiFirstDeps,
+  type WinCiFirstMode,
+  type WinCiFirstSettings,
+  type WinProc,
+} from '../machine/ciFirstWin.ts';
 
 /**
  * w6110: on 2026-11-26 12:54-14:53 UTC a worker's planted CPU hogs (64 to 96 busy loops, w6066) ran at Normal priority beside
@@ -24,7 +42,7 @@ const BASE: WinProc[] = [
   { pid: 31, ppid: 30, cmd: 'claude.exe' },
 ];
 
-function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[] } = {}) {
+function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[]; mode?: WinCiFirstMode; record?: Lowered; prio?: [number, number][] } = {}) {
   let procs = o.procs ?? BASE;
   const prio = new Map<number, number>([...[10, 11, 12, 20, 21, 22, 30].map((p) => [p, P.PRIORITY_NORMAL] as [number, number]), [23, P.PRIORITY_BELOW_NORMAL], [31, P.PRIORITY_ABOVE_NORMAL]]);
   const started = new Map<number, number>(procs.map((p) => [p.pid, 100 + p.pid])); // parents start before children
@@ -35,6 +53,9 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[] } = {}
   let busy = 0;
   let fail = false;
   let factsFail = false;
+  let held = false;
+  let record: Lowered = o.record ?? {};
+  const set: [number, number][] = [];
   const d: WinCiFirstDeps = {
     settings: o.settings === null ? undefined : (o.settings ?? LOTHDESKTOP_CI_FIRST),
     procs: async () => {
@@ -54,11 +75,24 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[] } = {}
     },
     machineBusyMs: () => busy,
     self: DAEMON,
+    mode: o.mode,
+    held: () => held,
+    setPriority: (pid, p) => {
+      if (!prio.has(pid)) return false;
+      prio.set(pid, p);
+      set.push([pid, p]);
+      return true;
+    },
+    record: { read: () => ({ ...record }), write: (l) => void (record = { ...l }) },
     now: () => now,
     log: (l) => void lines.push(l),
   };
+  for (const [pid, p] of o.prio ?? []) prio.set(pid, p);
   return {
     cf: new WinCiFirst(d),
+    set,
+    record: () => record,
+    setHeld: (h: boolean) => void (held = h),
     prio,
     started,
     lines,
@@ -74,7 +108,7 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[] } = {}
   };
 }
 
-test('lothdesktop is the one Windows CI-first machine, BelowNormal, and this step has no way to set a priority', () => {
+test('lothdesktop is the one Windows CI-first machine, BelowNormal', () => {
   assert.equal(WIN_CI_FIRST.lothdesktop, LOTHDESKTOP_CI_FIRST);
   assert.deepEqual(Object.keys(WIN_CI_FIRST), ['lothdesktop']);
   assert.equal(LOTHDESKTOP_CI_FIRST.priority, P.PRIORITY_BELOW_NORMAL);
@@ -96,10 +130,11 @@ test('beside a job: the job and the agents are logged, with the machine, the job
   const r = rig();
   const first = await r.cf.tick();
   assert.equal(first?.jobs, 1);
-  // 21, 22 (Normal) and 31 (AboveNormal) run above BelowNormal; 23 is BelowNormal already; the hosts 20 and 30 are not counted
-  assert.equal(first?.above, 3);
+  // 22 (Normal) runs above BelowNormal; 21 and 31 are the hosts' own children (claude) and 23 a Unity, none of them a tool;
+  // the hosts 20 and 30 are not counted
+  assert.equal(first?.above, 1);
   assert.equal(r.lines.length, 1);
-  assert.match(r.lines[0], /CI job\(s\) running: ffu-lothdesktop-2 \(worker 11 at Normal\); 2 agent\(s\) beside them; 3 of their process\(es\) run above BelowNormal, which enforcing would lower \(warn only, w6110\)/);
+  assert.match(r.lines[0], /CI job\(s\) running: ffu-lothdesktop-2 \(worker 11 at Normal\); 2 agent\(s\) beside them; 1 of their tools' process\(es\) run above BelowNormal, which enforcing would lower \(warn only, w6110\)/);
   r.advance(120_000); // an uneven tick: the window says what it was
   r.burn(22, 120_000 * 12); // a 12-core hog
   r.burn(12, 120_000 * 2);
@@ -163,7 +198,7 @@ test("a runner started under an agent host is the job's, not the agent's", async
   const r = rig({ procs });
   r.prio.set(40, P.PRIORITY_NORMAL);
   r.prio.set(41, P.PRIORITY_NORMAL);
-  assert.equal((await r.cf.tick())?.above, 3);
+  assert.equal((await r.cf.tick())?.above, 1);
   r.advance(60_000);
   r.burn(41, 60_000 * 3);
   const res = await r.cf.tick();
@@ -252,7 +287,7 @@ test("an adopted host whose old parent pid a job's process got again stays the a
   const procs = BASE.map((p) => (p.pid === 20 ? { ...p, ppid: 77 } : p)).concat([{ pid: 77, ppid: 12, cmd: 'rustc.exe' }]);
   const r = rig({ procs });
   r.prio.set(77, P.PRIORITY_NORMAL);
-  assert.equal((await r.cf.tick())?.above, 3);
+  assert.equal((await r.cf.tick())?.above, 1);
   r.advance(60_000);
   r.burn(22, 60_000 * 8);
   const res = await r.cf.tick();
@@ -267,4 +302,107 @@ test("a job whose first CPU read fails still gets its start line once the read a
   r.setFactsFail(false);
   await r.cf.tick();
   assert.equal(r.lines.filter((l) => /CI job\(s\) running/.test(l)).length, 1);
+});
+
+// ---- enforce (w6110's second step): daemon.json winCiFirst "enforce" ----
+
+test("enforce: beside a job only an agent's tools go to BelowNormal, recorded with what they had; hosts, claude, Unity and the job keep theirs", async () => {
+  const procs = [...BASE, { pid: 24, ppid: 23, cmd: 'bee_backend.exe' }];
+  const r = rig({ procs, mode: 'enforce', prio: [[24, P.PRIORITY_NORMAL]] });
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 1);
+  assert.deepEqual(r.set, [[22, P.PRIORITY_BELOW_NORMAL]]);
+  for (const pid of [10, 11, 12, 20, 21, 24, 30]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `pid ${pid}`);
+  assert.equal(r.prio.get(31), P.PRIORITY_ABOVE_NORMAL);
+  assert.deepEqual(r.record(), { '22@122': { prev: P.PRIORITY_NORMAL, at: 1_000_000 } });
+  assert.match(r.lines.join('\n'), /lowered 1 of the agents' tools' process\(es\) to BelowNormal beside the CI job\(s\), so the jobs go first \(w6110\): 22 python\.exe/);
+  assert.match(r.lines.join('\n'), /1 of their tools' process\(es\) lowered to BelowNormal so far/);
+  // the next tick finds it BelowNormal already: nothing set again
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.lowered, 0);
+  assert.equal(r.set.length, 1);
+});
+
+test('warn (the default) sets nothing even with a way to set', async () => {
+  const r = rig();
+  await r.cf.tick();
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.deepEqual(r.set, []);
+  assert.deepEqual(r.record(), {});
+});
+
+test("enforce: a bench or a person's turn raises what was lowered (and what it started since) back, and lowers nothing until it ends", async () => {
+  const procs = [...BASE, { pid: 25, ppid: 22, cmd: 'python.exe child.py' }, { pid: 26, ppid: 22, cmd: 'python.exe old.py' }];
+  const r = rig({ procs, mode: 'enforce', prio: [[26, P.PRIORITY_BELOW_NORMAL]] });
+  r.started.set(25, 2_000_000); // started after 22 was lowered, so it inherited BelowNormal
+  r.prio.set(25, P.PRIORITY_BELOW_NORMAL);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  r.setHeld(true);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.equal(res?.raised, 2);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(25), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(26), P.PRIORITY_BELOW_NORMAL, 'BelowNormal of its own before 22 was lowered: left alone');
+  assert.deepEqual(r.record(), {});
+  assert.equal(res?.lowered, 0);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL, 'nothing lowered while the turn holds');
+  assert.match(r.lines.join('\n'), /a bench or a person's turn holds this machine: what was lowered is raised back/);
+  r.setHeld(false);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL, 'lowered again once the turn ends');
+  assert.match(r.lines.join('\n'), /the turn holding this machine ended/);
+});
+
+test('enforce: once no CI job runs, what was lowered goes back', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  r.setProcs(BASE.filter((p) => p.pid !== 11 && p.pid !== 12));
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.equal(res?.jobs, 0);
+  assert.equal(res?.raised, 1);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.deepEqual(r.record(), {});
+});
+
+test('a daemon started with warn or off raises what the record holds; a reused pid (another start time) is left alone', async () => {
+  for (const mode of ['warn', 'off'] as const) {
+    const r = rig({
+      mode,
+      record: { '22@122': { prev: P.PRIORITY_NORMAL, at: 500 }, '31@999': { prev: P.PRIORITY_NORMAL, at: 500 } },
+      prio: [[22, P.PRIORITY_BELOW_NORMAL]],
+    });
+    r.prio.set(31, P.PRIORITY_BELOW_NORMAL); // 31 started at 131, not 999: another process with that pid
+    const res = await r.cf.tick();
+    assert.equal(res?.raised, 1, mode);
+    assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+    assert.equal(r.prio.get(31), P.PRIORITY_BELOW_NORMAL);
+    assert.deepEqual(r.record(), {});
+    assert.match(r.lines[0], new RegExp(`raised 1 process\\(es\\) back to the priority they had \\(winCiFirst is ${mode}; 2 were recorded as lowered, 1 of them still run\\)`));
+    if (mode === 'off') assert.equal(r.lines.length, 1, 'off: nothing else is read or said');
+  }
+});
+
+test('the record file: written atomically under <root>/tmp, bad entries dropped, removed when empty', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w6110-'));
+  try {
+    assert.deepEqual(readLowered(root), {});
+    writeLowered(root, { '22@122': { prev: 0, at: 5 } });
+    assert.deepEqual(readLowered(root), { '22@122': { prev: 0, at: 5 } });
+    fs.writeFileSync(loweredFile(root), JSON.stringify({ '22@122': { prev: 0, at: 5 }, bad: { prev: 0, at: 1 }, '7@1': { prev: 'x' } }));
+    assert.deepEqual(readLowered(root), { '22@122': { prev: 0, at: 5 } });
+    fs.writeFileSync(loweredFile(root), 'not json');
+    assert.deepEqual(readLowered(root), {});
+    writeLowered(root, {});
+    assert.equal(fs.existsSync(loweredFile(root)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

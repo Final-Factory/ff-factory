@@ -1073,6 +1073,17 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   const tdWin = store.readTranscript(OPS_ID, 300).filter((e) => e.kind === 'user').at(-1) as { text: string };
   assert.ok(tdWin.text.includes(`-ToolsDiskLock warn"'`), tdWin.text);
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-ToolsDiskLock on']);
+  // w6110: CI jobs first on a Windows CI-first machine: off, warn or enforce and nothing else, Windows only.
+  for (const bad of ['on', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', winCiFirst: bad as never }), /win_ci_first: off, warn or enforce/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', winCiFirst: 'enforce' }), /win_ci_first: Windows only, and biscuit is not a Windows PC/);
+  for (const m of ['off', 'warn', 'enforce'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', winCiFirst: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const cfWin = store.readTranscript(OPS_ID, 320).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(cfWin.text.includes(`-WinCiFirst ${m}"'`), cfWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), ['-WinCiFirst enforce']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), [], 'not Windows: no flag');
   ops.close();
 });
 
