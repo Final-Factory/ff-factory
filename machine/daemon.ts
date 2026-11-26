@@ -1446,7 +1446,11 @@ export class Daemon {
    */
   private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
     const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
-    const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    // Its own folder only when sessionTempEnv made it there (w6024 review, point 1): its fallback names the system temp,
+    // which must not pass for the Medium folder and skip the shared root and this warning.
+    const want = m.tempRoot ? sessionTempDir(m.tempRoot, id) : undefined;
+    const made = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    const own = want && made.TMP === want ? made : {};
     if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
     const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' && own.TMP ? 'on' : 'warn' };
     return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}), ...caches };

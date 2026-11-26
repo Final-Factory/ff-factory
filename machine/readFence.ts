@@ -1,7 +1,7 @@
 // The worker read fence's daemon-side helpers (w5546; docs/worker-fence.md "Reads"). No npm package: linkJob-safe.
 import fs from 'node:fs';
 import path from 'node:path';
-import { DAEMON_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, DAEMON_TMP_CHILD } from '../server/claudeHome.ts';
 
 /**
  * The read fence's mode on this machine (w5546 lockout review, lothsahn's rule: "warn-only first, enforce only after measured
@@ -139,7 +139,11 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
   ];
   const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
   const uniq = (l: string[]) => [...new Set(l)].filter(exists);
-  const asProbed = linux ? closed.flatMap((p) => (exists(p) && isDir(p) ? filesIn(p) : [p])) : closed;
+  // On Linux the daemon's own temp folder is left out (w6024 review, point 3): its files come and go, and one gone by the
+  // probe's open (ENOENT) would count as not judged and turn the read rules off until the next check. Elsewhere the folder
+  // itself is probed.
+  const daemonTmp = path.join(o.root, DAEMON_TMP_CHILD);
+  const asProbed = linux ? closed.flatMap((p) => (p === daemonTmp ? [] : exists(p) && isDir(p) ? filesIn(p) : [p])) : closed;
   return { closed: uniq(asProbed), open: uniq(open) };
 }
 

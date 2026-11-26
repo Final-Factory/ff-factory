@@ -53,7 +53,7 @@
   Left out: the install keeps what it has.
 .PARAMETER DaemonTmpdir
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
-  machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp\daemon, off keeps the
+  machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp-daemon, off keeps the
   system temp folder (the recovery). Left out: the install keeps what it has.
 .PARAMETER MediumAgentFolders
   With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
