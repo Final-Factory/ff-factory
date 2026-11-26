@@ -348,6 +348,9 @@ test('w890: Agents.waitOn names what a worker that ended its turn waits on: a de
   const env = await setupOnMachine(t);
   const { store, agents, dispatcher, call } = env;
   agentsRoom(agents, ['pc']);
+  // The ledger's status question, 3 s after a worker's turn ends without its requests' status: on a loaded machine it
+  // reached w1's worker before w3 started, and pc/alpha was busy with it (w5915, 3 of 6 runs at once on BEAST).
+  agents.orchestrators.statusAskDelayMs = 3_600_000;
   putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }, { id: 'w4' }, { id: 'w5' }, { id: 'w6', status: 'active' }]);
   // The release pass reads the ledger once per few seconds (Agents.waitLive); the test asks afresh.
   const waitOn = (i: SessionInfo) => {

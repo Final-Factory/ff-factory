@@ -4,3 +4,5 @@
   report the host's death first; hostCode's stand-in host exits after its closed line (each test waited out a 10 s exit
   wait, now about 0.1 s); w5938 reads each stand-in's command line once (a PowerShell CIM query on Windows); and w2231's
   last wait, a real sandbox switch on the test machine, allows 30 s.
+- **w890's test holds the ledger's status question** (w5915): 3 s after w1's worker ended its turn, the question gave
+  it a new turn on a loaded machine, and w3's start beside it was refused as busy (3 of 6 runs at once on BEAST).
