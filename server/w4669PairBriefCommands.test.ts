@@ -13,7 +13,8 @@ import { commandToSpawn, gitBash } from '../machine/unitySlots.ts';
 const commands = (text: string) => [...text.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
 
 // The game repo's scripts/nightly/ffnightly.py, its `run` parser: `--sha` and `--out` are required=True (origin/master,
-// 2026-11-18). build_player.sh: `PROJECT="$1"; SHA="$2"; TARGET="$3"` (the project folder, a 40-hex sha, mac|win|linux).
+// 2026-11-18). build_player.sh: `PROJECT="$1"; SHA="$2"; TARGET="$3"` (the project folder, a 40-hex sha, mac|win|linux;
+// w5965: pre-1.0's takes a required 4th, the cache root, and mac|win only).
 const NIGHTLY_RUN_REQUIRED = ['--sha', '--out'];
 
 for (const [name, brief] of [['PLAYERS_IN_SANDBOX', PLAYERS_IN_SANDBOX], ['BUILD_IN_SANDBOX', BUILD_IN_SANDBOX]] as const) {
@@ -25,8 +26,11 @@ for (const [name, brief] of [['PLAYERS_IN_SANDBOX', PLAYERS_IN_SANDBOX], ['BUILD
       const at = words.findIndex((w) => w.endsWith('build_player.sh'));
       assert.equal(words[at - 1], 'bash', `bash starts the script on every OS: ${c}`);
       assert.equal(words[at + 1], '"$PWD"', `the first argument is the project folder (the sandbox's path): ${c}`);
-      assert.equal(words.length - at - 1, 3, `project, sha, os: ${c}`);
-      assert.match(words[at + 3], /^<?(win\|mac\|linux|win|mac|linux)>?$/);
+      // w5965: a pre-1.0 commit's script (`<project-dir> <sha> <mac|win> <cache-root>`) needs the cache root master's defaults.
+      const args = words.length - at - 1;
+      assert.ok(args === 3 || args === 4, `project, sha, os[, cache root]: ${c}`);
+      assert.match(words[at + 3], args === 4 ? /^<?(win\|mac|win|mac)>?$/ : /^<?(win\|mac\|linux|win|mac|linux)>?$/);
+      if (args === 4) assert.equal(words[at + 4], '"$FF_WORKER_ROOT/player-cache"', `the cache root is the shared player cache: ${c}`);
     }
   });
 }
