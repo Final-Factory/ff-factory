@@ -364,7 +364,7 @@ const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'source', '.', 'eval
  * `cmd` with each heredoc's body taken out: it is the input of the command before it (a PR body, a file's text), never a command
  * line, so `cat > "$TMPDIR/body.md" <<'EOF'` with "git show HEAD:x > /tmp/bq_head.ts" in its text writes nothing in /tmp. A body
  * fed to a shell (`bash <<EOF`) is commands and stays. The command line itself (`cat <<'EOF' > /tmp/x`) is always kept. Unlike
- * guard.ts's withoutTextArgs, which also empties quoted -t values, this keeps `cp -t "/tmp/dst" a` seen. Exported for tests.
+ * guard.ts's withoutTextArgs, which also empties quoted -t values, this keeps `cp -t "<temp>/dst" a` seen. Exported for tests.
  */
 export function withoutHeredocText(cmd: string): string {
   return cmd.replace(HEREDOC, (m, lead: string, before: string, q: string, delim: string, after: string, body: string) => {
@@ -445,7 +445,7 @@ export function systemTempWrites(cmd: string, ctx: TmpWriteContext): TempWrite[]
         }
         const ps = /^\$env:(TMPDIR|TEMP|TMP)$/i.exec(w[0] ?? '');
         if (ps && w[1] === '=' && w[2]) judge(w[2], `$env:${ps[1]} =`);
-        // [IO.File]::WriteAllText('/tmp/x', ...), [System.IO.Directory]::CreateDirectory(...): every quoted path it is given (w6040)
+        // [IO.File]::WriteAllText(<temp path>, ...), [System.IO.Directory]::CreateDirectory(...): every quoted path it is given (w6040)
         for (const call of stage.matchAll(/\[(?:System\.)?IO\.(?:File|Directory)\]::(?:Write|Append|Create|Copy|Move|Delete|Replace|Open)\w*\(([^)]*)\)/gi))
           for (const lit of call[1].matchAll(/'([^']*)'|"([^"]*)"/g)) judge(lit[1] ?? lit[2], '[IO.File]');
         if (['cd', 'pushd', 'chdir', 'set-location', 'sl', 'push-location'].includes(verb)) {
