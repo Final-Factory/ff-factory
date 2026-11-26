@@ -540,4 +540,5 @@ test("lowDiskImages names each virtual disk in a Low tools child, never node's, 
   assert.match(w, /^WARNING worker integrity: /);
   assert.match(w, /Nothing was changed/);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>')), w);
+  assert.ok(w.includes(path.join(R, 'wsl', '<distro>', 'ext4.vhdx') + ' /setintegritylevel M'), w); // a same-volume move keeps the Low label (w5958)
 });

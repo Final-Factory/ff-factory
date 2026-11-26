@@ -274,7 +274,10 @@ const DISK_IMAGE = /\.vhdx?$/i;
  * rewrite the disk while the distro is stopped, and the next `wsl -d` by a Medium process runs what it planted as root in
  * the distro, which reaches the user's drives (/mnt/<drive>) and starts Windows programs at Medium (WSL interop). The
  * fix is to move the disk out of the workers' reach, into a root child no worker fence opens (one not in WORKER_CHILDREN
- * stays Medium): `wsl --manage <distro> --move <root>\wsl\<distro>`, the distro stopped. Exported for tests.
+ * stays Medium): `wsl --manage <distro> --move <root>\wsl\<distro>`, the distro stopped. A move within one volume is a
+ * rename, so the disk keeps the Low label it inherited and nothing relabels `<root>\wsl` later: after the move,
+ * `icacls <root>\wsl\<distro>\ext4.vhdx /setintegritylevel M` (or `/reset`) and check that icacls no longer shows
+ * `Mandatory Label\Low` (w5958's review). Exported for tests.
  */
 export function lowDiskImages(root: string, toolsChildren: { name: string; dir: boolean }[] | undefined, list: (dir: string) => string[] = (d) => { try { return fs.readdirSync(d); } catch { return []; } }): string[] {
   const found: string[] = [];
@@ -288,7 +291,7 @@ export function lowDiskImages(root: string, toolsChildren: { name: string; dir: 
 
 /** The warning the daemon logs for one disk lowDiskImages finds (w5948). Exported for tests. */
 export const lowDiskImageWarning = (disk: string, root: string) =>
-  `WARNING worker integrity: the virtual disk ${disk} is in a folder workers write (labelled Low): a Low worker can rewrite it while its VM or WSL distro is stopped, and the next start by a Medium process runs what it planted at Medium (w5948). Nothing was changed: move it into a folder no worker writes, e.g. \`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\` with the distro stopped (\`wsl --list -v\` names the distro).`;
+  `WARNING worker integrity: the virtual disk ${disk} is in a folder workers write (labelled Low): a Low worker can rewrite it while its VM or WSL distro is stopped, and the next start by a Medium process runs what it planted at Medium (w5948). Nothing was changed: move it into a folder no worker writes, e.g. \`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\` with the distro stopped (\`wsl --list -v\` names the distro), then relabel the moved disk, which keeps its Low label (a move on one volume is a rename): \`icacls ${path.join(root, 'wsl', '<distro>', 'ext4.vhdx')} /setintegritylevel M\`, and check icacls no longer shows Mandatory Label\\Low.`;
 
 /** The account the daemon runs as, as icacls names it (DOMAIN\\user), or undefined off Windows. */
 export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | undefined =>

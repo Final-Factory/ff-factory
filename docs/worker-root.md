@@ -829,7 +829,10 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     disk while the distro is stopped, and a Medium `wsl -d` then runs it with the user's drives and WSL interop at Medium.
     At start the daemon logs `WARNING worker integrity: the virtual disk ...` for each `*.vhdx`/`*.vhd` in a tools child
     but `node` (`lowDiskImages`, `machine/lowIntegrity.ts`). The fix is a move into a root child no fence opens, e.g.
-    `wsl --manage ffu-sniper --move <root>\wsl\ffu-sniper` with the distro stopped.
+    `wsl --manage ffu-sniper --move <root>\wsl\ffu-sniper` with the distro stopped, then a relabel: a move within one volume
+    is a rename, so `ext4.vhdx` keeps the Low label it inherited, and `<root>\wsl` is not in WORKER_CHILDREN, so nothing
+    relabels it later. Run `icacls <root>\wsl\ffu-sniper\ext4.vhdx /setintegritylevel M` (or `/reset`) and check that
+    `icacls` no longer shows `Mandatory Label\Low` (w5958's review).
   - **The daemon relabels at start, which takes a minute or two.** A probe right after a deploy reads the old labels. On
     LothDesktop on 2026-11-25, `worker integrity: kept V:\ffw\tools Medium` came about a minute after the new daemon
     started, at 17:36:17Z. A probe just before it still saw `tools` Low and `tools\node` deletable. Probe after that
