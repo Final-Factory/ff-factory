@@ -4,7 +4,7 @@
 // unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. On macOS and Linux that folder was the Unity slots
 // mailbox's `bin`, and both worker fences let workers write the mailbox (writeLock.ts `--rw <mailbox>`, workerFence.ts
 // extraWritable): a fenced worker could replace `ff-pr` and have it run, unfenced, in the next agent outside the fence,
-// with that agent's tokens. Windows moved its shims to `<root>/tools/shims` in w5838.
+// with that agent's tokens. Windows moved its shims to `<root>/tools/shims` in w5838 and to `<root>/tools-medium/shims` in w6101.
 //
 // "on" (w5899, the default) moves the shims to `<root>/tools-medium/shims` (enforcedShimDir), a folder both fences already
 // keep read-only (writeLock.ts LOCKED_CHILDREN, workerFence.ts READ_ONLY_IN_ROOT: TOOLS_MEDIUM_CHILD), so no new fence
@@ -27,7 +27,7 @@ import { TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
 export type PathFenceSetting = 'off' | 'warn' | 'on';
 
-/** The mode for this daemon: unset is "on"; Windows is always "off" (its shims sit in `<root>/tools/shims`, w5838). */
+/** The mode for this daemon: unset is "on"; Windows is always "off" (its shims sit in `<root>/tools-medium/shims`, Medium, w5838 and w6101). */
 export function pathFenceMode(setting: unknown, platform: NodeJS.Platform = process.platform): PathFenceSetting {
   if (platform === 'win32') return 'off';
   return setting === 'off' || setting === 'warn' ? setting : 'on';

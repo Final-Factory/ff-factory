@@ -201,7 +201,7 @@ function within(p: string, dir: string, P: PlatformPath): boolean {
 /**
  * w5542: a PATH with no folder a worker can write: every entry inside the worker root is dropped except the daemon's
  * folder (the shims folder comes first in a worker's PATH: `<root>/tools-medium/shims` on macOS and Linux with the path
- * fence on (w5899), `<root>/tools/shims` on Windows (Medium since w5838); with the path fence warn or off, or for an agent
+ * fence on (w5899), `<root>/tools-medium/shims` on Windows too (Medium; `<root>/tools/shims` from w5838 to w6101); with the path fence warn or off, or for an agent
  * started before the move, `<root>/unity-slots/bin`, which workers can write, so a planted `python3` or `gh` there would
  * run at the host's level), and so is every relative or empty entry (the working directory).
  */
@@ -406,7 +406,7 @@ export async function fetchHudData(repo: string, pr: number | string, run: GitRu
   return { dir };
 }
 
-/** w5542: gh on the agent host's PATH with every folder workers can write left out (the shims folder comes first there: `<root>/tools/shims` on Windows, w5838; `<root>/tools-medium/shims` on macOS and Linux, w5899, or `<root>/unity-slots/bin` with the path fence warn or off). */
+/** w5542: gh on the agent host's PATH with every folder workers can write left out (the shims folder comes first there: `<root>/tools-medium/shims` on Windows, w6101 (`<root>/tools/shims` from w5838), and on macOS and Linux, w5899, or `<root>/unity-slots/bin` with the path fence warn or off). */
 export function trustedGh(root: string | undefined = process.env.FF_WORKER_ROOT, appDir: string = trustedAppDir()): string {
   return resolveTrusted('gh', trustedPathValue(process.env.PATH ?? process.env.Path, root, appDir)) ?? 'gh';
 }
