@@ -1,7 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
 
 /**
  * The agents' node on a Windows worker root (w1742; lothsahn, 2026-10-22: "we're making random folders under the temp
@@ -71,8 +70,9 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * BEAST's instance portals, the updater task and the elevated `worker.ts tools` run. w5717 closed that from its deploy
  * on; this finds one put there before. Nothing here runs the installed node: what is there is read from this record,
  * which `tools` (Medium) writes when it puts the pinned node there: the version, the SHA-256 of every file in the folder
- * and the folder's identity (`folderId`). It lives in `<root>\tools-medium`, which no daemon labels Low, rolled back or
- * not; the one `tools\node.json` of before w5868's review, which a rolled-back daemon left Low-writable, is never read.
+ * and the folder's identity (`folderId`). It lives in `<root>\daemon\agent-node` (`agentNodeHome`), which no daemon
+ * version labels Low, and whose labels are read before the record is; the records of before (`legacyStamps`), in
+ * folders a rolled-back daemon labels Low, are never read.
  * Every tools run hashes the folder again, and a folder that is not the recorded one (a Low worker's copy of the pinned
  * bytes, its write handles kept open across a relabel: w5868's review) is put there again. The record must itself be the pinned download's (its files'
  * digest is `AGENT_NODE.treeSha256`), so one a Low worker wrote while `tools` was Low (before w5717, or a daemon
@@ -82,9 +82,20 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * there with Low labels of its own matches every hash and stays writable from Low, so the labels and access entries are
  * read first (`labelProblem`, w5866's review).
  */
-export const agentNodeStamp = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, 'agent-node.json');
-/** Where the record lived before w5868's review: in `tools`, which a rolled-back daemon labels Low. Never read. */
-const legacyStamp = (root: string) => path.join(root, 'tools', 'node.json');
+/**
+ * The record's folder, where the fresh node is unpacked too: `<root>\daemon\agent-node`. `daemon` and `secrets` are the
+ * root children every daemon version keeps Medium, from the first Windows fence on (w5377, 02cd43ca: MEDIUM_CHILDREN in
+ * machine/lowIntegrity.ts). Before w5539 every other root child was labelled Low, `tools-medium` too, and nothing labels
+ * it Medium again (w5876's review). Its labels are still read before the record is (`labelCheck`): a folder of it a Low
+ * worker could write is put aside for a new one, and nothing in it is trusted.
+ */
+export const agentNodeHome = (root: string) => path.join(root, 'daemon', 'agent-node');
+export const agentNodeStamp = (root: string) => path.join(agentNodeHome(root), 'record.json');
+/**
+ * Where the record lived before: `tools\node.json` (before w5868's review) and `tools-medium\agent-node.json` (before
+ * w5876's), both in folders a rolled-back daemon labels Low. Never read; deleted once a record is written.
+ */
+const legacyStamps = (root: string) => [path.join(root, 'tools', 'node.json'), path.join(root, 'tools-medium', 'agent-node.json')];
 type Stamp = { version: string; files: Record<string, string>; folder?: string };
 
 /**
@@ -268,9 +279,20 @@ function sweepOld(tools: string, now: number): void {
   }
 }
 
+/** Deletes the record folders an earlier run put aside (one still held open waits for a later run). */
+function sweepAside(daemonDir: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(daemonDir);
+  } catch {
+    return;
+  }
+  for (const n of names) if (/^agent-node\.old-\d+$/.test(n)) remove(path.join(daemonDir, n));
+}
+
 /**
  * Put the pinned node at `<root>\tools\node`, unless the record says it is there already. Everything it writes stays in
- * `<root>\tools`. Each run says one line the rollout log keeps: "node verified", or "node reinstalled (why)", or a WARNING
+ * `<root>\tools` and `<root>\daemon\agent-node`. Each run says one line the rollout log keeps: "node verified", or "node reinstalled (why)", or a WARNING
  * "node not reinstalled (why)" when it could not, and then the node there stays (lothsahn's lockout rule: never leave the
  * machine without node). A folder that cannot be moved aside keeps its node: 'busy', and the next rollout tries again.
  *
@@ -284,20 +306,44 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
   const stampFile = agentNodeStamp(root);
   const pin = d.pin ?? { exeSha256: AGENT_NODE.exeSha256, treeSha256: AGENT_NODE.treeSha256 };
   const tools = path.dirname(dir);
-  const medium = path.dirname(stampFile);
+  const medium = agentNodeHome(root);
+  const daemonDir = path.dirname(medium);
   sweepOld(tools, (d.now ?? Date.now)());
   sweepOld(medium, (d.now ?? Date.now)());
+  sweepAside(daemonDir);
+  // The record's folder first (w5876's review): a record a Low worker could write vouches for nothing, and a stage in a
+  // folder it can write could be held open. Such a folder goes aside, unread, for a new one; one that cannot keeps the
+  // node there (lothsahn's lockout rule).
+  const homeBad = notAFolder(medium)
+    ? 'is a link or a file, not a folder'
+    : fs.existsSync(medium)
+      ? (await labelCheck(medium, d))?.replace(/^its labels let/, 'has labels that let')
+      : undefined;
+  if (homeBad) {
+    const aside = path.join(daemonDir, `agent-node.old-${(d.now ?? Date.now)()}`);
+    try {
+      fs.renameSync(medium, aside);
+    } catch (e) {
+      d.say(`WARNING: Agent node: node not checked: its record's folder ${medium} ${homeBad} and could not be put aside (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); the node there stays until the next rollout.`);
+      return 'failed';
+    }
+    remove(aside);
+  }
   // The labels first: once nothing Low can write the files, what is hashed next stays what runs.
-  const lab = !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
-  const st = lab ? { ok: false as const, why: lab } : stampCheck(stampFile, dir, pin);
+  const lab = !homeBad && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
+  const st = homeBad
+    ? { ok: false as const, why: `its record's folder ${homeBad}` }
+    : lab
+      ? { ok: false as const, why: lab }
+      : stampCheck(stampFile, dir, pin);
   if (st.ok) {
     d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, and no Low label or access entry of their own lets a Low worker write them).`);
     return 'current';
   }
   const why = st.why;
-  // Unpacked in tools-medium, a root child no daemon labels Low (claudeHome.ts MEDIUM_ONLY_CHILDREN): its files are Medium
-  // from birth, so no Low worker ever holds a handle to one, even while `tools` is Low (w5868's review). A rename keeps
-  // them so on the way to `tools\node`, on the same volume.
+  // Unpacked in the record's folder, which no daemon labels Low (`agentNodeHome`): its files are Medium from birth, so no
+  // Low worker ever holds a handle to one, even while `tools` is Low (w5868's review). A rename keeps them so on the way to
+  // `tools\node`, on the same volume.
   const stage = path.join(medium, `node-${AGENT_NODE.version}-${(d.now ?? Date.now)()}.part`);
   try {
     fs.mkdirSync(tools, { recursive: true });
@@ -357,7 +403,7 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
       remove(`${stampFile}.part`);
       fs.writeFileSync(`${stampFile}.part`, `${JSON.stringify({ version: AGENT_NODE.version, files: fresh, folder: folderId(dir) } satisfies Stamp)}\n`);
       fs.renameSync(`${stampFile}.part`, stampFile);
-      remove(legacyStamp(root));
+      for (const l of legacyStamps(root)) remove(l);
     } catch (e) {
       unrecorded = `; WARNING: its record could not be written (${(e as Error).message}), so the next rollout puts it there again`;
     }

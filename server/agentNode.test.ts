@@ -5,13 +5,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, agentNodeStamp, ensureAgentNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir, agentNodeStamp, ensureAgentNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
  * folder (a new program path, and a Windows Firewall prompt, every session). These hold the swap with a fake download
  * and a fake tar: the folder's path never changes, a wrong download is refused, a busy folder is left alone.
- * w5839: whether the node there is the pinned one comes from its record (tools\node.json), checked by hashing, never by
+ * w5839: whether the node there is the pinned one comes from its record (daemon\agent-node\record.json), checked by hashing, never by
  * running the installed node.exe.
  */
 
@@ -44,7 +44,7 @@ function icaclsTree(dir: string, own: Record<string, string> = {}): string {
   return `${out.join('\r\n')}\r\nSuccessfully processed ${out.filter((l) => l === '').length} files; Failed processing 0 files\r\n`;
 }
 
-function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean; own?: Record<string, string>; readOut?: string } = {}) {
+function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean; own?: Record<string, string>; homeOwn?: Record<string, string>; readOut?: string } = {}) {
   const said: string[] = [];
   const ran: string[] = [];
   const tarInto: string[] = [];
@@ -57,10 +57,11 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
     exec: async (cmd, args) => {
       ran.push(cmd);
       if (cmd === 'icacls' && args.includes('/T')) {
-        // The labels `own` names are on the node there; the fresh copy that replaces it inherits alone.
-        const own = o.own;
-        o.own = undefined;
-        return { code: 0, stdout: o.readOut ?? icaclsTree(args[0], own), stderr: '' };
+        // The labels `own` names are on the node there, `homeOwn` on the record's folder; what replaces them inherits alone.
+        const key = path.basename(args[0]) === 'node' ? 'own' : 'homeOwn';
+        const own = o[key];
+        o[key] = undefined;
+        return { code: 0, stdout: key === 'own' && o.readOut !== undefined ? o.readOut : icaclsTree(args[0], own), stderr: '' };
       }
       if (cmd === 'icacls') return o.icaclsFails ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
       if (cmd === 'tar') {
@@ -77,7 +78,7 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
       return fs.existsSync(cmd) ? { code: 0, stdout: `${fs.readFileSync(cmd, 'utf8')}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'no such file' };
     },
   };
-  return { d, said, ran, tarInto };
+  return { d, said, ran, tarInto, o };
 }
 
 /** A download whose SHA-256 is the pinned one, as far as the code can tell: the pin replaced for the test. */
@@ -327,9 +328,9 @@ test("w5839: another folder with the pinned bytes, inherited Medium labels and a
     const root = tmp();
     const f = fake(zip);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
-    // Unpacked in tools-medium, where no Low worker holds a handle, and the record kept there too.
-    assert.ok(f.tarInto.every((p) => p.startsWith(path.join(root, 'tools-medium') + path.sep)), f.tarInto.join(', '));
-    assert.ok(agentNodeStamp(root).startsWith(path.join(root, 'tools-medium') + path.sep));
+    // Unpacked in daemon\agent-node, where no Low worker holds a handle, and the record kept there too.
+    assert.ok(f.tarInto.every((p) => p.startsWith(agentNodeHome(root) + path.sep)), f.tarInto.join(', '));
+    assert.equal(path.dirname(agentNodeStamp(root)), path.join(root, 'daemon', 'agent-node'));
     // A Low worker's copy, byte for byte, in a folder of its own put at tools\node (its handles survive a relabel).
     const copy = path.join(root, 'tools', 'copy');
     fs.cpSync(agentNodeDir(root), copy, { recursive: true });
@@ -345,7 +346,7 @@ test("w5839: another folder with the pinned bytes, inherited Medium labels and a
   });
 });
 
-test('w5839: the record in tools of before w5868 is never read, and goes once the record is in tools-medium', async () => {
+test('w5839: the records in tools (before w5868) and tools-medium (before w5876) are never read, and go once the record is in daemon\\agent-node', async () => {
   const zip = Buffer.from('a zip');
   await pinned(zip, async () => {
     const root = tmp();
@@ -354,9 +355,57 @@ test('w5839: the record in tools of before w5868 is never read, and goes once th
     const rec = fs.readFileSync(agentNodeStamp(root), 'utf8');
     fs.rmSync(agentNodeStamp(root));
     fs.writeFileSync(path.join(root, 'tools', 'node.json'), rec);
+    fs.mkdirSync(path.join(root, 'tools-medium'));
+    fs.writeFileSync(path.join(root, 'tools-medium', 'agent-node.json'), rec);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
     assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools-medium')), []);
+  });
+});
+
+test("w5839: a record in a folder a Low worker could write is not read: the folder goes aside for a new one (w5876's review)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    for (const [what, homeOwn] of [
+      ["an old daemon's Low label", { '': 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)' }],
+      ['a Low label on the record', { 'record.json': 'Mandatory Label\\Low Mandatory Level:(NW)' }],
+      ['an access entry of its own', { 'record.json': 'Everyone:(F)' }],
+    ] as const) {
+      const root = tmp();
+      const f = fake(zip);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+      const mark = path.join(agentNodeHome(root), 'mark');
+      fs.writeFileSync(mark, 'the old folder');
+      f.o.homeOwn = homeOwn;
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', what);
+      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record's folder has labels that let a Low worker write it: /, what);
+      assert.ok(!fs.existsSync(mark), `${what}: the folder was put aside, not reused`);
+      assert.deepEqual(fs.readdirSync(path.join(root, 'daemon')), ['agent-node'], what);
+      assert.equal(await ensureAgentNode(root, f.d), 'current', what);
+    }
+  });
+});
+
+test("w5839: a record folder that cannot be put aside keeps the node there and says so (lothsahn's lockout rule)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    const exe = fs.readFileSync(agentNodeExe(root));
+    f.o.homeOwn = { '': 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)' };
+    // A file held open in it: Windows refuses the rename. Elsewhere a read-only daemon folder does.
+    const held = fs.openSync(agentNodeStamp(root), 'r');
+    if (process.platform !== 'win32') fs.chmodSync(path.join(root, 'daemon'), 0o500);
+    try {
+      assert.equal(await ensureAgentNode(root, f.d), 'failed');
+    } finally {
+      fs.closeSync(held);
+      if (process.platform !== 'win32') fs.chmodSync(path.join(root, 'daemon'), 0o700);
+    }
+    assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not checked: its record's folder .* could not be put aside .*the node there stays/);
+    assert.deepEqual(fs.readFileSync(agentNodeExe(root)), exe);
   });
 });
 

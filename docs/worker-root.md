@@ -786,13 +786,18 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
   `server/toolsLabelsWin.test.ts` on the Windows runner.
   - **A node.exe planted before w5717 deployed is found and replaced** (w5839). `worker.ts tools` keeps a record of
-    the agents' node in `<root>\tools-medium\agent-node.json`: the version, the SHA-256 of every file in `tools\node`
+    the agents' node in `<root>\daemon\agent-node\record.json`: the version, the SHA-256 of every file in `tools\node`
     and that folder's identity (`folderId`: its volume and NTFS file id, which a rename keeps and a new folder never has,
     measured on BEAST's F:), written from the pinned download it unpacked. The record and the unpacking stage both live
-    in `tools-medium`, a root child no daemon labels Low, rolled back or not: a Low worker can make a folder of the
-    pinned bytes while a rolled-back daemon has `tools` Low, keep write handles open on its files, and those handles
-    outlive the Medium relabel (w5868's review), so only a folder this run made is trusted, and its files are Medium
-    from birth. The old `tools\node.json` is never read and is deleted. Every tools run hashes the folder again (1994 files in about 360 ms on BEAST,
+    in `daemon\agent-node`: `daemon` and `secrets` are the only root children every daemon version keeps Medium, from
+    the first Windows fence on (w5377, 02cd43ca); before w5539 every other root child, `tools-medium` too, was labelled
+    Low, and nothing labels it Medium again (w5876's review). A Low worker can make a folder of the pinned bytes while a
+    rolled-back daemon has `tools` Low, keep write handles open on its files, and those handles outlive the Medium relabel
+    (w5868's review), so only a folder this run made is trusted, and its files are Medium from birth. The record's folder
+    is read with icacls too before the record is: one with a Low label or an access entry of its own is put aside
+    (`daemon\agent-node.old-<ms>`, deleted) for a new one and nothing in it is trusted; one that cannot be put aside
+    leaves the node there with a WARNING. The records of before, `tools\node.json` and `tools-medium\agent-node.json`,
+    are never read and are deleted. Every tools run hashes the folder again (1994 files in about 360 ms on BEAST,
     measured) and never runs the installed node.exe. The record itself must be the pinned one: its node.exe hash is
     `AGENT_NODE.exeSha256` and the digest of its whole file list is `AGENT_NODE.treeSha256` (`treeDigest`), so a record a
     Low worker left in the old Low `tools` cannot vouch for another node or for a DLL it added (w5854's review). A
@@ -807,7 +812,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     parse 12 ms). Labels are read in English, as in `machine/lowIntegrity.ts`. A file that differs, is missing or was added, or no record at
     all, means a fresh pinned download swapped in at the same path, even when the files there match: a folder this run
     unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. Each run stages in
-    `tools-medium\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
+    `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
     may be another rollout's, still unpacking). The rollout log says
     `Agent node: node verified: ...`, `Agent node: node reinstalled (<why>): ...`, or
     `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or
