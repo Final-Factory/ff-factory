@@ -156,6 +156,7 @@ import { displayName } from '../shared/labels.ts';
 import type { StandingAgentInput, StandingTrigger } from '../shared/types.ts';
 import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, systemdSupervised, versionLine, waitingOnWakeLine, writeUpdateWanted, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
 import { appVersion, formatVersion } from './version.ts';
+import { PREFER_TOOLS } from './bashNudge.ts';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 /** What the MCP SDK passes a tool handler besides its arguments: enough to send a progress notice to a client that asked for them. */
@@ -488,6 +489,7 @@ A timed A/B gates your DONE only when the request's goal is a performance number
  * else a test step does. Every worker's brief carries it after DISK_HYGIENE.
  */
 export const SHELL_STEPS = `## Shell steps that never wait for a person
+${PREFER_TOOLS}
 You run in bypass mode: a Bash or PowerShell command asks nobody, except when Claude Code's own dangerous-rm check flags a delete in it (an \`rm\` of a \`$VAR\` path with a glob or a brace list, \`$TMPDIR/*.log\` or \`$TMPDIR/{a,b}\`, or of a critical path); then a person must approve it and your work stops. A function, a loop, several lines, \`&&\`, a copy into the game's data folder and a script run never ask (measured). So:
 - Put multi-step test logic (a function, a retry loop, several legs) in a script file in $TMPDIR, written with the Write tool, and run it: \`bash "$TMPDIR/leg.sh" 1920\`. It never asks, and you can run it again.
 - Keep what a command prints small: every later call reads it again, and tool output is nearly half of a worker's history (measured). Find the lines first (\`grep -n\`), then read the range you need, not the whole file; cap a search (\`| head -40\`, \`grep -l\`, \`grep -c\`); print a build's, a test run's or a CI log's summary and its failures (\`| tail -40\`, \`gh run view <id> --log-failed | tail -80\`), not the whole log.
@@ -3552,8 +3554,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     this.notifyPeople(
       this.orchestrators.audienceOf(s.info),
       `[worker update] ${this.label(s)} is waiting for permission to use ${p.toolName} with ${JSON.stringify(p.input ?? null).slice(0, 600)}` +
-        // Claude Code's reason (w5148): why it asked, which says what would have answered it.
-        `${'reason' in p && p.reason ? ` (Claude Code's reason: ${String(p.reason).slice(0, 300)})` : ''}. ` +
+        // Why it asked (w5148): Claude Code's reason, and for a shell command the worker's own "no other route" (w5914).
+        `${'reason' in p && p.reason ? ` (why: ${String(p.reason).slice(0, 400)})` : ''}. ` +
+        ('noRoute' in p && p.noRoute
+          ? 'FF Factory already asked the worker for a route that needs no approval and this is its answer; a request to build that route is filed or linked on the ledger. A message you send it, or its turn ending, clears the card. '
+          : '') +
         `You cannot approve it; tell the user it needs them (the approval card is in that sandbox's panel).`,
     );
   }
