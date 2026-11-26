@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEPLOY_NOTICE_FILE, DeployNotice, doneLine, estimateMinutes, minutesText, prsInRelease, startLine, type RestartSample } from './deployNotice.ts';
+import { DEPLOY_NOTICE_FILE, DeployNotice, doneLine, estimateMinutes, minutesText, prsInReason, prsInRelease, startLine, type RestartSample } from './deployNotice.ts';
 import { Drainer, type RestartRequest, type SessionSnapshot } from './restart.ts';
 
 /** w5887: a deploy or restart tells every active orchestrator it starts, and that it is done. */
@@ -60,6 +60,11 @@ test('the lines: what goes out, the measured estimate, how long it took', () => 
     doneLine({ update: true, startedAt: new Date(T0).toISOString() }, { running: '1a2b3c4d5', upAt: T0 + 2.5 * MIN, stoppedAt: new Date(T0 + 1 * MIN).toISOString() }),
     '[portal] Portal update done: now on 1a2b3c4d5, took 2.5 min since the start line, down 1.5 min.',
   );
+  // Seen on the portal 2026-11-26 05:09Z: an automatic deploy of the commit fffctl update had just put out.
+  const again = { update: true, from: '49b74382dc87', to: '49b74382dc87e19c', reason: 'update to 49b74382d (auto-deploy: #1295, #1289)' };
+  assert.match(startLine(again, undefined), /starting: deploying 49b74382d again, the commit it already runs\. /);
+  assert.deepEqual(prsInReason(again.reason), [{ number: 1295 }, { number: 1289 }]);
+  assert.deepEqual(prsInReason('update to 49b74382d (update (fffctl update))'), []);
   assert.equal(minutesText(40_000), 'under a minute');
   assert.equal(minutesText(14 * MIN), '14 min');
 });
@@ -87,6 +92,9 @@ test('a deploy: the start line to every active orchestrator, the stop and the ne
   b.started(UPDATE);
   assert.match(w.notes[0][1], /about 2 minutes \(the median of the last 1 restart, measured\)/);
   assert.ok(fs.existsSync(path.join(w.dir, DEPLOY_NOTICE_FILE)));
+  w.notes.length = 0;
+  b.started(UPDATE, { from: '0f0f0f0f0' });
+  assert.match(w.notes[0][1], /deploying 1a2b3c4d5 \(#1290, #1293\)\./, "no titles found: the numbers in fff-update's reason");
 });
 
 test('the deploy that ships this: no start line from the old server, but its downtime is still a sample (resume file)', (t) => {
