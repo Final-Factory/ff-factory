@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginBanner, ghLoginLabel, ghLoginRefused, ghLoginStatusLines, ghMachineLine, REFUSED_401, parseGhStatusJson, parseGhStatusText, sanitizeGhLogin, scopeList, type GhLogin } from '../shared/ghLogin.ts';
+import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginBanner, ghLoginLabel, ghLoginRefused, ghLoginStatusLines, ghMachineLine, REFUSED_401, REFUSED_NO_TOKEN, parseGhStatusJson, parseGhStatusText, sanitizeGhLogin, scopeList, type GhLogin } from '../shared/ghLogin.ts';
 import { GhLoginWatch, READ_EVERY_MS, ghHostsFile, readGhLogin } from '../machine/ghLogin.ts';
 import { capacityLines, pickComputer, placementHint, workflowLine, type Computer } from './placement.ts';
 import type { RunResult } from './proc.ts';
@@ -273,4 +273,22 @@ test("w5932: the daemon's watch reads a refused login and sends it at once", asy
   t += READ_EVERY_MS;
   await w.tick();
   assert.equal(ghLoginRefused(sent.at(-1)), true, 'a 401 is not kept back as a blip');
+});
+
+/** What gh 2.102.0 printed over the ops worker's ssh session to beast on 2026-11-26 (w5546): no token read, source "default". */
+const NO_TOKEN_TEXT = 'github.com\n  X Failed to log in to github.com account bryding (default)\n  - Active account: true\n  - The token in default is invalid.\n  - To re-authenticate, run: gh auth login -h github.com\n';
+/** Its JSON form, by gh's code (TokenForUser's TokenSourceDefault), not measured: the source is what tells it apart. */
+const NO_TOKEN_JSON = '{"hosts":{"github.com":[{"state":"error","error":"HTTP 401: Requires authentication","active":true,"host":"github.com","login":"bryding","tokenSource":"default","gitProtocol":"https"}]}}';
+
+test('w5546: a login gh found no token for ("default") reads as such, still a refused login, never as a revoked token', () => {
+  for (const r of [parseGhStatusText(NO_TOKEN_TEXT, NOW), parseGhStatusJson(NO_TOKEN_JSON, NOW)!]) {
+    assert.equal(r.ok, false);
+    assert.equal(r.account, 'bryding');
+    assert.equal(r.error, REFUSED_NO_TOKEN);
+    assert.equal(ghLoginRefused(r), true, 'it still warns: runs given this login get no token');
+    assert.equal(sanitizeGhLogin(r)?.error, REFUSED_NO_TOKEN, 'kept whole through the portal');
+  }
+  // A token GitHub refused stays REFUSED_401.
+  assert.equal(parseGhStatusText(REFUSED_TEXT, NOW).error, REFUSED_401);
+  assert.equal(parseGhStatusJson(REFUSED_JSON, NOW)!.error, REFUSED_401);
 });
