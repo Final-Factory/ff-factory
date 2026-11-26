@@ -42,7 +42,7 @@ import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
 export const DAEMON_YIELD_EXIT = 75;
-import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
+import { MachineGuard, realGuardEffects, runnerRestartScript, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
@@ -988,6 +988,8 @@ export class Daemon {
       signal: (pid, sig) => (!real ? 'not a real daemon' : process.platform === 'win32' && sig !== 'SIGTERM' ? winSuspend(pid, sig === 'SIGCONT') : sendSignal(pid, sig)),
       diag: (root) => (real ? readListenerLog(root) : undefined),
       opsRunner: (root) => real && isOpsRunner(root),
+      // w5916: a listener the load gate or a hold suspended stays the gate's: a turn's end never continues it
+      othersPaused: () => new Set(this.loadGate.state().suspended.map((p) => p.pid)),
       read: () => (cfg.root ? readRunnersFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeRunnersFile(cfg.root, st, log),
       log: (line) => log(line),
@@ -1005,6 +1007,20 @@ export class Daemon {
         return winSuspend(pid, resume);
       },
       diag: (root) => (real ? readListenerLog(root) : undefined),
+      // w5916: a person's hold drains every runner but an operations runner, and leaves a turn's paused ones to the turn
+      opsRunner: (root) => real && isOpsRunner(root),
+      othersPaused: () => new Set(this.benchRunners.paused().map((p) => p.pid)),
+      ...(real && process.platform === 'win32'
+        ? {
+            start: async (root: string) => {
+              const r = await new Promise<{ code: number; out: string; err: string }>((resolve) =>
+                execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
+              );
+              if (r.code !== 0) throw new Error((r.err || r.out || `exit ${r.code}`).trim());
+              return r.out.trim() || 'started';
+            },
+          }
+        : {}),
       read: () => (cfg.root ? readLoadGateFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeLoadGateFile(cfg.root, st, log),
       log: (line) => log(line),
@@ -1624,6 +1640,8 @@ export class Daemon {
         return !e.s.live;
       },
       // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
+      // w5916: runners a grow ended while this machine is held start when the hold lifts, not now
+      deferRunners: (roots: string[]) => this.loadGate.deferStart(roots),
       poolFloor: () => {
         const p = this.currentPool();
         return p ? { warnGB: p.diskWarnGB, criticalGB: p.diskCriticalGB } : undefined;
@@ -1749,7 +1767,7 @@ export class Daemon {
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
+    this.timers.push(setInterval(() => void this.loadGate.tick().then(() => this.sendRunnerHold()), 5_000));
     this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(() => void this.ciFirst.tick(), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
@@ -2169,6 +2187,18 @@ export class Daemon {
     ws.ping();
   }
 
+  /** The last runner hold report sent on this link (w5916), so it goes only when it changes. */
+  private runnerHoldKey?: string;
+
+  /** w5916: tell the portal what a hold does to this machine's CI runners (draining, stopped), when that changes. */
+  sendRunnerHold() {
+    const report = this.loadGate.holdReport() ?? null;
+    const key = JSON.stringify(report);
+    if (key === this.runnerHoldKey || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.runnerHoldKey = key;
+    this.send({ type: 'runner_hold', report });
+  }
+
   private send(msg: FromDaemon) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
@@ -2446,6 +2476,9 @@ export class Daemon {
     // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
     // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
     if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
+    // w5961: and on a Mac with the Seatbelt worker fence on, the home a fenced editor gets (`<root>/home`): unity-slot run
+    // gives it to an interactive Unity editor a worker opens itself (a peer run's clone), which otherwise hangs on a modal.
+    if (spec.sandbox && this.cfg.root && process.platform === 'darwin' && this.workerFence) env.FF_UNITY_EDITOR_HOME = path.posix.join(this.cfg.root, 'home');
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
@@ -4327,6 +4360,10 @@ export class Daemon {
         this.pause.setActivity(msg.config);
         return;
       }
+      case 'runner_hold':
+        // w5916: a person's hold on this machine (placement.hold or a drain): its CI runners drain, and start again on the lift
+        void this.loadGate.setHold(typeof msg.why === 'string' && msg.why.trim() ? msg.why.trim() : undefined).then(() => this.sendRunnerHold());
+        return;
       case 'cleanup_config': {
         this.cleanupSettings = { ...msg.config };
         try {
@@ -4449,6 +4486,9 @@ export class Daemon {
         void this.reportBenchHours();
         // The worker fence's state (w5555): the portal alerts on a failed one and places no worker here.
         this.send({ type: 'worker_fence', fence: this.fence.state });
+        // w5916: what a hold does to the runners, again for this link (the portal sends its hold after the welcome)
+        this.runnerHoldKey = undefined;
+        this.sendRunnerHold();
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {

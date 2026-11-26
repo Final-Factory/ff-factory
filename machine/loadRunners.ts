@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { holdsJob, listenerLog, runnerCensus, type ListenerLog, type RunnerCensus } from './benchRunners.ts';
 import type { Proc } from './unity.ts';
+import type { RunnerHoldReport } from '../shared/runnerHold.ts';
 
 export interface LoadGateSettings {
   /** Suspend once the mean CPU over pauseOverMs is at or over this (percent, all cores). */
@@ -49,12 +50,40 @@ export const LOTHDESKTOP_GATE: LoadGateSettings = { pauseAtPct: 70, resumeBelowP
  */
 export const LOAD_GATES: Record<string, LoadGateSettings> = { lothdesktop: LOTHDESKTOP_GATE };
 
+/**
+ * w5916: a person's hold on this machine (config placement.hold, or a drain set by hold_machine), as the portal last said
+ * it. While it is on, every runner but an operations runner (isOpsRunner) drains: a listener with a job keeps it and is
+ * suspended once the job ends, an idle settled one at once. `confirmedAt` is the portal's last word on it: past
+ * HOLD_LAPSE_MS without one (the portal gone for good) the hold lapses here, so no runner stays off for ever.
+ */
+export interface RunnerHold {
+  why: string;
+  since: string;
+  confirmedAt: string;
+}
+
 export interface LoadGateState {
+  /** The CPU gate (w3305) is closed. */
   closed: boolean;
   /** When the gate last closed or opened. */
   since?: string;
+  /** Suspended listeners. Written before each suspend (w5916), so a daemon that dies mid-suspend still resumes it. */
   suspended: { pid: number; root: string; at: string }[];
+  hold?: RunnerHold;
+  /** w5916: runners whose listener ended while held (a Dev Drive grow ends every process on the drive): started on the lift. */
+  startOnLift?: string[];
 }
+
+/** w5916: a hold the portal has not repeated for this long lapses on the daemon (the portal re-sends it every few minutes). */
+export const HOLD_LAPSE_MS = 12 * 3_600_000;
+/**
+ * w5916: GitHub removes a non-ephemeral self-hosted runner it has not seen connect for 14 days (changelog 2022-08-03,
+ * docs "Removing self-hosted runners"), and a suspended listener does not connect. So a listener suspended this long is
+ * resumed for RECONNECT_FOR_MS to reconnect (it may take a job then, and is suspended again once it ends): a hold of weeks
+ * never costs a runner its registration.
+ */
+export const RECONNECT_AFTER_MS = 7 * 24 * 3_600_000;
+export const RECONNECT_FOR_MS = 10 * 60_000;
 
 export interface LoadGateDeps {
   settings: LoadGateSettings | undefined;
@@ -66,6 +95,12 @@ export interface LoadGateDeps {
   /** Suspend or resume a process; answers why it could not, nothing when done. */
   suspend(pid: number, resume: boolean): Promise<string | void>;
   diag(root: string): string | undefined;
+  /** An operations runner (isOpsRunner, w3424): a hold never drains it (a deploy still lands on a held machine). */
+  opsRunner?(root: string): boolean;
+  /** Listener pids a timed run paused (machine/benchRunners.ts): left to it, and counted as taking no job. */
+  othersPaused?(): Set<number>;
+  /** Start a runner's listener again (Windows: its scheduled task or run.cmd, machine/hostGuard.ts runnerRestartScript). */
+  start?(root: string): Promise<string>;
   read(): LoadGateState | undefined;
   write(s: LoadGateState): void;
   log(text: string): void;
@@ -76,6 +111,7 @@ export interface LoadGateDeps {
 const busy = (c: RunnerCensus, l: RunnerCensus['listeners'][number]) => l.busy || c.workers.some((w) => w.root.toLowerCase() === l.root.toLowerCase());
 
 const base = (root: string) => root.replace(/\/+$/, '').split('/').pop() ?? root;
+const sameRoot = (a: string, b: string) => a.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() === b.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 
 export class LoadGate {
   private readonly d: LoadGateDeps;
@@ -83,15 +119,66 @@ export class LoadGate {
   private ticking = false;
   private samples: { at: number; pct: number }[] = [];
   private heldSaid = new Map<number, string>();
+  private report?: RunnerHoldReport;
+  /** w5916: listeners resumed to reconnect to GitHub after a long suspension (pid: until when), left alone meanwhile. */
+  private reconnect = new Map<number, number>();
+  /** w5916: the hold was lifted (or lapsed) since the last look: what a resume then says. */
+  private lifted = false;
 
   constructor(d: LoadGateDeps) {
     this.d = d;
     const s = d.read();
-    this.st = { closed: !!s?.closed, since: s?.since, suspended: Array.isArray(s?.suspended) ? s.suspended : [] };
+    const h = s?.hold;
+    this.st = {
+      closed: !!s?.closed,
+      since: s?.since,
+      suspended: Array.isArray(s?.suspended) ? s.suspended : [],
+      ...(h && typeof h.why === 'string' && typeof h.since === 'string' && typeof h.confirmedAt === 'string' ? { hold: h } : {}),
+      ...(Array.isArray(s?.startOnLift) && s.startOnLift.length ? { startOnLift: s.startOnLift.filter((r) => typeof r === 'string') } : {}),
+    };
   }
 
   state(): LoadGateState {
     return this.st;
+  }
+
+  /** w5916: the hold's effect on the runners, or undefined when no hold is on (set by each look). */
+  holdReport(): RunnerHoldReport | undefined {
+    return this.st.hold ? this.report : undefined;
+  }
+
+  /**
+   * w5916: the portal's word on this machine's hold: its reason, or undefined when there is none. Kept in the gate's file,
+   * so a restarted daemon keeps the runners suspended until the portal says the hold is lifted.
+   */
+  async setHold(why: string | undefined): Promise<void> {
+    const now = new Date(this.d.now()).toISOString();
+    const was = this.st.hold;
+    if (why) {
+      this.st = { ...this.st, hold: { why: why.slice(0, 300), since: was?.since ?? now, confirmedAt: now } };
+      if (!was) this.d.log(`ci hold: this machine is held (${why.slice(0, 200)}): each CI runner takes no new job; one running a job finishes it first (w5916)`);
+      this.d.write(this.st);
+    } else if (was) {
+      this.st = { ...this.st, hold: undefined };
+      this.lifted = true;
+      this.d.log(`ci hold: the hold on this machine was lifted: its CI runners take jobs again (w5916)`);
+      this.d.write(this.st);
+    } else return;
+    await this.tick();
+  }
+
+  /**
+   * w5916: these runners' listeners ended while the hold is on (a Dev Drive grow): they are not started now, but when it
+   * lifts. Answers false when no hold is on (the caller starts them itself).
+   */
+  deferStart(roots: string[]): boolean {
+    if (!this.st.hold) return false;
+    const list = [...(this.st.startOnLift ?? [])];
+    for (const r of roots) if (!list.some((x) => sameRoot(x, r))) list.push(r);
+    this.st = { ...this.st, startOnLift: list };
+    this.d.log(`ci hold: ${roots.map(base).join(', ')} ended while held: started again when the hold lifts`);
+    this.d.write(this.st);
+    return true;
   }
 
   async tick(): Promise<void> {
@@ -118,64 +205,139 @@ export class LoadGate {
   private async step() {
     const g = this.d.settings;
     const now = this.d.now();
+    const h = this.st.hold;
+    if (h && now - Date.parse(h.confirmedAt) > HOLD_LAPSE_MS) {
+      this.st = { ...this.st, hold: undefined };
+      this.lifted = true;
+      this.d.log(`ci hold: the portal has not repeated this machine's hold (${h.why.slice(0, 120)}) since ${h.confirmedAt}: it lapses here and the CI runners take jobs again (w5916, HOLD_LAPSE_MS)`);
+      this.d.write(this.st);
+    }
+    let why = 'the hold on this machine was lifted';
     if (!g) {
-      if (this.st.suspended.length) await this.resumeAll('no load gate is set for this machine');
-      return;
+      if (this.st.closed) {
+        this.st = { ...this.st, closed: false };
+        this.d.write(this.st);
+      }
+      if (!this.st.hold && !this.lifted) why = 'no load gate is set for this machine';
+    } else {
+      this.samples.push({ at: now, pct: this.d.cpu() });
+      // A slack past the longest window: ticks land a little over 5 s apart, so trimming at the window itself left the
+      // oldest sample always under resumeOverMs old and the gate never reopened (LothDesktop, 2026-11-07 09:08..10:03Z).
+      const keep = Math.max(g.pauseOverMs, g.resumeOverMs) + 30_000;
+      while (this.samples.length && now - this.samples[0].at > keep) this.samples.shift();
+      const hi = this.mean(g.pauseOverMs);
+      const lo = this.mean(g.resumeOverMs);
+      if (!this.st.closed && hi !== undefined && hi >= g.pauseAtPct) {
+        this.st = { ...this.st, closed: true, since: new Date(now).toISOString() };
+        this.d.log(`ci load gate: CPU ${hi.toFixed(0)}% over the last ${g.pauseOverMs / 1000} s (at or over ${g.pauseAtPct}%): this machine's idle CI runners take no job until it stays under ${g.resumeBelowPct}% for ${g.resumeOverMs / 1000} s (w3305)`);
+        this.d.write(this.st);
+      } else if (this.st.closed && lo !== undefined && lo < g.resumeBelowPct) {
+        this.st = { ...this.st, closed: false, since: new Date(now).toISOString() };
+        this.d.write(this.st);
+        why = `CPU ${lo.toFixed(0)}% over the last ${g.resumeOverMs / 1000} s (under ${g.resumeBelowPct}%)`;
+      }
     }
-    this.samples.push({ at: now, pct: this.d.cpu() });
-    // A slack past the longest window: ticks land a little over 5 s apart, so trimming at the window itself left the
-    // oldest sample always under resumeOverMs old and the gate never reopened (LothDesktop, 2026-11-07 09:08..10:03Z).
-    const keep = Math.max(g.pauseOverMs, g.resumeOverMs) + 30_000;
-    while (this.samples.length && now - this.samples[0].at > keep) this.samples.shift();
-    const hi = this.mean(g.pauseOverMs);
-    const lo = this.mean(g.resumeOverMs);
-    if (!this.st.closed && hi !== undefined && hi >= g.pauseAtPct) {
-      this.st = { ...this.st, closed: true, since: new Date(now).toISOString() };
-      this.d.log(`ci load gate: CPU ${hi.toFixed(0)}% over the last ${g.pauseOverMs / 1000} s (at or over ${g.pauseAtPct}%): this machine's idle CI runners take no job until it stays under ${g.resumeBelowPct}% for ${g.resumeOverMs / 1000} s (w3305)`);
-      this.d.write(this.st);
-    } else if (this.st.closed && lo !== undefined && lo < g.resumeBelowPct) {
-      this.st = { ...this.st, closed: false, since: new Date(now).toISOString() };
-      this.d.write(this.st);
-      await this.resumeAll(`CPU ${lo.toFixed(0)}% over the last ${g.resumeOverMs / 1000} s (under ${g.resumeBelowPct}%)`);
-      return;
+    const held = !!this.st.hold;
+    const cpuClosed = !!g && this.st.closed;
+    // The hold drains every runner but an operations runner; the CPU gate only its own (w3305).
+    const wants = (root: string) => (held && !this.d.opsRunner?.(root)) || (cpuClosed && !!g && g.runners.test(base(root)));
+    const off = this.st.suspended.filter((p) => !wants(p.root));
+    if (off.length) await this.resume(off, why);
+    this.lifted = false;
+    const stale = this.st.suspended.filter((p) => now - Date.parse(p.at) > RECONNECT_AFTER_MS);
+    if (stale.length) {
+      for (const p of stale) this.reconnect.set(p.pid, now + RECONNECT_FOR_MS);
+      await this.resume(stale, `suspended over ${RECONNECT_AFTER_MS / 86_400_000} days: it reconnects to GitHub for ${RECONNECT_FOR_MS / 60_000} minutes, so GitHub never removes it (14 days offline; w5916)`);
     }
-    if (this.st.closed) await this.suspendIdle(g);
+    for (const [pid, until] of this.reconnect) if (until <= now) this.reconnect.delete(pid);
+    if (!held && this.st.startOnLift?.length) await this.startLifted();
+    if (held || cpuClosed) await this.suspendIdle(wants);
+    else this.report = undefined;
   }
 
-  private async resumeAll(why: string) {
+  /** Resume these suspended listeners (each still a listener of its runner) and drop them from the list. */
+  private async resume(list: LoadGateState['suspended'], why: string) {
     const procs = await this.d.procs();
     const listening = new Set(runnerCensus(procs).listeners.map((l) => `${l.pid} ${l.root}`));
-    for (const p of this.st.suspended) {
+    for (const p of list) {
       // the pid may be another program's after a reboot: only a listener of that runner is resumed
       if (!listening.has(`${p.pid} ${p.root}`)) continue;
       const err = await this.d.suspend(p.pid, true);
       this.d.log(`ci load gate: ${why}: runner ${p.root} (listener pid ${p.pid}) ${err ? `could not be resumed: ${err}` : 'resumed: it takes CI jobs again'}`);
     }
-    this.st = { ...this.st, suspended: [] };
+    const gone = new Set(list.map((p) => p.pid));
+    this.st = { ...this.st, suspended: this.st.suspended.filter((p) => !gone.has(p.pid)) };
     this.heldSaid.clear();
     this.d.write(this.st);
   }
 
-  private async suspendIdle(g: LoadGateSettings) {
+  /** w5916: start each runner that ended while held and has no listener now; one that cannot start is tried at the next look. */
+  private async startLifted() {
+    const up = runnerCensus(await this.d.procs()).listeners;
+    const left: string[] = [];
+    for (const root of this.st.startOnLift ?? []) {
+      if (up.some((l) => sameRoot(l.root, root))) {
+        this.d.log(`ci hold: runner ${root} is up again`);
+        continue;
+      }
+      if (!this.d.start) {
+        this.d.log(`ci hold: runner ${root} ended while held and this daemon cannot start a runner here: start it by its own service`);
+        continue;
+      }
+      try {
+        this.d.log(`ci hold: runner ${root}: started again after the hold (${await this.d.start(root)})`);
+      } catch (e) {
+        left.push(root);
+        this.d.log(`ci hold: runner ${root} could not be started again: ${(e as Error).message.slice(0, 200)}; tried again at the next look`);
+      }
+    }
+    this.st = { ...this.st, ...(left.length ? { startOnLift: left } : { startOnLift: undefined }) };
+    this.d.write(this.st);
+  }
+
+  private async suspendIdle(wants: (root: string) => boolean) {
     let c = runnerCensus(await this.d.procs());
     const live = new Set(c.listeners.map((l) => `${l.pid} ${l.root}`));
     const kept = this.st.suspended.filter((p) => live.has(`${p.pid} ${p.root}`));
     let changed = kept.length !== this.st.suspended.length;
     this.st.suspended = kept;
     const done = new Set(kept.map((p) => p.pid));
+    const others = this.d.othersPaused?.() ?? new Set<number>();
     const stopped: (RunnerCensus['listeners'][number] & { log: ListenerLog })[] = [];
+    const waits: string[] = [];
+    const hold = this.st.hold ? (root: string) => !this.d.opsRunner?.(root) : () => false;
+    const at = () => new Date(this.d.now()).toISOString();
+    const drop = (pid: number) => {
+      this.st.suspended = this.st.suspended.filter((p) => p.pid !== pid);
+      this.d.write(this.st);
+    };
     for (const l of c.listeners) {
-      if (done.has(l.pid) || busy(c, l) || !g.runners.test(base(l.root))) continue;
+      if (done.has(l.pid) || others.has(l.pid) || !wants(l.root)) continue;
+      if (this.reconnect.has(l.pid)) {
+        if (hold(l.root)) waits.push(l.root);
+        continue;
+      }
+      if (busy(c, l)) {
+        if (hold(l.root)) waits.push(l.root);
+        continue;
+      }
       const log = listenerLog(this.d.diag(l.root));
       const why = holdsJob(log, this.d.now());
       if (why) {
+        if (hold(l.root)) waits.push(l.root);
         if (this.heldSaid.get(l.pid) !== why) this.d.log(`ci load gate: runner ${l.root} (listener pid ${l.pid}) not suspended yet: ${why}`);
         this.heldSaid.set(l.pid, why);
         continue;
       }
       this.heldSaid.delete(l.pid);
+      // w5916: written first, so a daemon that dies between the suspend and the write still resumes it on the lift
+      // (resuming a listener that was never suspended does nothing).
+      this.st.suspended.push({ pid: l.pid, root: l.root, at: at() });
+      this.d.write(this.st);
       const err = await this.d.suspend(l.pid, false);
       if (err) {
+        drop(l.pid);
+        if (hold(l.root)) waits.push(l.root);
         if (this.heldSaid.get(l.pid) !== err) this.d.log(`ci load gate: runner ${l.root} (listener pid ${l.pid}) could not be suspended: ${err}`);
         this.heldSaid.set(l.pid, err);
         continue;
@@ -185,21 +347,30 @@ export class LoadGate {
     if (stopped.length) {
       // A listener that took a job in the instant it was suspended would hold that job unrenewed: resume it.
       c = runnerCensus(await (this.d.freshProcs ?? this.d.procs)());
-      const at = new Date(this.d.now()).toISOString();
       for (const l of stopped) {
         const after = listenerLog(this.d.diag(l.root));
         const seen = c.listeners.find((x) => x.pid === l.pid);
         if (!seen || busy(c, seen) || after.state !== 'idle' || after.line !== l.log.line) {
           await this.d.suspend(l.pid, true);
+          drop(l.pid);
+          if (hold(l.root)) waits.push(l.root);
           this.d.log(`ci load gate: runner ${l.root} (listener pid ${l.pid}) took a job as it was suspended: resumed; suspended once the job ends`);
           continue;
         }
-        this.st.suspended.push({ pid: l.pid, root: l.root, at });
-        this.d.log(`ci load gate: runner ${l.root} (listener pid ${l.pid}) suspended: it takes no CI job while this machine is loaded`);
+        this.d.log(
+          this.st.hold && hold(l.root)
+            ? `ci hold: runner ${l.root} (listener pid ${l.pid}) suspended: it takes no CI job until the hold on this machine is lifted`
+            : `ci load gate: runner ${l.root} (listener pid ${l.pid}) suspended: it takes no CI job while this machine is loaded`,
+        );
         changed = true;
       }
     }
     if (changed) this.d.write(this.st);
+    if (this.st.hold) {
+      const mine = new Set(this.st.suspended.map((p) => p.pid));
+      const stoppedRoots = c.listeners.filter((l) => hold(l.root) && (mine.has(l.pid) || others.has(l.pid))).map((l) => base(l.root));
+      this.report = { why: this.st.hold.why, since: this.st.hold.since, stopped: [...new Set(stoppedRoots)].sort(), busy: [...new Set(waits.map(base))].sort(), startOnLift: (this.st.startOnLift ?? []).map(base) };
+    } else this.report = undefined;
   }
 }
 

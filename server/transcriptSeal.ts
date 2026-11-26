@@ -89,17 +89,34 @@ export function sealStore(dir: string, now: () => number = Date.now): SealStore 
   };
 }
 
-/** Feeds `hash` bytes [from, to) of `file`; false when the file is shorter than `to`. */
-async function feed(hash: crypto.Hash, file: string, from: number, to: number): Promise<boolean> {
+/** w5931: how far apart checkSeal keeps copies of its running hash, so a rewrite late in the file re-hashes only from there. */
+export const HASH_CHECKPOINT_BYTES = 64 << 20;
+
+/** The running hash as it was after the file's first `at` bytes (w5931). */
+export interface HashCheckpoint {
+  at: number;
+  hash: crypto.Hash;
+}
+
+/**
+ * Feeds `hash` bytes [from, to) of `file`; false when the file is shorter than `to`. With `marks`, a copy of the hash is kept
+ * each time it passes another HASH_CHECKPOINT_BYTES (w5931).
+ */
+async function feed(hash: crypto.Hash, file: string, from: number, to: number, marks?: HashCheckpoint[], every = HASH_CHECKPOINT_BYTES): Promise<boolean> {
   if (to <= from) return true;
   const fh = await fs.promises.open(file, 'r');
   try {
-    const buf = Buffer.allocUnsafe(Math.min(1 << 20, to - from));
+    const buf = Buffer.allocUnsafe(Math.min(1 << 20, to - from, every));
+    let next = marks ? (marks.at(-1)?.at ?? 0) + every : Infinity;
     for (let at = from; at < to; ) {
       const { bytesRead } = await fh.read(buf, 0, Math.min(buf.length, to - at), at);
       if (bytesRead === 0) return false;
       hash.update(buf.subarray(0, bytesRead));
       at += bytesRead;
+      if (marks && at >= next) {
+        marks.push({ at, hash: hash.copy() });
+        next = at + every;
+      }
     }
     return true;
   } finally {
@@ -153,7 +170,7 @@ export class TranscriptHasher {
 }
 
 export type SealCheck =
-  | { ok: true; hasher: TranscriptHasher; sealed: boolean; tail: number }
+  | { ok: true; hasher: TranscriptHasher; sealed: boolean; tail: number; checkpoints: HashCheckpoint[] }
   | { ok: false; why: string };
 
 /**
@@ -161,23 +178,45 @@ export type SealCheck =
  * older than SEAL_DAYS): it may, unsealed, and its whole file is what is hashed on. On a pass, `hasher` goes on from the end
  * of the file as it is now; `tail` is what was appended after a seal that was not final (its host ended before the process).
  */
-export async function checkSeal(file: string, seal: TranscriptSeal | undefined): Promise<SealCheck> {
+export async function checkSeal(file: string, seal: TranscriptSeal | undefined, every = HASH_CHECKPOINT_BYTES): Promise<SealCheck> {
   let len: number;
   try {
     len = (await fs.promises.stat(file)).size;
   } catch {
-    return seal ? { ok: false, why: 'its transcript is gone' } : { ok: true, hasher: new TranscriptHasher(file), sealed: false, tail: 0 };
+    return seal ? { ok: false, why: 'its transcript is gone' } : { ok: true, hasher: new TranscriptHasher(file), sealed: false, tail: 0, checkpoints: [] };
   }
   const hash = crypto.createHash('sha256');
+  const checkpoints: HashCheckpoint[] = [{ at: 0, hash: hash.copy() }];
   if (!seal) {
-    if (!(await feed(hash, file, 0, len))) return { ok: false, why: 'its transcript shrank while it was read' };
-    return { ok: true, hasher: new TranscriptHasher(file, len, hash), sealed: false, tail: 0 };
+    if (!(await feed(hash, file, 0, len, checkpoints, every))) return { ok: false, why: 'its transcript shrank while it was read' };
+    return { ok: true, hasher: new TranscriptHasher(file, len, hash), sealed: false, tail: 0, checkpoints };
   }
   if (len < seal.size) return { ok: false, why: `its transcript is ${len} bytes, shorter than the ${seal.size} sealed at ${seal.at}` };
-  if (!(await feed(hash, file, 0, seal.size)) || hash.copy().digest('hex') !== seal.sha256) return { ok: false, why: `its first ${seal.size} bytes changed since they were sealed at ${seal.at}` };
+  if (!(await feed(hash, file, 0, seal.size, checkpoints, every)) || hash.copy().digest('hex') !== seal.sha256) return { ok: false, why: `its first ${seal.size} bytes changed since they were sealed at ${seal.at}` };
   if (seal.final && len > seal.size) return { ok: false, why: `${len - seal.size} bytes were added to it after its process had ended (sealed at ${seal.at})` };
-  if (!(await feed(hash, file, seal.size, len))) return { ok: false, why: 'its transcript shrank while it was read' };
-  return { ok: true, hasher: new TranscriptHasher(file, len, hash), sealed: true, tail: len - seal.size };
+  if (!(await feed(hash, file, seal.size, len, checkpoints, every))) return { ok: false, why: 'its transcript shrank while it was read' };
+  return { ok: true, hasher: new TranscriptHasher(file, len, hash), sealed: true, tail: len - seal.size, checkpoints };
+}
+
+/**
+ * w5931: the running hash of `file` after our own rewrite of it from byte `from` on (the tool refresh's same-length edits, w2626),
+ * hashed again only from the last checkpoint at or before `from` instead of from the file's start: on 2026-11-26 the dispatcher's
+ * 1.48 GB transcript took about 31 s to check and the full second pass most of another 43 s, while a person's orchestrator
+ * waited behind it to launch. Checkpoints taken past `from` hash bytes that changed, so they go. Undefined when the file
+ * shrank meanwhile.
+ */
+export async function rehashFrom(file: string, checkpoints: HashCheckpoint[], from: number): Promise<{ hasher: TranscriptHasher; hashedBytes: number } | undefined> {
+  let cp: HashCheckpoint = { at: 0, hash: crypto.createHash('sha256') };
+  for (const c of checkpoints) if (c.at <= from && c.at >= cp.at) cp = c;
+  let len: number;
+  try {
+    len = (await fs.promises.stat(file)).size;
+  } catch {
+    return undefined;
+  }
+  const hash = cp.hash.copy();
+  if (!(await feed(hash, file, cp.at, len))) return undefined;
+  return { hasher: new TranscriptHasher(file, len, hash), hashedBytes: len - cp.at };
 }
 
 /** Whether `pid` still runs (signal 0); a pid we may not signal runs. */

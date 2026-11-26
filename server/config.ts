@@ -18,7 +18,7 @@ import { checkPoolConfig, type PoolConfig } from './tokenPool.ts';
  * one named vault token (the dispatcher). The host token, the token file and this host's login are gone (lothsahn,
  * 2026-10-12: "everything runs off the vault").
  */
-export type ClaudeAccount = 'vault' | `vault:${string}`;
+export type ClaudeAccount = 'vault' | `vault:${string}` | `pool:${string}`;
 export const CLAUDE_ACCOUNTS: readonly ClaudeAccount[] = ['vault'];
 /** What claudeAccounts said before w1078, now ignored: the startup takes them out (server/configMigration.ts). */
 export const RETIRED_ACCOUNTS: readonly string[] = ['token', 'login', 'tokenfile'];
@@ -28,10 +28,20 @@ export const RETIRED_ACCOUNTS: readonly string[] = ['token', 'login', 'tokenfile
  * that token, not on the token file or the host token.
  */
 export const VAULT_PINNED_PREFIX = 'vault:';
-/** The roles that may be pinned to one vault token. */
+/** The roles that may be pinned to one vault token, or to one person's pool (w5891). */
 export const VAULT_PINNED_ROLES: readonly string[] = ['dispatcher'];
 /** The vault entry a pinned account names ("vault:vault-lothsahn-1" -> "vault-lothsahn-1"), or undefined for any other account. */
 export const pinnedVaultEntry = (account: string | undefined): string | undefined => (typeof account === 'string' && account.startsWith(VAULT_PINNED_PREFIX) ? account.slice(VAULT_PINNED_PREFIX.length) : undefined);
+/**
+ * "pool:<login>" (w5891, lothsahn: "Have it use Ben's pool not a particular token"): the dispatcher runs on any token of that
+ * one person's own Claude pool with room, and moves within it when its token runs out (w5921); never on another pool, and
+ * that person's pool setting (w1717) does not move it.
+ */
+export const DISPATCHER_POOL_PREFIX = 'pool:';
+/** A login as config names it: letters, digits, ".", "_" and "-", up to 40. */
+export const POOL_PERSON = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+/** The person a pool account names ("pool:ben" -> "ben"), or undefined for any other account. */
+export const dispatcherPoolOf = (account: string | undefined): string | undefined => (typeof account === 'string' && account.startsWith(DISPATCHER_POOL_PREFIX) ? account.slice(DISPATCHER_POOL_PREFIX.length) : undefined);
 /** A vault entry's name as `Vault.add` takes it: lower-case letters, digits, ".", "_" and "-", up to 40 (server/vault.ts NAME). */
 export const VAULT_ENTRY_NAME = /^[a-z0-9][a-z0-9._-]{0,39}$/;
 /**
@@ -470,7 +480,8 @@ export interface Config {
   };
   /**
    * Which vault token THIS host's agents run on, per role (docs/accounts.md): the orchestrators on their person's pool
-   * ("vault", the only value), the dispatcher on one named token ("vault:<entry name>") or, unset, the system payer's pool.
+   * ("vault", the only value), the dispatcher on one named token ("vault:<entry name>"), on one person's pool ("pool:<login>",
+   * w5891) or, unset, the system payer's pool.
    * Only the orchestrators and the dispatcher run here (w510); workers and standing agents run on machines, on the pool of
    * the person their work is for. Nothing falls back to another credential (w1078).
    */
@@ -1299,7 +1310,13 @@ export function checkAccountConfig(cfg: Pick<Config, 'claudeAccounts' | 'machine
         if (!VAULT_ENTRY_NAME.test(pinned)) throw new Error(`config claudeAccounts.${role} is "vault:<entry name>", a vault entry's name as \`fffctl vault list\` shows it (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1"`);
         continue;
       }
-      if (v !== 'vault') throw new Error(`config claudeAccounts.${role} is "vault" (a person's own vault pool)${VAULT_PINNED_ROLES.includes(role) ? ' or "vault:<entry name>" (one named vault token)' : ''}: every Claude process runs on a vault token (w1078)`);
+      const pool = dispatcherPoolOf(v as string);
+      if (pool !== undefined) {
+        if (!VAULT_PINNED_ROLES.includes(role)) throw new Error(`config claudeAccounts.${role} cannot be "${v}": only ${VAULT_PINNED_ROLES.join(', ')} can run on one named person's pool`);
+        if (!POOL_PERSON.test(pool)) throw new Error(`config claudeAccounts.${role} is "pool:<login>", a login with a Claude pool in the vault, e.g. "pool:ben"`);
+        continue;
+      }
+      if (v !== 'vault') throw new Error(`config claudeAccounts.${role} is "vault" (a person's own vault pool)${VAULT_PINNED_ROLES.includes(role) ? ', "vault:<entry name>" (one named vault token) or "pool:<login>" (one person\'s pool)' : ''}: every Claude process runs on a vault token (w1078)`);
     }
   }
   const u: unknown = cfg.machines?.githubFromVault;

@@ -83,7 +83,7 @@ const SCAN_SLICE_MS = 50;
  * thread pool, and the scan lets the loop run every SCAN_SLICE_MS. `gone`, asked after each wait: the start was stopped meanwhile,
  * so nothing is written. The same records are dropped as refreshKeptTools drops (keptTools.test.ts).
  */
-export async function refreshKeptToolsAsync(file: string | undefined, now: Map<string, ToolNow>, gone: () => boolean = () => false): Promise<string[]> {
+export async function refreshKeptToolsAsync(file: string | undefined, now: Map<string, ToolNow>, gone: () => boolean = () => false, wrote?: { first?: number }): Promise<string[]> {
   if (!file || now.size === 0) return [];
   let buf: Buffer;
   try {
@@ -101,7 +101,11 @@ export async function refreshKeptToolsAsync(file: string | undefined, now: Map<s
   if (out.writes.length === 0 || gone()) return [];
   const fh = await fs.promises.open(file, 'r+');
   try {
-    for (const w of out.writes) await fh.write(w.bytes, 0, w.bytes.length, w.at);
+    for (const w of out.writes) {
+      await fh.write(w.bytes, 0, w.bytes.length, w.at);
+      // w5931: where the file first changed, so its hash goes on from a checkpoint before it (rehashFrom)
+      if (wrote && (wrote.first === undefined || w.at < wrote.first)) wrote.first = w.at;
+    }
   } finally {
     await fh.close();
   }

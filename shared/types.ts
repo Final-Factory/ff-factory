@@ -147,6 +147,11 @@ export interface PendingPermission {
   input: unknown;
   /** Why it is being asked (blocked path, etc.), when the SDK says. */
   reason?: string;
+  /**
+   * w5914: a shell command the worker asked again after FF Factory's nudge toward another route (server/bashNudge.ts):
+   * its "no other route" reason when it gave one, and the route key its route request is filed and de-duplicated by.
+   */
+  noRoute?: { reason?: string; key: string };
   createdAt: string;
 }
 
@@ -1137,6 +1142,8 @@ export interface WorkerFenceReport {
   since?: string;
 }
 
+import type { RunnerHoldReport } from './runnerHold.ts';
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -1190,6 +1197,11 @@ export interface Machine {
    * with the probe's error. A failed fence holds its sandbox workers, and placement counts the machine busy.
    */
   fence?: WorkerFenceReport;
+  /**
+   * w5916: what a person's hold (placement.hold, a drain) does to its CI runners, as its daemon last said: which are
+   * stopped, which still run a job. Absent with no hold. Shown beside the hold (runnerHoldText).
+   */
+  runnerHold?: RunnerHoldReport;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.
@@ -1895,9 +1907,10 @@ export interface TokenWarning {
    * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
    * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889); github-token:
    * a GitHub token lacks a required repository or permission, or nears its expiry (w904); github-rate-limit: GitHub is rate
-   * limiting a token's account, which says nothing about the token's permissions (w1186).
+   * limiting a token's account, which says nothing about the token's permissions (w1186); gh-login: GitHub refuses a
+   * machine's own gh login with 401 (w5932).
    */
-  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit';
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit' | 'gh-login';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
   /** The owners see it too, besides `person` (w904: a GitHub token that lacks a requirement). */
@@ -2532,6 +2545,13 @@ export interface WorkItem {
   findings?: WorkFinding[];
   /** w3706: its final outcome, written by every close (Store.putWork): the close note and the last worker report. */
   finalOutcome?: { at: string; status: WorkStatus; text: string };
+  /**
+   * w5914: a route request FF Factory filed itself (server/routeRequests.ts, docs/bash-nudge.md) because a worker answered
+   * the shell nudge with "no other route". `key` dedups the need; `waiters` are the workers whose card waits on it;
+   * `doneSha` is the portal's commit when it was first seen done, and `landed` when a later portal commit runs (the route
+   * deployed), with `line` the route the waiting workers are told to use; `told` the sessions already told once.
+   */
+  route?: WorkRoute;
   /** Questions the dispatcher asked about it (at most 3). */
   asks: number;
   /**
@@ -3189,8 +3209,30 @@ export interface WorkFfboxDev {
  * itself (nightly-run, w864; docs/intake.md, "The nightly run"), or a red master batch the game repo's CI found after
  * merges (master-batch, w1180; docs/intake.md, "Master batch reds").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch' | 'harness-route';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch', 'harness-route'];
+
+/** w5914: one worker whose shell approval card waits on a route request (WorkItem.route). */
+export interface RouteWaiter {
+  session: string;
+  requestId: string;
+  command: string;
+  reason?: string;
+  /** The worker's open requests when it asked. */
+  works: string[];
+  at: string;
+}
+
+/** w5914: the route request's own record (WorkItem.route). */
+export interface WorkRoute {
+  key: string;
+  triage: 'go' | 'approval';
+  waiters: RouteWaiter[];
+  doneSha?: string;
+  landed?: string;
+  line?: string;
+  told?: string[];
+}
 
 export interface WorkSource {
   kind: WorkSourceKind;

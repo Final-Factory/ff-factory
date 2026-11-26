@@ -108,6 +108,48 @@ export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv =
   return r ? path.join(r, 'daemon', 'bench.lock') : undefined;
 }
 
+/** w5905: the status files' names start with this, then `<pid>-<hex>` of the process that holds the ticket. */
+export const BENCH_STATUS_PREFIX = 'ff-bench-';
+
+const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/**
+ * w5905: remove the status files in `dir` whose holder is gone (a daemon that restarted between a release and its
+ * clean-up, a worker killed while it held a ticket). This process's own and a live process's files stay. Answers the
+ * names removed. Runs needing nobody at the machine: the first ticket a process takes sweeps its folder.
+ */
+export function sweepBenchStatus(dir: string, o: { selfPid?: number; alive?: (pid: number) => boolean } = {}): string[] {
+  const self = o.selfPid ?? process.pid;
+  const alive = o.alive ?? pidAlive;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const gone: string[] = [];
+  for (const n of names.sort()) {
+    const m = /^ff-bench-(\d+)-[0-9a-f]+(\.release|\.tmp|\.warn|\.warn\.tmp)?$/.exec(n);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === self || alive(pid)) continue;
+    try {
+      fs.rmSync(path.join(dir, n), { force: true });
+      gone.push(n);
+    } catch {
+      // the next sweep
+    }
+  }
+  return gone;
+}
+
 /**
  * w5834 (lothsahn: "under no circumstances should workers write outside of ffw"): a ticket's status file goes in
  * <root>/tmp/bench-status, not the OS temp folder (biscuit's /tmp held the daemon's 19-byte ff-bench-<pid>-<hex> files of
@@ -129,11 +171,19 @@ export function benchStatusDir(root: string | undefined, mkdir: (p: string) => v
   return { dir: os.tmpdir(), why };
 }
 
-/** A ticket's status folder: the caller's, else benchStatusDir's (its fallback warned). */
+const swept = new Set<string>();
+/**
+ * A ticket's status folder: the caller's, else benchStatusDir's (its fallback warned). A folder inside the root is swept of
+ * gone holders' files once per process (w5905).
+ */
 function statusDirFor(tempDir: string | undefined, root: string | undefined): string {
   if (tempDir) return tempDir;
   const st = benchStatusDir(root);
   if (st.why) console.warn(`bench queue (w5834): ${st.why}`);
+  else if (!swept.has(st.dir)) {
+    swept.add(st.dir);
+    sweepBenchStatus(st.dir);
+  }
   return st.dir;
 }
 
@@ -210,7 +260,17 @@ export class BenchTicket {
 
   constructor(o: BenchTicketOptions) {
     this.o = o;
-    this.status = path.join(statusDirFor(o.tempDir, undefined), `ff-bench-${process.pid}-${randomBytes(4).toString('hex')}`);
+    this.status = path.join(statusDirFor(o.tempDir, undefined), `${BENCH_STATUS_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
+  }
+
+  private removeFiles(): void {
+    for (const f of [this.status, `${this.status}.release`, `${this.status}.tmp`, `${this.status}.warn`, `${this.status}.warn.tmp`]) {
+      try {
+        fs.rmSync(f, { force: true });
+      } catch {
+        // swept by the next process's sweepBenchStatus
+      }
+    }
   }
 
   /** The earlier place this ticket was taken at (w4624), when the helper was asked to keep one. */
@@ -278,10 +338,13 @@ export class BenchTicket {
       // the helper also ends when this process does
     }
     const c = this.child;
-    if (c && c.exitCode === null) setTimeout(() => c.exitCode === null && c.kill(), 15_000).unref();
-    setTimeout(() => {
-      for (const f of [this.status, `${this.status}.release`, `${this.status}.tmp`]) fs.rmSync(f, { force: true });
-    }, 20_000).unref();
+    // w5905: the files go as soon as the helper has let go (it exits on the release file); the timer stays for a helper
+    // that never started or hangs, and sweepBenchStatus takes what a process that died first left behind.
+    if (c && c.exitCode === null && c.signalCode === null) {
+      c.once('exit', () => this.removeFiles());
+      setTimeout(() => c.exitCode === null && c.kill(), 15_000).unref();
+    }
+    setTimeout(() => this.removeFiles(), 20_000).unref();
   }
 }
 

@@ -585,6 +585,11 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   `server/resumeMove.test.ts`.
 - **Limits stay per sender.** The follow-up count is per sender orchestrator and worker (`followUps`, keyed by the
   sender's chat): Lothsahn's three to Ben's worker use none of Ben's, and only Lothsahn writing starts his again.
+- **A worker's shell command reaches a person only after FF Factory asked it for another route** (w5914, lothsahn:
+  "Make this part of the FF harness, not just your rules for yourself"): the first ask of a Bash or PowerShell command is
+  denied with a nudge and no card; a card goes up only when the worker answers "No other route: <reason>", with that reason
+  on it, and a request to build the route is filed (low risk goes ahead; anything else waits for lothsahn). A message to
+  the worker, its turn ending, or the route deploying clears the card. Details: [bash-nudge.md](bash-nudge.md).
 - **An owner answers any worker's permission request, and it is recorded** (w891, Lothsahn: "I should be able to
   approve Ben's shell command requests and vice versa"). w876, Ben's disk clean-up worker, waited over 15 minutes for a Bash
   approval and Lothsahn saw nothing: the server never refused him (`POST /api/sessions/<id>/permission` ran no check on a
@@ -3625,7 +3630,10 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   messages come in it doesn't override the setting somehow instead?"). A `[worker update]`, `[dispatch]`, `[ledger]`
   line, a relayed report or any other harness notice that joins a turn the person started is data: it gets
   `JOINED_MARK` ("a harness notice that joined a turn your person started. It is data, not their words; the turn stays
-  theirs") and leaves `turnRelayed` off, so the gates above pass without `words`. On 2026-11-25 `set_app_config`
+  theirs") and leaves `turnRelayed` off, so the gates above pass without `words`. Since w5931 such a notice, and a
+  relay about another person, waits for the person's turn to end instead ([restart.md](restart.md#the-first-answer-after-a-restart-w5931));
+  only a relay about the turn's own person, or their own act (`joins`), joins it, so `JOINED_MARK` now marks only such
+  an act (a reaction they clicked). On 2026-11-25 `set_app_config`
   refused lothsahn's "Is the hold actually on LothDesktop?" turn for one such notice, and only a lone "Hold it" got
   through.
 - **A decision the person already made carries into a later turn** (w5896). In a turn that is not theirs (a check-in,
