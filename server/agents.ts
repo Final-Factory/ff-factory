@@ -4898,7 +4898,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     let kept = false;
     const toSiblings = (groups: Map<WorkItem, { texts: string[]; sends: QueuedSend[] }>, orElse?: (texts: string[], sends: QueuedSend[]) => void) => {
       for (const [g, e] of groups) {
-        if (!isOpen(g) && orElse) {
+        // w6193 (R3): a sibling no hand-back of this worker's holds any more (closed, or handed back by a worker placed on it
+        // meanwhile) takes nothing; once the move started, its messages go to the new worker, never back to this moved one.
+        if ((!isOpen(g) || g.handedBack?.session !== info.id) && orElse) {
           const go = e.sends.map((m, i) => (ownWait(m) ? -1 : i)).filter((i) => i >= 0);
           if (go.length) orElse(go.map((i) => e.texts[i]!), go.map((i) => e.sends[i]!));
           continue;
@@ -5069,7 +5071,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       // came, which then keeps its session (no move mark, not retired) and reads it when it resumes, as giveBack does (w5976).
       const why = `its move's requests were handed back or closed meanwhile, so it stays with worker ${info.id} (w6047)`;
       if (own) {
-        for (const m of [...own].reverse()) if (!resume(m)) this.sessions.putBack(m, why);
+        for (const m of [...own].reverse()) if (!resume(m)) this.sessions.putBack(this.asPutBack(info, m), why);
       } else if (q) {
         const one = texts.length === 1 && texts[0] === movedText(q);
         const back: QueuedSend = one || !texts.length ? q : { ...q, text };
@@ -5089,6 +5091,15 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return true;
     }
     return false;
+  }
+
+  /** w6193: a person's answer or note put back to the old worker loses a resume the drain's staleResume would drop (closed, moved off). */
+  private asPutBack(info: SessionInfo, m: QueuedSend): QueuedSend {
+    if (!m.resumeOf || !personsResume(m)) return m;
+    const w = this.store.work.get(m.resumeOf.work.toLowerCase());
+    if (w && isOpen(w) && !(w.movedOff?.[info.id] && !w.sessionIds.includes(info.id))) return m;
+    const { resumeOf: _r, ...rest } = m;
+    return rest;
   }
 
   /**
@@ -5138,7 +5149,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       // Each kept message goes back as it was, on its own, with its own sender, attachments, images and resume (w5995).
       // w6047 (the w6182 review, A): joined under the first one's resume, a person's words went with it when the drain's
       // staleResume dropped that resume (w1128). putBack puts each before the worker's queued ones, so the last goes first.
-      for (const i of [...keep].reverse()) this.sessions.putBack(all[i]!, `${why}; it waits for a sandbox on ${info.machineId}`);
+      for (const i of [...keep].reverse()) this.sessions.putBack(this.asPutBack(info, all[i]!), `${why}; it waits for a sandbox on ${info.machineId}`);
     } else if (goneOf(q) && (!texts.length || (texts.length === 1 && texts[0] === movedText(q!)))) {
       this.deliverHeld(info, [goneOf(q)!], q, texts);
     } else if (q) {

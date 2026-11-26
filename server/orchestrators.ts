@@ -4943,7 +4943,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.store.putWork(w);
       return `${w.id} is blocked again on ${name}; the resume is kept and handed back when that clears`;
     }
-    if (!isOpen(w) && w.status !== 'stalled') return `${w.id} is ${w.status}`;
+    // w6047 (the w6193 review): a person's answer or note goes even when its request closed while it waited: the person's
+    // words are never dropped; the worker sees the request closed. A moved-off worker still does not take one (w2079 below):
+    // a person's resume for it goes to the request's new worker instead (forwardToHeirs).
+    if (!isOpen(w) && w.status !== 'stalled' && !answer) return `${w.id} is ${w.status}`;
     // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
     // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.
     if (w.movedOff?.[sessionId] && !w.sessionIds.includes(sessionId)) {
