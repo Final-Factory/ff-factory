@@ -99,9 +99,11 @@ export interface WinCiFirstDeps {
   record?: { read: () => Lowered; write: (l: Lowered) => void };
   /**
    * w6217: FF_SESSION_ID and FF_WORKER_ROOT of these processes, where Windows lets them be read (machine/leftovers.ts
-   * readEnvs; a process that shows none is left out). Without it no orphaned tool is looked for.
+   * readEnvs; a process that shows none is left out), and `ci` for one whose environment holds GITHUB_ACTIONS or
+   * RUNNER_TRACKING_ID (a CI runner's or job's, whatever FF variables it also carries). Without it no orphaned tool is
+   * looked for.
    */
-  envOf?: (pids: number[]) => Promise<Map<number, { session?: string; root?: string }>>;
+  envOf?: (pids: number[]) => Promise<Map<number, { session?: string; root?: string; ci?: boolean }>>;
   /** This daemon's worker root (FF_WORKER_ROOT of its workers' processes): an orphan of another root's worker is not ours. */
   root?: string;
   now: () => number;
@@ -112,7 +114,7 @@ export interface WinCiFirstResult {
   jobs: number;
   /** Agents' tools' processes above the setting's priority (before this tick lowered any). */
   above: number;
-  /** w6217: of `above`'s kind, agents' tools whose tree lost its link to the host (counted apart; not lowered yet). */
+  /** w6217: of `above`, agents' tools whose tree lost its link to the host (lowered with the rest when enforcing). */
   orphans?: number;
   /** Processes this tick lowered, and raised back. */
   lowered?: number;
@@ -140,6 +142,11 @@ export function priorityName(p: number | undefined): string {
   if (p >= P.PRIORITY_HIGH) return 'High';
   return 'Realtime';
 }
+
+/** w6217: what envSeen holds for a CI runner's or job's process. */
+const CI_ENV = '\0ci';
+/** w6217: ticks a failed environment read waits before it is tried again. */
+export const ENV_RETRY_TICKS = 5;
 
 const keyOf = (f: ProcFact) => `${f.pid}@${f.startedAt ?? ''}`;
 
@@ -228,6 +235,30 @@ export function writeLowered(root: string, l: Lowered) {
 }
 
 const isUnity = (p: WinProc) => /^unity(\.exe)?$/i.test(p.name ?? '') || /(^|[\\/"])unity\.exe"?(\s|$)/i.test(p.cmd);
+/**
+ * w6225 review: never an agent's tool, whatever session its environment carries.
+ * - Unity's helpers: its licensing client (a batch Unity leaves it running, and every editor on the machine asks it),
+ *   Unity Hub, and anything run from a Unity Editor install.
+ * - A runner's shell: a cmd.exe or conhost.exe whose command line names run.cmd, run-helper.cmd or a runner's folder.
+ *   Between two listeners (a self-update or a relaunch, exit 2 to 4) run.cmd has no listener below it to fence it, and
+ *   the next listener and its jobs would start at its priority.
+ */
+const isUnityAux = (p: WinProc) => {
+  const c = p.cmd.replace(/\//g, '\\');
+  return (
+    /^unity\.licensing\.client(\.exe)?$|^unity hub(\.exe)?$/i.test(p.name ?? '') ||
+    /unity\.licensing\.client\.exe|\\unity hub\\|\\unity hub\.exe|\\editor\\data\\/i.test(c)
+  );
+};
+const isRunnerShell = (p: WinProc, runnerRoots: string[]) => {
+  if (!/^(cmd|conhost)(\.exe)?$/i.test(imageOf(p))) return false;
+  const c = p.cmd.replace(/\//g, '\\').toLowerCase();
+  return (
+    /(^|[\\"\s])run(-helper)?\.cmd\b/.test(c) ||
+    /\\ffu-runners\\/.test(c) ||
+    runnerRoots.some((r) => r && c.includes(r.replace(/\//g, '\\').toLowerCase().replace(/\\+$/, '')))
+  );
+};
 const imageOf = (p: WinProc | undefined) => p?.name || (p?.cmd ?? '?').trim().replace(/^"/, '').split(/["\s]/)[0].split(/[\\/]/).pop() || '?';
 /** A process listing can be this old when it is answered (machine/sandboxes.ts realPoolDeps caches it for 5 s). */
 export const LIST_MAX_AGE_MS = 5_000;
@@ -250,9 +281,14 @@ export class WinCiFirst {
   private raiseFails = new Map<string, number>();
   /** Hosts with a tool at the lowered priority at the last enforcing tick beside a job. */
   private lowHosts = new Set<number>();
-  /** w6217: the FF_SESSION_ID each process read showed ('' for none or another root's), by pid@start: it never changes. */
+  /**
+   * w6217: what each process's environment showed, by pid@start (it never changes): its FF_SESSION_ID ('' for none or
+   * another root's), or CI_ENV for a runner's or a job's.
+   */
   private envSeen = new Map<string, string>();
   private envFailing = false;
+  /** w6217: ticks to skip the environment read after one failed (each read can hold a tick up to its 120 s timeout). */
+  private envSkip = 0;
   /** w6217: orphaned tools already named in the log, by pid@start. */
   private orphansSaid = new Set<string>();
 
@@ -415,20 +451,31 @@ export class WinCiFirst {
    * w6217: agents' tools that the walk from the hosts cannot reach, because a process between them and their host ended
    * before a tick saw it (Windows never gives an orphan a new parent). On 2026-11-26 from 21:54 UTC a `cargo test` under
    * a `bash /tmp/bugchecks.sh` whose starter had ended stayed at Normal beside two CI jobs for at least 9 minutes.
-   * An orphan root is a listed process outside every known tree (`fence`: the agents', the jobs', hosts, the daemon) whose
-   * parent is gone or started after it. Each orphan tree is walked as the hosts' are; a process in it whose environment
-   * holds FF_SESSION_ID of a host running now, under this daemon's root, is that host's tool, and so is what is below it
-   * (a Git Bash shell shows no environment to the reader, the cargo it starts does). No Unity process, or what one started.
-   * Each process's environment is read once (cached by pid@start). Returns pid -> its host.
+   * An orphan root is a listed process outside every known tree (`fence`: the agents', the jobs', hosts, the daemon, the
+   * listeners) whose parent is gone or started after it. Each orphan tree is walked as the hosts' are; a process in it
+   * whose environment holds FF_SESSION_ID of a host running now, under this daemon's root, is that host's tool, and so is
+   * what is below it (a Git Bash shell shows no environment to the reader, the cargo it starts does). Never a tool:
+   * - a Unity process, or what one started;
+   * - a CI runner's or job's process (GITHUB_ACTIONS or RUNNER_TRACKING_ID in its environment: a job step's orphan carries
+   *   the runner's environment, and so whatever FF_SESSION_ID a runner started from a worker's shell inherited), what it
+   *   started, or what is above it;
+   * - a process above a fenced one (a listener, a job, a host): the `cmd.exe /c run.cmd` an agent's shell left, which
+   *   starts the listener again after a runner update, would hand it the lowered priority (w6222 review);
+   * - a runner's shell (a cmd.exe or conhost.exe naming run.cmd or a runner's folder), even between two listeners, and
+   *   Unity's helpers (its licensing client, Unity Hub, anything from an Editor install) (w6225 review).
+   * Each process's environment is read once (cached by pid@start); a failed read is tried again after ENV_RETRY_TICKS
+   * ticks, and a tree with a member not read is left alone meanwhile.
+   * Returns pid -> its host, and how many roots and processes the orphan trees held.
    */
   private async orphanTools(
     procs: WinProc[],
     fence: Set<number>,
     started: Map<number, number>,
     hosts: { session: string; pid: number }[],
-  ): Promise<Map<number, number>> {
+    runnerRoots: string[] = [],
+  ): Promise<{ tools: Map<number, number>; roots: number; members: number }> {
     const out = new Map<number, number>();
-    if (!this.d.envOf || !hosts.length) return out;
+    if (!this.d.envOf || !hosts.length) return { tools: out, roots: 0, members: 0 };
     const hostOf = new Map(hosts.map((h) => [h.session, h.pid]));
     const procOf = new Map(procs.map((p) => [p.pid, p]));
     const roots = procs
@@ -444,40 +491,57 @@ export class WinCiFirst {
     const key = (pid: number) => `${pid}@${started.get(pid)}`;
     const members = roots.flatMap((r) => [r, ...(trees.get(r) ?? [])]);
     const unread = members.filter((pid) => !this.envSeen.has(key(pid)));
-    if (unread.length) {
+    if (unread.length && this.envSkip > 0) this.envSkip--;
+    else if (unread.length) {
       try {
         const env = await this.d.envOf(unread);
         for (const pid of unread) {
           const e = env.get(pid);
-          this.envSeen.set(key(pid), e?.session && sameRoot(e.root, this.d.root) ? e.session : '');
+          this.envSeen.set(key(pid), e?.ci ? CI_ENV : e?.session && sameRoot(e.root, this.d.root) ? e.session : '');
         }
         if (this.envFailing) this.d.log("ci first: the processes' environments read again");
         this.envFailing = false;
       } catch (e) {
-        if (!this.envFailing) this.d.log(`ci first: could not read the processes' environments: ${(e as Error).message.slice(0, 200)}`);
+        if (!this.envFailing) this.d.log(`ci first: could not read the processes' environments (tried again every ${ENV_RETRY_TICKS + 1} ticks): ${(e as Error).message.slice(0, 200)}`);
         this.envFailing = true;
+        this.envSkip = ENV_RETRY_TICKS;
       }
     }
     // what is no longer listed is forgotten
     const live = new Set(procs.filter((p) => started.has(p.pid)).map((p) => key(p.pid)));
     for (const k of [...this.envSeen.keys()]) if (!live.has(k)) this.envSeen.delete(k);
+    // A member with a fenced process (a listener, a job, a host) or a CI process below it is never a tool, nor is what is
+    // above it in its tree.
+    const memberSet = new Set(members);
+    const blocked = new Set<number>();
+    const block = (pid: number) => {
+      for (let x: number | undefined = pid; x !== undefined && memberSet.has(x) && !blocked.has(x); x = procOf.get(x)?.ppid) blocked.add(x);
+    };
+    for (const p of procs) {
+      const ps = started.get(p.ppid);
+      const st = started.get(p.pid);
+      if (fence.has(p.pid) && memberSet.has(p.ppid) && ps !== undefined && st !== undefined && ps <= st + 1_000) block(p.ppid);
+    }
+    for (const pid of members) if (this.envSeen.get(key(pid)) === CI_ENV || isRunnerShell(procOf.get(pid)!, runnerRoots)) block(pid);
     for (const root of roots) {
+      const tree = [root, ...(trees.get(root) ?? [])];
+      if (tree.some((pid) => !this.envSeen.has(key(pid)))) continue;
       // each member after its parent (agentTrees walks breadth first): it is a host's when it or a process above it is
-      const mark = new Map<number, number | 'unity' | undefined>();
-      for (const pid of [root, ...(trees.get(root) ?? [])]) {
+      const mark = new Map<number, number | 'no' | undefined>();
+      for (const pid of tree) {
         const p = procOf.get(pid)!;
         const above = pid === root ? undefined : mark.get(p.ppid);
-        if (above === 'unity' || isUnity(p)) {
-          mark.set(pid, 'unity');
+        if (above === 'no' || isUnity(p) || isUnityAux(p) || isRunnerShell(p, runnerRoots) || this.envSeen.get(key(pid)) === CI_ENV) {
+          mark.set(pid, 'no');
           continue;
         }
         const own = hostOf.get(this.envSeen.get(key(pid)) || '\0');
         const host = own ?? above;
         mark.set(pid, host);
-        if (host !== undefined) out.set(pid, host);
+        if (host !== undefined && !blocked.has(pid)) out.set(pid, host);
       }
     }
-    return out;
+    return { tools: out, roots: roots.length, members: members.length };
   }
 
   private async step(s: WinCiFirstSettings): Promise<WinCiFirstResult | undefined> {
@@ -599,6 +663,17 @@ export class WinCiFirst {
         else if (p && p.ppid !== root) tools.set(pid, root);
       }
     }
+    // w6217: orphaned tools (their starter gone) are found by their session's environment and go with the rest
+    const orphanFind = await this.orphanTools(procs, new Set([...stop, ...roots, ...[...trees.values()].flat()]), started, real, [
+      ...census.listeners.map((l) => l.root),
+      ...census.workers.map((w) => w.root),
+    ]);
+    const orphaned = orphanFind.tools;
+    const orphanAbove = [...orphaned.keys()].filter((pid) => {
+      const p = this.d.priorityOf(pid);
+      return p !== undefined && p < s.priority;
+    });
+    for (const [pid, host] of orphaned) tools.set(pid, host);
     let above = 0;
     const loweredNow: { k: string; pid: number; prev: number }[] = [];
     let lowerFailed = 0;
@@ -664,21 +739,17 @@ export class WinCiFirst {
       }
       if (pruned) this.save();
     }
-    // w6217, step 1: orphaned tools are found and counted (any mode), never lowered yet
-    const orphaned = await this.orphanTools(procs, new Set([...stop, ...roots, ...[...trees.values()].flat()]), started, real);
-    const orphanAbove = [...orphaned.keys()].filter((pid) => {
-      const p = this.d.priorityOf(pid);
-      return p !== undefined && p < s.priority;
-    });
     const sessionOf = new Map(real.map((h) => [h.pid, h.session]));
     const newly = orphanAbove.filter((pid) => !this.orphansSaid.has(keyOf(byPid.get(pid)!)));
     const liveKeys = new Set(facts.map(keyOf));
     for (const k of [...this.orphansSaid]) if (!liveKeys.has(k)) this.orphansSaid.delete(k);
     for (const pid of newly) this.orphansSaid.add(keyOf(byPid.get(pid)!));
     if (newly.length) {
-      const names = newly.map((pid) => `${pid} ${imageOf(procOf.get(pid))} (${sessionOf.get(orphaned.get(pid)!) ?? '?'})`);
+      const lowSet = new Set(loweredNow.map((l) => l.pid));
+      const names = newly.map((pid) => `${pid} ${imageOf(procOf.get(pid))} (${sessionOf.get(orphaned.get(pid)!) ?? '?'})${lowSet.has(pid) ? ' lowered' : ''}`);
+      const what = !enforcing ? 'enforcing would lower them (warn only)' : held ? "not lowered while a bench or a person's turn holds this machine" : 'lowered with the rest';
       this.d.log(
-        `ci first: ${newly.length} more of the agents' tools' process(es) run above ${priorityName(s.priority)} beside the CI job(s) with the process that started them gone, so the walk from their host misses them; ${orphanAbove.length} such now; not lowered yet (w6217): ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`,
+        `ci first: ${newly.length} more of the agents' tools' process(es) run above ${priorityName(s.priority)} beside the CI job(s) with the process that started them gone, found by their session's environment (w6217; ${orphanFind.roots} orphan tree(s) of ${orphanFind.members} process(es) looked at); ${what}: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`,
       );
     }
     const res: WinCiFirstResult = { jobs: census.workers.length, above, orphans: orphanAbove.length, lowered: loweredNow.length, raised };
@@ -704,7 +775,7 @@ export class WinCiFirst {
           ? `none of their tools lowered while a bench or a person's turn holds this machine`
           : `${Object.keys(this.lowered).length} of their tools' process(es) lowered to ${priorityName(s.priority)} so far`
         : `${above} of their tools' process(es) run above ${priorityName(s.priority)}, which enforcing would lower (warn only, w6110)`;
-    const orphanNote = orphanAbove.length ? `; ${orphanAbove.length} orphaned tool process(es) above ${priorityName(s.priority)}, not lowered yet (w6217)` : '';
+    const orphanNote = orphanAbove.length ? `; ${orphanAbove.length} of them with the process that started them gone (w6217)` : '';
     if (changed) {
       this.d.log(`ci first: CI job(s) running: ${sides}; ${real.length} agent(s) beside them; ${would}${orphanNote}`);
       this.warnedAt = 0;
