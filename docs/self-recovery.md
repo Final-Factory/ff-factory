@@ -289,6 +289,24 @@ priority. When a CI job starts or ends the daemon logs a `ci first:` line with b
 `cpu.weight`, and FF Factory's scopes' `cpu.weight` and highest thread priority (`-` means the cpu controller is off
 there, so nice decides). GPU and memory are not shared out by either. Tests: `server/w5322CiFirst.test.ts`.
 
+### CI jobs go first on LothDesktop: warn only so far (w6110)
+
+On 2026-11-26 from 12:54 to 14:53 UTC a worker's planted CPU hogs (64 to 96 busy loops for w6066's failover test) ran at
+Normal priority on LothDesktop's 16 threads beside its two ffu runners, and their steps ran 10 to 25 times slower: a
+crosscheck of 1 to 4 min took 56 min and was cancelled at its timeout, clippy's build of 6.5 min took 50 min. Neither
+guard covered it: the CI load gate (w3305) only stops an idle runner from taking a job, and the biscuit section above is
+Linux only. Windows has no scopes or nice; it has priority classes, which a child process inherits.
+
+`machine/ciFirstWin.ts` (`WIN_CI_FIRST`: lothdesktop only, ticked once a minute from `machine/daemon.ts`) finds, while a
+CI job runs, each agent host's processes by walking down from the host's own process. The walk never enters the host
+(its heartbeat), another host, the daemon or a runner's tree, and keeps a child only when its parent started before it
+(Windows reuses pids and does not reparent orphans). This first step sets nothing. It logs a `ci first:` line when a job
+starts or ends, and at most every 5 min while the agents' processes use 4 cores or more: the cores the machine, the jobs,
+each agent and the rest (editors, orphans, processes that ended) used over the last tick, and how many of the agents'
+processes run above BelowNormal. Editors the daemon starts are not under a host; on LothDesktop they run BelowNormal
+already, and batch builds go to Idle. The step that lowers the agents' processes to BelowNormal comes separately, behind
+a daemon.json switch with an undo. Tests: `server/w6110CiFirstWin.test.ts`.
+
 ## 3. The VHDX policy
 
 A dynamically expanding VHDX grows as its volume is written and never shrinks by itself. On
