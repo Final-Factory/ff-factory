@@ -12,7 +12,7 @@
  * Agents without a sandbox (standing agents) are not fenced and never wait here: they run at the daemon's own level on
  * purpose (docs/worker-root.md, "Who runs outside the fence").
  */
-import type { WorkerFenceReport } from '../shared/types.ts';
+import type { AgentIntegrity, WorkerFenceReport } from '../shared/types.ts';
 
 export type { WorkerFenceReport };
 
@@ -73,8 +73,20 @@ export class FenceGate {
 
   private set(r: Pick<WorkerFenceReport, 'state' | 'why'>): void {
     if (this.report.state !== 'setting_up') return; // decided once per daemon start: a restart probes again
-    this.report = { ...r, ...(this.report.kind ? { kind: this.report.kind } : {}), since: this.now().toISOString() };
+    const { agentIntegrity, agentIntegrityWhy, agentIntegrityAt } = this.report;
+    this.report = { ...r, ...(this.report.kind ? { kind: this.report.kind } : {}), since: this.now().toISOString(), ...(agentIntegrity ? { agentIntegrity } : {}), ...(agentIntegrityWhy ? { agentIntegrityWhy } : {}), ...(agentIntegrityAt ? { agentIntegrityAt } : {}) };
     this.settle();
+    this.changed(this.state);
+  }
+
+  /**
+   * w6003: the integrity level a sandbox agent's commands were measured at (machine/agentIntegrity.ts), or why it could
+   * not be: kept beside the state (a later state keeps it) and sent at once. Placement of a pre-w5297 pair run reads it.
+   */
+  measured(m: { level: AgentIntegrity } | { why: string }): void {
+    const { agentIntegrity: _l, agentIntegrityWhy: _w, agentIntegrityAt: _a, ...rest } = this.report;
+    const at = this.now().toISOString();
+    this.report = 'level' in m ? { ...rest, agentIntegrity: m.level, agentIntegrityAt: at } : { ...rest, agentIntegrityWhy: m.why.slice(0, 300), agentIntegrityAt: at };
     this.changed(this.state);
   }
 
