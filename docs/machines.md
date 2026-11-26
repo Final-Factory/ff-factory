@@ -1326,6 +1326,8 @@ older daemon ignores it and keeps making worktrees.
   `ops_worker` `machine_update` `win_ci_first` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `winCiFirst`;
   the daemon restarts with it. `enforce` lowers agents' tools to Idle while a CI job runs (the jobs themselves run BelowNormal); `warn` (unset) only logs
   what they use and raises back anything lowered, the way back.
+- **The ffu CI runners at Normal priority** (w6163, machine/runnerPriority.ts): `ops_worker` `machine_update` `runner_priority` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `runnerPriority`;
+  the daemon restarts with it. `enforce` sets the runners' scheduled tasks to priority 4 and raises their listeners to Normal; `warn` (the default everywhere but the machines in `RUNNER_PRIORITY_ENFORCE`, and the recovery) only logs what it reads; `off` stops it. Unset leaves it as it is.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 

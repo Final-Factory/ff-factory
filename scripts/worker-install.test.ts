@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -1029,6 +1029,24 @@ test('w6110: worker update --win-ci-first writes winCiFirst to daemon.json on Wi
   assert.equal(winCiFirstFlag(undefined), undefined);
   for (const m of ['off', 'warn', 'enforce']) assert.equal(winCiFirstFlag(m), m);
   for (const bad of ['on', 'ENFORCE', '']) assert.throws(() => winCiFirstFlag(bad), /--win-ci-first is off, warn or enforce/);
+});
+
+test('w6163: worker update --runner-priority writes runnerPriority to daemon.json on Windows only; unset carries it; anything but off, warn or enforce is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-rp-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { runnerPriority?: 'off' | 'warn' | 'enforce' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('runnerPriority' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.equal(written(BEAST_CONFIG, { runnerPriority: m }).runnerPriority, m, m);
+  const had = { ...BEAST_CONFIG, runnerPriority: 'enforce' };
+  assert.equal(written(had, {}).runnerPriority, 'enforce', 'unset carries it');
+  assert.equal(written(had, { runnerPriority: 'warn' }).runnerPriority, 'warn', 'the way back replaces it');
+  for (const p of ['linux', 'darwin'] as const) assert.throws(() => written(BEAST_CONFIG, { runnerPriority: 'enforce' }, p), /--runner-priority: Windows only/);
+  const cfg = { a: 1 };
+  assert.equal(applyRunnerPriority(cfg, undefined, 'linux'), cfg, 'unset: the very config, any OS');
+  assert.deepEqual(applyRunnerPriority(cfg, 'enforce', 'win32'), { a: 1, runnerPriority: 'enforce' });
+  assert.equal(runnerPriorityFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'enforce']) assert.equal(runnerPriorityFlag(m), m);
+  for (const bad of ['on', 'ENFORCE', '']) assert.throws(() => runnerPriorityFlag(bad), /--runner-priority is off, warn or enforce/);
 });
 
 test('w6000: worker update --daemon-tmpdir writes daemonTmpdir to daemon.json on every OS; unset carries it; anything but on or off is refused', () => {

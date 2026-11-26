@@ -250,8 +250,10 @@ Normal in all three; 5 and 6 lower the memory priority.
 - **The task.** It reads each running listener's scheduled task at the first tick, for a runner folder not seen before,
   and every hour.
 - **The processes.** It reads the class, I/O and memory priority of the listener and of the cmd.exe and conhost.exe it
-  runs under, when the listener is new or its class reads below Normal. run.cmd starts a relaunched listener under the
-  same cmd.
+  runs under, when the listener is new. Under enforce it looks again 30 minutes after a raise that failed or stayed low,
+  or whose class reads below Normal again. run.cmd starts a relaunched listener (a new pid) under the same cmd. Each pid
+  is checked to be the runner's own image (Runner.Listener.exe, then cmd.exe or conhost.exe) and no younger than its
+  child before anything is read or set.
 
 Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
 - It sets a task above 4 to 4 with `Set-ScheduledTask`. That is the user's own task, so no elevation is needed; the
@@ -259,10 +261,17 @@ Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
 - It raises each of those processes below Normal to Normal in all three priorities (SetPriorityClass, ProcessIoPriority,
   ProcessMemoryPriority) and reads them back, so the jobs started after that run at Normal.
 - Nothing is restarted, a job already running keeps its priority, and a process above Normal is left alone.
+- A runner running a job has its task set at the first tick it is between jobs.
+- A "parent" that started after its child is a stranger with a reused pid: the chain ends there and it is left alone.
+- A raise that fails or does not hold is tried again after 30 minutes, not every minute.
 
-The first step lists no machine, so everywhere it only logs `runner priority:` lines (lothsahn's lockout rule). BEAST stays
-log-only, under Ben's standing hold on its system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`)
-overrides the default at the daemon's start. A failure is logged once and changes nothing else. ffu's
+The first step listed no machine and only logged (lothsahn's lockout rule). Its lines on LothDesktop (2026-11-26 20:22Z)
+showed both tasks at 7 and both listeners at BelowNormal, I/O 1, memory 2, read at the daemon's Medium integrity. The
+second step lists LothDesktop. BEAST stays log-only in code: `enforce` in its daemon.json is read as `warn`, and
+`ops_worker runner_priority enforce` is refused for it, under Ben's standing hold on its
+system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`) overrides the default at the daemon's start;
+`ops_worker machine_update runner_priority warn` sets it with nobody at the machine, and is the recovery. A failure is
+logged once and changes nothing else. ffu's
 `install-ffu-runner.ps1` registers new tasks at 4 with no 72-hour limit (ffu #1204).
 
 ### Runner temp folders on macOS and Windows (w5999)
