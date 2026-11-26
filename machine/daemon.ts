@@ -2445,6 +2445,9 @@ export class Daemon {
     // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
     // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
     if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
+    // w5961: and on a Mac with the Seatbelt worker fence on, the home a fenced editor gets (`<root>/home`): unity-slot run
+    // gives it to an interactive Unity editor a worker opens itself (a peer run's clone), which otherwise hangs on a modal.
+    if (spec.sandbox && this.cfg.root && process.platform === 'darwin' && this.workerFence) env.FF_UNITY_EDITOR_HOME = path.posix.join(this.cfg.root, 'home');
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
