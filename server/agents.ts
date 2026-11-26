@@ -6039,6 +6039,8 @@ A report is for a person who asked for one, and people want very few. File one w
         denyToolPrefixes: ['mcp__ffsb__'],
         // w896: a worker deletes only inside the machine's worker install folder (server/rootFence.ts).
         ...(m.root ? { workerRoot: m.root } : {}),
+        // w6050: a shell write into a system temp folder is refused (config tmpWriteFence "warn" is the recovery switch).
+        tmpWriteFence: this.cfg.tmpWriteFence ?? 'on',
         // w3670: it reads the daemon's logs and other non-secret files in that protected folder (server/daemonReads.ts).
         daemonReads: { dir: appDirOf(m), ...(m.root ? { root: m.root } : {}) },
         // w936: a request of this worker's was granted work in the machine's main clone (an older daemon ignores it).

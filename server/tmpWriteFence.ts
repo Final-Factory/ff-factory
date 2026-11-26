@@ -70,7 +70,7 @@ const inside = (n: string, d: string) => n === d || n.startsWith(d + '/');
 /** Verbs whose every path argument is written, created or removed. */
 const WRITE_ALL = new Set([
   'tee', 'tee-object', 'out-file', 'set-content', 'sc', 'add-content', 'ac', 'new-item', 'ni', 'clear-content', 'clc', 'set-item',
-  'touch', 'mkdir', 'md', 'truncate', 'export-csv', 'export-clixml', 'out-string',
+  'touch', 'mkdir', 'md', 'truncate', 'export-csv', 'export-clixml', 'out-string', 'start-transcript', 'screencapture',
   'mv', 'move', 'move-item', 'mi', 'ren', 'rename', 'rename-item', 'rni',
   'rm', 'rmdir', 'unlink', 'rd', 'del', 'erase', 'remove-item', 'ri', 'shred',
 ]);
@@ -83,7 +83,7 @@ const DEST_FLAG = /^(?:-destination|-dest|-t|--target-directory)$/i;
 /** The verbs whose -t / --target-directory is the target folder (rsync's -t keeps times, scp's -t is its sink mode). */
 const TARGET_T = new Set(['cp', 'mv', 'install', 'ln']);
 /** Output flags of any tool: their value is a file or folder the tool writes. */
-const OUT_FLAG = /^(?:--output|--out|--outfile|--out-file|--output-file|-outfile|-outputfile|--output-dir|--output-directory|--out-dir|--outdir|-outputdirectory|-outdir|--log-file|--logfile|-logfile|--target-dir|--destination|--junit-xml|-testresults|--results-dir)$/i;
+const OUT_FLAG = /^(?:--output|--out|--outfile|--out-file|--output-file|-outfile|-outputfile|--output-dir|--output-directory|--out-dir|--outdir|-outputdirectory|-outdir|--log-file|--logfile|-logfile|--target-dir|--destination|--junit-xml|-testresults|--results-dir|-destinationpath|-transcriptpath)$/i;
 /** Tools whose short -o (wget's -O too) is the file they write; elsewhere -o is often a switch (grep -o, git ls-files -o). */
 const SHORT_O = new Set(['curl', 'wget', 'sort', 'gcc', 'g++', 'cc', 'clang', 'clang++', 'go', 'rustc', 'pandoc', 'zstd', 'xz', 'gh', 'uv', 'pip']);
 
@@ -95,19 +95,26 @@ function expand(p: string, env: Record<string, string | undefined>, home: string
     if (k === 'LOCALAPPDATA') return env.LOCALAPPDATA ?? `${home}/AppData/Local`;
     return env[name] ?? env[k] ?? Object.entries(env).find(([e]) => e.toUpperCase() === k)?.[1];
   };
+  // An unset variable (a loop's `$c`, `$(...)`'s $SUB) after a literal folder leaves the folder known: `> /tmp/mt_$c.txt`
+  // writes in /tmp whatever $c is (w6050's replay of real commands). One before any folder (`$X/out`) leaves nothing known.
+  const UNSET = String.fromCharCode(0);
   let out = p;
   for (let n = 0; n < 4; n++) {
-    let unknown = false;
     const next = out
       .replace(/^~(?=$|[\\/])/, () => home)
       .replace(/\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%/g, (_m, a, b, c, d) => {
         const v = get(a ?? b ?? c ?? d);
-        if (v === undefined) unknown = true;
-        return v ?? '';
+        return v ?? UNSET;
       });
-    if (unknown) return undefined;
     if (next === out) break;
     out = next;
+  }
+  const at = out.indexOf(UNSET);
+  if (at >= 0) {
+    const head = out.slice(0, at);
+    const cut = Math.max(head.lastIndexOf('/'), head.lastIndexOf('\\'));
+    if (cut <= 0) return undefined;
+    out = head.slice(0, cut + 1) + 'unset';
   }
   return /[$`%]/.test(out) ? undefined : out;
 }
@@ -195,13 +202,22 @@ function writtenBy(verb: string, args: string[]): { raw: string; how: string }[]
     }
     if (flags && a.startsWith('-') && a.length > 1) {
       const name = low.replace(/[=:].*$/, '');
-      if (OUT_FLAG.test(name) || (name === '-o' && SHORT_O.has(verb)) || (name === '-d' && verb === 'unzip') || (verb === 'tar' && /^(?:-C|--directory)(?:=|$)/.test(a) && (/x/.test(tarModes(args.map(unquote))) || args.some((x) => ['--extract', '--get'].includes(unquote(x)))))) {
+      if (
+        OUT_FLAG.test(name) ||
+        (name === '-o' && SHORT_O.has(verb)) ||
+        (name === '-d' && verb === 'unzip') ||
+        // pip install -t DIR / --target DIR; gh run download -D DIR / --dir DIR; zip -b TEMPDIR (w6040)
+        (name === '--target' && /^(?:pip|pip3|uv)$/.test(verb)) ||
+        (a.startsWith('-t') && name === '-t' && /^(?:pip|pip3)$/.test(verb)) ||
+        (verb === 'gh' && (a === '-D' || name === '--dir')) ||
+        (verb === 'zip' && name === '-b') || (verb === 'tar' && /^(?:-C|--directory)(?:=|$)/.test(a) && (/x/.test(tarModes(args.map(unquote))) || args.some((x) => ['--extract', '--get'].includes(unquote(x)))))) {
         const [v, used] = flagValue(args, i);
         if (v) out.push({ raw: v, how: `${verb} ${name}` });
         i += used;
         continue;
       }
-      if (DEST_FLAG.test(name) && (WRITE_LAST.has(verb) || TARGET_T.has(verb)) && (!/^(?:-t|--target-directory)$/.test(name) || TARGET_T.has(verb))) {
+      // -t is case-sensitive: cp's -T is "no target folder", not -t (w6040)
+      if (DEST_FLAG.test(name) && (name !== '-t' || a.startsWith('-t')) && (WRITE_LAST.has(verb) || TARGET_T.has(verb)) && (!/^(?:-t|--target-directory)$/.test(name) || TARGET_T.has(verb))) {
         const [v, used] = flagValue(args, i);
         if (v) out.push({ raw: v, how: verb });
         i += used;
@@ -240,26 +256,103 @@ function writtenBy(verb: string, args: string[]): { raw: string; how: string }[]
   } else if (verb === 'mktemp') {
     for (const p of plain) if (/[\\/]/.test(p)) out.push({ raw: p, how: 'mktemp' });
   } else if (verb === 'git') {
-    const sub = plain[0]?.toLowerCase();
-    if (sub === 'clone') {
-      const w = args.map(unquote);
-      const c = w.findIndex((x) => x.toLowerCase() === 'clone');
-      const pos: string[] = [];
-      for (let k = c + 1; k < w.length; k++) {
+    out.push(...gitWrites(args.map(unquote)));
+  } else if (verb === 'sed' || verb === 'perl') {
+    // sed -i / --in-place (perl -i, -pi) rewrites its files; the script is the first plain word unless -e / -f gave it (w6040)
+    const w = args.map(unquote);
+    const inPlace = w.some((x) => /^-[A-Za-z]*i/.test(x) && !x.startsWith('--') || /^--in-place(?:=|$)/.test(x));
+    if (inPlace) {
+      const files: string[] = [];
+      let script = w.some((x) => /^(?:-[A-Za-z]*[ef]|--expression|--file)(?:=|$)/.test(x));
+      for (let k = 0; k < w.length; k++) {
         const x = w[k];
-        if (x === '--') {
-          pos.push(...w.slice(k + 1));
-          break;
+        if (/^(?:-[A-Za-z]*[ef]|--expression|--file)$/.test(x)) {
+          k++;
+          continue;
         }
-        if (/^--separate-git-dir=/.test(x)) out.push({ raw: x.slice(19), how: 'git clone --separate-git-dir' });
-        else if (x === '--separate-git-dir' && w[k + 1]) out.push({ raw: w[k + 1], how: 'git clone --separate-git-dir' });
-        if (GIT_CLONE_VALUE.has(x)) k++;
-        else if (!x.startsWith('-')) pos.push(x);
+        if (x.startsWith('-') && x.length > 1) continue;
+        if (!script) script = true;
+        else files.push(x);
       }
-      if (pos[1]) out.push({ raw: pos[1], how: 'git clone' });
+      out.push(...files.map((raw) => ({ raw, how: `${verb} -i` })));
     }
-    if (sub === 'worktree' && plain[1]?.toLowerCase() === 'add' && plain[2]) out.push({ raw: plain[2], how: 'git worktree add' });
+  } else if (verb === 'find') {
+    // find ROOTS ... -delete: the roots (the words before the first expression) are deleted in (w6040)
+    const w = args.map(unquote);
+    if (w.includes('-delete')) for (const x of w) {
+      if (/^[-(!]/.test(x)) break;
+      out.push({ raw: x, how: 'find -delete' });
+    }
+  } else if (verb === 'zip' || verb === '7z' || verb === '7za') {
+    // zip ARCHIVE FILES...: the archive is written; 7z a ARCHIVE / 7z x -oDIR (w6040)
+    const p = verb === 'zip' ? plain : plain.slice(1);
+    // zip -sf / --show-files and -T only read the archive
+    const zipReads = verb === 'zip' && args.some((x) => ['-sf', '--show-files', '-T', '--test'].includes(unquote(x)));
+    if ((verb === 'zip' && !zipReads) || /^[au]$/i.test(plain[0] ?? '')) {
+      if (p[0]) out.push({ raw: p[0], how: verb });
+    }
+    if (verb !== 'zip') for (const x of args.map(unquote)) if (/^-o./.test(x)) out.push({ raw: x.slice(2), how: `${verb} -o` });
   }
+  return out;
+}
+
+/** git's global options that take the next word as their value (`git -C DIR`, `git -c k=v`). */
+const GIT_GLOBAL_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env', '--exec-path', '--super-prefix']);
+/** git subcommands that write into the repository they run in (`git -C /tmp/x commit`). */
+const GIT_WRITE_SUBS = new Set(['init', 'commit', 'add', 'checkout', 'switch', 'reset', 'merge', 'pull', 'fetch', 'apply', 'am', 'stash', 'rm', 'mv', 'restore', 'rebase', 'cherry-pick', 'revert', 'gc', 'prune', 'repack', 'submodule', 'notes', 'update-ref', 'update-index', 'clean', 'lfs', 'sparse-checkout', 'maintenance']);
+/** git worktree add's options that take the next word as their value. */
+const GIT_WORKTREE_VALUE = new Set(['-b', '-B', '--reason', '--orphan']);
+
+/**
+ * The paths a git command writes: `git clone URL DIR` (and --separate-git-dir), `git worktree add [-b new] DIR`, `git init DIR`,
+ * and `git -C DIR <a writing subcommand>` (w6040). Global options (`-c k=v`, `-C DIR`, `--git-dir=X`) come before the
+ * subcommand and never shift it; a relative destination is taken from -C's folder.
+ */
+function gitWrites(w: string[]): { raw: string; how: string }[] {
+  const out: { raw: string; how: string }[] = [];
+  let base: string | undefined;
+  let k = 0;
+  for (; k < w.length; k++) {
+    const x = w[k];
+    if (!x.startsWith('-')) break;
+    const eq = /^(--git-dir|--work-tree)=(.+)$/.exec(x);
+    if (eq) out.push({ raw: eq[2], how: `git ${eq[1]}` });
+    if (GIT_GLOBAL_VALUE.has(x)) {
+      if (x === '-C') base = base && !/^(?:[a-zA-Z]:)?[\\/]/.test(w[k + 1] ?? '') ? `${base}/${w[k + 1]}` : w[k + 1];
+      if ((x === '--git-dir' || x === '--work-tree') && w[k + 1]) out.push({ raw: w[k + 1], how: `git ${x}` });
+      k++;
+    }
+  }
+  const sub = w[k]?.toLowerCase();
+  const rest = w.slice(k + 1);
+  const at = (p: string) => (base && !/^(?:[a-zA-Z]:)?[\\/]|^[~$%]/.test(p) ? `${base}/${p}` : p);
+  if (sub === 'clone') {
+    const pos: string[] = [];
+    for (let j = 0; j < rest.length; j++) {
+      const x = rest[j];
+      if (x === '--') {
+        pos.push(...rest.slice(j + 1));
+        break;
+      }
+      if (/^--separate-git-dir=/.test(x)) out.push({ raw: at(x.slice(19)), how: 'git clone --separate-git-dir' });
+      else if (x === '--separate-git-dir' && rest[j + 1]) out.push({ raw: at(rest[j + 1]), how: 'git clone --separate-git-dir' });
+      if (GIT_CLONE_VALUE.has(x)) j++;
+      else if (!x.startsWith('-')) pos.push(x);
+    }
+    if (pos[1]) out.push({ raw: at(pos[1]), how: 'git clone' });
+    else if (pos[0] && base) out.push({ raw: base, how: 'git -C clone' });
+  } else if (sub === 'worktree' && rest[0]?.toLowerCase() === 'add') {
+    const pos: string[] = [];
+    for (let j = 1; j < rest.length; j++) {
+      if (GIT_WORKTREE_VALUE.has(rest[j])) j++;
+      else if (!rest[j].startsWith('-')) pos.push(rest[j]);
+    }
+    if (pos[0]) out.push({ raw: at(pos[0]), how: 'git worktree add' });
+  } else if (sub === 'init') {
+    const p = rest.filter((x) => !x.startsWith('-'));
+    if (p[0]) out.push({ raw: at(p[0]), how: 'git init' });
+    else if (base) out.push({ raw: base, how: 'git -C init' });
+  } else if (base && sub && GIT_WRITE_SUBS.has(sub)) out.push({ raw: base, how: `git -C ${sub}` });
   return out;
 }
 
@@ -274,11 +367,31 @@ const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'source', '.', 'eval
  * guard.ts's withoutTextArgs, which also empties quoted -t values, this keeps `cp -t "/tmp/dst" a` seen. Exported for tests.
  */
 export function withoutHeredocText(cmd: string): string {
-  return cmd.replace(HEREDOC, (m, lead: string, before: string, q: string, delim: string, after: string) => {
-    const seg = before.split(/&&|\|\||[;|]/).pop()?.trim() ?? '';
-    const first = (seg.split(/\s+/)[0] ?? '').replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, '');
-    return SHELLS.has(first) ? m : `${lead}${before}<<${q}${delim}${q}${after}\n${delim}`;
+  return cmd.replace(HEREDOC, (m, lead: string, before: string, q: string, delim: string, after: string, body: string) => {
+    // The body is fed to the command the heredoc sits on (`sudo bash <<EOF`, `timeout 60 bash <<EOF`) or to a shell later in
+    // its pipe (`cat <<EOF | bash`): then it is commands and stays (w6040).
+    const mine = before.split(/&&|\|\||[;|]/).pop() ?? '';
+    const piped = after.split(/&&|\|\||;/)[0].split('|').slice(1);
+    if ([mine, ...piped].some(runsShell)) return m;
+    // An unquoted heredoc's $(...) and backticks run as it is read: keep each as a command line of its own (w6040).
+    const subs = q ? [] : [...body.matchAll(/\$\(((?:[^()]|\([^()]*\))*)\)|`([^`]*)`/g)].map((s) => s[1] ?? s[2]).filter((s) => s.trim());
+    return `${lead}${before}<<${q}${delim}${q}${after}\n${delim}${subs.map((s) => `\n${s}`).join('')}`;
   });
+}
+
+/** Whether one pipeline stage runs a shell, past sudo, timeout N, env, nohup and VAR=value prefixes. */
+function runsShell(stage: string): boolean {
+  const w = stage.trim().split(/\s+/).map((x) => x.replace(/^['"]|['"]$/g, ''));
+  let i = 0;
+  while (i < w.length) {
+    const x = w[i].toLowerCase();
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w[i]) || ['sudo', 'doas', 'exec', 'nohup', 'time', 'env', 'command', 'nice', 'xargs', 'stdbuf'].includes(x) || (i > 0 && /^-/.test(w[i]))) i++;
+    else if (x === 'timeout') {
+      i++;
+      while (i < w.length && (/^-/.test(w[i]) || /^\d/.test(w[i]) || /^[A-Z]+$/.test(w[i]))) i++;
+    } else break;
+  }
+  return SHELLS.has((w[i] ?? '').replace(/^.*[\\/]/, '').toLowerCase().replace(/\.exe$/, ''));
 }
 
 /**
@@ -324,6 +437,17 @@ export function systemTempWrites(cmd: string, ctx: TmpWriteContext): TempWrite[]
         const verb = w[i] ? verbOf(w[i]) : '';
         const args = w.slice(i + 1);
         for (const r of redirects(w)) judge(r, 'redirect');
+        // TMPDIR=/tmp cmd, export TMPDIR=/tmp, $env:TEMP = 'C:\Windows\Temp': every tool after it writes its scratch there (w6040)
+        const assigns = [...w.slice(0, i), ...(['export', 'declare', 'typeset', 'local', 'set'].includes(verb) ? args : [])];
+        for (const a of assigns) {
+          const m = /^(TMPDIR|TEMP|TMP|TEMPDIR)=(.+)$/i.exec(unquote(a));
+          if (m) judge(m[2], `${m[1]}=`);
+        }
+        const ps = /^\$env:(TMPDIR|TEMP|TMP)$/i.exec(w[0] ?? '');
+        if (ps && w[1] === '=' && w[2]) judge(w[2], `$env:${ps[1]} =`);
+        // [IO.File]::WriteAllText('/tmp/x', ...), [System.IO.Directory]::CreateDirectory(...): every quoted path it is given (w6040)
+        for (const call of stage.matchAll(/\[(?:System\.)?IO\.(?:File|Directory)\]::(?:Write|Append|Create|Copy|Move|Delete|Replace|Open)\w*\(([^)]*)\)/gi))
+          for (const lit of call[1].matchAll(/'([^']*)'|"([^"]*)"/g)) judge(lit[1] ?? lit[2], '[IO.File]');
         if (['cd', 'pushd', 'chdir', 'set-location', 'sl', 'push-location'].includes(verb)) {
           const t = args.map(unquote).find((a) => !a.startsWith('-'));
           dir = t ? resolve(t) : undefined;
