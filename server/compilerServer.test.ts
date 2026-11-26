@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { beeAccessDenied, compilerServerAdvice, compilerServers, logFileArg, logTail, parseCompilerServers } from '../machine/compilerServer.ts';
+import { beeAccessDenied, compilerServerAdvice, compilerServers, compilerServersAsync, logFileArg, logTail, parseCompilerServers } from '../machine/compilerServer.ts';
 
 // w5347: the exact line slot1's player builds printed while a Low-integrity VBCSCompiler held the pipe (lothdesktop, 2026-11-23).
 const SLOT1 =
@@ -58,6 +58,14 @@ test('logTail reads the end of a log and tolerates a missing one', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('compilerServers is empty off Windows', () => {
+test('compilerServers is empty off Windows', async () => {
   assert.deepEqual(compilerServers('linux'), []);
+  assert.deepEqual(await compilerServersAsync('linux'), []);
+});
+
+test('w5938: the daemon looks for compiler servers off its event loop', () => {
+  // beast, 2026-11-24..26: the 15 s look ran the sync compilerServers() on the daemon's main thread (PowerShell, Add-Type
+  // and a CIM query: 2.2-5.7 s measured from a sandbox there), and its loop was blocked 90-230 times an hour, up to 72 s.
+  const daemon = fs.readFileSync(path.join(import.meta.dirname, '..', 'machine', 'daemon.ts'), 'utf8');
+  assert.doesNotMatch(daemon, /\bcompilerServers\(/, 'machine/daemon.ts calls the blocking compilerServers(): use compilerServersAsync()');
 });
