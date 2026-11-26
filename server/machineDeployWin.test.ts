@@ -605,6 +605,17 @@ test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir,
   assert.equal(up.code, 0, up.stderr);
   assert.ok(fs.existsSync(path.join(appDir, 'app.new', 'machine', 'daemon.ts')));
   assert.ok(!fs.existsSync(tgz), 'the uploaded bundle is deleted after unpacking');
+  // w5980: app.new carries the read fence's give-back label of its own (inherited by what tar made), so the rename to app
+  // keeps it readable to Low workers under a No-Read-Up daemon folder.
+  // On the system drive (the runner's temp folder) it is skipped and said: the fence labels nothing there.
+  const lab = execFileSync('icacls', [path.join(appDir, 'app.new')], { encoding: 'utf8' });
+  if (path.parse(appDir).root.slice(0, 2).toLowerCase() === (process.env.SystemDrive || 'C:').slice(0, 2).toLowerCase()) {
+    assert.match(up.stdout, /read-back label on .* skipped: on the system drive/, up.stdout);
+    assert.doesNotMatch(lab, /Mandatory Label/, lab);
+  } else {
+    assert.match(lab, /Mandatory Label\\Medium Mandatory Level:\(OI\)\(CI\)\(NW\)/, lab);
+  }
+  assert.doesNotMatch(up.stdout, /read-back label .* not set/, up.stdout);
 
   const npm = await runPs(win.npmScript(p.node!, 'abc1234', appDir), { env, timeoutMs: 8 * 60_000 });
   assert.equal(npm.code, 0, npm.stderr || npm.stdout);
@@ -818,4 +829,43 @@ test('logs: the real supervisor block, run by PowerShell over many restarts, kee
   assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.err.log').length, 3, 'empty err logs are not archived');
   maintainLogs(dir, { platform: 'win32' });
   assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.log' && x.gz).length, 5);
+});
+
+test('w5980: the staged app.new gets the read fence give-back label before tar unpacks into it', () => {
+  for (const s of [win.uploadScript(), win.uploadScript('D:\ff', '.ff-factory-upload-1.tgz')]) {
+    const label = s.indexOf("[FfStageLabel]::Set($new, 'S:(ML;OICI;NW;;;ME)')");
+    assert.ok(label > s.indexOf("New-Item -ItemType Directory -Force $new"), 'after app.new is made');
+    assert.ok(label < s.indexOf("'-xzf'"), 'before tar makes its files, so they inherit it');
+    assert.match(s, /^"@$/m, 'the here-string closes at column 0');
+  }
+});
+
+// The label for real, under a parent closed as on closes the daemon's folder: the files made in app.new after it is set
+// read as given back (their first label is NW, not NW NR). SystemDrive is pointed elsewhere for the child only, so the
+// runner's temp folder (on C:) stands in for a work drive; a Low process cannot set a Medium label (1299), so skipped there.
+test('w5980 (Windows): app.new labelled before tar keeps its files given back under a No-Read-Up daemon folder', { skip: process.platform !== 'win32' ? 'Windows only' : /S-1-16-4096\b/.test(execFileSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8' })) ? 'this process is Low' : false }, async () => {
+  const { labelScript, NO_READ_UP } = await import('../machine/lowIntegrity.ts');
+  const ps = (script: string, env: NodeJS.ProcessEnv = process.env) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ProgressPreference = 'SilentlyContinue'\n${script}`, 'utf16le').toString('base64')], { encoding: 'utf8', env });
+  // Windows names are any case (Git Bash passes SYSTEMDRIVE): one key, or the first one wins.
+  const withSystemDrive = (v: string) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'systemdrive')), SystemDrive: v });
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5980-stage-'));
+  try {
+    assert.match(ps(labelScript([{ path: d, sddl: NO_READ_UP.dir }])), /^ok 0/m);
+    const stage = path.join(d, 'app.new');
+    fs.mkdirSync(stage);
+    const out = ps(`$ErrorActionPreference = 'Stop'\n$new = '${stage.replace(/'/g, "''")}'\n${win.readBackScript('$new')}\n'end'`, withSystemDrive('Q:'));
+    assert.doesNotMatch(out, /read-back label/, out);
+    fs.mkdirSync(path.join(stage, 'machine'));
+    fs.writeFileSync(path.join(stage, 'machine', 'ghApp.ts'), 'x');
+    for (const x of [stage, path.join(stage, 'machine'), path.join(stage, 'machine', 'ghApp.ts')]) {
+      const first = execFileSync('icacls', [x], { encoding: 'utf8' }).split(/\r?\n/).find((l) => /Mandatory Label/.test(l)) ?? '';
+      assert.match(first, /Medium Mandatory Level:.*\(NW\)/, `${x}: ${first}`);
+      assert.doesNotMatch(first, /\(NR\)/, `${x}: ${first}`);
+    }
+    // And on the system drive it is skipped: the same folder, with SystemDrive left as it is when that is its drive.
+    const sysOut = ps(`$new = '${stage.replace(/'/g, "''")}'\n${win.readBackScript('$new')}`, withSystemDrive(stage.slice(0, 2)));
+    assert.match(sysOut, /skipped: on the system drive/, sysOut);
+  } finally {
+    fs.rmSync(d, { recursive: true, force: true });
+  }
 });

@@ -378,6 +378,8 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
 
 /** How long an aborted slot-repo conversion gets to end its git call before the pool tidies up (w5614). */
 const CONVERT_SETTLE_MS = 10_000;
+/** After a conversion at a placement fails, placements in that sandbox skip it this long; convertIdle still tries (w5614). */
+const CONVERT_BACKOFF_MS = 6 * 60 * 60_000;
 
 export class SandboxPool {
   private readonly o: PoolOptions;
@@ -432,8 +434,14 @@ export class SandboxPool {
   private converting = false;
   /** convertIdle's last reason to pass each worktree sandbox by (w5614): logged when it changes, not every look. */
   private readonly convertSkip = new Map<string, string>();
-  /** The longest a conversion at a placement (switch) may take before the switch goes on with the worktree (w5614). */
-  private convertAtPlacementMs = 3 * 60_000;
+  /**
+   * The longest a conversion at a placement (switch) may wait for the main clone's lock, and then take once it holds it,
+   * before the switch goes on with the worktree (w5614). 90 s each: the portal gives a whole switch 10 min
+   * (server/machines.ts) and switchBranch's own locked fetch 5 min of it (w6086's review, finding 2).
+   */
+  private convertAtPlacementMs = 90_000;
+  /** When a conversion at a placement last failed or timed out, per sandbox: placements skip it for CONVERT_BACKOFF_MS (w6086, finding 1). */
+  private readonly convertFailedAt = new Map<string, number>();
   private ticking = false;
 
   constructor(o: PoolOptions, d: PoolDeps) {
@@ -1170,34 +1178,48 @@ export class SandboxPool {
     const gone = () => {
       if (signal.aborted) throw new Error('aborted: it took too long');
     };
+    let held: () => void = () => undefined;
+    const lockHeld = new Promise<void>((res) => (held = res));
+    let tookLock = false;
     const work = withBaseRepoLock(async () => {
       gone();
+      tookLock = true;
+      held();
       const note = await guardStorePrune(this.d.git, signal);
       gone();
       return `${await convertToSlotRepo(this.d.git, r.path, signal)}${note ? `; ${note}` : ''}`;
     });
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
+      // The time limit counts from when the conversion holds the main clone's lock; a wait for the lock past the same limit
+      // gives up before anything is done (w6086, finding 2: another sandbox's locked fetch could use up the limit).
       const line = timeoutMs
         ? await Promise.race([
             work,
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => {
+              const cut = (why: string) => {
                 ac.abort();
-                reject(new Error(`timed out after ${Math.round(timeoutMs / 1000)} s; it stays a worktree for now`));
-              }, timeoutMs);
+                reject(new Error(why));
+              };
+              timer = setTimeout(() => cut(`the main clone stayed busy for ${Math.round(timeoutMs / 1000)} s; it stays a worktree for now`), timeoutMs);
+              void lockHeld.then(() => {
+                if (signal.aborted) return;
+                clearTimeout(timer);
+                timer = setTimeout(() => cut(`timed out after ${Math.round(timeoutMs / 1000)} s; it stays a worktree for now`), timeoutMs);
+              });
             }),
           ])
         : await work;
       this.o.log?.(`sandbox ${r.id}: ${line}`);
+      this.convertFailedAt.delete(r.id);
       if (!timeoutMs) this.git.set(r.id, await this.d.gitStatus(r.path).catch(() => undefined));
       return true;
     } catch (e) {
-      if (signal.aborted) {
+      work.catch(() => undefined);
+      if (signal.aborted && tookLock) {
         // Let an aborted git call end (its process is killed on the signal), at most a few seconds: the swap itself has
         // no await in it, so the work is then either before the swap or past it. A call still waiting for the lock does
-        // nothing when it runs (gone()).
-        work.catch(() => undefined);
+        // nothing when it runs (gone()), so a cut before the lock waits for nothing.
         await Promise.race([work.catch(() => undefined), new Promise((res) => setTimeout(res, CONVERT_SETTLE_MS))]);
       }
       // A worktree it never swapped is still a whole worktree; one it did is a whole slot repo (finishConversion).
@@ -1206,7 +1228,13 @@ export class SandboxPool {
       } catch {
         // reported below
       }
-      this.o.onEvent({ text: `sandbox ${r.id}: could not become a slot repo: ${(e as Error).message}` });
+      // The abort can land after the swap (a git call past it was cut): then it did become one (w6086, finding 3).
+      if (isSlotRepo(r.path)) {
+        this.o.log?.(`sandbox ${r.id}: became a slot repo (a step after the swap was cut: ${(e as Error).message.replace(/; it stays a worktree for now$/, '')})`);
+        return true;
+      }
+      if (timeoutMs && tookLock) this.convertFailedAt.set(r.id, Date.now());
+      this.o.onEvent({ text: `sandbox ${r.id}: could not become a slot repo: ${(e as Error).message}${timeoutMs && tookLock ? `; placements skip the conversion for ${CONVERT_BACKOFF_MS / 3_600_000} h, and the idle look still tries` : ''}` });
       return false;
     } finally {
       if (timer) clearTimeout(timer);
@@ -1518,7 +1546,9 @@ export class SandboxPool {
     // free only between a release and the next placement, so convertIdle alone may never see it free (BEAST's slot3,
     // 2026-11-26). The agent placed waits on this switch; a failure leaves the worktree whole and the switch goes on.
     // A hang is cut at convertAtPlacementMs and anything thrown is caught: a placement never fails on the conversion.
-    if (this.settings?.slotRepos === 'all' && isWorktree(r.path) && !this.converting && !this.convertBlocker(r)) await this.convert(r, this.convertAtPlacementMs).catch(() => false);
+    // After a failed one, placements there skip it for CONVERT_BACKOFF_MS, so a worker is not held up at every placement.
+    const failedAt = this.convertFailedAt.get(r.id);
+    if (this.settings?.slotRepos === 'all' && isWorktree(r.path) && !this.converting && !this.convertBlocker(r) && !(failedAt !== undefined && Date.now() - failedAt < CONVERT_BACKOFF_MS)) await this.convert(r, this.convertAtPlacementMs).catch(() => false);
     const slot = isSlotRepo(r.path);
     const took = slot ? await withBaseRepoLock(() => takeStoreBranch(this.d.git, r.path, branch)) : undefined;
     const res = await switchBranch({
