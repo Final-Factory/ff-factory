@@ -101,7 +101,7 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
-import { DROPIN_NAME, RunnerUnits, findRunnerUnits } from './runnerUnits.ts';
+import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
@@ -1014,16 +1014,30 @@ export class Daemon {
     const userUnits = path.join(os.homedir(), '.config', 'systemd', 'user');
     this.runnerUnits = new RunnerUnits({
       units: () => (real && process.platform === 'linux' ? findRunnerUnits(userUnits) : []),
-      readDropin: (unit) => {
+      readDropin: (unit, name = DROPIN_NAME) => {
         try {
-          return fs.readFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), 'utf8');
+          return fs.readFileSync(path.join(userUnits, `${unit}.d`, name), 'utf8');
         } catch {
           return undefined;
         }
       },
-      writeDropin: (unit, text) => {
+      writeDropin: (unit, text, name = DROPIN_NAME) => {
         fs.mkdirSync(path.join(userUnits, `${unit}.d`), { recursive: true });
-        fs.writeFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), text);
+        fs.writeFileSync(path.join(userUnits, `${unit}.d`, name), text);
+      },
+      // w5834: each runner's temp folder inside the worker root (runnerTempDir), made here too so its first start finds it
+      tempDir: (u) => {
+        const t = runnerTempDir(u, cfg.root);
+        if (t) fs.mkdirSync(t, { recursive: true });
+        return t;
+      },
+      startedTmpdir: (pid) => {
+        try {
+          const env = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+          return env.find((e) => e.startsWith('TMPDIR='))?.slice('TMPDIR='.length) ?? null;
+        } catch {
+          return undefined;
+        }
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>
@@ -2431,6 +2445,9 @@ export class Daemon {
     // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
     // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
     if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
+    // w5961: and on a Mac with the Seatbelt worker fence on, the home a fenced editor gets (`<root>/home`): unity-slot run
+    // gives it to an interactive Unity editor a worker opens itself (a peer run's clone), which otherwise hangs on a modal.
+    if (spec.sandbox && this.cfg.root && process.platform === 'darwin' && this.workerFence) env.FF_UNITY_EDITOR_HOME = path.posix.join(this.cfg.root, 'home');
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);

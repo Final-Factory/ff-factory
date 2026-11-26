@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ProviderManager, conversationQueryId, conversationView, describeLogs, describeQuery, describeRunFile, devRequestsFrom, ffboxLogsArgs, ffboxRunArgs } from './providers.ts';
+import { ProviderManager, type ProviderOutsideWatch, conversationQueryId, conversationView, describeLogs, describeQuery, describeRunFile, devRequestsFrom, ffboxLogsArgs, ffboxRunArgs } from './providers.ts';
 import { ffboxConversationHref, isFfboxConversationId } from '../shared/ffboxLinks.ts';
 import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
@@ -292,7 +292,7 @@ test('the first message must be a hello, within the hello timeout; a bad hello i
 
 test('no negotiation: any protocol or none is welcomed with the static accepts; protocol 1 or 2 echoed, else 2', async (t) => {
   const { connect, pm } = await setup(t);
-  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater', 'report_chunk', 'report_end'];
+  const all = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater', 'report_chunk', 'report_end', 'outside_watch_status'];
   for (const [protocol, want] of [[1, 1], [2, 2], [3, 2], [null, 2]] as const) {
     const c = connect();
     const w = (await c.hello({ protocol, accepts: protocol === 1 ? undefined : ['board'] })) as unknown as Record<string, unknown>;
@@ -682,6 +682,65 @@ test('updater health: an updater with no pass for three intervals is stale, and 
   assert.equal(updaterHealth(running, Date.parse('2026-10-03T18:17:01Z'))!.state, 'stale', 'a pass hung for over 9 min: stale');
   const failingAndStale = updater({ ok: false, checkouts: [{ name: 'agents', status: 'diverged', ok: false }] });
   assert.equal(updaterHealth(failingAndStale, at + limit + 1)!.state, 'stale', 'a stalled updater says so first: its checkout news is old');
+});
+
+const WATCH_STATUS = {
+  type: 'outside_watch_status',
+  outside_watch: {
+    at: '2026-11-25T06:00:00Z',
+    interval_secs: 60,
+    failures: 3,
+    state: 'up',
+    checks: 4,
+    alerts: 1,
+    pings: false,
+    health_url: 'https://fff.example.ts.net/api/health',
+    topic_tag: '0123456789ab',
+    checked_at: '2026-11-25T06:00:00Z',
+    ok_at: '2026-11-25T06:00:00Z',
+    announced_at: '2026-11-25T05:57:00Z',
+    last_alert: { at: '2026-11-25T05:57:00Z', title: 'Outside watchdog on FFBox', ok: true },
+    some_future_field: 1,
+  },
+};
+
+test('outside watch (w5892): the topic goes to a connector that takes it, once per value per link, and on reconnect; its status is kept', async (t) => {
+  const { connect, pm } = await setup(t);
+  pm.setOutsideWatch('ffsb-topic-0123456789');
+  const old = connect();
+  await old.hello({ protocol: 2, accepts: ['board'] });
+  old.capacity();
+  await until('capacity', () => !!pm.summary().capacity);
+  assert.equal(old.received.some((m) => m.type === 'outside_watch'), false, 'a connector that does not list it is sent none');
+  assert.equal(pm.takesOutsideWatch, false);
+  old.close();
+  await until('offline', () => !pm.online);
+
+  const c = connect();
+  await c.hello({ protocol: 2, accepts: ['board', 'outside_watch'] });
+  assert.deepEqual(await c.next('outside_watch'), { type: 'outside_watch', topic: 'ffsb-topic-0123456789' }, 'sent on the new link');
+  assert.equal(pm.takesOutsideWatch, true);
+  pm.setOutsideWatch('ffsb-topic-0123456789');
+  pm.setOutsideWatch(null);
+  assert.deepEqual(await c.next('outside_watch'), { type: 'outside_watch', topic: null }, 'a change goes at once');
+  c.capacity();
+  await until('capacity again', () => !!pm.summary().capacity);
+  assert.equal(c.received.filter((m) => m.type === 'outside_watch').length, 0, 'the same value is not sent twice on one link');
+
+  assert.equal(pm.outsideWatch, undefined);
+  c.send(WATCH_STATUS);
+  await until('status', () => !!pm.outsideWatch);
+  const o = pm.outsideWatch!;
+  assert.equal(o.state, 'up');
+  assert.equal(o.healthUrl, 'https://fff.example.ts.net/api/health');
+  assert.equal(o.announcedAt, '2026-11-25T05:57:00Z');
+  assert.deepEqual(o.lastAlert, { at: '2026-11-25T05:57:00Z', title: 'Outside watchdog on FFBox', ok: true });
+  assert.equal('some_future_field' in o, false, 'an unknown field is dropped, not refused');
+  c.send({ ...WATCH_STATUS, outside_watch: { ...WATCH_STATUS.outside_watch, topic_tag: 'ffsb-topic-0123456789' } });
+  assert.equal((await c.next('error')).code, 'bad_message', 'a topic where its hash goes is refused');
+  c.send({ ...WATCH_STATUS, outside_watch: { ...WATCH_STATUS.outside_watch, state: 'sideways' } });
+  assert.equal((await c.next('error')).code, 'bad_message');
+  assert.equal((pm.outsideWatch as ProviderOutsideWatch | undefined)?.topicTag, '0123456789ab', 'and the last good one stays');
 });
 
 test('updater: pushed by the connector, kept and shown; ok -> failing -> ok on one link; bad values refused, unknown fields ignored', async (t) => {
