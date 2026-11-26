@@ -1,6 +1,7 @@
 // The WebSocket protocol between the portal (server/machines.ts) and a machine daemon
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
 import type { RunnerHoldReport } from '../shared/runnerHold.ts';
+import type { AgentCensus } from './agentCensus.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { PortalPinStatus } from '../machine/portalPin.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -494,7 +495,7 @@ export type FromDaemon =
    * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts). `bench` (w1835): its bench
    * queue's mode, holders and waiters (machine/benchState.ts), for the machine view.
    */
-  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport; playerCache?: PlayerCacheReport; ffuSlots?: FfuSlotsReport }
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport; playerCache?: PlayerCacheReport; ffuSlots?: FfuSlotsReport; agents?: AgentCensus }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */

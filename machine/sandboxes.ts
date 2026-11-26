@@ -26,6 +26,7 @@ import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
 import { isPersonTicket } from './personPlay.ts';
 import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
+import { describeCounted, type CensusAgent } from '../server/agentCensus.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
@@ -268,9 +269,10 @@ export function samePath(a: string, b: string, platform: NodeJS.Platform = proce
 }
 
 /** Live agents across a machine's sandboxes against the pool's total (maxAgents), as a refusal, or undefined. Exported for tests. */
-export function totalAgentsRefusal(liveInSandboxes: number, settings: Pick<SandboxPoolSettings, 'maxAgents'> | undefined | null): string | undefined {
+export function totalAgentsRefusal(liveInSandboxes: number, settings: Pick<SandboxPoolSettings, 'maxAgents'> | undefined | null, counted?: readonly CensusAgent[]): string | undefined {
   const max = settings?.maxAgents;
-  return max !== undefined && liveInSandboxes >= max ? `already ${liveInSandboxes} agents running in this machine's sandboxes (max_sandbox_agents ${max}); stop one first` : undefined;
+  // w5972: the agents it counted, by id: beast's refusal of 06:37:34Z on 2026-11-26 named none, while the portal counted 2.
+  return max !== undefined && liveInSandboxes >= max ? `already ${liveInSandboxes} agents running in this machine's sandboxes (max_sandbox_agents ${max}); stop one first${counted ? `; counted: ${describeCounted(counted)}` : ''}` : undefined;
 }
 
 /** Running editors to stop for being idle: up, no agent mid-turn there, nothing done there for `idleMinutes`. Exported for tests. */
