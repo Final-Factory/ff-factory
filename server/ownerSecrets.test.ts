@@ -49,23 +49,23 @@ test('machineGhEnv: the machine login reaches only a run with no vault token of 
   assert.equal(hasOwnGithub({ GH_TOKEN: '' }), false);
 });
 
-test('machineGhToken: runs gh auth token without any inherited token, and keeps only a token-shaped answer', () => {
+test('machineGhToken: runs gh auth token without any inherited token, and keeps only a token-shaped answer', async () => {
   let seen: NodeJS.ProcessEnv | undefined;
-  const ok: TokenRun = (_c, args, o) => {
+  const ok: TokenRun = async (_c, args, o) => {
     seen = o.env;
     assert.deepEqual(args, ['auth', 'token', '--hostname', 'github.com']);
     return { status: 0, stdout: 'gho_abcdefghijklmnopqrstuvwxyz0123\n' };
   };
   process.env.GH_TOKEN = 'inherited';
   try {
-    assert.equal(machineGhToken(ok), 'gho_abcdefghijklmnopqrstuvwxyz0123');
+    assert.equal(await machineGhToken(ok), 'gho_abcdefghijklmnopqrstuvwxyz0123');
     assert.equal(seen?.GH_TOKEN, undefined, 'an inherited GH_TOKEN would answer itself, not the login');
   } finally {
     delete process.env.GH_TOKEN;
   }
-  assert.equal(machineGhToken(() => ({ status: 1, stdout: '' })), undefined);
-  assert.equal(machineGhToken(() => ({ status: 0, stdout: 'no oauth token found\n' })), undefined);
-  assert.equal(machineGhToken(() => { throw new Error('ENOENT'); }), undefined);
+  assert.equal(await machineGhToken(async () => ({ status: 1, stdout: '' })), undefined);
+  assert.equal(await machineGhToken(async () => ({ status: 0, stdout: 'no oauth token found\n' })), undefined);
+  assert.equal(await machineGhToken(async () => { throw new Error('ENOENT'); }), undefined);
 });
 
 test('ownerReadDenied: the gh folder is closed only to a run with a token; Windows gets none (w5553, w5548)', async () => {

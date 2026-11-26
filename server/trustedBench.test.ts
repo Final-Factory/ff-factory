@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { benchTicketFor, newestBenchQueueScript, refreshTrustedBench, trustedBenchScript, TRUSTED_BENCH_MAX_AGE_MS } from '../machine/benchQueue.ts';
+import { benchTicketFor, newestBenchQueueScript, refreshTrustedBench, refreshTrustedBenchAsync, resetBenchFetches, trustedBenchScript, TRUSTED_BENCH_MAX_AGE_MS } from '../machine/benchQueue.ts';
 
 /**
  * w5572 (from w5542's audit): the daemon and the agent host took their bench tickets with the bench_queue.py of highest
@@ -82,5 +82,53 @@ test('w5572: the trusted copy is fetched when missing or old, kept when a fetch 
   assert.match(refreshTrustedBench(t, undefined) ?? '', /offline/);
   assert.equal(fs.readFileSync(file, 'utf8'), 'RULES_VERSION = 8\n', 'a failed fetch keeps the copy it had');
   assert.deepEqual(fs.readdirSync(path.dirname(file)), ['bench_queue.py']);
+  fs.rmSync(appDir, { recursive: true, force: true });
+});
+
+test('w5973: the daemon fetches the trusted copy in the background, one fetch at a time, and never on its own thread', async () => {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5973-app-'));
+  const file = trustedBenchScript(appDir);
+  let now = 1_000_000_000_000;
+  let syncCalls = 0;
+  let asyncCalls = 0;
+  let answer: (v: { text?: string; error?: string }) => void = () => undefined;
+  const t = { appDir, background: true, now: () => now, fetch: () => (syncCalls++, { text: 'RULES_VERSION = 1\n' }), fetchAsync: () => (asyncCalls++, new Promise<{ text?: string; error?: string }>((r) => (answer = r))) };
+  // No copy yet: refused as before, saying the fetch has started; a second call while it runs starts no second one.
+  assert.match(refreshTrustedBench(t, undefined) ?? '', /fetching master's scripts\/bench\/bench_queue\.py in the background/);
+  assert.match(refreshTrustedBench(t, undefined) ?? '', /in the background/);
+  assert.equal(asyncCalls, 1);
+  assert.equal(syncCalls, 0, 'the blocking fetch never runs in background mode');
+  answer({ text: 'RULES_VERSION = 9\n' });
+  assert.equal(await refreshTrustedBenchAsync(t, undefined), undefined);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'RULES_VERSION = 9\n');
+  assert.equal(refreshTrustedBench(t, undefined), undefined, 'fresh: nothing to fetch');
+  // Old: the call goes on with the copy it has while one fetch runs; a failed fetch keeps it.
+  now = fs.statSync(file).mtimeMs + TRUSTED_BENCH_MAX_AGE_MS + 1;
+  assert.equal(refreshTrustedBench(t, undefined), undefined);
+  assert.equal(asyncCalls, 2);
+  const pending = refreshTrustedBenchAsync(t, undefined);
+  assert.equal(asyncCalls, 2, 'a call while one runs shares it');
+  answer({ error: 'offline' });
+  assert.match((await pending) ?? '', /offline/);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'RULES_VERSION = 9\n');
+  fs.rmSync(appDir, { recursive: true, force: true });
+});
+
+test("w5973 (w5998's review): a background fetch that just failed is not started again on each call, and its error is the refusal", async () => {
+  resetBenchFetches();
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5973-fail-'));
+  let now = 1_000_000_000_000;
+  let calls = 0;
+  const t = { appDir, background: true, now: () => now, fetchAsync: async () => (calls++, { error: 'HTTP 401: Bad credentials' }) };
+  assert.match(refreshTrustedBench(t, undefined) ?? '', /in the background/);
+  assert.match((await refreshTrustedBenchAsync(t, undefined)) ?? '', /Bad credentials/, 'the call that started it shares its answer');
+  assert.equal(calls, 1);
+  assert.match(refreshTrustedBench(t, undefined) ?? '', /Bad credentials/, "the refusal is gh's error, not 'fetching'");
+  assert.equal(calls, 1, 'no second fetch within the minute');
+  now += 61_000;
+  refreshTrustedBench(t, undefined);
+  await refreshTrustedBenchAsync(t, undefined);
+  assert.equal(calls, 2, 'tried again after a minute');
+  resetBenchFetches();
   fs.rmSync(appDir, { recursive: true, force: true });
 });

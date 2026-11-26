@@ -293,7 +293,7 @@ export interface HostDeps {
   /** The worker caps' mode for a host about to start (daemon.json `workerCaps`, w5554); unset: warn. */
   capsMode?: () => CapsMode;
   /** Why a host's systemd scope ended (machine/linuxScope.ts scopeEndCause, w2884); tests stand in for journalctl. */
-  scopeEndCause?: (unit: string) => string | undefined;
+  scopeEndCause?: (unit: string) => string | undefined | Promise<string | undefined>;
   /**
    * CPU used so far by the tools its agent runs (w3673): the processes under its host's children (its claude), by
    * `pid@start`, in ms; undefined when the machine cannot tell. Without it the hang watch counts its tools as idle.
@@ -371,6 +371,8 @@ export class HostedSession implements SessionHandle {
   /** Since when its heartbeat is late while its process runs (w799). */
   private staleSince?: number;
   private checking = false;
+  /** A gone host's journal is being read (endGone, w5973). */
+  private goneLooking = false;
   /** Its host's tree being stopped and its folder removed (w799); messages sent meanwhile wait in `waiting`. */
   private stoppingNow?: Promise<void>;
   private waiting: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>[] = [];
@@ -664,7 +666,7 @@ export class HostedSession implements SessionHandle {
         return;
       case 'gone':
         this.tail.poll();
-        if (this.running) this.ended(this.goneWhy('its agent host stopped unexpectedly'));
+        if (this.running) this.endGone();
         return;
       case 'starting':
         if (Date.now() - this.launchedAt > START_MS) this.ended(`its agent host did not start (see ${this.files.log})`);
@@ -699,7 +701,8 @@ export class HostedSession implements SessionHandle {
         if (!this.running || this.stoppingNow) return;
         if (who === 'gone' || who === 'other') {
           this.tail?.poll();
-          this.ended(who === 'gone' ? this.goneWhy('its agent host stopped unexpectedly') : `its agent host is gone (pid ${pid} is another program now)`);
+          if (who === 'gone') this.endGone();
+          else this.ended(`its agent host is gone (pid ${pid} is another program now)`);
         } else if (hung) {
           this.tail?.poll();
           this.ended(`its agent host gave no heartbeat for ${Math.round((Date.now() - this.staleSince!) / 60_000)} min while its process ran: stopped`);
@@ -786,10 +789,23 @@ export class HostedSession implements SessionHandle {
    * Why its host died, as far as this machine says (w2884): on Linux its systemd scope's journal names an OOM kill
    * ("A process of this unit has been killed by the OOM killer."), which ended the whole scope under OOMPolicy=stop.
    */
-  private goneWhy(why: string): string {
+  private async goneWhy(why: string): Promise<string> {
     const unit = readFileOr(this.files.scope, '').trim();
-    const cause = unit ? (this.deps.scopeEndCause ?? scopeEndCause)(unit) : undefined;
+    const cause = unit ? await Promise.resolve((this.deps.scopeEndCause ?? scopeEndCause)(unit)).catch(() => undefined) : undefined;
     return cause ? `${why} (its scope ${unit}: ${cause})` : why;
+  }
+
+  /**
+   * Ends a host found gone, once its journal is read (w5973: off the daemon's loop, so the poll may come round meanwhile:
+   * one look at a time, and nothing if it ended another way in between).
+   */
+  private endGone() {
+    if (this.goneLooking) return;
+    this.goneLooking = true;
+    void this.goneWhy('its agent host stopped unexpectedly').then((why) => {
+      this.goneLooking = false;
+      if (this.running && !this.stoppingNow) this.ended(why);
+    });
   }
 
   private saveOffset() {
