@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, farWhy, groupedBySandbox, keptWhy, liveLostNote, movedNote, placeFor, releaseStep, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
+import { LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, farWhy, groupedBySandbox, keptWhy, liveLostNote, movedNote, placeFor, releaseStep, seatFor, releaseWhy, releasedOn, savedNote, waitReleaseWhy, type PlaceFacts } from './placeAgain.ts';
 import { agentStateText, holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import { isLiveAgent } from '../shared/fleet.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
@@ -146,6 +146,20 @@ test('place again (w640): where a released worker resumes: its own sandbox, anot
   assert.match((placeFor(w, m([taken, s3]), facts([w, n1], { liveIds: ['n1'] }), new Map(), (x) => x === 'slot3') as { wait: string }).wait, /no sandbox/);
 });
 
+
+test('w5924: a game worker never resumes in a light agent folder, and an agent seat is never one', () => {
+  // beast, 2026-11-26 02:20: 81ec4f0a was placed into the light folder beast/agent2 and its branch switch failed there.
+  const w = worker('w1', { placeReleased: { at: iso(NOW), sandbox: 'slot1', branch: 'feature/w1', why: 'far' } });
+  const m = (sbs: MachineSandbox[]): Pick<Machine, 'id' | 'sandboxes'> => ({ id: 'pc', sandboxes: sbs });
+  const taken = sandbox('slot1', { sessionIds: ['w1', 'n1'] }, { branch: 'sandbox/slot1-w635' });
+  const n1 = worker('n1', { status: 'running' });
+  const light = sandbox('agent2', { kind: 'light', unity: { state: 'stopped' } });
+  assert.match((placeFor(w, m([taken, light]), facts([w, n1], { liveIds: ['n1'] })) as { wait: string }).wait, /no sandbox on pc is free/);
+  const s3 = sandbox('slot3');
+  assert.equal((placeFor(w, m([taken, light, s3]), facts([w, n1], { liveIds: ['n1'] })) as { sandbox: MachineSandbox }).sandbox.id, 'slot3');
+  assert.equal((seatFor(w, m([light, s3]), facts([w]), 2) as { sandbox: MachineSandbox }).sandbox.id, 'slot3');
+  assert.match((seatFor(w, m([light]), facts([w]), 2) as { wait: string }).wait, /no agent seat is free/);
+});
 test('place again (w640): waiting resumes claim the free sandboxes before new work, oldest id first; the moved note', () => {
   const rel = (id: string): SessionInfo => worker(id, { placeReleased: { at: iso(NOW), sandbox: 'slot1', branch: `feature/${id}`, why: 'far' } });
   const w1 = rel('a1');
