@@ -287,6 +287,8 @@ export class AutoCompactor {
   /** When each session's last automatic compaction started: one that did not finish holds the next for RETRY_AFTER_MS. */
   private readonly attempts = new Map<string, number>();
   private readonly timers = new Map<string, NodeJS.Timeout>();
+  /** stop() was called: no check is armed again (w6191: stopping the sessions after it failed their compactions, which armed a retry that started one again). */
+  private stopped = false;
   /** When each session's last turn ended, as seen here (w1538's quiet clock; after a restart, its saved lastResultAt). */
   private readonly turnEnded = new Map<string, number>();
   private readonly settleMs: number;
@@ -342,6 +344,7 @@ export class AutoCompactor {
 
   /** Check this session after SETTLE_MS, or `ms` (a later turn end moves it: the quiet wait starts again, w1538). */
   private soon(id: string, ms = this.settleMs) {
+    if (this.stopped) return;
     clearTimeout(this.timers.get(id));
     const t = setTimeout(() => {
       this.timers.delete(id);
@@ -483,6 +486,7 @@ export class AutoCompactor {
 
   /** Stop the pending checks (tests, the server stopping). */
   stop() {
+    this.stopped = true;
     for (const t of this.timers.values()) clearTimeout(t);
     this.timers.clear();
   }
