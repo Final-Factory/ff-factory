@@ -331,7 +331,13 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    published branch, its own repository (daemon.json `updateOrigin`). A download that stalls (30 s without a byte) or breaks resumes from
    the bytes it has with a Range request, up to 6 tries within 8 minutes, each logged in the daemon's log with its cause
    (`machine/selfUpdate.ts` `DOWNLOAD`; w1641: beast's stalled at 7 of 18.5 MB and Node's fetch sat 300 s before it said
-   "terminated"). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
+   "terminated"). A call that runs out keeps its bytes in `<appDir>/update/<sha256 prefix>.bundle.part`, and the next update
+   of the same bundle hashes them again and asks only for the rest (w5898: beast fetched one 29.3 MB bundle four times from
+   0 on 2026-11-25, reaching 16.6, 19.5, 22.0 and 8.9 MB). Each call keeps its 8 minutes. The SHA-256 of the whole file is
+   still checked before anything installs: a resumed bundle that does not match deletes the part and downloads again from 0
+   in the time left; a part that is empty, not a file, or not shorter than the bundle, or a resume the portal answers 416, is
+   dropped the same way; a refusal keeps nothing; and only the newest part of another bundle stays beside it. Recovery needs
+   nobody at the machine. The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
    An answer the link could not carry (it was down, or it was sent less than a minute before a drop, since a dead link
    looks open for up to 45 s) is kept 30 minutes and sent again after the next hello (`ANSWERS`; w1641: at the 450f7d53c
    rollout the portal VM's Tailscale restarted 4.5 minutes into beast's update). The portal ignores a repeat, takes a
@@ -1005,10 +1011,19 @@ tools; both measured on LothDesktop on 2026-10-12): an update keeps it and says 
 
 A larger maximum is the ops worker's `machine_update` with `dev_drive_max_gb` (the only control; lothsahn: "just build scoped
 commands for the functionality needed ... But no way into machines"). The update writes it as `wantGB` in the host folder's
-`devdrive.json` (`scripts/worker/worker.ts` `wantDevDriveGrow`), and the daemon's host guard grows the drive once no agent
-(running, between turns or waiting) and no editor is in a sandbox (`machine/hostGuard.ts` `growIfIdle`). Until then the portal
-hears "Dev Drive: grow pending" once, with who is there. While it grows, new agents and editors wait (`blockReason`), and the
-guard does not look at the drive, which is detached on purpose.
+`devdrive.json` (`scripts/worker/worker.ts` `wantDevDriveGrow`), and the daemon's host guard grows the drive once nothing in a
+sandbox would lose work (`machine/hostGuard.ts` `growIfIdle`). What holds it: an editor up, and an agent mid-turn (starting,
+running), waiting on a permission, between turns with a tool still running (`activeTool`), or between turns with a pending
+check-in (`wake_me`) or a timed run of its own (the daemon's `idleHold` port). An agent between turns with none of those does
+not (w5906, lothsahn: "An agent host pid was blocking the grow.  Please file a fix so that doesn't happen again"; on
+2026-11-26 lothdesktop's grow waited for 74e5a46e, w5814's own worker, and then for 2c75765f, w5475's, until the ops worker
+stopped its host by hand). Once nothing else holds the grow (no editor, no busy runner on the drive, the drive there), the
+guard stops each such host through the daemon's own stop op, the one a pause uses (`stopIdle`: up to 20 s for it to end), and
+grows in the same look, about 30 s after the last turn ended. A stopped worker resumes at its next message as any stopped
+one does; one whose host has not ended holds the grow to the next look. Until it grows the portal hears "Dev Drive: grow
+pending" with who holds it and why, and again when that changes (the daemon log at most every 2 minutes, the portal's report
+every 15), so the line never names agents that left long ago. While it grows, new agents and editors wait (`blockReason`), and
+the guard does not look at the drive, which is detached on purpose.
 
 The detach ends every process run from the drive, GitHub Actions runners included (w3721: LothDesktop's ffu-lothdesktop-1 and
 -2 live in `V:\ffw\ffu-runners`, and the 2026-11-08 20:33 UTC grow left both offline). So the grow also waits while a runner

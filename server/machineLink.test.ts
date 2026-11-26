@@ -4,6 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { Worker } from 'node:worker_threads';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -16,7 +17,7 @@ import { MachineManager } from './machines.ts';
 import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobOverdue, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -536,10 +537,10 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   const f2 = await downloadBundle(whole.url, 'tok', b, path.join(dir, 'c'), fetch, { stallMs: 300 });
   assert.equal(createHash('sha256').update(fs.readFileSync(f2)).digest('hex'), b.sha256);
 
-  // Every try stalls: it gives up with the reason, the part file gone.
+  // Every try stalls: it gives up with the reason, and keeps what it got for the next call (w5898).
   const never = await bundleServer(t, body, () => 'stall');
   await assert.rejects(downloadBundle(never.url, 'tok', b, path.join(dir, 'd'), fetch, { stallMs: 200, attempts: 2 }), /the bundle's download stalled \(no byte in 0 s\) at \d+ of 200000 bytes, after 2 attempt\(s\)/);
-  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), []);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), [`${b.sha256.slice(0, 16)}.bundle.part`]);
 
   // A refusal is not retried.
   const refused = await bundleServer(t, body, () => 404);
@@ -547,6 +548,148 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   assert.equal(refused.seen.length, 1);
 
   assert.equal(fetchError(Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }) })), 'terminated (UND_ERR_BODY_TIMEOUT: Body Timeout Error)');
+});
+
+test('w5898: a cut download keeps its part and the next call resumes it; a bad part falls back to a full download from 0', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 13) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const name = `${b.sha256.slice(0, 16)}.bundle.part`;
+
+  // beast's case: one call runs out (here: its one attempt stalls at half); the next call asks only for the rest.
+  const d1 = path.join(dir, 'resume');
+  const first = await bundleServer(t, body, () => 'stall');
+  const lines: string[] = [];
+  await assert.rejects(downloadBundle(first.url, 'tok', b, d1, fetch, { stallMs: 200, attempts: 1, log: (l) => lines.push(l) }), /stalled/);
+  assert.equal(fs.statSync(path.join(d1, name)).size, 100_000, 'the bytes of the cut attempt stay');
+  assert.match(lines.at(-1) ?? '', /kept the 100000 of 200000 bytes of the bundle in .*\.bundle\.part; the next attempt resumes from there/);
+  const second = await bundleServer(t, body, () => 'serve');
+  lines.length = 0;
+  const file = await downloadBundle(second.url, 'tok', b, d1, fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.deepEqual(second.seen, ['bytes=100000-'], 'the second call asks only for the rest');
+  assert.ok(fs.readFileSync(file).equals(body));
+  assert.match(lines[0] ?? '', /resuming the bundle's download from the 100000 of 200000 bytes an earlier attempt kept/);
+  assert.deepEqual(fs.readdirSync(d1), [path.basename(file)], 'the part became the bundle');
+
+  // A kept part whose bytes are wrong: the whole file's SHA-256 refuses it, the part goes, and it downloads again from 0.
+  const d2 = path.join(dir, 'bad');
+  fs.mkdirSync(d2);
+  fs.writeFileSync(path.join(d2, name), Buffer.alloc(100_000, 0xff));
+  const bad = await bundleServer(t, body, () => 'serve');
+  lines.length = 0;
+  const f2 = await downloadBundle(bad.url, 'tok', b, d2, fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.deepEqual(bad.seen, ['bytes=100000-', undefined], 'a resume, then the whole bundle from 0');
+  assert.ok(fs.readFileSync(f2).equals(body));
+  assert.ok(lines.some((l) => /did not match what the portal said .*the kept part is deleted and the download starts again from 0/.test(l)), lines.join('\n'));
+  assert.deepEqual(fs.readdirSync(d2), [path.basename(f2)]);
+
+  // A part as long as the bundle or longer, or a folder in its place: removed, and a plain download from 0.
+  for (const [sub, make] of [
+    ['long', (f: string) => fs.writeFileSync(f, Buffer.alloc(200_001))],
+    ['full', (f: string) => fs.writeFileSync(f, body)],
+    ['empty', (f: string) => fs.writeFileSync(f, '')],
+    ['folder', (f: string) => fs.mkdirSync(f)],
+  ] as const) {
+    const d = path.join(dir, sub);
+    fs.mkdirSync(d);
+    make(path.join(d, name));
+    const s = await bundleServer(t, body, () => 'serve');
+    const f = await downloadBundle(s.url, 'tok', b, d, fetch, { stallMs: 5000 });
+    assert.deepEqual(s.seen, [undefined], `${sub}: from 0`);
+    assert.ok(fs.readFileSync(f).equals(body), sub);
+  }
+
+  // A portal that will not serve the kept range (416): from 0 on the next try, not a refusal.
+  const d4 = path.join(dir, 'range');
+  fs.mkdirSync(d4);
+  fs.writeFileSync(path.join(d4, name), body.subarray(0, 100_000));
+  const r416 = await bundleServer(t, body, (n) => (n === 1 ? 416 : 'serve'));
+  const f4 = await downloadBundle(r416.url, 'tok', b, d4, fetch, { stallMs: 5000 });
+  assert.deepEqual(r416.seen, ['bytes=100000-', undefined]);
+  assert.ok(fs.readFileSync(f4).equals(body));
+
+  // A refusal keeps nothing; parts of other bundles beyond the newest one go.
+  const d5 = path.join(dir, 'refused');
+  fs.mkdirSync(d5);
+  fs.writeFileSync(path.join(d5, name), body.subarray(0, 100_000));
+  fs.writeFileSync(path.join(d5, 'aaaaaaaaaaaaaaaa.bundle.part'), 'old');
+  fs.utimesSync(path.join(d5, 'aaaaaaaaaaaaaaaa.bundle.part'), new Date(1_000_000), new Date(1_000_000));
+  fs.writeFileSync(path.join(d5, 'bbbbbbbbbbbbbbbb.bundle.part'), 'newer');
+  const refused = await bundleServer(t, body, () => 404);
+  await assert.rejects(downloadBundle(refused.url, 'tok', b, d5, fetch, { stallMs: 5000 }), /the portal answered 404/);
+  assert.deepEqual(fs.readdirSync(d5), ['bbbbbbbbbbbbbbbb.bundle.part']);
+});
+
+test('w5938: a stall check that comes late (the daemon blocked its own loop) is not a stall; the bytes that came meanwhile are read', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 11) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  // The portal in a thread of its own, so it sends while this thread's loop is blocked: 1000 bytes, the rest 200 ms later.
+  const portal = new Worker(
+    `const http = require('node:http'); const { parentPort } = require('node:worker_threads');
+     const body = Buffer.from(Array.from({ length: 200000 }, (_, i) => (i * 11) % 251));
+     const s = http.createServer((req, res) => {
+       parentPort.postMessage({ range: req.headers.range ?? null });
+       res.writeHead(200, { 'content-length': String(body.length) });
+       res.write(body.subarray(0, 1000));
+       setTimeout(() => res.end(body.subarray(1000)), 200);
+     });
+     s.listen(0, '127.0.0.1', () => parentPort.postMessage({ port: s.address().port }));`,
+    { eval: true },
+  );
+  t.after(async () => {
+    await portal.terminate();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const seen: (string | null)[] = [];
+  const port = await new Promise<number>((r) => portal.on('message', (m: { port?: number; range?: string | null }) => (m.port ? r(m.port) : seen.push(m.range ?? null))));
+  // beast, 2026-11-26: LoopWatch logged the loop blocked 40-72 s; here 1.2 s, outside a timer (a sync call in an I/O or
+  // immediate callback), so the next turn of the loop runs the due stall check before it reads the socket.
+  const run = async (sub: string, lateMs: number) => {
+    const lines: string[] = [];
+    setTimeout(() => setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1200)), 100);
+    const file = await downloadBundle(`http://127.0.0.1:${port}`, 'tok', b, path.join(dir, sub), fetch, { stallMs: 300, lateMs, log: (l) => lines.push(l) });
+    assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), b.sha256);
+    return lines;
+  };
+  // Before w5938 (no check of lateness): the late check is taken for a stall and the download starts again.
+  const before = await run('before', 1e9);
+  assert.match(before.join('\n'), /stalled \(no byte in 0 s\) at 1000 of 200000 bytes; attempt 2 of 6/);
+  assert.deepEqual(seen.splice(0), [null, 'bytes=1000-']);
+  const lines = await run('after', 200);
+  assert.deepEqual(seen, [null], 'one request: no retry');
+  assert.equal(lines.length, 1, lines.join('\n'));
+  assert.match(lines[0], /the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 200000 bytes: not a stall/);
+});
+
+test('w5938: an update job past its limit is named in the refusal and warned of once; nothing ends it yet', async () => {
+  const at = Date.parse('2026-11-26T06:11:26Z');
+  const job = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir: 'a', service: 's', createdAt: new Date(at).toISOString(), phase: 'running', pid: process.pid } as UpdateJob;
+  assert.equal(jobOverdue(job, at + 15 * 60_000), undefined, "beast's 15.5 min job is within its limit");
+  assert.equal(inFlightRefusal(job, at + 3 * 60_000), 'an update job of this machine is still running (job 977d56f7, update, 3 min since it was made)');
+  assert.equal(jobOverdue(job, at + JOB_LIMIT.inFlightMs + 60_000), `job 977d56f7 (update) has been running (pid ${process.pid}) for 46 min, past its 45 min limit`);
+  assert.match(inFlightRefusal(job, at + JOB_LIMIT.inFlightMs + 60_000), /^an update job of this machine is still running: job 977d56f7 .* past its 45 min limit; nothing ends it yet \(warn only, w5938\)$/);
+  const staged = { ...job, phase: 'staged', pid: undefined } as UpdateJob;
+  assert.match(jobOverdue(staged, at + JOB_LIMIT.stagedMs + 60_000) ?? '', /staged and never taken by its process for 11 min, past its 10 min limit/);
+  assert.equal(jobOverdue({ ...job, phase: 'done' }, at + 10 * JOB_LIMIT.inFlightMs), undefined, 'a job that ended is not overdue');
+  assert.equal(jobOverdue({ ...job, pid: 2 ** 30 }, at + 10 * JOB_LIMIT.inFlightMs), undefined, 'nor one whose process is gone');
+
+  // The daemon: warned once by the tick, refused with the reason, and the job left as it is.
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjob-'));
+  try {
+    const f = updateFiles(appDir);
+    writeJson(f.job, { ...job, appDir });
+    const logs: string[] = [];
+    const sent: unknown[] = [];
+    const u = new SelfUpdater({ appDir, portalUrl: () => 'http://x', token: 't', send: (m) => (sent.push(m), true), exit: () => undefined, log: (...a) => logs.push(a.join(' ')), now: () => at + JOB_LIMIT.inFlightMs + 60_000 });
+    await u.tick();
+    await u.tick();
+    assert.equal(logs.filter((l) => /WARNING job 977d56f7/.test(l)).length, 1, logs.join('\n'));
+    assert.equal(readJson<UpdateJob>(f.job)?.phase, 'running', 'warn only: the job is left in flight');
+  } finally {
+    fs.rmSync(appDir, { recursive: true, force: true });
+  }
 });
 
 test('w1641: an answer the link could not carry goes again when it is back; one sent just before a drop too; the portal ignores a repeat', async () => {

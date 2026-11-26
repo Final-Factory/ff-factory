@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
+import { FIXED_GIT_CONFIG, HOOKS, SCANNED_KEYS, parseScan, scannedOverrides, withConfigFirst } from './safeGit.ts';
 
 /**
  * The agent tools publish (w1476; lothsahn, 2026-10-18: "Please create a new work item that deploying the latest tools is
@@ -330,21 +331,56 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
     // The workers' folder first (its lines are the ones the rollout reads, machineRollout.ts), then the Medium agents' one.
     const x = { co: keepCo, legacy, base, run, env, sh, marker, latest };
     const code = await registerInto(root, d, { ...x, claudeDir, label: '' });
-    if (code !== EXIT.ok) return code;
     const medium = o.medium && path.resolve(o.medium) !== path.resolve(claudeDir) ? o.medium : undefined;
     if (medium) {
       fs.mkdirSync(medium, { recursive: true });
       const mBefore = installedVersions(readJson(path.join(medium, 'plugins', 'installed_plugins.json')));
       const label = ` (Medium agents, ${medium})`;
       d.say(`${LINE.before.replace(/:$/, label + ':')} ${formatVersions(mBefore)}`);
+      // The Medium agents' folder is refreshed even when the workers' one failed (w5946 F6): what a worker can do to its own
+      // folder must not keep Medium agents on old plugins. The first failure is still the answer.
       const m = await registerInto(root, d, { ...x, env: { ...env, CLAUDE_CONFIG_DIR: medium }, claudeDir: medium, label });
-      if (m !== EXIT.ok) return m;
+      if (code === EXIT.ok && m !== EXIT.ok) return m;
     }
+    if (code !== EXIT.ok) return code;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
   d.say('Agent tools published: every installed plugin is on master. Running agents keep the version they started with; new sessions load these.');
   return EXIT.ok;
+}
+
+/**
+ * w5870: the env registerAgents.sh runs with, fenced like safeGit's calls. Its `claude plugin marketplace update` runs git in
+ * <claudeDir>/plugins/marketplaces/final-factory-agents, and the workers' folder is Low-writable while `worker.ts tools`
+ * runs at Medium (or elevated): a worker could plant a hook, an fsmonitor or a filter there for that git to run. The
+ * fixed keys and the overrides of what that checkout's own config names go in as command-scope entries, which every
+ * git under it reads; a planted key is also said, so a person can look.
+ */
+export async function fencedRegisterEnv(d: Pick<PublishDeps, 'exec' | 'say'>, claudeDir: string, env: NodeJS.ProcessEnv, label = ''): Promise<NodeJS.ProcessEnv | undefined> {
+  const mp = path.join(claudeDir, 'plugins', 'marketplaces', 'final-factory-agents');
+  let rows: ReturnType<typeof parseScan> = [];
+  const fence = ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${HOOKS}`];
+  if (fs.existsSync(mp)) {
+    const r = await d.exec('git', [...fence, '-C', mp, 'config', '--show-scope', '-z', '--get-regexp', SCANNED_KEYS], { env, timeoutMs: 60_000 });
+    // Exit 1 is "no key matched".
+    if (r.code === 0) rows = parseScan(r.stdout);
+    else if (r.code !== 1) d.say(`WARNING: could not read the marketplace checkout's git config${label} (${tail(r)}); its git runs with the fixed fence only.`);
+  }
+  const planted = rows.filter((r) => !['system', 'global', 'command', 'unknown'].includes(r.scope));
+  if (planted.length) d.say(`WARNING: the marketplace checkout ${mp}${label} sets ${[...new Set(planted.map((r) => r.key))].join(', ')} in its own config; the refresh runs with them overridden (w5870). Look at who wrote it, or run registerAgents.sh --reinstall there.`);
+  // A URL rewrite cannot be overridden by value (safeGit refuses the call, w5573): it could point the refresh at another
+  // repository, whose plugins every agent would then load. So it is taken out of that config, said, and the refresh goes on
+  // (w5946 F6: a worker who plants one must not be able to stop every refresh); only a rewrite that stays stops this folder's.
+  for (const key of new Set(planted.filter((r) => /^url\..+\.(insteadof|pushinsteadof)$/.test(r.key)).map((r) => r.key))) {
+    const u = await d.exec('git', [...fence, '-C', mp, 'config', '--local', '--unset-all', key], { env, timeoutMs: 60_000 });
+    if (u.code !== 0 && u.code !== 5) {
+      d.say(`FAILED: the marketplace checkout ${mp}${label} rewrites remote URLs (${key}), so its refresh could fetch another repository, and the rewrite could not be removed (${tail(u)}); this folder's plugins stay as they were. Remove it (\`git -C ${mp} config --local --unset-all ${key}\`) or run registerAgents.sh --reinstall.`);
+      return undefined;
+    }
+    d.say(`WARNING: the marketplace checkout ${mp}${label} rewrote remote URLs (${key}), so its refresh could have fetched another repository; it is removed from that checkout's config (w5870). Look at who wrote it.`);
+  }
+  return withConfigFirst(env, [...FIXED_GIT_CONFIG, ...scannedOverrides(rows)]);
 }
 
 /** One Claude Code folder's part of a publish: registerAgents.sh into it, then the check that every plugin is on master's version. */
@@ -356,7 +392,8 @@ async function registerInto(
   const { co, legacy, base, run, env, sh, marker, claudeDir, latest, label } = x;
   const installed = path.join(claudeDir, 'plugins', 'installed_plugins.json');
   const markerBefore = readText(marker);
-  const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
+  const registerEnv = await fencedRegisterEnv(d, claudeDir, { ...REGISTER_ENV, ...env }, label);
+  if (!registerEnv) return EXIT.failed;
   const register = async () => {
     const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: run, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
     for (const l of `${x.stdout}\n${x.stderr}`.split(/\r?\n/).filter((y) => y.trim())) d.say(`  ${l.trimEnd()}`);

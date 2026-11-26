@@ -19,8 +19,8 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
-import { compilerServers } from './compilerServer.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
@@ -42,11 +42,13 @@ import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
 export const DAEMON_YIELD_EXIT = 75;
-import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
+import { MachineGuard, realGuardEffects, runnerRestartScript, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
+import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
+import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
@@ -87,10 +89,10 @@ import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
-import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
-import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -101,7 +103,7 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
-import { DROPIN_NAME, RunnerUnits, findRunnerUnits } from './runnerUnits.ts';
+import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
@@ -126,8 +128,9 @@ import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type Gh
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
+import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
-import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -179,6 +182,18 @@ export interface DaemonConfig {
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
    */
   workerIntegrity?: 'low';
+  /**
+   * w5862: Medium agents' (any launch that is not a sandbox's) own temp root and cargo home, out of the folders workers
+   * write (machine/mediumFolders.ts). Absent or "warn": only a WARNING at start names the exposed folders; "on": Medium
+   * agents get <root>/tmp-medium and <root>/cache-medium/cargo, keeping today's folders with a WARNING when they cannot.
+   */
+  mediumAgentFolders?: MediumFoldersMode;
+  /**
+   * w5870: Medium agents' own tool caches (npm, pip, NuGet, .NET, Playwright, Unity's), the user PATH and ffu slots
+   * (machine/mediumFolders.ts planMediumCaches). Absent or "warn": WARNINGs only; "on": Medium agents get <root>/cache-medium's
+   * caches, the user PATH loses its entries in folders workers write, and `ffu-slot take` refuses a Medium agent.
+   */
+  mediumAgentCaches?: MediumCachesMode;
   /**
    * Paths outside the worker root that Low workers may write, labelled Low with the root (w5377): the person's decision,
    * never a default (lothsahn: "under no circumstances should workers write outside of ffw"). A path that is a file now is
@@ -520,6 +535,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** How often the status reads the ffu slots again (w5912): a git status and a few stats per held slot, in a child process. */
+const FFU_REPORT_MS = 2 * 60_000;
 /** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
 const LINK_BEAT_MS = 20_000;
 const LINK_DEAD_MS = 45_000;
@@ -590,6 +607,8 @@ export class Daemon {
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
   readonly pool: SandboxPool;
+  /** Light agent folders (w5924, machine/lightFolders.ts): agent-only workers' plain folders under the sandbox root, reported with the sandboxes. */
+  readonly light: LightFolders;
   /** Each sandbox's local test runs, sent to the portal's per-test history (w4922, machine/testHistorySpool.ts). */
   private readonly testHistory: TestHistorySpool;
   /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
@@ -657,6 +676,12 @@ export class Daemon {
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
   private lastStats?: { stats: HostStats; at: number };
+  /** Each ffu slot's target size as the last clean-up pass measured it (w5912): the status reports it, never a du of its own. */
+  private readonly ffuSizes = new Map<string, { bytes: number; at: string }>();
+  /** The last `ffu-slot list --json` (w5912), read again every FFU_REPORT_MS in the background. */
+  private ffuReport?: FfuSlotsReport;
+  private ffuReportAt = 0;
+  private ffuReporting = false;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
@@ -904,6 +929,7 @@ export class Daemon {
       ready: () => this.welcomed,
       slotRoots,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      mediumTempRoot: () => this.mediumFolders().tempRoot,
       leases: () => readLeases(slotRoots()),
       protectedPaths: () => [cfg.repoPath, appDirOfConfig(cfg), ...(this.currentPool()?.protectedPaths ?? [])],
       places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
@@ -981,6 +1007,8 @@ export class Daemon {
       signal: (pid, sig) => (!real ? 'not a real daemon' : process.platform === 'win32' && sig !== 'SIGTERM' ? winSuspend(pid, sig === 'SIGCONT') : sendSignal(pid, sig)),
       diag: (root) => (real ? readListenerLog(root) : undefined),
       opsRunner: (root) => real && isOpsRunner(root),
+      // w5916: a listener the load gate or a hold suspended stays the gate's: a turn's end never continues it
+      othersPaused: () => new Set(this.loadGate.state().suspended.map((p) => p.pid)),
       read: () => (cfg.root ? readRunnersFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeRunnersFile(cfg.root, st, log),
       log: (line) => log(line),
@@ -998,6 +1026,20 @@ export class Daemon {
         return winSuspend(pid, resume);
       },
       diag: (root) => (real ? readListenerLog(root) : undefined),
+      // w5916: a person's hold drains every runner but an operations runner, and leaves a turn's paused ones to the turn
+      opsRunner: (root) => real && isOpsRunner(root),
+      othersPaused: () => new Set(this.benchRunners.paused().map((p) => p.pid)),
+      ...(real && process.platform === 'win32'
+        ? {
+            start: async (root: string) => {
+              const r = await new Promise<{ code: number; out: string; err: string }>((resolve) =>
+                execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
+              );
+              if (r.code !== 0) throw new Error((r.err || r.out || `exit ${r.code}`).trim());
+              return r.out.trim() || 'started';
+            },
+          }
+        : {}),
       read: () => (cfg.root ? readLoadGateFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeLoadGateFile(cfg.root, st, log),
       log: (line) => log(line),
@@ -1008,16 +1050,30 @@ export class Daemon {
     const userUnits = path.join(os.homedir(), '.config', 'systemd', 'user');
     this.runnerUnits = new RunnerUnits({
       units: () => (real && process.platform === 'linux' ? findRunnerUnits(userUnits) : []),
-      readDropin: (unit) => {
+      readDropin: (unit, name = DROPIN_NAME) => {
         try {
-          return fs.readFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), 'utf8');
+          return fs.readFileSync(path.join(userUnits, `${unit}.d`, name), 'utf8');
         } catch {
           return undefined;
         }
       },
-      writeDropin: (unit, text) => {
+      writeDropin: (unit, text, name = DROPIN_NAME) => {
         fs.mkdirSync(path.join(userUnits, `${unit}.d`), { recursive: true });
-        fs.writeFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), text);
+        fs.writeFileSync(path.join(userUnits, `${unit}.d`, name), text);
+      },
+      // w5834: each runner's temp folder inside the worker root (runnerTempDir), made here too so its first start finds it
+      tempDir: (u) => {
+        const t = runnerTempDir(u, cfg.root);
+        if (t) fs.mkdirSync(t, { recursive: true });
+        return t;
+      },
+      startedTmpdir: (pid) => {
+        try {
+          const env = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+          return env.find((e) => e.startsWith('TMPDIR='))?.slice('TMPDIR='.length) ?? null;
+        } catch {
+          return undefined;
+        }
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>
@@ -1047,6 +1103,7 @@ export class Daemon {
       census: async () => runnerCensus(await pd.procs()),
       log: (line) => log(line),
     });
+    this.light = new LightFolders({ root: () => this.sandboxRoot(), onChange: () => this.reportSandboxes() });
     this.pool = new SandboxPool(
       {
         repoPath: cfg.repoPath,
@@ -1124,9 +1181,10 @@ export class Daemon {
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      mediumTempRoot: () => this.mediumFolders().tempRoot,
       ready: () => this.welcomed,
       sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live, resumable: this.resumable.has(e.s.info.id) })),
-      dirOf: (id) => sessionTempDir(agentTempRoot(cfg.tempDir), id),
+      dirOf: (id) => this.sessionTemp(id),
       guard: () => this.cleanupGuard(),
       procs: () => this.procs(),
       self: () => [process.pid, process.ppid],
@@ -1166,7 +1224,7 @@ export class Daemon {
         // w5281: old runs in the shared determinism audit folder (<root>/cache/determinism-audit) age out.
         // w5306: playtest sessions in the worker's game data root (<root>/gamedata/PlaytestSessions) age out as in the old folder.
         // w5557: and in each sandbox's own (<root>/gamedata/sandboxes/<id>/PlaytestSessions).
-        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
+        const rules = rulesOnInstallDrive(cleanupRules({ ...env, mediumTemp: this.mediumFolders().tempRoot, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
         // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
         if (!opts.dryRun) void this.mediumUvPruner?.maybe(low);
@@ -1184,7 +1242,7 @@ export class Daemon {
               await planInstallLeftovers({
                 root: this.cfg.root,
                 sandboxes: this.pool.list().map((x) => x.path),
-                tempRoots: [agentTempRoot(this.cfg.tempDir)],
+                tempRoots: this.agentTempRoots(),
                 guard,
                 ctx: this.staleCtx,
                 procs: await this.procs().catch(() => undefined),
@@ -1198,6 +1256,7 @@ export class Daemon {
                 published: readPublished(publishedFile(appDirOfConfig(this.cfg))),
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
+                ffuSized: this.ffuSized,
               }),
             );
           },
@@ -1205,13 +1264,14 @@ export class Daemon {
             planInstallLeftovers({
               root: this.cfg.root,
               sandboxes: [],
-              tempRoots: [agentTempRoot(this.cfg.tempDir)],
+              tempRoots: this.agentTempRoots(),
               guard,
               ctx: this.staleCtx,
               procs: await this.procs().catch(() => undefined),
               self: [process.pid, process.ppid],
               scope: 'cargo-cap',
               closed: this.closedSessionDirs(),
+              ffuSized: this.ffuSized,
             }),
           busyNow: runnerBusyNow(() => this.procs()),
           endStrays: async (strays) => {
@@ -1316,6 +1376,77 @@ export class Daemon {
   }
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
+  private mediumMemo?: MediumFolders;
+  /** Folders the fences open whole wherever they are (w5869, w5871's F3; mediumFolders.ts workerWritable's `opened`). */
+  private fenceOpened(): string[] {
+    const c = this.cfg;
+    return [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])];
+  }
+  /** w5862: Medium agents' own temp root and cargo home (machine/mediumFolders.ts), decided and logged once. */
+  mediumFolders(): MediumFolders {
+    if (!this.mediumMemo) {
+      const c = this.cfg;
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
+      for (const line of this.mediumMemo.lines) log(line);
+    }
+    return this.mediumMemo;
+  }
+
+  private cachesMemo?: MediumCaches;
+  /** w5870: Medium agents' own tool caches (machine/mediumFolders.ts planMediumCaches), decided and logged once. */
+  mediumCaches(): MediumCaches {
+    if (!this.cachesMemo) {
+      const c = this.cfg;
+      this.cachesMemo = planMediumCaches({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
+      for (const line of this.cachesMemo.lines) log(line);
+    }
+    return this.cachesMemo;
+  }
+
+  /** w5870: the user PATH's entries in folders workers write, warned of or taken off once at start (Windows). */
+  async checkUserPath(): Promise<void> {
+    const c = this.cfg;
+    const runPs = (script: string) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
+    for (const line of await fixUserPath({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened(), runPs })) log(line);
+  }
+
+  /** The agents' temp roots: the one every agent had, and Medium agents' own once w5862's switch is on. */
+  private agentTempRoots(): string[] {
+    const m = this.mediumFolders().tempRoot;
+    return [agentTempRoot(this.cfg.tempDir), ...(m ? [m] : [])];
+  }
+
+  /** The temp folder a session uses: a Medium one's in Medium agents' temp root once w5862's switch made it. */
+  private sessionTemp(id: string): string {
+    const m = this.mediumFolders().tempRoot;
+    if (m) {
+      const d = sessionTempDir(m, id);
+      // w5869 (w5871's F1): only a folder that exists. A Medium agent started before the switch went on, or one whose own
+      // folder could not be made (agentTempEnv's fallback), runs in the shared root; a sandbox session always does.
+      if (!this.entries.get(id)?.spec?.sandbox && fs.existsSync(d)) return d;
+    }
+    return sessionTempDir(agentTempRoot(this.cfg.tempDir), id);
+  }
+
+  /** Every temp folder a session may have (w5862): what guards and grants name, so a session's is covered either way. */
+  private sessionTemps(id: string): string[] {
+    return this.agentTempRoots().map((t) => sessionTempDir(t, id));
+  }
+
+  /**
+   * A new agent's TMP, TEMP and TMPDIR (cleanup.ts sessionTempEnv) and, for a Medium agent once w5862's switch is on, its
+   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root. w5870: a
+   * Medium agent also gets its own tool caches once that switch is on, and MEDIUM_AGENT_VAR either way (ffu-slot reads it):
+   * "on" only once its own temp folder was made too, since ffu-slot then sends it to build there (w5946 F5).
+   */
+  private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
+    const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
+    const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
+    const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' && own.TMP ? 'on' : 'warn' };
+    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}), ...caches };
+  }
+
   private sandboxRoot(): string | undefined {
     return this.currentPool()?.root;
   }
@@ -1342,13 +1473,13 @@ export class Daemon {
     return {
       keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), this.voice?.v.toolsDir, c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
       inUse: [
-        ...[...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
+        ...[...this.entries.values()].filter((e) => e.s.live).flatMap((e) => this.sessionTemps(e.s.info.id)),
         // Every bash of this user uses it as /tmp, whichever session's folder it was.
-        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), agentTempRoot(c.tempDir)])].filter((x): x is string => !!x),
+        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
       ],
       home: HOME,
       // Before the portal's welcome nobody knows which stopped workers a request waits for (w1379): every worker folder stays.
-      resumable: this.welcomed ? [...this.resumable].map((id) => sessionTempDir(agentTempRoot(c.tempDir), id)) : [agentTempRoot(c.tempDir)],
+      resumable: this.welcomed ? [...this.resumable].flatMap((id) => this.sessionTemps(id)) : this.agentTempRoots(),
     };
   }
 
@@ -1359,7 +1490,7 @@ export class Daemon {
   private finishedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
     const owners = this.owners;
-    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).map((id) => sessionTempDir(agentTempRoot(this.cfg.tempDir), id));
+    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).flatMap((id) => this.sessionTemps(id));
   }
 
   /**
@@ -1369,17 +1500,19 @@ export class Daemon {
    */
   private closedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
-    const t = agentTempRoot(this.cfg.tempDir);
-    let names: string[];
-    try {
-      names = fs.readdirSync(t);
-    } catch {
-      return [];
-    }
-    return names
-      .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
-      .filter((id): id is string => !!id && this.sessionClosed(id))
-      .map((id) => sessionTempDir(t, id));
+    // w5862: and Medium agents' own temp root, once that switch is on.
+    return this.agentTempRoots().flatMap((t) => {
+      let names: string[];
+      try {
+        names = fs.readdirSync(t);
+      } catch {
+        return [];
+      }
+      return names
+        .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
+        .filter((id): id is string => !!id && this.sessionClosed(id))
+        .map((id) => sessionTempDir(t, id));
+    });
   }
 
   /** Worker `id` is stopped, not resumable, and on no request that has not closed (w3656); false before the portal's welcome. */
@@ -1415,7 +1548,7 @@ export class Daemon {
     return {
       at: new Date().toISOString(),
       connected: this.ws?.readyState === WebSocket.OPEN && this.welcomed,
-      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir) } : {}),
+      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir), ...(this.mediumFolders().tempRoot ? { mediumTempRoot: this.mediumFolders().tempRoot } : {}) } : {}),
       sandboxes: this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
       live: sessionIds,
       resumable: [...this.resumable],
@@ -1539,7 +1672,24 @@ export class Daemon {
         this.send({ type: 'host_health', health: { checkedAt: h.checkedAt, sandboxRoot: h.sandboxRoot, level: h.level, ...(h.detail ? { detail: h.detail } : {}), ...(h.blocked ? { blocked: h.blocked } : {}) } });
       },
       log: (line: string) => log(`host guard: ${line}`),
+      // w5906: an idle agent with a pending check-in or a timed run keeps its sandbox through a grow; any other is stopped
+      // for it through the stop op a pause uses, and waited for (up to 20 s) so the grow runs in the same look.
+      idleHold: (id: string) => {
+        const at = this.wakes.get(id);
+        if (at !== undefined) return `a check-in at ${new Date(at).toISOString()}`;
+        return this.timed?.active().includes(id) ? 'a timed run' : undefined;
+      },
+      stopIdle: async (id: string) => {
+        const e = this.entries.get(id);
+        if (!e?.s.live) return true;
+        log(`agent ${id}: stopped between turns for the Dev Drive grow (w5906); it resumes at its next message`);
+        e.s.stop();
+        for (let i = 0; i < 40 && e.s.live; i++) await new Promise((r) => setTimeout(r, 500));
+        return !e.s.live;
+      },
       // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
+      // w5916: runners a grow ended while this machine is held start when the hold lifts, not now
+      deferRunners: (roots: string[]) => this.loadGate.deferStart(roots),
       poolFloor: () => {
         const p = this.currentPool();
         return p ? { warnGB: p.diskWarnGB, criticalGB: p.diskCriticalGB } : undefined;
@@ -1578,7 +1728,7 @@ export class Daemon {
       this.cliScrub = new CliScrubber({
         root: cliProjectsDir(),
         // w5305: the legacy ~/.claude's transcripts too, while agents started before the move (or on the stored login) write there
-        extraRoots: () => [...cliTempFolders(agentTempRoot(this.cfg.tempDir)), ...legacyProjectsDirs(process.env)],
+        extraRoots: () => [...this.agentTempRoots().flatMap((t) => cliTempFolders(t)), ...legacyProjectsDirs(process.env)],
         log: (line) => log(line),
         // the portal keeps it beside the clean-up passes (portal_logs cleanup, this machine): paths and counts only
         report: (r: CliScrubReport) => this.out({ type: 'cleanup_log', entry: { ...r } }),
@@ -1675,7 +1825,7 @@ export class Daemon {
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
     this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
+    this.timers.push(setInterval(() => void this.loadGate.tick().then(() => this.sendRunnerHold()), 5_000));
     this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(() => void this.ciFirst.tick(), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
@@ -2095,6 +2245,18 @@ export class Daemon {
     ws.ping();
   }
 
+  /** The last runner hold report sent on this link (w5916), so it goes only when it changes. */
+  private runnerHoldKey?: string;
+
+  /** w5916: tell the portal what a hold does to this machine's CI runners (draining, stopped), when that changes. */
+  sendRunnerHold() {
+    const report = this.loadGate.holdReport() ?? null;
+    const key = JSON.stringify(report);
+    if (key === this.runnerHoldKey || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.runnerHoldKey = key;
+    this.send({ type: 'runner_hold', report });
+  }
+
   private send(msg: FromDaemon) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
@@ -2202,6 +2364,8 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
+      lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
@@ -2287,10 +2451,25 @@ export class Daemon {
       const personPlay = this.personPlayReport();
       // The players its shared player cache holds (w4601): a pair leg goes where its commit's player already is.
       const playerCache = readPlayerCache(playerCacheRoot(this.cfg.root));
-      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
+      // Its ffu build slots (w5912): the machine view and list_sandboxes show who holds each, and which holds are stale.
+      this.refreshFfuReport();
+      const ffuSlots = this.ffuReport;
+      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(ffuSlots ? { ffuSlots } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}), agents: this.census() });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
+  }
+
+  private readonly ffuSized = (slot: string, bytes: number) => void this.ffuSizes.set(slot, { bytes, at: new Date().toISOString() });
+
+  /** Read the ffu slots again in the background once FFU_REPORT_MS passed (w5912); the next stats carry the result. */
+  private refreshFfuReport() {
+    if (!this.cfg.root || this.ffuReporting || Date.now() - this.ffuReportAt < FFU_REPORT_MS) return;
+    this.ffuReporting = true;
+    this.ffuReportAt = Date.now();
+    void readFfuSlotsReport({ root: this.cfg.root, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX, sizes: this.ffuSizes, log })
+      .then((r) => void (this.ffuReport = r))
+      .finally(() => void (this.ffuReporting = false));
   }
 
   /** RAM in use, %: the last stats (a Mac's counts file cache as free), else Windows' own numbers; undefined: unknown. */
@@ -2372,6 +2551,9 @@ export class Daemon {
     // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
     // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
     if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
+    // w5961: and on a Mac with the Seatbelt worker fence on, the home a fenced editor gets (`<root>/home`): unity-slot run
+    // gives it to an interactive Unity editor a worker opens itself (a peer run's clone), which otherwise hangs on a modal.
+    if (spec.sandbox && this.cfg.root && process.platform === 'darwin' && this.workerFence) env.FF_UNITY_EDITOR_HOME = path.posix.join(this.cfg.root, 'home');
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
@@ -2433,7 +2615,12 @@ export class Daemon {
       const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
       return here.length ? { ...sb, lingering: here } : sb;
     });
-    this.send({ type: 'sandboxes', list, disk: this.pool.diskState() });
+    // w5924: the light agent folders ride along, `kind: "light"`; a portal that predates them never asks for one, so finds none.
+    const light = this.light.list().map((sb) => {
+      const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
+      return here.length ? { ...sb, lingering: here } : sb;
+    });
+    this.send({ type: 'sandboxes', list: [...list, ...light], disk: this.pool.diskState() });
   }
 
   /**
@@ -3067,7 +3254,7 @@ export class Daemon {
       if (hasFile && typeof rest.text === 'string' && rest.text.trim()) throw new Error('give text or file, not both');
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const roots = [folder, sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId)];
+      const roots = [folder, ...this.sessionTemps(sessionId)];
       const text = hasFile ? await postTextFromFile(folder, file, skip, roots) : rest.text;
       // Images go to FFBox in parts before the post, so the call waits longer (POST_IMAGE_UPLOAD in server/ffboxPost.ts).
       if (!hasImages) return call('post_as_max', 90_000)({ ...rest, text });
@@ -3089,7 +3276,7 @@ export class Daemon {
     all.timed_run = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      const temp = this.sessionTemp(sessionId);
       return timedRunFromMachine({ portalUrl: this.cfg.portalUrl, token: this.cfg.token, roots: [folder, temp, ...(this.cfg.root ? [this.cfg.root] : [])], saveRoots: [folder, temp], cwd: folder, tempDir: temp, args, key: sessionId, rpc: (a) => call('timed_run', 900_000)(a), log: (line) => log(line) });
     };
     // publish_attachment (docs/attachments.md, "Agents' files"): the portal opens an upload for this machine; the file
@@ -3097,7 +3284,7 @@ export class Daemon {
     all.publish_attachment = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      const temp = this.sessionTemp(sessionId);
       const roots = [folder, temp];
       // w4613: a player from this computer's shared player cache, packed into the session's temp folder and sent up.
       if (args.player !== undefined && args.player !== '') {
@@ -3180,7 +3367,7 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   /**
@@ -3524,9 +3711,13 @@ export class Daemon {
         void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
-      this.timers.push(setInterval(() => {
+      // w5938: off the event loop (compilerServersAsync), and one look at a time.
+      let looking = false;
+      this.timers.push(setInterval(async () => {
+        if (looking) return;
+        looking = true;
         try {
-          for (const pid of strayLowServers(compilerServers(), root)) {
+          for (const pid of strayLowServers(await compilerServersAsync(), root)) {
             log(`worker integrity: ending Low compiler server ${pid}, which runs from the install's own path (w5347)`);
             try {
               process.kill(pid);
@@ -3536,6 +3727,8 @@ export class Daemon {
           }
         } catch {
           /* the next look */
+        } finally {
+          looking = false;
         }
       }, 15_000));
     } catch (e) {
@@ -3602,11 +3795,14 @@ export class Daemon {
       const copy = this.lowCopies?.make(exe);
       if (!copy) return loud('no Low copy of gh to test with');
       // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
-      const env = { ...bareEnv(), ...pickEnv(['USERPROFILE']), ...lowEnv(root, undefined, 'PATH', process.env.PATH, gh), GH_TOKEN: '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
+      // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
+      // the daemon read one, which is the only route left once the owner's gh folder carries No-Read-Up; else the folder.
+      const token = this.machineGh().GH_TOKEN;
+      const env = { ...bareEnv(), ...pickEnv(['USERPROFILE']), ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
-      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token/i.test(l));
+      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token:/i.test(l));
       if (r.code !== 0) return loud(`gh auth status at Low exited ${r.code}: ${said.slice(0, 3).join(' / ').trim().slice(0, 300)}`);
-      log(`worker integrity: gh authenticates for Low workers (${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
+      log(`worker integrity: gh authenticates for Low workers (${token ? "the machine login's token as GH_TOKEN" : 'the login folder'}: ${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
     } catch (e) {
       loud((e as Error).message);
     }
@@ -3689,7 +3885,14 @@ export class Daemon {
       // on mode (the most closed case: the gh login's folder closed), so a passing probe has run every rule on mode adds.
       const owner = ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: true });
       const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
-      log(sayOwnerRules(mode, process.platform, owner));
+      // w5749: on Windows the owner's secrets are closed by labels on this machine's system drive, where lothsahn allowed it.
+      if (process.platform === 'win32') {
+        // The plan first: gh is asked where its login is only on a machine with a plan (w5849's review of #1278), so on every
+        // other Windows machine nothing on the system drive is looked at.
+        const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+        const st = plan.label.length || plan.left.length ? await run(trustedGh(), ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 30_000, env: machineGhStatusEnv() }).catch(() => undefined) : undefined;
+        log(sayOwnerLabels(mode, plan, st ? ghLoginStorage(`${st.stdout}\n${st.stderr}`) : undefined));
+      } else log(sayOwnerRules(mode, process.platform, owner));
       const fence = this.workerFence;
       const lock = this.writeLock;
       const ownerFence = fence && { ...fence, secretsDirs: this.secretsDirs, readOff: false, readDenied: [...(fence.readDenied ?? []), ...owner], ...(owner.length ? { ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : {}) };
@@ -3792,6 +3995,43 @@ export class Daemon {
   }
 
   /**
+   * w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"; "Do only
+   * that on C:. Keep a tested way back"): on a machine in OWNER_LABEL_ON_SYSTEM_DRIVE, in on mode the gh login moves from
+   * Credential Manager into its folder's hosts.yml (ghLoginToFile, checked before the entries are deleted) and the gh folder
+   * and ~/.ssh get No-Read-Up, with no grant (labelNoReadUp grant false). In off and warn, the way back: the labels come off
+   * (unlabelNoReadUp: no explicit label, as before) and, when the note says the daemon moved it, the login goes back into
+   * Credential Manager. Other machines: nothing, and nothing on their system drive is looked at.
+   */
+  private async applyOwnerLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+    const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+    if (!plan.label.length) return;
+    const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
+    const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
+    if (mode === 'on') {
+      // The note is written before gh's login call (w5849's review of #1281), so a daemon that dies mid-move still moves it
+      // back in warn or off; a note left by a move that did not happen is harmless (the way back finds the login in the keyring).
+      const writeNote = () => fs.writeFileSync(note, JSON.stringify({ movedAt: new Date().toISOString(), why: 'w5749: the read fence moved the gh login out of Credential Manager; off or warn moves it back' }));
+      const m = await ghLoginToFile(realGhRun, writeNote);
+      tell(m.line);
+      if (m.ok && m.deleteFrom?.length) {
+        const d = await deleteGenericCreds(m.deleteFrom, exec);
+        tell(`Credential Manager: ${d.deleted.length ? `deleted ${d.deleted.join(', ')}` : 'no gh entry left'}${d.failed.length ? `; could NOT delete ${d.failed.join(', ')}, which a Low worker can still read` : ''}`);
+      }
+      const ok = await labelNoReadUp(plan.label, exec, say, { systemDrive: () => false, grant: false, what: "No-Read-Up on the owner's gh folder and ~\\.ssh, w5749" });
+      const st = await realGhRun(['auth', 'status', '--hostname', 'github.com']);
+      log(sayOwnerLabels('on', plan, ghLoginStorage(`${st.stdout}\n${st.stderr}`)) + (ok ? '' : ' (not every label could be set: the lines above say which)'));
+      return;
+    }
+    const off = await unlabelNoReadUp(plan.label.map((t) => t.path), exec, say);
+    tell(off === undefined ? 'not every read label could be taken off (the line above says which)' : off.length ? `read labels taken off ${off.join(', ')}` : "no read label on the owner's folders");
+    if (fs.existsSync(note)) {
+      const b = await ghLoginToKeyring(realGhRun);
+      tell(b.line);
+      if (b.ok) fs.rmSync(note, { force: true });
+    }
+  }
+
+  /**
    * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
    * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
    * one, so a switch or a revert leaves no read label behind (lockout review B1). A path without NR is not touched: setting
@@ -3799,6 +4039,8 @@ export class Daemon {
    */
   private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     if (!this.cfg.root) return;
+    // w5749: the owner's secrets on the system drive (LothDesktop only), apart: their failure is said and leaves the rest.
+    await this.applyOwnerLabels(mode, exec, say).catch((e) => say(`worker integrity: owner secrets: ${(e as Error).message}`));
     const appDir = appDirOfConfig(this.cfg);
     // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
     ensureDaemonOnlyDirs(this.cfg.root);
@@ -4115,7 +4357,19 @@ export class Daemon {
    * (w384). Idle agents, their process up or not, take no slot; the portal queues a message until one is free.
    */
   private runningIn(sandbox: string | undefined | '*') {
-    return [...this.entries.values()].filter((e) => isMidTurn(e.s.info) && (sandbox === '*' ? !!e.spec?.sandbox : e.spec?.sandbox === sandbox)).length;
+    return this.countedIn(sandbox).length;
+  }
+
+  /** The agents runningIn counts, by id, place and state (w5972): a refusal names them, and the stats carry them (the census). */
+  private countedIn(sandbox: string | undefined | '*'): CensusAgent[] {
+    return [...this.entries]
+      .filter(([, e]) => isMidTurn(e.s.info) && (sandbox === '*' ? !!e.spec?.sandbox : e.spec?.sandbox === sandbox))
+      .map(([id, e]) => ({ id, ...(e.spec?.sandbox ? { sandbox: e.spec.sandbox } : {}), status: e.s.info.status, live: e.s.live }));
+  }
+
+  /** What the agent limits count here, sandboxes' and standing agents together (w5972): sent with every stats report. */
+  private census(): AgentCensus {
+    return { midTurn: [...this.countedIn('*'), ...this.countedIn(undefined)] };
   }
 
   /**
@@ -4140,17 +4394,19 @@ export class Daemon {
     if (!spec.sandbox) {
       // No agent works in the main clone (w536); a standing agent works in its own folder, under the machine's cap.
       if (path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine runs workers in sandboxes only: start it in one of this machine's sandboxes";
-      const all = this.runningIn('*') + this.runningIn(undefined);
-      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions})` : undefined;
+      const counted = this.census().midTurn;
+      const all = counted.length;
+      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions}); counted: ${describeCounted(counted)}` : undefined;
     }
-    const sb = this.pool.list().find((s) => s.id === spec.sandbox);
+    const sb = this.pool.list().find((s) => s.id === spec.sandbox) ?? (isLightId(spec.sandbox) ? this.light.list().find((s) => s.id === spec.sandbox) : undefined);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
     if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
     if (path.resolve(sb.path).toLowerCase() !== path.resolve(spec.cwd).toLowerCase()) return `sandbox ${sb.id} is at ${sb.path}, not ${spec.cwd}`;
     const max = this.poolSettings?.maxAgentsPerSandbox ?? this.cfg.sandboxes?.maxAgentsPerSandbox ?? 2;
-    if (this.runningIn(sb.id) >= max) return `already ${max} agents mid-turn in sandbox ${sb.id} (max_agents_per_sandbox)`;
-    const inSandboxes = this.runningIn('*');
-    return totalAgentsRefusal(inSandboxes, this.currentPool());
+    const inThis = this.countedIn(sb.id);
+    if (inThis.length >= max) return `already ${max} agents mid-turn in sandbox ${sb.id} (max_agents_per_sandbox); counted: ${describeCounted(inThis)}`;
+    const inSandboxes = this.countedIn('*');
+    return totalAgentsRefusal(inSandboxes.length, this.currentPool(), inSandboxes);
   }
 
   /** The pool settings the portal last sent (welcome). */
@@ -4208,6 +4464,10 @@ export class Daemon {
         this.pause.setActivity(msg.config);
         return;
       }
+      case 'runner_hold':
+        // w5916: a person's hold on this machine (placement.hold or a drain): its CI runners drain, and start again on the lift
+        void this.loadGate.setHold(typeof msg.why === 'string' && msg.why.trim() ? msg.why.trim() : undefined).then(() => this.sendRunnerHold());
+        return;
       case 'cleanup_config': {
         this.cleanupSettings = { ...msg.config };
         try {
@@ -4266,7 +4526,7 @@ export class Daemon {
         const sb = msg.sandbox ? this.pool.pathOf(msg.sandbox) : undefined;
         void runSteamJob(msg, {
           root: this.cfg.root,
-          allowedRoots: [...(sb ? [sb] : []), sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.session)],
+          allowedRoots: [...(sb ? [sb] : []), ...this.sessionTemps(msg.session)],
           python: pythonExe(process.env),
           gitEnv: githubNetEnv(msg.githubToken),
           send: (m) => this.send(m),
@@ -4330,6 +4590,9 @@ export class Daemon {
         void this.reportBenchHours();
         // The worker fence's state (w5555): the portal alerts on a failed one and places no worker here.
         this.send({ type: 'worker_fence', fence: this.fence.state });
+        // w5916: what a hold does to the runners, again for this link (the portal sends its hold after the welcome)
+        this.runnerHoldKey = undefined;
+        this.sendRunnerHold();
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {
@@ -4358,7 +4621,11 @@ export class Daemon {
         const deliver = (attachments?: Awaited<ReturnType<typeof fetchAttachments>>) => {
           try {
             const why = refusal();
-            if (why) throw new Error(why);
+            if (why) {
+              // w5972: which agents a refusal counted, in this log too (the portal's queue line quotes it).
+              log(`start of ${id} refused: ${why}`);
+              throw new Error(why);
+            }
             const e = this.entry(msg.info, msg.lastSeq);
             e.spec = msg.spec;
             // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
@@ -4467,6 +4734,16 @@ export class Daemon {
             (text) => this.send({ type: 'sandbox_result', id: msg.id, ok: true, text }),
             (err) => this.send({ type: 'sandbox_result', id: msg.id, ok: false, text: (err as Error).message }),
           );
+        // w5924: a light agent folder (an id agent1, agent2, ...): a plain folder, no worktree, no Library, no editor.
+        if (isLightId(msg.sandbox) && (msg.op === 'create' || msg.op === 'delete' || msg.op === 'release' || msg.op === 'log')) {
+          const live = msg.op === 'create' || msg.op === 'log' ? 0 : this.liveIn(msg.sandbox);
+          if (live) reply(Promise.reject(new Error(`${live} agent(s) still run in light folder ${msg.sandbox}; stop them first`)));
+          else if (msg.op === 'create') reply(Promise.resolve().then(() => this.light.create(msg.sandbox)));
+          else if (msg.op === 'delete') reply(this.light.remove(msg.sandbox, msg.force === true));
+          else if (msg.op === 'log') reply(Promise.resolve(`light folder ${msg.sandbox} has no editor, so no editor log`));
+          else reply(Promise.resolve(`light folder ${msg.sandbox} released (it stays on disk until it is deleted)`));
+          return;
+        }
         if (msg.op === 'create') {
           reply(this.pool.create({ id: msg.sandbox, branch: msg.branch, base: msg.base, seedLibrary: msg.seedLibrary, startUnity: msg.startUnity }).then((s) => `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.`));
         } else if (msg.op === 'delete') {
@@ -4537,7 +4814,7 @@ export class Daemon {
         // /tmp is looked up again first: it moves to the first bash's TMP whenever the user's MSYS processes all ended, and a
         // value up to 5 minutes old removed a folder that had just become /tmp (w3559: every bash on LothDesktop, ffu's CI
         // runners included, lost /tmp at 2026-11-08 03:30Z until the 5-minute check made it again at 03:34Z).
-        const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId);
+        const temp = this.sessionTemp(msg.sessionId);
         const same = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
         void this.ensureBashTmp()
           .catch(() => undefined)
@@ -4557,7 +4834,7 @@ export class Daemon {
         // Only the sandboxes and the standing agents' folders (and, for one session's image, its own temp folder): inline
         // images, nothing else. Not the main clone (w536): no agent works there.
         const roots = [path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
-        if (msg.op === 'read' && msg.sessionId) roots.push(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId));
+        if (msg.op === 'read' && msg.sessionId) roots.push(...this.sessionTemps(msg.sessionId));
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);
@@ -4697,6 +4974,12 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // w5545: what the daemon starts itself (nightly builds, timed runs, ops) asks for slots and tickets as the daemon.
   Object.assign(process.env, d.rpcEnv(`daemon-${cfg.id}`));
   d.start();
+  // w5862: says at start where Medium agents' temp root and cargo home are exposed to workers, or moves them (mediumAgentFolders).
+  const medium = d.mediumFolders();
+  if (medium.cargoHome && fs.existsSync(path.join(HOME, '.cargo'))) void seedCargoHome(path.join(HOME, '.cargo'), medium.cargoHome).then((m) => log(m));
+  // w5870: the same for Medium agents' other tool caches, and the user PATH's entries in folders workers write (mediumAgentCaches).
+  d.mediumCaches();
+  void d.checkUserPath();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
   const quit = () => {
     log('shutting down: agents in agent hosts run on for the next daemon; any others stop');

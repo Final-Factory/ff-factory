@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { rootEnv } from '../machine/daemon.ts';
 import { editorLaunchEnv, sandboxEditorEnv } from '../machine/sandboxes.ts';
@@ -55,7 +56,7 @@ test('w5833: a sandbox editor on macOS and Linux gets TMPDIR in the root only wi
 });
 
 test('w5833 (review F1): the editor makes its TMPDIR at each start, and starts with the system temp when it cannot', () => {
-  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'w5833-f1-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5833-f1-'));
   const lines: string[] = [];
   const t = path.join(dir, 'tmp', 'editor-slot1');
   const env = { A: '1', TMPDIR: t };
@@ -94,9 +95,9 @@ test('outside writes: a batch Unity run without -logFile gets one in the worker\
  * the write into it if it can (rootEnv, sharedCaches.ts), else add it to docs/worker-root.md 2.6 and raise the count here.
  */
 const KNOWN: Record<string, [number, string]> = {
-  'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given (docs 2.6)'],
+  'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given, warned in the log (w5834: <root>/tmp/bench-status otherwise)'],
   'machine/burstPref.ts': [1, 'exception: Unity\'s Burst EditorPref (registry, plist, ~/.local/share/unity3d)'],
-  'machine/daemon.ts': [8, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads); the owner secrets a run may not read (w5553, ownerReadDenied: reads, writes nothing; and the owner targets of the read-fence probe, w5747, reads only)'],
+  'machine/daemon.ts': [10, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads); the owner secrets a run may not read (w5553, ownerReadDenied: reads, writes nothing; and the owner targets of the read-fence probe, w5747, reads only; the owner-secret label plan named in the read-fence probe line on LothDesktop, w5749, reads only; and on LothDesktop in on mode the owner gh folder and ~/.ssh get their No-Read-Up label, w5749, lothsahn go for C:)'],
   'machine/ownerSecrets.ts': [3, 'the owner secret paths (gh login, ~/.ssh, browsers, Keychain) the fences close to reads (w5548, w5553): names them, writes nothing there'],
   'machine/lowIntegrity.ts': [2, "reads: where the daemon user's gh keeps its login, for a Low worker's GH_CONFIG_DIR (w5430)"],
   'machine/prFlow.ts': [1, 'names APPDATA in the gh refusal (w5430, reads)'],

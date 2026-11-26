@@ -94,3 +94,9 @@ test('w4537: checkStrayWrite opens the held slot folder it is given', () => {
   assert.ok(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot1/ffu/src/new.rs', held));
   assert.ok(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot2/ffu/src/new.rs', mac));
 });
+
+test('w5885: checkStrayWrite opens every held slot folder (one per branch)', () => {
+  const held = { ...mac, heldFfuSlot: () => ['/Users/benryding/ffw/ffu-sandboxes/slot2', '/Users/benryding/ffw/ffu-sandboxes/slot3'] };
+  assert.equal(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot3/ffu/src/new.rs', held), undefined);
+  assert.ok(checkStrayWrite('/Users/benryding/ffw/ffu-sandboxes/slot1/ffu/src/new.rs', held));
+});

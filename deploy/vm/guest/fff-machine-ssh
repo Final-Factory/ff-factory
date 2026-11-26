@@ -80,7 +80,20 @@ machines=$(all_machines)
 lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 fp() { printf 'x ssh-ed25519 %s\n' "$1" | ssh-keygen -l -f - 2>/dev/null | awk '{print $2}'; }
 # The ed25519 key HOST shows over the network now (nothing when it does not answer).
-seen_key() { { ssh-keyscan -T 10 -t ed25519 "$1" 2>/dev/null || true; } | awk '$2 == "ssh-ed25519" {print $3; exit}'; }
+seen_key() {
+  if [ -n "${SEEN_SCANNED+x}" ]; then
+    awk -v h="$1" '$1 == h {print $2; exit}' <<<"$SEEN_SCANNED"
+    return 0
+  fi
+  { ssh-keyscan -T 10 -t ed25519 "$1" 2>/dev/null || true; } | awk '$2 == "ssh-ed25519" {print $3; exit}'
+}
+# scan_seen HOST...: the keys of every HOST in one ssh-keyscan, which asks them all at once, so the machines that do not
+# answer cost one timeout together, not one each (w5888: an update's --fix took about 84 s with the m3 and m5 offline);
+# seen_key reads them from here after. "host key" lines, the host lower-cased as asked.
+scan_seen() {
+  [ "$#" -gt 0 ] || { SEEN_SCANNED=; return 0; }
+  SEEN_SCANNED=$({ ssh-keyscan -T 10 -t ed25519 "$@" 2>/dev/null || true; } | awk '$2 == "ssh-ed25519" && !($1 in got) {got[$1] = 1; print tolower($1), $3}')
+}
 # The ed25519 keys known_hosts and known_hosts2 hold for HOST (hashed lines included).
 known_keys() {
   local f
@@ -113,6 +126,8 @@ prepare() {
 fix() {
   local alias host user key h seen
   prepare
+  # shellcheck disable=SC2046 # one word per host: machines.ssh's hosts have no spaces
+  scan_seen $(awk '{print tolower($2)}' <<<"$machines")
   while read -r alias host user key <&3; do
     h=$(lower "$host")
     seen=$(seen_key "$h")
@@ -173,8 +188,20 @@ pin() {
 }
 
 check() {
-  local alias host user key h want got known seen out line bad=0 refused=0
+  local alias host user key h want got known seen out line bad=0 refused=0 probes n=0
+  # shellcheck disable=SC2046 # one word per host: machines.ssh's hosts have no spaces
+  [ -n "${SEEN_SCANNED+x}" ] || scan_seen $(awk '{print tolower($2)}' <<<"$machines")
+  # Every machine's ssh at once (w5888: one after the other, each machine that does not answer cost its 10 s timeout),
+  # read in machines.ssh's order below.
+  probes=$(mktemp -d)
   while read -r alias host user key <&3; do
+    n=$((n + 1))
+    { if ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$alias" exit 0 >"$probes/$n.out" 2>&1; then echo 0; else echo 1; fi >"$probes/$n.rc"; } &
+  done 3<<<"$machines"
+  wait
+  n=0
+  while read -r alias host user key <&3; do
+    n=$((n + 1))
     h=$(lower "$host")
     want="$user@$h"
     # -F: the portal account's own config (its $HOME is its home; ssh would read the passwd entry's, the same file).
@@ -184,7 +211,8 @@ check() {
     line="$alias: alias $([ "$got" = "$want" ] && echo ok || echo "MISSING (ssh -G gives $got, not $want)")"
     if grep -qxF "$key" <<<"$known"; then line+="; known_hosts: pinned"; elif [ -n "$known" ]; then line+="; known_hosts: ANOTHER key ($(fp "$(head -n 1 <<<"$known")"))"; else line+="; known_hosts: MISSING"; fi
     if [ -z "$seen" ]; then line+="; tailnet: no answer"; elif [ "$seen" = "$key" ]; then line+="; tailnet: $(fp "$seen") = pinned"; else line+="; tailnet: $(fp "$seen") DIFFERS from the pinned $(fp "$key")"; fi
-    if out=$(ssh -n -o BatchMode=yes -o ConnectTimeout=10 "$alias" exit 0 2>&1); then line+="; ssh: ok"; else
+    out=$(cat "$probes/$n.out" 2>/dev/null || true)
+    if [ "$(cat "$probes/$n.rc" 2>/dev/null)" = 0 ]; then line+="; ssh: ok"; else
       line+="; ssh: $(tail -n 1 <<<"$out")"
       bad=1
       case "$out" in *"Permission denied"*) refused=1 ;; esac
@@ -192,6 +220,7 @@ check() {
     case "$line" in *MISSING* | *ANOTHER* | *DIFFERS*) bad=1 ;; esac
     echo "$line"
   done 3<<<"$machines"
+  rm -rf "$probes"
   if [ "$refused" = 1 ]; then
     printf '%s\n' "A machine that says Permission denied adds this line to the ssh user's ~/.ssh/authorized_keys (a Windows admin account: C:\\ProgramData\\ssh\\administrators_authorized_keys):"
   else

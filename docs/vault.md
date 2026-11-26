@@ -345,8 +345,23 @@ code and covered by `server/tokenSwitch.test.ts`:
   failed at once and kept the turn open ahead of the resume (7d4cb2df and 9888f324). A person's **orchestrator** moves the same way (`orchestratorPoolMove` → `orchestratorOut`) when its token is used
   up and its pool has a token that is not, or when it is retired and its pool has one that is neither; it uses the pool up as
   before otherwise. A **standing agent** starts each run on a fresh process, so its next run picks a token with room. The
-  **dispatcher** stays on the token `claudeAccounts.dispatcher` pins (or its payer's pool, unpinned) and is never moved or
-  resumed by this; the ops worker starts a fresh process for every job.
+  **dispatcher** (w5921) moves the same way within the one pool its config names (`dispatcherMove` in `server/tokenSwitch.ts`):
+  on `"pool:<login>"` or unpinned (the system payer's pool, by their pool setting) it is resumed on a token of that pool with
+  room, and never on another pool's (lothsahn, 2026-11-26: "If it's out of quota it should pick another sub within that pool. It
+  shouldn't use a different pool"); with none, it waits, and its log and alert say "every token of ben's pool ... is out, so it
+  waits and never runs on another pool; the first to reset is <token>, at <time>" (`dispatcherWait`). Pinned to one token
+  (`"vault:<name>"`) it waits for that token's reset. The ops worker starts a fresh process for every job.
+- **A config change applies at once, between turns** (w5921, lothsahn: "Changing that config should take effect immediately.
+  If it requires a restart the dispatcher should be restarted."). `Agents.applyAccountConfig` runs right after
+  `set_app_config claudeAccounts.dispatcher`, at the end of `set_pool`, and every 30 s (`server/index.ts`): each live, idle
+  orchestrator whose process runs on another token or pool than its config names now (the dispatcher: its pin, its pool, or its
+  a person's orchestrator: their pool setting, w1717) is stopped, with a system line in its history and no message (no turn
+  spent); its next message starts it on the right token, its conversation kept. One mid-turn, or with a background task,
+  finishes on the token it started on (a turn is never killed) and moves at the first check after. A token that ran out is not
+  a config move: the dispatcher leaves it at its next message or turn's end (w1745), once; a restart that lands on the same
+  token again (the pool's pick keeps a sticky capped one when nothing else passes its caps) is not moved again for 30 min, so
+  it never loops. A dispatcher moved into a pool with no room waits (its queued messages are kept as long as a worker's), and
+  the operators' orchestrators get a `[token alert]` with the first reset; `set_app_config` says so in its answer too.
 - **An agent the limit stopped is resumed at once** (`TokenSwitch.turnEnded`, 3 seconds after its turn ends): when the pool
   its work runs on can serve it (`limitsClearFor`, the rule the ledger cleanup uses: its person's pool, or the pool their
   setting names, w1717) it gets `[token switch] Your last turn stopped because vault-ben-1 …nQAA ran out ... Carry on where you
@@ -372,6 +387,17 @@ code and covered by `server/tokenSwitch.test.ts`:
   vault-ben-2 …dAAA: vault-ben-1 …nQAA ran out ("You've hit your weekly limit ...")`. `system_status` also lists each token
   out now ("Token out (w1745): ... Still on it: ...") and the moves waiting for their next process, and the last 24 hours of
   switches (`data/token-switches.json` keeps the last 20). A token is only ever named by its vault name and last four characters.
+- **Stuck on the limit: an alert (w5921).** lothsahn, 2026-11-26: "Why was it hung without a decision? Why did it stall?" From
+  03:38Z that day the dispatcher's process stayed on vault-ben-2, which Claude refused (weekly, reset 08:00Z), while its config
+  had moved to vault-ben-3; every turn ended at once on the limit line and nobody was told. Now the dispatcher, or a person's
+  orchestrator, ending `LIMIT_STREAK` (2) turns in a row on Claude's usage limit on one token sends a `[token alert]` line to
+  the operators' orchestrators (the owners and everyone with a Claude pool, never the stuck one itself), once per streak: the
+  token (vault name and last four), when its window resets, and what FF Factory did about it (`TokenSwitch.alertStreak`;
+  journal `token alert (w5921): ...`). While the dispatcher's last turn ended on the limit and the window has not reset,
+  `system_status` says `Dispatcher rate-limited (w5921): The dispatcher is rate-limited on <token> until <time>`, an undecided
+  request's live state gives that as its reason (Working, then Stalled past the 15-minute bound), and the w2217 re-offer waits
+  until the dispatcher runs again instead of going to the same stuck process (`Orchestrators.undecidedBound`). Moving the
+  dispatcher itself off the token is the next change (w5921, w5891).
 **Near a weekly reset (w1539; the w1659 offset retired by w2722).** lothsahn, 2026-10-21: "Instead of having it go first like that, can we just adjust the
 weighting so it gets used sooner? Like subtract 12 or 18 hours from the time remaining so that it starts getting consumed
 first?", then "Let's make the new setting 24 hours, not 12", with his earlier limit (2026-10-19): "We don't want it to always use the token about to expire first, though, as we
@@ -501,7 +527,8 @@ and none opens. A pool that is only held or used up waits as above. Work nobody 
 `vault.unattributed`'s person (section 10); with none named it does not start.
 
 **The dispatcher's reserve (enforced since w971).** The vault token the dispatcher is pinned to (`claudeAccounts.dispatcher`
-"vault:<entry name>", resolved from config at each look) keeps a buffer for it (before w1078 the token file, the host token and
+"vault:<entry name>", resolved from config at each look), or on `"pool:<login>"` the token of that pool it runs on now (w5891),
+keeps a buffer for it (before w1078 the token file, the host token and
 the host login had one too; they are gone). Unpinned, the dispatcher runs on the system payer's pool and has no reserve:
 that pool's own limits hold it like anyone's. The buffer is: **5% of the weekly window for each day left until that window resets** (35% with seven days to go, 5%
 with one, 0 at the reset; `vault.pool.reservePerDayPercent`) and **20% of the 5-hour window**
@@ -589,7 +616,7 @@ that day rather than the token asked for, and the reserve needs one credential t
 (`OWNER_ONLY_KEYS`, `server/appConfig.ts`); `set_app_config` refuses a name that is not an enabled Claude entry the key opens, and the
 config check refuses the value for the orchestrator. What it changes, each point *read* from the code:
 - **The process.** The dispatcher starts with that token alone (`pinnedDispatcherEnv`, from `orchestratorEnv` in
-  `server/agents.ts`), at each process start; a running dispatcher keeps its account until its process restarts. The entry
+  `server/agents.ts`), at each process start; since w5921 a change restarts it between turns (`applyAccountConfig`, above). The entry
   needs no role or machine grant, and does not have to be the dispatcher's person's: the setting is the consent.
 - **Unpinned (w1078).** With no pin (`claudeAccounts.dispatcher` unset, or `"vault"`, which `set_app_config` stores as no key),
   the dispatcher runs on the system payer's pool (`poolRunEnv` with `identity.systemPayer()`), picked like an orchestrator's.
@@ -609,12 +636,26 @@ config check refuses the value for the orchestrator. What it changes, each point
   use it there, which is more than the reserve asks. The two rules only differ in the last day before the weekly reset, when the
   buffer has shrunk below 5% and 95% or more is the one-at-a-time zone and no longer inside the buffer. The dispatcher is
   still named under the token in `system_status` ("N running: …"). Workers and the person's orchestrator count as before.
+- **On one person's pool (w5891).** `claudeAccounts.dispatcher` also takes `"pool:<login>"`, e.g. `"pool:ben"` (lothsahn,
+  w5921: "Ben's pool not a particular token"). The dispatcher starts on any token of that person's **own** pool with room
+  (`poolRunEnv` with `ownPool`), whatever their pool setting names, and never on another person's credential. `set_app_config`
+  stores the login's own spelling and refuses an unknown login or one with no enabled Claude token (`fffctl conf set`, which
+  runs apart from the portal, checks only the shape). *Decisions* (lothsahn left them to the worker; reasons, not measured):
+  **the reserve** is kept on the token it runs on now (`reservedCredentials` with `VaultContext.dispatcherOn`), so it moves with
+  the dispatcher and the person's workers prefer the pool's other tokens, as with a pin; reserving the whole pool would hold every
+  worker of that person whenever any token neared its buffer. **`dispatcherStopPercent`** (`dispatcherToken` in
+  `server/index.ts`) reads the token it is on only once no other token of that pool has room (`dispatcherRoomIn`: not used
+  up, retired, capped or held, not marked out, below the stop line): before then the dispatcher at its stop line moves to that
+  token at its next message or turn's end (`dispatcherMove` with `atStop`), so stopping the person's workers would protect
+  nothing. The stop fires only when no token of the pool has room. One rule serves both, so a token at the line always either
+  moves or stops (review of #1312: a capped token counted as room for the stop and not for the move, so neither happened).
 - **If the vault cannot give the token** (entry removed or disabled, key missing or wrong) the dispatcher does not start
   (w1078; before, it ran on the token file or the host token): `pinnedDispatcherEnv` throws `PoolHeldError` with "the dispatcher
   is pinned to vault token <name> (claudeAccounts.dispatcher), but the vault has no usable Claude entry of that name, so it
   does not start: fix the entry (`fffctl vault list`), or pin another", which the log, the start error and `system_status`'s
-  vault warning show. `set_app_config claudeAccounts.dispatcher "vault:<other name>"` pins another; `"vault"` (or `null`)
-  puts it on the payer's pool. Only those forms are accepted: `"token"`, `"login"` and `"tokenfile"` are retired.
+  vault warning show. `set_app_config claudeAccounts.dispatcher "vault:<other name>"` pins another, `"pool:<login>"` puts it
+  on that person's pool, and `"vault"` (or `null`) puts it on the payer's pool, each applied at once between turns (w5921).
+  Only those forms are accepted: `"token"`, `"login"` and `"tokenfile"` are retired.
 
 **Which account runs what (w1078).** Every Claude process is on a vault token and no other credential: it starts with that
 token as `CLAUDE_CODE_OAUTH_TOKEN` alone, every other Claude credential removed first (for a machine's run the daemon drops its
@@ -1195,6 +1236,7 @@ it to `shared/githubRequirements.ts` and this table in a pull request, and says 
 | Resource owner | **Final-Factory** | every required repository is the organization's |
 | Repository access | **All repositories**, or select the list below | |
 | Actions (repository) | **Read and write** | read runs, jobs and logs; re-run a failed job (`POST …/actions/runs/{id}/rerun`, write). Probe: `GET /repos/{repo}/actions/runs` |
+| Administration (repository) | **Read-only** | ffu only, for its repo-level self-hosted runners: ffu's CI wait lists them (`server/blockerWatch.ts` `awayNow`; w5928, measured 2026-11-25: 403 with `X-Accepted-Github-Permissions: administration=read` without it). Probe: `GET /repos/Final-Factory/ffu/actions/runners` |
 | Artifact metadata (repository) | **Read-only** | artifact storage and deployment records. Probe: `GET /orgs/Final-Factory/artifacts/{digest}/metadata/storage-records` with a made-up digest: 404 counts as allowed, 403 as refused *(measured with a token that may read: 404)* |
 | Commit statuses (repository) | **Read and write** | the status part of a PR's checks (`GET …/commits/{ref}/status`). Probe: that, on `HEAD` |
 | Contents (repository) | **Read and write** | `git push`; merging a PR (`PUT …/pulls/{n}/merge` is listed under Contents, write). Probe: `GET /repos/{repo}/commits` |

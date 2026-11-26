@@ -23,6 +23,8 @@ export interface Computer {
    * unfenced, so it takes no work of any kind until the fence is fixed or switched off on purpose.
    */
   fenceFailed?: string;
+  /** w5965: its worker fence's state (Machine.fence.state): a pair run of a pre-w5297 player goes only where it is off. */
+  fence?: 'off' | 'setting_up' | 'on' | 'failed';
   /** Agent processes up in its sandboxes; an idle one holds its memory too. */
   live: number;
   /** Of those, mid-turn (what its agent limit counts since w384). */
@@ -49,6 +51,11 @@ export interface Computer {
    * Factory, FFBox, the plugin) takes; undefined when unknown, which counts as a seat.
    */
   agentSeats?: number;
+  /**
+   * w5924: its daemon makes light agent folders, so agent-only work needs no seat in a game sandbox (agentSeats unset): the
+   * folders there now and how many hold a worker.
+   */
+  light?: { folders: number; inUse: number };
   /**
    * Whether work placed here may push a change to .github/workflows (w1463): its machine's gh login has the `workflow` scope
    * (true), lacks it (false), or nobody knows (undefined: no report, or a fine-grained login). For one person's work, a vault
@@ -457,7 +464,7 @@ export function slotsOf(p: Computer, kind: NeedKind): number {
 }
 
 /** What decides which work can run on `p` (RoomNow.fit, shared/capacity.ts unfitWhy). */
-const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}) });
+const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}), ...(p.fence ? { fence: p.fence } : {}) });
 
 /**
  * Whether pair run `w` could ever get all its legs at once (w3530): pairRoom over every computer that is online and not held
@@ -855,7 +862,9 @@ export function capacityLines(places: readonly Computer[], last?: string, prefs:
     const verdict = why.length ? `BUSY (${why.join('; ')})` : hold.has(p.id) ? `ROOM ${pctOf(roomOf(p))} but HELD (${hold.get(p.id)}): no new work goes there` : `ROOM ${pctOf(roomOf(p))}${reserved}`;
     // Agent room for non-game work (w1098), beside the game verdict: the dispatcher reads both from the one line.
     const agent = hasAgentRoom(p) ? (hold.has(p.id) ? 'agent slot: free but held' : `agent slot: free (${p.midTurn} of ${p.maxAgents} mid-turn)${m ? `, ${minPriorityText(m)}` : ''}`) : `agent slot: none (${agentBusyReasons(p).join('; ')})`;
-    return `- ${p.id}${tags.length ? ` [${tags.join('; ')}]` : ''}: ${verdict}: ${loadPart(p)}; ${agent}`;
+    // w5924: agent-only work starts there in a new light folder, whatever its game sandboxes hold.
+    const light = p.light ? `; light folders: ${p.light.folders - p.light.inUse} free of ${p.light.folders}, a new one made per agent-only start` : '';
+    return `- ${p.id}${tags.length ? ` [${tags.join('; ')}]` : ''}: ${verdict}: ${loadPart(p)}; ${agent}${light}`;
   });
   // The "Next" lines are for low and normal work (prefs.priority unset); reservedLine says where higher work goes.
   const base = { ...prefs, priority: undefined };

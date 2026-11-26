@@ -94,6 +94,21 @@ test('w1379: a stopped worker on an open request is kept, a worker on a closed r
   assert.match(text, /DELETE .*ffa-b0b0b0b0/);
 });
 
+test("w5869: Medium agents' own temp root (tmp-medium) is judged like the workers' one: a closed request's folder goes, a running one stays", async (t) => {
+  const { root, facts } = world(t);
+  const medium = path.join(root, 'tmp-medium');
+  for (const sid of ['b0b0b0b0', 'd2d2d2d2']) fs.mkdirSync(path.join(medium, `ffa-${sid}`), { recursive: true });
+  const f = { ...facts, at: new Date(Date.now() + 1000).toISOString(), mediumTempRoot: medium };
+  assert.equal(judgePath(path.join(medium, 'ffa-b0b0b0b0'), f).kind, 'session-temp');
+  assert.equal(judgePath(path.join(medium, 'ffa-b0b0b0b0'), f).verdict, 'delete', 'its only request closed');
+  assert.equal(judgePath(path.join(medium, 'ffa-d2d2d2d2'), f).verdict, 'keep', 'running now');
+  const rows = await planFolders(f, { sizes: 'none' });
+  const mine = rows.filter((r) => r.path.startsWith(medium)).map((r) => `${path.basename(r.path)} ${r.verdict}`).sort();
+  assert.deepEqual(mine, ['ffa-b0b0b0b0 delete', 'ffa-d2d2d2d2 keep']);
+  // Without the field (the switch off, or an older daemon's facts) nothing in tmp-medium is a session folder.
+  assert.equal(judgePath(path.join(medium, 'ffa-b0b0b0b0'), facts).kind, 'other');
+});
+
 test('w1379: a worker handed off its open request keeps its folders too: the request has not closed', () => {
   const o = ownersOf([{ id: 'old00001' }], [item('w50', 'active', ['old00001', 'new00002'])]);
   const f = { owners: o, live: [], resumable: [] } as unknown as CleanupFacts;

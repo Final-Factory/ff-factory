@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { ghConfigFolder, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
+import path from 'node:path';
+import { ghConfigFolder, ghLoginStorage, machineGhStatusEnv, OWNER_LABEL_ON_SYSTEM_DRIVE, ownerLabelTargets, sayOwnerLabels, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, ghLoginToFile, ghLoginToKeyring, ghLoginAccounts, ghKeyringTargets, OWNER_GH_MOVED_NOTE, type GhRun, type TokenRun } from '../machine/ownerSecrets.ts';
+import { NO_READ_UP } from '../machine/lowIntegrity.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
 
@@ -268,4 +270,182 @@ test('the Keychain write leg is held after it hung or got through, until the cod
   assert.match(held.skipped[0], /^security \(held: .*let through/);
   const linux = ownerToolLegs({ platform: 'linux', gh: 'gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: {}, keychainHeld: 'let through' });
   assert.deepEqual(linux.skipped, [], 'the hold means nothing off a Mac');
+});
+
+// w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"; for LothDesktop).
+const w = path.win32;
+test('ownerLabelTargets (w5749): only LothDesktop labels, gh and ~/.ssh only; browsers left with their reason', () => {
+  const home = w.join('C:', 'Users', 'L');
+  const env = { APPDATA: w.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: w.join(home, 'AppData', 'Local') };
+  const gh = w.join(env.APPDATA, 'GitHub CLI');
+  const ssh = w.join(home, '.ssh');
+  const chrome = w.join(env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data');
+  const there = new Set([gh, ssh, chrome]);
+  const plan = ownerLabelTargets({ platform: 'win32', home, env, machineId: 'LothDesktop', exists: (p) => there.has(p) });
+  assert.deepEqual(plan.label, [
+    { path: gh, sddl: NO_READ_UP.dir },
+    { path: ssh, sddl: NO_READ_UP.dir },
+  ]);
+  assert.deepEqual(
+    plan.left.map((l) => l.path),
+    [chrome],
+  );
+  assert.match(plan.left[0].why, /AppContainer/);
+});
+
+test('ownerLabelTargets (w5749): every other machine and OS looks at nothing on its system drive', () => {
+  let calls = 0;
+  const exists = () => (calls++, true);
+  for (const o of [
+    { platform: 'win32' as const, machineId: 'beast' },
+    { platform: 'win32' as const, machineId: undefined },
+    { platform: 'darwin' as const, machineId: 'lothdesktop' },
+    { platform: 'linux' as const, machineId: 'lothdesktop' },
+  ])
+    assert.deepEqual(ownerLabelTargets({ ...o, home: w.join('C:', 'Users', 'L'), env: {}, exists }), { label: [], left: [] });
+  assert.equal(calls, 0);
+  assert.ok(OWNER_LABEL_ON_SYSTEM_DRIVE.has('lothdesktop') && OWNER_LABEL_ON_SYSTEM_DRIVE.size === 1);
+});
+
+test('ghLoginStorage (w5749): keyring, file or none, from gh auth status', () => {
+  assert.equal(ghLoginStorage(['github.com', '  ✓ Logged in to github.com account Lothsahn (keyring)', '  - Token: gho_***'].join('\n')), 'keyring');
+  assert.equal(ghLoginStorage(['github.com', `  ✓ Logged in to github.com account Lothsahn (${w.join('C:', 'U', 'GitHub CLI', 'hosts.yml')})`].join('\n')), 'file');
+  assert.equal(ghLoginStorage('You are not logged into any GitHub hosts.'), undefined);
+  // A login gh could not check (w5849: an invalid token; a network outage likely the same) is still stored where it says.
+  assert.equal(ghLoginStorage(['github.com', `  X Failed to log in to github.com account Lothsahn (${w.join('C:', 'U', 'GitHub CLI', 'hosts.yml')})`].join('\n')), 'file');
+  assert.equal(ghLoginStorage('  X Failed to log in to github.com account Lothsahn (keyring)'), 'keyring');
+});
+
+test('machineGhStatusEnv (w5749): no token reaches the status check', () => {
+  const e = machineGhStatusEnv({ GH_TOKEN: 'x', GITHUB_TOKEN: 'y', PATH: 'p' });
+  assert.equal(e.GH_TOKEN, undefined);
+  assert.equal(e.GITHUB_TOKEN, undefined);
+  assert.equal(e.PATH, 'p');
+  assert.equal(e.GH_PROMPT_DISABLED, '1');
+});
+
+test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and what stays open', () => {
+  const ssh = w.join('C:', 'U', '.ssh');
+  const plan = { label: [{ path: ssh, sddl: NO_READ_UP.dir }], left: [{ path: 'Chrome', why: 'AppContainer' }] };
+  const line = sayOwnerLabels('warn', plan, 'keyring');
+  assert.ok(line.includes(`would label (warn only: no label set) No-Read-Up on ${ssh};`), line);
+  assert.match(line, /Credential Manager \(keyring\).*on moves it/);
+  assert.match(line, /left open: Chrome \(AppContainer\)$/);
+  assert.match(sayOwnerLabels('on', plan, 'file'), /rules label No-Read-Up on .*hosts\.yml/);
+  assert.match(sayOwnerLabels('warn', { label: [], left: [] }, undefined), /none on this Windows machine .*only on lothdesktop/);
+});
+
+/** A fake gh for the w5749 move: keeps where the login is and its token, and answers status, token and login as gh does. */
+function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: string[]; loginFails?: boolean; loginLies?: boolean; status?: 'unread' | 'failed' | 'timeout' }) {
+  const st = { storage: start.storage, token: start.token ?? 'gho_abcdefghijklmnopqrstuvwxyz0123', users: start.users ?? ['lothsahn'] };
+  const calls: string[][] = [];
+  const gh: GhRun = async (args, o = {}) => {
+    calls.push(args);
+    if (args[1] === 'status') {
+      // w5849: gh that cannot answer (unread), or cannot check the token (failed: an invalid token, a network outage).
+      if (start.status === 'unread') return { code: 1, stdout: '', stderr: 'error connecting to api.github.com' };
+      if (start.status === 'failed' && st.storage) return { code: 1, stdout: '', stderr: `github.com\n  X Failed to log in to github.com account ${st.users[0]} (${st.storage === 'keyring' ? 'keyring' : 'C:\\U\\hosts.yml'})` };
+      if (start.status === 'timeout' && st.storage) return { code: 1, stdout: '', stderr: `github.com\n  X Timeout trying to log in to github.com account ${st.users[0]} (${st.storage === 'keyring' ? 'keyring' : 'C:\\U\\hosts.yml'})` };
+      if (!st.storage) return { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.' };
+      const where = st.storage === 'keyring' ? 'keyring' : 'C:\\Users\\o\\AppData\\Roaming\\GitHub CLI\\hosts.yml';
+      return { code: 0, stdout: `github.com\n${st.users.map((u) => `  ✓ Logged in to github.com account ${u} (${where})\n  - Token: gho_****`).join('\n')}`, stderr: '' };
+    }
+    if (args[1] === 'token') return st.storage ? { code: 0, stdout: `${st.token}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'no oauth token' };
+    if (args[1] === 'login') {
+      assert.equal(o.input?.trim(), st.token, 'the login is given its own token');
+      if (start.loginFails) return { code: 1, stdout: '', stderr: 'boom' };
+      if (!start.loginLies) st.storage = args.includes('--insecure-storage') ? 'file' : 'keyring';
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  };
+  return { gh, st, calls };
+}
+
+test('w5749: ghLoginToFile moves a keyring login into hosts.yml with its own token, checked, and names the entries to delete', async () => {
+  const f = fakeGh({ storage: 'keyring' });
+  const m = await ghLoginToFile(f.gh);
+  assert.deepEqual({ ok: m.ok, moved: m.moved, deleteFrom: m.deleteFrom }, { ok: true, moved: true, deleteFrom: ['gh:github.com:', 'gh:github.com:lothsahn'] });
+  assert.equal(f.st.storage, 'file');
+  assert.ok(f.calls.some((a) => a.join(' ') === 'auth login --hostname github.com --with-token --insecure-storage'));
+  // Again: already in the file, nothing moved, the entries still named (a delete that failed last time is tried again).
+  const again = await ghLoginToFile(f.gh);
+  assert.deepEqual({ ok: again.ok, moved: again.moved, deleteFrom: again.deleteFrom }, { ok: true, moved: false, deleteFrom: ['gh:github.com:', 'gh:github.com:lothsahn'] });
+});
+
+test('w5749: ghLoginToFile leaves the login in Credential Manager, with nothing to delete, on any failure', async () => {
+  for (const start of [{ storage: 'keyring' as const, loginFails: true }, { storage: 'keyring' as const, loginLies: true }, { storage: 'keyring' as const, users: ['a', 'b'] }, { storage: 'keyring' as const, token: 'short' }]) {
+    const f = fakeGh(start);
+    const m = await ghLoginToFile(f.gh);
+    assert.equal(m.ok, false, JSON.stringify(start));
+    assert.equal(m.moved, false);
+    assert.equal(m.deleteFrom, undefined, 'no Credential Manager entry is deleted');
+    assert.equal(f.st.storage, 'keyring');
+  }
+  const none = await ghLoginToFile(fakeGh({}).gh);
+  assert.deepEqual({ ok: none.ok, moved: none.moved, deleteFrom: none.deleteFrom }, { ok: true, moved: false, deleteFrom: undefined });
+});
+
+test('w5749: the way back, ghLoginToKeyring, moves a hosts.yml login into Credential Manager and leaves it on failure', async () => {
+  const f = fakeGh({ storage: 'file' });
+  const b = await ghLoginToKeyring(f.gh);
+  assert.deepEqual({ ok: b.ok, moved: b.moved }, { ok: true, moved: true });
+  assert.equal(f.st.storage, 'keyring');
+  assert.ok(f.calls.some((a) => a.join(' ') === 'auth login --hostname github.com --with-token'));
+  assert.deepEqual(await ghLoginToKeyring(f.gh).then((x) => [x.ok, x.moved]), [true, false]);
+  const bad = fakeGh({ storage: 'file', loginFails: true });
+  assert.deepEqual(await ghLoginToKeyring(bad.gh).then((x) => [x.ok, x.moved]), [false, false]);
+  assert.equal(bad.st.storage, 'file');
+  // A round trip ends where it started, with the same token.
+  const r = fakeGh({ storage: 'keyring' });
+  await ghLoginToFile(r.gh);
+  await ghLoginToKeyring(r.gh);
+  assert.deepEqual([r.st.storage, r.st.token], ['keyring', 'gho_abcdefghijklmnopqrstuvwxyz0123']);
+});
+
+test('w5749: ghLoginAccounts and ghKeyringTargets', () => {
+  assert.deepEqual(ghLoginAccounts('  ✓ Logged in to github.com account lothsahn (keyring)\n  ✓ Logged in to github.com account bryding (keyring)'), ['lothsahn', 'bryding']);
+  assert.deepEqual(ghKeyringTargets('x'), ['gh:github.com:', 'gh:github.com:x']);
+  assert.equal(OWNER_GH_MOVED_NOTE, 'read-fence-gh-moved.json');
+});
+
+test('w5849 review of #1281: an unread gh auth status is never "no login": the way back keeps its note, the move moves nothing', async () => {
+  const back = await ghLoginToKeyring(fakeGh({ storage: 'file', status: 'unread' }).gh);
+  assert.deepEqual([back.ok, back.moved], [false, false], 'ok false: the daemon keeps the note and tries again next start');
+  assert.match(back.line, /could not be read/);
+  const on = await ghLoginToFile(fakeGh({ storage: 'keyring', status: 'unread' }).gh);
+  assert.deepEqual([on.ok, on.moved, on.deleteFrom], [false, false, undefined]);
+  assert.doesNotMatch(on.line, /no gh login/);
+  // gh says "Failed to log in" (it could not check the token): the login is still found where it is and moved back.
+  const f = fakeGh({ storage: 'file', status: 'failed' });
+  const b = await ghLoginToKeyring(f.gh);
+  assert.deepEqual([b.ok, b.moved, f.st.storage], [true, true, 'keyring']);
+  assert.deepEqual(ghLoginAccounts('  X Failed to log in to github.com account lothsahn (keyring)'), ['lothsahn']);
+});
+
+test('w5849 review of #1281: the caller is told before the login call, so its note is down before anything moves', async () => {
+  const f = fakeGh({ storage: 'keyring' });
+  let at = -1;
+  await ghLoginToFile(f.gh, () => { at = f.calls.length; });
+  assert.ok(at >= 0, 'beforeMove was called');
+  assert.ok(!f.calls.slice(0, at).some((a) => a[1] === 'login'), 'no login call before the note');
+  assert.equal(f.calls[at]?.[1], 'login', 'the login call comes right after it');
+  let told = false;
+  await ghLoginToFile(fakeGh({ storage: 'file' }).gh, () => { told = true; });
+  assert.equal(told, false, 'a login already in hosts.yml (no move) writes no note');
+});
+
+test('w5859 review of #1281: a file login gh could not check keeps the Credential Manager entries; a timeout is a stored login', async () => {
+  for (const status of ['failed', 'timeout'] as const) {
+    const m = await ghLoginToFile(fakeGh({ storage: 'file', status }).gh);
+    assert.deepEqual([m.ok, m.moved, m.deleteFrom], [false, false, undefined], status);
+    assert.match(m.line, /could not check it/);
+  }
+  const checked = await ghLoginToFile(fakeGh({ storage: 'file' }).gh);
+  assert.deepEqual([checked.ok, checked.deleteFrom], [true, ghKeyringTargets('lothsahn')]);
+  const t = '  X Timeout trying to log in to github.com account lothsahn (keyring)';
+  assert.equal(ghLoginStorage(t), 'keyring');
+  assert.deepEqual(ghLoginAccounts(t), ['lothsahn']);
+  const back = await ghLoginToKeyring(fakeGh({ storage: 'file', status: 'timeout' }).gh);
+  assert.deepEqual([back.ok, back.moved], [true, true], 'the way back still finds a login gh timed out on');
 });

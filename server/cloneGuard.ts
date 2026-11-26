@@ -29,7 +29,9 @@ export const BUILD_PLAYER_TO_CACHE =
   '(w4669: `bash` in front, since Windows cannot start a .sh file by itself (`spawn EFTYPE`), and the first argument is the project ' +
   'folder, your sandbox\'s path, not its name), which writes the player to ' +
   'this computer\'s shared player cache (<worker root>/player-cache/<sha>-<os>, outside the tree), prints "player: <path>" for ffnightly.py ' +
-  '--player, and skips the build when that commit is already there; leave the player there, since the next leg on this computer reuses it (w4614)';
+  '--player, and skips the build when that commit is already there; leave the player there, since the next leg on this computer reuses it (w4614). ' +
+  'A commit before master\'s optional cache root (pre-1.0, the 0.50 line) needs it as a 4th argument and builds only win|mac: ' +
+  '`bash scripts/nightly/build_player.sh "$PWD" <sha> win "$FF_WORKER_ROOT/player-cache"` (w5944, w5965)';
 
 /** w4669: ffnightly.py run's required flags are --sha and --out (scripts/nightly/ffnightly.py, the run parser); a leg left out --out. */
 export const NIGHTLY_RUN =

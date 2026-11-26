@@ -970,6 +970,11 @@ export interface VaultContext {
   payer?: () => string | undefined;
   /** Whose Claude pool a person's work runs on (w1717, poolOwnerOf over AppSettings.pool); unset, their own. */
   poolOf?: (person: string) => string;
+  /**
+   * The credential key ("token:<fingerprint>") the dispatcher's live process runs on (w5891): on a pool ("pool:<login>") its
+   * reserve is kept on the token it is on now. Unset or not running: no reserve.
+   */
+  dispatcherOn?: () => string | undefined;
   /** A run that wanted a vault Claude token and fell back, or an entry that would not open: for the log and system_status. */
   onProblem?: (line: string) => void;
   /** Whether a GitHub token may be handed out (not refused by GitHub, not expired: server/githubTokens.ts, w868). */

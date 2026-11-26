@@ -12,7 +12,7 @@ import { PoolHeldError, Vault, fingerprintOf, newKeyText, type KeySource, type V
 import { machineRunEnv } from './secrets.ts';
 import { poolForRef, type GatePoolToken } from './usageGate.ts';
 import { UsageTracker, withOut } from './usage.ts';
-import { TokenSwitch, orchestratorOut, refusedWindow, type TokenSwitchDeps } from './tokenSwitch.ts';
+import { TokenSwitch, dispatcherMove, dispatcherWait, orchestratorOut, refusedWindow, type DispatcherAccount, type TokenSwitchDeps } from './tokenSwitch.ts';
 import type { Config } from './config.ts';
 import type { PlanUsage, SessionInfo, UserInfo } from '../shared/types.ts';
 
@@ -156,7 +156,18 @@ function world(t: { after: (fn: () => void | Promise<void>) => void }) {
     return h;
   };
   const runEnv = (sid: string, person: string) => machineRunEnv({ machines: [] } as never, { id: 'lothdesktop' } as never, { role: 'workers', requestedBy: { userId: person, displayName: person }, sessionId: sid }, ctx);
-  return { dir, store, sessions, agents, usage, meter, sw, deps, add, runEnv, resumed, held, notes, logs, poolSetting, views, label };
+  const ownerOf = (account: string) => vault.list().find((x) => `token:${x.fingerprint}` === account)?.owner;
+  agents.tokenOwner = ownerOf;
+  // The dispatcher's config, as server/index.ts reads claudeAccounts.dispatcher (w5891, w5921); unset: the payer's (Ben's) pool.
+  const dispatcherCfg: { now: DispatcherAccount } = { now: { pool: 'ben', named: false } };
+  // Room as index.ts's dispatcherRoomIn reads it: another token of the pool not used up, retired, held or capped.
+  const roomIn = (pool: string, except: string) => views().some(([p, list]) => p === pool && list.some((t) => t.key !== except && !['exhausted', 'retired', 'held'].includes(t.state)));
+  agents.dispatcherAccountMove = (account) => dispatcherMove(dispatcherCfg.now, views(), account, { label: label(account), owner: ownerOf(account), room: !dispatcherCfg.now.pinned && roomIn(dispatcherCfg.now.pool, account) });
+  const dispatcherServes = deps.serves;
+  deps.serves = (s) => (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher' ? !!s.account && !!agents.dispatcherAccountMove?.(s.account) : dispatcherServes(s));
+  deps.dispatcherWait = () => dispatcherWait(dispatcherCfg.now, [...pools()].find(([p]) => p === dispatcherCfg.now.pool)?.[1].map((x) => ({ label: `${x.entry.name} …${x.entry.last4}`, until: x.view.until ? Date.parse(x.view.until) : undefined })) ?? [], Date.now());
+  const pin = (token: string) => ({ pinned: { name: label(key(token))!.split(' ')[0], key: key(token), label: label(key(token)) }, pool: '', named: false });
+  return { dir, store, sessions, agents, usage, meter, sw, deps, add, runEnv, resumed, held, notes, logs, poolSetting, views, label, dispatcherCfg, pin };
 }
 
 const worker = (id: string, account: string, over: Partial<SessionInfo> = {}): SessionInfo =>
@@ -319,16 +330,10 @@ test("w1745: another person's pool is never used: lothsahn's agent on his out to
   assert.match(orchestratorOut(w.views(), key(L1), 'ben') ?? '', /^vault token vault-lothsahn-1 …\w{4} \(.*used up/);
 });
 
-test('w1745: the dispatcher and the ops worker are not resumed; one whose process could not move is not resumed or held in a loop', (t) => {
+test('w1745: the ops worker is not resumed; one whose process could not move is not resumed or held in a loop', (t) => {
   const w = world(t);
   w.meter(B1, reading(50, 97));
   w.meter(B2, reading(0, 0));
-  const disp = w.add({ ...worker('disp', key(B1), { lastResult: LIMIT_LINE }), kind: 'orchestrator', orchestratorRole: 'dispatcher', machineId: undefined } as SessionInfo);
-  w.sw.turnEnded(disp.info);
-  assert.equal(w.resumed.length, 0);
-  assert.match(w.logs.at(-1)!, /the dispatcher stays on its own token/);
-  w.sessions.send('disp', 'next', 'system');
-  assert.equal(disp.stops, 0, 'the dispatcher keeps the token it is pinned to');
   w.sw.turnEnded({ ...worker('ops-1', key(B1), { lastResult: LIMIT_LINE }), kind: 'ops' } as SessionInfo);
   assert.equal(w.resumed.length, 0);
   // A worker with a background build keeps its process (accountMove): resumed once, refused again there, it is held.
@@ -344,6 +349,92 @@ test('w1745: the dispatcher and the ops worker are not resumed; one whose proces
   bg.info.backgroundTasks = 0;
   w.sessions.send('w-bg', 'the build finished', 'system');
   assert.equal(bg.stops, 1);
+});
+
+test('w5921: the dispatcher ending 2 turns in a row on the usage limit alerts the operators once, with the token, its reset and what was done', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100, 4));
+  w.meter(B2, reading(0, 3));
+  const alerts: { id: string; line: string }[] = [];
+  w.deps.alert = (s, line) => alerts.push({ id: s.id, line });
+  w.dispatcherCfg.now = w.pin(B1);
+  const sw = new TokenSwitch(w.deps);
+  const disp = { ...worker('disp', key(B1), { lastResult: LIMIT_LINE }), kind: 'orchestrator', orchestratorRole: 'dispatcher', machineId: undefined } as SessionInfo;
+  assert.equal(sw.dispatcherLimited(), undefined);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 0, 'one limit turn alerts nobody (a turn the limit cut short before a switch took)');
+  assert.match(sw.dispatcherLimited()!, /^the dispatcher is rate-limited on vault-ben-1 …\w{4} until \d{4}-\d\d-\d\d \d\d:\d\dZ$/);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].line, /^\[token alert\] The dispatcher ended 2 turns in a row on Claude's usage limit, on vault token vault-ben-1 …\w{4}; Claude counts that token's window used up until \d{4}-\d\d-\d\d \d\d:\d\dZ\. What FF Factory did: it is pinned to vault token vault-ben-1 …\w{4} \(claudeAccounts.dispatcher\), so it waits for that token's reset/);
+  assert.doesNotMatch(alerts[0].line, new RegExp(B1.slice(0, 20)), 'never the token itself');
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1, 'once per streak');
+  assert.ok(sw.statusLines([], () => []).some((l) => /^Dispatcher rate-limited \(w5921\): The dispatcher is rate-limited on vault-ben-1/.test(l)));
+  // A turn that ends normally ends the streak; the next two limit turns on the same token's window do not alert again.
+  sw.turnEnded({ ...disp, lastResult: 'Started w5907 on lothdesktop.' });
+  assert.equal(sw.dispatcherLimited(), undefined);
+  sw.turnEnded(disp);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1, 'once per token window, a flapping token included');
+});
+
+test('w5921 review: a reset dispatcher (a new session) is not limited by the old one; a backlog read mid-turn still alerts; the reset is the usage mark\'s', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100, 4));
+  w.meter(B2, reading(0, 3));
+  const alerts: string[] = [];
+  w.deps.alert = (_s, line) => alerts.push(line);
+  w.dispatcherCfg.now = w.pin(B1);
+  let current = 'disp';
+  w.deps.dispatcherId = () => current;
+  const marks = new Map<string, number>();
+  const at = Date.now();
+  w.deps.outUntil = (account) => marks.get(account);
+  const sw = new TokenSwitch(w.deps);
+  const disp = { ...worker('disp', key(B1), { lastResult: LIMIT_LINE }), kind: 'orchestrator', orchestratorRole: 'dispatcher', machineId: undefined } as SessionInfo;
+  marks.set(key(B1), at + 3 * 3_600_000);
+  // A queued backlog: both turns read mid-turn, and the second alerts anyway.
+  sw.turnEnded({ ...disp, status: 'running' });
+  sw.turnEnded({ ...disp, status: 'running' });
+  assert.equal(alerts.length, 1, 'alerted although every reading was mid-turn');
+  assert.match(sw.dispatcherLimited()!, new RegExp(`until ${new Date(at + 3 * 3_600_000).toISOString().slice(0, 16).replace('T', ' ')}Z$`), "the usage tracker's mark, the time system_status shows");
+  // The mark ends (or is cleared): not limited, whatever the streak's own guess said.
+  marks.delete(key(B1));
+  assert.equal(sw.dispatcherLimited(), undefined);
+  marks.set(key(B1), at + 3 * 3_600_000);
+  // The dispatcher is reset: a new session id; the old one's streak is not the new dispatcher's.
+  current = 'disp-2';
+  assert.equal(sw.dispatcherLimited(), undefined, 'a reset dispatcher is not rate-limited by its predecessor');
+  sw.turnEnded({ ...disp, id: 'disp-2', account: key(B2), lastResult: 'Started w5907.' });
+  current = 'disp';
+  assert.equal(sw.dispatcherLimited(), undefined, "a dispatcher's normal turn clears every earlier dispatcher's streak");
+  // A token that flaps alerts once per window, not every other turn.
+  sw.turnEnded(disp);
+  sw.turnEnded(disp);
+  sw.turnEnded({ ...disp, lastResult: 'ok' });
+  sw.turnEnded(disp);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1, 'one alert per agent and token window');
+});
+
+test("w5921: a person's orchestrator stuck on the limit twice alerts too, saying what was done; a worker never does", (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100));
+  w.meter(B2, reading(100, 100));
+  const alerts: string[] = [];
+  w.deps.alert = (_s, line) => alerts.push(line);
+  const sw = new TokenSwitch(w.deps);
+  const orch = { ...worker('orch-ben', key(B1), { lastResult: LIMIT_LINE, title: 'Ben' }), kind: 'orchestrator', orchestratorRole: 'personal', machineId: undefined } as SessionInfo;
+  sw.turnEnded(orch);
+  sw.turnEnded(orch);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /^\[token alert\] Orchestrator orch-ben \(Ben\) ended 2 turns in a row .*What FF Factory did: (no token in its pool has room, so it waits|resumed on a token with room)/);
+  assert.equal(sw.dispatcherLimited(), undefined, "only the dispatcher's limit is the ledger's reason");
+  const wk = worker('w-1', key(B1), { lastResult: LIMIT_LINE });
+  sw.turnEnded(wk);
+  sw.turnEnded(wk);
+  assert.equal(alerts.length, 1, 'workers are moved or held by w1745 and named in their requests, not alerted');
 });
 
 test('w1745: a worker left idle on the out token after its resume is resumed again 10 min later, at most 3 times (7d4cb2df, 2026-10-22)', (t) => {
@@ -414,4 +505,164 @@ test('w2785: an orchestrator moves off a token at its own weekly cap to any toke
   assert.ok(orchestratorOut(pools('retired'), 'b3', 'ben'), 'off a capped token even a token past the 99% line is better: the 10% is its person\'s');
   assert.equal(orchestratorOut(pools('exhausted'), 'b3', 'ben'), undefined, 'nothing better: it stays (its pick holds it at its next start)');
   assert.equal(orchestratorOut([['ben', [v('b2', 'retired', true), v('b3', 'retired', true)]]], 'b3', 'ben'), undefined, 'another capped token is not better');
+});
+
+/** What the sessions were sent (the [token move] lines), by id, beside the real send. */
+function recordSends(w: ReturnType<typeof world>) {
+  const got: Record<string, string[]> = {};
+  const send = w.sessions.send.bind(w.sessions);
+  w.sessions.send = ((id: string, text: string, ...rest: unknown[]) => {
+    (got[id] ??= []).push(text);
+    return (send as (...a: unknown[]) => unknown)(id, text, ...rest);
+  }) as typeof w.sessions.send;
+  return got;
+}
+
+/** The system lines Agents.applyAccountConfig appends when it stops an orchestrator, by session id (it sends no message). */
+function recordStops(w: { store: Store }) {
+  const got: Record<string, string[]> = {};
+  const append = w.store.append.bind(w.store);
+  w.store.append = ((id: string, e: { kind: string; text?: string }) => {
+    if (e.kind === 'system' && e.text) (got[id] ??= []).push(e.text);
+    return append(id, e as never);
+  }) as typeof w.store.append;
+  return got;
+}
+
+const dispatcherOn = (account: string, over: Partial<SessionInfo> = {}) => ({ ...worker('disp', account, { lastResult: LIMIT_LINE, ...over }), kind: 'orchestrator', orchestratorRole: 'dispatcher', machineId: undefined }) as SessionInfo;
+
+test("w5921: the dispatcher on a used-up token moves to another of its pool's tokens with room, before its next turn", (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100));
+  w.meter(B2, reading(0, 3));
+  w.dispatcherCfg.now = { pool: 'ben', named: true };
+  const disp = w.add(dispatcherOn(key(B1)));
+  w.sw.turnEnded(disp.info);
+  assert.equal(w.resumed.length, 1, 'resumed: its pool has a token with room');
+  assert.equal(disp.stops, 1, 'its process stopped before the resume, so the resume starts it on another token');
+});
+
+test("w5921: the dispatcher never crosses pools: its pool used up, it waits, naming the first reset, while another pool has room", (t) => {
+  const w = world(t);
+  w.meter(B1, reading(0, 0));
+  w.meter(B2, reading(0, 0));
+  w.meter(L1, reading(20, 100, 7));
+  const alerts: string[] = [];
+  w.deps.alert = (_s, line) => alerts.push(line);
+  w.dispatcherCfg.now = { pool: 'lothsahn', named: true };
+  const sw = new TokenSwitch(w.deps);
+  const disp = w.add(dispatcherOn(key(L1)));
+  sw.turnEnded(disp.info);
+  sw.turnEnded(disp.info);
+  assert.equal(w.resumed.length, 0, "never resumed onto Ben's pool");
+  assert.equal(disp.stops, 0);
+  assert.equal(dispatcherMove(w.dispatcherCfg.now, w.views(), key(L1), { label: w.label(key(L1)), owner: 'lothsahn', room: false }), undefined, 'no move: only its own pool is read');
+  assert.match(w.logs.join('\n'), /every token of lothsahn's pool \(claudeAccounts.dispatcher\) is out, so it waits and never runs on another pool; the first to reset is vault-lothsahn-1 …\w{4}, at /);
+  assert.equal(alerts.length, 1, 'two turns on the limit alert');
+  assert.match(alerts[0], /the first to reset is vault-lothsahn-1/);
+  // The message it gets meanwhile does not move it to Ben's pool either.
+  w.sessions.send('disp', 'next', 'system');
+  assert.equal(disp.stops, 0);
+});
+
+test('w5921: a pinned dispatcher waits for its own token; its pin is never left for a free token', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100));
+  w.meter(B2, reading(0, 0));
+  w.dispatcherCfg.now = w.pin(B1);
+  const disp = w.add(dispatcherOn(key(B1)));
+  w.sw.turnEnded(disp.info);
+  assert.equal(w.resumed.length, 0);
+  assert.equal(disp.stops, 0);
+  assert.match(w.logs.at(-1)!, /it is pinned to vault token vault-ben-1 …\w{4} \(claudeAccounts.dispatcher\), so it waits for that token's reset/);
+  // A pin the vault lacks: no move (its start would fail), it stays where it is.
+  assert.equal(dispatcherMove({ pinned: { name: 'vault-gone' }, pool: '', named: false }, w.views(), key(B1), { label: 'x', owner: 'ben', room: true }), undefined);
+});
+
+test('w5921: a change of claudeAccounts.dispatcher (a pin, a pool) or of the payer\'s pool setting restarts the dispatcher between turns, never mid-turn', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(10, 10));
+  w.meter(B2, reading(10, 10));
+  w.meter(L1, reading(10, 10));
+  const disp = w.add(dispatcherOn(key(B1), { lastResult: 'ok' }));
+  const got = recordStops(w);
+  assert.deepEqual(w.agents.applyAccountConfig('test'), [], 'on its configured pool, with room: nothing moves');
+  // A pin to another token: restarted at once, between turns.
+  w.dispatcherCfg.now = w.pin(B2);
+  assert.deepEqual(w.agents.applyAccountConfig('config claudeAccounts.dispatcher changed'), ['disp']);
+  assert.equal(disp.stops, 1, 'stopped between turns, with no message (no turn spent): its next message starts it on the new token');
+  assert.match(got.disp.at(-1)!, /^Stopped by FF Factory between turns to apply its account config: .*pins vault token vault-ben-2/);
+  assert.deepEqual(w.agents.applyAccountConfig('again'), [], 'once: its stopped process is not stopped again');
+  // Its process started again on the pinned token: its next message moves nothing.
+  const moved = w.add(dispatcherOn(key(B2), { lastResult: 'ok' }));
+  w.sessions.send('disp', 'hello', 'system');
+  assert.equal(moved.stops, 0);
+  // Mid-turn: nothing until the turn ends; the next check after it moves it.
+  w.dispatcherCfg.now = { pool: 'lothsahn', named: true };
+  const busy = w.add(dispatcherOn(key(B1), { lastResult: 'ok', status: 'running' }));
+  assert.deepEqual(w.agents.applyAccountConfig('mid-turn'), [], 'a turn is never killed');
+  assert.equal(busy.stops, 0);
+  busy.info.status = 'idle';
+  assert.deepEqual(w.agents.applyAccountConfig('after the turn'), ['disp']);
+  assert.equal(busy.stops, 1);
+  assert.match(got.disp.at(-1)!, /claudeAccounts.dispatcher names lothsahn's pool/);
+  // Unset (the system payer's pool): Ben's pool setting naming lothsahn's moves it too (set_pool calls this).
+  w.add(dispatcherOn(key(L1), { lastResult: 'ok' }));
+  w.sessions.send('disp', 'hello', 'system');
+  assert.deepEqual(w.agents.applyAccountConfig('on its pool'), []);
+  // claudeAccounts.dispatcher cleared: the system payer's pool (Ben's, by his own pool setting).
+  w.dispatcherCfg.now = { pool: 'ben', named: false };
+  const again = w.add(dispatcherOn(key(L1), { lastResult: 'ok' }));
+  assert.deepEqual(w.agents.applyAccountConfig('set_pool'), ['disp']);
+  assert.equal(again.stops, 1);
+  assert.match(got.disp.at(-1)!, /the system payer's pool, ben's by their pool setting/);
+});
+
+test("w5921: a person's orchestrator moves at once when their pool setting changes, not at its next message", (t) => {
+  const w = world(t);
+  w.meter(B1, reading(10, 10));
+  w.meter(L1, reading(10, 10));
+  const orch = w.add({ ...worker('orch-l', key(L1), { requestedBy: { userId: 'lothsahn', displayName: 'lothsahn' }, lastResult: 'ok' }), kind: 'orchestrator', orchestratorRole: 'personal', machineId: undefined } as SessionInfo);
+  const got = recordStops(w);
+  w.agents.hasPool = () => true;
+  assert.deepEqual(w.agents.applyAccountConfig('test'), []);
+  assert.equal(w.agents.setPool('lothsahn', 'ben', 'test'), 'ben');
+  assert.equal(orch.stops, 1, "set_pool restarted lothsahn's orchestrator between turns");
+  assert.match(got['orch-l'].at(-1)!, /^Stopped by FF Factory between turns to apply its account config: .*lothsahn's pool setting names ben's now/);
+});
+
+test('w5921 review of #1312: a restart that lands on the same out token again (a sticky capped one) is not moved again for 30 min', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100));
+  w.meter(B2, reading(0, 3));
+  w.dispatcherCfg.now = { pool: 'ben', named: true };
+  let now = Date.parse('2026-11-26T10:00:00Z');
+  t.mock.method(Date, 'now', () => now);
+  const move = (h: ReturnType<typeof w.add>) => (w.agents as unknown as { accountMoveWhy(s: unknown): string | undefined }).accountMoveWhy(h);
+  const first = w.add(dispatcherOn(key(B1), { lastResult: 'ok' }));
+  assert.match(move(first)!, /restarts on a token with room in ben's pool/, 'off the used-up token once');
+  now += 60_000;
+  assert.ok(move(first), 'the same move holds while its restart happens');
+  // Its restart landed on vault-ben-1 again: no second move, no loop.
+  now += 5 * 60_000;
+  const again = w.add(dispatcherOn(key(B1), { lastResult: 'ok' }));
+  assert.equal(move(again), undefined, 'not moved again onto the same token');
+  now += 30 * 60_000;
+  assert.ok(move(again), 'after 30 min it tries again');
+});
+
+test('w5921 review of #1312: the stop line moves the dispatcher only when its pool has room; with no room it stays', () => {
+  const c: DispatcherAccount = { pool: 'ben', named: true };
+  const on = { label: 'vault-ben-1 …1111', owner: 'ben' };
+  assert.match(dispatcherMove(c, [], 'token:a', { ...on, room: true, atStop: true })!.why, /at the dispatcher's stop line, so it restarts on a token with room in ben's pool/);
+  assert.equal(dispatcherMove(c, [], 'token:a', { ...on, room: true, atStop: true })!.out, true, 'an out move, not a config one');
+  assert.equal(dispatcherMove(c, [], 'token:a', { ...on, room: false, atStop: true }), undefined, 'no room: it stays (the whole pool is out: it waits there)');
+  assert.equal(dispatcherMove(c, [], 'token:a', { ...on, owner: 'lothsahn', room: false })!.out, false, 'a config move is never an out move');
+});
+
+test('w5921: dispatcherWait names the earliest reset of its pool', () => {
+  const c: DispatcherAccount = { pool: 'ben', named: true };
+  const now = Date.parse('2026-11-26T00:00:00Z');
+  const line = dispatcherWait(c, [{ label: 'a …1111', until: now + 5 * 3_600_000 }, { label: 'b …2222', until: now + 2 * 3_600_000 }, { label: 'c …3333' }], now);
+  assert.match(line, /every token of ben's pool \(claudeAccounts.dispatcher\) is out, so it waits and never runs on another pool; the first to reset is b …2222, at 2026-11-26 02:00Z$/);
 });

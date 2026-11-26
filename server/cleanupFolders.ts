@@ -42,6 +42,8 @@ export interface CleanupFacts {
   root?: string;
   /** The workers' temp root, <root>/tmp. */
   tempRoot?: string;
+  /** Medium agents' own temp root, <root>/tmp-medium, once daemon.json mediumAgentFolders is on (w5862, w5869). */
+  mediumTempRoot?: string;
   sandboxes: { id: string; path: string }[];
   /** Sessions whose process runs here now. */
   live: string[];
@@ -595,6 +597,9 @@ export async function judgePlayerCachePath(p: string, f: CleanupFacts, now: numb
   return row('delete', `${what}: no running process, pin, slot in use or worker with a request not closed uses it, last used ${agoMin(now - used)} ago, and not one of the ${PLAYER_CACHE_KEEP_NEWEST} newest builds; the next run that needs this commit builds it again (3 to 23 min). An idle player slot filled from it keeps its hard-linked files until that slot is emptied too`);
 }
 
+/** The agents' temp roots the facts name: the workers' and, once w5862's switch is on, Medium agents' own (w5869). */
+const tempRootsOf = (f: CleanupFacts): string[] => [f.tempRoot, f.mediumTempRoot].filter((t): t is string => !!t);
+
 /** The verdict for one path, wherever it is. */
 export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: SlotContext): FolderRow {
   const row = (kind: FolderRow['kind'], r: Pick<FolderRow, 'verdict' | 'why'>): FolderRow => ({ path: p, kind, ...r });
@@ -602,12 +607,13 @@ export function judgePath(p: string, f: CleanupFacts, now = Date.now(), slots?: 
   if (bad) return row('other', { verdict: 'keep', why: bad });
   const root = f.root!;
   if (!within(p, root) || norm(p) === norm(root)) return row('other', { verdict: 'keep', why: OUTSIDE_ROOT_WHY });
-  if (f.tempRoot && within(p, f.tempRoot) && norm(p) !== norm(f.tempRoot)) {
-    const first = norm(p).slice(norm(f.tempRoot).length + 1).split('/')[0]!;
+  const temp = tempRootsOf(f).find((t) => within(p, t) && norm(p) !== norm(t));
+  if (temp) {
+    const first = norm(p).slice(norm(temp).length + 1).split('/')[0]!;
     const sid = sessionOfDir(first);
     if (sid) {
       const r = judgeSession(sid, f);
-      const seen = r.verdict === 'delete' ? sessionSeen(sid, path.join(f.tempRoot, first), f, slots) : undefined;
+      const seen = r.verdict === 'delete' ? sessionSeen(sid, path.join(temp, first), f, slots) : undefined;
       return row('session-temp', seen ? { verdict: 'keep', why: seen } : r);
     }
     return row('other', { verdict: 'keep', why: 'not a worker temp folder (ffa-<session>)' });
@@ -749,7 +755,7 @@ export async function planFolders(f: CleanupFacts, o: { now?: number; sizes?: 'a
   const bad = factsProblem(f, now);
   if (bad) return [{ path: f.root ?? '(no install folder)', kind: 'other', verdict: 'keep', why: bad }];
   const paths: string[] = [];
-  if (f.tempRoot) for (const e of entries(f.tempRoot)) if (e.isDirectory() && sessionOfDir(e.name)) paths.push(path.join(f.tempRoot, e.name));
+  for (const t of tempRootsOf(f)) for (const e of entries(t)) if (e.isDirectory() && sessionOfDir(e.name)) paths.push(path.join(t, e.name));
   for (const e of entries(path.join(f.root!, 'scratch'))) paths.push(path.join(f.root!, 'scratch', e.name));
   for (const e of entries(path.join(f.root!, 'players'))) if (e.isDirectory() && isSlotDir(e.name)) paths.push(path.join(f.root!, 'players', e.name));
   const ffu = path.join(f.root!, FFU_SLOTS_DIR);

@@ -15,6 +15,7 @@ import type { TimerAuthority } from './timers.ts';
 import type { LinkUpdateFlags, LinkUpdateReport } from './machineProtocol.ts';
 import { linkReportSummary } from './machineRollout.ts';
 import { FULL_COMMIT, portalCommit } from './version.ts';
+import { PREFER_TOOLS } from './bashNudge.ts';
 
 /**
  * The orchestration worker (w597, docs/ops-worker.md): ONE Claude Code session with a real shell, for Lothsahn's and
@@ -650,7 +651,7 @@ export function opsSpawner(socketPath = OPS_PATHS.socket, version = sdkVersion()
 export function opsBrief(ownerName: string | undefined): string {
   return `
 ## You are FF Factory's orchestration worker (w597, docs/ops-worker.md)
-You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials and member logins' API keys. Anything heavy runs on the target machine over ssh, never here.
+You run inside the FF Factory portal's VM (fff, on Loth2400) as the Linux account fff-ops, with a real shell. You take jobs only from Lothsahn's and Ben's own orchestrators; each message says whose it is. ${PREFER_TOOLS} ${ownerName ? `The portal's owner is ${ownerName}.` : ''} Your job is orchestration: reaching the machines (beast, lothdesktop, m3, m5, biscuit and new ones) over ssh and copying files to and from them with scp, reading the portal's state, pinning a new machine's host key, and issuing machine credentials and member logins' API keys. Anything heavy runs on the target machine over ssh, never here.
 
 What you have:
 - \`ssh <machine> '<command>'\`: as the portal's account with its key. Machines by their aliases (m3, m5, beast, Loth2800: deploy/vm/guest/machines.ssh) or the user@host list_machines shows for a machine its installer registered. Only pinned host keys connect. A machine whose worker install has no ssh (list_machines says "no ssh": it joined with -NoSsh, w1596, like LothLaptop) has no sshd, and port 22 there times out by design: your guard refuses ssh, scp and sftp to it with the reason (w4674). Its routes are an update over its daemon's link (the orchestrator's ops_worker machine_update, or the rollout after a deploy) and a local worker in one of its sandboxes; tell your requester that, and never set or keep a timer that tries ssh there again. Send the remote command in single quotes; pipe a script with \`ssh m5 'bash -s' < script.sh\` (Windows: \`ssh beast 'powershell -NoProfile -Command -' < script.ps1\`). The worker installer is run there (docs/worker-install.md). To update a machine's install, run its update there and nothing else (docs/worker-install.md, "Updating"; it asks nothing, keeps every setting, the machine's own credential and the PATH, restarts the daemon and says what the portal sees): on a Mac \`ssh m5 'bash -c "$(curl -fsSL https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.sh)" -- --update --ref <commit> --root <root>'\`, on Windows \`ssh beast 'powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Final-Factory/ff-factory/<commit>/scripts/worker/install.ps1))) -Update -Ref <commit> -Root <root>"'\`. <commit> is the portal's own full commit, the \`commit\` field of \`curl -fsS <portal>/api/health\` (w5516: never main, whose head may be code nobody verified); the installer checks that exact commit out and refuses when it cannot, and puts the daemon on it. Better still, ask the orchestrator for machine_update, which writes the command itself. An update needs no new credential: never issue one for it. An update never needs a drain or a wait (w605): it stops only the daemon, agents mid-turn run on in their own agent hosts and the new daemon adopts them, so run it at once. After a portal deploy you do not update the machines: FF Factory does that itself once the deploy has verified (w887).
@@ -694,6 +695,8 @@ export interface OpsDeps {
    * (w5507), only with `words` found in their own message in it.
    */
   personTurn: (orchestratorId: string, words?: string) => boolean;
+  /** w5896: what would pass a gate reserved for the person's own words in that chat now (Orchestrators.ownWordsNeed). */
+  personTurnNeed?: (orchestratorId: string, words?: string) => string | undefined;
   /**
    * w1039: whether a click of the person's (👍 ✅ on their orchestrator's proposal) is their own words for `need` now, and spends
    * it. Optional: a portal without it takes only a typed turn.
@@ -764,6 +767,7 @@ export function workerUpdateFlags(
   storeLock?: 'off' | 'warn' | 'on',
   editorTmpdir?: 'on' | 'off',
   pathFence?: 'off' | 'warn',
+  mediumAgentFolders?: 'warn' | 'on',
 ): string[] {
   const win = platform === 'win32';
   return (
@@ -779,8 +783,9 @@ export function workerUpdateFlags(
           workerFence && `-WorkerFence ${workerFence}`,
           workerCaps && `-WorkerCaps ${workerCaps}`,
           storeLock && `-StoreLock ${storeLock}`,
+          mediumAgentFolders && `-MediumAgentFolders ${mediumAgentFolders}`,
         ]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`]
   ).filter((f): f is string => !!f);
 }
 
@@ -970,11 +975,13 @@ export class OpsWorker {
       throw new Error(`follow_up: ${why}, so there is nothing to follow up. Send it again, in full, with no follow_up: that is a new job`);
     }
     const h = this.handle();
+    // w5896: each refusal says exactly what passes (Orchestrators.ownWordsNeed).
+    const need = () => this.d.personTurnNeed?.(caller.id, words) ?? `a turn ${person.displayName} started with a message of their own, or their own words that decided it quoted verbatim in words`;
     if (!theirTurn && jobOpen && this.now() - Date.parse(this.job!.at) >= OPS_LIMITS.harnessFollowUpMs) {
-      throw new Error(`a follow-up in a harness turn (a check-in, a timer or a relayed report) is accepted only in the first ${OPS_LIMITS.harnessFollowUpMs / 60_000} minutes of the job; this job is older, so it needs a turn ${person.displayName} started with a message of their own: a new job, or follow_up: true there`);
+      throw new Error(`a follow-up in a harness turn (a check-in, a timer or a relayed report) is accepted only in the first ${OPS_LIMITS.harnessFollowUpMs / 60_000} minutes of the job; this job is older, so it needs a turn ${person.displayName} started with a message of their own: a new job, or follow_up: true there. What passes: ${need()}`);
     }
     const opening = fresh || !jobOpen || (theirTurn && !followUp);
-    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it: then quote ${person.displayName}'s own words from it in words, w5507)`);
+    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own, or their own words: ${need()}`);
     if (opening && !fresh && jobOpen && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with your open job (${this.job!.what}), and a new job starts a fresh conversation, which would cut that turn off. Wait for its [ops worker] report, send follow_up: true to add to that job, ops_worker interrupt to end its turn, or fresh: true to cut it off and start over`);
     }
@@ -1016,7 +1023,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn'; mediumAgentFolders?: 'warn' | 'on' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1050,6 +1057,8 @@ export class OpsWorker {
     // w5863: the path fence's switch (daemon.json `pathFence`), macOS and Linux only.
     if (o.pathFence !== undefined && o.pathFence !== 'off' && o.pathFence !== 'warn') throw new Error('path_fence: off or warn');
     if (o.pathFence !== undefined && m.platform === 'win32') throw new Error(`path_fence: macOS and Linux only, and ${m.id} is a Windows PC`);
+    // w5862, w5869: Medium agents' own temp root and cargo home (daemon.json `mediumAgentFolders`), every OS.
+    if (o.mediumAgentFolders !== undefined && o.mediumAgentFolders !== 'warn' && o.mediumAgentFolders !== 'on') throw new Error('medium_agent_folders: warn or on');
     // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
     // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
     // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the
@@ -1062,7 +1071,7 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders }).filter(([, v]) => v !== undefined && v !== false));
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1077,7 +1086,7 @@ export class OpsWorker {
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
@@ -1097,7 +1106,7 @@ export class OpsWorker {
     if (!person || !caller) throw new Error(OPS_REFUSED);
     // w5507: in a turn a relayed message joined, the deploy's text (their own words, as they said them) or words must be
     // found in their own message in it.
-    if (!this.d.personTurn(caller.id, words) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it, and neither text nor words quotes their own message in it, w5507); ask them`);
+    if (!this.d.personTurn(caller.id, words) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words: ${this.d.personTurnNeed?.(caller.id, words) ?? 'a turn they started with a message of their own, or their words quoted in words'}`);
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
     const h = this.handle();

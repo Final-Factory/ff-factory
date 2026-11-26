@@ -12,15 +12,28 @@
  * A worker takes a slot with `eval "$(ffu-slot take --branch <b>)"`: it keeps the slot it holds, else gets a free one, the
  * one last on its branch first, then the one used most recently (the warmest target), and only then a new one (a cold
  * target), up to FF_FFU_SLOTS_MAX. A slot is free when no one holds it, or its holder's process no longer runs here
- * (cleanup-facts.json's `live`) and its checkout holds no work (no change, no commit missing from origin). A held slot whose
- * holder stopped with work in it stays theirs. The cargo registry is the machine's, inside the install folder (w5501): every
+ * (cleanup-facts.json's `live`) and its checkout holds no work (no change, no commit missing from origin). w5885 (lothsahn:
+ * "fix how stale workers held on to slots"): a holder also loses its slot once it is finished (on no open request), stopped
+ * or waiting past FFU_SLOT_WAIT_GRACE_MS, or idle in it past FFU_SLOT_IDLE_MS; work it left is saved first on a rescue
+ * branch (rescueWork), never dropped. A worker that finds every slot held waits (`take --wait`, or wake_me) and never builds
+ * elsewhere. The cargo registry is the machine's, inside the install folder (w5501): every
  * slot shares one CARGO_HOME, `<root>/cache/cargo` unless one already sits inside the root (sharedCaches.ts workerCargoHome).
  * Measured design: docs/ffu-sandboxes.md.
+ *
+ * w5870: the slots are in a folder workers write (Low on Windows), so a build there runs build scripts, target binaries and a
+ * slot's `.cargo/config.toml` that any worker could have written. A sandbox agent is a worker itself; a Medium agent (one not
+ * in a sandbox, outside the fences) is not, so `take` and `where` warn it, and refuse it (exit 5) once the daemon says "on" in
+ * MEDIUM_AGENT_VAR (machine/mediumFolders.ts): daemon.json "mediumAgentCaches" is "on" and w5862's "mediumAgentFolders" gave
+ * the agent its own temp folder, which no worker writes, so it builds there instead (w5946 F5). A Medium agent's `take` keeps its
+ * own CARGO_HOME and never gets the workers' `<root>/cache/cargo` (w5947): crates and build scripts a worker could have planted.
  */
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitSpawnSync } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
+import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
@@ -31,6 +44,30 @@ export const FFU_SLOTS_DEFAULT_MAX = 4;
 export const FFU_NEW_SLOT_MIN_FREE_GB = 40;
 /** The facts file is trusted for other holders' liveness only while this fresh; older, every other holder counts as live. */
 const FACTS_FRESH_MS = 15 * 60_000;
+/**
+ * w5885: a holder that stopped, or whose every request waits (blocked_on, a question, queued), keeps its slot this long after
+ * its last use; then a worker that needs one may take it (its work saved first, rescueWork). 30 min is the harness's own line
+ * between a short wait and a long one (a wake_me check-in under 30 min keeps a sandbox, a longer one frees it; the worker
+ * brief). ffu's pull request CI took 123 min at the median and 190 at p90 (measured, gh run list -R Final-Factory/ffu, 92
+ * runs to 2026-11-26), so holding a slot through a whole CI wait idles a warm target for hours, and a resumed worker takes
+ * one back cheaply: a slot last on its branch is picked first.
+ */
+export const FFU_SLOT_WAIT_GRACE_MS = 30 * 60_000;
+/**
+ * w5885: a holder on a request still marked working keeps its slot this long with no use of it (no take, git index or cargo
+ * write), then it is taken like a waiting one. A guess, long beside the ffu loop's slowest measured step (a cold workspace
+ * build, 221-366 s; docs/ffu-sandboxes.md), so only a worker that moved to other work loses it (6d0f156a held LothDesktop's
+ * slot1 all of 2026-11-25 while it worked in Unity, and five workers built in their temp folders).
+ */
+export const FFU_SLOT_IDLE_MS = 2 * 60 * 60_000;
+/**
+ * w5885 (lothsahn's note, 2026-11-26: "A worker with two checkouts may lease a second ffu slot, one slot per checkout and per
+ * branch, when one is free"): the most slots one worker holds at once. Two covers the case that note came from (w5475: a map
+ * branch and a Report a Bug branch); a guess, kept low so one worker never takes a machine's four.
+ */
+export const FFU_SLOTS_PER_WORKER = 2;
+/** w5885: how often `take --wait` looks for a free slot again. */
+const WAIT_POLL_MS = 30_000;
 const LOCK_STALE_MS = 15 * 60_000;
 const LOCK_WAIT_MS = 10 * 60_000;
 
@@ -44,8 +81,23 @@ export interface FfuSlot {
   usedAt?: string;
 }
 
+/** w5885: work a freed slot's holder had left in it, kept on a branch of the shared clone (and pushed to origin when it could be). */
+export interface FfuRescue {
+  holder: string;
+  slot: string;
+  branch: string;
+  sha: string;
+  /** The holder's branch in the slot, if it was on one. */
+  from?: string;
+  pushed: boolean;
+  at: string;
+  /** Set once the holder was told (its next take or where). */
+  told?: boolean;
+}
+
 export interface FfuSlotState {
   slots: FfuSlot[];
+  rescues?: FfuRescue[];
 }
 
 export interface Ran {
@@ -61,6 +113,10 @@ export interface FfuSlotDeps {
   /** The machine's CARGO_HOME inside the root (w5501, sharedCaches.ts workerCargoHome); `take` exports it. */
   cargoHome?: string;
   facts?: CleanupFacts;
+  /** w5870: MEDIUM_AGENT_VAR, set only for a Medium agent: "warn" or "on". */
+  medium?: string;
+  /** Read cleanup-facts.json again (`take --wait` polls with it); absent: the facts stay as given. */
+  readFacts?: () => CleanupFacts | undefined;
   now: () => number;
   git: (args: string[], cwd?: string) => Ran;
   freeGB: (dir: string) => number | undefined;
@@ -103,7 +159,7 @@ const repoDir = (root: string) => path.join(slotsBase(root), 'repo');
 export function readSlotState(root: string): FfuSlotState {
   try {
     const s = JSON.parse(fs.readFileSync(stateFile(root), 'utf8')) as FfuSlotState;
-    return { slots: Array.isArray(s.slots) ? s.slots.filter((x) => x && /^slot\d+$/.test(x.id)) : [] };
+    return { slots: Array.isArray(s.slots) ? s.slots.filter((x) => x && /^slot\d+$/.test(x.id)) : [], ...(Array.isArray(s.rescues) && s.rescues.length ? { rescues: s.rescues } : {}) };
   } catch {
     return { slots: [] };
   }
@@ -150,7 +206,8 @@ function withLock<T>(d: FfuSlotDeps, fn: () => T): T {
 export function checkoutWork(d: FfuSlotDeps, id: string): string | undefined {
   const wt = slotCheckout(d.root, id);
   if (!fs.existsSync(wt)) return undefined;
-  const st = d.git(['status', '--porcelain', '--untracked-files=normal'], wt);
+  // --no-optional-locks: a plain status rewrites the index, which slotLastUsed reads as the holder's own use (w5885)
+  const st = d.git(['--no-optional-locks', 'status', '--porcelain', '--untracked-files=normal'], wt);
   if (st.code !== 0) return `its checkout cannot be read (git status: ${st.err.trim().slice(0, 160)})`;
   if (st.out.trim()) return `its checkout has ${st.out.trim().split('\n').length} uncommitted change(s)`;
   const ahead = d.git(['log', '--oneline', '-n', '1', 'HEAD', '--not', '--remotes'], wt);
@@ -159,16 +216,131 @@ export function checkoutWork(d: FfuSlotDeps, id: string): string | undefined {
   return undefined;
 }
 
-/** Whether another worker may take `s` now, and if not why. */
-export function slotFree(d: FfuSlotDeps, s: FfuSlot): { free: boolean; why: string } {
+/**
+ * When the slot was last used (ms): the newest of its take, its checkout's git files (the index git status refreshes, HEAD,
+ * the reflog) and its target's profile folders (cargo adds files there on a build). A proxy: an edit no command has looked
+ * at yet does not count, so the limits above are long.
+ */
+export function slotLastUsed(d: FfuSlotDeps, s: FfuSlot): number {
+  let t = Math.max(Date.parse(s.usedAt ?? '') || 0, Date.parse(s.takenAt ?? '') || 0);
+  const m = (p: string) => {
+    const st = fs.statSync(p, { throwIfNoEntry: false });
+    if (st && st.mtimeMs > t) t = st.mtimeMs;
+  };
+  // git names a worktree's folder in the shared clone after the checkout's folder ("ffu", then "ffu1", ...): read its .git file
+  const dotGit = fs.existsSync(path.join(slotCheckout(d.root, s.id), '.git')) ? fs.readFileSync(path.join(slotCheckout(d.root, s.id), '.git'), 'utf8') : '';
+  const gd = /^gitdir:\s*(.+?)\s*$/m.exec(dotGit)?.[1];
+  if (gd) for (const f of ['index', 'HEAD', path.join('logs', 'HEAD')]) m(path.resolve(slotCheckout(d.root, s.id), gd, f));
+  const tgt = slotTarget(d.root, s.id);
+  for (const prof of ['debug', 'release', 'bench']) for (const sub of ['', '.fingerprint', 'deps']) m(path.join(tgt, prof, sub));
+  return t;
+}
+
+/** Whether the holder is on no open request, or every request it works on waits (blocked, a question, queued), as the portal last said. */
+function holderState(f: CleanupFacts, holder: string): 'finished' | 'waiting' | 'working' | 'unknown' {
+  if (!f.connected || !f.owners) return 'unknown';
+  const o = f.owners[holder];
+  if (!o) return 'finished';
+  const open = o.requests.filter((r) => ['new', 'question', 'queued', 'blocked', 'active', 'stalled'].includes(r.status));
+  const mine = open.some((r) => r.with) ? open.filter((r) => r.with) : open;
+  if (!mine.length) return 'finished';
+  return mine.every((r) => ['question', 'queued', 'blocked', 'stalled'].includes(r.status)) ? 'waiting' : 'working';
+}
+
+const mins = (ms: number) => `${Math.round(ms / 60_000)} min`;
+
+/**
+ * Whether another worker may take `s` now, and if not why. `rescue` is set when the slot is free only once its holder's work
+ * is saved (rescueWork): a finished holder, or one stopped, waiting or idle past its limit (w5885).
+ */
+export function slotFree(d: FfuSlotDeps, s: FfuSlot): { free: boolean; why: string; rescue?: string } {
   if (!s.holder) return { free: true, why: 'released' };
-  if (s.holder === d.session) return { free: true, why: 'yours' };
+  if (s.holder === d.session) return { free: true, why: `yours${s.branch ? ` (on ${s.branch})` : ''}` };
   const f = d.facts;
   if (!f || !f.at || d.now() - Date.parse(f.at) > FACTS_FRESH_MS) return { free: false, why: `held by ${s.holder} (whether it runs is not known: no fresh cleanup-facts.json)` };
-  if (f.live.includes(s.holder)) return { free: false, why: `held by ${s.holder}, which runs` };
+  const live = f.live.includes(s.holder);
+  const state = holderState(f, s.holder);
+  const idle = d.now() - slotLastUsed(d, s);
   const work = checkoutWork(d, s.id);
-  if (work) return { free: false, why: `held by ${s.holder}, stopped, and ${work}` };
-  return { free: true, why: `held by ${s.holder}, which no longer runs, and its work is pushed` };
+  const free = (why: string) => (work ? { free: true, why: `${why}; ${work}, saved on a rescue branch first`, rescue: work } : { free: true, why: `${why}, and its work is pushed` });
+  if (state === 'finished') return free(`held by ${s.holder}, which is on no open request`);
+  if (!live && !work) return { free: true, why: `held by ${s.holder}, which no longer runs, and its work is pushed` };
+  if ((!live || state === 'waiting') && idle > FFU_SLOT_WAIT_GRACE_MS) return free(`held by ${s.holder}, ${live ? 'which waits' : 'which no longer runs'}, unused for ${mins(idle)}`);
+  if (idle > FFU_SLOT_IDLE_MS) return free(`held by ${s.holder}, unused for ${mins(idle)}`);
+  if (!live) return { free: false, why: `held by ${s.holder}, stopped and used ${mins(idle)} ago (kept ${mins(FFU_SLOT_WAIT_GRACE_MS)} for a short wait), and ${work}` };
+  if (state === 'waiting') return { free: false, why: `held by ${s.holder}, which waits, used ${mins(idle)} ago (kept ${mins(FFU_SLOT_WAIT_GRACE_MS)} for a short wait)` };
+  return { free: false, why: `held by ${s.holder}, which runs, used ${mins(idle)} ago` };
+}
+
+/**
+ * Every slot as `ffu-slot list` judges it, for the daemon's status (w5912, lothsahn: "Can we show those on the portal?"):
+ * the same slotFree, so the portal's free, held and stale are the shim's own. Run by `ffu-slot list --json`.
+ */
+export function slotsReport(d: FfuSlotDeps): FfuSlotsReport {
+  const f = d.facts;
+  const fresh = !!f?.at && d.now() - Date.parse(f.at) <= FACTS_FRESH_MS;
+  const slots = readSlotState(d.root).slots.map((s): FfuSlotView => {
+    const j = slotFree(d, s);
+    const used = slotLastUsed(d, s);
+    const head = fs.existsSync(slotCheckout(d.root, s.id)) ? d.git(['rev-parse', '--short=12', 'HEAD'], slotCheckout(d.root, s.id)) : undefined;
+    const holderIs = !s.holder ? undefined : !fresh ? 'unknown' : f!.live.includes(s.holder) ? 'live' : f!.resumable.includes(s.holder) ? 'stopped' : 'gone';
+    return {
+      id: s.id,
+      ...(s.holder ? { holder: s.holder, holderIs } : {}),
+      ...(s.branch ? { branch: s.branch } : {}),
+      ...(head?.code === 0 && head.out.trim() ? { commit: head.out.trim() } : {}),
+      ...(s.takenAt ? { takenAt: s.takenAt } : {}),
+      ...(used ? { usedAt: new Date(used).toISOString() } : {}),
+      free: j.free,
+      // A held slot another worker may take now: w5885's notion of a stale hold, which the next take frees by itself.
+      stale: !!s.holder && j.free,
+      why: j.why,
+    };
+  });
+  return { at: new Date(d.now()).toISOString(), max: d.max, slots };
+}
+
+/**
+ * w5885: save the work a freed slot's holder left in its checkout before the slot is reset (lothsahn: "Unpushed work is pushed
+ * or kept safe first, never dropped"): uncommitted changes are committed, and the tip is kept as branch
+ * `rescue/ffu-slot/<slot>-<holder>-<sha8>` in the shared clone (a local branch: fetch --prune never drops it) and pushed to
+ * origin when it can be (ffu's CI runs on pushes to main and tags only, so the push starts nothing). Throws when it cannot
+ * commit: the take then fails and the checkout stays as it was.
+ */
+export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
+  const wt = slotCheckout(d.root, s.id);
+  const repo = repoDir(d.root);
+  const holder = s.holder ?? 'unknown';
+  const from = d.git(['symbolic-ref', '--quiet', '--short', 'HEAD'], wt).out.trim() || undefined;
+  if (d.git(['status', '--porcelain', '--untracked-files=normal'], wt).out.trim()) {
+    must(d.git(['add', '-A'], wt), 'git add');
+    must(d.git(['commit', '--quiet', '-m', `ffu-slot rescue: what ${holder} left uncommitted in ${s.id}${from ? ` on ${from}` : ''} (w5885)`], wt), 'git commit');
+  }
+  const sha = must(d.git(['rev-parse', 'HEAD'], wt), 'git rev-parse').trim();
+  const branch = `rescue/ffu-slot/${s.id}-${holder.slice(0, 8)}-${sha.slice(0, 8)}`;
+  must(d.git(['branch', '-f', branch, sha], repo), 'git branch');
+  // The work now lives on the rescue branch only: the holder's own branch goes back to origin's (or away, if origin has
+  // none), so the next worker on it starts from what was pushed, not from what another worker left.
+  if (from) {
+    must(d.git(['checkout', '--quiet', '--detach'], wt), 'git checkout');
+    const onOrigin = d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${from}`], repo).code === 0;
+    must(d.git(onOrigin ? ['branch', '-f', from, `refs/remotes/origin/${from}`] : ['branch', '-D', from], repo), 'git branch');
+  }
+  const push = d.git(['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], repo);
+  const r: FfuRescue = { holder, slot: s.id, branch, sha, ...(from ? { from } : {}), pushed: push.code === 0, at: new Date(d.now()).toISOString() };
+  d.say(`ffu-slot: saved ${holder}'s work in ${s.id} (${sha.slice(0, 8)}) on branch ${branch}${r.pushed ? ', pushed to origin' : ` in ${fwd(repo)} (push failed: ${(push.err || push.out).trim().slice(0, 160)})`}\n`);
+  return r;
+}
+
+/** Tell this worker, once, of work of its own that a freed slot saved (w5885); true when it told one. */
+function tellRescues(d: FfuSlotDeps, st: FfuSlotState): boolean {
+  let told = false;
+  for (const r of st.rescues ?? []) {
+    if (r.holder !== d.session || r.told) continue;
+    d.say(`ffu-slot: your slot ${r.slot} went to another worker after you left it unused; your work there (${r.sha.slice(0, 8)}${r.from ? `, on ${r.from}` : ''}) is on branch ${r.branch}${r.pushed ? ' (pushed to origin)' : ' in the shared clone'}: take a slot and merge or check it out\n`);
+    r.told = told = true;
+  }
+  return told;
 }
 
 const nextId = (s: FfuSlotState) => {
@@ -270,36 +442,79 @@ export interface TakeOptions {
   remote?: string;
 }
 
-/** Take a slot (or keep the one held): its id, after the checkout is ready. Throws with the reason when none can be had. */
+/** No slot can be had now (all held, or no disk for a new one): `take --wait` waits on it; the CLI exits 4. */
+export class NoFreeSlot extends Error {}
+
+/** What a worker that finds no free slot does (w5885): wait, never build elsewhere. */
+export const NO_SLOT_ADVICE =
+  'Wait for one: run `ffu-slot take --wait 9 --branch <your branch>` (it looks every 30 s), or set a wake_me check-in (15 min) and end your turn, then take again. Do not build ffu anywhere else: not in $TMPDIR, not in a clone or worktree of your own (w5885)';
+
+/** w5885: the slots a session holds, the most recently used first. */
+export function heldSlots(st: FfuSlotState, session: string): FfuSlot[] {
+  const used = (s: FfuSlot) => Date.parse(s.usedAt ?? '') || 0;
+  return st.slots.filter((s) => session && s.holder === session).sort((a, b) => used(b) - used(a));
+}
+
+/** Take a slot (or keep the one held): its id, after the checkout is ready. Throws NoFreeSlot with the reason when none can be had. */
 export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
   const base = o.base ?? 'main';
   return withLock(d, () => {
     ensureRepo(d, o.remote ?? FFU_REMOTE);
     const st = readSlotState(d.root);
-    const mine = st.slots.find((s) => s.holder === d.session);
+    tellRescues(d, st);
+    // w5885: a worker holds one slot per branch (up to FFU_SLOTS_PER_WORKER): take --branch on a branch none of its slots is on
+    // leases another free slot, so two checkouts never share one target; with none free, a slot of its own with no work
+    // switches, as before.
+    const held = heldSlots(st, d.session);
+    const mine = o.branch ? held.find((s) => s.branch === o.branch) : held[0];
     let pick = mine;
     if (!pick) {
-      const free = st.slots.filter((s) => slotFree(d, s).free);
+      const verdict = new Map(st.slots.map((s) => [s, slotFree(d, s)]));
+      const free = held.length < FFU_SLOTS_PER_WORKER ? st.slots.filter((s) => s.holder !== d.session && verdict.get(s)?.free) : [];
       const used = (s: FfuSlot) => Date.parse(s.usedAt ?? '') || 0;
       const onBranch = o.branch ? free.filter((s) => s.branch === o.branch) : [];
-      pick = (onBranch.length ? onBranch : free).sort((a, b) => used(b) - used(a))[0];
+      // A slot with no work to save goes before one whose holder's work must be rescued first.
+      const clean = (l: FfuSlot[]) => l.filter((s) => !verdict.get(s)?.rescue);
+      const pool = [onBranch, free].map((l) => (clean(l).length ? clean(l) : l)).find((l) => l.length) ?? [];
+      pick = pool.sort((a, b) => used(b) - used(a))[0];
+      // No other slot to lease (or at the cap): a slot of your own with no work switches to the branch, the least used first.
+      const own = () => [...held].reverse().find((s) => !checkoutWork(d, s.id));
+      if (!pick && held.length && (held.length >= FFU_SLOTS_PER_WORKER || st.slots.length >= d.max)) {
+        const sw = own();
+        if (sw) pick = sw;
+        else {
+          tellAndKeep(d, st);
+          const yours = held.map((s) => `${s.id}${s.branch ? ` on ${s.branch}` : ''}: ${checkoutWork(d, s.id)}`).join('; ');
+          throw new NoFreeSlot(
+            held.length >= FFU_SLOTS_PER_WORKER
+              ? `you hold ${held.length} ffu slots, the most one worker may (${yours}): push the work of one and release it (ffu-slot release --slot <id>), or wait for your own build to finish there`
+              : `no other ffu slot is free for ${o.branch} (${st.slots.filter((s) => s.holder !== d.session).map((s) => `${s.id}: ${verdict.get(s)?.why}`).join('; ')}), and yours have work (${yours}). ${NO_SLOT_ADVICE}`,
+          );
+        }
+      }
+      if (!pick && st.slots.length >= d.max) {
+        tellAndKeep(d, st);
+        throw new NoFreeSlot(`all ${d.max} ffu slots are held (${st.slots.map((s) => `${s.id}: ${verdict.get(s)?.why}`).join('; ')}). ${NO_SLOT_ADVICE}`);
+      }
+      if (pick && pick.holder !== d.session) {
+        const v = verdict.get(pick);
+        if (v?.rescue) (st.rescues ??= []).push(rescueWork(d, pick));
+        d.say(`ffu-slot: took ${pick.id}${pick.branch ? ` (last on ${pick.branch})` : ''}${held.length ? `, beside your ${held.map((s) => s.id).join(', ')}` : ''}: ${v?.why}\n`);
+      }
     }
     if (!pick) {
-      if (st.slots.length >= d.max) {
-        const why = st.slots.map((s) => `${s.id}: ${slotFree(d, s).why}`).join('; ');
-        throw new Error(`all ${d.max} ffu slots are held (${why}). Build in your temp folder this time (CARGO_TARGET_DIR="$TMPDIR/ffu-target"), or wait and take one later`);
-      }
       const gb = d.freeGB(d.root);
-      if (gb !== undefined && gb < FFU_NEW_SLOT_MIN_FREE_GB) throw new Error(`no free ffu slot, and a new one is not made with ${gb.toFixed(0)} GB free (under ${FFU_NEW_SLOT_MIN_FREE_GB} GB)`);
+      if (gb !== undefined && gb < FFU_NEW_SLOT_MIN_FREE_GB) {
+        tellAndKeep(d, st);
+        throw new NoFreeSlot(`no free ffu slot, and a new one is not made with ${gb.toFixed(0)} GB free (under ${FFU_NEW_SLOT_MIN_FREE_GB} GB). ${NO_SLOT_ADVICE}`);
+      }
       pick = { id: nextId(st) };
       st.slots.push(pick);
       d.say(`ffu-slot: made ${pick.id}: its first build is cold\n`);
-    } else if (pick !== mine) {
-      d.say(`ffu-slot: took ${pick.id}${pick.branch ? ` (last on ${pick.branch})` : ''}: ${slotFree(d, pick).why}\n`);
     }
     // Your own slot keeps its checkout as you left it, unless you ask for another branch.
-    if (pick !== mine || (o.branch && o.branch !== pick.branch) || !fs.existsSync(path.join(slotCheckout(d.root, pick.id), '.git'))) {
-      if (pick === mine) {
+    if (pick.holder !== d.session || (o.branch && o.branch !== pick.branch) || !fs.existsSync(path.join(slotCheckout(d.root, pick.id), '.git'))) {
+      if (pick.holder === d.session) {
         const work = checkoutWork(d, pick.id);
         if (work) throw new Error(`${pick.id}: ${work}: commit and push it before switching the slot to ${o.branch}`);
       }
@@ -310,30 +525,95 @@ export function takeSlot(d: FfuSlotDeps, o: TakeOptions = {}): string {
     if (pick.holder !== d.session) pick.takenAt = at;
     pick.holder = d.session;
     pick.usedAt = at;
+    // A rescue is listed a fortnight; its branch stays until someone deletes it.
+    if (st.rescues) st.rescues = st.rescues.filter((r) => d.now() - Date.parse(r.at) < 14 * 24 * 3_600_000);
     writeSlotState(d.root, st);
     return pick.id;
   });
 }
 
-export function releaseSlot(d: FfuSlotDeps): string | undefined {
+/** Keep the told marks a refused take set. */
+function tellAndKeep(d: FfuSlotDeps, st: FfuSlotState): void {
+  if (st.rescues?.some((r) => r.holder === d.session && r.told)) writeSlotState(d.root, st);
+}
+
+/** w5885: take a slot, waiting up to `minutes` for one to free (looking every WAIT_POLL_MS, outside the lock) instead of building elsewhere. */
+export function takeSlotWaiting(d: FfuSlotDeps, o: TakeOptions, minutes: number): string {
+  const until = d.now() + minutes * 60_000;
+  let told = false;
+  for (;;) {
+    try {
+      return takeSlot(d, o);
+    } catch (e) {
+      if (!(e instanceof NoFreeSlot) || d.now() + WAIT_POLL_MS > until) throw e;
+      if (!told) d.say(`ffu-slot: no slot is free; waiting up to ${minutes} min for one (${(e as Error).message.replace(/\. Wait for one:.*$/s, '')})\n`);
+      told = true;
+      d.sleep(WAIT_POLL_MS);
+      if (d.readFacts) d.facts = d.readFacts() ?? d.facts;
+    }
+  }
+}
+
+/** w5885: free every slot a worker may take now (a finished or long-unused holder's), saving its work first; the ids freed. */
+export function sweepSlots(d: FfuSlotDeps): string[] {
   return withLock(d, () => {
     const st = readSlotState(d.root);
-    const mine = st.slots.find((s) => s.holder === d.session);
-    if (!mine) return undefined;
-    const work = checkoutWork(d, mine.id);
-    if (work) throw new Error(`${mine.id}: ${work}. Commit and push first; a slot with work stays yours`);
-    delete mine.holder;
-    mine.usedAt = new Date(d.now()).toISOString();
+    const out: string[] = [];
+    for (const s of st.slots) {
+      if (!s.holder || s.holder === d.session) continue;
+      const f = slotFree(d, s);
+      if (!f.free) continue;
+      if (f.rescue) (st.rescues ??= []).push(rescueWork(d, s));
+      d.say(`ffu-slot: freed ${s.id}: ${f.why}\n`);
+      delete s.holder;
+      out.push(s.id);
+    }
     writeSlotState(d.root, st);
-    return mine.id;
+    return out;
   });
 }
 
-export const USAGE = `usage: ffu-slot take [--branch <b>] [--base <b>] | where | release | list
+/**
+ * Give back the slots you hold (w5885: all of them, or the one on `which.branch` or with id `which.slot`); the ids released.
+ * A slot with work stays yours: the error names it, after the others are released.
+ */
+export function releaseSlot(d: FfuSlotDeps, which: { branch?: string; slot?: string } = {}): string[] {
+  return withLock(d, () => {
+    const st = readSlotState(d.root);
+    const mine = heldSlots(st, d.session).filter((s) => (!which.slot || s.id === which.slot) && (!which.branch || s.branch === which.branch));
+    const out: string[] = [];
+    const kept: string[] = [];
+    for (const s of mine) {
+      const work = checkoutWork(d, s.id);
+      if (work) {
+        kept.push(`${s.id}: ${work}`);
+        continue;
+      }
+      delete s.holder;
+      s.usedAt = new Date(d.now()).toISOString();
+      out.push(s.id);
+    }
+    writeSlotState(d.root, st);
+    if (kept.length) throw new Error(`${out.length ? `released ${out.join(', ')}; ` : ''}${kept.join('; ')}. Commit and push first; a slot with work stays yours`);
+    return out;
+  });
+}
+
+/** `take` and `where`'s exit when a Medium agent is refused a slot (w5870; 4 is "no slot free", w5946 F4). */
+export const EXIT_MEDIUM_REFUSED = 5;
+
+/** The CARGO_HOME `take` exports: the machine's one in the root for a worker; none for a Medium agent, which keeps its own (w5947). */
+export const slotCargoHome = (d: Pick<FfuSlotDeps, 'cargoHome' | 'medium'>) => (d.medium ? undefined : d.cargoHome);
+
+export const USAGE = `usage: ffu-slot take [--branch <b>] [--base <b>] [--wait <minutes>] | where [--branch <b>] | release [--branch <b> | --slot <id>] | list [--json] | sweep
   take: eval "$(ffu-slot take --branch <your branch>)" gives you an ffu checkout with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR) and cds into it
-  where: the same lines for the slot you hold (exit 1 if none)
-  release: give your slot back once your work is pushed (a stopped worker's pushed slot frees itself)
+    exit 4: no slot is free; --wait <minutes> waits for one. Never build ffu elsewhere: wait, or end your turn with wake_me and take again
+    exit 5: refused to an agent outside the worker fences (w5870): build in a clone in your own temp folder, as the message says
+    a second branch gets a second slot of its own (its own checkout and target), up to ${FFU_SLOTS_PER_WORKER} per worker; never two checkouts in one target
+  where: the same lines for the slot you hold on --branch, else the one you used last (exit 1 if none)
+  release: give your slots back (or the one on --branch, or --slot) once your work is pushed (a stopped worker's pushed slot frees itself)
   list: every slot, its holder, branch and whether it is free
+  sweep: free every slot whose holder finished or left it unused past its limit, saving its work on a rescue branch first
 `;
 
 export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
@@ -346,47 +626,85 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     d.say(`ffu-slot: FF_SESSION_ID is not set: run it from a worker of FF Factory\n`);
     return 2;
   }
+  // w5870: a Medium agent and the slots workers write (see the header).
+  const own = 'build ffu in your own temp folder instead, which no worker writes: git clone https://github.com/Final-Factory/ffu.git "$TMPDIR/ffu" and CARGO_TARGET_DIR="$TMPDIR/ffu-target"';
+  if ((cmd === 'take' || cmd === 'where') && (d.medium === 'on' || d.medium === 'warn')) {
+    if (d.medium === 'on') {
+      d.say(`ffu-slot: refused: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write, so a build there would run their build scripts and cargo config outside the fence; ${own} (w5870)
+`);
+      return EXIT_MEDIUM_REFUSED;
+    }
+    d.say(`ffu-slot: WARNING: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write: a build there runs build scripts and a cargo config any worker could have written. Once daemon.json "mediumAgentFolders" and "mediumAgentCaches" are both "on" (your own temp folder then no worker writes) this is refused (w5870)
+`);
+  }
   try {
     if (cmd === 'take') {
       const branch = opt('--branch');
       if (branch !== undefined && !/^[A-Za-z0-9._/-]+$/.test(branch)) throw new Error(`not a branch name: ${branch}`);
-      const id = takeSlot(d, { branch, base: opt('--base') });
-      d.write(envLines(d.root, id, d.cargoHome));
+      const wait = opt('--wait');
+      if (wait !== undefined && !(Number(wait) >= 0)) throw new Error(`not a number of minutes: ${wait}`);
+      const id = wait ? takeSlotWaiting(d, { branch, base: opt('--base') }, Number(wait)) : takeSlot(d, { branch, base: opt('--base') });
+      d.write(envLines(d.root, id, slotCargoHome(d)));
       d.say(`ffu-slot: ${id}: ${fwd(slotCheckout(d.root, id))} (target ${fwd(slotTarget(d.root, id))})\n`);
       return 0;
     }
     if (cmd === 'where') {
-      const mine = readSlotState(d.root).slots.find((s) => s.holder === d.session);
-      if (!mine) return 1;
-      d.write(envLines(d.root, mine.id, d.cargoHome));
+      const held = heldSlots(readSlotState(d.root), d.session);
+      const want = opt('--branch');
+      const mine = want ? held.find((s) => s.branch === want) : held[0];
+      if (!mine) {
+        if (want && held.length) {
+          d.say(`ffu-slot: none of your slots (${held.map((s) => `${s.id} on ${s.branch ?? 'origin/main'}`).join(', ')}) is on ${want}: take one with eval "$(ffu-slot take --branch ${want})"\n`);
+          return 1;
+        }
+        d.say(`ffu-slot: you hold no slot: take one with eval "$(ffu-slot take --branch <your branch>)"\n`);
+        return 1;
+      }
+      d.write(envLines(d.root, mine.id, slotCargoHome(d)));
       return 0;
     }
     if (cmd === 'release') {
-      const id = releaseSlot(d);
-      d.say(id ? `ffu-slot: released ${id}; its target stays warm for the next worker\n` : 'ffu-slot: you hold no slot\n');
+      const ids = releaseSlot(d, { branch: opt('--branch'), slot: opt('--slot') });
+      d.say(ids.length ? `ffu-slot: released ${ids.join(', ')}; ${ids.length > 1 ? 'their targets stay' : 'its target stays'} warm for the next worker\n` : 'ffu-slot: you hold no slot\n');
+      return 0;
+    }
+    if (cmd === 'list' && rest.includes('--json')) {
+      d.write(`${JSON.stringify(slotsReport(d))}\n`);
       return 0;
     }
     if (cmd === 'list') {
       const st = readSlotState(d.root);
       if (!st.slots.length) d.write(`no ffu slots yet in ${fwd(slotsBase(d.root))} (max ${d.max})\n`);
-      for (const s of st.slots) d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${s.usedAt ?? '-'}\t${slotFree(d, s).why}\n`);
+      // w5912: the last use slotFree and the portal's report read (slotLastUsed), not only the stamp a take wrote in slots.json.
+      for (const s of st.slots) {
+        const used = slotLastUsed(d, s);
+        d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${used ? new Date(used).toISOString() : '-'}\t${slotFree(d, s).why}\n`);
+      }
+      for (const r of st.rescues ?? []) d.write(`rescue\t${r.branch}\t${r.at}\t${r.holder}'s work from ${r.slot}${r.pushed ? ', pushed to origin' : ', in the shared clone only'}\n`);
+      return 0;
+    }
+    if (cmd === 'sweep') {
+      const ids = sweepSlots(d);
+      d.say(ids.length ? `ffu-slot: freed ${ids.join(', ')}; their targets stay warm\n` : 'ffu-slot: no slot to free\n');
       return 0;
     }
     d.say(USAGE);
     return 2;
   } catch (e) {
     d.say(`ffu-slot: ${(e as Error).message}\n`);
-    return 3;
+    return e instanceof NoFreeSlot ? 4 : 3;
   }
 }
 
 export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDeps {
-  let facts: CleanupFacts | undefined;
-  try {
-    facts = env.FF_CLEANUP_FACTS ? (JSON.parse(fs.readFileSync(env.FF_CLEANUP_FACTS, 'utf8')) as CleanupFacts) : undefined;
-  } catch {
-    facts = undefined;
-  }
+  const readFacts = () => {
+    try {
+      return env.FF_CLEANUP_FACTS ? (JSON.parse(fs.readFileSync(env.FF_CLEANUP_FACTS, 'utf8')) as CleanupFacts) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const facts = readFacts();
   const root = env.FF_WORKER_ROOT || facts?.root || '';
   if (!root) throw new Error('FF_WORKER_ROOT is not set: run it from a worker of FF Factory');
   const max = Number(env.FF_FFU_SLOTS_MAX);
@@ -396,6 +714,8 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     cargoHome: workerCargoHome(root, env, '').home, // the home folder only names a seed's source, which take does not need
     max: Number.isInteger(max) && max >= 0 ? max : FFU_SLOTS_DEFAULT_MAX,
     facts,
+    ...(env[MEDIUM_AGENT_VAR] ? { medium: env[MEDIUM_AGENT_VAR] } : {}),
+    readFacts,
     now: () => Date.now(),
     git: (args, cwd) => {
       const r = gitSpawnSync(args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
@@ -427,6 +747,36 @@ export function installFfuSlotShim(bin: string, factsFile: string, max: number, 
   fs.chmodSync(`${sh}.tmp`, 0o755);
   fs.renameSync(`${sh}.tmp`, sh);
   fs.writeFileSync(`${sh}.cmd`, `@echo off\r\nrem FF Factory: ffu sandboxes (machine/ffuSlots.ts).\r\nset "FF_CLEANUP_FACTS=${factsFile}"\r\nset "FF_FFU_SLOTS_MAX=${max}"\r\n${[node, ...nodeArgs, script].map((s) => `"${s}"`).join(' ')} %*\r\n`);
+}
+
+/**
+ * The daemon's ffu slot report (w5912): `ffu-slot list --json` run as its own process, so the git reads slotFree makes never
+ * hold the daemon's event loop, with each target's size as the last clean-up pass measured it (`sizes`, never a du here).
+ * Undefined when no slot was made here yet, or the run failed (said in `log`).
+ */
+export function readFfuSlotsReport(o: { root: string; factsFile: string; max: number; sizes?: ReadonlyMap<string, { bytes: number; at: string }>; log?: (s: string) => void; script?: string }): Promise<FfuSlotsReport | undefined> {
+  if (!fs.existsSync(stateFile(o.root))) return Promise.resolve(undefined);
+  const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
+  const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'list', '--json'];
+  return new Promise((resolve) => {
+    execFile(process.execPath, args, { env, timeout: 60_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        o.log?.(`ffu slots: list --json failed: ${(stderr || err.message).trim().slice(0, 200)}`);
+        return resolve(undefined);
+      }
+      try {
+        const r = JSON.parse(stdout) as FfuSlotsReport;
+        for (const s of r.slots) {
+          const z = o.sizes?.get(s.id);
+          if (z) Object.assign(s, { targetBytes: z.bytes, sizedAt: z.at });
+        }
+        resolve(r);
+      } catch (e) {
+        o.log?.(`ffu slots: list --json printed no report: ${(e as Error).message}`);
+        resolve(undefined);
+      }
+    });
+  });
 }
 
 // Run when started directly (the ffu-slot shim).

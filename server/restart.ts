@@ -14,6 +14,8 @@ import { relocateProblem } from './machineProtocol.ts';
 export interface Unanswered {
   text: string;
   from: 'human' | 'orchestrator' | 'system';
+  /** w5896: text a third party wrote (an FFBox hand-over, another person's message_person), relayed: SessionHandle.turnRelayed. */
+  relay?: boolean;
   /** The person it came from or was sent for (w389: the resume says whose it was). */
   requestedBy?: Requester;
 }
@@ -344,6 +346,8 @@ export interface DrainDeps {
   dataDir: string;
   /** Send every connected machine daemon to the portal at `url` (a request's relocate). Absent: such requests are refused. */
   relocate?(url: string): Promise<RelocateOutcome[]>;
+  /** The drain gave up and the restart did not happen (w5887: the deploy notice says so). Must not throw. */
+  cancelled?(why: string): void;
 }
 
 export function drainMessage(req: RestartRequest, deadline: Date): string {
@@ -536,6 +540,16 @@ export class Drainer {
     this.relocated = false;
     this.drained = new Set();
     this.deps.changed();
+    try {
+      this.deps.cancelled?.(why);
+    } catch {
+      // a notice never holds up the restart's own path
+    }
+  }
+
+  /** The restart taken and not done yet (w5887: a request refused or already pending leaves it as it was). */
+  get requested(): RestartRequest | undefined {
+    return this.req;
   }
 
   get drainedIds(): ReadonlySet<string> {

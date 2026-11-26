@@ -58,7 +58,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_CARD_MS, HAND_UP_RESEND_MS, handUpPerson, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn, warmText } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, LEGACY_READ, LEGACY_INTEGRITY_CHECK, mentionsLegacyPlayer, resolveNeeds, steamShortIn, warmText } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, needsWindow, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
@@ -97,6 +97,25 @@ import { failureLine, failureOf, failurePriority, kindOfKey, structuredFailure, 
 import { openQuestionsOf } from './reports.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
+
+/** w5976: what a room move changes on a request, taken before it (moveBeforeOf), so Orchestrators.moveUndone can put it back. */
+export interface MoveBefore {
+  status: WorkItem['status'];
+  queuedFor?: WorkItem['queuedFor'];
+  handedBack?: WorkItem['handedBack'];
+  gateResumes?: WorkItem['gateResumes'];
+  link?: NonNullable<WorkItem['links']>[string];
+}
+
+export function moveBeforeOf(w: WorkItem, sessionId: string): MoveBefore {
+  return {
+    status: w.status,
+    ...(w.queuedFor ? { queuedFor: w.queuedFor } : {}),
+    ...(w.handedBack ? { handedBack: w.handedBack } : {}),
+    ...(w.gateResumes ? { gateResumes: [...w.gateResumes] } : {}),
+    ...(w.links?.[sessionId] ? { link: w.links[sessionId] } : {}),
+  };
+}
 
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
 const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
@@ -772,6 +791,13 @@ export class PermissionAnswerRefused extends Error {
   }
 }
 
+/**
+ * w5896: how far back a person's own message may decide a gate's action carried out later (a harness turn included), and
+ * how many words of it must be quoted: enough to name a decision, never a lone "yes" or "go" taken out of its turn.
+ */
+export const DECISION_WORDS_HOURS = 72;
+export const DECISION_WORDS_MIN = 4;
+
 export class Orchestrators {
   private readonly d: OrchestratorsDeps;
   readonly now: () => Date;
@@ -909,6 +935,13 @@ export class Orchestrators {
   }
 
   // ---------------------------------------------------------------- the sessions
+
+  /**
+   * w5921: "the dispatcher is rate-limited on <token> until <time>" while its turns end at once on Claude's usage limit
+   * (TokenSwitch.dispatcherLimited, wired by index.ts); undefined otherwise. A request sits undecided then because nobody can
+   * decide it: the ledger says so, and does not offer it again to the same stuck process (undecidedBound).
+   */
+  dispatcherLimited?: () => string | undefined;
 
   /** The dispatcher's session id. store.orchestratorId keeps its old name: it was the one shared orchestrator. */
   get dispatcherId(): string | undefined {
@@ -1070,7 +1103,8 @@ export class Orchestrators {
     const target = this.personalFor(to);
     const id = `pm-${this.now().getTime().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     // Sent as the harness's (a turn it starts is not the recipient's own), about the sender.
-    this.sessions.send(target.info.id, personMessage(owner, to, text, id, answered), 'system', undefined, { requestedBy: asRequester(owner) });
+    // w5896: another person's words, relayed: they never pass as the recipient's own (turnRelayed).
+    this.sessions.send(target.info.id, personMessage(owner, to, text, id, answered), 'system', undefined, { requestedBy: asRequester(owner), relay: true });
     if (loop) this.ownerLoop.set(key, [...loop, now]);
     else if (!owners) this.messaged.set(key, n + 1);
     const mark = { id, from: asRequester(owner), at: this.now().toISOString(), text, ...(answered.length ? { answers: answered } : {}) };
@@ -1858,14 +1892,16 @@ It is for your part of the work, not an answer to another worker's question.`;
     return told;
   }
 
-  /** Send each of these people's own orchestrators a harness message (made if missing). */
-  toPeople(people: readonly Requester[], text: string) {
+  /** Send each of these people's own orchestrators a harness message (made if missing; `existing`: only to one they have, w5921). */
+  toPeople(people: readonly Requester[], text: string, existing = false) {
     const seen = new Set<string>();
     for (const r of people) {
       if (seen.has(r.userId.toLowerCase())) continue;
       seen.add(r.userId.toLowerCase());
       try {
-        this.sessions.send(this.personalFor(r).info.id, text, 'system', undefined, { requestedBy: asRequester(r) });
+        const to = existing ? this.personalOf(r.userId) : this.personalFor(r);
+        if (!to) continue;
+        this.sessions.send(to.info.id, text, 'system', undefined, { requestedBy: asRequester(r) });
       } catch {
         // that orchestrator could not be started (a limit); the ledger and the UI still have it
       }
@@ -1957,6 +1993,12 @@ It is for your part of the work, not an answer to another worker's question.`;
     const since = this.now().getTime() - 3 * 86_400_000;
     const keep = [...this.store.work.values()].filter((w) => isOpen(w) || w.status === 'stalled' || Date.parse(w.updatedAt) >= since);
     return keep.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100);
+  }
+
+  /** A line in a request's log, saved (w5914: server/routeRequests.ts notes the route requests and the waiting workers). */
+  noteOnWork(w: WorkItem, line: string) {
+    this.stamp(w, line);
+    this.store.putWork(w);
   }
 
   private stamp(w: WorkItem, line: string) {
@@ -2184,6 +2226,34 @@ It is for your part of the work, not an answer to another worker's question.`;
   }
 
   /**
+   * w5976, config movedAwayWorkers "on" (Agents.moveForRoom): a move whose fresh session did not start gives request `w` back
+   * to worker `s`, the one it was to leave, as it was before the move (`before`): linked again with its gate resumes, its
+   * hand-off and its Queued state undone. A request the move had not touched yet is left as it is. Without it the request sat
+   * Queued with no worker while `s` kept its movedAway mark (the w5950 review: handBack before startMoved succeeds).
+   */
+  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string) {
+    if (!isOpen(w)) return;
+    const off = !w.sessionIds.includes(s.id);
+    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return;
+    if (off) w.sessionIds = [...w.sessionIds, s.id];
+    w.links = { ...w.links, [s.id]: before.link ?? { at: this.now().toISOString(), how: 'sent' } };
+    if (w.movedOff?.[s.id]) {
+      const { [s.id]: _undone, ...rest } = w.movedOff;
+      w.movedOff = Object.keys(rest).length ? rest : undefined;
+    }
+    const mine = (before.gateResumes ?? []).filter((r) => r.session === s.id && !w.gateResumes?.some((x) => x.session === r.session && x.at === r.at));
+    if (mine.length) w.gateResumes = [...(w.gateResumes ?? []), ...mine];
+    if (w.handedBack?.session === s.id) w.handedBack = before.handedBack;
+    if (w.status === 'queued' && before.status !== 'queued') {
+      w.status = before.status;
+      w.queuedFor = before.queuedFor;
+    }
+    this.stamp(w, `given back to worker ${s.id}: ${why} (w5976)`);
+    this.store.putWork(w);
+    console.log(`ledger: ${w.id}: given back to worker ${s.id}, its move did not start (w5976): ${why}`);
+  }
+
+  /**
    * The worker on `w` stopped on a usage limit, and it is on another person's request too, so that limit is another
    * person's account's (w1076: "a session that hit one person's usage limit must not hold another person's request
    * hostage"). `w` does not wait for it: the dispatcher is told to give it a session of its own now (message_agent with its
@@ -2384,7 +2454,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       this.stamp(repeat, `filed again by ${owner.displayName}'s orchestrator${human ? ' in their own turn' : ''}: ${firstLine(brief)}`);
       // Filed again in the person's own turn: they asked for it themselves now, which the destructive tools need.
       const confirmed = human && !repeat.humanAsked;
-      if (confirmed) repeat.humanAsked = true;
+      if (confirmed) this.markAsked(repeat, mine);
       if (human) this.takeOver(repeat, owner, `${owner.displayName} filed it again`);
       this.store.putWork(repeat);
       if (confirmed) this.gatherForDispatcher(owner, updateNotice(repeat, owner, 'asked for it again in their own words'));
@@ -2434,6 +2504,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       requestedBy: asRequester(owner),
       requesters: [asRequester(owner)],
       humanAsked: human,
+      ...(mine.earlier ? { askedFromRecord: true } : {}),
       status: 'new',
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
@@ -2721,7 +2792,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const asks = w.question?.asks ?? open?.asks;
     const at = this.now().toISOString();
     if (note) w.notes = [...(w.notes ?? []), { at, by: from.displayName, text: note.slice(0, 2000) }].slice(-20);
-    w.humanAsked = this.turnOwnWords(chat, words).own;
+    this.markAsked(w, this.turnOwnWords(chat, words));
     w.status = 'question';
     w.stalled = undefined;
     w.flag = undefined;
@@ -2803,7 +2874,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (input.approve || input.decline) {
       if (input.approve && input.decline) throw new Error('approve or decline, not both');
       const turn = this.reactionTurn(chat, { verb: input.approve ? 'approve' : 'decline', refs: [w.id] }, input.words);
-      if (!turn.own) throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}. A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
+      if (!turn.own) throw new GateRefused(`only ${owner.displayName}, in their own words, approves or declines ${w.id}${turn.hint}. A decision of theirs that waits for a fact ("once #1314 merges") is recorded with update_work when, in their turn`);
       const done = input.approve ? this.approveIntake(w.id, owner) : this.declineIntake(w.id, owner, input.note);
       if (turn.words) {
         turn.use();
@@ -2848,7 +2919,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // What the person asks now is what the dispatcher acts on: it counts as theirs only when said in their own turn, and
     // in a turn a relayed message joined only with their words quoted (w5507).
-    w.humanAsked = this.turnOwnWords(chat, input.words).own;
+    this.markAsked(w, this.turnOwnWords(chat, input.words));
     const what: string[] = [];
     let settledFor: { asked: Requester[]; line: string } | undefined;
     // ACTING (w1031): their own words in this turn, never a harness message or a worker's report relayed to their chat.
@@ -3306,7 +3377,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       return true;
     }
     const grant = this.armReaction(sessionId, seq, emoji, by);
-    this.sessions.send(sessionId, reactionText(by.displayName, emoji, quoted, !!grant), 'system', undefined, { requestedBy: by });
+    this.sessions.send(sessionId, reactionText(by.displayName, emoji, quoted, !!grant), 'system', undefined, { requestedBy: by, joins: true });
     return true;
   }
 
@@ -3356,17 +3427,67 @@ It is for your part of the work, not an answer to another worker's question.`;
    * `quoted` is found verbatim in a message of theirs in this turn. A turn the harness started is never theirs here
    * (reactionTurn adds a click). `words` is the record to keep for a quote; `hint` says why a relayed turn fell short.
    */
-  turnOwnWords(chat: SessionHandle, quoted?: string): { own: boolean; words?: string; hint: string } {
-    if ((chat.turnFrom ?? chat.lastFrom) !== 'human') return { own: false, hint: '' };
-    if (!chat.turnRelayed) return { own: true, hint: '' };
+  turnOwnWords(chat: SessionHandle, quoted?: string, o: { thisTurn?: boolean } = {}): { own: boolean; words?: string; hint: string; earlier?: boolean } {
+    const theirs = (chat.turnFrom ?? chat.lastFrom) === 'human';
+    if (theirs && !chat.turnRelayed) return { own: true, hint: '' };
     const n = this.ownerOf(chat.info)?.displayName ?? 'your person';
-    if (quoted?.trim() && inPersonWords(quoted, this.turnPersonMessages(chat))) return { own: true, words: `"${clip(quoted.trim(), 300)}"`, hint: '' };
-    return {
-      own: false,
-      hint: quoted?.trim()
-        ? `; words "${clip(quoted, 120)}" is not in ${n}'s own message in this turn: quote them verbatim (at least a few words), never your summary or a relayed message's`
-        : `; a message that is not ${n}'s own (a worker update, a dispatch notice or a relayed text) joined this turn, so this needs ${n}'s own words from this turn quoted in \`words\` (verbatim, at least a few words), or their click on a card (w5507)`,
-    };
+    const q = quoted?.trim();
+    if (q && theirs && inPersonWords(q, this.turnPersonMessages(chat))) return { own: true, words: `"${clip(q, 300)}"`, hint: '' };
+    // w5896: a decision they already made in their own words (lothsahn's 2026-11-25 22:08 "Hold new work on LothDesktop
+    // and let the running workers finish", carried out hours later), quoted verbatim from a real message of theirs in this
+    // chat, authorises carrying it out in a later turn, a harness turn included. Relayed text is never `from` 'human', so
+    // a relay quoting or claiming them matches nothing.
+    const owner = this.ownerOf(chat.info);
+    const earlier = q && owner && !o.thisTurn ? this.earlierPersonWords(chat, q) : undefined;
+    if (earlier?.at) return { own: true, earlier: true, words: `"${clip(q!, 300)}" (${n}'s message of ${earlier.at.slice(0, 16).replace('T', ' ')} UTC)`, hint: '' };
+    const why = theirs
+      ? `another person's or a relayed text (an FFBox hand-over, a person message) joined ${n}'s turn`
+      : `this turn is the harness's (a check-in, a timer, a worker update or a relayed message), not one ${n} started`;
+    const pass = o.thisTurn
+      ? `${n}'s own words for this from their message in this turn quoted verbatim in \`words\` (at least a few words), or their click on a card; else ask them`
+      : `${n}'s own words that decided this quoted verbatim in \`words\`, from their message in this turn or a message of theirs in this chat in the last ${DECISION_WORDS_HOURS} hours (at least ${DECISION_WORDS_MIN} words, e.g. the message an update_work note quotes; w5896), or their click on a card; else ask them`;
+    if (!q) return { own: false, hint: `; ${why}, so what passes is ${pass}` };
+    const miss = earlier?.short
+      ? `"${clip(q, 120)}" is in a message of ${n}'s but before this turn, and a decision from an earlier message needs at least ${DECISION_WORDS_MIN} words of it`
+      : `words "${clip(q, 120)}" is not in ${o.thisTurn ? `${n}'s own message in this turn` : `any message of ${n}'s own in this chat in the last ${DECISION_WORDS_HOURS} hours`}`;
+    return { own: false, hint: `; ${why}, and ${miss}: what passes is ${pass}, never your summary, a note's paraphrase or a relayed message's text` };
+  }
+
+  /**
+   * Whether a request counts as its person's ask (humanAsked), and whether that rests only on an earlier message of theirs
+   * quoted (askedFromRecord, w5896): the dispatcher's destructive tools still need their words in a turn of theirs.
+   */
+  private markAsked(w: WorkItem, mine: { own: boolean; earlier?: boolean }) {
+    w.humanAsked = mine.own;
+    if (mine.own && mine.earlier) w.askedFromRecord = true;
+    else delete w.askedFromRecord;
+  }
+
+  /**
+   * w5896: whether `quoted` is in a message of the person's own in this chat in the last DECISION_WORDS_HOURS (from
+   * 'human' only: their typed messages and their FFBox operator turns). `at` is the newest such message's time; `short`
+   * says it was found but has fewer than DECISION_WORDS_MIN words, too short to stand for a decision out of its turn.
+   */
+  private earlierPersonWords(chat: SessionHandle, quoted: string): { at?: string; short?: boolean } | undefined {
+    const since = this.now().getTime() - DECISION_WORDS_HOURS * 3_600_000;
+    const mine = this.store
+      .readTranscript(chat.info.id, 4000)
+      .filter((e): e is Extract<typeof e, { kind: 'user' }> => e.kind === 'user' && e.from === 'human' && Date.parse(e.t) >= since);
+    const hit = mine.findLast((e) => inPersonWords(quoted, [e.text]));
+    if (!hit) return undefined;
+    const words = quoted.replace(/^["'\s]+|["'\s.,;!]+$/g, '').split(/\s+/).filter(Boolean).length;
+    return words >= DECISION_WORDS_MIN ? { at: hit.t } : { short: true };
+  }
+
+  /**
+   * What a gate tells its caller about this turn (w5896): undefined when it is the person's own, else exactly what would
+   * pass it (turnOwnWords' hint, without its leading "; ").
+   */
+  ownWordsNeed(chatId: string, quoted?: string, o: { thisTurn?: boolean } = {}): string | undefined {
+    const chat = this.sessions.sessions.get(chatId);
+    if (!chat) return 'no such chat';
+    const r = this.turnOwnWords(chat, quoted, o);
+    return r.own ? undefined : r.hint.replace(/^; /, '');
   }
 
   /** The person's own messages in the current turn (w5507): from the one that opened it on, `from` 'human' only. */
@@ -3482,10 +3603,10 @@ It is for your part of the work, not an answer to another worker's question.`;
       }
       const a = actions[0];
       const verb = a === 'approve' ? 'approve' : a === 'decline' ? 'decline' : a === 'done' ? 'close_done' : 'close_cancelled';
-      const turn = this.reactionTurn(chat, { verb, refs: [w.id], also: waits ? [waits.ref] : [] });
+      const turn = this.reactionTurn(chat, { verb, refs: [w.id], also: waits ? [waits.ref] : [] }, input.words); // w5896: or their earlier words
       if (actions.length === 1 && waits && turn.words) click = turn;
       else hint = turn.hint;
-      if (!click) throw new GateRefused(`a decision that waits for a fact is recorded only in a turn ${n} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed message)${hint}`);
+      if (!click) throw new GateRefused(`a decision that waits for a fact is recorded only on ${n}'s own words${hint}`);
     }
     if (input.reopen || input.priority || input.subjects?.length || input.ledger_read !== undefined || input.spend_read !== undefined || input.main_clone !== undefined) throw new Error('when goes with one action (approve, decline or close) and its note, nothing else');
     if (actions.length !== 1) throw new Error('when needs exactly one action: approve, decline, or close (done or cancelled)');
@@ -3867,7 +3988,7 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /** The machine id a main_clone names, or why it cannot be granted: only in a turn of the person's own (w936). */
   private mainCloneMachine(owner: Requester, name: string, humanTurn: boolean, hint = ''): string {
-    if (!humanTurn) throw new GateRefused(`main_clone lets workers act in a machine's main clone, a person's own project folder: only ${owner.displayName}, in their own words, asks for that, and this turn is not theirs (a check-in, a timer or a relayed message)${hint}`);
+    if (!humanTurn) throw new GateRefused(`main_clone lets workers act in a machine's main clone, a person's own project folder: only ${owner.displayName}, in their own words, asks for that${hint}`);
     const { machines } = this.d.places();
     const m = machines.find((x) => same(x.id, name.trim()));
     if (!m) throw new Error(`main_clone: no machine "${name}" (machines: ${machines.map((x) => x.id).join(', ') || 'none'})`);
@@ -3926,7 +4047,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const turn = this.reactionTurn(chat, input.close ? { verb: input.close === 'done' ? 'close_done' : 'close_cancelled', refs: [w.id] } : { verb: 'job' }, input.words);
     const own = turn.own;
     const betweenOwners = this.isOwnerRole(w.requestedBy.userId);
-    if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words in this turn, closes or reopens ${whose} request ${w.id}, and this turn is not theirs (a check-in, a timer or a relayed message)${turn.hint}`);
+    if (!own && !betweenOwners) throw new GateRefused(`only ${by.displayName}, in their own words, closes or reopens ${whose} request ${w.id}${turn.hint}`);
     const note = input.note?.trim();
     if (!note) throw new Error(`say why in a note: ${names(w.requesters)} will be told who ${input.close ? 'closed' : 'reopened'} ${w.id} and why`);
     const problem = updateProblem(w, input, this.now().getTime());
@@ -3979,7 +4100,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       // A note alone outside their turn stays a note (w677); a priority or a move waits for their own words. A turn a
       // relayed message joined takes their words quoted (w5507).
       if (answer) return false;
-      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only in a turn ${by.displayName} started with their own words, and this turn is not theirs (a check-in, a timer, a worker's report or a relayed message) (w3606)${mine.hint}`);
+      throw new GateRefused(`${w.id} is ${whose} request, not ${by.displayName}'s: ${by.displayName}'s orchestrator ${act} only on ${by.displayName}'s own words (w3606)${mine.hint}`);
     }
     if (input.priority && input.question_for) throw new Error('question_for stands alone (a note giving the reason is fine): it hands the open question on and keeps the request open');
     const asked = questionFor(w);
@@ -5002,7 +5123,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -5021,6 +5142,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2648: its own menus field rules; its words are read only without one, and "none" is kept (noMenus) so nothing reads them later.
     const menusNone = !steam && saysNone(menusSaid);
     const menus = steam || menusNone ? undefined : menusSaid || (mentionsMenus(what, brief) ? MENUS_READ : undefined);
+    // w5965: a player from before w5297 goes only where the worker fence is off: said by the worker, or read from its words.
+    const legacySaid = String(a.legacy_data ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    const legacyData = saysNone(legacySaid) ? undefined : legacySaid || (mentionsLegacyPlayer(what, brief) ? LEGACY_READ : undefined);
     // w4618: 1 leg unless it names a reason to need computers at once; a leg count asked for outright stands (legsSaid).
     const splitSaid = String(a.split ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     const legs = a.legs ?? (pairComputersReason({ title: what, brief, pair: { crossOs, steam, timed: a.timed === true, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined } }) ? 2 : 1);
@@ -5083,7 +5207,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
-      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}) });
+      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5462,6 +5586,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   undecidedBound(): string[] {
     const now = this.now().getTime();
     const offered: string[] = [];
+    const limited = this.dispatcherLimited?.();
     for (const w of this.store.work.values()) {
       if (w.status !== 'new') {
         if (w.undecided) {
@@ -5477,6 +5602,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       const since = Date.parse(w.undecided.since) || now;
       if (w.undecided.reofferedAt || now - since < UNDECIDED_BOUND_MS) continue;
+      // w5921: offered again to a dispatcher whose every turn ends on the usage limit, it is lost too: it waits for the reset
+      // (its live state says so), and is offered again once the dispatcher runs.
+      if (limited) continue;
       const mins = Math.round((now - since) / 60_000);
       w.undecided = { ...w.undecided, reofferedAt: new Date(now).toISOString() };
       this.stamp(w, `ledger: undecided for ${mins} min: offered to the dispatcher again (w2217)`);
@@ -5660,7 +5788,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return last && legs?.length ? { from: last.from, legs } : undefined;
   }
 
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer; legacyData?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
@@ -5679,6 +5807,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(x.pr ? { pr: x.pr } : {}),
       ...(x.commit ? { commit: x.commit } : {}),
       ...(x.player ? { player: x.player } : {}),
+      ...(x.legacyData ? { legacyData: x.legacyData } : {}),
     };
     const warm = this.warmLegsFor(w.id, x.avoid);
     if (warm) pair.warm = warm;
@@ -5687,7 +5816,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       [
         x.brief,
         '',
-        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}${warm ? ` ${warmText(warm)}` : ''}`,
+        `FF Factory filed this for worker ${sessionId} on ${w.id} (w1945, request_pair): ${pairText(pair)}. ${pair.legs === 1 ? 'Its one leg starts alone, a worker in a game sandbox that runs the host and the client on its own computer (start_agent with sandbox alone);' : 'Its legs start together, one worker in a game sandbox on each computer (start_agent with pair_sandboxes);'} ${PLAYERS_IN_SANDBOX} each leg's first message says which leg it is and where the others are, and message_pair reaches them. ${w.id}'s worker is Blocked on this request's report: the host leg (leg 1) reports the result with a line "For ${w.id}:" (what ran, the commit every leg ran, what the check compared and found, any desync report files), and every leg ends with DONE once the run is over. Do not merge ${w.id}'s pull request: its own worker does.${pair.legacyData ? ` ${LEGACY_INTEGRITY_CHECK}` : ''}${x.retryOf ? ` This is a retry of ${x.retryOf}, whose legs did not deliver the result (w2041)${x.avoid?.length ? `: no leg goes on ${x.avoid.join(' or ')}, where one failed` : ''}; start it fresh, nothing of ${x.retryOf}'s legs carries over.` : ''}${warm ? ` ${warmText(warm)}` : ''}`,
       ].join('\n'),
       8000,
     );
@@ -7616,7 +7745,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const now = this.now().getTime();
     // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
     // bug report filed from that thread (nor the other way round).
-    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' || k === 'master-batch' ? k : 'release');
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' || k === 'master-batch' || k === 'harness-route' ? k : 'release');
     const prefix = family(kind);
     const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;

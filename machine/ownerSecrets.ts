@@ -11,10 +11,11 @@
  * with `gh auth token` and gives it to that run as GH_TOKEN, as a vault token is given. So the files stay denied to every
  * fenced run, and the login reaches only the runs that have no token of their own (docs/worker-fence.md, "Owner secrets").
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { trustedGh } from './evidenceGate.ts';
+import { NO_READ_UP, type LabelTarget } from './lowIntegrity.ts';
 
 export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain' | 'credentials';
 
@@ -360,6 +361,204 @@ export function sayOwnerRules(mode: string, platform: NodeJS.Platform, owner: re
   const verb = mode === 'on' ? 'close' : 'would close (warn only: runs start without them)';
   const mac = platform === 'darwin' ? `, deny mach-lookup of ${KEYCHAIN_MACH_SERVICES.join(' and ')}, and deny preference writes` : '';
   return `read fence (${mode}): owner-secret rules ${verb}: reads of ${owner.length ? owner.join(', ') : 'no owner path'}${mac}`;
+}
+
+/**
+ * w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"): the Windows
+ * machines where the read fence may label the owner's own secret folders on the system drive. LothDesktop only: the go was
+ * for LothDesktop, and "Do only that on C:". Every other Windows machine keeps its system drive untouched (lowIntegrity.ts
+ * labelNoReadUp) and its owner secrets open to Low workers, as before. Measured on LothDesktop (2026-11-25, a Low worker):
+ * `GH_CONFIG_DIR="%APPDATA%\GitHub CLI" gh auth status` said "Logged in to github.com account Lothsahn (keyring)", and
+ * ~/.ssh listed its keys.
+ */
+export const OWNER_LABEL_ON_SYSTEM_DRIVE: ReadonlySet<string> = new Set(['lothdesktop']);
+
+/** One owner path the Windows read fence labels, or leaves open and says why. */
+export interface OwnerLabelPlan {
+  /** Labelled No-Read-Up in on mode (a folder: inherited by everything in it, files made later included). */
+  label: LabelTarget[];
+  /** Left open, each with its reason, said in the warn and on lines. */
+  left: { path: string; why: string }[];
+}
+
+/**
+ * The Windows owner-secret labels for this machine (w5749). On a machine in OWNER_LABEL_ON_SYSTEM_DRIVE: the gh login's
+ * folder and ~/.ssh, when they exist. Browser profiles stay open: Chrome and Edge grant their network service's
+ * AppContainer (which runs at Low) Modify on each profile's Network folder (measured on LothDesktop, 2026-11-25: icacls
+ * shows an S-1-15-3-1024-... capability with (M) on `User Data\Default\Network`), so a No-Read-Up label on the profile
+ * would refuse the owner's own browser its cookies; handed back to lothsahn as its own decision. Nothing outside the go
+ * (~/.netrc, ~/.git-credentials, the Claude login) is labelled here. Other platforms and machines: nothing; `exists` is
+ * then never called, so nothing on their system drive is even looked at.
+ */
+export function ownerLabelTargets(o: { platform: NodeJS.Platform; home: string; env: NodeJS.ProcessEnv; machineId?: string; exists?: (p: string) => boolean }): OwnerLabelPlan {
+  if (o.platform !== 'win32' || !o.machineId || !OWNER_LABEL_ON_SYSTEM_DRIVE.has(o.machineId.toLowerCase())) return { label: [], left: [] };
+  const exists = o.exists ?? fs.existsSync;
+  const out: OwnerLabelPlan = { label: [], left: [] };
+  for (const s of ownerSecretPaths(o)) {
+    if (!exists(s.path)) continue;
+    if (s.kind === 'browser') out.left.push({ path: s.path, why: "its browser's own AppContainer (Low) reads the profile's Network folder; a No-Read-Up label would refuse it the owner's cookies" });
+    else out.label.push({ path: s.path, sddl: NO_READ_UP.dir });
+  }
+  return out;
+}
+
+/**
+ * Where gh keeps this machine's login, from `gh auth status` (run by the daemon, outside the fence; the token is never in
+ * what it prints): 'keyring' (Windows Credential Manager, which a Low process reads as the owner does: the folder's label
+ * does not reach it), 'file' (the folder's hosts.yml, which the label closes), or undefined (no login, or not said).
+ */
+const GH_LOGIN_LINE = /(?:Logged|Failed to log|Timeout trying to log) in to github\.com/i;
+/** A status line gh printed after it checked the token with GitHub ("✓ Logged in"), not one it could only read from storage. */
+const GH_CHECKED = /Logged in to github\.com/i;
+const GH_UNCHECKED = /(?:Failed to log|Timeout trying to log) in to github\.com/i;
+
+export function ghLoginStorage(statusOut: string): 'keyring' | 'file' | undefined {
+  // gh prints "X Failed to log in to github.com account <user> (<where>)" when it cannot check the token (an invalid token,
+  // measured with gh 2.102.0 by w5849; a network outage is likely the same), and "X Timeout trying to log in to github.com
+  // account <user> (<where>)" when the check times out (measured with gh 2.46.0 by w5859): the login is still stored there,
+  // so read both too.
+  const line = statusOut.split(/\r?\n/).find((l) => GH_LOGIN_LINE.test(l));
+  if (!line) return undefined;
+  return /\(keyring\)/i.test(line) ? 'keyring' : 'file';
+}
+
+/** The daemon's environment for its own `gh auth status` (ghLoginStorage): no token, so gh reports its stored login. */
+export function machineGhStatusEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
+  delete out.GH_TOKEN;
+  delete out.GITHUB_TOKEN;
+  return out;
+}
+
+/** The warn and on line for the Windows owner-secret labels (w5749): what on labels, the gh login's move, and what stays open. */
+export function sayOwnerLabels(mode: string, plan: OwnerLabelPlan, gh: 'keyring' | 'file' | undefined): string {
+  if (!plan.label.length && !plan.left.length) return `read fence (${mode}): owner-secret rules: none on this Windows machine (the fence labels the owner's folders on the system drive only on ${[...OWNER_LABEL_ON_SYSTEM_DRIVE].join(', ')})`;
+  const verb = mode === 'on' ? 'label' : 'would label (warn only: no label set)';
+  const move = gh === 'keyring' ? "; the gh login is in Credential Manager (keyring), which the label does not close: on moves it into the gh folder's hosts.yml" : gh === 'file' ? '; the gh login is in its folder (hosts.yml)' : '; no gh login found';
+  const left = plan.left.length ? `; left open: ${plan.left.map((l) => `${l.path} (${l.why})`).join(', ')}` : '';
+  return `read fence (${mode}): owner-secret rules ${verb} No-Read-Up on ${plan.label.length ? plan.label.map((t) => t.path).join(', ') : 'nothing'}${move}${left}`;
+}
+
+/** gh run by the daemon (outside the fence, no token in its environment), with optional stdin. */
+export type GhRun = (args: string[], o?: { input?: string }) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+
+/** The real GhRun: the trusted gh (evidenceGate.ts trustedGh), machineGhStatusEnv, 60 s. */
+export const realGhRun: GhRun = (args, o = {}) =>
+  new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    const end = (code: number | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(trustedGh(), args, { env: machineGhStatusEnv(), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      resolve({ code: null, stdout: '', stderr: (e as Error).message });
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill();
+      end(null);
+    }, 60_000);
+    child.stdout?.on('data', (d) => (stdout += String(d)));
+    child.stderr?.on('data', (d) => (stderr += String(d)));
+    child.on('error', (e) => {
+      stderr += e.message;
+      end(null);
+    });
+    child.on('close', (c) => end(c));
+    child.stdin?.end(o.input ?? '');
+  });
+
+/** The github.com accounts `gh auth status` says are logged in. */
+export const ghLoginAccounts = (statusOut: string): string[] => [...statusOut.matchAll(/(?:Logged|Failed to log|Timeout trying to log) in to github\.com account (\S+)/gi)].map((m) => m[1]);
+
+/** The Credential Manager targets go-keyring keeps a gh github.com login under (service `gh:github.com`, `<service>:<user>`). */
+export const ghKeyringTargets = (user: string): string[] => ['gh:github.com:', `gh:github.com:${user}`];
+/** w5749: the daemon's note (in its app folder) that it moved the gh login out of Credential Manager, so off or warn moves it back. */
+export const OWNER_GH_MOVED_NOTE = 'read-fence-gh-moved.json';
+
+/** What a move of the gh login did: `line` is said; `deleteFrom` are the Credential Manager targets the caller deletes next. */
+export interface GhMove {
+  ok: boolean;
+  /** Whether this call changed where the login is kept (the caller notes it, so the way back moves only what it moved). */
+  moved: boolean;
+  line: string;
+  deleteFrom?: string[];
+}
+
+const ghStatusOf = async (gh: GhRun) => {
+  const r = await gh(['auth', 'status', '--hostname', 'github.com']);
+  const out = `${r.stdout}\n${r.stderr}`;
+  // `none`: gh said plainly there is no login. A status with no login line and no such words (gh failed, timed out, or
+  // printed something new) is unread, never "no login" (w5849's review of #1281: that misreading lost the way back).
+  // `checked`: gh verified the token with GitHub; a "Failed to log in" or "Timeout" line is a stored login it could not check.
+  return { storage: ghLoginStorage(out), accounts: ghLoginAccounts(out), none: /not logged in/i.test(out), checked: GH_CHECKED.test(out) && !GH_UNCHECKED.test(out) };
+};
+const ghTokenOf = async (gh: GhRun) => {
+  const r = await gh(['auth', 'token', '--hostname', 'github.com']);
+  const t = r.code === 0 ? r.stdout.trim() : '';
+  return /^[A-Za-z0-9_]{20,255}$/.test(t) ? t : undefined;
+};
+
+/**
+ * w5749 (lothsahn: "move gh's login out of Credential Manager"): moves the machine's gh login for github.com from
+ * Credential Manager, which a Low worker reads as the owner does (measured on LothDesktop: `gh auth status` at Low with the
+ * owner's GH_CONFIG_DIR said "(keyring)"), into the gh folder's hosts.yml, which the folder's No-Read-Up label closes.
+ * `gh auth login --with-token --insecure-storage` with the login's own token; then checked: gh must say the login is in
+ * the file with the same token before the caller deletes the Credential Manager entries (deleteFrom). Any step that fails
+ * leaves the login where it was, working. One account only: with several, nothing is moved and it is said.
+ */
+export async function ghLoginToFile(gh: GhRun, beforeMove?: () => void): Promise<GhMove> {
+  const before = await ghStatusOf(gh);
+  if (!before.storage)
+    return before.none
+      ? { ok: true, moved: false, line: 'no gh login for github.com: nothing to move' }
+      : { ok: false, moved: false, line: "gh auth status could not be read (no login line); the login, wherever it is, is not moved and the next start tries again" };
+  if (before.accounts.length !== 1) return { ok: false, moved: false, line: `gh has ${before.accounts.length} github.com accounts (${before.accounts.join(', ')}); the move handles one, so the login stays in Credential Manager` };
+  const user = before.accounts[0];
+  // A Credential Manager entry is deleted only on a login gh checked (w5859's review of #1281): a file login gh could not
+  // check may be a dead token beside a live one in the keyring, so the entries stay and the next start tries again.
+  if (before.storage === 'file')
+    return before.checked
+      ? { ok: true, moved: false, line: `the gh login (${user}) is already in hosts.yml`, deleteFrom: ghKeyringTargets(user) }
+      : { ok: false, moved: false, line: `the gh login (${user}) is in hosts.yml but gh could not check it with GitHub; the Credential Manager entries are kept and the next start tries again` };
+  const token = await ghTokenOf(gh);
+  if (!token) return { ok: false, moved: false, line: 'gh auth token gave no token; the login stays in Credential Manager' };
+  // The caller's note goes down before the move (w5849): a daemon that dies after the login call still knows to move it back.
+  beforeMove?.();
+  const r = await gh(['auth', 'login', '--hostname', 'github.com', '--with-token', '--insecure-storage'], { input: `${token}\n` });
+  const after = await ghStatusOf(gh);
+  const again = await ghTokenOf(gh);
+  if (r.code !== 0 || after.storage !== 'file' || again !== token)
+    return { ok: false, moved: false, line: `gh auth login --insecure-storage did not leave the login in hosts.yml (exit ${r.code}, now ${after.storage ?? 'no login'}${again && again !== token ? ', another token' : ''}); the Credential Manager entry is kept` };
+  return { ok: true, moved: true, line: `moved the gh login (${user}) from Credential Manager into hosts.yml`, deleteFrom: ghKeyringTargets(user) };
+}
+
+/**
+ * The way back (read fence off or warn, or the enforce stage reverted): the gh login from hosts.yml into Credential Manager
+ * again with `gh auth login --with-token` (gh's default, secure storage, which also takes the token out of hosts.yml), and
+ * checked as above. Called only when the daemon's note says it moved the login itself.
+ */
+export async function ghLoginToKeyring(gh: GhRun): Promise<GhMove> {
+  const before = await ghStatusOf(gh);
+  if (before.storage === 'keyring') return { ok: true, moved: false, line: 'the gh login is already in Credential Manager: nothing to move back' };
+  if (!before.storage)
+    return before.none
+      ? { ok: true, moved: false, line: 'the gh login is gone (gh says no github.com login): nothing to move back' }
+      : { ok: false, moved: false, line: 'gh auth status could not be read (no login line); the note is kept and the next start tries the move back again' };
+  const token = await ghTokenOf(gh);
+  if (!token) return { ok: false, moved: false, line: 'gh auth token gave no token; the login stays in hosts.yml' };
+  const r = await gh(['auth', 'login', '--hostname', 'github.com', '--with-token'], { input: `${token}\n` });
+  const after = await ghStatusOf(gh);
+  const again = await ghTokenOf(gh);
+  if (r.code !== 0 || after.storage !== 'keyring' || again !== token) return { ok: false, moved: false, line: `gh auth login did not put the login back in Credential Manager (exit ${r.code}, now ${after.storage ?? 'no login'}); it stays in hosts.yml` };
+  return { ok: true, moved: true, line: `moved the gh login (${after.accounts[0] ?? '?'}) back into Credential Manager` };
 }
 
 /**

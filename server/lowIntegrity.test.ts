@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -753,4 +753,55 @@ test('w5731: a <root>/steam made after the start is labelled at the next labelli
   const vdf = t2.find((x) => bs(x.path).endsWith('config.vdf'))!;
   assert.equal(hasLabel(`${vdf.path} Mandatory Label\\Low Mandatory Level:(NW)`, vdf.sddl), false);
   assert.equal(hasLabel(`${vdf.path} Mandatory Label\\Medium Mandatory Level:(NW,NR)`, vdf.sddl), true);
+});
+
+test('w5749: labelNoReadUp with grant false sets the label but never grants, even after a WRITE_OWNER refusal', async () => {
+  const calls: { cmd: string; args: string[] }[] = [];
+  const exec: Exec = async (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd === 'icacls') return { code: 0, stdout: '', stderr: '' };
+    return { code: 0, stdout: 'err 0 5\r\n', stderr: '' };
+  };
+  const said: string[] = [];
+  const ok = await labelNoReadUp([{ path: 'C:\\Users\\o\\.ssh', sddl: NO_READ_UP.dir }], exec, (l) => void said.push(l), { account: 'me', systemDrive: () => false, grant: false });
+  assert.equal(ok, false);
+  assert.ok(!calls.some((c) => c.cmd === 'icacls' && c.args.includes('/grant')), 'no grant on an owner folder');
+  assert.equal(calls.filter((c) => c.cmd === 'powershell.exe').length, 1);
+});
+
+test('w5749: unlabelNoReadUp takes off only an explicit NR label, with the empty label SACL, and says a failure', async () => {
+  const scripts: string[] = [];
+  const icacls: Record<string, string> = {
+    'C:\\o\\gh': 'C:\\o\\gh Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW,NR)',
+    'C:\\o\\.ssh': 'C:\\o\\.ssh Mandatory Label\\Medium Mandatory Level:(I)(OI)(CI)(NW,NR)',
+    'C:\\o\\plain': 'C:\\o\\plain BUILTIN\\Users:(RX)',
+  };
+  const exec: Exec = async (cmd, args) => {
+    if (cmd === 'icacls') return { code: 0, stdout: icacls[args[0]] ?? '', stderr: '' };
+    scripts.push(Buffer.from(args[args.length - 1], 'base64').toString('utf16le'));
+    return { code: 0, stdout: 'ok 0\r\n', stderr: '' };
+  };
+  assert.deepEqual(await unlabelNoReadUp(Object.keys(icacls), exec, () => {}), ['C:\\o\\gh']);
+  assert.equal(scripts.length, 1);
+  assert.ok(scripts[0].includes("[FfLabel]::Set('C:\\o\\gh', 'S:')") || scripts[0].includes("'C:\\o\\gh', 'S:'"), scripts[0].slice(-300));
+  assert.ok(!scripts[0].includes('.ssh') && !scripts[0].includes('plain'), 'an inherited or absent label is left alone');
+  assert.equal(NO_LABEL, 'S:');
+  const none: Exec = async () => ({ code: 0, stdout: '', stderr: '' });
+  assert.deepEqual(await unlabelNoReadUp(['C:\\o\\plain'], none, () => {}), []);
+  const said: string[] = [];
+  const bad: Exec = async (cmd, args) => (cmd === 'icacls' ? { code: 0, stdout: icacls[args[0]] ?? '', stderr: '' } : { code: 0, stdout: 'err 0 5\r\n', stderr: '' });
+  assert.equal(await unlabelNoReadUp(['C:\\o\\gh'], bad, (l) => void said.push(l)), undefined);
+  assert.ok(said.some((l) => l.includes('C:\\o\\gh')));
+});
+
+test('w5749: deleteGenericCreds deletes generic entries with CredDeleteW, counts a missing one as done and names a failure', async () => {
+  const script = credDeleteScript(['gh:github.com:', "o'k"]);
+  assert.match(script, /CredDeleteW\(t, 1, 0\)/);
+  assert.ok(script.includes("Del('gh:github.com:')") && script.includes("Del('o''k')"), 'targets are quoted for PowerShell');
+  assert.ok(script.includes('1168'));
+  const exec: Exec = async () => ({ code: 0, stdout: 'ok 0\r\ngone 1\r\nerr 2 5\r\n', stderr: '' });
+  assert.deepEqual(await deleteGenericCreds(['a', 'b', 'c', 'd'], exec), { deleted: ['a'], failed: ['c', 'd'] });
+  let ran = false;
+  assert.deepEqual(await deleteGenericCreds([], async () => ((ran = true), { code: 0, stdout: '', stderr: '' })), { deleted: [], failed: [] });
+  assert.equal(ran, false);
 });

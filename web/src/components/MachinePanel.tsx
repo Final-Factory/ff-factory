@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { benchGlance } from '../../../shared/benchGlance';
 import { playGlance } from '../../../shared/personPlay';
+import { runnerHoldText } from '../../../shared/runnerHold';
 import { machineKind, type AppState, type Machine } from '../../../shared/types';
 import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
 import { BenchStopButtons } from './BenchStop';
+import { FfuSlotsSection } from './FfuSlots';
 import { GitFacts } from './Git';
 import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
@@ -178,6 +180,15 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               </span>
             </div>
           )}
+          {/* A person's hold drains its CI runners (w5916): busy ones finish their job, then none takes another until it lifts. */}
+          {m.runnerHold && runnerHoldText(m.runnerHold) && (
+            <div className="unity-bar" data-testid="machine-runner-hold">
+              <Chip tone="amber">{m.runnerHold.busy.length ? 'CI draining' : 'CI stopped'}</Chip>
+              <span className="dim small ellipsis" title={`held: ${m.runnerHold.why}`}>
+                {runnerHoldText(m.runnerHold)}: they start again when the hold lifts
+              </span>
+            </div>
+          )}
           {/* Its owner's pause (w1532): from its tray app, its schedule or a person's input; a paused machine takes no work. */}
           {m.pause && (
             <div className="unity-bar" data-testid="machine-pause">
@@ -202,6 +213,8 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
             </div>
           </DetailsSection>
         )}
+        {/* Its ffu build slots (w5912), their own set beside the game sandboxes. */}
+        {m.online && app.machineStats?.[m.id]?.ffuSlots && <FfuSlotsSection app={app} report={app.machineStats[m.id]!.ffuSlots!} now={now} />}
       </DetailsSheet>
 
       <div className="panel-empty">

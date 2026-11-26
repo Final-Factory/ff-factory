@@ -80,6 +80,68 @@ drain message and stops nothing. While the portal is down the daemons queue thei
   not heard from its daemon since (it may still be running there)" (`SessionManager.restore`). Its first report puts
   their real state back. Off (`false`), machine agents are drained and stopped with the portal, and resumed after.
 
+## Deploy notices in the orchestrators' chats (w5887)
+
+lothsahn (2026-11-26): "Please update the portal so when a new deployment is starting it puts a message in all active
+orchestrators. You become unresponsive for 2-3 minutes during updates and it would be good to know why."
+
+Every restart the server takes (the automatic deploy and `fffctl update`, both through fff-update's `restart.request`;
+`fffctl restart`; `request_app_update`) puts one system line in each active orchestrator's chat (each person's
+orchestrator whose chat moved in the last 14 days, and the dispatcher's) when the Drainer takes it, before the server stops:
+
+> [portal] Portal update starting: deploying 1a2b3c4d5 (#1290 Deploy notices). I'll be unresponsive for about 2 minutes
+> (the median of the last 7 restarts, measured).
+
+The next server posts the done line once it starts:
+
+> [portal] Portal update done: now on 1a2b3c4d5, took 2.3 min since the start line, down 1.7 min.
+
+- **A line, not a message** (`SessionManager.note`): the person sees it at once and the orchestrator opens no turn, so an
+  automatic deploy's drain, which waits for coordinator turns, is not held up by it.
+- **The estimate is measured**: each start records its downtime (stopServer's stop to the next server's start, or the
+  resume file's `at` when the old server did not record one) in `data/deploy-notice.json`; the line gives the median of the
+  last ten, of the same kind (update or plain restart) when there are three. With no sample yet it says "a few minutes".
+- **The pull requests** come from the automatic deploy's batch, or else from the prepared release's merge commits
+  (`update.prepared.json`'s folder, `git log` with a 3 s limit).
+- A drain that gives up says "cancelled". An update that did not take says which commit it was to deploy.
+- **It never holds up a restart**: every step catches and logs (`deploy notice:` in the portal's log), and the Drainer
+  calls its `cancelled` hook in a try (`server/deployNotice.ts`, tests in `deployNotice.test.ts`).
+
+## The first answer after a restart (w5931)
+
+A restart resumes each conversation lazily: its process launches when the first message arrives (w3855,
+`AgentSession.launchResumed` in `server/sessions.ts`). Each launch reads its whole transcript, sometimes twice: the seal
+check (w5563) and the tool refresh (w2626). On 2026-11-26 the transcripts were 1.3 to 2.5 GB. After the 05:35Z deploy,
+lothsahn's first message waited 63 s behind the dispatcher's launch (about 75 s of passes). His own seal pass took
+another 62 s. Then the five harness messages that came in meanwhile joined his turn, first in, first out. That turn's
+text answered a `[dispatch]`, and his four questions were answered only in its thinking (measured from the journal and
+the transcript; the turn lasted 201 s). Since w5931:
+
+- **A person's launch goes first.** The launch queue (`launchTurn`, `pumpLaunches`) has two lanes. A launch whose
+  orchestrator holds a person's unanswered message runs at once, beside the harness's own launch. A launch a person
+  writes to while it waits moves to the front. The harness's own launches still run one at a time, as w3855 needs.
+- **A person's message to an orchestrator still launching opens the turn.** The harness messages waiting in its input
+  are taken out (`InputQueue.take`) and held until that turn ends.
+- **A harness message to an orchestrator in its person's turn waits for that turn to end** (`AgentSession.held`,
+  `flushHeld`). It is then delivered in order, and it opens a turn of its own, so the person's turn answers only the
+  person. It is delivered at the idle state, at a result with nothing queued, after an interrupt, and when the process
+  ends by itself. A stop on purpose drops it. `snapshot().unanswered` counts it, so a restart resumes it. Workers are
+  unchanged: their harness messages join the turn as before. The chat shows a held message when it is delivered.
+- **What comes of that person joins their turn, unheld**: a relay whose `requestedBy` is the turn's person (the rest
+  of the FFBox turn that carried their own words, w831, which their words refer to) and their own act sent with
+  `joins` (a reaction they clicked, `Orchestrators.react`: the transcript must show it at once, or a second click
+  counts as a change). A notice about them (a `[dispatch]` carrying their `requestedBy`, the 05:38Z case) and a relay
+  about another person (`message_person` from Cara) still wait.
+- **The re-hash after the tool refresh starts at the first rewritten byte.** It no longer reads the whole file again.
+  The seal check keeps a hash checkpoint every 64 MB (`checkSeal`, `rehashFrom` in `server/transcriptSeal.ts`).
+- **Each launch logs its timings** on one line in the portal's log: `launch timing: <kind> <id> (<title>): waited X s
+  to launch behind N; seal X s (MB); tools X s (N changed, first rewrite at MB); re-hash X s (MB); meter X s; spawned
+  X s after it was asked for (w5931)`. Further lines follow: `Claude Code started X s after its spawn`, `first reply
+  text to the page X s after its spawn, Y s after it was asked for` and `first turn ended`. Read them with
+  `portal_logs` after a deploy.
+
+Tests: `server/personFirst.test.ts`, `server/transcriptSeal.test.ts` (the w5931 re-hash).
+
 ## Who is resumed
 
 `collectResume` in `server/restart.ts` (tests in `restart.test.ts`):

@@ -175,7 +175,17 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
 // w5703 (no bump): LaunchSpec `transcriptLabels`, set by the machine's own daemon for its own agent host; an older host
 // ignores it (the conversation is then not labelled, as with the switch off).
-const DECIDED = { protocol: 9, fingerprint: '06643f713ae88528' };
+// w5916 (no bump): `runner_hold` both ways (the portal's hold for the daemon's CI runners, the daemon's report); neither
+// onMessage switch has a default, so an older daemon ignores the hold (its runners take jobs as before) and an older portal
+// drops the report.
+// w5924 (no bump): `lightFolders` in the hello; MachineSandbox `kind: 'light'`; sandbox op delete takes `force`. The portal
+// makes and deletes light folders only on a daemon whose hello offered lightFolders, so an older daemon never gets one, and an
+// older portal never asks and shows a light folder (if any) as a sandbox.
+// w5912 (no bump): `ffuSlots` on `stats`, optional; an older portal drops it and an older daemon never sends it (the machine
+// page then shows no ffu slots section).
+// w5972 (no bump): `agents` (the daemon's census of the agents it counts against its caps) on `stats`, optional; an older
+// portal drops it and an older daemon never sends it (the portal then warns of no count mismatch for that machine).
+const DECIDED = { protocol: 9, fingerprint: 'f61f67af9097125a' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

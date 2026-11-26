@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_WORKER_EFFORT, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_WORKER_EFFORT, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, DISPATCHER_POOL_PREFIX, POOL_PERSON, dispatcherPoolOf, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
 import { SECRET_KEYS, maskSecret } from './secrets.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash, secretsDirOf, writeFfboxTokenHash } from './configMigration.ts';
 import { vaultContext } from './vault.ts';
@@ -64,10 +64,15 @@ export const SETTABLE_KEYS = [
   // start as the portal's account, as before), "warn" (unset: as the portal's account, with a background check of the
   // agents' own) or "on" (as fff-agent); null puts back "warn". fffctl agents on the VM wins over it.
   'agentAccount',
+  // w5950: workers whose work moved to another computer that a daemon still runs or a resume would wake (w5942,
+  // docs/machines.md): "warn" (unset: journal and report only), "on" (stop or skip them, when a started new worker holds
+  // each of their requests) or "off" (no check: the recovery switch); null puts back "warn".
+  'movedAwayWorkers',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
-  // The one vault token the dispatcher runs on (w996), "vault:<entry name>"; unset, the system payer's pool. The owner's only.
+  // The one vault token the dispatcher runs on (w996), "vault:<entry name>", or one person's pool, "pool:<login>" (w5891); unset,
+  // the system payer's pool. The owner's only. A change restarts the dispatcher on it between turns (w5921).
   // Every other Claude process runs on its person's pool: nothing else to set (w1078).
   'claudeAccounts.dispatcher',
   // Whether a machine's runs (and, for the machine id "portal", the portal's own gh reads) use the run person's vault GitHub
@@ -202,7 +207,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount', 'movedAwayWorkers']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -523,8 +528,19 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       // The dispatcher on one named vault token (w996), or "vault": the system payer's pool, stored as no key (w1078).
       const v = typeof value === 'string' ? value.trim() : value;
       if (v === 'vault') return undefined;
+      // w5891: one person's own pool, any token of it with room; stored in the login's own spelling.
+      const pool = dispatcherPoolOf(typeof v === 'string' ? v : undefined);
+      if (pool !== undefined) {
+        if (!POOL_PERSON.test(pool)) throw new Error(`${key} is "${DISPATCHER_POOL_PREFIX}<login>", a login with a Claude pool in the vault, e.g. "pool:ben"`);
+        // Without the logins (fffctl conf set, which runs apart from the portal) the shape is checked, as for "vault:<name>".
+        const known = users ? users.find((u) => u.toLowerCase() === pool.toLowerCase()) : pool;
+        if (!known) throw new Error(`${key}: no login ${JSON.stringify(pool.slice(0, 40))}; the logins are ${(users ?? []).join(', ') || '(none)'}`);
+        const context = vaultContext();
+        if (context && !context.vault.hasClaudeFor(known)) throw new Error(`${key}: ${known} has no enabled Claude token in the vault that its key opens (fffctl vault list; docs/vault.md section 10): the dispatcher would not start`);
+        return `${DISPATCHER_POOL_PREFIX}${known}` as ClaudeAccount;
+      }
       const pinned = pinnedVaultEntry(typeof v === 'string' ? v : undefined);
-      if (pinned === undefined || !VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1", or "vault" (the system payer's pool); every Claude process runs on a vault token (w1078)`);
+      if (pinned === undefined || !VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1", "${DISPATCHER_POOL_PREFIX}<login>" (any token of that person's pool with room, w5891), or "vault" (the system payer's pool); every Claude process runs on a vault token (w1078)`);
       const context = vaultContext();
       if (context && !context.vault.claudeByName(pinned)) throw new Error(`${key}: the vault has no enabled Claude token named "${pinned}" that its key opens (\`fffctl vault list\` shows the names)`);
       return v as ClaudeAccount;
@@ -613,6 +629,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null) return undefined;
       if (value === 'on' || value === 'warn' || value === 'off') return value;
       throw new Error('agentAccount is "on" (the portal VM starts its agents as their own OS account, fff-agent), "warn" (as the portal\'s account, checking the agent account\'s socket and alerting when it fails) or "off" (as the portal\'s account, as before w5598: the recovery switch); null puts back "warn"; the VM\'s fffctl agents wins over it');
+    }
+    case 'movedAwayWorkers': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'on' || value === 'warn' || value === 'off') return value;
+      throw new Error('movedAwayWorkers is "warn" (journal and report a worker whose work moved to another computer that its daemon still runs or a resume would wake), "on" (stop it after saving its sandbox\'s work to a side branch, or skip its resume, but only when a started new worker holds each of its requests) or "off" (no check: the recovery switch); null puts back "warn"');
     }
     case 'privacyGuards': {
       if (value === undefined || value === null) return undefined;
@@ -1083,6 +1104,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   }
   else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
   else if (key === 'agentAccount') cfg.agentAccount = v as 'off' | 'warn' | 'on' | undefined;
+  else if (key === 'movedAwayWorkers') cfg.movedAwayWorkers = v as 'off' | 'warn' | 'on' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;
     else cfg.privacyGuards = v as boolean;
