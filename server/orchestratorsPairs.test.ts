@@ -30,7 +30,7 @@ import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSen
 import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { cargoShortOf, fetchPlayerNote, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy } from '../shared/capacity.ts';
+import { cargoShortOf, fetchPlayerNote, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy, LEGACY_READ, LEGACY_INTEGRITY_CHECK, mentionsLegacyPlayer, pairRoom } from '../shared/capacity.ts';
 import { pickReclaim, type Pressure } from './priorityReclaim.ts';
 import { STEAM_READ } from '../shared/steam.ts';
 import { benchLockIn, type BenchState, type BusyJob, type Machine, type MachineStats, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
@@ -377,6 +377,8 @@ test('w4596: request_pair legs 1 files a pair run of 1 leg that no Mac takes, an
   assert.match(said, /ffnightly\.py run --player <the printed path> --sha <40-hex sha> --scenario <id> --out /);
   assert.match(said, /shared player cache \(<worker root>\/player-cache\/<sha>-<os>, outside the tree\).*leave the player there/);
   assert.match(said, /Run ffnightly\.py from your sandbox's checkout, never a copy in \$TMPDIR/);
+  // w5965: a pre-1.0 commit's build_player.sh needs the cache root as its 4th argument (master's defaults it) and builds win|mac.
+  assert.match(said, /needs it as a 4th argument and builds only win\|mac: `bash scripts\/nightly\/build_player\.sh \\"\$PWD\\" <sha> win \\"\$FF_WORKER_ROOT\/player-cache\\"`/);
   assert.doesNotMatch(said, /move the player out of the tree|[^/]scripts\/build_player\.sh/);
 });
 
@@ -816,4 +818,49 @@ test("w2007: two budget hits of one orchestrator within 6 h file one request on 
   sessions.events.emit('turnBudget', loth, hit);
   assert.equal(budget().length, 3);
   assert.equal(pushed.length, 3);
+});
+
+// w5965 (w5944 on lothdesktop slot5): a 0.50 (pre-1.0) player never reads FF_GAME_DATA_DIR and writes the owner's LocalLow,
+// which a Low-integrity (fenced) worker cannot write, so ffnightly waited 420 s for a host-ready that never came. A pair run
+// whose player predates w5297 is marked, from its words or request_pair legacy_data, and its legs go only where the fence is off.
+test('w5965: request_pair marks a pair run of a pre-w5297 player from its words or legacy_data, and "none" says it is not one', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w5944', by: BEN }, { id: 'w5945', by: BEN }, { id: 'w5946', by: BEN }]);
+  const read = await startedFor(env, 'w5944');
+  const out = String(await read.h.request_pair!({ what: 'MP-activity-fingerprint on pre-1.0', brief: 'Build the 0.50 line at ac80d7b0 and run MP-activity-fingerprint.' }));
+  const p = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
+  assert.equal(p.pair?.legacyData, LEGACY_READ);
+  assert.match(out, /only on computers whose worker fence is off, never Linux \(its player predates w5297/);
+  // w5988: its brief says how to check the level, with Windows' whoami.exe (Git Bash's is coreutils).
+  assert.ok(p.brief.includes(LEGACY_INTEGRITY_CHECK), p.brief);
+  assert.match(LEGACY_INTEGRITY_CHECK, /MSYS2_ARG_CONV_EXCL='\*' "\$SYSTEMROOT\/System32\/whoami\.exe" \/groups/);
+  const said = await startedFor(env, 'w5945');
+  const out2 = String(await said.h.request_pair!({ what: 'MP-activity-fingerprint at ac80d7b0', brief: 'Run it.', legacy_data: 'ac80d7b0 is 0.50.0.47' }));
+  assert.equal(store.work.get(/^Filed (w\d+)/.exec(out2)![1])!.pair?.legacyData, 'ac80d7b0 is 0.50.0.47');
+  const none = await startedFor(env, 'w5946');
+  const out3 = String(await none.h.request_pair!({ what: 'MP-activity-fingerprint on pre-1.0', brief: 'Run it.', legacy_data: 'none' }));
+  assert.equal(store.work.get(/^Filed (w\d+)/.exec(out3)![1])!.pair?.legacyData, undefined);
+});
+
+test('w5965: a pair run of a pre-w5297 player goes only on a computer whose worker fence is off, and never on Linux', () => {
+  const w = { needs: 'game' as const, title: 'Pair run for w5944: MP-activity-fingerprint', brief: 'Run it.', pair: { legs: 1, legacyData: LEGACY_READ } };
+  const fit = { lothdesktop: { platform: 'win32', fence: 'on' as const }, beast: { platform: 'win32', fence: 'off' as const }, lothlaptop: { platform: 'win32' }, lin: { platform: 'linux', fence: 'off' as const }, wait: { platform: 'win32', fence: 'setting_up' as const } };
+  assert.match(unfitWhy(w, 'lothdesktop', fit) ?? '', /^lothdesktop's worker fence is on, and this pair run's player predates w5297 \(read from its words.*a fenced worker cannot write \(w5944, w5965\)/);
+  assert.match(unfitWhy(w, 'wait', fit) ?? '', /worker fence is setting up/);
+  assert.match(unfitWhy(w, 'lin', fit) ?? '', /^lin is on Linux.*pre-1\.0 has no Linux multiplayer build/);
+  assert.equal(unfitWhy(w, 'beast', fit), undefined);
+  // w5988: on Windows the fence is the integrity level, so an unreported one is not Medium; a Mac's still fits.
+  assert.match(unfitWhy(w, 'lothlaptop', fit) ?? '', /^lothlaptop has not reported its worker fence, so its workers' integrity level is unknown.*\(w5988\)/);
+  assert.doesNotMatch(unfitWhy(w, 'mac', { ...fit, mac: { platform: 'darwin' } }) ?? '', /fence|integrity/, 'a Mac whose fence nobody reported is not refused for it, as no unknown fact is');
+  // A pair run of a current player is untouched by the fence.
+  assert.equal(unfitWhy({ ...w, pair: { legs: 1 } }, 'lothdesktop', fit), undefined);
+  assert.match(pairText(w.pair), /, only on computers whose worker fence is off, never Linux/);
+  assert.deepEqual(pairRoom(w, ['beast'], fit).pick, ['beast']);
+});
+
+test('w5965: the words that mark a pre-w5297 player', () => {
+  for (const t of ['MP-activity-fingerprint on pre-1.0', 'the 0.50 line at ac80d7b0', 'build 0.50.0.47', 'its player predates w5297']) assert.equal(mentionsLegacyPlayer(t), true, t);
+  for (const t of ['a 0.50 s wait', 'MP-activity-fingerprint on master', 'pre-1.05 notes', 'version 10.50.1']) assert.equal(mentionsLegacyPlayer(t), false, t);
 });

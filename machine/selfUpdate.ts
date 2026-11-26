@@ -218,7 +218,8 @@ class Final extends Error {}
 
 /**
  * Download the bundle and check it against what the portal said on the link; returns its path. A download that stalls or
- * breaks resumes from the bytes it has (DOWNLOAD), each retry logged with its reason. Exported for tests.
+ * breaks resumes from the bytes it has (DOWNLOAD), each retry logged with its reason; a call that runs out keeps them for the
+ * next call of the same bundle (w5898, keptPart). Exported for tests.
  */
 export async function downloadBundle(
   portalUrl: string,
@@ -226,7 +227,7 @@ export async function downloadBundle(
   b: { sha256: string; size: number },
   dir: string,
   doFetch: typeof fetch = fetch,
-  o: { stallMs?: number; attempts?: number; totalMs?: number; lateMs?: number; log?: (line: string) => void } = {},
+  o: { stallMs?: number; attempts?: number; totalMs?: number; lateMs?: number; fromZero?: boolean; log?: (line: string) => void } = {},
 ): Promise<string> {
   const stallMs = o.stallMs ?? DOWNLOAD.stallMs;
   const lateMs = o.lateMs ?? DOWNLOAD.lateMs;
@@ -236,9 +237,14 @@ export async function downloadBundle(
   const file = path.join(dir, `${b.sha256.slice(0, 16)}.bundle`);
   const part = `${file}.part`;
   const url = `${portalUrl.replace(/\/+$/, '')}/machine/update/${b.sha256}`;
-  const out = await fs.promises.open(part, 'w');
-  let hash = createHash('sha256');
-  let size = 0;
+  // w5898: a part an earlier call kept (a cut attempt) is resumed: its bytes are hashed again and the next request asks for
+  // the rest. One that cannot be read, is not a file or is not shorter than the bundle goes, and the download starts from 0.
+  sweepParts(dir, part, o.log);
+  const kept = o.fromZero ? undefined : await keptPart(part, b.size, o.log);
+  const out = await fs.promises.open(part, kept ? 'r+' : 'w');
+  let hash = kept?.hash ?? createHash('sha256');
+  let size = kept?.size ?? 0;
+  if (kept) o.log?.(`update over the link: resuming the bundle's download from the ${kept.size} of ${b.size} bytes an earlier attempt kept`);
   const restart = async () => {
     await out.truncate(0);
     hash = createHash('sha256');
@@ -274,6 +280,12 @@ export async function downloadBundle(
         const from = size;
         const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal });
         notePortalRedirect(url, res);
+        // A range the portal will not serve (416): the kept bytes are not part of this bundle, so it starts again from 0.
+        if (from && res.status === 416) {
+          await res.body?.cancel();
+          await restart();
+          throw new Error(`the portal answered 416 for a resume from byte ${from}; starting from 0`);
+        }
         if (res.status >= 400 && res.status < 500) {
           await res.body?.cancel();
           throw new Final(`the portal answered ${res.status} for the update's bundle`);
@@ -307,17 +319,78 @@ export async function downloadBundle(
     }
   } catch (e) {
     await out.close();
-    fs.rmSync(part, { force: true });
+    // w5898: a cut download keeps its bytes for the next call (beast fetched one 29.3 MB bundle four times from 0 on
+    // 2026-11-25, reaching 16.6, 19.5, 22.0 and 8.9 MB); a refusal or a bundle unlike what the portal said keeps nothing.
+    if (e instanceof Final || size <= 0) fs.rmSync(part, { force: true });
+    else o.log?.(`update over the link: kept the ${size} of ${b.size} bytes of the bundle in ${path.basename(part)}; the next attempt resumes from there`);
     throw e;
   }
   await out.close();
   const sha = hash.digest('hex');
   if (size !== b.size || sha !== b.sha256) {
     fs.rmSync(part, { force: true });
+    // A kept part that did not add up (bytes changed on disk, or not this bundle's): gone, and once more from 0 in the time left.
+    if (kept && Date.now() < deadline) {
+      o.log?.(`update over the link: the bundle resumed from ${kept.size} kept bytes did not match what the portal said (SHA-256 ${sha.slice(0, 12)}…); the kept part is deleted and the download starts again from 0`);
+      return downloadBundle(portalUrl, token, b, dir, doFetch, { ...o, fromZero: true, totalMs: deadline - Date.now() });
+    }
     throw new Error(`the bundle does not match what the portal said on the link (${size} bytes, SHA-256 ${sha.slice(0, 12)}…; expected ${b.size} bytes, ${b.sha256.slice(0, 12)}…): nothing was changed`);
   }
   fs.renameSync(part, file);
   return file;
+}
+
+/** The other bundles' parts that stay beside this one (w5898): a thin and a full one of the same commit, say. */
+const KEEP_OTHER_PARTS = 1;
+
+/** Parts of other bundles: the newest `KEEP_OTHER_PARTS` stay, the rest go, so kept parts never pile up in the update folder. */
+function sweepParts(dir: string, part: string, log?: (line: string) => void): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir).filter((n) => n.endsWith('.bundle.part') && path.join(dir, n) !== part);
+  } catch {
+    return;
+  }
+  const byAge = names
+    .map((n) => ({ f: path.join(dir, n), t: fs.statSync(path.join(dir, n), { throwIfNoEntry: false })?.mtimeMs ?? 0 }))
+    .sort((a, b) => b.t - a.t);
+  for (const { f } of byAge.slice(KEEP_OTHER_PARTS)) {
+    try {
+      fs.rmSync(f, { force: true });
+      log?.(`update over the link: removed the partial bundle ${path.basename(f)} of an older update`);
+    } catch {
+      // Best effort: it goes at the next download or the next finished update (removeOldBundles).
+    }
+  }
+}
+
+/**
+ * The part an earlier call kept for this bundle, hashed so far, or undefined (w5898). Anything else at that path (a part as
+ * long as the bundle or longer, an empty one, a folder, one that cannot be read) is removed, and the download starts from 0.
+ */
+async function keptPart(part: string, total: number, log?: (line: string) => void): Promise<{ size: number; hash: ReturnType<typeof createHash> } | undefined> {
+  const st = fs.lstatSync(part, { throwIfNoEntry: false });
+  if (!st) return undefined;
+  const drop = (why: string) => {
+    log?.(`update over the link: the kept partial bundle ${path.basename(part)} ${why}; it is deleted and the download starts from 0`);
+    fs.rmSync(part, { force: true, recursive: true });
+    return undefined;
+  };
+  if (!st.isFile()) return drop('is not a file');
+  if (st.size <= 0) return drop('is empty');
+  if (st.size >= total) return drop(`holds ${st.size} bytes, not fewer than the bundle's ${total}`);
+  try {
+    const hash = createHash('sha256');
+    let size = 0;
+    for await (const chunk of fs.createReadStream(part, { end: st.size - 1 })) {
+      hash.update(chunk as Buffer);
+      size += (chunk as Buffer).length;
+    }
+    if (size !== st.size) return drop(`read ${size} of its ${st.size} bytes`);
+    return { size, hash };
+  } catch (e) {
+    return drop(`could not be read (${(e as Error).message})`);
+  }
 }
 
 const git = (args: string[], timeoutMs = 5 * 60_000) =>

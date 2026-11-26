@@ -23,6 +23,8 @@ export interface Computer {
    * unfenced, so it takes no work of any kind until the fence is fixed or switched off on purpose.
    */
   fenceFailed?: string;
+  /** w5965: its worker fence's state (Machine.fence.state): a pair run of a pre-w5297 player goes only where it is off. */
+  fence?: 'off' | 'setting_up' | 'on' | 'failed';
   /** Agent processes up in its sandboxes; an idle one holds its memory too. */
   live: number;
   /** Of those, mid-turn (what its agent limit counts since w384). */
@@ -462,7 +464,7 @@ export function slotsOf(p: Computer, kind: NeedKind): number {
 }
 
 /** What decides which work can run on `p` (RoomNow.fit, shared/capacity.ts unfitWhy). */
-const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}) });
+const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}), ...(p.fence ? { fence: p.fence } : {}) });
 
 /**
  * Whether pair run `w` could ever get all its legs at once (w3530): pairRoom over every computer that is online and not held

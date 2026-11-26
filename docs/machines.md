@@ -205,6 +205,16 @@ before redeploying by hand.
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).
+- **Count census** (w5972, warn only). The two counts can disagree. On 2026-11-26 placement counted beast at "2 of 6"
+  while its daemon counted six agent hosts it had adopted at start, some of them stale copies of moved requests. The
+  daemon's agent-cap refusals now name the agents they counted (`; counted: 11a84ee9 (slot1, running), d732483b (slot3,
+  running, no process)`, `describeCounted` in `server/agentCensus.ts`). Its `stats` (every 15 s) carry `agents`, the list
+  its `runningIn` counts. The portal compares that list with its own count of the machine (sessions reported mid-turn,
+  plus turns sent but not yet reported) by session id (`CensusWatch`, `noteCensus` in `server/machines.ts`). A
+  difference that outlasts 60 s and two reports is logged as one `agent count:` warning naming each id counted on only
+  one side and what the portal holds of it. The warning repeats when the set changes and every 30 minutes, and one
+  line follows when the counts agree again. Nothing is stopped, dropped or placed by it: making placement use the
+  daemon's count is a separate stage.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
@@ -2732,7 +2742,7 @@ LothDesktop and Beast, not just when BEAST is full").
       branch its new worker carries is never pushed from there), and each new worker gets "[forwarded, w5942] … [w5950] Your
       request's old worker … " naming where that work went. Only when `movedAwayVerdict` holds the w5949 review's conditions:
       (a) its open requests no longer list it (else `awayMoveUndone`, w3425, clears the mark); (b) every request moved off it
-      has another worker (a failed start hands the request back with none: kept); (c) that worker is in another sandbox and
+      has another worker (a failed start hands the request back with none: kept; with "on" it is given back instead, w5976 below); (c) that worker is in another sandbox and
       started (live, mid-turn, or ran a turn), not errored or stopped on purpose, a live one preferred; (d) the save is
       skipped when another agent works in its sandbox, its process did not end within 10 s or its branch is unknown, and
       said so in the message; (e) the "too long ago to resume" report names a moved-away worker's new worker to message,
@@ -2740,6 +2750,17 @@ LothDesktop and Beast, not just when BEAST is full").
       could stop the only copy of the work: … (w5950)". The side branch is local-first: the sandbox's branch is one WIP
       commit ahead until that sandbox is switched or cleaned. Recovery needs nobody at any machine: an owner's request to
       the dispatcher, set_app_config `movedAwayWorkers` `"off"` (or `null` for `"warn"`).
+    - **A move that does not start gives the work back** (w5976, under the same `"on"`): `Agents.moveForRoom` sets
+      `movedAway` before `startMoved` succeeds, and a failed start used to hand the request back Queued with no worker
+      (`Orchestrators.handBack`). With `"on"` the other requests are handed back only once the fresh session started, and a
+      failed start (no seat there, an error status, a link refused, before or after `movedForRoom` took it off) gives every
+      request back to the old worker (`Agents.giveBack`, `Orchestrators.moveUndone`): linked again with its link, gate
+      resumes, hand-off and Queued state as they were before the move (`moveBeforeOf`), its `movedAway` mark cleared, and the
+      message the move took queued for it again with its first time (`SessionManager.putBack`). Its sandbox stays released
+      (its work was saved), so it resumes when a sandbox frees on its own computer, and it is not retired. The computer
+      whose start failed is no move target for `REFUSED_FOR_MS` ("a moved session did not start there … (w5976)",
+      `MoveGuard.noteRefusal`), so the next drain moves it elsewhere or keeps it waiting, never the same start again. `"warn"`
+      and `"off"` keep the hand-back. Tests: `server/w5976MoveGiveBack.test.ts`.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
