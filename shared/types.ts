@@ -1907,9 +1907,10 @@ export interface TokenWarning {
    * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
    * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889); github-token:
    * a GitHub token lacks a required repository or permission, or nears its expiry (w904); github-rate-limit: GitHub is rate
-   * limiting a token's account, which says nothing about the token's permissions (w1186).
+   * limiting a token's account, which says nothing about the token's permissions (w1186); gh-login: GitHub refuses a
+   * machine's own gh login with 401 (w5932).
    */
-  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit';
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit' | 'gh-login';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
   /** The owners see it too, besides `person` (w904: a GitHub token that lacks a requirement). */
