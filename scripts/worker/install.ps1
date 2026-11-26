@@ -51,6 +51,11 @@
   machine_update store_lock does: on makes the main clone read-only to the Low integrity workers once every sandbox is a
   slot repo (held off until then), warn refuses nothing and logs each write the daemon did not make, off opens it again.
   Left out: the install keeps what it has.
+.PARAMETER SharedLock
+  With -Update (w5615, docs/worker-root.md "Per-slot caches and the players broker"): set the shared-cache lock in
+  daemon.json (sharedLock), as ops_worker machine_update shared_lock does: each sandbox gets its own copy-on-write clone of
+  the tool caches and players are installed and launched by the daemon; warn logs worker writes to the shared caches,
+  players, seed and tools, on makes those read-only to workers, off opens them again. Left out: the install keeps what it has.
 .PARAMETER DaemonTmpdir
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
   machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp-daemon, off keeps the
@@ -125,6 +130,7 @@ param(
     [ValidateSet('on', 'off')][string]$WorkerFence,
     [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
     [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
+    [ValidateSet('off', 'warn', 'on')][string]$SharedLock,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
@@ -296,6 +302,7 @@ if ($Update) {
     if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
     if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
     if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
+    if ($SharedLock) { $argv += @('--shared-lock', $SharedLock) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }

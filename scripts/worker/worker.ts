@@ -1968,6 +1968,8 @@ export interface UpdateFlags {
   toolsDiskLock?: 'warn' | 'on';
   /** CI jobs first on a Windows CI-first machine (w6110, machine/ciFirstWin.ts), Windows only: written as daemon.json's `winCiFirst`; unset carries daemon.json's (absent: warn). */
   winCiFirst?: 'off' | 'warn' | 'enforce';
+  /** The shared-cache lock (w5615, docs/worker-root.md "Per-slot caches and the players broker"), every OS: written as daemon.json's `sharedLock`; unset carries daemon.json's. */
+  sharedLock?: 'off' | 'warn' | 'on';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2117,6 +2119,18 @@ export function applyWinCiFirst(config: Record<string, unknown>, setting: 'off' 
   return { ...config, winCiFirst: setting };
 }
 
+/** `--shared-lock off|warn|on` (w5615): anything else is refused, never guessed at. Exported for tests. */
+export function sharedLockFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn' && v !== 'on') throw new Error(`--shared-lock is off, warn or on, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the shared-cache lock set, "off" written as "off" like the caps' modes (w5615); every platform. Exported for tests. */
+export function applySharedLock(config: Record<string, unknown>, setting: 'off' | 'warn' | 'on' | undefined): Record<string, unknown> {
+  return setting ? { ...config, sharedLock: setting } : config;
+}
+
 /** daemon.json with the daemon's own temp folder set, "off" written as "off" (w6000); every platform. Exported for tests. */
 export function applyDaemonTmpdirSetting(config: Record<string, unknown>, setting: 'on' | 'off' | undefined): Record<string, unknown> {
   return setting ? { ...config, daemonTmpdir: setting } : config;
@@ -2163,7 +2177,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applySharedLock(applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), f.sharedLock), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2406,6 +2420,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.daemonTmpdir) say(`daemon tmpdir: ${f.daemonTmpdir}`);
   if (f.toolsDiskLock) say(`tools disk lock: ${f.toolsDiskLock}`);
   if (f.winCiFirst) say(`win ci first: ${f.winCiFirst}`);
+  if (f.sharedLock) say(`shared lock: ${f.sharedLock}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -3014,6 +3029,9 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--win-ci-first off|warn|enforce] (w6110, Windows: enforce lowers the processes agents' tools start to BelowNormal while a CI
              job runs on a CI-first machine, warn only logs what they take, the recovery, off stops it; daemon.json winCiFirst;
              default: as daemon.json has it, warn if it has none)
+            [--shared-lock off|warn|on] (w5615, every OS: per-slot copy-on-write tool caches, players installed and launched by the daemon;
+             warn logs worker writes to the shared caches, players, seed and tools, on makes them read-only to workers; daemon.json
+             sharedLock; default: as daemon.json has it; docs/worker-root.md "Per-slot caches and the players broker")
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -3119,6 +3137,7 @@ export async function main(argv = process.argv.slice(2)) {
     const daemonTmpdir = flags.has('daemon-tmpdir') ? daemonTmpdirFlag('') : daemonTmpdirFlag(opts['daemon-tmpdir']);
     const toolsDiskLock = flags.has('tools-disk-lock') ? toolsDiskLockFlag('') : toolsDiskLockFlag(opts['tools-disk-lock']);
     const winCiFirst = flags.has('win-ci-first') ? winCiFirstFlag('') : winCiFirstFlag(opts['win-ci-first']);
+    const sharedLock = flags.has('shared-lock') ? sharedLockFlag('') : sharedLockFlag(opts['shared-lock']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3139,6 +3158,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(daemonTmpdir ? { daemonTmpdir } : {}),
       ...(toolsDiskLock ? { toolsDiskLock } : {}),
       ...(winCiFirst ? { winCiFirst } : {}),
+      ...(sharedLock ? { sharedLock } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

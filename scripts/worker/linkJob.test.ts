@@ -132,6 +132,13 @@ test('w5614: the store lock goes through to the installer update as named; an un
   assert.deepEqual(updateFlagsOf('/src', { storeLock: 'enforce' as never }), { source: '/src' });
 });
 
+test('w5615: the shared-cache lock goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { sharedLock: m }), { source: '/src', sharedLock: m });
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', sharedLock: 'warn' }), { source: '/src', workerFence: 'on', sharedLock: 'warn' });
+  assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  assert.deepEqual(updateFlagsOf('/src', { sharedLock: 'enforce' as never }), { source: '/src' });
+});
+
 test('w5862: the Medium agents folder mode goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
   for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { mediumAgentFolders: m }), { source: '/src', mediumAgentFolders: m });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', mediumAgentFolders: 'on' }), { source: '/src', workerFence: 'on', mediumAgentFolders: 'on' });

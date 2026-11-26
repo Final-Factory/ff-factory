@@ -1027,6 +1027,21 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, 'off'), ['-StoreLock off']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, 'on'), ['--store-lock on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn']);
+  // w5615: the shared-cache lock's mode: off, warn or on and nothing else, on every OS (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', sharedLock: 'maybe' as never }), /shared_lock: off, warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: '' as never }), /shared_lock: off, warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: 'enforce' as never }), /shared_lock: off, warn or on/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', sharedLock: 'warn' });
+  await new Promise((r) => setTimeout(r, 300));
+  const shLin = store.readTranscript(OPS_ID, 220).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(shLin.text.includes(`--worker-fence on --shared-lock warn'`), shLin.text);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const shWin = store.readTranscript(OPS_ID, 240).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(shWin.text.includes(`-SharedLock on"'`), shWin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-SharedLock off']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--shared-lock on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--shared-lock on']);
   // w5833: the editor temp folder's switch: on or off and nothing else, macOS and Linux only (beast is Windows, biscuit is Linux here).
   assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', editorTmpdir: 'maybe' as never }), /editor_tmpdir: on or off/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', editorTmpdir: '' as never }), /editor_tmpdir: on or off/);

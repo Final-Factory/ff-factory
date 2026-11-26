@@ -34,6 +34,10 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
+import { SlotCaches, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { playersRpcHandlers } from './playersBroker.ts';
+import { brokerLauncher } from './playersLaunch.ts';
+import { playerFenceFor, type PlayerFence } from './playerFence.ts';
 import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
@@ -60,7 +64,7 @@ import { cliProjectsDir } from '../server/cliTranscript.ts';
 import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, workerClaudeDir } from '../server/claudeHome.ts';
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
-import { run } from '../server/proc.ts';
+import { copyTree, removeTree, run } from '../server/proc.ts';
 import { probeReadFenceWin } from './readFenceWin.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
@@ -133,7 +137,7 @@ import { TrayHost, trayInstance } from './tray.ts';
 import { FirefoxCloser, closeFirefox, firefoxFile, winFirefoxDeps } from './firefox.ts';
 import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type GhLoginDeps } from './ghLogin.ts';
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
-import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
+import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV, type RpcHandler } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
 import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
@@ -320,6 +324,13 @@ export interface DaemonConfig {
    * unset; decided once per daemon process; set remotely by `ops_worker machine_update store_lock`.
    */
   storeLock?: 'off' | 'warn' | 'on';
+  /**
+   * w5615: the shared lock (machine/slotCaches.ts, docs/worker-root.md "Per-slot caches and the players broker"): "warn"
+   * gives each sandbox its own clones of the tool caches, a determinism-audit folder of its own and the players broker, and
+   * logs worker writes to the shared caches, players, seed and tools; "on" also makes those read-only to workers. Off when
+   * unset; decided once per daemon process; set remotely by `ops_worker machine_update shared_lock`.
+   */
+  sharedLock?: 'off' | 'warn' | 'on';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -568,6 +579,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** w5615: how often the clone keeper looks for a sandbox whose caches to make, merge back or refresh. */
+const SLOT_CACHES_EVERY_MS = 10 * 60_000;
 /** How often the status reads the ffu slots again (w5912): a git status and a few stats per held slot, in a child process. */
 const FFU_REPORT_MS = 2 * 60_000;
 /** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
@@ -805,7 +818,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on');
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on', () => this.sharedLock);
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -2060,6 +2073,11 @@ export class Daemon {
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
     this.timers.push(setInterval(loopLabel('timer reaper.tick', () => void this.reaper.tick()), 15_000));
     if (this.procsBroker) this.timers.push(setInterval(loopLabel('timer procsBroker.tick', () => void this.procsBroker?.tick()), PROCS_POLL_MS));
+    // w5615: each sandbox's own clones of the tool caches, made, merged back and refreshed while it is idle.
+    if (this.slotCaches) {
+      void this.slotCaches.tick();
+      this.timers.push(setInterval(loopLabel('timer slotCaches.tick', () => void this.slotCaches?.tick()), SLOT_CACHES_EVERY_MS));
+    }
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
     if (this.cfg.leftovers !== false) this.timers.push(setInterval(loopLabel('timer leftovers.tick', () => void this.leftovers.tick().then(() => this.feedPersonPlay())), 15_000));
@@ -2217,7 +2235,7 @@ export class Daemon {
       key: this.rpcKey,
       infoFile: rpcInfoFile(appDirOfConfig(this.cfg)),
       alsoInfoFile: legacyRpcInfoFile(appDirOfConfig(this.cfg)),
-      handlers: { ...slotRpcHandlers(this.slots.dir, { filed: () => void this.slots.tick() }), ...(this.benchProxy?.handlers() ?? {}) },
+      handlers: { ...slotRpcHandlers(this.slots.dir, { filed: () => void this.slots.tick() }), ...(this.benchProxy?.handlers() ?? {}), ...this.playersHandlers() },
       ...(this.cfg.root ? { benchLock: benchLockDir(this.cfg.root) } : {}),
       log: (line) => log(line),
     });
@@ -3601,7 +3619,9 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+    // w5615: with the shared lock, its own clones of the tool caches and audit folder, and player_slots.py asks the broker.
+    const slotOwn = spec.sandbox && this.sharedLock !== 'off' ? { ...slotCacheEnv(this.cfg.root, spec.sandbox, this.sharedLock), FF_PLAYER_BROKER: '1' } : {};
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...slotOwn, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   /**
@@ -3708,6 +3728,74 @@ export class Daemon {
     return this.storeLockMemo;
   }
   private stopStoreWatch?: () => void;
+
+  private sharedLockMemo?: SharedLockSetting;
+  /**
+   * w5615: the shared lock for this daemon process (machine/slotCaches.ts), decided at its first use and kept. "on" with a
+   * sandbox that has no clones yet is held to "warn" for this run (sharedLockBlockers). Anything but off starts the watch.
+   */
+  private get sharedLock(): SharedLockSetting {
+    if (!this.sharedLockMemo) {
+      const asked = sharedLockSetting(this.cfg.sharedLock);
+      const blockers = asked === 'off' ? [] : sharedLockBlockers(this.cfg.root, this.pool.list().map((s) => s.id));
+      this.sharedLockMemo = asked === 'on' && blockers.length ? 'warn' : asked;
+      const line = sharedLockLine(asked, blockers);
+      if (line) log(line);
+      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonBusy: () => this.sharedBusy > 0 });
+    }
+    return this.sharedLockMemo;
+  }
+  private stopSharedWatch?: () => void;
+  /** Writes the daemon itself makes in the locked folders right now (a merge-back, a player install): the watch skips them. */
+  private sharedBusy = 0;
+  private async sharedWrite<T>(f: () => Promise<T>): Promise<T> {
+    this.sharedBusy++;
+    try {
+      return await f();
+    } finally {
+      this.sharedBusy--;
+    }
+  }
+
+  private slotCachesMemo?: SlotCaches | null;
+  /** w5615: the clone keeper, with the shared lock on or warn and a worker root. */
+  private get slotCaches(): SlotCaches | undefined {
+    if (this.slotCachesMemo === undefined) {
+      const root = this.cfg.root;
+      this.slotCachesMemo =
+        root && this.sharedLock !== 'off'
+          ? new SlotCaches({
+              root,
+              setting: this.sharedLock,
+              sandboxes: () => this.pool.list().map((sb) => ({ id: sb.id, idle: this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) })),
+              copyTree: (src, dst) => this.sharedWrite(() => copyTree(src, dst, process.platform === 'win32' ? { mode: 'clone' } : {})),
+              removeTree: async (dir) => {
+                await removeTree(dir);
+              },
+              log: (l) => log(l),
+            })
+          : null;
+    }
+    return this.slotCachesMemo ?? undefined;
+  }
+
+  /** w5615: the players broker's calls (machine/playersBroker.ts), with the shared lock on or warn. */
+  private playersHandlers(): Record<string, RpcHandler> {
+    const root = this.cfg.root;
+    if (!root || this.sharedLock === 'off') return {};
+    let fence: PlayerFence | undefined;
+    return playersRpcHandlers({
+      root,
+      host: os.hostname().toLowerCase(),
+      sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
+      copyTree: (src, dst) => this.sharedWrite(() => copyTree(src, dst, process.platform === 'win32' ? { mode: 'clone' } : {})),
+      removeTree: async (dir) => {
+        await this.sharedWrite(() => removeTree(dir));
+      },
+      launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowCopies?.make(process.execPath) }),
+      log: (l) => log(l),
+    });
+  }
 
   private fenceMemo?: { fence?: WorkerFence; why?: string };
   /**

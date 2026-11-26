@@ -1,0 +1,512 @@
+/**
+ * The players broker (w5615, stage 2 of w5544; docs/worker-root.md "Per-slot caches and the players broker"). Built players
+ * run only from `<root>/players/<sandbox>-<peer>` (docs/worker-root.md 2.5: a stable path, so no firewall prompt). Workers
+ * used to fill those folders themselves (the game repo's scripts/nightly/player_slots.py), so any worker could replace the
+ * build another sandbox's run was about to start. With daemon.json `sharedLock` "warn" or "on" a worker asks the daemon
+ * instead (machine/daemonRpc.ts, from scripts/bench/daemon_rpc.py with FF_PLAYER_BROKER=1):
+ * - `players/install` {player, sha?, peer?}: the daemon copies the build into the caller's own slot, a block clone where the
+ *   disk has one and never a hard link (a hard link would share the file, and on Windows its label, with the worker's
+ *   build), and writes slot.json as player_slots.py does. A slot already holding the same build is kept.
+ * - `players/launch` {peer?, args, config?}: the daemon starts the slot's player, fenced as its timed runs are
+ *   (machine/playerFence.ts; on Windows through the Low node copy, so the player runs Low and the worker can end it), with
+ *   no credential in its environment, and writes the lease with the caller's session. Answers the pid.
+ * - `players/release` {lease}: the caller's own lease goes. `players/status`: the caller's slots.
+ * The slot comes from the caller's token (its sandbox), never from the body: a worker reaches only its own two slots.
+ * The build must lie in the caller's sandbox, the temp folder or the nightly folder, never in players, the daemon's folder
+ * or the secrets.
+ */
+import { createHash, randomBytes } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { RpcRefused, type Caller } from "./daemonRpc.ts";
+import { okSandboxId } from "./slotCaches.ts";
+
+/** What a running player writes into its own folder (the game's LocalMultiplayerAutomationSessionConfig): not the build. */
+export const RUNTIME_FILES = new Set([
+  ".ff-local-automation-status.json",
+  ".ff-local-automation.json",
+]);
+export const AUTOMATION_CONFIG = ".ff-local-automation.json";
+/** RpcRefused takes the message first; here the status reads first. */
+const refuse = (status: number, message: string) =>
+  new RpcRefused(message, status);
+const MAX_ARGS = 200;
+const MAX_ARG = 4096;
+/** Under the daemon RPC's 16 KB body (machine/daemonRpc.ts MAX_BODY). */
+const MAX_CONFIG = 12 * 1024;
+
+export interface PlayersMarker {
+  sha: string;
+  fingerprint: string;
+  state: "filling" | "ready";
+  source: string;
+  /** Where the build lands under player/ ('' for an exe's folder, the .app's name for a bundle) and what to start there. */
+  lands: string;
+  entry: string;
+  filled: number;
+  used: number;
+  /** Written by the daemon's broker (player_slots.py fills a slot of its own otherwise). */
+  broker: true;
+}
+
+export interface BrokerLaunch {
+  exe: string;
+  args: string[];
+  cwd: string;
+  /** The slot folder: the player may write there (its status file), and its run folder. */
+  slotDir: string;
+  sandbox: string;
+  session: string;
+  /** The folder of its -logFile, when that lies in the workers' temp tree (`<root>/tmp`): the player writes its log there. */
+  logDir?: string;
+}
+
+export interface PlayersBrokerDeps {
+  root: string;
+  host: string;
+  /** The caller's sandbox folder, from the pool. */
+  sandboxPath: (id: string) => string | undefined;
+  copyTree: (src: string, dst: string) => Promise<void>;
+  removeTree: (dir: string) => Promise<void>;
+  /** Start the player, fenced, detached; answers its pid or why it was not started. */
+  launch: (l: BrokerLaunch) => Promise<{ pid: number } | { refused: string }>;
+  alive?: (pid: number) => boolean;
+  log: (l: string) => void;
+  now?: () => number;
+  /** "warn": note it in the log; the broker answers the same either way. */
+  platform?: NodeJS.Platform;
+}
+
+const real = (p: string) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+};
+const inside = (p: string, dir: string) => {
+  const r = path.relative(dir, p);
+  return r === "" || (!!r && !r.startsWith("..") && !path.isAbsolute(r));
+};
+const alive0 = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+};
+
+/** The folder to mirror, where it lands under player/, and the entry to start (player_slots.py split_player). */
+export function splitPlayer(player: string): {
+  src: string;
+  lands: string;
+  entry: string;
+} {
+  const p = path.resolve(player.replace(/[\\/]+$/, ""));
+  if (p.endsWith(".app"))
+    return { src: p, lands: path.basename(p), entry: path.basename(p) };
+  if (/\.(exe|x86_64)$/i.test(p))
+    return { src: path.dirname(p), lands: "", entry: path.basename(p) };
+  throw refuse(
+    400,
+    `players/install: player is a built player's .exe, .x86_64 or .app, not ${path.basename(p)}`,
+  );
+}
+
+/**
+ * Which build a folder holds: every file's relative path, size and modification time (never its content: 2-3 GB), the
+ * runtime files left out. Not player_slots.py's fingerprint: a slot the broker filled is reused only by the broker.
+ */
+export function buildKey(tree: string): string {
+  const h = createHash("sha256");
+  const files: string[] = [];
+  const walk = (rel: string) => {
+    let es: fs.Dirent[] = [];
+    try {
+      es = fs.readdirSync(path.join(tree, rel), { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of es) {
+      const r = rel ? path.join(rel, e.name) : e.name;
+      if (RUNTIME_FILES.has(e.name)) continue;
+      if (e.isDirectory()) walk(r);
+      else files.push(r);
+    }
+  };
+  if (fs.statSync(tree).isDirectory()) walk("");
+  for (const r of files.sort()) {
+    const st = fs.lstatSync(path.join(tree, r));
+    h.update(
+      `${r.replace(/\\/g, "/")}\0${st.size}\0${Math.trunc(st.mtimeMs)}\0`,
+    );
+  }
+  return `broker-v1-${h.digest("hex").slice(0, 32)}`;
+}
+
+/** The Mac bundle's executable (Contents/MacOS/<CFBundleExecutable>, the only file there in a Unity build). */
+export function bundleExe(app: string): string {
+  const dir = path.join(app, "Contents", "MacOS");
+  const files = fs.readdirSync(dir).filter((n) => !n.startsWith("."));
+  if (files.length !== 1)
+    throw refuse(
+      409,
+      `players/launch: ${dir} holds ${files.length} files, not one executable`,
+    );
+  return path.join(dir, files[0]);
+}
+
+export function playersRpcHandlers(
+  d: PlayersBrokerDeps,
+): Record<string, (c: Caller, b: Record<string, unknown>) => unknown> {
+  const now = () => (d.now ?? Date.now)();
+  const alive = d.alive ?? alive0;
+  const players = path.join(d.root, "players");
+  let chain: Promise<unknown> = Promise.resolve();
+  /** One install or launch at a time: they share the slot folders and the daemon has one view of them. */
+  const serial = <T>(f: () => Promise<T>): Promise<T> => {
+    const p = chain.then(f, f);
+    chain = p.catch(() => undefined);
+    return p;
+  };
+  const slotOf = (c: Caller, b: Record<string, unknown>) => {
+    if (!okSandboxId(c.sandbox))
+      throw refuse(403, "players: only a sandbox worker has player slots");
+    const peer = b.peer === undefined ? 0 : b.peer;
+    if (peer !== 0 && peer !== 1) throw refuse(400, "players: peer is 0 or 1");
+    const name = `${c.sandbox}-${peer}`;
+    return { name, dir: path.join(players, name), sandbox: c.sandbox };
+  };
+  const readMarker = (dir: string): PlayersMarker | undefined => {
+    try {
+      return JSON.parse(
+        fs.readFileSync(path.join(dir, "slot.json"), "utf8"),
+      ) as PlayersMarker;
+    } catch {
+      return undefined;
+    }
+  };
+  const writeJson = (file: string, data: unknown) => {
+    const tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 1));
+    fs.renameSync(tmp, file);
+  };
+  /** The slot's live leases (player_slots.py live_leases: a lease whose pid is gone is dead). Reads only. */
+  const liveLeases = (dir: string) => {
+    const ld = path.join(dir, "leases");
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(ld).filter((n) => n.endsWith(".json"));
+    } catch {
+      return [];
+    }
+    const out: {
+      file: string;
+      pid: number;
+      session?: string;
+      host?: string;
+    }[] = [];
+    for (const n of names) {
+      try {
+        const l = JSON.parse(fs.readFileSync(path.join(ld, n), "utf8")) as {
+          pid?: number;
+          session?: string;
+          host?: string;
+        };
+        const local = !l.host || l.host === d.host;
+        if (Number.isInteger(l.pid) && (!local || alive(l.pid!)))
+          out.push({
+            file: n,
+            pid: l.pid!,
+            ...(l.session ? { session: l.session } : {}),
+            ...(l.host ? { host: l.host } : {}),
+          });
+      } catch {
+        // half-written or gone
+      }
+    }
+    return out;
+  };
+  const allowedSource = (c: Caller, src: string): boolean => {
+    const s = real(src);
+    const closed = [
+      players,
+      path.join(d.root, "daemon"),
+      path.join(d.root, "secrets"),
+    ].map(real);
+    if (closed.some((x) => inside(s, x))) return false;
+    const sb = c.sandbox ? d.sandboxPath(c.sandbox) : undefined;
+    const open = [sb, path.join(d.root, "tmp"), path.join(d.root, "nightly")]
+      .filter((x): x is string => !!x)
+      .map(real);
+    return open.some((x) => inside(s, x));
+  };
+
+  return {
+    "players/status": (c) => {
+      if (!okSandboxId(c.sandbox))
+        throw refuse(403, "players: only a sandbox worker has player slots");
+      return {
+        slots: [0, 1].map((peer) => {
+          const dir = path.join(players, `${c.sandbox}-${peer}`);
+          return {
+            slot: path.basename(dir),
+            dir,
+            marker: readMarker(dir) ?? null,
+            leases: liveLeases(dir),
+          };
+        }),
+      };
+    },
+
+    "players/install": (c, b) =>
+      serial(async () => {
+        const slot = slotOf(c, b);
+        if (typeof b.player !== "string" || !path.isAbsolute(b.player))
+          throw refuse(
+            400,
+            "players/install: player is the absolute path of a built player",
+          );
+        const sha = typeof b.sha === "string" ? b.sha.slice(0, 64) : "";
+        const { src, lands, entry } = splitPlayer(b.player);
+        if (
+          !fs.existsSync(src) ||
+          !fs.existsSync(path.join(src, lands ? "" : entry))
+        )
+          throw refuse(404, `players/install: no player at ${b.player}`);
+        if (!allowedSource(c, src))
+          throw refuse(
+            403,
+            `players/install: ${src} is not in your sandbox, the temp folder or the nightly folder`,
+          );
+        const fingerprint = buildKey(src);
+        fs.mkdirSync(path.join(slot.dir, "leases"), { recursive: true });
+        const m = readMarker(slot.dir);
+        const dst = path.join(slot.dir, "player");
+        if (
+          m?.broker &&
+          m.state === "ready" &&
+          m.sha === sha &&
+          m.fingerprint === fingerprint &&
+          m.entry === entry &&
+          fs.existsSync(path.join(dst, lands ? entry : entry))
+        ) {
+          m.used = now();
+          writeJson(path.join(slot.dir, "slot.json"), m);
+          return {
+            slot: slot.name,
+            slotDir: slot.dir,
+            player: path.join(dst, entry),
+            filled: false,
+            build: fingerprint,
+          };
+        }
+        const live = liveLeases(slot.dir);
+        if (live.length)
+          throw refuse(
+            409,
+            `players/install: ${slot.name} holds a running player (pid ${live.map((l) => l.pid).join(", ")}); end it or use the other peer's slot`,
+          );
+        for (const n of fs.readdirSync(slot.dir))
+          if (n.startsWith("trash-"))
+            await d.removeTree(path.join(slot.dir, n)).catch(() => undefined);
+        if (fs.existsSync(dst)) {
+          const trash = path.join(slot.dir, `trash-${now()}-${process.pid}`);
+          try {
+            fs.renameSync(dst, trash);
+          } catch (e) {
+            throw refuse(
+              409,
+              `players/install: ${slot.name}'s player folder is in use (${(e as Error).message})`,
+            );
+          }
+          await d.removeTree(trash).catch(() => undefined);
+        }
+        const marker: PlayersMarker = {
+          sha,
+          fingerprint,
+          state: "filling",
+          source: src,
+          lands,
+          entry,
+          filled: now(),
+          used: now(),
+          broker: true,
+        };
+        writeJson(path.join(slot.dir, "slot.json"), marker);
+        const t0 = now();
+        try {
+          if (lands) {
+            fs.mkdirSync(dst, { recursive: true });
+            await d.copyTree(src, path.join(dst, lands));
+          } else await d.copyTree(src, dst);
+          for (const r of RUNTIME_FILES)
+            fs.rmSync(path.join(lands ? path.join(dst, lands) : dst, r), {
+              force: true,
+            });
+        } catch (e) {
+          await d.removeTree(dst).catch(() => undefined);
+          fs.rmSync(path.join(slot.dir, "slot.json"), { force: true });
+          throw refuse(
+            500,
+            `players/install: copying ${src} into ${slot.name} failed: ${(e as Error).message.split("\n")[0]}`,
+          );
+        }
+        marker.state = "ready";
+        writeJson(path.join(slot.dir, "slot.json"), marker);
+        d.log(
+          `players broker: ${c.session} installed ${src} into ${slot.name} in ${((now() - t0) / 1000).toFixed(1)} s (w5615)`,
+        );
+        return {
+          slot: slot.name,
+          slotDir: slot.dir,
+          player: path.join(dst, entry),
+          filled: true,
+          build: fingerprint,
+        };
+      }),
+
+    "players/launch": (c, b) =>
+      serial(async () => {
+        const slot = slotOf(c, b);
+        const m = readMarker(slot.dir);
+        if (!m?.broker || m.state !== "ready")
+          throw refuse(
+            409,
+            `players/launch: ${slot.name} holds no build the broker installed; players/install first`,
+          );
+        const args = b.args === undefined ? [] : b.args;
+        if (
+          !Array.isArray(args) ||
+          args.length > MAX_ARGS ||
+          !args.every(
+            (a) =>
+              typeof a === "string" && a.length <= MAX_ARG && !a.includes("\0"),
+          )
+        )
+          throw refuse(
+            400,
+            `players/launch: args is a list of at most ${MAX_ARGS} strings`,
+          );
+        const top = path.join(slot.dir, "player", m.entry);
+        if (!fs.existsSync(top))
+          throw refuse(
+            409,
+            `players/launch: ${top} is gone; players/install again`,
+          );
+        const exe = m.entry.endsWith(".app") ? bundleExe(top) : top;
+        // The game reads its automation config from the folder above its data folder: the exe's folder, or the .app.
+        const projectRoot = m.entry.endsWith(".app") ? top : path.dirname(top);
+        if (b.config !== undefined) {
+          if (typeof b.config !== "string" || b.config.length > MAX_CONFIG)
+            throw refuse(
+              400,
+              `players/launch: config is the automation config's JSON text, at most ${MAX_CONFIG} bytes`,
+            );
+          try {
+            JSON.parse(b.config);
+          } catch {
+            throw refuse(400, "players/launch: config is not JSON");
+          }
+          fs.writeFileSync(path.join(projectRoot, AUTOMATION_CONFIG), b.config);
+        } else
+          fs.rmSync(path.join(projectRoot, AUTOMATION_CONFIG), { force: true });
+        const r = await d.launch({
+          exe,
+          args: args as string[],
+          cwd: path.dirname(exe),
+          slotDir: slot.dir,
+          sandbox: slot.sandbox,
+          session: c.session,
+          ...logDirOf(args as string[], d.root),
+        });
+        if ("refused" in r) throw refuse(503, `players/launch: ${r.refused}`);
+        const t = now();
+        const lease = path.join(
+          slot.dir,
+          "leases",
+          `${d.host}-${r.pid}-${randomBytes(4).toString("hex")}.json`,
+        );
+        writeJson(lease, {
+          pid: r.pid,
+          host: d.host,
+          sandbox: d.sandboxPath(slot.sandbox) ?? slot.sandbox,
+          sha: m.sha,
+          build: m.fingerprint,
+          time: t / 1000,
+          when: new Date(t).toISOString().slice(0, 19),
+          session: c.session,
+          broker: true,
+        });
+        m.used = t;
+        writeJson(path.join(slot.dir, "slot.json"), m);
+        d.log(
+          `players broker: ${c.session} started ${exe} in ${slot.name} as pid ${r.pid} (w5615)`,
+        );
+        return {
+          pid: r.pid,
+          exe,
+          lease,
+          slot: slot.name,
+          build: m.fingerprint,
+        };
+      }),
+
+    "players/release": (c, b) => {
+      if (!okSandboxId(c.sandbox))
+        throw refuse(403, "players: only a sandbox worker has player slots");
+      if (typeof b.lease !== "string")
+        throw refuse(
+          400,
+          "players/release: lease is the path players/launch answered",
+        );
+      const name = path.basename(b.lease);
+      for (const peer of [0, 1]) {
+        const f = path.join(players, `${c.sandbox}-${peer}`, "leases", name);
+        if (path.resolve(b.lease) !== path.resolve(f) || !fs.existsSync(f))
+          continue;
+        let session: string | undefined;
+        try {
+          session = (
+            JSON.parse(fs.readFileSync(f, "utf8")) as { session?: string }
+          ).session;
+        } catch {
+          // unreadable: the caller's own slot, so it may go
+        }
+        if (session && session !== c.session)
+          throw refuse(
+            403,
+            "players/release: another session holds that lease",
+          );
+        fs.rmSync(f, { force: true });
+        return { had: true };
+      }
+      return { had: false };
+    },
+  };
+}
+
+/** The environment a broker-started player gets: no credential (editorEnv.ts's rule), the display, the sandbox's data root. */
+export const PLAYER_DISPLAY_ENV = [
+  "DISPLAY",
+  "WAYLAND_DISPLAY",
+  "XDG_RUNTIME_DIR",
+  "XAUTHORITY",
+  "LANG",
+  "LC_ALL",
+  "SHELL",
+  "LOGNAME",
+  "PULSE_SERVER",
+  "TMPDIR",
+];
+
+/** The -logFile folder of a launch when it lies in `<root>/tmp` (a worker's own temp folder), else nothing. */
+export function logDirOf(args: string[], root: string): { logDir?: string } {
+  const i = args.findIndex((a) => a.toLowerCase() === "-logfile");
+  const f = i >= 0 ? args[i + 1] : undefined;
+  if (!f || !path.isAbsolute(f)) return {};
+  const dir = real(path.dirname(f));
+  const tmp = real(path.join(root, "tmp"));
+  return dir !== tmp && inside(dir, tmp) ? { logDir: dir } : {};
+}

@@ -146,6 +146,8 @@ export interface LinkUpdateFlags {
   toolsDiskLock?: 'warn' | 'on';
   /** CI jobs first on a Windows CI-first machine, off, warn or enforce (w6110, machine/ciFirstWin.ts), Windows only: daemon.json `winCiFirst`; unset: carried. A daemon that predates it ignores it. */
   winCiFirst?: 'off' | 'warn' | 'enforce';
+  /** The shared-cache lock's mode (w5615, docs/worker-root.md "Per-slot caches and the players broker"), any OS: daemon.json `sharedLock`; unset: carried. A daemon that predates it ignores it. */
+  sharedLock?: 'off' | 'warn' | 'on';
 }
 
 /**

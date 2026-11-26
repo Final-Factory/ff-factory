@@ -23,11 +23,11 @@
 // command lines that name the install folder or an agent host, with no environment. The check is not proof against a
 // worker that sets out to lie: it can name another live worker's pid and session (same user, it can read a node
 // process's environment itself). It keeps the broker from handing every worker the whole machine.
-import { randomBytes } from 'node:crypto';
-import fs from 'node:fs';
-import path from 'node:path';
+import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
-export type ProcsOp = 'procs' | 'env' | 'inspect' | 'census';
+export type ProcsOp = "procs" | "env" | "inspect" | "census";
 /** Who asks (w5558): the worker's session (FF_SESSION_ID) and the asking process. */
 export interface ProcsWho {
   session: string;
@@ -38,10 +38,20 @@ export interface ProcsAsk {
   pids?: number[];
   who?: ProcsWho;
 }
-export type ProcsAnswer = { ok: true; result: unknown } | { ok: false; error: string };
+export type ProcsAnswer =
+  { ok: true; result: unknown } | { ok: false; error: string };
 
-/** The mailbox folder inside the Unity slots one. */
-export const procsMailbox = (slotsDir: string) => path.join(slotsDir, 'procs');
+/**
+ * The mailbox folder inside the Unity slots one. w5615: a sandbox worker's own subfolder `procs/<sandbox>` (FF_SANDBOX_ID),
+ * so no worker reads, answers or removes another slot's asks; the daemon answers in every subfolder and in `procs` itself
+ * (a worker of a daemon before w5615, or one outside a sandbox).
+ */
+export const procsMailbox = (slotsDir: string, sandbox?: string) =>
+  sandbox &&
+  /^[A-Za-z0-9][\w.-]{0,63}$/.test(sandbox) &&
+  !sandbox.includes("..")
+    ? path.join(slotsDir, "procs", sandbox)
+    : path.join(slotsDir, "procs");
 
 /** An ask or answer older than this is a dead worker's or a dead daemon's: removed. */
 export const STALE_MS = 2 * 60_000;
@@ -54,12 +64,14 @@ const MAX_PIDS = 100_000;
 /** True when an error says a program could not be started because the sandbox refused it (EPERM, EACCES). */
 export function execRefused(e: unknown): boolean {
   const code = (e as NodeJS.ErrnoException | null)?.code;
-  if (code === 'EPERM' || code === 'EACCES') return true;
-  return /\bspawn(Sync)? \S*\s*E(PERM|ACCES)\b/.test(String((e as Error | null)?.message ?? ''));
+  if (code === "EPERM" || code === "EACCES") return true;
+  return /\bspawn(Sync)? \S*\s*E(PERM|ACCES)\b/.test(
+    String((e as Error | null)?.message ?? ""),
+  );
 }
 
 function writeAtomic(file: string, data: string) {
-  const tmp = `${file}.${process.pid}.${randomBytes(3).toString('hex')}.tmp`;
+  const tmp = `${file}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
   fs.writeFileSync(tmp, data, { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
@@ -83,14 +95,33 @@ export function parseAsk(text: string): ProcsAsk | undefined {
   } catch {
     return undefined;
   }
-  const o = j as { op?: unknown; pids?: unknown; who?: { session?: unknown; pid?: unknown } | null };
-  if (o.op !== 'procs' && o.op !== 'env' && o.op !== 'inspect' && o.op !== 'census') return undefined;
+  const o = j as {
+    op?: unknown;
+    pids?: unknown;
+    who?: { session?: unknown; pid?: unknown } | null;
+  };
+  if (
+    o.op !== "procs" &&
+    o.op !== "env" &&
+    o.op !== "inspect" &&
+    o.op !== "census"
+  )
+    return undefined;
   const w = o.who;
-  if (!w || typeof w.session !== 'string' || !SESSION.test(w.session) || !Number.isInteger(w.pid) || (w.pid as number) <= 0) return undefined;
+  if (
+    !w ||
+    typeof w.session !== "string" ||
+    !SESSION.test(w.session) ||
+    !Number.isInteger(w.pid) ||
+    (w.pid as number) <= 0
+  )
+    return undefined;
   const who = { session: w.session, pid: w.pid as number };
-  if (o.op === 'procs' || o.op === 'census') return { op: o.op, who };
+  if (o.op === "procs" || o.op === "census") return { op: o.op, who };
   if (!Array.isArray(o.pids) || o.pids.length > MAX_PIDS) return undefined;
-  const pids = [...new Set(o.pids.filter((p): p is number => Number.isInteger(p) && p > 0))];
+  const pids = [
+    ...new Set(o.pids.filter((p): p is number => Number.isInteger(p) && p > 0)),
+  ];
   return { op: o.op, pids, who };
 }
 
@@ -120,41 +151,61 @@ export class ProcsBroker {
       }
       const now = (this.d.now ?? Date.now)();
       let n = 0;
-      for (const name of fs.readdirSync(this.d.dir)) {
-        const f = path.join(this.d.dir, name);
-        if (/^ans-[\w-]+\.json$/.test(name) || name.endsWith('.tmp')) {
-          // A worker that never read its answer (it timed out and went): removed after a while.
-          try {
-            if (now - fs.statSync(f).mtimeMs > STALE_MS) rm(f);
-          } catch {
-            // taken meanwhile
-          }
-          continue;
-        }
-        const m = /^ask-([\w-]+)\.json$/.exec(name);
-        if (!m) continue;
-        let text: string;
-        let age = 0;
+      // w5615: the mailbox itself and each sandbox's subfolder (procsMailbox).
+      const dirs = [this.d.dir];
+      for (const e of fs.readdirSync(this.d.dir, { withFileTypes: true }))
+        if (e.isDirectory()) dirs.push(path.join(this.d.dir, e.name));
+      for (const dir of dirs) {
+        let names: string[] = [];
         try {
-          text = fs.readFileSync(f, 'utf8');
-          age = now - fs.statSync(f).mtimeMs;
+          names = fs.readdirSync(dir);
         } catch {
           continue;
         }
-        rm(f);
-        if (age > STALE_MS) continue;
-        const ask = parseAsk(text);
-        let out: ProcsAnswer;
-        if (!ask) out = { ok: false, error: 'not an ask this mailbox answers (op procs, env, inspect or census, with who: {session, pid}, and pids for env and inspect)' };
-        else {
-          try {
-            out = { ok: true, result: await this.d.answer(ask) };
-          } catch (e) {
-            out = { ok: false, error: String((e as Error)?.message ?? e).slice(0, 300) };
+        for (const name of names) {
+          const f = path.join(dir, name);
+          if (/^ans-[\w-]+\.json$/.test(name) || name.endsWith(".tmp")) {
+            // A worker that never read its answer (it timed out and went): removed after a while.
+            try {
+              if (now - fs.statSync(f).mtimeMs > STALE_MS) rm(f);
+            } catch {
+              // taken meanwhile
+            }
+            continue;
           }
+          const m = /^ask-([\w-]+)\.json$/.exec(name);
+          if (!m) continue;
+          let text: string;
+          let age = 0;
+          try {
+            text = fs.readFileSync(f, "utf8");
+            age = now - fs.statSync(f).mtimeMs;
+          } catch {
+            continue;
+          }
+          rm(f);
+          if (age > STALE_MS) continue;
+          const ask = parseAsk(text);
+          let out: ProcsAnswer;
+          if (!ask)
+            out = {
+              ok: false,
+              error:
+                "not an ask this mailbox answers (op procs, env, inspect or census, with who: {session, pid}, and pids for env and inspect)",
+            };
+          else {
+            try {
+              out = { ok: true, result: await this.d.answer(ask) };
+            } catch (e) {
+              out = {
+                ok: false,
+                error: String((e as Error)?.message ?? e).slice(0, 300),
+              };
+            }
+          }
+          writeAtomic(path.join(dir, `ans-${m[1]}.json`), JSON.stringify(out));
+          n++;
         }
-        writeAtomic(path.join(this.d.dir, `ans-${m[1]}.json`), JSON.stringify(out));
-        n++;
       }
       return n;
     } catch (e) {
@@ -167,28 +218,44 @@ export class ProcsBroker {
 }
 
 /** The worker's side: one ask, waited for. Throws when the daemon does not answer in time or answers an error. */
-export async function askDaemon<T>(dir: string, ask: ProcsAsk, o: { timeoutMs?: number; pollMs?: number; sleep?: (ms: number) => Promise<void> } = {}): Promise<T> {
-  const id = `${process.pid}-${randomBytes(4).toString('hex')}`;
+export async function askDaemon<T>(
+  dir: string,
+  ask: ProcsAsk,
+  o: {
+    timeoutMs?: number;
+    pollMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<T> {
+  const id = `${process.pid}-${randomBytes(4).toString("hex")}`;
   const askFile = path.join(dir, `ask-${id}.json`);
   const ansFile = path.join(dir, `ans-${id}.json`);
+  fs.mkdirSync(dir, { recursive: true }); // w5615: a sandbox's own subfolder (procsMailbox)
   writeAtomic(askFile, JSON.stringify(ask));
-  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep =
+    o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const until = Date.now() + (o.timeoutMs ?? ASK_TIMEOUT_MS);
   try {
     for (;;) {
       let text: string | undefined;
       try {
-        text = fs.readFileSync(ansFile, 'utf8');
+        text = fs.readFileSync(ansFile, "utf8");
       } catch {
         // not yet
       }
       if (text !== undefined) {
         rm(ansFile);
         const a = JSON.parse(text) as ProcsAnswer;
-        if (!a.ok) throw new Error(`the daemon could not read the processes: ${a.error}`);
+        if (!a.ok)
+          throw new Error(
+            `the daemon could not read the processes: ${a.error}`,
+          );
         return a.result as T;
       }
-      if (Date.now() > until) throw new Error(`ps is refused here (the worker fence) and the daemon did not answer in ${Math.round((o.timeoutMs ?? ASK_TIMEOUT_MS) / 1000)} s through ${dir}`);
+      if (Date.now() > until)
+        throw new Error(
+          `ps is refused here (the worker fence) and the daemon did not answer in ${Math.round((o.timeoutMs ?? ASK_TIMEOUT_MS) / 1000)} s through ${dir}`,
+        );
       await sleep(o.pollMs ?? 100);
     }
   } finally {
@@ -197,7 +264,10 @@ export async function askDaemon<T>(dir: string, ask: ProcsAsk, o: { timeoutMs?: 
 }
 
 /** Run `local`; when the sandbox refuses the program it starts, ask the daemon instead. */
-export async function orDaemon<T>(local: () => Promise<T>, remote: () => Promise<T>): Promise<T> {
+export async function orDaemon<T>(
+  local: () => Promise<T>,
+  remote: () => Promise<T>,
+): Promise<T> {
   try {
     return await local();
   } catch (e) {

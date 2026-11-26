@@ -159,6 +159,7 @@ const CENSUS: Record<string, [number, string]> = {
   'server/cleanup.ts': [4, 'reads: the clean-up\'s rules for the system temp (as before, systemTempDir()) and the daemon\'s own; comments; writer: sessionTempEnv\'s last resort when an agent\'s ffa- folder cannot be made (systemTempEnv: the pre-w6000 behaviour, since the daemon-only tmp-daemon is closed to a fenced agent; agentTempEnv tries the shared root first and warns)'],
   'machine/sandboxes.ts': [2, 'writer: a sandbox editor on macOS or Linux while editorTmpdir is off, or whose own TMPDIR cannot be made (editorSystemTempEnv): the system temp it had before w6000, since editorTmpdir alone decides an editor\'s temp (w5833)'],
   'machine/timedRunner.ts': [1, 'writer: the timed-run player (systemTempEnv), as before w6000: a Low player on Windows and the fenced player elsewhere cannot write the daemon-only tmp-daemon; its saves and logs go to its own folders'],
+  'machine/playersLaunch.ts': [1, 'writer: the players-broker player (systemTempEnv), as the timed-run player: a Low player on Windows and the fenced player elsewhere cannot write the daemon-only tmp-daemon (w5615)'],
   'server/reaper.ts': [1, 'reads: the browser reaper looks for the profiles browsers keep in the system temp (systemTempDir())'],
   'server/gitBashTmp.ts': [1, 'asks cygpath where Git Bash maps /tmp (reads; w603 re-makes only the folder Git Bash itself uses)'],
   'server/guard.ts': [1, 'a comment of the guard\'s path rules'],
