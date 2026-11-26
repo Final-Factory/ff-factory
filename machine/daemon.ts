@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -30,7 +30,7 @@ import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts'
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
-import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
+import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
 import { pathFenceLine, pathFenceMode, watchShimBin } from './pathFence.ts';
@@ -60,6 +60,7 @@ import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, w
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
+import { probeReadFenceWin } from './readFenceWin.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
@@ -1824,7 +1825,7 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer offerSelfUpdate', () => this.offerSelfUpdate()), REOFFER_MS.value));
     // w5377: the worker fence, set up in the background (Windows labels folders); w5555: sandbox workers wait until it is
     // decided, and are held if it failed, never started unfenced.
-    void this.fenceSetup();
+    this.fenceReady = this.fenceSetup().catch(() => undefined);
     // w5546: the read fence's probe (warn and on modes), in the background; runs start without read rules until it passes.
     void this.probeReadFence();
     this.startRpc();
@@ -3539,6 +3540,9 @@ export class Daemon {
     log(`worker integrity: ${why}; sandbox workers are held (w5555)`);
   }
 
+  /** w5957: the start's fence setup; the Windows read probe waits for it, since it sets the labels the probe checks. */
+  private fenceReady?: Promise<void>;
+
   /**
    * Decides the worker fence once at start (w5555): Windows sets up the Low fence (lowSetup), macOS and Linux probe theirs.
    * The gate (this.fence) then lets sandbox workers start inside it, or holds them with the reason, which the portal shows.
@@ -3676,7 +3680,7 @@ export class Daemon {
         const sessions = ghAppPaths(appDir).sessions;
         fs.mkdirSync(sessions, { recursive: true });
         // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
-        ensureReadBackDirs(appDir);
+        ensureReadBackDirs(appDir, this.cfg.root);
         await this.applyReadLabels(readFenceMode(appDir), exec, say);
         this.watchLoginLabels(exec, say);
         for (const f of this.loginFiles.left) say(`worker integrity: left the Claude login ${f} without a read label: it is on the system drive, which the fence touches only on ${[...LOGIN_LABEL_ON_SYSTEM_DRIVE].join(', ')} (w5559)`);
@@ -3898,12 +3902,12 @@ export class Daemon {
       return;
     }
     try {
-      ensureReadBackDirs(appDir);
+      ensureReadBackDirs(appDir, root);
       fs.mkdirSync(ghAppPaths(appDir).sessions, { recursive: true });
       // w5747 (w5733's review of #1232): the probe runs the owner-secret rules too, as a run that holds a token gets them in
       // on mode (the most closed case: the gh login's folder closed), so a passing probe has run every rule on mode adds.
       const owner = ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: true });
-      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
+      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, rootBack: fenceRootReadBack(root), owner });
       // w5749: on Windows the owner's secrets are closed by labels on this machine's system drive, where lothsahn allowed it.
       if (process.platform === 'win32') {
         // The plan first: gh is asked where its login is only on a machine with a plan (w5849's review of #1278), so on every
@@ -3922,8 +3926,35 @@ export class Daemon {
             ? ['python3', FF_LANDLOCK, ...lock, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), '--', cmd, ...args]
             : undefined;
       const argv = fenced(process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open]);
+      if (!argv && process.platform === 'win32' && this.cfg.workerIntegrity === 'low') {
+        await this.fenceReady;
+        // w5957 (N7): a Low node opens each path; warn on a mirror of the labels on would set, on the real ones in on (where a
+        // path workers need found refused takes the labels off again by itself). readFenceWin.ts says how.
+        const exec = (cmd: string, args: string[], o?: { timeoutMs?: number; cwd?: string }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000, cwd: o?.cwd });
+        const say = (l: string) => log(l);
+        const labels = this.readLabelTargets(appDir);
+        const w = await probeReadFenceWin({
+          mode,
+          labels,
+          t,
+          lowNode: await lowCopy(root, process.execPath, exec, say),
+          mirrorDir: path.join(appDir, 'read-fence-precheck'),
+          skip: this.labelSystemDrive,
+          run: exec,
+          // w5968: and NR on what inside carries an explicit label of its own (relabelInside), as applyReadLabels does.
+          setLabels: async (l) => (await labelNoReadUp(l, exec, say, { systemDrive: () => false, what: 'read fence probe mirror' })) && (await relabelInside(l, 'close', exec, say, { systemDrive: () => false })),
+          openLabels: async (l) => !!(await openNoReadUp(l, exec, say, { systemDrive: this.labelSystemDrive })) && (await relabelInside(l, 'open', exec, say, { systemDrive: this.labelSystemDrive })),
+          log,
+        });
+        if (gen !== this.readProbeGen) {
+          log(`read fence (${mode}): a newer probe started while this one ran; its verdict is the one that counts`);
+          return;
+        }
+        this.readProbeBlocks = w.blocks;
+        return;
+      }
       if (!argv) {
-        // Windows (labels, set only in on mode by lowSetup), or no fence here: nothing a probe child could show.
+        // Windows with Medium workers (no labels to probe), or no fence here: nothing a probe child could show.
         this.readProbeBlocks = process.platform !== 'win32';
         log(`read fence (${mode}): ${process.platform === 'win32' ? `${mode === 'warn' ? 'warn only: no No-Read-Up label set; on would close' : 'closes'} ${t.closed.join(', ')} and give back ${t.open.length} paths` : 'no worker fence runs here (workerFence on macOS, writeLock on Linux), so there is nothing to probe or enforce'}`);
         return;
@@ -4050,6 +4081,11 @@ export class Daemon {
     }
   }
 
+  /** The read fence's Windows labels (applyReadLabels), and what the probe's mirror copies (w5957). */
+  private readLabelTargets(appDir: string) {
+    return noReadUpTargets({ root: this.cfg.root!, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions, ...fenceRootReadBack(this.cfg.root!)], secrets: this.secretsDirs });
+  }
+
   /**
    * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
    * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
@@ -4063,14 +4099,18 @@ export class Daemon {
     const appDir = appDirOfConfig(this.cfg);
     // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
     ensureDaemonOnlyDirs(this.cfg.root);
-    const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions], secrets: this.secretsDirs });
+    const t = this.readLabelTargets(appDir);
     if (mode === 'on') {
       if (!(await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      // w5968: a file an elevated process made inside keeps its own High label, which the folder's NR does not override.
+      if (!(await relabelInside(t, 'close', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every explicitly labelled path inside the closed folders got No-Read-Up; Low workers may still read those (the daemon log says which)');
       log('worker integrity: the read fence is on: No-Read-Up labels set');
       return;
     }
     const opened = await openNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive });
     if (!opened) throw new Error('not every No-Read-Up label could be taken off (the daemon log says which)');
+    // w5968: and the NR on explicitly labelled paths inside, which only an earlier on adds (so only when it was on).
+    if (opened.length && !(await relabelInside(t, 'open', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every No-Read-Up label inside the closed folders could be taken off (the daemon log says which)');
     log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
   }
 
@@ -4115,7 +4155,7 @@ export class Daemon {
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
           args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
-          ensureReadBackDirs(appDirOfConfig(this.cfg));
+          ensureReadBackDirs(appDirOfConfig(this.cfg), this.cfg.root);
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, ...this.readLock, '--', '/bin/true']);
           if (probe.ok) {

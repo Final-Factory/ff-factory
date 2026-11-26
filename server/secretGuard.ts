@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
+import { isLink } from './fsLink.ts';
 
 /**
  * What orchestrators and standing agents may not read (w467, change 7 of docs/portal-on-ffbox-host.md): FF Factory's
@@ -233,7 +234,7 @@ export function secretReadGuard(rules: SecretRules, cwd: string, platform: NodeJ
 function linkedProjects(home: string): string[] {
   try {
     const p = path.join(home, 'projects');
-    return fs.lstatSync(p).isSymbolicLink() ? [fs.realpathSync(p)] : [];
+    return isLink(p) ? [fs.realpathSync.native(p)] : [];
   } catch {
     return [];
   }

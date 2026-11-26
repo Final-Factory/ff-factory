@@ -15,7 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from './claudeHome.ts';
 import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
-import { FENCE_READ_ALLOW } from './daemonReads.ts';
+import { FENCE_READ_ALLOW, fenceRootReadBack } from './daemonReads.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
 import { projectSlug } from './claudeHome.ts';
 import { STORE_CHILD } from '../machine/storeLock.ts';
@@ -201,6 +201,8 @@ function readRules(f: WorkerFence): string[] {
     '(allow file-read-data',
     `  (literal ${lit(daemon)})`,
     ...FENCE_READ_ALLOW.map((p) => `  (${spot(p)} ${lit(mac.join(daemon, p))})`),
+    // w5957 (N6): the bench queue in the root's own daemon folder (person.json: unity-slot run's person-play hold).
+    ...fenceRootReadBack(f.root, mac.join).map((p) => `  (subpath ${lit(p)})`),
     ...(f.readAllowed ?? []).filter((p) => mac.isAbsolute(p)).map((p) => `  (subpath ${lit(p)})`),
     ')',
     ...(f.ownerSecrets ? ownerSecretRules(f.ownerSecrets.mach) : []),

@@ -13,6 +13,14 @@ export interface DurableOptions {
   spacingMs?: number;
   /** File mode for a new file (tokens: 0o600). Versions share it: they are hard links. */
   mode?: number;
+  /**
+   * w5957 (N5): write over the file itself, keeping its inode and security descriptor, for a file the worker fences give
+   * back (server/daemonReads.ts FENCE_FILE_WRITERS): a rename makes a new file, which a Landlock grant (by inode) does not
+   * cover and which on Windows takes its folder's No-Read-Up label. The previous version is first copied to `.1` and
+   * fsynced (a copy, not a hard link, which the write would change too), so a crash during the write leaves a torn file
+   * that readJsonDurable heals from `.1`: the old or the new content, as with the rename.
+   */
+  inPlace?: boolean;
 }
 
 /** A data file found damaged at load, and what was done about it. */
@@ -96,8 +104,10 @@ async function fsyncDirAsync(dir: string) {
  * `.2` up to a minute, `.3` one to eleven minutes: a failure that damaged every recent write still leaves an older one.
  * A version is replaced only by a newer good one, and a slot moves on only once it is old enough (its content's mtime).
  */
-function rotate(file: string, generations: number, spacingMs: number, tries: number) {
+function rotate(file: string, generations: number, spacingMs: number, tries: number, copy = false) {
   if (generations <= 0 || !fs.existsSync(file)) return;
+  // inPlace: a version that is still a hard link of the file (written before inPlace) would change with it; copy it apart.
+  if (copy) for (let k = 1; k <= generations; k++) unlink(file, generationPath(file, k));
   const now = Date.now();
   let top = 1;
   for (let k = 2; k <= generations; k++) {
@@ -112,16 +122,49 @@ function rotate(file: string, generations: number, spacingMs: number, tries: num
   const g1 = generationPath(file, 1);
   retrySync(() => fs.rmSync(g1, { force: true }), tries);
   try {
+    if (copy) throw new Error('inPlace: a copy');
     fs.linkSync(file, g1);
   } catch {
-    // no hard links on this file system: a copy, on disk before it counts
-    fs.copyFileSync(file, g1);
-    const fd = fs.openSync(g1, 'r+');
-    try {
-      fs.fsyncSync(fd);
-    } finally {
-      fs.closeSync(fd);
-    }
+    // no hard links on this file system (or inPlace): a copy, on disk before it counts
+    copySynced(file, g1);
+  }
+}
+
+function copySynced(from: string, to: string) {
+  fs.copyFileSync(from, to);
+  const fd = fs.openSync(to, 'r+');
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Replace `g` with a copy of itself when it is the same file as `file` (a hard link). */
+function unlink(file: string, g: string) {
+  const a = fs.statSync(file, { throwIfNoEntry: false, bigint: true });
+  const b = fs.statSync(g, { throwIfNoEntry: false, bigint: true });
+  if (!a || !b || a.ino !== b.ino || a.dev !== b.dev || a.ino === 0n) return;
+  copySynced(g, `${g}.tmp`);
+  fs.renameSync(`${g}.tmp`, g);
+}
+
+/** inPlace: the new bytes over the old, cut to their length, fsynced; the same file (inode, security descriptor) stays. */
+function writeOver(file: string, data: string | Buffer, mode: number) {
+  const b = typeof data === 'string' ? Buffer.from(data) : data;
+  let fd: number;
+  try {
+    fd = fs.openSync(file, 'r+');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    fd = fs.openSync(file, 'w', mode);
+  }
+  try {
+    fs.writeSync(fd, b, 0, b.length, 0);
+    fs.ftruncateSync(fd, b.length);
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
   }
 }
 
@@ -146,6 +189,19 @@ function commit(file: string, tmp: string, o: DurableOptions, tries: number) {
 
 /** Write a file so that a crash at any moment leaves either the old or the new content, never a torn or zeroed file. */
 export function writeFileDurable(file: string, data: string | Buffer, o: DurableOptions = {}) {
+  if (o.inPlace) {
+    try {
+      rotate(file, o.generations ?? DEFAULT_GENERATIONS, o.spacingMs ?? DEFAULT_SPACING_MS, 5, true);
+      // w5968 review of #1324: .1's entry on disk before the live file starts to change.
+      fsyncDir(path.dirname(file));
+    } catch (e) {
+      // Still in place (w5968: a rename here would take the file's give-back away until the next start); only this write
+      // has no fresh previous version, so a crash inside it falls back to an older generation.
+      console.warn(`durable: could not keep the previous version of ${path.basename(file)} (${(e as Error).message}); written in place without it this time`);
+    }
+    writeOver(file, data, o.mode ?? 0o666);
+    return;
+  }
   const tmp = `${file}.tmp`;
   const fd = fs.openSync(tmp, 'w', o.mode ?? 0o666);
   try {
@@ -246,7 +302,7 @@ const iso = (ms: number | undefined) => (ms === undefined ? undefined : new Date
  * Returns undefined when there is no file at all (a first start) or when nothing good is left (then it starts empty,
  * and the recovery says so).
  */
-export function readJsonDurable<T>(file: string, o: { check?: Check; generations?: number; extra?: string[]; mode?: number } = {}): T | undefined {
+export function readJsonDurable<T>(file: string, o: { check?: Check; generations?: number; extra?: string[]; mode?: number; inPlace?: boolean } = {}): T | undefined {
   const first = readCandidate(file, o.check);
   if (first.ok) return first.value as T;
   const candidates = [...Array.from({ length: o.generations ?? DEFAULT_GENERATIONS }, (_, i) => generationPath(file, i + 1)), ...(o.extra ?? [])];
@@ -266,7 +322,7 @@ export function readJsonDurable<T>(file: string, o: { check?: Check; generations
     rec.from = c;
     rec.fromTime = iso(mtimeOf(c));
     try {
-      writeFileDurable(file, r.text, { generations: 0, mode: o.mode });
+      writeFileDurable(file, r.text, { generations: 0, mode: o.mode, inPlace: o.inPlace });
     } catch (e) {
       console.error(`durable: restored ${path.basename(file)} from ${path.basename(c)} in memory, but could not write it back: ${(e as Error).message}`);
     }

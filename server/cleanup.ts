@@ -1104,12 +1104,19 @@ export async function sizePlan(items: CleanupItem[]): Promise<{ path: string; by
 
 // ---------------------------------------------------------------- the log
 
-/** Append one pass to `<dir>/cleanup-log.jsonl` (kept under ~5 MB: the older half moves to .1). */
+/**
+ * Append one pass to `<dir>/cleanup-log.jsonl` (kept under ~5 MB: past it the log is copied to .1 and emptied). The roll
+ * keeps the file itself (w5957): workers' fences give it back (server/daemonReads.ts FENCE_FILE_WRITERS), and a
+ * renamed-away log would leave a new file they cannot read.
+ */
 export function appendCleanupLog(dir: string, entry: object) {
   try {
     const file = path.join(dir, 'cleanup-log.jsonl');
     fs.mkdirSync(dir, { recursive: true });
-    if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) fs.renameSync(file, `${file}.1`);
+    if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) {
+      fs.copyFileSync(file, `${file}.1`);
+      fs.truncateSync(file, 0);
+    }
     fs.appendFileSync(file, JSON.stringify(entry) + '\n');
   } catch {
     // the log is best-effort; the summary still reaches system_status

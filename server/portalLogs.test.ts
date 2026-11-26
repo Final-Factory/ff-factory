@@ -123,8 +123,17 @@ test('w920: only the listed sources are read: another name, a path or a link is 
   fs.writeFileSync(path.join(dataDir, 'send-queue.json'), `queued ${FAKE.password}`);
   fs.mkdirSync(path.join(dataDir, 'cleanup', 'm5'), { recursive: true });
   fs.writeFileSync(path.join(outside, 'cleanup-log.jsonl'), JSON.stringify({ at: '2026-10-10T19:00:00Z', trigger: 'hourly', removed: 0, softFreeGB: 20 }) + '\n');
-  fs.symlinkSync(path.join(outside, 'cleanup-log.jsonl'), path.join(dataDir, 'cleanup', 'm5', 'cleanup-log.jsonl'));
-  fs.symlinkSync(path.join(dataDir, 'state.json'), path.join(dataDir, 'update.result.json'));
+  // w5915: a Windows account without the symlink right (no Developer Mode, not elevated: BEAST's workers) cannot make a
+  // file link (EPERM), and nobody else there can plant one either; only the link checks below need it.
+  let links = true;
+  try {
+    fs.symlinkSync(path.join(outside, 'cleanup-log.jsonl'), path.join(dataDir, 'cleanup', 'm5', 'cleanup-log.jsonl'));
+    fs.symlinkSync(path.join(dataDir, 'state.json'), path.join(dataDir, 'update.result.json'));
+  } catch (e) {
+    if (process.platform !== 'win32' || (e as NodeJS.ErrnoException).code !== 'EPERM') throw e;
+    links = false;
+    t.diagnostic('this account cannot make symlinks: the link checks are left out');
+  }
   const d = deps(dataDir);
   for (const source of ['state.json', '../state.json', 'send-queue', 'send-queue.json', 'vault', 'logins', 'sessions', 'uploads', 'transcripts', '/etc/passwd', 'C:\\x', '__proto__', 'constructor', 'toString', 'hasOwnProperty', 'JOURNAL', 'journal ']) {
     await assert.rejects(readPortalLogs(d, { source }), /is not one portal_logs reads/, source);
@@ -136,8 +145,10 @@ test('w920: only the listed sources are read: another name, a path or a link is 
   }
   await assert.rejects(readPortalLogs(d, { source: 'portal', machine: 'm5' }), /only the cleanup and bench_hours sources take one/);
   // A link in the data folder is not followed, to a file in or outside it.
-  await assert.rejects(readPortalLogs(d, { source: 'cleanup', machine: 'm5' }), /a link: refused/);
-  await assert.rejects(readPortalLogs(d, { source: 'update_result' }), /a link: refused/);
+  if (links) {
+    await assert.rejects(readPortalLogs(d, { source: 'cleanup', machine: 'm5' }), /a link: refused/);
+    await assert.rejects(readPortalLogs(d, { source: 'update_result' }), /a link: refused/);
+  }
   // The list names no closed file.
   const list = await readPortalLogs(d, {});
   for (const name of LOG_SOURCE_NAMES) assert.ok(list.includes(`- ${name}:`), name);

@@ -61,6 +61,7 @@ import { gamePlayers, isUnityBinary, slotsDir, splitArgs, unityProcesses } from 
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
 import { askDaemon, orDaemon, procsMailbox, type ProcsAsk, type ProcsWho } from './procsBroker.ts';
 import { readShellGroups, shellGroupsDir, withShellGroups, type ShellGroup } from './shellGroups.ts';
+import { isLink } from '../server/fsLink.ts';
 
 const MIN = 60_000;
 
@@ -1520,7 +1521,7 @@ export function removeFenceProblem(p: string, root: string, o: { home: string; d
   } catch {
     return 'no such file or folder';
   }
-  if (st.isSymbolicLink()) return 'a symbolic link or junction: remove deletes real folders only, never a link (its target could be anywhere)';
+  if (st.isSymbolicLink() || isLink(p)) return 'a symbolic link or junction: remove deletes real folders only, never a link (its target could be anywhere)';
   let real: string;
   try {
     real = fs.realpathSync.native(p);

@@ -466,7 +466,7 @@ export class SandboxPool {
     // would forget its sandboxes, and the portal their labels and agents with them (w424).
     let rows: Rec[] | undefined;
     try {
-      rows = readJsonDurable<Rec[]>(this.o.stateFile, { check: checkArray });
+      rows = readJsonDurable<Rec[]>(this.o.stateFile, { check: checkArray, inPlace: true });
     } catch (e) {
       this.o.onEvent({ text: `could not read ${this.o.stateFile}: ${(e as Error).message}` });
     }
@@ -491,8 +491,9 @@ export class SandboxPool {
   private save() {
     try {
       fs.mkdirSync(path.dirname(this.o.stateFile), { recursive: true });
-      // Fsynced, then renamed into place, with the last good versions kept beside it (server/durable.ts).
-      writeJsonDurable(this.o.stateFile, [...this.recs.values()], { indent: 2 });
+      // Fsynced, with the last good versions kept beside it (server/durable.ts). In place (w5957): workers' fences give
+      // sandboxes.json back (server/daemonReads.ts FENCE_FILE_WRITERS), and a rename would make a file they cannot read.
+      writeJsonDurable(this.o.stateFile, [...this.recs.values()], { indent: 2, inPlace: true });
     } catch (e) {
       this.o.onEvent({ text: `could not save ${this.o.stateFile}: ${(e as Error).message}` });
     }

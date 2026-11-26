@@ -210,7 +210,9 @@ test("a standing agent's launch (no sandbox) gets the Medium folder from buildOp
 const claudeBin = spawnSync('claude', ['--version'], { encoding: 'utf8' }).status === 0 ? 'claude' : undefined;
 test('live: a hook planted in the workers\' folder does not run in a Medium agent; the Medium folder\'s own does', { skip: !claudeBin && 'needs the claude CLI' }, async () => {
   const w = world();
-  const env: Record<string, string | undefined> = { PATH: process.env.PATH, HOME: w.home };
+  // w5915: claude runs a hook through Git Bash; the agents' own (a Low-integrity worker's <root>/tools/git) where one is
+  // set, since Program Files' msys bash dies at Low integrity (0xC0000022, measured on BEAST) and the hook never ran.
+  const env: Record<string, string | undefined> = { PATH: process.env.PATH, HOME: w.home, CLAUDE_CODE_GIT_BASH_PATH: process.env.CLAUDE_CODE_GIT_BASH_PATH };
   moveClaudeHome(env, w.root, w.home);
   const medium = path.join(w.root, 'claude-medium');
   const hook = (dir: string, marker: string) => fs.writeFileSync(path.join(dir, 'settings.json'), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: `node -e "require('fs').writeFileSync(process.argv[1],'')" "${marker}"` }] }] } }));
@@ -225,7 +227,11 @@ test('live: a hook planted in the workers\' folder does not run in a Medium agen
     const p = spawn(claudeBin!, ['-p', 'hi', '--setting-sources', 'user', '--max-turns', '1'], { cwd: w.base, env: runEnv, stdio: 'ignore' });
     const until = Date.now() + 60_000;
     while (!fs.existsSync(wait) && Date.now() < until) await new Promise((r) => setTimeout(r, 200));
+    // Ended before the folder goes (w5915): Windows refuses to delete a folder a live process is in (EPERM), which hid the
+    // assertion that failed.
+    const exited = p.exitCode !== null || p.signalCode !== null ? Promise.resolve() : new Promise((r) => p.once('exit', r));
     p.kill('SIGKILL');
+    await exited;
     return o.env?.CLAUDE_CONFIG_DIR;
   };
   const spec = { cwd: w.base, settingSources: ['user'], append: '', strictMcp: true, env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' }, guard: { id: 'standing-a', ownPath: w.base, protectedPaths: [] } } as unknown as LaunchSpec;

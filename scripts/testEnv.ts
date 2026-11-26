@@ -12,3 +12,32 @@ process.env.FF_CLI_SCRUB ??= 'off';
 // w5545: a test's unity-slot or bench ticket never asks the worker's real daemon (its token would file a real request).
 delete process.env.FF_DAEMON_RPC;
 delete process.env.FF_DAEMON_TOKEN;
+
+// w5915: the tests run the same in a worker's session as in CI. A worker's agent is launched with its session's settings
+// (server/agents.ts, machine/sandboxes.ts): FF_GAME_DATA_DIR, FF_SANDBOX_*, FF_WORKER_ROOT, its Claude folder, and git
+// settings as GIT_CONFIG_COUNT/KEY_n/VALUE_n (the commit identity and a GitHub credential helper). On BEAST they reached the
+// code under test: gameData and liveMachine read the sandbox's game data folder, githubTokens saw the daemon's helper,
+// memoryGit committed as the worker, not as the repository's own identity. Every FF_ variable goes, except the switches a
+// person sets to opt into a test group or to point at a tool; so do the session's git and Claude Code settings. CLAUDE_CONFIG_DIR
+// stays: scripts/ownerAckEval.ts runs on this shell's Claude login.
+export const KEPT_FF_ENV = new Set([
+  'FF_CLI_SCRUB',
+  'FF_TIMING_TESTS',
+  'FF_NETWORK_TESTS',
+  'FF_TEST_FILE_TIMES',
+  'FF_TEST_INFLIGHT',
+  'FF_PWSH',
+  'FF_PYTHON',
+  'FF_FFMPEG',
+  'FF_AGENT_HOST_FAKE',
+  'FF_AGENT_HOST_CODE',
+  'FF_LANDLOCK_ABI',
+  'FF_LINK_JOB_LOG',
+  'FF_LEFTOVERS_CALLERS',
+  'FF_GAME_REPO',
+]);
+const SESSION_ENV = /^(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)|CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_AGENT_SDK_VERSION|CLAUDE_CODE_(?!GIT_BASH_PATH$)[A-Z_]+)$/;
+export function sessionEnvNames(env: Record<string, string | undefined>): string[] {
+  return Object.keys(env).filter((k) => (k.startsWith('FF_') && !KEPT_FF_ENV.has(k)) || SESSION_ENV.test(k));
+}
+for (const name of sessionEnvNames(process.env)) delete process.env[name];

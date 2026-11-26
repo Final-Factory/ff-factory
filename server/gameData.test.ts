@@ -11,7 +11,9 @@ test('w5306: the game data roots, the override first; the old root per OS as Gam
   assert.match(legacyGameDataRoot('win32', 'C:/Users/x'), /AppData[\\/]LocalLow[\\/]Never Games[\\/]finalfactory$/);
   assert.match(legacyGameDataRoot('darwin', '/Users/x'), /Library[\\/]Application Support[\\/]Never Games[\\/]finalfactory$/);
   assert.match(legacyGameDataRoot('linux', '/home/x'), /\.config[\\/]unity3d[\\/]Never Games[\\/]finalfactory$/);
-  assert.deepEqual(gameDataRoots({ FF_GAME_DATA_DIR: '/ffw/gamedata' }, 'linux', '/home/x'), ['/ffw/gamedata', legacyGameDataRoot('linux', '/home/x')]);
+  // w5915: no folders listed: on a Windows worker '/ffw/gamedata' is the machine's real game data folder (F:\ffw\gamedata on
+  // BEAST), whose sandboxes' folders the real lister found.
+  assert.deepEqual(gameDataRoots({ FF_GAME_DATA_DIR: '/ffw/gamedata' }, 'linux', '/home/x', () => []), ['/ffw/gamedata', legacyGameDataRoot('linux', '/home/x')]);
   assert.deepEqual(gameDataRoots({}, 'linux', '/home/x'), [legacyGameDataRoot('linux', '/home/x')]);
 });
 
