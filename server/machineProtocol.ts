@@ -132,6 +132,10 @@ export interface LinkUpdateFlags {
   transcriptLock?: 'on' | 'off';
   /** The store lock's mode (w5614, docs/machines.md "Slot repos"), any OS: daemon.json `storeLock`; unset: carried. A daemon that predates it ignores it. */
   storeLock?: 'off' | 'warn' | 'on';
+  /** The editor temp folder on or off (w5833), macOS and Linux only: daemon.json `editorTmpdir`; unset: carried. A daemon that predates it ignores it. */
+  editorTmpdir?: 'on' | 'off';
+  /** The path fence off or warn (w5863), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
+  pathFence?: 'off' | 'warn';
 }
 
 /**

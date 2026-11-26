@@ -227,7 +227,7 @@ const TERMINAL: SessionInfo['status'][] = ['idle', 'stopped', 'error'];
 function applyEvent(ev: ServerEvent) {
   switch (ev.type) {
     case 'state':
-      set({ app: ev.state });
+      gotState(ev.state);
       noteServedBuild(ev.state.app?.web);
       return;
     case 'system':
@@ -396,8 +396,7 @@ function startSocket() {
     onFailure: async () => {
       try {
         // Bounded: a path that hangs (w5318) must not hold the next attempt.
-        const app = await api.state(SOCKET_FAILURE_CHECK_MS);
-        set({ app });
+        gotState(await api.state(SOCKET_FAILURE_CHECK_MS));
         return true;
       } catch (e) {
         return !(e instanceof UnauthorizedError);
@@ -416,20 +415,35 @@ setUnauthorizedHandler(() => {
   set({ auth: 'needed' });
 });
 
+/**
+ * A whole state, from the socket or a fetch: the page is signed in. The first one starts its notifications. Not after a
+ * logout: a state still on its way from the old socket does not sign the page back in.
+ */
+function gotState(app: AppState) {
+  if (state.auth === 'needed') return;
+  const first = state.auth !== 'ok';
+  set({ app, auth: 'ok' });
+  if (first) void initNotifications();
+}
+
+/** A socket attempt not open by then (w5318: a Funnel attempt can hang) no longer holds the page: it fetches the state. */
+export const BOOT_FETCH_AFTER_MS = 2500;
+
 export async function boot() {
+  // w5861: the socket's first message is the whole state (megabytes at thousands of sessions), and the page used to
+  // fetch /api/state first as well: two copies before the page was connected, 5-10 s over Funnel. Now the socket's is
+  // the one. A failed attempt fetches the state (onFailure: signed out shows the login), and so does an attempt that
+  // has not opened after BOOT_FETCH_AFTER_MS; an open socket is already sending it.
+  stopSocket();
+  startSocket();
+  await new Promise((r) => setTimeout(r, BOOT_FETCH_AFTER_MS));
+  if (state.app || state.auth !== 'unknown' || state.ws === 'open') return;
   try {
-    const app = await api.state();
-    set({ app, auth: 'ok' });
-    startSocket();
-    void initNotifications();
+    const app = await api.state(SOCKET_FAILURE_CHECK_MS);
+    if (!state.app) gotState(app);
   } catch (e) {
-    if (e instanceof UnauthorizedError) set({ auth: 'needed' });
-    else {
-      // Server unreachable: keep trying; the socket loop will pick it up.
-      set({ auth: 'ok' });
-      toastError(e);
-      startSocket();
-    }
+    // Signed out: the unauthorized handler showed the login. Unreachable: the socket loop keeps trying.
+    if (!(e instanceof UnauthorizedError)) toastError(e);
   }
 }
 

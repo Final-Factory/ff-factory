@@ -117,7 +117,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { SymbolOwners } from './symbolOwners.ts';
 import { SteamJobs, branchOf, describeJob, parseAsk, readClaim, refuseUpload } from './steamUpload.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
@@ -4218,8 +4218,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const held: Record<string, string> = {};
     const game = reqs.filter((w) => needsOf(w) === 'game');
     for (const p of places) {
-      if (p.id === placeId(info.machineId!) || p.freeSandboxes < 1) continue;
-      const why = game.map((w) => this.heldFor(p.id, w)).find(Boolean);
+      if (p.id === placeId(info.machineId!)) continue;
+      // w5860: work that needs only an agent seat leaves another request's older leg its seat there too.
+      const why = !game.length ? reqs.map((w) => this.legHoldProblem(p.id, w, 'seat')).find(Boolean) : p.freeSandboxes < 1 ? undefined : game.map((w) => this.heldFor(p.id, w)).find(Boolean);
       if (why) held[p.id] = why.split(/\. Start /)[0]!;
     }
     return {
@@ -4242,7 +4243,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
           ...(first ? { first } : {}),
           ...(needsUi(w) ? { ui: true } : {}),
           // w2521: its constraints' "must run on X" pins it too (w2499 went to m3 by this move at 02:48Z on 2026-10-29).
-          ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : this.pinOf(w) ? { pinned: this.pinOf(w)!.ids } : {}),
+          // w5860: so do the computers its legs wait for (decide_work queue with needs, w1863): at 00:23Z on 2026-11-26 the
+          // agent-cap move took w5857, queued for beast or biscuit to keep it off held lothdesktop, to lothdesktop/slot1.
+          ...(w.queuedFor?.needs?.length ? { pinned: w.queuedFor.needs } : this.pinOf(w) ? { pinned: this.pinOf(w)!.ids } : w.legs?.length ? { pinned: [...new Set(w.legs.flatMap((l) => l.needs))] } : {}),
           ...(w.timedLeg ? { timedLeg: true } : {}),
           ...(mine >= 0 ? { pair: { leg: mine + 1, others, crossOs: !!w.pair!.crossOs, ...(w.pair!.avoid ? { avoid: w.pair!.avoid } : {}), ...(livePair(w) ? { live: true } : {}) } } : {}),
         };
@@ -4468,7 +4471,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const timed = !!timedKind(needsTimed(w));
       const free = (ids: string[]) => ids.filter((id) => {
         if (!held.has(id)) {
-          const why = this.pairHoldProblem(id, w, freedOn(id)) ?? this.timedHoldProblem(id, w, timed, freedOn(id));
+          const why = this.pairHoldProblem(id, w, freedOn(id)) ?? this.timedHoldProblem(id, w, timed, freedOn(id)) ?? this.legHoldProblem(id, w, undefined, freedOn(id));
           held.set(id, why ? why.split(/\. Start /)[0] : '');
         }
         return !held.get(id);
@@ -5800,7 +5803,7 @@ A report is for a person who asked for one, and people want very few. File one w
     const memo = this.holdMemo;
     const key = `${machine}\0${w.id}`;
     if (memo.why.has(key)) return memo.why.get(key);
-    const why = this.pairHoldProblem(machine, w, memo) ?? this.timedHoldProblem(machine, w, !!w.timedLeg || !!timedKind(needsTimed(w)), memo);
+    const why = this.pairHoldProblem(machine, w, memo) ?? this.timedHoldProblem(machine, w, !!w.timedLeg || !!timedKind(needsTimed(w)), memo) ?? this.legHoldProblem(machine, w, undefined, memo);
     memo.why.set(key, why);
     return why;
   }
@@ -5867,6 +5870,43 @@ A report is for a person who asked for one, and people want very few. File one w
       break;
     }
     return plan;
+  }
+
+  /**
+   * Why `w` may not take a place on `machine` (w5860), or undefined: a leg of another open request (WorkItem.legs, w1863)
+   * waits for that computer, and is ahead of `w` in lothsahn's order (w4620: strict priority, then oldest first; a leg goes
+   * by its request's age, as Queued work goes by its own). From 23:50Z on 2026-11-25 w5833's leg (high, filed 21:07) waited
+   * for "the next free sandbox on biscuit" while biscuit's freed sandboxes went to w5854, w5855 and w5859, all high and
+   * filed after it: start_agent and the w2046 moves read only pair and timed holds. The leg holds what it needs of that
+   * computer and no more: game legs its free sandboxes (one each), every leg an agent slot. `takes` is what starting `w`
+   * there uses: 'sandbox' (game work, or any work put in a FREE sandbox) or 'seat' (an agent beside a busy worker), so a
+   * seat beside a busy worker is held only while the agent slots left are the legs'. Not held: `w`'s own leg (starting it
+   * there is what the leg asks for), higher or older work, and, LEG_HOLD_MS after that computer's room began, anything (a
+   * leg nobody starts never idles a computer for long).
+   */
+  legHoldProblem(machine: string | undefined, w: WorkItem | undefined, takes: 'sandbox' | 'seat' = w && needsOf(w) === 'agent' ? 'seat' : 'sandbox', memo?: HoldMemo): string | undefined {
+    if (!machine) return undefined;
+    const place = (memo ? (memo.places ??= this.places()) : this.places()).find((p) => p.id === placeId(machine));
+    if (!place) return undefined;
+    const rank = (p: WorkPriority | undefined) => priorityIndex(p ?? 'normal');
+    const age = (x: Pick<WorkItem, 'createdAt' | 'queuedFor'>) => Date.parse(x.createdAt) || Date.parse(x.queuedFor?.at ?? '') || 0;
+    const mine = w ? age(w) || Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
+    const ahead = [...this.store.work.values()]
+      .filter((l) => isOpen(l) && l.id !== w?.id && l.legs?.some((g) => g.needs.some((n) => placeId(n) === place.id)))
+      .filter((l) => rank(l.priority) > rank(w?.priority) || (rank(l.priority) === rank(w?.priority) && age(l) < mine))
+      .sort((x, y) => rank(y.priority) - rank(x.priority) || age(x) - age(y));
+    if (!ahead.length) return undefined;
+    const games = ahead.filter((l) => needsOf(l) === 'game').length;
+    const slots = Math.max(0, Math.min(place.maxAgents - place.midTurn, place.agentSeats ?? Number.MAX_SAFE_INTEGER));
+    const short = takes === 'sandbox' && games > 0 && place.freeSandboxes <= games ? 'sandbox' : slots <= ahead.length ? 'slot' : undefined;
+    if (!short) return undefined;
+    const facts = memo ? (memo.facts ??= this.roomFacts()) : this.roomFacts();
+    const freeSince = facts.since?.[`${needsOf(ahead[0]!)}:${place.id}`];
+    if (freeSince !== undefined && (this.orchestrators?.now().getTime() ?? Date.now()) >= freeSince + LEG_HOLD_MS) return undefined;
+    const first = ahead[0]!;
+    const leg = first.legs!.find((g) => g.needs.some((n) => placeId(n) === place.id))!;
+    const more = ahead.length > 1 ? ` (and ${ahead.length - 1} more leg${ahead.length > 2 ? 's' : ''} ahead: ${ahead.slice(1, 4).map((l) => l.id).join(', ')})` : '';
+    return `${place.id}'s ${short === 'sandbox' ? 'next free sandbox' : 'next agent slot'} is held for ${first.id}'s leg "${first.title.slice(0, 80)}" (${first.priority}, filed ${first.createdAt.slice(11, 16)} UTC, its leg queued for ${leg.needs.join(' or ')} since ${leg.at.slice(11, 16)} UTC)${more}: it is ahead of ${w ? `${w.id} (${w.priority ?? 'normal'})` : 'this'} by strict priority, then oldest first (w4620, w5860). Start ${first.id} there first (start_agent with work_id "${first.id}" in a FREE sandbox on ${place.id}; override_duplicate when its own worker still runs elsewhere), or drop its leg (decide_work queue drop_leg)`;
   }
 
   /**
@@ -6734,6 +6774,13 @@ A report is for a person who asked for one, and people want very few. File one w
               const timedHold = this.timedHoldProblem(this.newWorkOn(a.sandbox, a.machine), w, !!w?.timedLeg || !!timedKind(needsTimed(w, a.prompt)));
               if (timedHold) throw new Error(timedHold);
             }
+            // w5860: nor, of any kind, the place an older or higher leg (w1863) waits for there: w5833's leg for biscuit lost
+            // four freed places in an hour to later work of its own priority, seat-only reviews among them.
+            if (ctx.role === 'dispatcher') {
+              const on = this.machineOf(a.sandbox, a.machine);
+              const legHold = this.legHoldProblem(on, w, needs === 'game' || this.newWorkOn(a.sandbox, a.machine) ? 'sandbox' : 'seat');
+              if (legHold) throw new Error(legHold);
+            }
             // w2544: a person named this computer for it: pinned there, so the timing order and later moves keep it there.
             const pinOn = this.machineOf(a.sandbox, a.machine);
             if (a.pin_words?.trim()) {
@@ -7083,8 +7130,10 @@ ${w.repo ?? ''}
             worker_caps: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: set this machine's per-worker memory, process and temp-disk caps (w5554, docs/worker-caps.md): warn (the default: measures and reports, never limits or kills), enforce (the kernel limit and the tool kill) or off (nothing). Unset leaves it as it is. Off is the recovery switch when a cap breaks work; it holds for each worker started after the update."),
             transcript_lock: z.enum(['on', 'off']).optional().describe("action machine_update, a Linux machine with the worker fence on: let each locked worker write only its own conversation's transcript (w5702, docs/transcript-seal.md): on moves <root>/claude/projects to <root>/transcripts behind a link and gives each claude rules for its own conversation; off opens the transcripts folder to workers again. Unset leaves it as it is. Off is the recovery switch, and worker_fence off lifts it with the whole lock."),
             store_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the store lock (w5614, docs/machines.md \"Slot repos\"): on makes the machine's main clone read-only to fenced workers once every sandbox is a slot repo (held off, and said why, until then); warn refuses nothing and logs each write to the main clone the daemon did not make; off (the recovery switch) opens it again. Takes effect at the daemon restart the update makes. Unset leaves it as it is."),
+            editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
+            path_fence: z.enum(['off', 'warn']).optional().describe("action machine_update: w5863: the path fence on macOS and Linux: warn (the default) refuses nothing and logs each write to the unity-slot shims folder (first on every agent's PATH) that the daemon did not make; off stops the watch (the recovery switch). Takes effect at the daemon's next start. Unset leaves it as it is."),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7092,7 +7141,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
