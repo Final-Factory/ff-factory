@@ -85,6 +85,31 @@ export interface TokenSwitchDeps {
   /** Put a line in the log of each open request the agent holds; the ids. */
   note: (s: SessionInfo, line: string) => string[];
   log: (line: string) => void;
+  /**
+   * w5921: the dispatcher or a person's orchestrator ended LIMIT_STREAK turns in a row on Claude's usage limit: tell the
+   * operators (index.ts: lothsahn's and Ben's orchestrators). `line` names the token (vault name and last four only), its reset
+   * and what was done. Absent: nobody is told (tests that need no alert).
+   */
+  alert?: (s: SessionInfo, line: string) => void;
+  /** w5921: what config says the dispatcher runs on ("vault token vault-ben-3 …abcd (claudeAccounts.dispatcher)"), for its alert. */
+  dispatcherConfigured?: () => string | undefined;
+}
+
+/**
+ * w5921: this many turns in a row ending on Claude's usage limit alert the operators. One can be a turn the limit cut short
+ * before the switch took; two in a row means the agent is stuck on the token (the dispatcher from 03:38Z on 2026-11-26).
+ */
+export const LIMIT_STREAK = 2;
+
+/** w5921: an orchestrator's (the dispatcher's) run of turns ending on Claude's usage limit on one token. */
+interface LimitStreak {
+  account: string;
+  label: string;
+  turns: number;
+  /** When the token's refused window resets (epoch ms), as its out mark says. */
+  until: number;
+  dispatcher: boolean;
+  alerted?: boolean;
 }
 
 const MID_TURN = new Set(['running', 'starting', 'waiting_permission']);
@@ -139,6 +164,10 @@ export class TokenSwitch {
   private readonly retries = new Map<string, { account: string; tries: number; gaveUp?: boolean }>();
   private pending = new Map<string, Pending>();
   private recent: TokenSwitchRecord[] = [];
+  /** w5921: the orchestrators (the dispatcher included) whose last turns ended on the limit, by session id. */
+  private readonly streaks = new Map<string, LimitStreak>();
+  /** When each out token's refused window resets, as markOut set it (epoch ms), by key. */
+  private readonly outUntil = new Map<string, number>();
 
   constructor(d: TokenSwitchDeps) {
     this.d = d;
@@ -176,13 +205,21 @@ export class TokenSwitch {
     const label = this.d.label(account);
     const text = (s.lastResult ?? '').trim();
     const limitLine = LIMIT_END.test(text);
-    if (!label || (!limitLine && refusedOn !== account)) return;
+    if (!label || (!limitLine && refusedOn !== account)) {
+      this.streaks.delete(s.id);
+      return;
+    }
     const line = text.replace(/\s+/g, ' ').slice(0, 120);
     if (limitLine) this.markOut(account, label, refusedWindow(undefined, text, this.d.meters(account)), undefined, `${s.kind} ${s.id}'s turn ended on Claude's limit line ("${line}")`);
+    const streak = s.kind === 'orchestrator' ? this.count(s, account, label) : undefined;
     if (MID_TURN.has(s.status)) return; // a message queued behind the turn started the next one: it ends on the limit too, and comes back here
     const who = `${s.kind} ${s.id}`;
     if (s.kind === 'ops' || (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')) {
       this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out; ${s.kind === 'ops' ? 'the ops worker starts a fresh process for every job, on a token with room' : 'the dispatcher stays on its own token'}, so it is not resumed`);
+      if (streak) {
+        const conf = this.d.dispatcherConfigured?.();
+        this.alertStreak(s, streak, `nothing yet: the dispatcher does not switch tokens by itself (w5921's next change does); it stays on ${label} and every turn it takes ends at once until ${hhmm(streak.until)}${conf ? `. Its config names ${conf}, which it moves to only when its process restarts` : ''}`);
+      }
       return;
     }
     const why = `${label} ran out (${limitLine ? `"${line}"` : 'Claude refused it'})`;
@@ -193,6 +230,7 @@ export class TokenSwitch {
       this.resumed.set(s.id, { account, at: this.now() });
       this.moving(s, why);
       this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out; resumed on a token with room in its pool`);
+      if (streak) this.alertStreak(s, streak, 'resumed on a token with room in its own pool (its process restarts there before the turn)');
       this.d.resume(s, this.resumeText(s, label, why));
       return;
     }
@@ -200,6 +238,7 @@ export class TokenSwitch {
       // Its process could not move (a background task keeps it, accountMove): another resume would run on the out token again,
       // and a usage gate would clear at once (its pool has room) and loop. It moves at its first message once the task is done;
       // tick resumes it again RETRY_STUCK_MS later, a few times, and the ledger cleanup resumes a worker a limit cut off (cutOffStep).
+      if (streak) this.alertStreak(s, streak, `its process could not move (${s.backgroundTasks ? 'a background task keeps it' : 'it did not restart'}); it moves at its next message once nothing keeps it`);
       this.d.log(`token switch (w1745): ${who} stopped on ${label} again after its resume: its process is still there (${s.backgroundTasks ? 'a background task keeps it' : 'it did not restart'}), so it is not resumed at once; it moves at its next message once nothing keeps the process, or is resumed again in ${RETRY_STUCK_MS / 60_000} min`);
       return;
     }
@@ -207,7 +246,43 @@ export class TokenSwitch {
     if (s.kind === 'worker') {
       const blocked = this.d.hold(s, label, `${label} ran out and ${reason}`);
       this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out, and ${reason}: ${blocked.length ? `${blocked.join(', ')} blocked on its usage limit, resumed when a token of the pool has room` : 'nothing to block'}`);
-    } else this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out, and ${reason}: it waits (its next message or run starts when a token has room)`);
+    } else {
+      this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out, and ${reason}: it waits (its next message or run starts when a token has room)`);
+      if (streak) this.alertStreak(s, streak, `${reason}, so it waits; its next message after a token of its pool has room runs there`);
+    }
+  }
+
+  /**
+   * w5921: the dispatcher is rate-limited now: its last turn ended on Claude's usage limit and the token's refused window has
+   * not reset. "the dispatcher is rate-limited on vault-ben-2 …abcd until 2026-11-26 08:00Z", for the ledger's undecided and
+   * stalled text (shared/workState.ts) and system_status; undefined when it is not.
+   */
+  dispatcherLimited(): string | undefined {
+    const now = this.now();
+    for (const st of this.streaks.values()) if (st.dispatcher && st.until > now) return `the dispatcher is rate-limited on ${st.label} until ${hhmm(st.until)}`;
+    return undefined;
+  }
+
+  /** Count a turn of an orchestrator that ended on the limit on `account`; the streak once it reaches LIMIT_STREAK and is not alerted yet. */
+  private count(s: SessionInfo, account: string, label: string): LimitStreak | undefined {
+    const was = this.streaks.get(s.id);
+    const until = this.outUntil.get(account) ?? this.now() + OUT_FALLBACK_MS;
+    const st: LimitStreak = was?.account === account ? { ...was, turns: was.turns + 1, until } : { account, label, turns: 1, until, dispatcher: s.orchestratorRole === 'dispatcher' };
+    this.streaks.set(s.id, st);
+    return st.turns >= LIMIT_STREAK && !st.alerted ? st : undefined;
+  }
+
+  /** Tell the operators, once per streak: the agent, its token (name and last four), the reset and what was done. */
+  private alertStreak(s: SessionInfo, st: LimitStreak, done: string) {
+    st.alerted = true;
+    const who = st.dispatcher ? 'The dispatcher' : `Orchestrator ${s.id} (${s.title})`;
+    const line = `[token alert] ${who} ended ${st.turns} turns in a row on Claude's usage limit, on vault token ${st.label}; Claude counts that token's window used up until ${hhmm(st.until)}. What FF Factory did: ${done}. (w5921; system_status, "Token out")`;
+    this.d.log(`token alert (w5921): ${who.toLowerCase()} ${s.id}: ${st.turns} limit turns in a row on ${st.label}, until ${hhmm(st.until)}; told the operators`);
+    try {
+      this.d.alert?.(s, line);
+    } catch (e) {
+      this.d.log(`token alert (w5921): could not tell the operators: ${(e as Error).message}`);
+    }
   }
 
   /**
@@ -292,6 +367,8 @@ export class TokenSwitch {
       const on = live(key);
       out.push(`Token out (w1745): ${this.d.label(key) ?? 'a vault token'}: ${o.why} (${hhmm(o.at)}); its ${o.field === 'weekly' ? 'weekly' : '5-hour'} window counts as used up until ${hhmm(o.until)}. ${on.length ? `Still on it: ${on.join(', ')}; each moves to a token with room at its next turn, never mid-turn` : 'No agent runs on it'}.`);
     }
+    const limited = this.dispatcherLimited();
+    if (limited) out.push(`Dispatcher rate-limited (w5921): ${limited[0].toUpperCase()}${limited.slice(1)}: its turns end at once on Claude's usage limit, so it decides nothing before then.`);
     const waiting = [...this.pending].filter(([, p]) => now - p.at <= PENDING_MS);
     if (waiting.length) out.push(`Token switches waiting for their next process (w1745): ${waiting.map(([id, p]) => `${id} from ${this.d.label(p.from) ?? 'a vault token'}`).join(', ')}`);
     const day = this.recent.filter((r) => now - Date.parse(r.at) < 86_400_000);
@@ -307,6 +384,7 @@ export class TokenSwitch {
     const meter = this.d.meters(account)?.[field];
     const fromMeter = meter?.resetsAt ? Date.parse(meter.resetsAt) : NaN;
     const until = reset && reset > now ? reset : Number.isFinite(fromMeter) && fromMeter > now ? fromMeter : now + OUT_FALLBACK_MS;
+    this.outUntil.set(account, until);
     this.d.markOut(account, { field, until, at: now, why }, label);
   }
 

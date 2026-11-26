@@ -910,6 +910,13 @@ export class Orchestrators {
 
   // ---------------------------------------------------------------- the sessions
 
+  /**
+   * w5921: "the dispatcher is rate-limited on <token> until <time>" while its turns end at once on Claude's usage limit
+   * (TokenSwitch.dispatcherLimited, wired by index.ts); undefined otherwise. A request sits undecided then because nobody can
+   * decide it: the ledger says so, and does not offer it again to the same stuck process (undecidedBound).
+   */
+  dispatcherLimited?: () => string | undefined;
+
   /** The dispatcher's session id. store.orchestratorId keeps its old name: it was the one shared orchestrator. */
   get dispatcherId(): string | undefined {
     return this.store.orchestratorId;
@@ -5462,6 +5469,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   undecidedBound(): string[] {
     const now = this.now().getTime();
     const offered: string[] = [];
+    const limited = this.dispatcherLimited?.();
     for (const w of this.store.work.values()) {
       if (w.status !== 'new') {
         if (w.undecided) {
@@ -5477,6 +5485,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       const since = Date.parse(w.undecided.since) || now;
       if (w.undecided.reofferedAt || now - since < UNDECIDED_BOUND_MS) continue;
+      // w5921: offered again to a dispatcher whose every turn ends on the usage limit, it is lost too: it waits for the reset
+      // (its live state says so), and is offered again once the dispatcher runs.
+      if (limited) continue;
       const mins = Math.round((now - since) / 60_000);
       w.undecided = { ...w.undecided, reofferedAt: new Date(now).toISOString() };
       this.stamp(w, `ledger: undecided for ${mins} min: offered to the dispatcher again (w2217)`);

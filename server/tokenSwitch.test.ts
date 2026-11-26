@@ -346,6 +346,53 @@ test('w1745: the dispatcher and the ops worker are not resumed; one whose proces
   assert.equal(bg.stops, 1);
 });
 
+test('w5921: the dispatcher ending 2 turns in a row on the usage limit alerts the operators once, with the token, its reset and what was done', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100, 4));
+  w.meter(B2, reading(0, 3));
+  const alerts: { id: string; line: string }[] = [];
+  w.deps.alert = (s, line) => alerts.push({ id: s.id, line });
+  w.deps.dispatcherConfigured = () => 'vault token vault-ben-2 …bbbb (claudeAccounts.dispatcher)';
+  const sw = new TokenSwitch(w.deps);
+  const disp = { ...worker('disp', key(B1), { lastResult: LIMIT_LINE }), kind: 'orchestrator', orchestratorRole: 'dispatcher', machineId: undefined } as SessionInfo;
+  assert.equal(sw.dispatcherLimited(), undefined);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 0, 'one limit turn alerts nobody (a turn the limit cut short before a switch took)');
+  assert.match(sw.dispatcherLimited()!, /^the dispatcher is rate-limited on vault-ben-1 …\w{4} until \d{4}-\d\d-\d\d \d\d:\d\dZ$/);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0].line, /^\[token alert\] The dispatcher ended 2 turns in a row on Claude's usage limit, on vault token vault-ben-1 …\w{4}; Claude counts that token's window used up until \d{4}-\d\d-\d\d \d\d:\d\dZ\. What FF Factory did: .*Its config names vault token vault-ben-2 …bbbb/);
+  assert.doesNotMatch(alerts[0].line, new RegExp(B1.slice(0, 20)), 'never the token itself');
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1, 'once per streak');
+  assert.ok(sw.statusLines([], () => []).some((l) => /^Dispatcher rate-limited \(w5921\): The dispatcher is rate-limited on vault-ben-1/.test(l)));
+  // A turn that ends normally ends the streak: the next two limit turns alert again.
+  sw.turnEnded({ ...disp, lastResult: 'Started w5907 on lothdesktop.' });
+  assert.equal(sw.dispatcherLimited(), undefined);
+  sw.turnEnded(disp);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 2);
+});
+
+test("w5921: a person's orchestrator stuck on the limit twice alerts too, saying what was done; a worker never does", (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100));
+  w.meter(B2, reading(100, 100));
+  const alerts: string[] = [];
+  w.deps.alert = (_s, line) => alerts.push(line);
+  const sw = new TokenSwitch(w.deps);
+  const orch = { ...worker('orch-ben', key(B1), { lastResult: LIMIT_LINE, title: 'Ben' }), kind: 'orchestrator', orchestratorRole: 'personal', machineId: undefined } as SessionInfo;
+  sw.turnEnded(orch);
+  sw.turnEnded(orch);
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0], /^\[token alert\] Orchestrator orch-ben \(Ben\) ended 2 turns in a row .*What FF Factory did: (no token in its pool has room, so it waits|resumed on a token with room)/);
+  assert.equal(sw.dispatcherLimited(), undefined, "only the dispatcher's limit is the ledger's reason");
+  const wk = worker('w-1', key(B1), { lastResult: LIMIT_LINE });
+  sw.turnEnded(wk);
+  sw.turnEnded(wk);
+  assert.equal(alerts.length, 1, 'workers are moved or held by w1745 and named in their requests, not alerted');
+});
+
 test('w1745: a worker left idle on the out token after its resume is resumed again 10 min later, at most 3 times (7d4cb2df, 2026-10-22)', (t) => {
   // Worker 7d4cb2df (w1752): its resume went into an agent host that predated the daemon fix, ran on vault-ben-1 again, and it
   // then sat idle there from 18:31Z, waiting for "its next message", which nothing sent.
