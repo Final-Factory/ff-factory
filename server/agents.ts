@@ -74,6 +74,7 @@ import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts'
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
+import { runnerHoldText } from '../shared/runnerHold.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
 import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
@@ -6270,6 +6271,19 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   /** One sandbox for list_sandboxes. By default (w1159) the status and editor details are cut and git leaves out the last commit's subject and the PR's URL; detail keeps them. */
+  /**
+   * w5916: what a person's hold does to a machine's self-hosted CI runners, while the portal holds it (a drain or
+   * placement.hold): its daemon's last word ("runners draining (1 busy: ...)", "runners stopped by hold (...)"), or that
+   * the daemon has not answered yet. Undefined with no hold.
+   */
+  private runnerHoldLine(m: Machine): string | undefined {
+    if (!this.machines.runnerHoldFor?.(m.id)) return undefined;
+    const said = runnerHoldText(m.runnerHold);
+    if (said) return said;
+    if (!this.machines.isOnline(m.id)) return 'runners: the hold drains them when its daemon is back';
+    return m.runnerHold ? 'runners: none to stop' : 'runners: draining (its daemon has not answered yet)';
+  }
+
   private describeMachineSandbox(m: Machine, sb: MachineSandbox, detail = false) {
     const u = sb.unity;
     const cut = (t: string) => (detail ? t : clip(t, SANDBOX_DETAIL_CHARS));
@@ -6645,9 +6659,10 @@ A report is for a person who asked for one, and people want very few. File one w
       const editors = u ? `Unity ${unitySlotsLine(u)}` : `${pool?.maxUnity} editors at once`;
       const limits = pool ? `${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}, up to ${pool.maxAgentsPerSandbox} agents each, ${editors}, root ${pool.root}` : 'no sandbox_root any more';
       const diskPart = disk && disk.level !== 'ok' ? `; DISK ${disk.level.toUpperCase()} (${((disk.freeBytes ?? 0) / 2 ** 30).toFixed(0)} GB free)` : '';
+      const ciPart = this.runnerHoldLine(m) ? `; CI ${this.runnerHoldLine(m)}` : '';
       const noun = m.local ? `this host's own daemon; bare names like "${sbs[0]?.id ?? 'sb1'}" work too` : platformNoun(m.platform);
       const total = pool ? `, up to ${agentCap(m)} agents in all, standing agents included` : '';
-      parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s, detail)) : ['(none yet)']));
+      parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart}${ciPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s, detail)) : ['(none yet)']));
     }
     const cap = [...capacityLines(this.places(), this.lastPlaced, this.placement()), ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l)];
     this.logTimedLine(cap);
@@ -7545,6 +7560,8 @@ ${w.repo ?? ''}
             }
             // w4468: a hold lifted or a reservation changed (placement.hold, holdExcept, minPriority) re-places Queued work now.
             if (key.startsWith('placement.')) this.orchestrators?.capacityMayHaveFreed(`config ${key} changed`);
+            // w5916: a hold set or lifted drains or restarts that machine's CI runners now, not at the next minute's look
+            if (key.startsWith('placement.hold')) this.machines.syncRunnerHolds();
             if (key === 'live.enabled') await this.liveHub?.switched(after === true);
             if (key.startsWith('providers.') || key.startsWith('intake.')) this.providers?.configChanged();
             if (key.startsWith('intake.')) {
@@ -7648,6 +7665,7 @@ ${w.repo ?? ''}
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : m.noSsh ? 'no ssh (joined with -NoSsh: updated over its link, w4674)' : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? (m.pause?.paused ? PAUSED_STATE : 'online') : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}${this.machines.isOnline(m.id) && m.pause?.paused ? ` (${pauseHold(m.pause, Date.now())}): nothing is placed, queued or planned here, and what waits here moves, as for an offline computer; only work pinned here waits, Blocked` : `; ${m.status}`}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; screen: ${desktopLabel(m.desktop)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
+      ...(this.runnerHoldLine(m) ? [`  CI runners (w5916): ${this.runnerHoldLine(m)}`] : []),
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       // The portal hosts its daemon follows (w5576): online machines only.
       ...(this.machines.isOnline(m.id) ? [`  ${describePortalPin(this.machines.portalPinOf(m.id))}`] : []),
@@ -7928,6 +7946,7 @@ ${w.repo ?? ''}
             const was = drainOf(m, this.orchestrators.now().getTime());
             if (!m.drain) return `${m.id} is not drained: nothing to lift.`;
             mm.update(m.id, { drain: undefined });
+            mm.syncRunnerHolds(m.id); // w5916: its CI runners take jobs again
             this.orchestrators?.capacityMayHaveFreed(`${m.id}'s drain lifted`);
             console.log(`[machines] ${m.id} drain lifted by ${ctx.owner?.displayName ?? ctx.role}${was ? ` (was: ${was.who}: "${was.words}")` : ''} (w5878)`);
             return `${m.id} takes new work again (its drain${was ? ` for ${was.who}'s "${was.words}"` : ''} is lifted).`;
@@ -7936,6 +7955,7 @@ ${w.repo ?? ''}
           const d = newDrain({ words, who, hours, except }, by, this.orchestrators?.now() ?? new Date());
           if (typeof d === 'string') throw new Error(d);
           mm.update(m.id, { drain: d });
+          mm.syncRunnerHolds(m.id); // w5916: its CI runners drain
           console.log(`[machines] ${m.id} drained by ${by}: ${d.who}: "${d.words}"${d.until ? ` until ${d.until}` : ''}${d.except ? `, except ${d.except.join(', ')}` : ''} (w5878)`);
           const there = [...this.store.sessions.values()].filter((s) => s.machineId === m.id && s.kind === 'worker' && s.status !== 'stopped').length;
           return `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${there} worker(s) there finish.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;

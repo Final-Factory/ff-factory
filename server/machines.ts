@@ -40,8 +40,12 @@ import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
 import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 import { beatWasLate } from './loopWatch.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
+import { runnerHoldReportOf } from '../shared/runnerHold.ts';
 
 const PING_MS = 20_000;
+/** w5916: how often the portal looks whether a machine's hold changed, and how often it repeats a hold that did not. */
+const RUNNER_HOLD_CHECK_MS = 60_000;
+const RUNNER_HOLD_REPEAT_MS = 10 * 60_000;
 const DEAD_MS = 45_000;
 /** How far back a machine's CPU use is averaged for placement (w2054): four of its daemon's 15 s reports. */
 export const CPU_WINDOW_MS = 60_000;
@@ -520,6 +524,8 @@ export class MachineManager {
       store.putMachine(m);
     }
     setInterval(() => this.heartbeat(), PING_MS).unref();
+    // w5916: each linked daemon hears its machine's hold when it changes, and again every few minutes
+    setInterval(() => this.syncRunnerHolds(), RUNNER_HOLD_CHECK_MS).unref();
   }
 
   /** Whose ~/.ssh holds the pinned host keys: the portal account's home (tests point it at a folder of their own). */
@@ -912,6 +918,30 @@ export class MachineManager {
       if (only && id !== only) continue;
       const c = this.activityFor?.(id);
       if (c) this.post(id, { type: 'activity_config', config: c }, false);
+    }
+  }
+
+  /**
+   * w5916: a person's hold on a machine (config placement.hold, or a drain), its words, or undefined. Its daemon drains
+   * the machine's CI runners while it is on (machine/loadRunners.ts). Wired by index.ts.
+   */
+  runnerHoldFor?: (machineId: string) => string | undefined;
+  /** What each linked daemon was last told of its hold, and when. */
+  private runnerHoldSent = new Map<string, { why: string | null; at: number }>();
+
+  /**
+   * w5916: tell each linked daemon (or only `only`) its machine's hold when it changed since the last word, and every
+   * RUNNER_HOLD_REPEAT_MS while one is on, so the daemon's lapse (12 h without a word) never fires while the portal runs.
+   */
+  syncRunnerHolds(only?: string, now = Date.now()) {
+    for (const id of this.links.keys()) {
+      if (only && id !== only) continue;
+      const why = this.runnerHoldFor?.(id) ?? null;
+      const last = this.runnerHoldSent.get(id);
+      if (last && last.why === why && (why === null || now - last.at < RUNNER_HOLD_REPEAT_MS)) continue;
+      this.runnerHoldSent.set(id, { why, at: now });
+      if (last?.why !== why) console.log(`machine ${id}: ${why ? `held: its CI runners drain (${why.slice(0, 120)})` : 'no hold: its CI runners take jobs'} (w5916)`);
+      this.post(id, { type: 'runner_hold', why }, false);
     }
   }
 
@@ -2398,6 +2428,12 @@ export class MachineManager {
     if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
     const activity = this.activityFor?.(id);
     if (activity) ws.send(JSON.stringify({ type: 'activity_config', config: activity } satisfies ToDaemon));
+    // w5916: its hold, at every connect (null too: a hold lifted while the link was down lifts now)
+    if (this.runnerHoldFor) {
+      const why = this.runnerHoldFor(id) ?? null;
+      this.runnerHoldSent.set(id, { why, at: Date.now() });
+      ws.send(JSON.stringify({ type: 'runner_hold', why } satisfies ToDaemon));
+    }
     const ctx = m.local ? undefined : this.cleanupContext?.();
     if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     const prio = this.benchPrioritiesFor?.(id);
@@ -2748,6 +2784,13 @@ export class MachineManager {
       case 'pause':
         this.takePause(id, msg.pause);
         return;
+      case 'runner_hold': {
+        const r = runnerHoldReportOf(msg.report);
+        if (r === null) {
+          if (this.store.machines.get(id)?.runnerHold) this.update(id, { runnerHold: undefined });
+        } else if (r) this.update(id, { runnerHold: r });
+        return;
+      }
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
         return;
