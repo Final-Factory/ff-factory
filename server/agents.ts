@@ -2797,6 +2797,26 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return cutOff;
   }
 
+  /** Starts and moves this began without waiting for them (w5278's hand-over, a room move): what settled() waits for. */
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private track<T>(p: Promise<T>): Promise<T> {
+    const seen = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlight.add(seen);
+    void seen.finally(() => this.inFlight.delete(seen));
+    return p;
+  }
+
+  /**
+   * Once every start and move this began without waiting has finished, its worker linked or its failure said (w5915: a test
+   * waits for that, not for a time: on a loaded BEAST a hand-over's ~30 git processes outran a 5 s wait).
+   */
+  async settled(): Promise<void> {
+    while (this.inFlight.size) await Promise.all([...this.inFlight]);
+  }
+
   /**
    * Stop every timer this started (w3746): its ticks, the orchestrators' timers, the pending wakes (their file kept), the ops
    * worker's and the rollout's. A test calls it before it removes the data folder: a release pass that fired after the
@@ -4288,7 +4308,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
-    this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+    this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
     return true;
   }
 
@@ -4338,7 +4358,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       this.roomMoving.set(info.id, entry);
       const hold = `its check after ${on.machines.join(' or ')}'s update runs on ${d.move.to}`;
       console.log(`deploy move: worker ${info.id} on ${from} (${w.id}) moves to ${d.move.to}: ${on.why} (w5328); ${d.move.why}`);
-      this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+      this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
       return true;
     }
     if ('none' in d) {
@@ -7566,7 +7586,7 @@ ${w.repo ?? ''}
               if (w) this.orchestrators.noteOnRequest(w.id, `its start_agent in ${at} did not start after the sandbox was prepared (w5278): ${why}`);
               this.notifyDispatcher(`[start failed] ${label} did not start in ${at}: ${why}. Nothing was started for it: start_agent it again (another free sandbox if this one is the problem).`, requestedBy);
             };
-            plan.pending.then(
+            this.track(plan.pending).then(
               (h) => {
                 if (w) this.agentStarting.delete(w.id);
                 try {
