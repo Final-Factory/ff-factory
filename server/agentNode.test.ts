@@ -5,38 +5,93 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, ensureAgentNode, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
+import { parseHolders, holdersScript, type Holder } from './agentNodeHolders.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodeHome, agentNodePathDir, agentNodeStamp, ensureAgentNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
  * folder (a new program path, and a Windows Firewall prompt, every session). These hold the swap with a fake download
  * and a fake tar: the folder's path never changes, a wrong download is refused, a busy folder is left alone.
+ * w5839: whether the node there is the pinned one comes from its record (daemon\agent-node\record.json), checked by hashing, never by
+ * running the installed node.exe.
  */
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'agent-node-'));
 const unpackedName = AGENT_NODE.zip.replace(/\.zip$/, '');
+const shaOf = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
-/** Deps whose "node.exe" is a text file holding its version, and whose tar makes the unpacked folder. */
-function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string } = {}) {
+/** Deps whose "node.exe" is a text file holding its version, and whose tar makes the unpacked folder (node.exe, npm.cmd). */
+/** The pin of the fake download's tree: what the fake tar unpacks when its node.exe says `version`. */
+const pinOf = (version: string) => {
+  const files = { 'node.exe': shaOf(version), 'node_modules/npm/index.js': shaOf('npm'), 'npm.cmd': shaOf('@echo npm') };
+  return { exeSha256: files['node.exe'], treeSha256: treeDigest(files) };
+};
+
+/**
+ * `icacls <dir> /T /C` as Windows prints it (the layout of BEAST's live tools\node, w5839): each entry's path, its first
+ * access entry on the same line and the rest indented under it, a blank line between entries. Every entry inherits, save
+ * the folder's own Medium label; `own` adds a line to the entries it names (a path relative to the folder, '' for it).
+ */
+function icaclsTree(dir: string, own: Record<string, string> = {}): string {
+  const walk = (rel: string): string[] => [rel, ...(fs.statSync(path.join(dir, rel)).isDirectory() ? fs.readdirSync(path.join(dir, rel)).sort().flatMap((n) => walk(rel ? `${rel}/${n}` : n)) : [])];
+  const out: string[] = [];
+  for (const rel of walk('')) {
+    const p = rel ? `${dir}\\${rel.replaceAll('/', '\\')}` : dir;
+    const aces = ['BEAST\\rydin:(I)(F)', 'BUILTIN\\Administrators:(I)(F)', 'NT AUTHORITY\\Authenticated Users:(I)(M)', 'BUILTIN\\Users:(I)(RX)'];
+    aces.push(rel ? 'Mandatory Label\\Medium Mandatory Level:(I)(NW)' : 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)');
+    if (own[rel]) aces.push(own[rel]);
+    out.push(`${p} ${aces[0]}`, ...aces.slice(1).map((a) => `${' '.repeat(p.length + 1)}${a}`), '');
+  }
+  return `${out.join('\r\n')}\r\nSuccessfully processed ${out.filter((l) => l === '').length} files; Failed processing 0 files\r\n`;
+}
+
+function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean; own?: Record<string, string>; homeOwn?: Record<string, string>; readOut?: string; held?: (Holder[] | Error)[] } = {}) {
   const said: string[] = [];
+  const reads: string[][] = [];
+  // Per read: whether only write access counted (the check before trust) or any handle (a refused swap).
+  const modes: boolean[] = [];
+  const ran: string[] = [];
+  const tarInto: string[] = [];
   const d: AgentNodeDeps = {
     platform: 'win32',
     say: (l) => void said.push(l),
     download: async () => zipBytes,
     tar: 'tar',
+    pin: pinOf(o.pinVersion ?? AGENT_NODE.version),
+    retryMs: 0,
+    // The Low holders: the next of `held` per read, none once it is used up.
+    holders: async (dirs, m) => {
+      reads.push(dirs);
+      modes.push(m.writesOnly);
+      const next = o.held?.shift();
+      if (next instanceof Error) throw next;
+      return next ?? [];
+    },
     exec: async (cmd, args) => {
+      ran.push(cmd);
+      if (cmd === 'icacls' && args.includes('/T')) {
+        // The labels `own` names are on the node there, `homeOwn` on the record's folder; what replaces them inherits alone.
+        const key = path.basename(args[0]) === 'node' ? 'own' : 'homeOwn';
+        const own = o[key];
+        o[key] = undefined;
+        return { code: 0, stdout: key === 'own' && o.readOut !== undefined ? o.readOut : icaclsTree(args[0], own), stderr: '' };
+      }
+      if (cmd === 'icacls') return o.icaclsFails ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
       if (cmd === 'tar') {
+        tarInto.push(args[args.indexOf('-C') + 1]);
         if (o.tarFails) return { code: 1, stdout: '', stderr: 'bad zip' };
         const into = path.join(args[args.indexOf('-C') + 1], unpackedName);
-        fs.mkdirSync(into, { recursive: true });
+        fs.mkdirSync(path.join(into, 'node_modules', 'npm'), { recursive: true });
         fs.writeFileSync(path.join(into, 'node.exe'), o.version ?? AGENT_NODE.version);
+        fs.writeFileSync(path.join(into, 'npm.cmd'), '@echo npm');
+        fs.writeFileSync(path.join(into, 'node_modules', 'npm', 'index.js'), 'npm');
         return { code: 0, stdout: '', stderr: '' };
       }
       // "<exe> --version": the fake exe's text
       return fs.existsSync(cmd) ? { code: 0, stdout: `${fs.readFileSync(cmd, 'utf8')}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'no such file' };
     },
   };
-  return { d, said };
+  return { d, said, ran, tarInto, o, reads, modes };
 }
 
 /** A download whose SHA-256 is the pinned one, as far as the code can tell: the pin replaced for the test. */
@@ -46,38 +101,533 @@ function pinned(bytes: Buffer, fn: () => Promise<void>) {
   return fn().finally(() => ((AGENT_NODE as { sha256: string }).sha256 = real));
 }
 
-test('the agent node goes to <root>/tools/node, is current on the next run, and the path stays when the version changes (w1742)', async () => {
+test('the agent node goes to <root>/tools/node with its record, is verified on the next run, and the path stays when the version changes (w1742, w5839)', async () => {
   const root = tmp();
   const zip = Buffer.from('a zip');
   await pinned(zip, async () => {
     const f = fake(zip);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node'], 'nothing left beside it');
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
-    // An older node there: replaced in place, the same folder.
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node'], 'nothing left beside it but the record');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no node\.exe there\)/);
+    const rec = JSON.parse(fs.readFileSync(agentNodeStamp(root), 'utf8')) as { version: string; files: Record<string, string> };
+    assert.equal(rec.version, AGENT_NODE.version);
+    assert.deepEqual(Object.keys(rec.files).sort(), ['node.exe', 'node_modules/npm/index.js', 'npm.cmd']);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled [(]verified: .*3 files match the record.*swapped anyway/);
+    // An older node there, its record of the older one: replaced in place, the same folder.
     fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
+    fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ version: 'v22.0.0', files: { ...rec.files, 'node.exe': shaOf('v22.0.0') } }));
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
-    assert.match(f.said.at(-1)!, /installed at .*\(was v22\.0\.0\)/);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record is not of the pinned v/);
   });
 });
 
-test('a download with the wrong SHA-256, a failed unpack or a wrong version leaves the old node and no part folder (w1742)', async () => {
+test("w5839: every run swaps in a fresh copy, from the zip kept in the record's folder; a kept zip that is not the pinned one is downloaded again (w5964's review)", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    let downloads = 0;
+    f.d.download = async () => (downloads++, zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // A handle a Low process could have hidden from the holder read stays on the old file once it is swapped: node.exe is
+    // a new file after the run (another file id), even though it passed every check.
+    assert.equal(f.tarInto.length, 1);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled [(]verified: .*swapped anyway/);
+    assert.equal(f.tarInto.length, 2, 'a fresh copy was unpacked and put there');
+    assert.equal(downloads, 1, 'the kept zip was used');
+    const kept = path.join(agentNodeHome(root), AGENT_NODE.zip);
+    fs.writeFileSync(kept, 'a planted zip');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.equal(downloads, 2, 'a kept zip that is not the pinned one is not unpacked');
+    assert.deepEqual(fs.readFileSync(kept), zip);
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
+  });
+});
+
+test('w5839: a node.exe replaced, a file added beside it or a file removed is reinstalled from the pinned download, and the installed node is never run', async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    fs.writeFileSync(agentNodeExe(root), 'a planted node');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its files are not the recorded ones: 1 differ \(node\.exe\)\)/);
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
+    fs.writeFileSync(path.join(agentNodeDir(root), 'version.dll'), 'a planted DLL');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /1 added \(version\.dll\)/);
+    assert.ok(!fs.existsSync(path.join(agentNodeDir(root), 'version.dll')));
+    fs.rmSync(path.join(agentNodeDir(root), 'npm.cmd'));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /1 missing \(npm\.cmd\)/);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.ok(!f.ran.includes(agentNodeExe(root)), `ran the installed node: ${f.ran.join(', ')}`);
+  });
+});
+
+test('w5839: a node from before the record is always swapped, even one whose files match; a planted one, or one a planted record vouches for, is reinstalled', async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    fs.rmSync(agentNodeStamp(root));
+    // The old folder carries a mark of its own: gone after the run, so the folder was swapped, not kept.
+    const before = fs.readdirSync(agentNodeDir(root)).sort();
+    fs.writeFileSync(path.join(agentNodeDir(root), 'mark'), '');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
+    assert.deepEqual(fs.readdirSync(agentNodeDir(root)).sort(), before, 'the folder there was swapped, not kept');
+    assert.ok(fs.existsSync(agentNodeStamp(root)));
+    // A planted node.exe with no record.
+    fs.rmSync(agentNodeStamp(root));
+    fs.writeFileSync(agentNodeExe(root), 'a planted node');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
+    // A planted node.exe with a planted record that names it.
+    const rec = JSON.parse(fs.readFileSync(agentNodeStamp(root), 'utf8')) as { version: string; files: Record<string, string> };
+    fs.writeFileSync(agentNodeExe(root), 'a planted node');
+    fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ ...rec, files: { ...rec.files, 'node.exe': shaOf('a planted node') } }));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /its record is not of the pinned/);
+    // The genuine node.exe, a planted DLL beside it, and a record forged to list the DLL too (w5854's first hole).
+    fs.writeFileSync(path.join(agentNodeDir(root), 'version.dll'), 'a planted DLL');
+    fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ ...rec, files: { ...rec.files, 'version.dll': shaOf('a planted DLL') } }));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /its record is not of the pinned/);
+    assert.ok(!fs.existsSync(path.join(agentNodeDir(root), 'version.dll')));
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.ok(!f.ran.includes(agentNodeExe(root)));
+  });
+});
+
+test("w5839: a junction at tools\\node is refused and a real folder put there; the folder it pointed at is left alone (w5854's second hole)", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // A copy of the genuine folder elsewhere, and tools\node a junction to it: its record and its files match.
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.cpSync(agentNodeDir(root), elsewhere, { recursive: true });
+    fs.rmSync(agentNodeDir(root), { recursive: true });
+    fs.symlinkSync(elsewhere, agentNodeDir(root), 'junction');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(.* is a link or a file, not a folder\)/);
+    const st = fs.lstatSync(agentNodeDir(root));
+    assert.ok(st.isDirectory() && !st.isSymbolicLink());
+    assert.ok(fs.existsSync(path.join(elsewhere, 'node.exe')), 'nothing was deleted through the junction');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+  });
+});
+
+test('w5839: a staging folder a run left behind is swept, and never stops the next run', async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    fs.mkdirSync(path.join(root, 'tools', `node-${AGENT_NODE.version}.part`, 'x'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'tools', `node-${AGENT_NODE.version}-123.part`), { recursive: true });
+    // Another rollout's stage of the last minute is left to it (w5866's review), and goes once it is an hour old.
+    const now = Date.now();
+    const theirs = `node-${AGENT_NODE.version}-${now - 60_000}.part`;
+    fs.mkdirSync(path.join(root, 'tools', theirs));
+    assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now }), 'installed');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', theirs].sort());
+    assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now + 2 * 60 * 60_000 }), 'installed');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
+  });
+});
+
+test('w5839: a fresh folder that cannot be labelled Medium is not put in place, and the node there stays', async () => {
+  const root = tmp();
+  fs.mkdirSync(agentNodeDir(root), { recursive: true });
+  fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip, { icaclsFails: true });
+    assert.equal(await ensureAgentNode(root, f.d), 'failed');
+    assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled .*could not label .* Medium.*the node there stays\.$/);
+  });
+  assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'v22.0.0');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
+});
+
+test('a download with the wrong SHA-256, a failed unpack or a wrong node.exe leaves the old node and no part folder (w1742, w5839)', async () => {
   const root = tmp();
   fs.mkdirSync(agentNodeDir(root), { recursive: true });
   fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
   const bad = fake(Buffer.from('not the pinned zip'));
   assert.equal(await ensureAgentNode(root, bad.d), 'failed');
-  assert.match(bad.said.at(-1)!, /^WARNING: .*SHA-256/);
+  assert.match(bad.said.at(-1)!, /^WARNING: Agent node: node not reinstalled \(no record of its install .*SHA-256.*the node there stays\.$/);
   const zip = Buffer.from('a zip');
   await pinned(zip, async () => {
     assert.equal(await ensureAgentNode(root, fake(zip, { tarFails: true }).d), 'failed');
-    assert.equal(await ensureAgentNode(root, fake(zip, { version: 'v1.0.0' }).d), 'failed');
+    // The unpacked node.exe is not the pinned one.
+    const wrong = fake(zip, { version: 'v1.0.0' });
+    assert.equal(await ensureAgentNode(root, wrong.d), 'failed');
+    assert.match(wrong.said.at(-1)!, /the unpacked node\.exe has SHA-256/);
+    // Its hash is right but it says another version.
+    assert.equal(await ensureAgentNode(root, fake(zip, { version: 'v1.0.0', pinVersion: 'v1.0.0' }).d), 'failed');
   });
   assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'v22.0.0');
   assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
+});
+
+test('w5839: an old node folder a swap could not delete (a node still ran from it) goes on a later run', async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    fs.mkdirSync(path.join(root, 'tools', 'node.old-1795650065661'));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
+  });
+});
+
+test('w5839: treeDiff names what differs, what is missing and what was added', () => {
+  assert.equal(treeDiff({ a: '1', b: '2' }, { b: '2', a: '1' }), undefined);
+  assert.equal(treeDiff({ a: '1', b: '2', c: '3' }, { a: 'x', c: '3', d: '4' }), '1 differ (a); 1 missing (b); 1 added (d)');
+  assert.equal(treeDiff({}, { a: '1', b: '1', c: '1', d: '1' }), '4 added (a, b, c, ...)');
+});
+
+test('w5839: treeDigest does not depend on the order of the record, and changes with any file', () => {
+  assert.equal(treeDigest({ a: '1', b: '2' }), treeDigest({ b: '2', a: '1' }));
+  assert.notEqual(treeDigest({ a: '1', b: '2' }), treeDigest({ a: '1', b: '2', c: '3' }));
+  assert.notEqual(treeDigest({ a: '1', b: '2' }), treeDigest({ a: '1', b: '3' }));
+});
+
+test("w5839: a pinned copy whose files carry a Low label or an access entry of their own is put there again (w5866's review)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    for (const own of [
+      { 'node_modules/npm/index.js': 'Mandatory Label\\Low Mandatory Level:(NW)' },
+      { 'node.exe': 'Mandatory Label\\Untrusted Mandatory Level:(NW)' },
+      { 'node_modules/npm': 'Everyone:(OI)(CI)(M)' },
+      { '': 'Everyone:(OI)(CI)(M)' },
+    ] as Record<string, string>[]) {
+      const root = tmp();
+      assert.equal(await ensureAgentNode(root, fake(zip).d), 'installed');
+      // The same bytes and a record that matches them: only the labels differ.
+      const f = fake(zip, { own });
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', JSON.stringify(own));
+      assert.ok(f.said.at(-1)!.startsWith('Agent node: node reinstalled (its labels let a Low worker write it: '), f.said.at(-1)!);
+      assert.ok(f.said.at(-1)!.includes(Object.values(own)[0]!), f.said.at(-1)!);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled [(]verified: .*no Low label/);
+    }
+  });
+});
+
+test('w5839: icacls output that cannot be read, or that names a failure, counts against the folder; with no node yet the line says so', async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    assert.equal(await ensureAgentNode(root, fake(zip).d), 'installed');
+    const one = `${agentNodeDir(root)} BEAST\\rydin:(I)(F)\r\n${' '.repeat(agentNodeDir(root).length + 1)}BUILTIN\\Users:(I)(RX)\r\n\r\n`;
+    for (const readOut of ['', 'something else\r\n', `${one}Successfully processed 1 files; Failed processing 1 files\r\n`, `${one.replace('(I)(RX)', 'RX')}Successfully processed 1 files; Failed processing 0 files\r\n`]) {
+      const f = fake(zip, { readOut });
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', readOut);
+      assert.match(f.said.at(-1)!, /its labels let a Low worker write it/);
+    }
+  });
+  // No node at all and the download is not the pinned one: the line does not say a node stays.
+  const bad = fake(Buffer.from('not the pinned zip'));
+  assert.equal(await ensureAgentNode(tmp(), bad.d), 'failed');
+  assert.match(bad.said.at(-1)!, /has no node yet; the next rollout tries again\.$/);
+});
+
+test("w5839: labelProblem reads icacls's layout: paths and accounts with spaces, the folder's own Medium label, a Low one", () => {
+  const dir = 'F:\\ffw\\tools\\node';
+  const e = (p: string, ...aces: string[]) => [`${p} ${aces[0]}`, ...aces.slice(1).map((a) => `${' '.repeat(p.length + 1)}${a}`), ''].join('\r\n');
+  const sum = (n: number) => `Successfully processed ${n} files; Failed processing 0 files\r\n`;
+  const top = e(dir, 'BEAST\\rydin:(I)(OI)(CI)(F)', 'NT AUTHORITY\\Authenticated Users:(I)(M)', 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)');
+  const file = (p: string, label = 'Mandatory Label\\Medium Mandatory Level:(I)(NW)') => e(`${dir}\\${p}`, 'NT AUTHORITY\\SYSTEM:(I)(F)', 'BUILTIN\\Users:(I)(RX)', label);
+  assert.equal(labelProblem([top, file('a b\\c d.txt'), sum(2)].join('\r\n'), dir), undefined);
+  assert.equal(labelProblem([top, file('a b\\c d.txt', 'Mandatory Label\\Low Mandatory Level:(NW)'), sum(2)].join('\r\n'), dir), `${dir}\\a b\\c d.txt is labelled Mandatory Label\\Low Mandatory Level:(NW)`);
+  // Only the folder itself may hold a label of its own: a file's explicit Medium one is still an entry of its own.
+  assert.match(labelProblem([top, file('x.js', 'Mandatory Label\\Medium Mandatory Level:(NW)'), sum(2)].join('\r\n'), dir)!, /x\.js holds an access entry of its own/);
+  assert.match(labelProblem([file('x.js'), sum(1)].join('\r\n'), 'F:\\other')!, /outside/);
+  assert.equal(labelProblem(sum(0), dir), 'icacls named nothing');
+});
+
+test("w5839: another folder with the pinned bytes, inherited Medium labels and a copy of the record is put there again (w5868's review)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // Unpacked in daemon\agent-node, where no Low worker holds a handle, and the record kept there too.
+    assert.ok(f.tarInto.every((p) => p.startsWith(agentNodeHome(root) + path.sep)), f.tarInto.join(', '));
+    assert.equal(path.dirname(agentNodeStamp(root)), path.join(root, 'daemon', 'agent-node'));
+    // A Low worker's copy, byte for byte, in a folder of its own put at tools\node (its handles survive a relabel).
+    const copy = path.join(root, 'tools', 'copy');
+    fs.cpSync(agentNodeDir(root), copy, { recursive: true });
+    fs.renameSync(agentNodeDir(root), path.join(root, 'tools', 'aside'));
+    fs.renameSync(copy, agentNodeDir(root));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record is of another folder /);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // Ours, moved aside and back, is still ours.
+    fs.renameSync(agentNodeDir(root), path.join(root, 'tools', 'away'));
+    fs.renameSync(path.join(root, 'tools', 'away'), agentNodeDir(root));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+  });
+});
+
+test('w5839: the records in tools (before w5868) and tools-medium (before w5876) are never read, and go once the record is in daemon\\agent-node', async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    const rec = fs.readFileSync(agentNodeStamp(root), 'utf8');
+    fs.rmSync(agentNodeStamp(root));
+    fs.writeFileSync(path.join(root, 'tools', 'node.json'), rec);
+    fs.mkdirSync(path.join(root, 'tools-medium'));
+    fs.writeFileSync(path.join(root, 'tools-medium', 'agent-node.json'), rec);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools-medium')), []);
+  });
+});
+
+test("w5839: a record in a folder a Low worker could write is not read: the folder goes aside for a new one (w5876's review)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    for (const [what, homeOwn] of [
+      ["an old daemon's Low label", { '': 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)' }],
+      ['a Low label on the record', { 'record.json': 'Mandatory Label\\Low Mandatory Level:(NW)' }],
+      ['an access entry of its own', { 'record.json': 'Everyone:(F)' }],
+    ] as const) {
+      const root = tmp();
+      const f = fake(zip);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+      const mark = path.join(agentNodeHome(root), 'mark');
+      fs.writeFileSync(mark, 'the old folder');
+      f.o.homeOwn = homeOwn;
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', what);
+      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record's folder has labels that let a Low worker write it: /, what);
+      assert.ok(!fs.existsSync(mark), `${what}: the folder was put aside, not reused`);
+      assert.deepEqual(fs.readdirSync(path.join(root, 'daemon')), ['agent-node'], what);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', what);
+    }
+  });
+});
+
+test("w5839: a record folder that cannot be put aside keeps the node there and says so (lothsahn's lockout rule)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    const exe = fs.readFileSync(agentNodeExe(root));
+    f.o.homeOwn = { '': 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)' };
+    // A file held open in it: Windows refuses the rename. Elsewhere a read-only daemon folder does.
+    const held = fs.openSync(agentNodeStamp(root), 'r');
+    if (process.platform !== 'win32') fs.chmodSync(path.join(root, 'daemon'), 0o500);
+    try {
+      assert.equal(await ensureAgentNode(root, f.d), 'failed');
+    } finally {
+      fs.closeSync(held);
+      if (process.platform !== 'win32') fs.chmodSync(path.join(root, 'daemon'), 0o700);
+    }
+    assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not checked: its record's folder .* could not be put aside .*the node there stays/);
+    assert.deepEqual(fs.readFileSync(agentNodeExe(root)), exe);
+  });
+});
+
+test("w5839: a Low process with write access to the recorded node, with labels and hashes right, is named, not ended, and the node swapped (w5882's review, B2; w5926's review, B2)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    for (const where of ['node', 'record'] as const) {
+      const root = tmp();
+      const f = fake(zip);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+      assert.deepEqual(f.reads.at(-1), [agentNodeDir(root), agentNodeHome(root)], 'both folders are read');
+      assert.equal(f.modes.at(-1), true, 'only write access counts before the node is trusted');
+      // Two rollbacks gave it a write handle on the real folder; the relabel since left labels, hashes and identity right.
+      const at = where === 'node' ? agentNodeExe(root) : agentNodeStamp(root);
+      f.o.held = [[{ pid: 4242, name: 'powershell', path: at }]];
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', where);
+      assert.match(f.said.at(-2)!, new RegExp(`^WARNING: Agent node: processes below Medium integrity hold write access to the node's folders.*powershell \\(4242\\) ${at.replaceAll('\\', '\\\\')}; the node is not trusted, and they are not ended\\.$`));
+      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(Low processes held write access to it: powershell \(4242\)\)/);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    }
+  });
+});
+
+test('w5839: when the processes holding the node cannot be read, the node is not called verified', async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    f.o.held = [new Error('the read of the processes holding them failed (1: Add-Type refused)')];
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(could not tell which processes hold it open: .*Add-Type refused/);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+  });
+});
+
+test("w5839: a planted node a Low process holds open is named once the rename is refused, nothing is ended, and the node stays until the next rollout (w5882's review, B1; w5926's review, B2)", { skip: process.platform !== 'win32' && 'a file held open refuses a rename only on Windows' }, async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    fs.mkdirSync(agentNodeDir(root), { recursive: true });
+    fs.writeFileSync(agentNodeExe(root), 'planted');
+    const fd = fs.openSync(agentNodeExe(root), 'r');
+    // Not seen before the check (it opened the file just after), seen once the rename is refused.
+    const f = fake(zip, { held: [[], [{ pid: 777, name: 'claude', path: agentNodeExe(root) }]] });
+    try {
+      assert.equal(await ensureAgentNode(root, f.d), 'busy');
+      assert.deepEqual(f.modes, [true, false], 'any handle counts once the swap was refused, read once');
+      assert.match(f.said.at(-2)!, /^WARNING: Agent node: processes below Medium integrity hold the node's folder open, so the swap cannot pass: .*claude \(777\).*; they are not ended\.$/);
+      assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled \(no record of its install.*is still in use \((EBUSY|EPERM).*Low processes held it open: claude \(777\)\); nothing is ended, and the node there stays until the next rollout\.$/);
+      assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'planted');
+    } finally {
+      fs.closeSync(fd);
+    }
+    // Once it lets go, the next rollout swaps it.
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
+  });
+});
+
+test("w5839: a planted node held open by no process below Medium stays, nothing is ended, and the line says so (lothsahn's lockout rule)", { skip: process.platform !== 'win32' && 'a file held open refuses a rename only on Windows' }, async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    fs.mkdirSync(agentNodeDir(root), { recursive: true });
+    fs.writeFileSync(agentNodeExe(root), 'planted');
+    const fd = fs.openSync(agentNodeExe(root), 'r');
+    const f = fake(zip);
+    try {
+      assert.equal(await ensureAgentNode(root, f.d), 'busy');
+    } finally {
+      fs.closeSync(fd);
+    }
+    assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled \(no record of its install.*is still in use \((EBUSY|EPERM)[^;]*\); nothing is ended, and the node there stays/);
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'planted');
+    assert.deepEqual(fs.readdirSync(agentNodeHome(root)), [AGENT_NODE.zip], 'no stage left, only the kept zip');
+  });
+});
+
+test('w5839: the holder read prints its count line and each holder; a run cut short reads as unknown', () => {
+  assert.deepEqual(parseHolders('read low=3 handles=900 unread=1\r\nholder 4242 powershell F:\\ffw\\tools\\node\\node.exe\r\n'), [
+    { pid: 4242, name: 'powershell', path: 'F:\\ffw\\tools\\node\\node.exe' },
+  ]);
+  assert.deepEqual(parseHolders('read low=0 handles=0 unread=0\r\n'), []);
+  assert.equal(parseHolders('read low=0 handles=0\r\n'), undefined, 'an older script');
+  assert.equal(parseHolders('holder 4242 powershell F:\\x'), undefined);
+  const sc = holdersScript(["F:\\ffw\\it's\\tools\\node"], [12]);
+  assert.match(sc, /\[FfHolders\]::Find\(\[string\[\]\]@\('F:\\ffw\\it''s\\tools\\node'\), \[int\[\]\]@\(12, \$PID\), \$true\)\)/);
+  assert.match(holdersScript(['F:\\x'], [], false), /\$PID\), \$false\)\)/);
+});
+
+test("w5839: the holder read, run: before trust it names only a Low process that can write there; once a swap was refused, any that holds a file or the folder (w5886's review)", { skip: process.platform !== 'win32' && 'needs Windows PowerShell' }, async () => {
+  const dir = tmp();
+  fs.writeFileSync(path.join(dir, 'f.js'), 'x');
+  fs.writeFileSync(path.join(dir, 'g.js'), 'y');
+  // g.js labelled Low, as files were while an old daemon had `tools` Low, so a Low process may open it for writing.
+  assert.equal(spawnSync('icacls', [path.join(dir, 'g.js'), '/setintegritylevel', 'low'], { encoding: 'utf8' }).status, 0);
+  const read = (writesOnly: boolean, at = dir) => {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(holdersScript([at], [process.pid], writesOnly), 'utf16le').toString('base64')], { encoding: 'utf8', maxBuffer: 1 << 26 });
+    last = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim().slice(0, 2000);
+    return parseHolders(r.stdout ?? '');
+  };
+  let last = '';
+  // Nothing of ours yet; a process whose handles cannot be read (Windows' own sandboxed services, as on the CI runner)
+  // is never named.
+  assert.deepEqual(read(false), [], `the read finishes and names nothing: ${last}`);
+  // A process started from an exe labelled Low runs Low, whatever starts it (machine/lowIntegrity.ts, tools\low).
+  const exe = path.join(dir, 'lownode', 'node.exe');
+  fs.mkdirSync(path.dirname(exe));
+  fs.copyFileSync(process.execPath, exe);
+  assert.equal(spawnSync('icacls', [exe, '/setintegritylevel', 'low'], { encoding: 'utf8' }).status, 0);
+  const { spawn } = await import('node:child_process');
+  // Started, and answered only once its file is open: a fresh copy of node.exe can take seconds to start on the CI runner
+  // while it is scanned, and a fixed wait read the folder before the reader held it (w5839, CI at 5d3003b0).
+  const run = async (what: string, code: string) => {
+    const p = spawn(exe, ['-e', `${code}; console.log('ready'); setTimeout(() => {}, 120000)`], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    let out = '';
+    p.stderr!.on('data', (b) => (err += b));
+    await new Promise<void>((res, rej) => {
+      const t = setTimeout(() => rej(new Error(`the Low node did not ${what} in 60 s: ${err}`)), 60000);
+      p.stdout!.on('data', (b) => ((out += b), out.includes('ready') && (clearTimeout(t), res())));
+      p.on('exit', (c) => (clearTimeout(t), rej(new Error(`the Low node exited ${c}: ${err}`))));
+    });
+    return Object.assign(p, { out: () => out });
+  };
+  const hold = (file: string, flags: string) => run(`open ${file}`, `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}')`);
+  // A legitimate Low worker: its working folder there and a file open for reading.
+  const reader = await hold('f.js', 'r');
+  try {
+    assert.deepEqual(read(true), [], `a reader is never ended on a check: ${last}`);
+    const any = read(false);
+    assert.deepEqual(any?.map((h) => h.pid), [reader.pid], `once a swap was refused it is: ${last}`);
+    // The folder as given need not be the form Windows names open files by: os.tmpdir() is a short 8.3 name on the CI
+    // runner (C:\\Users\\RUNNER~1\\...), and a root may sit behind a junction. Each is resolved first (w5926's review, B1).
+    const link = path.join(tmp(), 'through');
+    fs.symlinkSync(dir, link, 'junction');
+    assert.deepEqual(read(false, link)?.map((h) => h.pid), [reader.pid], `through a junction: ${last}`);
+    assert.deepEqual(read(false, fs.realpathSync.native(dir))?.map((h) => h.pid), [reader.pid], `in its final form: ${last}`);
+    // Named in the final long form, which os.tmpdir() need not be (w5951's review, N1: C:\Users\RUNNER~1 on the CI runner).
+    const real = fs.realpathSync.native(dir);
+    assert.ok(any![0].path.toLowerCase().startsWith(real.toLowerCase()), `${any![0].path} under ${real}`);
+    const writer = await hold('g.js', 'r+');
+    try {
+      const w = read(true);
+      assert.deepEqual(w?.map((h) => h.pid), [writer.pid], `a writer is named on a check: ${last}`);
+      assert.equal(w![0].path.toLowerCase(), path.join(real, 'g.js').toLowerCase());
+    } finally {
+      writer.kill();
+    }
+    // A write handle opened through a second hard link that was deleted since (w5951's review, B1): the file is back to one
+    // name, so the nlink check passes, and Windows gives no path for the handle. It is matched by its file id. Write-only
+    // too, so the id is read with no read right on the handle. The link's folder is labelled Low, as a Low worker's are.
+    const side = tmp();
+    assert.equal(spawnSync('icacls', [side, '/setintegritylevel', '(OI)(CI)low'], { encoding: 'utf8' }).status, 0);
+    const lk = JSON.stringify(path.join(side, 'x.js'));
+    const sneak = await run('open g.js through a deleted link', `const fs = require('fs'); fs.linkSync(${JSON.stringify(path.join(dir, 'g.js'))}, ${lk}); globalThis.fd = fs.openSync(${lk}, fs.constants.O_WRONLY); fs.unlinkSync(${lk}); console.log('nlink=' + fs.statSync(${JSON.stringify(path.join(dir, 'g.js'))}).nlink)`);
+    try {
+      assert.match(sneak.out(), /nlink=1/, 'the second name is gone');
+      assert.ok(!fs.existsSync(path.join(side, 'x.js')));
+      assert.deepEqual(read(true)?.map((h) => h.pid), [sneak.pid], `a writer through a deleted link is named on a check: ${last}`);
+    } finally {
+      sneak.kill();
+    }
+  } finally {
+    reader.kill();
+  }
+});
+
+test("w5839: a file of the node with another hard link is never trusted: a handle opened through that name is not under the folder (w5886's review, M2)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    const other = path.join(root, 'elsewhere');
+    fs.mkdirSync(other);
+    fs.linkSync(agentNodeExe(root), path.join(other, 'n.exe'));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(1 of its files has another hard link \(node\.exe\)\)/);
+    assert.equal(fs.statSync(agentNodeExe(root)).nlink, 1, 'the fresh copy has one name');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+  });
 });
 
 test('not Windows: nothing to place, and nothing goes on PATH; Windows: the folder once node.exe is there (w1742)', async () => {
