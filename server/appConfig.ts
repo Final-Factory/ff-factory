@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { DEFAULT_CLEANUP, DEFAULT_WORKER_EFFORT, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
+import { DEFAULT_CLEANUP, DEFAULT_WORKER_EFFORT, HOST_GUARD_DEFAULTS, DEFAULT_USAGE_POLL_MINUTES, LOOP_GUARD_RANGE, ROOT, VAULT_ENTRY_NAME, VAULT_PINNED_PREFIX, VOICE_DEFAULTS, DISPATCHER_POOL_PREFIX, POOL_PERSON, dispatcherPoolOf, pinnedVaultEntry, type ClaudeAccount, type Config, type IntakeConfig } from './config.ts';
 import { SECRET_KEYS, maskSecret } from './secrets.ts';
 import { FFBOX_HASH_FILE, ffboxTokenHash, secretsDirOf, writeFfboxTokenHash } from './configMigration.ts';
 import { vaultContext } from './vault.ts';
@@ -67,7 +67,8 @@ export const SETTABLE_KEYS = [
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
   'privacyGuards',
-  // The one vault token the dispatcher runs on (w996), "vault:<entry name>"; unset, the system payer's pool. The owner's only.
+  // The one vault token the dispatcher runs on (w996), "vault:<entry name>", or one person's pool, "pool:<login>" (w5891); unset,
+  // the system payer's pool. The owner's only. A change restarts the dispatcher on it between turns (w5921).
   // Every other Claude process runs on its person's pool: nothing else to set (w1078).
   'claudeAccounts.dispatcher',
   // Whether a machine's runs (and, for the machine id "portal", the portal's own gh reads) use the run person's vault GitHub
@@ -523,8 +524,18 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       // The dispatcher on one named vault token (w996), or "vault": the system payer's pool, stored as no key (w1078).
       const v = typeof value === 'string' ? value.trim() : value;
       if (v === 'vault') return undefined;
+      // w5891: one person's own pool, any token of it with room; stored in the login's own spelling.
+      const pool = dispatcherPoolOf(typeof v === 'string' ? v : undefined);
+      if (pool !== undefined) {
+        if (!POOL_PERSON.test(pool)) throw new Error(`${key} is "${DISPATCHER_POOL_PREFIX}<login>", a login with a Claude pool in the vault, e.g. "pool:ben"`);
+        const known = (users ?? []).find((u) => u.toLowerCase() === pool.toLowerCase());
+        if (!known) throw new Error(`${key}: no login ${JSON.stringify(pool.slice(0, 40))}; the logins are ${(users ?? []).join(', ') || '(none)'}`);
+        const context = vaultContext();
+        if (context && !context.vault.hasClaudeFor(known)) throw new Error(`${key}: ${known} has no enabled Claude token in the vault that its key opens (fffctl vault list; docs/vault.md section 10): the dispatcher would not start`);
+        return `${DISPATCHER_POOL_PREFIX}${known}` as ClaudeAccount;
+      }
       const pinned = pinnedVaultEntry(typeof v === 'string' ? v : undefined);
-      if (pinned === undefined || !VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1", or "vault" (the system payer's pool); every Claude process runs on a vault token (w1078)`);
+      if (pinned === undefined || !VAULT_ENTRY_NAME.test(pinned)) throw new Error(`${key} is "${VAULT_PINNED_PREFIX}<vault entry name>", the name \`fffctl vault list\` shows (lower-case letters, digits, ".", "_", "-"), e.g. "vault:vault-lothsahn-1", "${DISPATCHER_POOL_PREFIX}<login>" (any token of that person's pool with room, w5891), or "vault" (the system payer's pool); every Claude process runs on a vault token (w1078)`);
       const context = vaultContext();
       if (context && !context.vault.claudeByName(pinned)) throw new Error(`${key}: the vault has no enabled Claude token named "${pinned}" that its key opens (\`fffctl vault list\` shows the names)`);
       return v as ClaudeAccount;
