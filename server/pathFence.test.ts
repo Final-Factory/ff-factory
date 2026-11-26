@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin } from '../machine/pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, ownFolderMode, readyShimDir, retryShimWrite, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin } from '../machine/pathFence.ts';
 import { writeShims } from '../machine/unitySlots.ts';
 import { hostsWithPathDir } from '../machine/agentHost.ts';
 import { FF_LANDLOCK, LOCKED_CHILDREN, readLockArgs, writeLockArgs } from '../machine/writeLock.ts';
@@ -556,5 +556,79 @@ test('live w5899 enforce: an extra writable folder over the root does not open <
     assert.equal(run(`PATH=${JSON.stringify(dir)}:$PATH; unity-slot`).stdout.trim(), 'real', 'and it runs from PATH');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// w6144: the three notes of w6103's review (https://github.com/Final-Factory/ff-factory/pull/1359#pullrequestreview-6077955434).
+test('w6144 note 1: after a failed start write, the shims the retry writes have their modes guarded', notWinNorRoot, async () => {
+  const g = guardRoot();
+  fs.rmSync(g.target, { recursive: true });
+  // As at the daemon's start: the write failed, so the mode guard starts with nothing in the folder to guard.
+  const guard = guardShimModes(g.target, { log: (l) => g.lines.push(l), everyMs: 100 });
+  const retry = retryShimWrite(g.target, { write: (d) => void writeShims(d), wrote: () => guard.learn(), log: (l) => g.lines.push(l), everyMs: 50 });
+  try {
+    assert.ok(await waitFor(() => g.lines.some((l) => /wrote the shims in/.test(l))), 'the retry wrote the shims');
+    const shim = path.join(g.target, 'unity-slot');
+    const was = fs.statSync(shim).mode & 0o777;
+    fs.chmodSync(shim, 0o000);
+    assert.ok(await waitFor(() => (fs.statSync(shim).mode & 0o777) === was), `a worker's chmod 000 of unity-slot is put back to ${was.toString(8)}`);
+  } finally {
+    clearInterval(retry);
+    guard();
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6144 note 2: a link swapped in while a folder at 000 is given its owner bits back keeps its target\'s mode', { skip: process.platform !== 'darwin' && 'lchmod is macOS only; on Linux Landlock lets the worker chmod the target itself (w6103)' }, () => {
+  const root = fakeRoot();
+  const p = path.join(root, 'shut');
+  const victim = path.join(root, 'victim');
+  fs.mkdirSync(p);
+  fs.mkdirSync(victim);
+  fs.chmodSync(p, 0o000);
+  fs.chmodSync(victim, 0o500);
+  const real = fs.lstatSync;
+  let swapped = false;
+  // The worker wins the race: just after the daemon's look at p, p becomes a link to the victim.
+  (fs as { lstatSync: unknown }).lstatSync = ((q: fs.PathLike, ...rest: unknown[]) => {
+    const st = (real as (...a: unknown[]) => fs.Stats)(q, ...rest);
+    if (!swapped && q === p) {
+      swapped = true;
+      fs.renameSync(p, `${p}.away`);
+      fs.symlinkSync(victim, p);
+    }
+    return st;
+  }) as typeof fs.lstatSync;
+  try {
+    assert.equal(ownFolderMode(p, 0o755), false, 'what opened is not a real folder: refused');
+    assert.ok(swapped, 'the swap happened');
+    assert.equal(fs.statSync(victim).mode & 0o777, 0o500, 'the link\'s target was not chmodded');
+  } finally {
+    (fs as { lstatSync: unknown }).lstatSync = real;
+    fs.chmodSync(`${p}.away`, 0o755);
+    fs.chmodSync(victim, 0o755);
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6144 note 3: a mailbox or root a worker chmodded 000 is put back, and the old bin mended', notWinNorRoot, async () => {
+  for (const which of ['mailbox', 'root', 'mailbox while running'] as const) {
+    const g = guardRoot();
+    const folder = which === 'root' ? g.root : path.dirname(g.bin);
+    if (which !== 'mailbox while running') fs.chmodSync(folder, 0o000);
+    const stop = guardOldShimBin(g.bin, g.opts(() => ['s1'], 100));
+    try {
+      if (which === 'mailbox while running') {
+        assert.ok(await waitFor(() => g.only()), 'first mended');
+        fs.chmodSync(folder, 0o000);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.ok(await waitFor(() => (fs.statSync(folder).mode & 0o700) === 0o700), `${which}: owner rwx again`);
+      assert.ok(await waitFor(() => g.only()), `${which}: agents started before the move run the daemon's shims`);
+    } finally {
+      stop();
+      unmode(folder);
+      fs.rmSync(g.root, { recursive: true, force: true });
+    }
   }
 });

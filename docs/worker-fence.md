@@ -693,6 +693,13 @@ Two more holes, from w5872's review:
     `tools-medium` as well as the shims folder; and in `on` there is no fallback into the mailbox at all (below). A
     folder whose owner may not read it cannot be opened, even by its owner: then a real folder gets owner rwx back by
     path, and the handle opened after is refused if it is not the folder looked at.
+  - **After w6103's review** (w6144). That chmod by path follows a link a worker swaps in after the look; on macOS,
+    where Seatbelt refuses a worker's own chmod, it is `/bin/chmod -h` (fchmodat with AT_SYMLINK_NOFOLLOW), since no
+    open of a folder at 000 succeeds there (O_EVTONLY and O_SYMLINK included, measured on m5) and Node's `lchmodSync`
+    opens for writing (EISDIR on a folder). Linux has no such call for a folder, and Landlock lets the worker chmod
+    the target itself anyway. Each eviction gives the root and the mailbox owner rwx before it looks at `bin`: in a
+    mailbox at 000 the look itself failed and `bin` was never mended. When the start write failed and the minute's
+    retry writes the shims later (`retryShimWrite`), `guardShimModes` learns their modes then; it had none to guard.
   - Other locked folders (`secrets`, the daemon's) can be made unreadable the same way: a denial of service, not a way
     to run code, and not covered here.
 - **Grants add up.** A `writeLockExtra` (or `extraRoots`) folder that holds a locked one, or sits in one (the root,
