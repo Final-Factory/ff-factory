@@ -78,12 +78,14 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * and the folder's identity (`folderId`). It lives in `<root>\daemon\agent-node` (`agentNodeHome`), which no daemon
  * version labels Low, and whose labels are read before the record is; the records of before (`legacyStamps`), in
  * folders a rolled-back daemon labels Low, are never read.
- * Every tools run hashes the folder again, and a folder that is not the recorded one (a Low worker's copy of the pinned
- * bytes, its write handles kept open across a relabel: w5868's review) is put there again. The record must itself be the pinned download's (its files'
+ * Every tools run swaps in a fresh copy of the pinned node, whatever it finds (w5964's review, B1: a Low process can hide
+ * a write handle from the holder read), and the checks below say in the rollout line what they found: a folder that is
+ * not the recorded one (a Low worker's copy of the pinned bytes, its write handles kept open across a relabel: w5868's
+ * review), and the rest. The record must itself be the pinned download's (its files'
  * digest is `AGENT_NODE.treeSha256`), so one a Low worker wrote while `tools` was Low (before w5717, or a daemon
  * rolled back) cannot vouch for a planted DLL or script. A record that is not, a file that differs, is missing or was
  * added (a DLL beside node.exe loads before the system's), a link where the folder should be, or no record at all, is
- * a node put there again from a fresh pinned download. Matching bytes are not enough: a pinned copy a Low worker put
+ * named in that line as the reason for the swap. Matching bytes are not enough: a pinned copy a Low worker put
  * there with Low labels of its own matches every hash and stays writable from Low, so the labels and access entries are
  * read first (`labelProblem`, w5866's review).
  */
@@ -422,8 +424,11 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
   // The labels first, then the holders (w5951's review, N3): once the labels let no Low process open the files for writing,
   // no new write handle can appear, so the holder read after them sees every one there will be, and what is hashed next
   // stays what runs.
+  // Since every rollout swaps (B1 below), neither read decides the swap; both say why in the line. The holder read runs
+  // when the labels already fail too (w5986, N4): a node a Low label leaves writable is the one whose Low writers the
+  // next stage (w5952) must know by name, and the label read is the only one that sees a label any Low process can use.
   const lab = !homeBad && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
-  const held = homeBad || lab || notAFolder(dir) ? undefined : await warnLowHolders([dir, medium], true, d);
+  const held = homeBad || notAFolder(dir) ? undefined : await warnLowHolders([dir, medium], true, d);
   const st = homeBad
     ? { ok: false as const, why: `its record's folder ${homeBad}` }
     : lab
@@ -453,8 +458,9 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     const x = await d.exec(tar, ['-xf', zip, '-C', stage], { timeoutMs: 10 * 60_000 });
     if (x.code !== 0) throw new Error(`tar could not unpack ${zip}: ${(x.stderr || x.stdout).trim().slice(-300)}`);
     const unpacked = path.join(stage, AGENT_NODE.zip.replace(/\.zip$/, ''));
-    // Medium on its own label before it is hashed: a daemon that starts during this run labels each other folder in
-    // tools Low (machine/lowIntegrity.ts lowTargets), this one too. Hashed after, so what was written before is seen.
+    // Medium on its own label before it is hashed. The stage is in the record's folder, which no daemon labels Low
+    // (`agentNodeHome`), so this changes nothing there today; it keeps the files Medium if a later daemon ever labels that
+    // folder otherwise, and the hash after it sees whatever was written before.
     const lab = await d.exec('icacls', [unpacked, '/setintegritylevel', '(OI)(CI)medium'], { timeoutMs: 30 * 60_000 });
     if (lab.code !== 0) throw new Error(`could not label ${unpacked} Medium: ${(lab.stderr || lab.stdout).trim().slice(-200)}`);
     const fresh = treeHashes(unpacked);
