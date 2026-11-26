@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { LIGHT_DIR, LightFolders, isLightId, lightName, reposIn, unsavedWork, type GitRun } from '../machine/lightFolders.ts';
+import { LIGHT_DIR, LightFolders, isLightId, lightName, reposIn, scanRepos, unsavedWork, type GitRun } from '../machine/lightFolders.ts';
 import { gameSandboxes, isLight, lightFolders, lightUseText } from '../shared/sandboxKind.ts';
 import { capacityLines, hasRoomFor, type Computer } from './placement.ts';
 import { LIGHT_GRACE_MS, PlaceAgain, movedNote } from './placeAgain.ts';
@@ -72,8 +72,40 @@ test('w5924: a light folder whose clone holds unpushed commits, uncommitted file
   try {
     const repo = path.join(root, LIGHT_DIR, 'agent1', 'ff-factory');
     fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
-    fs.mkdirSync(path.join(root, LIGHT_DIR, 'agent1', 'node_modules', 'x', '.git'), { recursive: true });
-    assert.deepEqual(reposIn(path.join(root, LIGHT_DIR, 'agent1')), [repo], 'node_modules is not searched');
+    fs.mkdirSync(path.join(root, LIGHT_DIR, 'agent1', 'node_modules', 'x', 'y', '.git'), { recursive: true });
+    assert.deepEqual(reposIn(path.join(root, LIGHT_DIR, 'agent1')), [repo], 'node_modules is never walked past one level (w6031)');
+    // w6031 (the w6027 review): a clone 4 levels down, or one named like a build cache, is found too; deeper is unsure.
+    const a3 = path.join(root, LIGHT_DIR, 'agent3');
+    const deep = path.join(a3, 'a', 'b', 'c', 'd');
+    const build = path.join(a3, 'build');
+    for (const r of [deep, build]) fs.mkdirSync(path.join(r, '.git'), { recursive: true });
+    fs.writeFileSync(path.join(a3, 'a', 'b', 'c', 'note.txt'), 'x');
+    fs.mkdirSync(path.join(a3, 'a', 'b', 'c', 'files'), { recursive: true });
+    fs.writeFileSync(path.join(a3, 'a', 'b', 'c', 'files', 'f.txt'), 'x');
+    fs.mkdirSync(path.join(a3, 'x', 'y', 'z', 'w', 'v', 'repo', '.git'), { recursive: true });
+    fs.mkdirSync(path.join(a3, 'node_modules', 'pkg', 'lib'), { recursive: true });
+    // w6031 (the w6046 review): a clone directly inside a cache (build/ffr) is found; deeper in a cache is not walked.
+    const inCache = path.join(a3, 'target', 'ffr');
+    fs.mkdirSync(path.join(inCache, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(a3, 'target', 'debug', 'deps', 'x', '.git'), { recursive: true });
+    const scan = scanRepos(a3);
+    assert.deepEqual([...scan.repos].sort(), [build, deep, inCache].sort(), 'the clone 4 levels down, the one named build and target/ffr');
+    assert.deepEqual(scan.unsure, [path.join(a3, 'x', 'y', 'z', 'w')], 'past the depth with folders inside: unsure; a folder of files only is not');
+    const none: GitRun = async () => ({ code: 0, stdout: '', stderr: '' });
+    assert.deepEqual(await unsavedWork(a3, none), [`${path.join('x', 'y', 'z', 'w')}: could not be searched to the end for clones (too deep or unreadable)`]);
+    await assert.rejects(new LightFolders({ root: () => root, git: none }).remove('agent3'), /delete refused: light folder agent3/, 'unsure: never deleted');
+    assert.ok(fs.existsSync(deep));
+    assert.deepEqual(scanRepos(path.join(root, 'gone')), { repos: [], unsure: [] }, 'a folder that is gone holds nothing');
+    if (process.platform !== 'win32' && process.getuid?.() !== 0) {
+      const locked = path.join(root, LIGHT_DIR, 'agent4', 'locked');
+      fs.mkdirSync(locked, { recursive: true });
+      fs.chmodSync(locked, 0o000);
+      try {
+        assert.deepEqual(scanRepos(path.join(root, LIGHT_DIR, 'agent4')).unsure, [locked], 'a folder it cannot read is unsure');
+      } finally {
+        fs.chmodSync(locked, 0o755);
+      }
+    }
     const answers: Record<string, string> = { status: ' M a.ts\n?? b.ts\n', log: 'abc1234 wip\n', stash: 'stash@{0}: x\n' };
     const git: GitRun = async (_cwd, args) => ({ code: 0, stdout: answers[args[0]] ?? '', stderr: '' });
     assert.deepEqual(await unsavedWork(path.join(root, LIGHT_DIR, 'agent1'), git), ['ff-factory: 2 uncommitted or untracked file(s), 1 commit(s) on no remote branch, 1 stash entr(ies)']);
@@ -297,6 +329,10 @@ test('w5924: through a real daemon: its hello offers light folders; the portal m
   const m = store.machines.get('pc')!;
   assert.deepEqual(gameSandboxes(m.sandboxes).map((s) => s.id), ['sb1']);
   assert.deepEqual(lightFolders(m.sandboxes).map((s) => s.id), ['agent1', 'agent2']);
+  // The worker installer's --max-sandboxes check reads whoami (w5924: it counted the light folders and refused updates).
+  const me = mm.selfStatus('pc');
+  assert.deepEqual(me.sandboxes, ['sb1'], 'whoami lists game sandboxes only');
+  assert.deepEqual(me.lights, ['agent1', 'agent2']);
   await assert.rejects(mm.unity('pc', 'start', false, 'agent1'), /light agent folder \(w5924\).*no Unity editor/);
   await assert.rejects(mm.deleteLightFolder('pc', 'sb1'), /is a game sandbox, not a light folder/);
   // A clone with an unpushed commit keeps it; once gone, the folder is deleted.

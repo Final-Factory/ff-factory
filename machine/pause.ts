@@ -3,7 +3,7 @@
 // a person's 90 minutes. It tells the portal (a `pause` report, and in every hello) and the tray app what holds now.
 import fs from 'node:fs';
 import path from 'node:path';
-import { writeFileDurable } from '../server/durable.ts';
+import { checkObject, readJsonDurable, writeFileDurable } from '../server/durable.ts';
 import { DEFAULT_PAUSE_SETTINGS, SUPPRESS_SECONDS, cleanSettings, nextChangeAt, pauseState, personInput, settingsChanged, trayCommand, type PauseMemory } from './pauseRules.ts';
 import type { MachinePause, MachinePauseSettings } from '../shared/types.ts';
 
@@ -41,7 +41,8 @@ export class PauseKeeper {
     this.d = d;
     this.now = d.now ?? Date.now;
     try {
-      const j = JSON.parse(fs.readFileSync(d.file, 'utf8')) as { v?: number; settings?: unknown; memory?: PauseMemory };
+      // w5957: written in place, so a crash mid-write leaves a torn file; the previous version (.1) is the fallback.
+      const j = (readJsonDurable(d.file, { check: checkObject, inPlace: true }) ?? (() => { throw new Error('no pause.json'); })()) as { v?: number; settings?: unknown; memory?: PauseMemory };
       this.settings = cleanSettings(j.settings);
       // A pause.json from before w1574 had the activity pause on by default: off on every machine once (lothsahn), then the
       // portal's machines.activityPause or the tray's own choice.
@@ -200,7 +201,8 @@ export class PauseKeeper {
   private save() {
     try {
       fs.mkdirSync(path.dirname(this.d.file), { recursive: true });
-      writeFileDurable(this.d.file, `${JSON.stringify({ v: PAUSE_FILE_VERSION, settings: this.settings, memory: this.mem }, null, 2)}\n`);
+      // In place (w5957): workers' fences give pause.json back (server/daemonReads.ts FENCE_FILE_WRITERS).
+      writeFileDurable(this.d.file, `${JSON.stringify({ v: PAUSE_FILE_VERSION, settings: this.settings, memory: this.mem }, null, 2)}\n`, { inPlace: true });
     } catch (e) {
       this.d.log(`pause: could not save ${this.d.file}: ${(e as Error).message}`);
     }

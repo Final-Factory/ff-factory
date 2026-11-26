@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { GRACE_MS, STORE_CHILD, daemonGit, daemonGitBusy, decideStoreLock, ignoredStorePath, storeGitFolder, storeLockLine, storeLockSetting, watchStore } from '../machine/storeLock.ts';
 import { isSlotRepo } from '../machine/slotRepo.ts';
-import { isLabelledLow, isLabelledMedium, lowTargets, labelLow, lowCopy, type Exec } from '../machine/lowIntegrity.ts';
+import { isLabelledLow, isLabelledMedium, lowTargets, labelLow, LowCopies, type Exec } from '../machine/lowIntegrity.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { fenceFor, seatbeltProfile } from './workerFence.ts';
 
@@ -236,7 +236,7 @@ test('live (Windows): a Low process writes its slot repo and is refused in the M
     assert.ok(locked.medium.includes(g));
     assert.equal(await labelLow(locked, realExec, (l) => void said.push(l)), true, said.join('\n'));
     assert.ok(isLabelledMedium(await label(g)), `locked: the store reads Medium\n${await label(g)}`);
-    const cmd = await lowCopy(r0.base, path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'), realExec, (l) => void said.push(l));
+    const cmd = new LowCopies(r0.base, (l: string) => void said.push(l)).make(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'));
     assert.ok(cmd, said.join('\n'));
     const low = lowShell(cmd!);
     const ok = low(`echo x> "${path.join(a, 'low.txt')}"`);

@@ -181,6 +181,9 @@ test('the pull requests a prepared release brings, from its merge commits', (t) 
   git('switch', '-q', 'main');
   git('merge', '-q', '--no-ff', 'side', '-m', 'Merge pull request #1300 from Final-Factory/side\n\nDeploy notices');
   const to = git('rev-parse', 'HEAD');
-  assert.deepEqual(prsInRelease(dir, from, to), [{ number: 1300, title: 'Deploy notices' }]);
-  assert.throws(() => prsInRelease(dir, 'nope', to), 'the caller catches it');
+  // w5915: a test computer's budget, not the portal's 3 s: on BEAST under other agents' load one git process took up
+  // to 12.5 s just to start (measured 2026-11-26), and this sync git timed out there (ETIMEDOUT).
+  const budget = 60_000;
+  assert.deepEqual(prsInRelease(dir, from, to, budget), [{ number: 1300, title: 'Deploy notices' }]);
+  assert.throws(() => prsInRelease(dir, 'nope', to, budget), 'the caller catches it');
 });

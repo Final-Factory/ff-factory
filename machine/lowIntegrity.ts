@@ -15,6 +15,8 @@
  * write. It stops accidental writes outside the root, which is lothsahn's rule ("under no circumstances should workers
  * write outside of ffw").
  */
+import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES } from '../server/claudeHome.ts';
@@ -149,19 +151,29 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // labels `dirs` before `medium`, and asks a child of a Medium folder for its own Low label, not an inherited one).
   // The path of node stays, so the firewall rule "Final Factory agent node" still names it. Files right in tools stay
   // Medium: only the daemon and `worker.ts tools` write there (the agent Git's stamp, server/agentGit.ts).
+  //
+  // w5838: `low` (the Low copies of claude, node and gh the daemon runs, lowCopy), `unity-low` (the junctions Low editors
+  // start Unity through) and `shims` (unity-slot, ff-pr, ff-leftovers and ffu-slot, first on every agent's PATH, Medium
+  // ones included) are the daemon's alone too: Low, a worker could plant a DLL beside a copy, swap a junction for its own
+  // Unity.exe, or rewrite a shim a Medium agent then runs. Kept Medium, a Low worker reads and runs them and writes none.
   const tools = path.join(i.root, 'tools');
   const medium: string[] = [];
   const at = dirs.findIndex((d) => same(d, tools));
   if (at >= 0) {
     if (i.toolsChildren) {
-      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && c.name.toLowerCase() !== 'node').map((c) => path.join(tools, c.name)));
-      medium.push(tools);
-    }
-    medium.push(path.join(tools, 'node'));
+      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !MEDIUM_TOOLS.includes(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
+      medium.push(tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)));
+    } else medium.push(path.join(tools, 'node'));
   }
   medium.push(...fenced, ...lockedStore);
   return { dirs, files, medium };
 }
+
+/** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
+export const MEDIUM_TOOLS = ['node', 'low', 'unity-low', 'shims'];
+
+/** Where the daemon writes the workers' shims on Windows with a root (w5838): a Medium folder, not the Low slots mailbox. */
+export const toolsShimsDir = (root: string) => path.join(root, 'tools', 'shims');
 
 type Ran = { code: number | null; stdout: string; stderr: string };
 export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<Ran>;
@@ -217,8 +229,9 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
   };
   for (const d of t.dirs) await one(d, LOW_LABEL);
   for (const f of t.files) await one(f, 'low');
-  // Folders kept Medium inside a Low one (lowTargets' medium): only those that exist and inherited Low. A failure here
-  // leaves the fence whole (only a Medium agent's node is affected), so it is said and not counted.
+  // Folders kept Medium inside a Low one (lowTargets' medium): only those that exist and inherited Low. A failure here is
+  // not counted, so the fence stays on, but it is a WARNING: since w5838 these hold the daemon's Low copies (tools/low,
+  // whose LowCopies then sweeps it before every run), the Unity junctions and the shims every agent runs (w5877).
   for (const p of t.medium ?? []) {
     try {
       if (!fs.existsSync(p)) continue;
@@ -227,13 +240,13 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
       // A child that could not get its own Low label would turn Medium with its parent, and workers could no longer write it.
       const stuck = failed.filter((f) => same(path.dirname(f), p));
       if (stuck.length) {
-        say(`worker integrity: left ${p} Low: ${stuck.join(', ')} could not be labelled Low on its own`);
+        say(`worker integrity: WARNING: left ${p} Low: ${stuck.join(', ')} could not be labelled Low on its own`);
         continue;
       }
       await setLabel(p, MEDIUM_LABEL);
       say(`worker integrity: kept ${p} Medium`);
     } catch (e) {
-      say(`worker integrity: could not keep ${p} Medium: ${(e as Error).message}`);
+      say(`worker integrity: WARNING: could not keep ${p} Medium, so Low workers may write it: ${(e as Error).message}`);
     }
   }
   // w5717: once their parent is Medium, the children it holds are read again; one that lost its Low label is labelled again.
@@ -268,43 +281,313 @@ export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | u
 
 export const lowToolsDir = (root: string) => path.join(root, 'tools', 'low');
 
-/**
- * A Low-labelled copy of `exe` in `<root>\tools\low`, named by its size and mtime so a new claude gets a new copy; copies
- * of older builds are removed when nothing runs them. Returns the copy's path, or undefined (and says why) when it
- * cannot be made: the caller then runs that agent unfenced.
- */
-export async function lowCopy(root: string, exe: string, exec: Exec, say: (line: string) => void): Promise<string | undefined> {
+/** A run that waits for its answer: the Low copies' checks happen in runSpec, which is synchronous (w5838). */
+export type ExecSync = (cmd: string, args: string[]) => Ran;
+
+export const execSync: ExecSync = (cmd, args) => {
+  const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, windowsHide: true });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr || (r.error ? r.error.message : '') };
+};
+
+/** A file's SHA-256, read in 1 MB pieces: about 250 ms for claude.exe's 300 MB (measured on BEAST, w5838). */
+export function fileHash(p: string): string {
+  const h = createHash('sha256');
+  const fd = fs.openSync(p, 'r');
   try {
-    const st = fs.statSync(exe);
-    const dir = lowToolsDir(root);
-    fs.mkdirSync(dir, { recursive: true });
-    const base = path.basename(exe, path.extname(exe));
-    const name = `${base}-${st.size}-${Math.floor(st.mtimeMs)}${path.extname(exe)}`;
-    const copy = path.join(dir, name);
-    if (!fs.existsSync(copy) || fs.statSync(copy).size !== st.size) {
-      const part = `${copy}.part`;
-      fs.copyFileSync(exe, part);
-      fs.renameSync(part, copy);
-    }
-    const now = await exec('icacls', [copy], { timeoutMs: 60_000 });
-    if (!(now.code === 0 && isLabelledLow(now.stdout))) {
-      const r = await exec('icacls', [copy, '/setintegritylevel', 'low'], { timeoutMs: 60_000 });
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
-    }
-    for (const old of fs.readdirSync(dir)) {
-      if (old !== name && old.startsWith(`${base}-`)) {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    for (let n = fs.readSync(fd, buf, 0, buf.length, null); n > 0; n = fs.readSync(fd, buf, 0, buf.length, null)) h.update(buf.subarray(0, n));
+  } finally {
+    fs.closeSync(fd);
+  }
+  return h.digest('hex');
+}
+
+/**
+ * What a file's stat shows of a change: any write moves its change time, and setting that back needs
+ * FILE_WRITE_ATTRIBUTES, which a read-only copy refuses a Low process; a new file has a new file id (ino).
+ */
+const statKey = (p: string) => {
+  // bigint: a 64-bit NTFS file id and 100 ns times survive whole (w5838 review: as a double, ino loses its low bits).
+  const st = fs.statSync(p, { bigint: true });
+  return `${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.ino}`;
+};
+
+/** The names `LowCopies.make` gives its copies (`<base>-<size>-<mtime>[-<n>][.exe]`, base claude, node or gh); anything else in `tools/low` is planted. */
+export const LOW_COPY_NAME = /^(claude|node|gh)-\d+-\d+(-\d+)?(\.exe)?$/;
+
+/** How many names a copy may take while older ones of the same build still run (LowCopies.make, w5877). */
+const COPY_SLOTS = 20;
+
+/**
+ * Removes `p` without following it (w5838): a junction or link goes itself, never what it leads to (a Unity install); a
+ * real folder goes with everything in it. Nothing there: nothing to do.
+ */
+export function removeEntry(p: string): void {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return;
+  }
+  fs.rmSync(p, { recursive: !st.isSymbolicLink() && st.isDirectory(), force: true });
+}
+
+/** These keys of `env` (any case, as Windows' are), for a run that should have only them (w5838). */
+export function pickEnv(keys: readonly string[], env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const want = new Set(keys.map((k) => k.toLowerCase()));
+  return Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => want.has(e[0].toLowerCase()) && typeof e[1] === 'string'));
+}
+
+/**
+ * What a fence probe that failed with a bare environment is tried again with (w5838 review): where Windows keeps its
+ * programs, the profile and temp folders, and nothing the daemon adds (vault tokens, daemon.json `env`).
+ */
+export const PROBE_ENV_KEYS = ['SystemRoot', 'windir', 'SystemDrive', 'PATH', 'PATHEXT', 'ComSpec', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME'];
+
+/**
+ * icacls' arguments that leave a copy read-only to the account (w5838): no inherited entries, read and run for the account
+ * and for OWNER RIGHTS (which takes away the owner's implicit WRITE_DAC), Full for SYSTEM and Administrators. Measured on
+ * BEAST from a Low process: the copy still runs; a write, an append, a new grant and a new label are refused. The daemon
+ * still removes or replaces it through the folder's delete-child right (measured: Node's rmSync and renameSync).
+ */
+export const readOnlyGrants = (account: string) => ['/inheritance:r', '/grant:r', '*S-1-3-4:(RX)', `${account}:(RX)`, '*S-1-5-18:(F)', '*S-1-5-32-544:(F)'];
+
+/**
+ * Whether icacls shows a copy nobody but SYSTEM and Administrators can write (w5838): an OWNER RIGHTS:(RX) entry, nothing
+ * inherited, and every other entry read-and-run only, but SYSTEM's and Administrators' Full (w5877: an extra
+ * `Everyone:(F)` beside the OWNER RIGHTS entry is not read-only). Exported for tests.
+ */
+export function isReadOnlyCopy(icaclsOut: string): boolean {
+  if (!/OWNER RIGHTS:\(RX\)/i.test(icaclsOut) || /\(I\)/i.test(icaclsOut)) return false;
+  for (const raw of icaclsOut.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^Successfully processed /i.test(line)) continue;
+    // w5904: icacls prints some rights in mixed case (`Rc`), and a line it cannot read is not read-only.
+    const m = /^(.*):((?:\([A-Za-z]+(?:,[A-Za-z]+)*\))+)$/.exec(line);
+    if (!m) return false;
+    if (/Mandatory Label\\/i.test(m[1])) continue;
+    const rights = m[2].toUpperCase();
+    if (rights === '(RX)') continue;
+    if (rights === '(F)' && /(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators)$/i.test(m[1])) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * The PowerShell that locks a new copy in one call (w5904): the read-only access list (readOnlyGrants' entries, the
+ * account by the daemon's own SID) and the Low label are set together by SetNamedSecurityInfoW, on the `.part` while it
+ * is still Medium, so a Low worker never sees it labelled Low and writable: icacls sets them in two calls, and a write
+ * handle or an entry a worker adds between them survives the second (measured by w5904 on BEAST). Prints `ok` or
+ * `err <win32 error>`. Exported for tests.
+ */
+export function lockCopyScript(p: string): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public static class FfLock {',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint rev, out IntPtr sd, IntPtr size);',
+    '  [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);',
+    '  [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool present, out IntPtr dacl, out bool defaulted);',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] public static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);',
+    '  [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);',
+    '  public static uint Set(string path, string sddl) {',
+    '    IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();',
+    '    try { bool p, d; IntPtr dacl, sacl;',
+    '      if (!GetSecurityDescriptorDacl(sd, out p, out dacl, out d) || !GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();',
+    // DACL (0x4) + LABEL (0x10) + PROTECTED_DACL (0x80000000): one call, no inherited entries.
+    '      return SetNamedSecurityInfoW(path, 1, 0x80000014, IntPtr.Zero, IntPtr.Zero, dacl, sacl); } finally { LocalFree(sd); }',
+    '  }',
+    '}',
+    '"@',
+    '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    "$r = [FfLock]::Set(" + psqLock(p) + ", \"D:P(A;;0x1200a9;;;OW)(A;;0x1200a9;;;$sid)(A;;FA;;;SY)(A;;FA;;;BA)S:(ML;;NW;;;LW)\")",
+    "if ($r -eq 0) { 'ok' } else { 'err ' + $r }",
+  ].join('\n');
+}
+
+const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
+
+/**
+ * The Low-labelled copies of claude, node and gh in `<root>\tools\low` the daemon runs (w5333, w5540, w5430): a process
+ * started from a Low-labelled file runs at Low. Each is named by its source's size and mtime, so a new claude gets a new
+ * copy; copies of older builds are removed when nothing runs them.
+ *
+ * w5838: a Low worker can write a Low-labelled file, so before this one could replace a copy and have the next agent, editor
+ * or probe run its program with what the daemon passes in (another person's vault tokens, for an agent). Now:
+ * - the folder is Medium (lowTargets, MEDIUM_TOOLS): a worker cannot add, rename or delete a file there, nor plant a DLL;
+ * - each copy is read-only, its access list and Low label set in one call on the `.part` while it is still Medium
+ *   (lockCopyScript, w5904), so a worker cannot rewrite it either; where that fails, icacls sets them in two calls
+ *   (readOnlyGrants) with a WARNING, and where that fails too the copy is hashed in full before every run instead;
+ * - `check` before every run: the copy still has its source's bytes (a full hash every time, w5877), else it is made
+ *   again from the source, with a WARNING in the log;
+ * - a copy left by an earlier daemon run is never taken over (make).
+ */
+export class LowCopies {
+  private copies = new Map<string, { source: string; readOnly: boolean }>();
+  /** w5877: set when `tools/low` is not Medium (folderCheck): then it is swept before every run. */
+  private folderOpen = false;
+  private sources = new Map<string, { key: string; hash: string }>();
+
+  private root: string;
+  private say: (line: string) => void;
+  private exec: ExecSync;
+  private account: string | undefined;
+  private hash: (p: string) => string;
+
+  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash) {
+    this.root = root;
+    this.say = say;
+    this.exec = exec;
+    this.account = account;
+    this.hash = hash;
+  }
+
+  private sourceHash(exe: string): string {
+    const key = statKey(exe);
+    const had = this.sources.get(exe);
+    if (had?.key === key) return had.hash;
+    const hash = this.hash(exe);
+    this.sources.set(exe, { key, hash });
+    return hash;
+  }
+
+  /**
+   * The Low copy of `exe`, made now; undefined (and says why) when it cannot be made: the caller decides.
+   *
+   * w5838 re-review (w5877): a copy is never taken over from an earlier daemon run, whose folder was Low: a Low worker
+   * could have opened it for writing, or set its access list to pass as read-only, while it was labelled Low. Each run of
+   * the daemon makes its own (a copy it made in this run is reused while its bytes match). An old one still running cannot
+   * be removed, so the copy goes to the next free name (`<base>-<size>-<mtime>-<n>`) instead of holding the fence.
+   */
+  make(exe: string): string | undefined {
+    try {
+      const st = fs.statSync(exe);
+      const dir = lowToolsDir(this.root);
+      fs.mkdirSync(dir, { recursive: true });
+      this.folderCheck(dir);
+      this.sweep(dir);
+      const base = path.basename(exe, path.extname(exe));
+      const stem = `${base}-${st.size}-${Math.floor(st.mtimeMs)}`;
+      const want = this.sourceHash(exe);
+      let copy: string | undefined;
+      for (let n = 0; n < COPY_SLOTS && !copy; n++) {
+        const p = path.join(dir, `${stem}${n ? `-${n}` : ''}${path.extname(exe)}`);
+        if (!fs.existsSync(p)) {
+          copy = p;
+          break;
+        }
+        const ours = this.copies.get(p)?.source === exe;
+        if (ours && this.sameAs(p, want)) return p;
+        if (!this.sameAs(p, want)) this.say(`worker integrity: WARNING: the Low copy ${p} is not ${exe} (its bytes differ, or it cannot be read); made again (w5838)`);
+        else this.say(`worker integrity: ${p} was made by an earlier daemon run; made again, never taken over (w5838)`);
         try {
-          fs.rmSync(path.join(dir, old), { force: true });
+          removeEntry(p);
+          this.copies.delete(p);
+          copy = p;
         } catch {
-          /* still running: the next start removes it */
+          /* still running from an earlier daemon run: the next name, and the next start removes it */
         }
       }
+      if (!copy) throw new Error(`no free name for it in ${dir} (${COPY_SLOTS} copies of it still running?)`);
+      const part = `${copy}.part`;
+      fs.rmSync(part, { force: true });
+      fs.copyFileSync(exe, part);
+      // w5904: the access list and the Low label in one call, while the `.part` is still Medium (no label: a Low worker
+      // cannot open it for writing), and only then its name. icacls' two calls are the fallback, with a WARNING.
+      const ps = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(lockCopyScript(part), 'utf16le').toString('base64')]);
+      const locked = ps.code === 0 && /^ok$/m.test(ps.stdout);
+      if (!locked) this.say(`worker integrity: WARNING: could not lock the Low copy ${copy} in one call (${(ps.stderr || ps.stdout).trim().slice(-200) || 'no answer'}); labelled and made read-only in two, so a Low worker may write it in between (w5904)`);
+      fs.renameSync(part, copy);
+      let g: Ran | undefined;
+      if (!locked) {
+        const r = this.exec('icacls', [copy, '/setintegritylevel', 'low']);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+        g = this.account ? this.exec('icacls', [copy, ...readOnlyGrants(this.account)]) : undefined;
+      }
+      const now = this.exec('icacls', [copy]);
+      if (now.code !== 0 || !isExplicitLow(now.stdout)) throw new Error(`it is not labelled Low (${(now.stderr || now.stdout).trim().slice(-200)})`);
+      const readOnly = (locked || g?.code === 0) && isReadOnlyCopy(now.stdout);
+      if (!readOnly) this.say(`worker integrity: WARNING: could not make the Low copy ${copy} read-only (${g ? (g.stderr || g.stdout).trim().slice(-200) || 'its access list still lets someone write it' : locked ? 'its access list still lets someone write it' : 'no account name'}); it is hashed in full before every run, as every copy is (w5838)`);
+      // Checked once it is labelled and read-only, so nothing written before that is run.
+      if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
+      this.copies.set(copy, { source: exe, readOnly });
+      for (const old of fs.readdirSync(dir)) {
+        if (old !== path.basename(copy) && old.startsWith(`${base}-`)) {
+          try {
+            fs.rmSync(path.join(dir, old), { force: true });
+            this.copies.delete(path.join(dir, old));
+          } catch {
+            /* still running: the next start removes it */
+          }
+        }
+      }
+      return copy;
+    } catch (e) {
+      this.say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
+      return undefined;
     }
-    return copy;
-  } catch (e) {
-    say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
-    return undefined;
   }
+
+  /**
+   * w5838 re-review (w5877): whether `tools/low` really is Medium. If labelLow could not keep it so, a Low worker can plant
+   * a DLL beside the copies at any time, so the folder is swept before every run too, with a WARNING once.
+   */
+  private folderCheck(dir: string): void {
+    const r = this.exec('icacls', [dir]);
+    const open = r.code !== 0 || isLabelledLow(r.stdout);
+    if (open && !this.folderOpen) this.say(`worker integrity: WARNING: ${dir} is not labelled Medium, so Low workers may write it; it is swept before every run of a copy (w5838)`);
+    this.folderOpen = open;
+  }
+
+  /** Whether `copy` has these bytes; a copy that cannot be read (a folder, a locked file planted at its name) has not. */
+  private sameAs(copy: string, want: string): boolean {
+    try {
+      return this.hash(copy) === want;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * w5838 review: everything in `tools/low` that is not named as a copy goes, with a WARNING each: a DLL planted beside the
+   * copies while the folder was still Low (before this change) would be loaded by every copy run from it.
+   */
+  private sweep(dir: string): void {
+    for (const n of fs.readdirSync(dir)) {
+      if (LOW_COPY_NAME.test(n)) continue;
+      const p = path.join(dir, n);
+      try {
+        removeEntry(p);
+        this.say(`worker integrity: WARNING: removed ${p}: it is not a copy the daemon made (planted while the folder was Low?) (w5838)`);
+      } catch (e) {
+        this.say(`worker integrity: WARNING: ${p} is not a copy the daemon made and could not be removed: ${(e as Error).message} (w5838)`);
+      }
+    }
+  }
+
+  /**
+   * Before each run of `copy` (w5838): the path to run, which is `copy` while it still has its source's bytes, else a copy
+   * made again from the source (a new path when the source changed). Undefined when `copy` is not one of this daemon's or
+   * cannot be made again: the caller does not run it.
+   */
+  check(copy: string): string | undefined {
+    const c = this.copies.get(copy);
+    if (!c) return undefined;
+    try {
+      // w5838 re-review (w5877): every copy is hashed in full before every run (about 250 ms for claude, measured on
+      // BEAST). Its stat is no proof: a worker that could write it can put its times back after a same-size rewrite.
+      if (this.folderOpen) this.sweep(path.dirname(copy));
+      const sourceSame = this.sources.get(c.source)?.key === statKey(c.source);
+      if (sourceSame && this.hash(copy) === this.sourceHash(c.source)) return copy;
+      if (sourceSame) this.say(`worker integrity: WARNING: the Low copy ${copy} was changed since it was made from ${c.source}; made again before this run (w5838)`);
+    } catch (e) {
+      this.say(`worker integrity: WARNING: the Low copy ${copy} could not be checked (${(e as Error).message}); made again before this run (w5838)`);
+    }
+    return this.make(c.source);
+  }
+
 }
 
 /**
@@ -371,11 +654,18 @@ export async function lowUnityJunctions(root: string, editors: { version: string
     const target = path.dirname(e.bin); // <install>\<version>\Editor
     const link = path.join(dir, e.version);
     try {
-      if (fs.existsSync(path.join(link, 'Unity.exe'))) {
-        have.push(e.version);
-        continue;
+      // w5838: and only when it still leads to the install's Editor folder: the daemon's editors start Unity through it.
+      // w5877: and not labelled Low on its own: a worker could have given it a Low label while the folder was Low, kept when
+      // the folder turned Medium, and then point it elsewhere after this check.
+      if (fs.existsSync(path.join(link, 'Unity.exe')) && junctionLeadsTo(link, target)) {
+        const now = await exec('icacls', [link], { timeoutMs: 60_000 });
+        if (!(now.code === 0 && isExplicitLow(now.stdout))) {
+          have.push(e.version);
+          continue;
+        }
+        say(`worker integrity: WARNING: the Unity junction ${link} carries a Low label of its own; made again (w5838)`);
       }
-      fs.rmSync(link, { recursive: false, force: true });
+      removeEntry(link); // a real folder planted at this version's name too (w5838 review), never what a junction leads to
       const r = await exec('cmd.exe', ['/d', '/c', 'mklink', '/J', link, target], { timeoutMs: 60_000 });
       if (r.code !== 0 || !fs.existsSync(path.join(link, 'Unity.exe'))) throw new Error((r.stderr || r.stdout).trim().slice(-300) || 'no Unity.exe through it');
       have.push(e.version);
@@ -383,7 +673,36 @@ export async function lowUnityJunctions(root: string, editors: { version: string
       say(`worker integrity: could not junction Unity ${e.version} at ${link}: ${(err as Error).message}`);
     }
   }
+  // w5838 review: the daemon starts `<this folder>/<version>/Unity.exe` (unity.ts fencedEditorBin), so a folder planted
+  // for another version while this folder was Low would be started with the daemon's environment: all but the junctions
+  // just checked go.
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    /* nothing to sweep */
+  }
+  for (const n of names) {
+    if (have.includes(n)) continue;
+    const p = path.join(dir, n);
+    try {
+      removeEntry(p);
+      say(`worker integrity: WARNING: removed ${p}: it is not a junction to an installed Unity (w5838)`);
+    } catch (err) {
+      say(`worker integrity: WARNING: ${p} is not a junction to an installed Unity and could not be removed: ${(err as Error).message} (w5838)`);
+    }
+  }
   return have;
+}
+
+/** Whether the junction (or link) `link` leads to `target`. Exported for tests. */
+export function junctionLeadsTo(link: string, target: string, readlink: (p: string) => string = fs.readlinkSync): boolean {
+  try {
+    const plain = (p: string) => path.resolve(p.replace(/^\\\\\?\\/, '')).replace(/[\\/]+$/, '').toLowerCase();
+    return plain(readlink(link)) === plain(target);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -420,7 +739,9 @@ export interface LabelTarget {
 }
 
 /** The NR labels, closed paths first, then the read-backs. Paths that do not exist are left out. Exported for tests. */
-export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; secrets?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined }): LabelTarget[] {
+export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; secrets?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined; path?: typeof path }): LabelTarget[] {
+  // The host OS's join by default; a test of Windows paths on POSIX passes path.win32 (w5968 review of #1324).
+  const P = o.path ?? path;
   const stat =
     o.stat ??
     ((p: string) => {
@@ -437,12 +758,12 @@ export function noReadUpTargets(o: { root: string; appDir: string; allowBack: re
   };
   // secrets: every secrets folder (readFence.ts secretsDirs), the Dev Drive host folder's too (B3 of the #1193 lockout review).
   // steam (w5639): steamcmd's cached login and the upload config; the daemon runs the uploads at Medium, which NR leaves alone.
-  const daemonOnly = DAEMON_ONLY_CHILDREN.map((c) => path.join(o.root, c));
-  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), ...daemonOnly, path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
+  const daemonOnly = DAEMON_ONLY_CHILDREN.map((c) => P.join(o.root, c));
+  for (const p of [o.appDir, P.join(o.root, 'daemon'), P.join(o.root, 'secrets'), ...(o.secrets ?? []), ...daemonOnly, P.join(o.root, 'root.json')]) add(p, NO_READ_UP);
   // w5731 (N2 of the #1237 review): steam's secret files by name, so one that kept an explicit Low label (BEAST's steam was
   // Low from 2026-11-24 to 2026-11-25) gets NR of its own; the folder's inherited label would not reach it.
-  for (const f of STEAM_SECRET_FILES) add(path.join(o.root, STEAM_CHILD, ...f.split('/')), NO_READ_UP);
-  for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(path.isAbsolute(a) ? a : path.join(o.appDir, a), READ_BACK);
+  for (const f of STEAM_SECRET_FILES) add(P.join(o.root, STEAM_CHILD, ...f.split('/')), NO_READ_UP);
+  for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(P.isAbsolute(a) ? a : P.join(o.appDir, a), READ_BACK);
   return out;
 }
 
@@ -561,6 +882,108 @@ export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (
   }
   if (open.length && !(await labelNoReadUp(open, exec, say, o))) return undefined;
   return open.map((x) => x.path);
+}
+
+/**
+ * The C# of relabelInside: walks each root, never into a reparse point nor below a skipped (read-back) folder, leaves the
+ * label targets themselves alone (but walks into them), and on every other path with an EXPLICIT label at Medium or above
+ * adds No-Read-Up (close) or takes it off (open), keeping the label's level, flags and other rights. Prints `set <path>`,
+ * `err <code> <path>` and last `done <looked at> <changed> <failed>`. No `$` or backtick inside: it sits in a PowerShell
+ * here-string.
+ */
+const RELABEL_CS = String.raw`using System; using System.IO; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text.RegularExpressions;
+public static class FfWalk {
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint GetNamedSecurityInfoW(string name, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, out IntPtr sacl, out IntPtr sd);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(IntPtr sd, uint rev, uint info, out IntPtr s, IntPtr len);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint rev, out IntPtr sd, IntPtr size);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+  static string Label(string p, out uint err) {
+    IntPtr sacl, sd; err = GetNamedSecurityInfoW(p, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out sacl, out sd);
+    if (err != 0) return null;
+    try { IntPtr s; if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, 1, 0x10, out s, IntPtr.Zero)) { err = (uint)Marshal.GetLastWin32Error(); return null; }
+      try { return Marshal.PtrToStringUni(s); } finally { LocalFree(s); } } finally { LocalFree(sd); }
+  }
+  static uint Set(string path, string sddl) {
+    IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();
+    try { bool p, d; IntPtr sacl; if (!GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();
+      return SetNamedSecurityInfoW(path, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl); } finally { LocalFree(sd); }
+  }
+  static int Level(string l) {
+    if (l == "LW") return 0x1000; if (l == "ME") return 0x2000; if (l == "MP") return 0x2100; if (l == "HI") return 0x3000; if (l == "SI") return 0x4000;
+    int n; if (l.StartsWith("S-1-16-") && int.TryParse(l.Substring(7), out n)) return n; return -1;
+  }
+  static bool Inherited(string flags) { for (int i = 0; i + 1 < flags.Length; i += 2) if (flags.Substring(i, 2) == "ID") return true; return false; }
+  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close) {
+    var o = new List<string>(); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var sk = new HashSet<string>(skip, StringComparer.OrdinalIgnoreCase); var tg = new HashSet<string>(targets, StringComparer.OrdinalIgnoreCase);
+    var rx = new Regex(@"\(ML;([A-Z]*);([A-Z]*);;;([A-Z0-9-]+)\)");
+    var st = new Stack<KeyValuePair<string, bool>>(); foreach (var r in roots) st.Push(new KeyValuePair<string, bool>(r, true));
+    int looked = 0, changed = 0, failed = 0;
+    while (st.Count > 0) {
+      var e = st.Pop(); string p = e.Key.TrimEnd('\\'); if (!seen.Add(p) || sk.Contains(p)) continue;
+      FileAttributes a; try { a = File.GetAttributes(p); } catch { continue; }
+      if (!e.Value && (a & FileAttributes.ReparsePoint) != 0) continue;
+      looked++;
+      if (!tg.Contains(p)) {
+        uint err; string l = Label(p, out err);
+        if (l == null) { failed++; o.Add("err " + err + " " + p); }
+        else {
+          Match m = rx.Match(l);
+          if (m.Success && !Inherited(m.Groups[1].Value) && Level(m.Groups[3].Value) >= 0x2000) {
+            string f = m.Groups[1].Value, rights = m.Groups[2].Value, lv = m.Groups[3].Value, want = null;
+            bool nr = rights.Contains("NR");
+            if (close && !nr) want = "S:(ML;" + f + ";" + rights + "NR;;;" + lv + ")";
+            if (!close && nr) { string rest = rights.Replace("NR", ""); want = "S:(ML;" + f + ";" + (rest.Length > 0 ? rest : "NW") + ";;;" + lv + ")"; }
+            if (want != null) { uint se = Set(p, want); if (se == 0) { changed++; o.Add("set " + p); } else { failed++; o.Add("err " + se + " " + p); } }
+          }
+        }
+      }
+      if ((a & FileAttributes.Directory) != 0) {
+        try { foreach (var c in Directory.EnumerateFileSystemEntries(p)) st.Push(new KeyValuePair<string, bool>(c, false)); }
+        catch (Exception x) { failed++; o.Add("err list " + p + " (" + x.GetType().Name + ")"); }
+      }
+    }
+    o.Add("done " + looked + " " + changed + " " + failed); return o.ToArray();
+  }
+}`;
+
+/** The PowerShell that runs RELABEL_CS on these roots. Exported for tests. */
+export function relabelScript(roots: readonly string[], skip: readonly string[], targets: readonly string[], close: boolean): string {
+  const arr = (a: readonly string[]) => `@(${a.map(psq).join(', ')})`;
+  return ["$ErrorActionPreference = 'Stop'", 'Add-Type -TypeDefinition @"', RELABEL_CS, '"@', `[FfWalk]::Run([string[]]${arr(roots)}, [string[]]${arr(skip)}, [string[]]${arr(targets)}, $${close})`].join('\n');
+}
+
+/**
+ * w5968 (review of #1324): a label set on a folder reaches only what inherits it. A file or folder that carries an
+ * EXPLICIT label keeps it, and the first label wins, so a file a High (elevated) process made inside a closed folder,
+ * which gets `S:(ML;;NW;;;HI)` of its own, would stay readable by Low under the folder's No-Read-Up (suspected on the
+ * Windows CI runner; there the cause was the child's enabled SeBackupPrivilege, docs/worker-fence.md, but a daemon that
+ * once ran elevated can leave such files). Medium creators give no explicit label, Low ones an explicit Low label, which this leaves
+ * alone (workers write there). So after labelNoReadUp (`close`) every explicitly labelled path at Medium or above inside the
+ * closed folders gets NR too, keeping its level; `open` takes that NR off again. Read-back folders, the label targets
+ * themselves, reparse points and the system drive are never touched. Returns whether every path that needed it was set;
+ * never throws.
+ */
+export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | 'open', exec: Exec, say: (line: string) => void, o: { systemDrive?: (p: string) => boolean } = {}): Promise<boolean> {
+  const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
+  const roots = t.filter((x) => x.sddl === NO_READ_UP.dir && !sys(x.path)).map((x) => x.path);
+  if (!roots.length) return true;
+  const skip = t.filter((x) => x.sddl === READ_BACK.dir).map((x) => x.path);
+  const script = relabelScript(roots, skip, t.map((x) => x.path), mode === 'close');
+  const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
+  const lines = r.stdout.split(/\r?\n/).map((l) => l.trim());
+  const done = lines.map((l) => /^done (\d+) (\d+) (\d+)$/.exec(l)).find(Boolean);
+  if (!done) {
+    say(`worker integrity: could not look for explicit labels inside the closed folders: ${(r.stderr || r.stdout).trim().slice(-300)}`);
+    return false;
+  }
+  const errs = lines.filter((l) => l.startsWith('err '));
+  for (const e of errs.slice(0, 20)) say(`worker integrity: explicit label inside a closed folder: ${e}`);
+  const [looked, changed, failed] = done.slice(1).map(Number);
+  if (changed || failed) say(`worker integrity: ${mode === 'close' ? 'No-Read-Up added to' : 'No-Read-Up taken off'} ${changed} explicitly labelled path(s) inside the closed folders (${looked} looked at${failed ? `, ${failed} could not be` : ''})`);
+  return failed === 0;
 }
 
 /** An empty label SACL: setting it takes a path's explicit label off, so it inherits its parent's again (w5749, measured). */

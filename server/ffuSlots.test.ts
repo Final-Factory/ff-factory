@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotGitEnv, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
@@ -14,11 +14,25 @@ import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
  * targets (server/installLeftovers.ts, ffu-slot-target). The leases run real git against a local "origin".
  */
 
+// w5991: no automatic gc or maintenance in the fixture repositories: every fetch and commit started a detached
+// `git maintenance run --auto` (61 git processes in this file), which only made the run slower on a busy machine.
+{
+  const n = Number(process.env.GIT_CONFIG_COUNT ?? 0) || 0;
+  [['maintenance.auto', 'false'], ['gc.auto', '0']].forEach(([k, v], i) => {
+    process.env[`GIT_CONFIG_KEY_${n + i}`] = k;
+    process.env[`GIT_CONFIG_VALUE_${n + i}`] = v;
+  });
+  process.env.GIT_CONFIG_COUNT = String(n + 2);
+}
+
 const NOW = Date.now();
 const HOUR = 3_600_000;
 
+/** The tests' own git is no worker's: no FF_SESSION_ID, so the slot hooks (w6038) check nothing. */
+const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'FF_SESSION_ID'));
+
 function git(args: string[], cwd?: string) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 }
@@ -107,6 +121,16 @@ test("w3764: a stopped holder's slot frees itself when its work is pushed, and w
   assert.equal(takeSlot(b, { remote }), 'slot1', 'stopped holder, nothing unpushed: the slot is free');
 });
 
+test("w5991: ffu-slot's own git runs no hook but on a push, and keeps the caller's config entries", () => {
+  const env = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' };
+  const e = slotGitEnv(['-C', 'x', 'checkout', '--quiet', 'feat'], env);
+  assert.equal(e.GIT_CONFIG_COUNT, '2');
+  assert.equal(e.GIT_CONFIG_KEY_0, 'a.b');
+  assert.equal(e.GIT_CONFIG_KEY_1, 'core.hooksPath');
+  assert.ok(fs.statSync(e.GIT_CONFIG_VALUE_1 ?? '').isFile(), 'a regular file: git finds no hook there');
+  assert.equal(slotGitEnv(['push', '--quiet', 'origin', 'x'], env), env, "a push keeps git-lfs's pre-push");
+});
+
 test('w3764: no new slot below the free-disk floor, and take prints the lines eval runs', (t) => {
   const { root, remote } = world(t);
   const low = deps(root, 'aaaa1111', { freeGB: 10 });
@@ -160,7 +184,7 @@ function target(root: string, slot: string, ageH: number, incBytes = 10, depsByt
   return t;
 }
 
-async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' } = {}) {
+async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' | 'ffu-slots' } = {}) {
   const guard: CleanupGuard = { keep: [path.join(root, 'sandboxes')], inUse: o.inUse ?? [], home: path.join(root, 'home') };
   return planInstallLeftovers({
     root,
@@ -600,4 +624,26 @@ test("w5885: one worker, two branches: each checkout gets its own slot and targe
   // release with no argument gives back every slot without work, and keeps (and names) the one with work.
   assert.throws(() => releaseSlot(e), /slot1: .*uncommitted.*a slot with work stays yours/);
   assert.deepEqual(releaseSlot(f).sort(), ['slot2', 'slot3']);
+});
+
+// w6044: the first step of a pass (scope 'ffu-slots') takes released slots only: BEAST's released slot1, slot3 and slot4
+// targets (49.2, 57.7 and 83.6 GB) waited behind slower steps that a restart cut off, while held slot2 must stay warm.
+test('w6044: the ffu-slots scope takes a released slot whole on a low pass, at once; a held, running or recent one is left to the later step', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6044-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  target(root, 'slot1', 2, 2000, 5000); // released, settled
+  target(root, 'slot2', 2, 2000, 5000); // held by a running worker
+  const t3 = target(root, 'slot3', 2); // released, a program runs from it
+  target(root, 'slot4', 0); // released, written within the settle time
+  target(root, 'slot5', 2); // its holder stopped for good
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot2', holder: 'live0002' }, { id: 'slot5', holder: 'gone0005' }] }));
+  const inUse = [path.join(root, 'tmp', 'ffa-live0002')];
+  const procs: ProcLite[] = [{ pid: 43, ppid: 1, cmd: `${t3}/debug/deps/golden-1234 --test-threads 4` } as ProcLite];
+  const low = await plan(root, { low: true, inUse, procs, scope: 'ffu-slots' });
+  assert.deepEqual(ffuItems(root, low), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target']);
+  assert.ok(low.items.every((i) => /taken first in the pass \(w6044\)/.test(i.why)));
+  assert.ok(!low.items.some((i) => /slot2/.test(i.path)), 'a held slot is never taken in the first step, not even its incremental cache');
+  // The hourly pass: a released target over the cap is judged as the cap rule judges it, a held one not at all.
+  const hourly = await plan(root, { inUse, procs, scope: 'ffu-slots', settings: { ffuSlotTargetCapGB: 3000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, hourly), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target/debug/incremental']);
 });

@@ -26,6 +26,7 @@ import { refreshKeptToolsAsync, sdkToolsNow } from './keptTools.ts';
 import { tempSizeHook } from './tempSizeHook.ts';
 import { capNotesHook } from './workerCapNotes.ts';
 import { ffuSlotBuildHook } from './ffuSlotBuildHook.ts';
+import { tmpWriteHook } from './tmpWriteFence.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -976,7 +977,9 @@ export class AgentSession implements SessionHandle {
       const env = options.env as Record<string, string | undefined> | undefined;
       const root = env?.FF_WORKER_ROOT;
       const slotNote = root ? [ffuSlotBuildHook({ root, session: env?.FF_SESSION_ID || this.info.id })] : [];
-      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch, capNotesHook(), ...slotNote] }] };
+      // w6008: and is told when its shell wrote into /tmp or another system temp folder outside ffw (server/tmpWriteFence.ts, warn-only).
+      const tmpNote = tmpWriteHook({ root, temp: this.tempDir, sandbox: this.cwd, env, session: env?.FF_SESSION_ID || this.info.id });
+      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch, capNotesHook(), ...slotNote, tmpNote] }] };
     }
     this.costBase = this.info.costUsd;
     // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept, or is rebuilt
@@ -1424,6 +1427,8 @@ export class AgentSession implements SessionHandle {
         if (wrote.first !== undefined && file && gen?.hasher) {
           const again = check?.ok ? await rehashFrom(file, check.checkpoints, wrote.first) : undefined;
           gen.hasher = again?.hasher;
+          // w5888: sealed as rewritten at once, so a check from here on passes even if no turn ends to seal it
+          if (again) await this.sealNow(gen, false);
           t.push(`re-hash ${lap()} (${again ? mb(again.hashedBytes) : 'failed'})`);
           mark('re-hashed');
         }

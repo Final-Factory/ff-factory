@@ -1166,6 +1166,15 @@ export interface MachineDrain {
   until?: string;
   /** Requests whose new workers may still go there (lowercase ids), as placement.holdExcept. */
   except?: string[];
+  /**
+   * w5895: whose resumes the drain lets through. 'running' (the default since w5895: "let the running workers finish, and
+   * none resume"): only the workers mid-turn when it was set (`running`) and the excepted requests' workers; 'all': every
+   * worker already there (w5878's drain). WARN-ONLY for now: a resume 'running' would hold is logged and shown, not held.
+   * Absent on a drain set before w5895: 'all'.
+   */
+  resumes?: 'running' | 'all';
+  /** w5895: the worker sessions mid-turn there when the drain was set. */
+  running?: string[];
 }
 
 /** A machine's worker write fence as its daemon reports it (w5555, machine/fenceGate.ts). */
@@ -2650,6 +2659,12 @@ export interface WorkItem {
    * without it, so a later wait goes again (Orchestrators.orchestratorStep).
    */
   orchestratorStep?: { worker: string; line: string; at: string; to: string[] };
+  /**
+   * w5895: a hold or lift of a machine its person asked for on this request (update_work hold): set at once in their own
+   * turn, else recorded here unset and handed to the dispatcher, whose hold_machine for this work_id it lets through. `set`
+   * once it took effect. system_status and list_machines name an unset one and who still has to set it.
+   */
+  holdAsk?: { machine: string; action: 'hold' | 'lift'; words: string; who: string; at: string; except?: string[]; hours?: number; resumes?: 'running' | 'all'; set?: { at: string; by: string } };
   /**
    * w2956: a worker's still-open line handing the dispatcher legs to start ("the dispatcher starts the ten rows above"),
    * sent to the dispatcher once as a `[work update]` (Orchestrators.dispatcherLegs); a re-report of the same line sends nothing.

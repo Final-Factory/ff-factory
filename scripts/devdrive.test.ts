@@ -14,6 +14,7 @@ import { daemonJson, devDriveFlags, layoutOf, manifestFor, parseArgs, planUpdate
 import { saveWork } from '../server/saveWork.ts';
 import { fenceToRoot } from '../server/cleanup.ts';
 import { roomLevel } from '../server/hostHealth.ts';
+import { linkTarget } from '../server/fsLink.ts';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PWSH = process.env.FF_PWSH || 'pwsh';
@@ -438,7 +439,7 @@ test('the root’s sandboxes and seed folders become junctions to the drive; a r
   // Empty real folders (a new install made them): replaced.
   const first = linkRootFolders(root, target, junction);
   assert.deepEqual(first.map((x) => x.action), ['created', 'created']);
-  assert.equal(fs.readlinkSync(path.join(root, 'sandboxes')), target.sandboxes);
+  assert.equal(linkTarget(path.join(root, 'sandboxes')), target.sandboxes);
   // A second run: nothing is made, nothing changes.
   made.length = 0;
   const again = linkRootFolders(root, target, junction);
@@ -448,7 +449,7 @@ test('the root’s sandboxes and seed folders become junctions to the drive; a r
   const other = tmp('drive2');
   const moved = linkRootFolders(root, { sandboxes: path.join(other, 'sandboxes'), seed: path.join(other, 'seed') }, junction);
   assert.deepEqual(moved.map((x) => x.action), ['retargeted', 'retargeted']);
-  assert.equal(fs.readlinkSync(path.join(root, 'seed')), path.join(other, 'seed'));
+  assert.equal(linkTarget(path.join(root, 'seed')), path.join(other, 'seed'));
   // What is on the drive is never touched by any of it.
   fs.writeFileSync(path.join(other, 'sandboxes', 'keep.txt'), 'x');
   linkRootFolders(root, target, junction);

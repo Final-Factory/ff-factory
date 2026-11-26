@@ -156,9 +156,24 @@ A run's own GitHub App tokens file
 
 Kept working through the daemon's own writes (lockout review of #1193):
 
-- A file workers read that the daemon rewrites (`cleanup-facts.json`, `person-play.json`) is written in place
-  (`writeInPlace`, machine/readFence.ts), never by rename: a renamed-in file is a new inode, which a Landlock grant does not
-  cover, and on Windows it takes the daemon folder's No-Read-Up label.
+- A file workers read that the daemon rewrites is written in place, never by rename: a renamed-in file is a new inode,
+  which a Landlock grant does not cover, and on Windows it takes the daemon folder's No-Read-Up label. Each given-back file
+  names its writer in `FENCE_FILE_WRITERS` (server/daemonReads.ts), and machine/readFenceGaps.test.ts fails on one without.
+  Since w5957 (N5, from w5617's re-review of #1193) that covers `sandboxes.json` and `pause.json` too: server/durable.ts
+  `inPlace` copies the previous version to `.1` (copying apart a `.1` that an older rename write left as a hard link of the
+  file), then writes over the same file and fsyncs it; a torn file is healed from `.1` at the next load, as before.
+  `cleanup-log.jsonl` rolls by copy and truncate. `update/job.json` and `update/result.json` stay rename-written (the update
+  job is what a rewrite could break), so their folder `update` is given back whole instead.
+  An in-place write is not atomic (w5968's review of #1324): a reader at the same moment can see new bytes followed by old
+  ones, and a full disk or a crash partway leaves the live file torn, where a rename write left it whole. `.1` (its
+  directory entry fsynced before the write starts) heals it at the next `readJsonDurable`, and the daemon reads both files
+  only at start. When the `.1` copy cannot be made, the file is still written in place, without a previous version that
+  time, and a warning says so: falling back to a rename would take the file's give-back away until the next start.
+- The person-play hold (`<root>/daemon/bench.queue/person.json`, machine/personPlay.ts) and the bench queue's tickets sit in
+  `<root>/daemon`, which is closed. Since w5957 (N6) the folder `<root>/daemon/bench.queue` is given back on all three fences
+  (`fenceRootReadBack`, server/daemonReads.ts: a Landlock `--read`, a Seatbelt subpath allow, a Windows read-back label) and
+  in the probe, and made before the fences are set, so `unity-slot run` sees a person's play in `on`. `bench.lock` beside it
+  is not: it is made and removed on every exclusive turn, so a label or a Landlock grant on it would not last.
 - The given-back folders the daemon makes later (`logs`, `rpc` (the daemon's call address, w5545), `unity-mcp`, `unity-slots`, `gh-app/bin`, `gh-app/sessions`) are
   made before the fences are set (`ensureReadBackDirs`), since Landlock skips a path that is not there.
 - The fence never stands between the daemon and its updates: only the claude runs it starts are fenced
@@ -190,7 +205,45 @@ under the same fence a run gets (macOS Seatbelt, Linux Landlock with the read ru
 secrets folders, the machine token, root.json, daemon.json, gh-app/tokens.json) and each given-back one (FENCE_READ_ALLOW,
 `app/machine/ghApp.ts`) read-only and closes it at once, reading no byte, and the daemon logs one line, `read fence (<mode>,
 <os>) probe: a/b closed paths refused, c/d given-back paths open; ...` with what it would wrongly refuse or leave open. On
-Windows the labels are what refuses, so `warn` sets none and logs what `on` would close.
+Windows the labels are what refuses (w5957, N7, machine/readFenceWin.ts `probeReadFenceWin`): in `warn` the daemon builds a
+mirror in `<app_dir>/read-fence-precheck` (its own folder, which workers cannot write, so none can plant a junction there):
+an empty folder or file for each label and probe target, named after the real path (`D:\work\ffw\daemon` is
+`...\read-fence-precheck\D\work\ffw\daemon`), never a byte copied. It sets on the mirror the labels `on` would set on the
+real paths (none on the system drive, as `on`), a Low copy of node (`lowCopy`) opens each one, and the mirror is removed. The
+line is `read fence (warn, win32) probe (on a mirror of the labels on would set, in <dir>): N/N closed paths refused, M/M
+given-back paths open; ...`, naming the real paths. In `on` the Low child opens the real paths once the labels are set (the
+probe waits for the daemon's label setup); a path workers need refused, or a probe that could not run, takes the No-Read-Up
+labels off again by itself (`openNoReadUp`) and says so, so Low workers read as in `warn` with nobody at the machine; the
+mode stays `on` and the next start or switch labels and probes again. If the labels cannot come off, the line says to
+switch the fence off from the portal. A worker cannot run this check itself: it is Low, and a Low process cannot set a
+Medium label (error 1299, measured on LothDesktop 2026-11-26), so the test of real labels in machine/readFenceGaps.test.ts
+skips at Low and runs on a Medium or elevated runner.
+
+**The Windows CI runner cannot prove the fence** (w5957, measured at #1324's 579a7480 and 3aed8cd7): there the mirrored
+`daemon.json` carried the inherited `Medium (I)(NW,NR)` label (icacls) and the test's child ran Low (`whoami /groups`), yet
+the child opened it. The child holds SeBackupPrivilege **enabled** (`whoami /priv`, from the elevated runner's token), and
+node opens every file with `FILE_FLAG_BACKUP_SEMANTICS` (libuv), which with that privilege skips the access check, labels
+included. A Medium daemon's Low workers hold no SeBackupPrivilege (none in a fenced worker on LothDesktop, measured), so the
+probe means what it says there. The real-label leg in `machine/readFenceGaps.test.ts` removes SeBackupPrivilege and
+SeRestorePrivilege from its own process first (`server/winPrivileges.fixtures.ts`, as w5703's transcript-lock leg does), checks
+the Low child holds neither, and so tests the labels on the runner; the daemon's own `warn` probe on each machine checks them there.
+
+**Explicit labels inside a closed folder** (w5968's review of #1324 suspected them on the CI runner; the backup privilege
+above was the cause there): a folder's label reaches only what inherits it, and a path's own explicit label wins, so a file a
+High (elevated) process makes, with its explicit `S:(ML;;NW;;;HI)`, would stay readable under the folder's No-Read-Up. A
+daemon that once ran elevated could leave such files. So after the labels, `relabelInside`
+(machine/lowIntegrity.ts) walks the closed folders and gives every path with an explicit label at Medium or above No-Read-Up
+too, keeping its level (`S:(ML;;NWNR;;;HI)`); in `off` and `warn`, after an `on`, it takes that NR off again. It never
+touches the label targets themselves, the read-back folders, reparse points (it does not follow them) or the system drive,
+and leaves explicit Low labels alone (workers' own files). A Medium daemon cannot relabel a High-labelled file (a guess from No-Write-Up, not measured:
+keeps it out), so such a file is logged as `err 5 <path>` and `on` reports the labels not all set; the warn mirror runs the
+same walk, so its probe shows it first.
+
+Two limits of the check: a daemon folder on the system drive gets no `warn` verdict at all (the mirror would sit on C:,
+which the fence never writes, so the line says "not run" and runs wait, readFenceWin.ts), so `on` cannot be checked in
+advance on such a machine. And in `on` workers can start before the probe has judged the labels: the label setup opens the
+gate, while the probe waits for it, a Low node copy and up to 60 s of opens, so a bad label locks workers out for that
+window before the revert (as before w5957).
 
 Since w5747 (from w5733's review of #1232) the probe also runs the owner-secret rules ("Owner secrets" below) as `on` adds
 them for a run that holds a token: the owner paths join the closed targets and the fence (Seatbelt `readDenied` plus
@@ -213,14 +266,11 @@ refuses an action it does not know.
 
 Limits:
 
-- **Linux and Windows, diagnostic files** (in `on` mode): a given-back file in the daemon's folder that the daemon rewrites
-  by rename (`sandboxes.json` and `pause.json` through server/durable.ts, `update/job.json` and `update/result.json` through
-  machine/selfUpdate.ts `writeJson`, `cleanup-log.jsonl` when it rotates) is a new file afterwards, which a run started
-  before it cannot read until the next run (Linux) or the next daemon start (Windows). Only an agent's own `cat` of them
-  for diagnosis reads them; no worker tool does (`leftovers.ts` reads `cleanup-facts.json` and `published.jsonl`, both
-  written in place). Their writers are left as they are on purpose: the pool's crash-safe writer and the update job are
-  what a rewrite could break. The files a worker's tools need (`rpc/`, `unity-slots`, `unity-mcp`, `cleanup-facts.json`,
-  `person-play.json`, `published.jsonl`, its own tokens folder) are folders or written in place.
+- **Linux and Windows, diagnostic files** (in `on` mode): closed by w5957 (N5, above). Every given-back file is written in
+  place, and `update/` is given back as a folder. A file the daemon writes anew by rename in a given-back folder (the
+  update's `job.json`) stays readable: on Windows it inherits the folder's read-back label, and on Linux a folder grant
+  covers what is made in it later. What remains is a writer added later that renames a given-back file: the
+  `FENCE_FILE_WRITERS` test fails on a given-back file with no writer named, and checks that the two durable writers pass `inPlace`.
 - **Linux, a self-update** (in `on` mode): the update puts the new code in a new `app` folder (scripts/worker/linkJob.ts),
   which a run that outlives the update was never granted, so until that run ends its gh helper, git credential helper and
   `unity-slot` (all `node <daemon>/app/machine/...`) are refused. New runs are fine. This is why `on` is refused on Linux
@@ -401,6 +451,30 @@ Measured with the generated profile unless noted:
   readonly database" lines open the fenced log and not the unfenced one: a system framework's SQLite file outside the root
   (guess: `~/Library/Accessibility/*.sqlite`, which editors hold open), refused without effect.
 - Batch player build: see the w5333 PR.
+
+## Shell writes into the system temp folders (w6008, warn-only)
+
+lothsahn (w5823): "under no circumstances should workers write outside of ffw". The OS fences refuse a write into `/tmp`, but
+a shell redirect still leaves the empty file behind: w5834's hour diff of biscuit's `/tmp` (2026-11-26, 08:49-09:52 UTC) found
+`/tmp/bq_head.ts`, 0 bytes, from the w5973 worker's `git show HEAD:machine/benchQueue.ts > /tmp/bq_head.ts`, which printed
+Permission denied. No worker may delete it, so it stays.
+
+`server/tmpWriteFence.ts` reads a Bash or PowerShell command's text for writes into a system temp folder: `/tmp`, `/var/tmp`,
+`/private/tmp`, `/var/folders` (every OS; Git Bash's `/tmp` on Windows too), `C:\Users\<u>\AppData\Local\Temp` and
+`C:\Windows\Temp`. A write is a redirect (`>`, `>>`, `2>`, `&>`, `*>`), a write verb (tee, Tee-Object, Out-File, Set-Content,
+New-Item, touch, mkdir), the destination of cp / Copy-Item / rsync / robocopy and both ends of a move, a delete, `mktemp` given
+a folder or template there, an output flag (`-o` of curl and sort, `--output`, `-OutFile`, `-logFile`, `dd of=`, `unzip -d`,
+`tar -C` on extract, `tar -cf`, ffmpeg's output) and `git clone` / `git worktree add` into one, after a `cd` there, or inside
+`bash -c` and `powershell -Command`. A path inside the install folder, the worker's own temp folder or its sandbox is never
+one, whatever variable spells it (`$TMPDIR`, `%TEMP%` and `$env:TEMP` resolve through the worker's env, which points them
+inside ffw). Bare `mktemp` uses `$TMPDIR` and passes. Like the rest of the guard it reads text: a script, a python `open()` or
+an unknown variable is not seen.
+
+**Warn-only for now** (lothsahn's lockout rule): a PostToolUse hook (`tmpWriteHook`, wired in server/sessions.ts) tells the
+worker what it wrote and where its own temp folder is, and the daemon log gets one line per command,
+`tmp write fence (w6008, warn): <session> <tool>: <path> (<how>)`. Nothing is refused, so nothing can lock a worker out, and
+reverting the PR is the whole recovery. The enforcing change, a separate and independently reviewed PR, adds
+`checkSystemTempWrite` to the PreToolUse guard (server/guard.ts) once those log lines show no false refusal.
 
 ## Known limits
 

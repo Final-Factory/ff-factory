@@ -66,14 +66,21 @@ export const TOOLS_MEDIUM_CHILD = 'tools-medium';
  * agent's temp folder there that the Medium agent then runs at Medium.
  */
 export const MEDIUM_TMP_CHILD = 'tmp-medium';
+/**
+ * The root child that is the daemon's own temp folder (w6000, machine/daemonTemp.ts): its TMPDIR, TEMP and TMP, so what it
+ * and the git, gh, ssh, python and scripts it starts put in a temp file stays in the root. Not under `<root>/tmp`, a worker
+ * folder (review B1 of #1345): a worker could plant a file or a link there that the daemon then opens, runs or writes through
+ * at its own level, the threat MEDIUM_TMP_CHILD names.
+ */
+export const DAEMON_TMP_CHILD = 'tmp-daemon';
 /** The root's children only Medium writes: kept Medium on Windows, read-only under the Landlock and Seatbelt fences. */
 export const MEDIUM_ONLY_CHILDREN = [MEDIUM_CLAUDE_CHILD, MEDIUM_CACHE_CHILD, TOOLS_MEDIUM_CHILD, MEDIUM_TMP_CHILD] as const;
 /**
- * Root children only the daemon writes, read-only under the Landlock and Seatbelt fences (writeLock.ts LOCKED_CHILDREN,
+ * Root children only the daemon writes (steam, and its own temp folder tmp-daemon, w6000), read-only under the Landlock and Seatbelt fences (writeLock.ts LOCKED_CHILDREN,
  * workerFence.ts READ_ONLY_IN_ROOT). On Windows they are no worker child (lowIntegrity.ts WORKER_CHILDREN), so a rollout
  * that labelled one Low relabels it Medium.
  */
-export const DAEMON_ONLY_CHILDREN = [STEAM_CHILD] as const;
+export const DAEMON_ONLY_CHILDREN = [STEAM_CHILD, DAEMON_TMP_CHILD] as const;
 /**
  * The files in <root>/steam that hold a credential or the upload's config (w5731): the upload config, the uploads record and
  * steamcmd's config.vdf, where its cached login (ConnectCache) sits. Each gets its own No-Read-Up label on Windows

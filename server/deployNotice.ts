@@ -124,9 +124,13 @@ export function prsInReason(reason: string): BatchPr[] {
   return [...list.matchAll(/#(\d+)/g)].map((m) => ({ number: Number(m[1]) }));
 }
 
-/** The pull requests a deploy brings: merge commits in the prepared release between the running commit and it. */
-export function prsInRelease(dir: string, from: string, to: string): BatchPr[] {
-  const out = gitExecFileSync(['-C', dir, 'log', '--first-parent', '--format=%B%x00', `${from}..${to}`], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
+/**
+ * The pull requests a deploy brings: merge commits in the prepared release between the running commit and it.
+ * timeoutMs bounds how long a restart request blocks the portal's event loop on this sync git (the portal VM's git
+ * answers in milliseconds).
+ */
+export function prsInRelease(dir: string, from: string, to: string, timeoutMs = 3000): BatchPr[] {
+  const out = gitExecFileSync(['-C', dir, 'log', '--first-parent', '--format=%B%x00', `${from}..${to}`], { encoding: 'utf8', timeout: timeoutMs, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
   return prsInMessages(out.split('\0').map((m) => m.trim()));
 }
 

@@ -237,6 +237,36 @@ test('the reinstall’s check of the sandboxes: a commit no remote has, or an un
   const slotRisk = (await sandboxRisks(sandboxes)).find((r) => r.sandbox === 'slot4');
   assert.equal(slotRisk?.unpushed.length, 2, 'the side branch commit and the stash');
   assert.match(slotRisk!.unpushed.join('\n'), /\(stash, in this sandbox only\)/);
+  // w5924: a light agent folder holds no checkout; a clone a worker made in it with a commit no remote has is a risk.
+  const lightClone = path.join(sandboxes, 'agent-work', 'agent1', 'ff-factory');
+  git(base, 'clone', '-q', origin, lightClone);
+  fs.writeFileSync(path.join(lightClone, 'd.txt'), 'd');
+  git(lightClone, 'add', 'd.txt');
+  git(lightClone, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'light work');
+  const lightRisk = (await sandboxRisks(sandboxes)).find((r) => r.sandbox === 'agent-work/agent1/ff-factory');
+  assert.equal(lightRisk?.unpushed.length, 1, 'the commit in the light folder clone');
+  // w6018's review: a clone at the light folder itself ("git clone <url> .") and one nested deeper are found too.
+  for (const [rel, file] of [['agent-work/agent2', 'e.txt'], ['agent-work/agent3/sub/repo', 'f.txt']] as const) {
+    const at = path.join(sandboxes, ...rel.split('/'));
+    git(base, 'clone', '-q', origin, at);
+    fs.writeFileSync(path.join(at, file), file);
+    git(at, 'add', file);
+    git(at, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'light work');
+  }
+  const lightRisks = await sandboxRisks(sandboxes);
+  for (const rel of ['agent-work/agent2', 'agent-work/agent3/sub/repo']) {
+    assert.equal(lightRisks.find((r) => r.sandbox === rel)?.unpushed.length, 1, `the commit in ${rel}`);
+  }
+  // w6031: a tree deeper than the scan looks is a risk; a clone named like a build cache is searched.
+  fs.mkdirSync(path.join(sandboxes, 'agent-work', 'agent4', 'a', 'b', 'c', 'd', 'e'), { recursive: true });
+  const cacheNamed = path.join(sandboxes, 'agent-work', 'agent5', 'build');
+  git(base, 'clone', '-q', origin, cacheNamed);
+  fs.writeFileSync(path.join(cacheNamed, 'g.txt'), 'g');
+  git(cacheNamed, 'add', 'g.txt');
+  git(cacheNamed, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'light work');
+  const deeper = await sandboxRisks(sandboxes);
+  assert.match(deeper.find((r) => r.sandbox === 'agent-work/agent4/a/b/c/d')?.unpushed[0] ?? '', /not searched/, 'the tree past the depth');
+  assert.equal(deeper.find((r) => r.sandbox === 'agent-work/agent5/build')?.unpushed.length, 1, 'the clone named build');
   fs.rmSync(base, { recursive: true, force: true });
 });
 

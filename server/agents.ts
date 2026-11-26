@@ -52,7 +52,7 @@ const LIVE_STATE = z.enum(WORK_LIVE_STATES as unknown as [WorkLiveState, ...Work
 import { ROOT, branded, claudeAiConnectorsFor, configPath, privacyGuardsOn, projectBrief, projectOf, connectorEnv, ownerLine, pinnedVaultEntry, publicIdentityLine, publicIdentityOf, type Config, hostSoftFreeGB, type HostGuardConfig } from './config.ts';
 import { dryRun, refuseInDryRun } from './dryRun.ts';
 import { MachineRollout, timedRunText } from './machineRollout.ts';
-import { OWNER_ONLY_KEYS, SETTABLE_KEYS, setAppConfig } from './appConfig.ts';
+import { OWNER_ONLY_KEYS, SETTABLE_KEYS, readBackSetting, setAppConfig } from './appConfig.ts';
 import { bus, type Store } from './store.ts';
 import { branchProblem, slugify, withBaseRepoLock } from './sandboxes.ts';
 import { gameSandboxes, isLight, lightFolders, lightUseText } from '../shared/sandboxKind.ts';
@@ -72,9 +72,9 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, exceptOf, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
-import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
+import { drainOf, newDrain, drainHolds, drainWouldHold, holdReadback, type HeldWorker } from './machineDrain.ts';
 import { runnerHoldText } from '../shared/runnerHold.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
 import { movedAwayMode, movedAwayVerdict, type HeirFacts, type MovedAwayFacts } from './movedAwayEnforce.ts';
@@ -1110,6 +1110,9 @@ export class Agents {
       path.join(cfg.dataDir, 'timers.json'),
     );
     this.orchestrators = new Orchestrators({
+      holdMachine: (a, by, workId) => this.holdMachine(a, by, workId),
+      holdReadback: (machine) => this.holdReadbackOf(machine),
+      spendHoldAsk: (workId) => this.spendHoldAskIfInForce(workId),
       cfg,
       store,
       sessions,
@@ -3930,11 +3933,162 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
     const mine = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(i.id)).map((w) => w.id);
     const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i);
+    // w5895: a drain set to let only its running workers finish ("and none resume") would hold this resume. WARN-ONLY under
+    // lothsahn's lockout rule (warn and enforce in separate PRs): logged once per worker and drain, and the resume goes on.
+    if (!why && i.kind === 'worker') this.warnDrainResume(i, mine);
     // w3715: a worker whose own work holds a bench ticket there goes on through any hold until it lets go (lothsahn: "make
     // sure stuff holding locks can continue doing stuff"): its messages, wakes and bench warnings reach it, so it can finish
     // and release. Not a pause: that ends its processes, and with them the ticket (machine/pauseStop.ts).
     if (why && this.benchHeld(i).length && !holdReason(i.machineId, { hold: pauseHolds(this.store.machines.values()) })) return undefined;
     return why;
+  }
+
+  /** w5895: the resumes a 'running' drain would hold, logged once each (warn-only; the enforcing step is a later PR). */
+  private readonly drainResumeWarned = new Set<string>();
+  private warnDrainResume(i: SessionInfo, mine: readonly string[]): void {
+    const d = drainOf(this.store.machines.get(i.machineId ?? ''), this.orchestrators?.now().getTime() ?? Date.now());
+    const would = drainWouldHold(d, { id: i.id, works: [...mine] });
+    if (!d || !would) return;
+    const key = `${i.id}@${d.at}`;
+    if (this.drainResumeWarned.has(key)) return;
+    this.drainResumeWarned.add(key);
+    console.log(`[machines] ${i.machineId} drain: worker ${i.id}${mine.length ? ` (${mine.join(', ')})` : ''} resumes there, which ${would}; warn-only: it would be held once enforced (w5895)`);
+  }
+
+  /** w5895: the workers on machine `id` the read-back names: live ones, and stopped ones with open requests. */
+  heldWorkers(id: string): HeldWorker[] {
+    const open = [...this.store.work.values()].filter((w) => isOpen(w));
+    return [...this.store.sessions.values()]
+      .filter((s) => s.kind === 'worker' && s.machineId === id)
+      .map((s) => ({ id: s.id, midTurn: isMidTurn(s), stopped: s.status === 'stopped' || s.status === 'error', works: open.filter((w) => w.sessionIds.includes(s.id)).map((w) => w.id), wake: this.waker.pending(s.id)?.at }))
+      .filter((s) => !s.stopped || s.works.length);
+  }
+
+  /**
+   * w5895: machine `id`'s hold read back live from placement() and the store (never the arguments just given): held or NOT
+   * held, its exceptions, and every excepted or resuming worker that is not running there now, with when it resumes.
+   */
+  holdReadbackOf(id: string): string {
+    const m = this.store.machines.get(placeId(id));
+    if (!m) return `${id}: no such machine.`;
+    const prefs = this.placement();
+    const hold = Object.entries(prefs.hold ?? {}).find(([k]) => placeId(k) === m.id)?.[1];
+    return holdReadback(displayName(m), hold, exceptOf(prefs, m.id), drainOf(m, this.orchestrators?.now().getTime() ?? Date.now()), this.heldWorkers(m.id));
+  }
+
+  /**
+   * w5895: drain or lift machine `a.machine` (hold_machine, and update_work hold in the person's own turn), then read the
+   * live state back. `workId`: the request whose person asked; its hold ask is marked set. Throws on a refusal.
+   */
+  holdMachine(a: { machine: string; action: 'hold' | 'lift'; words?: string; who?: string; hours?: number; except?: string[]; resumes?: 'running' | 'all' }, by: string, workId?: string): string {
+    const mm = this.machines;
+    const m = mm.require(placeId(a.machine));
+    const now = this.orchestrators?.now() ?? new Date();
+    let said: string;
+    if (a.action === 'lift') {
+      const was = drainOf(m, now.getTime());
+      // A config placement.hold is not a drain: while it holds the machine, a drain lift does not let new work in (w5978, P1).
+      const config = this.personHeld(m.id).config ? ` config placement.hold still holds ${m.id}: it takes no new work until set_app_config placement.hold is set without ${m.id}.` : '';
+      if (!m.drain) said = `${m.id} is not drained: nothing to lift.${config}`;
+      else {
+        mm.update(m.id, { drain: undefined });
+        mm.syncRunnerHolds(m.id); // w5916: its CI runners take jobs again
+        this.orchestrators?.capacityMayHaveFreed(`${m.id}'s drain lifted`);
+        console.log(`[machines] ${m.id} drain lifted by ${by}${was ? ` (was: ${was.who}: "${was.words}")` : ''} (w5878)`);
+        const lifted = `its drain${was ? ` for ${was.who}'s "${was.words}"` : ''} is lifted`;
+        said = config ? `${m.id}: ${lifted}, but${config}` : `${m.id} takes new work again (${lifted}).`;
+      }
+    } else {
+      const running = this.heldWorkers(m.id).filter((s) => s.midTurn).map((s) => s.id);
+      const d = newDrain({ words: a.words, who: a.who, hours: a.hours, except: a.except, resumes: a.resumes, running }, by, now);
+      if (typeof d === 'string') throw new Error(d);
+      mm.update(m.id, { drain: d });
+      mm.syncRunnerHolds(m.id); // w5916: its CI runners drain
+      console.log(`[machines] ${m.id} drained by ${by}: ${d.who}: "${d.words}"${d.until ? ` until ${d.until}` : ''}${d.except ? `, except ${d.except.join(', ')}` : ''}, resumes ${d.resumes} (w5878, w5895)`);
+      said = `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${running.length} worker(s) running there finish${d.resumes === 'running' ? ', and the others there should not resume (warn-only for now: their resumes are logged, not held, w5895)' : ', and the others there resume as before'}.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;
+    }
+    this.markHoldAsksSet(m.id, a.action, by, workId);
+    return `${said}\nRead back live: ${this.holdReadbackOf(m.id)}`;
+  }
+
+  /**
+   * w5895: a hold or lift of `machine` landed (hold_machine, update_work hold, or config placement.hold): every open
+   * request's unset ask for that machine and action is now set, not only `workId`'s. An ask left unset by a hold that came
+   * another way would come back as HOLD ASKED, NOT SET once the hold is lifted, and the guard would let the dispatcher
+   * hold the machine again (w5943's review of #1307 at c72eeb05). Only an ask now in force is marked (holdAskInForce): a
+   * lift while a drain or a config hold still holds the machine, or a lift with nothing to lift, spends no ask (w5969's
+   * review at d4df9ff1, its probe B3).
+   */
+  markHoldAsksSet(machine: string, action: 'hold' | 'lift', by: string, workId?: string): void {
+    if (!this.holdAskInForce(machine, action)) return;
+    const at = (this.orchestrators?.now() ?? new Date()).toISOString();
+    for (const w of this.store.work.values()) {
+      if (!isOpen(w) || !w.holdAsk || w.holdAsk.set || w.holdAsk.action !== action || placeId(w.holdAsk.machine) !== placeId(machine)) continue;
+      w.holdAsk = { ...w.holdAsk, set: { at, by: workId && w.id !== workId.trim().toLowerCase() ? `${by} (through ${workId})` : by } };
+      this.store.putWork(w);
+    }
+  }
+
+  /**
+   * w5895: the open requests whose person asked for a hold or lift of a machine that is not in force: the hold not there, or
+   * the lift not done. Shown in system_status and list_machines with who still has to set it. An ask once set is done: a
+   * later lift, or the hold's hours running out, must not bring the line back and ask the dispatcher to hold it again
+   * (w5940's review of #1307 at ae282369).
+   */
+  /**
+   * w5895: a person's own hold of `machine` (a drain, hold_machine, or config placement.hold) is on. A pause, a coming build
+   * or a person playing holds a machine too (placement()), but no lift of a person's ends those.
+   */
+  private personHeld(machine: string): { drain: boolean; config: boolean } {
+    const id = placeId(machine);
+    return {
+      drain: !!drainOf(this.store.machines.get(id), this.orchestrators?.now().getTime() ?? Date.now()),
+      config: Object.keys(this.cfg.placement?.hold ?? {}).some((k) => placeId(k) === id),
+    };
+  }
+
+  /**
+   * w5895: whether a hold or lift ask of `machine` is in force: a hold while placement holds it (a pause counts, as it keeps
+   * work off); a lift once neither the person's drain nor a config hold holds it. One test for marking an ask set and for the
+   * NOT SET line, so they never disagree (w5969's review at d4df9ff1).
+   */
+  holdAskInForce(machine: string, action: 'hold' | 'lift'): boolean {
+    if (action === 'lift') {
+      const p = this.personHeld(machine);
+      return !p.drain && !p.config;
+    }
+    return Object.keys(this.placement().hold ?? {}).some((k) => placeId(k) === placeId(machine));
+  }
+
+  /**
+   * w5895: an ask already in force when it is recorded (a lift while nothing of a person's holds the machine, a hold while
+   * a person's drain or config hold is on) is spent at once, else it stays unset and the dispatcher's guard opens for it
+   * later against someone else's new drain (w5978's review at ff84e75d, probe P3). A pause, a build or a person playing does
+   * not count for a hold: they end by themselves, and the person's hold would go with them.
+   */
+  spendHoldAskIfInForce(workId: string): boolean {
+    const w = this.store.work.get(workId.trim().toLowerCase());
+    const h = w?.holdAsk;
+    if (!w || !h || h.set) return false;
+    const p = this.personHeld(h.machine);
+    if (h.action === 'lift' ? p.drain || p.config : !p.drain && !p.config) return false;
+    w.holdAsk = { ...h, set: { at: (this.orchestrators?.now() ?? new Date()).toISOString(), by: 'already in force when asked' } };
+    this.store.putWork(w);
+    return true;
+  }
+
+  unsetHoldAsks(machine?: string): string[] {
+    return [...this.store.work.values()]
+      .filter((w) => isOpen(w) && w.holdAsk && !w.holdAsk.set && (!machine || placeId(w.holdAsk.machine) === placeId(machine)))
+      .filter((w) => !this.holdAskInForce(w.holdAsk!.machine, w.holdAsk!.action))
+      .map((w) => {
+        const h = w.holdAsk!;
+        // A lift of a hold set in config is a set_app_config placement.hold change, not hold_machine (w5969, B4).
+        const how = h.action === 'lift' && this.personHeld(h.machine).config
+          ? `${h.who}'s orchestrator sets it in ${h.who}'s own turn with set_app_config placement.hold without ${h.machine} (the dispatcher's guard opens only hold_machine)${this.personHeld(h.machine).drain ? `, and the dispatcher lifts the drain with hold_machine machine=${h.machine} action=lift work_id=${w.id}` : ''}`
+          : `the dispatcher sets it with hold_machine machine=${h.machine} action=${h.action} work_id=${w.id}`;
+        return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} ASKED, NOT SET: ${w.id}: ${h.who} asked at ${h.at.slice(11, 16)}Z to ${h.action} ${h.machine} ("${h.words.slice(0, 120)}"); ${how} (w5895).`;
+      });
   }
 
   /** w3715: the granted bench tickets this worker's own work holds on its machine, from its daemon's last report (server/benchHolders.ts). */
@@ -7527,9 +7681,10 @@ ${w.repo ?? ''}
             store_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the store lock (w5614, docs/machines.md \"Slot repos\"): on makes the machine's main clone read-only to fenced workers once every sandbox is a slot repo (held off, and said why, until then); warn refuses nothing and logs each write to the main clone the daemon did not make; off (the recovery switch) opens it again. Takes effect at the daemon restart the update makes. Unset leaves it as it is."),
             editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
             path_fence: z.enum(['off', 'warn']).optional().describe("action machine_update: w5863: the path fence on macOS and Linux: warn (the default) refuses nothing and logs each write to the unity-slot shims folder (first on every agent's PATH) that the daemon did not make; off stops the watch (the recovery switch). Takes effect at the daemon's next start. Unset leaves it as it is."),
+            daemon_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w6000: the daemon's own temp folder, every OS: on (the default) points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps the system temp folder (the recovery). Takes effect at the daemon's next start."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7537,7 +7692,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
@@ -7756,6 +7911,7 @@ ${w.repo ?? ''}
               `${statsLine(s.hostname, s)} (this host)`,
               ...(this.machineStatusLines?.() ?? []),
               ...capacityLines(this.places(), this.lastPlaced, this.placement()),
+              ...this.unsetHoldAsks(),
               ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l),
               ...(this.usageLines?.() ?? []),
               ...hostHealthLines(this.hostHealth?.status, this.cfg.hostGuard),
@@ -7833,6 +7989,12 @@ ${w.repo ?? ''}
             }
             if (machine && !this.machines.list().some((m) => m.id === machine)) throw new Error(`no machine "${machine}"; the machines are ${this.machines.list().map((m) => m.id).join(', ') || '(none)'}`);
             const { before, after } = setAppConfig(configPath(), this.cfg, key, value, { machine, users: this.identity.list().map((u) => u.userId) });
+            // w5895: read the live value back from the running server; a mismatch is the result, loud.
+            const back = readBackSetting(this.cfg, key, after);
+            if (!back.ok) {
+              console.log(`app config: ${key} READ BACK MISMATCH: wrote ${JSON.stringify(after ?? null)}, the running server holds ${JSON.stringify(back.live ?? null)} (w5895)`);
+              throw new Error(`${key} was written to config.json as ${JSON.stringify(after ?? null)}, but READ BACK the running server holds ${JSON.stringify(back.live ?? null)}: it is NOT in effect. Do not tell anyone it is set; report this (w5895).`);
+            }
             // Who changed what, for the journal (fffctl logs); a secret key's values are masked, the pool limits are numbers.
             {
               const by = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})` : ctx.role === 'dispatcher' ? `the dispatcher, for ${this.store.work.get(String((a as { work_id?: unknown }).work_id ?? '').trim().toLowerCase())?.requestedBy.userId ?? 'a request'}` : 'an orchestrator';
@@ -7864,7 +8026,15 @@ ${w.repo ?? ''}
             if (key.startsWith('vault.unattributed.')) return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server: work nobody asked for by name of that kind (docs/vault.md section 10) takes ${after ?? 'the default (lothsahn)'}'s Claude pool and GitHub token from its next run or process start, with no restart.`;
             if (key.startsWith('vault.pool.')) return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}${key.endsWith('Percent') ? ' (percent)' : ''}. The token pool's limits are one set for everyone; the next process start on any Claude token reads it, with no restart. system_status shows each pool's state.`;
             if (key === 'providers.ffbox.token') return `${key}: ${after === 'not set' ? 'removed' : 'set'}. Its SHA-256 only is kept, in the secrets folder (config providers.ffbox.tokenSha256File names the file; config.json never holds it); the connector's next connection must use it. The value is never shown.`;
-            return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server${key === 'ownerName' ? ' (prompts of sessions started from now on)' : ''}.`;
+            // w5895: a hold or exception change reads each machine it names back live: held or not, and who resumes there.
+            if (key === 'placement.hold') {
+              const named = new Set([before, after].flatMap((v) => (v && typeof v === 'object' ? Object.keys(v) : [])).map((k) => placeId(k)));
+              const has = (v: unknown, id: string) => !!v && typeof v === 'object' && Object.keys(v).some((k) => placeId(k) === id);
+              for (const id of named) if (has(before, id) !== has(after, id)) this.markHoldAsksSet(id, has(after, id) ? 'hold' : 'lift', 'config placement.hold');
+              const back = [...named].filter((id) => this.store.machines.has(id)).map((id) => this.holdReadbackOf(id));
+              return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server; read back live:\n${back.join('\n') || '(no machine named)'}`;
+            }
+            return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server (read back: it is in effect)${key === 'ownerName' ? ' (prompts of sessions started from now on)' : ''}.`;
           }),
         ),
         tool(
@@ -7980,6 +8150,9 @@ ${w.repo ?? ''}
       ...(this.machines.personPlayOf(m.id) ? [`  playing: ${playLine(this.machines.personPlayOf(m.id)!)}`] : []),
       // Reserved for higher work (w1643, config placement.minPriority): who may be placed here.
       ...(this.reservedLine(m.id) ? [this.reservedLine(m.id)!] : []),
+      // w5895: its hold, read back live, and a hold its person asked for that nobody set yet.
+      ...(Object.keys(this.placement().hold ?? {}).some((k) => placeId(k) === m.id) ? [`  hold: ${this.holdReadbackOf(m.id).replace(/\n/g, '\n  ')}`] : []),
+      ...this.unsetHoldAsks(m.id).map((l) => `  ${l}`),
       // Its main clone's git, from a daemon before w536 only (a current one reports none).
       ...(g ? [`  ${describeGit(g)}`] : []),
       ...(detail ? [`  last clean-up: ${m.lastCleanup ? describeCleanup(m.lastCleanup) : 'none reported yet'}`] : []),
@@ -8221,7 +8394,7 @@ ${w.repo ?? ''}
           if (m.awaitingInstall) return `${m.id}: a record for its worker install (ssh target ${m.host}, portal ${m.portalUrl}), no daemon yet. Next, on that machine: the portal's ssh key and a host-key pin (fff-machine-ssh --key, --pin), its credential (fffctl credential issue ${m.id} --to ${m.host}), then its installer; the orchestration worker can do each (docs/ops-worker.md, "A new machine"). list_machines shows it online once its daemon connects.`;
           if (m.root) {
             const pool = poolSettingsOf(m);
-            return `${m.id} is a worker root install (${m.root}): settings changed, no redeploy (it updates by its installer)${pool ? `; ${(m.sandboxes ?? []).length}/${pool.maxSandboxes} sandboxes, up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once` : ''}${mm.isOnline(m.id) ? '; its daemon has them now' : '; its daemon gets them when it connects'}.`;
+            return `${m.id} is a worker root install (${m.root}): settings changed, no redeploy (it updates by its installer)${pool ? `; ${gameSandboxes(m.sandboxes).length}/${pool.maxSandboxes} sandboxes, up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once` : ''}${mm.isOnline(m.id) ? '; its daemon has them now' : '; its daemon gets them when it connects'}.`;
           }
           return `Deploying to ${m.id} (${m.local ? 'this host, no ssh' : `ssh ${m.host}`}, portal ${m.portalUrl}); list_machines shows progress.`;
         }),
@@ -8237,7 +8410,7 @@ ${w.repo ?? ''}
       ),
       tool(
         'hold_machine',
-        "Drain a computer when a person asks to hold new work off it (w5878; lothsahn on w5814: \"Hold new work on LothDesktop and let the running workers finish\"): no new start, no automatic move (w2046, the agent-cap move), no pair leg and no priority reclaim lands there, while the workers already there resume and finish. Kept by the portal, not config: it binds every placement path but timed runs (which read placement(false)), and the Capacity block shows the computer HELD. Runs only when the person asked (pass the work_id of their request). hold needs the person's own words, quoted, and who said them; lift when they say it may take work again (or set hours to end it by itself). except: requests the person let through. Never your own idea: a drain only a person asked for.",
+        "Drain a computer when a person asks to hold new work off it (w5878; lothsahn on w5814: \"Hold new work on LothDesktop and let the running workers finish\"): no new start, no automatic move (w2046, the agent-cap move), no pair leg and no priority reclaim lands there, while the workers already there resume and finish. Kept by the portal, not config: it binds every placement path but timed runs (which read placement(false)), and the Capacity block shows the computer HELD. Runs only when the person asked (pass the work_id of their request). hold needs the person's own words, quoted, and who said them; lift when they say it may take work again (or set hours to end it by itself). except: requests the person let through. Never your own idea: a drain only a person asked for. Its result reads the machine back live (w5895): say it is held only once that says HELD. A HOLD ASKED, NOT SET line in system_status is yours: call this with its machine, action and work_id.",
         {
           machine: z.string(),
           action: z.enum(['hold', 'lift']),
@@ -8245,27 +8418,10 @@ ${w.repo ?? ''}
           who: z.string().optional().describe('hold: the person who said them (their name).'),
           hours: z.number().min(1).max(168).optional().describe('hold: lift it by itself after this many hours; absent: until lift.'),
           except: z.array(z.string()).max(10).optional().describe('hold: requests (w123) whose new workers may still go there, as the person said.'),
+          resumes: z.enum(['running', 'all']).optional().describe("hold: running (default, w5895): only the workers mid-turn now finish and none of the others there resume (\"let the running workers finish\"; warn-only for now); all: every worker already there resumes and finishes."),
+          work_id: z.string().optional().describe('The request (w12) whose person asked for it; its hold ask (update_work hold) is then marked set.'),
         },
-        wrap(async ({ machine, action, words, who, hours, except }) => {
-          const m = mm.require(placeId(machine));
-          if (action === 'lift') {
-            const was = drainOf(m, this.orchestrators.now().getTime());
-            if (!m.drain) return `${m.id} is not drained: nothing to lift.`;
-            mm.update(m.id, { drain: undefined });
-            mm.syncRunnerHolds(m.id); // w5916: its CI runners take jobs again
-            this.orchestrators?.capacityMayHaveFreed(`${m.id}'s drain lifted`);
-            console.log(`[machines] ${m.id} drain lifted by ${ctx.owner?.displayName ?? ctx.role}${was ? ` (was: ${was.who}: "${was.words}")` : ''} (w5878)`);
-            return `${m.id} takes new work again (its drain${was ? ` for ${was.who}'s "${was.words}"` : ''} is lifted).`;
-          }
-          const by = 'the dispatcher';
-          const d = newDrain({ words, who, hours, except }, by, this.orchestrators?.now() ?? new Date());
-          if (typeof d === 'string') throw new Error(d);
-          mm.update(m.id, { drain: d });
-          mm.syncRunnerHolds(m.id); // w5916: its CI runners drain
-          console.log(`[machines] ${m.id} drained by ${by}: ${d.who}: "${d.words}"${d.until ? ` until ${d.until}` : ''}${d.except ? `, except ${d.except.join(', ')}` : ''} (w5878)`);
-          const there = [...this.store.sessions.values()].filter((s) => s.machineId === m.id && s.kind === 'worker' && s.status !== 'stopped').length;
-          return `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${there} worker(s) there finish.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;
-        }),
+        wrap(async ({ machine, action, words, who, hours, except, resumes, work_id }) => this.holdMachine({ machine, action, words, who, hours, except, resumes }, ctx.role === 'dispatcher' ? 'the dispatcher' : `${ctx.owner?.displayName ?? 'a person'}'s orchestrator`, work_id)),
       ),
       tool(
         'machine_daemon',
@@ -8667,7 +8823,7 @@ ${w.repo ?? ''}
     const owner = this.orchestrators.ownerOf(info);
     const ctx: BeltCtx = owner ? { role: 'personal', sessionId: info.id, owner } : { role: 'dispatcher', sessionId: info.id };
     const specs = this.toolSpecs('orchestrator', owner ? this.fixedActor(owner) : this.dispatcherActor, ctx);
-    return beltFor(ctx.role, specs, (tool, workId) => this.userAskedProblem(tool, workId)).map((t) => ({ ...t, description: branded(t.description, this.cfg) }));
+    return beltFor(ctx.role, specs, (tool, workId, args) => this.userAskedProblem(tool, workId, args)).map((t) => ({ ...t, description: branded(t.description, this.cfg) }));
   }
 
   /**
@@ -8688,12 +8844,19 @@ ${w.repo ?? ''}
    * runs in a turn the owner started in the dispatcher's own chat, or for a request its person asked for in their own
    * turn. Request text is written by a model that may relay injected text, so its "the user asked" is not enough.
    */
-  private userAskedProblem(tool: string, workId?: string): string | undefined {
+  private userAskedProblem(tool: string, workId?: string, args?: Record<string, unknown>): string | undefined {
     if (this.orchestrators.dispatcherHeardPerson()) return undefined;
     if (!workId) return `${tool} runs only for a request its person asked for in their own words (pass its work_id)`;
     const w = this.store.work.get(workId.trim().toLowerCase());
     if (!w) return `no work request "${workId}"`;
     if (!WORK_OPEN.includes(w.status)) return `${w.id} is ${w.status}`;
+    // w5895: a hold or lift its person asked for on this request (update_work hold), not set yet: a later note outside their
+    // turn (which clears humanAsked) does not undo their ask, so it reaches the one tool that sets it (C1: w5814, 22:08 UTC).
+    // A lift opens only against a drain set before the ask: never someone else's newer drain (w5978, P3).
+    if (tool === 'hold_machine' && w.holdAsk && !w.holdAsk.set && w.holdAsk.action === args?.action && typeof args?.machine === 'string' && placeId(args.machine) === placeId(w.holdAsk.machine)) {
+      const drain = drainOf(this.store.machines.get(placeId(args.machine)), this.orchestrators.now().getTime());
+      if (!(w.holdAsk.action === 'lift' && drain && drain.at > w.holdAsk.at)) return undefined;
+    }
     const n = w.requestedBy.displayName;
     // w5896: what would pass, said exactly.
     if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${n}'s, so ${tool} cannot run for it. What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started, or with ${n}'s own words that decided it quoted verbatim in update_work's \`words\` (from a message of theirs in the last ${DECISION_WORDS_HOURS} hours, at least ${DECISION_WORDS_MIN} words); else ask them (decide_work ask)`;
@@ -8768,7 +8931,7 @@ ${w.repo ?? ''}
       ),
       tool(
         'update_work',
-        "Add to or change one of your person's requests: a note (the answer to the dispatcher's question, or more detail), a priority, close (done: nothing more is needed; cancelled: no longer wanted), or reopen one closed in the last 7 days. The dispatcher hears of it, except a close as done. One state for everyone on a request: a close closes it for every requester, who are told who and why; it never just takes you off it. To pass it to someone else and keep it open, use assign_to. A close your person asks for in their own turn does not count toward the filings limit, so \"close everything that's done\" can close them all. If your person has the owner role, you may also close or reopen another person's request, with a note saying why (its people are told who and why): another owner's as your person's own, in any turn and on your own judgment (w677); a non-owner's only when your person explicitly asks for it in this turn. An owner may also add a note to another owner's request (w677): it reaches its dispatcher, workers and people, and changes nothing else unless your person asks in their own words this turn (w3606): then the note answers the question waiting on an owner, question_for moves it between owners, a priority changes it; never a non-owner's. A decision your person makes for later, on a checked fact (\"close w811 as a duplicate once #1314 merges\"), is recorded now in their turn with when and words, and FF Factory carries it out itself when the fact is met (w830).",
+        "Add to or change one of your person's requests: a note (the answer to the dispatcher's question, or more detail), a priority, close (done: nothing more is needed; cancelled: no longer wanted), or reopen one closed in the last 7 days. The dispatcher hears of it, except a close as done. A close closes it for every requester (told who and why). To hand it on and keep it open: assign_to. A close your person asks for in their turn is outside the filings limit. If your person is an owner, you may also close or reopen another person's request, with a note saying why: another owner's as your person's own, in any turn and on your own judgment (w677); a non-owner's only when your person explicitly asks for it in this turn. An owner may also add a note to another owner's request (w677): it reaches its dispatcher, workers and people, and changes nothing else unless your person asks in their own words this turn (w3606): then the note answers the question waiting on an owner, question_for moves it between owners, a priority changes it; never a non-owner's. A decision your person makes for later, on a checked fact (\"close w811 as a duplicate once #1314 merges\"), is recorded now in their turn with when and words, and FF Factory carries it out itself when the fact is met (w830).",
         {
           id: z.string(),
           note: z.string().max(2000).optional(),
@@ -8791,9 +8954,13 @@ ${w.repo ?? ''}
           words: z.string().max(500).optional().describe("With when: your person's own words for the decision, quoted verbatim from a message of theirs here (\"Close w811 as a duplicate once 1314 is merged\"). Kept with it and checked against their messages. Also after a relayed message joined their turn: their words for this change, verbatim."),
           expires_days: z.number().int().min(1).max(60).optional().describe('With when: dropped unmet after this many days, your person told (default 14).'),
           disk_cleanup: z.string().optional().describe('Machine id; "" clears (w3328).'),
-          main_clone: z.union([z.string(), z.literal(false)]).optional().describe("A machine id (\"m5\"): grant the request's workers on that machine work in its main clone (quit the editor open there cleanly, back up, git fetch and checkout, reopen Unity; nothing else), as request_work main_clone does. Only your person's own request, never one from the intake, and only in a turn they started with their own words, when they asked for work in that clone. false takes it back. A running worker gets it with its next message (message_agent)."),
+          main_clone: z.union([z.string(), z.literal(false)]).optional().describe("A machine id (\"m5\"): grant the request's workers on that machine work in its main clone (quit its editor cleanly, back up, fetch and checkout, reopen Unity; nothing else), as request_work main_clone does. Only your person's own request, never one from the intake, and only in a turn they started with their own words, when they asked for work in that clone. false takes it back. A running worker gets it with its next message (message_agent)."),
           spend_read: z.boolean().optional().describe("true: its workers may use spend_export (like ledger_read)."),
           ledger_read: z.boolean().optional().describe("true: the request's workers may list and read every open and stalled request with read_work (a ledger task); false takes it back. Your person's own request only; never a request from the intake."),
+          hold: z
+            .object({ machine: z.string(), action: z.enum(['hold', 'lift']), except: z.array(z.string()).max(10).optional() })
+            .optional()
+            .describe("w5895: a machine hold (or lift) your person asked for, their words in words; say held only once its read-back says HELD."),
           report: z.union([z.enum(REPORT_KINDS), z.literal(false)]).optional().describe('w2541: its result is a report of this kind (file_report; DONE waits for one), only when your person asked for one in this turn (w5223); false takes it back.'),
           subjects: z
             .array(z.string())
