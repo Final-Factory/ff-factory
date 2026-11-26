@@ -371,15 +371,21 @@ test("w2231: a worker whose Claude pool is held is Blocked on that pool, gives u
   assert.equal(store.work.get('w1')!.status, 'active');
   assert.match(agents.waker.pending(a.id)?.note ?? '', /^w1 is unblocked: /);
   (agents.waker as unknown as { fire(id: string, tries: number): void }).fire(a.id, 0);
-  await until('the parked message and the resume reach it', () => {
-    const tx = store.readTranscript(a.id);
-    return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: '));
-  });
+  // Its placement on beta is the test machine's real sandbox switch (about 30 git processes, none of it work Agents began
+  // and settled() waits for): 1.7 s on an idle BEAST (w5915, git p50 57 ms), past the kit's 5 s under a full run's load.
+  await until(
+    'the parked message and the resume reach it',
+    () => {
+      const tx = store.readTranscript(a.id);
+      return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: '));
+    },
+    30_000,
+  );
   assert.equal(sessions.parked(a.id).length, 0);
   assert.equal(store.sessions.get(a.id)!.machineSandbox, 'beta', 'placed again on a free sandbox');
 });
 
-test("w6092: a dispatcher's message_agent naming a request, parked on a held pool, is linked before it is sent, so a 'running' drain holds it, never drops it", async (t) => {
+test("w6092: a dispatcher's message_agent naming a request, parked on a held pool, is linked as its send returns, so a 'running' drain holds it, never drops it", async (t) => {
   const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
   const held = heldVault(t);
   const { store, agents, o, dispatcher, call, sessions } = env;
@@ -394,6 +400,7 @@ test("w6092: a dispatcher's message_agent naming a request, parked on a held poo
   const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w2', title: 'follow-up', session: 'same', session_reason: 'a fix for what it shipped', text: 'A follow-up for you.' });
   assert.equal(sent.isError, false, sent.text);
   assert.equal(sessions.parked(a.id).length, 1, 'parked on its pool');
+  assert.equal(store.work.get('w2')!.blocked?.kind, 'usage', 'w2 is Blocked on the pool with the rest of what the worker holds (w6180), not Working');
   // Its own request closes while the message waits, and a drain that lets only its running workers finish is set on pc meanwhile.
   store.putWork({ ...store.work.get('w1')!, status: 'done' });
   store.putWork({ ...store.work.get('w3')!, humanAsked: true });
@@ -410,6 +417,50 @@ test("w6092: a dispatcher's message_agent naming a request, parked on a held poo
   assert.ok(sessions.queued().some((q) => q.id === a.id && q.text.includes('A follow-up for you.')), 'held on the drain until it is lifted');
   // w2 was linked to its worker before the send, not left for a resume that never links it (another worker could be started on it).
   assert.ok(store.work.get('w2')!.sessionIds.includes(a.id));
+});
+
+test("w6180: a message_agent whose send is refused links nothing: no notice, no card closed, no other session released", async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const { store, agents, o, dispatcher, call, sessions } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }]);
+  const a = await startedFor(env, 'w1', { extra_agent: false });
+  const before = structuredClone(store.work.get('w2')!);
+  const told: unknown[] = [];
+  const released: unknown[] = [];
+  const settled: unknown[] = [];
+  const oo = o as unknown as { toPeople: (...x: unknown[]) => void; releaseStoppedAway: (...x: unknown[]) => string[]; settleQuestion: (...x: unknown[]) => unknown };
+  const settle = oo.settleQuestion.bind(o);
+  oo.settleQuestion = (...x) => {
+    settled.push(x);
+    return settle(...x);
+  };
+  const toPeople = oo.toPeople.bind(o);
+  const release = oo.releaseStoppedAway.bind(o);
+  oo.toPeople = (...x) => {
+    told.push(x);
+    toPeople(...x);
+  };
+  oo.releaseStoppedAway = (...x) => {
+    released.push(x);
+    return release(...x);
+  };
+  // Its start is refused outright when the message would start it (a dry-run refusal, as checkStart throws).
+  const check = sessions.checkStart.bind(sessions);
+  sessions.checkStart = (id, ...rest) => {
+    if (id === a.id) throw new Error('not started: refused for the test');
+    return check(id, ...rest);
+  };
+  const r = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w2', title: 'follow-up', session: 'same', session_reason: 'a fix for what it shipped', text: 'A follow-up for you.' });
+  assert.equal(r.isError, true, r.text);
+  assert.match(r.text, /refused for the test/);
+  assert.deepEqual(told, [], 'no notice went to its people');
+  assert.deepEqual(released, [], 'no other session was taken off it');
+  assert.deepEqual(settled, [], 'no question card was closed');
+  const after = store.work.get('w2')!;
+  assert.ok(!after.sessionIds.includes(a.id), 'not linked');
+  assert.equal(after.status, before.status, 'not marked active');
+  assert.ok(!(after.log ?? []).some((l) => /dispatcher: sent to /.test(l)), `no link stamp: ${(after.log ?? []).join(' | ')}`);
 });
 
 test("w1463: a machine's gh login reaches list_machines, the Capacity block, start_agent's note and the worker's brief, as names only", async (t) => {

@@ -55,6 +55,10 @@ test('w5572: a planted higher-RULES_VERSION bench_queue.py in a sandbox is never
   assert.equal(fs.readFileSync(path.join(marks, 'trusted'), 'utf8'), '1 --lock ' + path.join(root, 'daemon', 'bench.lock'));
   assert.equal(fetched, 1);
   assert.equal(fs.readFileSync(trustedBenchScript(appDir), 'utf8'), marking(marks, 'trusted', 8));
+  // The helper exits on the release file, a moment after release() returns; on Windows its open lock file made the
+  // folder's removal EPERM until then (BEAST full runs, w5915).
+  const helper = (r.ticket as unknown as { child?: { exitCode: number | null; signalCode: string | null } }).child;
+  await until(() => !helper || helper.exitCode !== null || helper.signalCode !== null);
   fs.rmSync(root, { recursive: true, force: true });
 });
 
