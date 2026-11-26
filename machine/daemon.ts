@@ -4224,11 +4224,12 @@ export class Daemon {
   /** The label pass running now, or the last one (w5980). */
   private readLabelPass: Promise<void> = Promise.resolve();
   /**
-   * w5980 (measured on LothDesktop, 2026-11-26): the switch to on at 15:45 was still labelling (its WRITE_OWNER grants walk
-   * the daemon's whole folder) when the switch to warn came at 15:52; the two passes ran side by side, warn's opened what
-   * on had closed so far, and on's finished last (16:00), leaving every closed path labelled under warn. So one pass at a
-   * time: each waits for the one before, sets the mode the mode file says when it starts, stops early when the file
-   * changes under it (applyReadLabels `still`), and runs again for the new mode, so the last switch always wins.
+   * w5980 (measured on LothDesktop, 2026-11-26): the switch to on at 15:45 was still labelling (its label runs and the
+   * relabelling inside walk the daemon's whole folder) when the switch to warn came at 15:52; the two passes ran side by
+   * side, warn's opened what on had closed so far (15:56), and on's finished last (16:00), leaving the daemon's folder
+   * closed under warn. So one switch's pass at a time: each waits for the one before, sets the mode the mode file says
+   * when it starts, stops early when the file changes under it (applyReadLabels `still`), and runs again for the new mode,
+   * so the last switch always wins. (on's probe reverting its own labels and the login watcher still label outside it.)
    */
   private applyReadLabelsInTurn(exec: Exec, say: (line: string) => void): Promise<void> {
     const appDir = appDirOfConfig(this.cfg);
