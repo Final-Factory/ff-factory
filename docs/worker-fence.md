@@ -164,6 +164,11 @@ Kept working through the daemon's own writes (lockout review of #1193):
   file), then writes over the same file and fsyncs it; a torn file is healed from `.1` at the next load, as before.
   `cleanup-log.jsonl` rolls by copy and truncate. `update/job.json` and `update/result.json` stay rename-written (the update
   job is what a rewrite could break), so their folder `update` is given back whole instead.
+  An in-place write is not atomic (w5968's review of #1324): a reader at the same moment can see new bytes followed by old
+  ones, and a full disk or a crash partway leaves the live file torn, where a rename write left it whole. `.1` (its
+  directory entry fsynced before the write starts) heals it at the next `readJsonDurable`, and the daemon reads both files
+  only at start. When the `.1` copy cannot be made, the file is still written in place, without a previous version that
+  time, and a warning says so: falling back to a rename would take the file's give-back away until the next start.
 - The person-play hold (`<root>/daemon/bench.queue/person.json`, machine/personPlay.ts) and the bench queue's tickets sit in
   `<root>/daemon`, which is closed. Since w5957 (N6) the folder `<root>/daemon/bench.queue` is given back on all three fences
   (`fenceRootReadBack`, server/daemonReads.ts: a Landlock `--read`, a Seatbelt subpath allow, a Windows read-back label) and
@@ -213,6 +218,22 @@ mode stays `on` and the next start or switch labels and probes again. If the lab
 switch the fence off from the portal. A worker cannot run this check itself: it is Low, and a Low process cannot set a
 Medium label (error 1299, measured on LothDesktop 2026-11-26), so the test of real labels in machine/readFenceGaps.test.ts
 skips at Low and runs on a Medium or elevated runner.
+
+**Explicit labels inside a closed folder** (w5968's review of #1324, measured on the Windows CI runner): a folder's label
+reaches only what inherits it, and a path's own explicit label wins. A file a High (elevated) process makes gets an explicit
+`S:(ML;;NW;;;HI)`, so under the folder's No-Read-Up a Low child still opened it. So after the labels, `relabelInside`
+(machine/lowIntegrity.ts) walks the closed folders and gives every path with an explicit label at Medium or above No-Read-Up
+too, keeping its level (`S:(ML;;NWNR;;;HI)`); in `off` and `warn`, after an `on`, it takes that NR off again. It never
+touches the label targets themselves, the read-back folders, reparse points (it does not follow them) or the system drive,
+and leaves explicit Low labels alone (workers' own files). A Medium daemon cannot relabel a High-labelled file (a guess from No-Write-Up, not measured:
+keeps it out), so such a file is logged as `err 5 <path>` and `on` reports the labels not all set; the warn mirror runs the
+same walk, so its probe shows it first.
+
+Two limits of the check: a daemon folder on the system drive gets no `warn` verdict at all (the mirror would sit on C:,
+which the fence never writes, so the line says "not run" and runs wait, readFenceWin.ts), so `on` cannot be checked in
+advance on such a machine. And in `on` workers can start before the probe has judged the labels: the label setup opens the
+gate, while the probe waits for it, a Low node copy and up to 60 s of opens, so a bad label locks workers out for that
+window before the revert (as before w5957).
 
 Since w5747 (from w5733's review of #1232) the probe also runs the owner-secret rules ("Owner secrets" below) as `on` adds
 them for a run that holds a token: the owner paths join the closed targets and the fence (Seatbelt `readDenied` plus

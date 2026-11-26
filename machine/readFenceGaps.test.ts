@@ -13,7 +13,7 @@ import { appendCleanupLog } from '../server/cleanup.ts';
 import { seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
 import { readLockArgs } from './writeLock.ts';
 import { ensureReadBackDirs, readFenceProbeTargets } from './readFence.ts';
-import { NO_READ_UP, READ_BACK, noReadUpTargets, type LabelTarget } from './lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, noReadUpTargets, relabelInside, relabelScript, type LabelTarget } from './lowIntegrity.ts';
 import { buildMirror, mirrorPath, precheckPlan, probeReadFenceWin, realVerdict, windowsReadVerdict } from './readFenceWin.ts';
 import { personFile } from './personPlay.ts';
 
@@ -105,7 +105,7 @@ test('w5957 N6: the bench queue (the person-play hold) is given back on all thre
   const R = 'V:\\ffw';
   const app = 'D:\\work\\ffw\\daemon';
   const there = new Set([R + '\\daemon', R + '\\daemon\\bench.queue', app]);
-  const t = noReadUpTargets({ root: R, appDir: app, allowBack: [], extraBack: fenceRootReadBack(R, path.win32.join), stat: (x) => (there.has(x) ? 'dir' : undefined) });
+  const t = noReadUpTargets({ root: R, appDir: app, allowBack: [], extraBack: fenceRootReadBack(R, path.win32.join), stat: (x) => (there.has(x) ? 'dir' : undefined), path: path.win32 });
   assert.deepEqual(t.find((x) => x.path === R + '\\daemon'), { path: R + '\\daemon', sddl: NO_READ_UP.dir });
   assert.deepEqual(t.find((x) => x.path === R + '\\daemon\\bench.queue'), { path: R + '\\daemon\\bench.queue', sddl: READ_BACK.dir });
   // The probe opens it as a given-back path.
@@ -163,7 +163,8 @@ const fakeRun = (refuse: (p: string) => boolean, seen: string[][]) => async (_cm
   return { code: 0, stdout: paths.map((p, i) => `${i} ${refuse(p) ? 'refused' : 'ok'}`).join('\n'), stderr: '' };
 };
 
-test('w5957 N7: warn builds the mirror (no content copied), labels it, probes it from a Low child, logs the line and removes it', async () => {
+// Real temp paths go through mirrorPath's win32 join, so this runs on Windows only (w5968).
+test('w5957 N7: warn builds the mirror (no content copied), labels it, probes it from a Low child, logs the line and removes it', { skip: process.platform !== 'win32' ? 'mirror paths are Windows paths' : false }, async () => {
   const d = tmp('mirror');
   try {
     const real = path.join(d, 'real');
@@ -221,6 +222,36 @@ test('w5957 N7: on probes the real paths and, on a lockout, takes the labels off
   assert.deepEqual([crashed.blocks, crashed.reverted], [true, true], 'a probe that could not run counts as a lockout in on');
 });
 
+test('w5968: relabelInside walks only the closed folders off the system drive, skips read-backs, and fails on any path it could not set', async () => {
+  const t: LabelTarget[] = [
+    { path: 'D:\\w\\daemon', sddl: NO_READ_UP.dir },
+    { path: 'C:\\anchor\\secrets', sddl: NO_READ_UP.dir },
+    { path: 'D:\\w\\root.json', sddl: NO_READ_UP.file },
+    { path: 'D:\\w\\daemon\\logs', sddl: READ_BACK.dir },
+    { path: 'D:\\w\\daemon\\sandboxes.json', sddl: READ_BACK.file },
+  ];
+  const sys = (p: string) => p.startsWith('C:');
+  // The script: the walk's arguments in PowerShell, and no `$` in the C# (it sits in an expanding here-string).
+  const s = relabelScript(['D:\\w\\daemon'], ['D:\\w\\daemon\\logs'], t.map((x) => x.path), true);
+  assert.ok(s.endsWith("[FfWalk]::Run([string[]]@('D:\\w\\daemon'), [string[]]@('D:\\w\\daemon\\logs'), [string[]]@('D:\\w\\daemon', 'C:\\anchor\\secrets', 'D:\\w\\root.json', 'D:\\w\\daemon\\logs', 'D:\\w\\daemon\\sandboxes.json'), $true)"), s.slice(-300));
+  const cs = s.slice(s.indexOf('@"') + 2, s.indexOf('"@'));
+  assert.ok(!cs.includes('$') && !cs.includes('`'), 'nothing in the C# that PowerShell would expand');
+  assert.ok(!/^"@/m.test(cs.slice(1)), 'nothing that ends the here-string early');
+  const said: string[] = [];
+  let script = '';
+  const fake = (stdout: string) => async (_c: string, args: string[]) => ((script = Buffer.from(args.at(-1)!, 'base64').toString('utf16le')), { code: 0, stdout, stderr: '' });
+  assert.equal(await relabelInside(t, 'close', fake('set D:\\w\\daemon\\x.json\r\ndone 9 1 0\r\n'), (l) => void said.push(l), { systemDrive: sys }), true);
+  assert.ok(script.includes("Run([string[]]@('D:\\w\\daemon'), [string[]]@('D:\\w\\daemon\\logs'),"), 'roots: the closed folders off the system drive; skipped: the read-back folders');
+  assert.match(said.at(-1)!, /No-Read-Up added to 1 explicitly labelled path\(s\) inside the closed folders \(9 looked at\)/);
+  assert.equal(await relabelInside(t, 'open', fake('err 5 D:\\w\\daemon\\y.json\r\ndone 9 0 1\r\n'), (l) => void said.push(l), { systemDrive: sys }), false);
+  assert.ok(script.endsWith('$false)'));
+  assert.ok(said.some((l) => l.includes('err 5 D:\\w\\daemon\\y.json')));
+  // No answer from PowerShell: not done.
+  assert.equal(await relabelInside(t, 'close', fake(''), (l) => void said.push(l), { systemDrive: sys }), false);
+  // Nothing closed off the system drive: nothing to walk.
+  assert.equal(await relabelInside(t, 'close', async () => assert.fail('no walk'), () => {}, { systemDrive: () => true }), true);
+});
+
 /** Whether this process runs at Low integrity (whoami /groups names the label). */
 const lowSelf = () => /S-1-16-4096\b/.test(spawnSync(path.join(process.env.SystemRoot ?? process.env.windir ?? '', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8', windowsHide: true }).stdout ?? '');
 
@@ -236,7 +267,7 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
       const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: o?.timeoutMs ?? 60_000, cwd: o?.cwd });
       return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
     };
-    const { labelNoReadUp, openNoReadUp } = await import('./lowIntegrity.ts');
+    const { labelNoReadUp, openNoReadUp, relabelInside, labelScript, NO_LABEL } = await import('./lowIntegrity.ts');
     const real = path.join(d, 'real');
     fs.mkdirSync(path.join(real, 'app', 'logs'), { recursive: true });
     fs.writeFileSync(path.join(real, 'app', 'daemon.json'), '{}');
@@ -244,9 +275,12 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     const labels = noReadUpTargets({ root: real, appDir: path.join(real, 'app'), allowBack: ['logs', 'sandboxes.json'] });
     const t = { closed: [path.join(real, 'app', 'daemon.json')], open: [path.join(real, 'app', 'logs'), path.join(real, 'app', 'sandboxes.json')] };
     const lines: string[] = [];
+    const say = (s: string) => void lines.push(s);
     const deps = { labels, t, lowNode: node, mirrorDir: path.join(d, 'mirror'), skip: () => false, run: exec, log: (l: string) => void lines.push(l),
-      setLabels: (l: readonly LabelTarget[]) => labelNoReadUp(l, exec, (s) => void lines.push(s), { systemDrive: () => false }),
-      openLabels: async (l: readonly LabelTarget[]) => !!(await openNoReadUp(l, exec, (s) => void lines.push(s), { systemDrive: () => false })) };
+      // As the daemon's: the labels, then NR on what inside has an explicit label of its own (this process may be elevated,
+      // and a High creator's file carries an explicit High label: the w5968 finding).
+      setLabels: async (l: readonly LabelTarget[]) => (await labelNoReadUp(l, exec, say, { systemDrive: () => false })) && (await relabelInside(l, 'close', exec, say, { systemDrive: () => false })),
+      openLabels: async (l: readonly LabelTarget[]) => !!(await openNoReadUp(l, exec, say, { systemDrive: () => false })) && (await relabelInside(l, 'open', exec, say, { systemDrive: () => false })) };
     const w = await probeReadFenceWin({ ...deps, mode: 'warn' });
     assert.equal(w.blocks, false, lines.join('\n'));
     assert.match(w.line, /1\/1 closed paths refused, 2\/2 given-back paths open; no failures/);
@@ -257,9 +291,17 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     assert.deepEqual([on.blocks, on.reverted], [false, false], lines.join('\n'));
     fs.writeFileSync(path.join(real, 'app', 'sandboxes.json.tmp'), '[1]');
     fs.renameSync(path.join(real, 'app', 'sandboxes.json.tmp'), path.join(real, 'app', 'sandboxes.json'));
+    // The daemon writes at Medium, so its renamed file has no label of its own and inherits the folder's NR. This process
+    // may be High, whose file carries its own High label: take that off so the file is as the daemon's would be.
+    const unl = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(labelScript([{ path: path.join(real, 'app', 'sandboxes.json'), sddl: NO_LABEL }]), 'utf16le').toString('base64')]);
+    assert.match(unl.stdout, /^ok 0/m, unl.stdout + unl.stderr);
     const after = await probeReadFenceWin({ ...deps, mode: 'on' });
     assert.deepEqual([after.blocks, after.reverted], [true, true], lines.join('\n'));
     assert.match(after.line, /would refuse what workers need: .*sandboxes\.json/);
+    // The labels came off by themselves: a Low child reads the given-back file again (and the closed one, as in off).
+    const reverted = await probeReadFenceWin({ ...deps, mode: 'on' });
+    assert.deepEqual([reverted.blocks, reverted.reverted], [true, false], lines.join('\n'));
+    assert.match(reverted.line, /0\/1 closed paths refused, 2\/2 given-back paths open/);
   } finally {
     // Labels at Medium do not stop the test (Medium) removing its own folder.
     fs.rmSync(d, { recursive: true, force: true });

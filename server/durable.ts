@@ -192,10 +192,12 @@ export function writeFileDurable(file: string, data: string | Buffer, o: Durable
   if (o.inPlace) {
     try {
       rotate(file, o.generations ?? DEFAULT_GENERATIONS, o.spacingMs ?? DEFAULT_SPACING_MS, 5, true);
+      // w5968 review of #1324: .1's entry on disk before the live file starts to change.
+      fsyncDir(path.dirname(file));
     } catch (e) {
-      // Without the previous version a crash in the write could lose the file; write it the renaming way this once.
-      console.warn(`durable: could not keep the previous version of ${path.basename(file)} (${(e as Error).message}); written by rename this time`);
-      return writeFileDurable(file, data, { ...o, inPlace: false, generations: 0 });
+      // Still in place (w5968: a rename here would take the file's give-back away until the next start); only this write
+      // has no fresh previous version, so a crash inside it falls back to an older generation.
+      console.warn(`durable: could not keep the previous version of ${path.basename(file)} (${(e as Error).message}); written in place without it this time`);
     }
     writeOver(file, data, o.mode ?? 0o666);
     return;

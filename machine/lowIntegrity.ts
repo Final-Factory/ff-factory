@@ -420,7 +420,9 @@ export interface LabelTarget {
 }
 
 /** The NR labels, closed paths first, then the read-backs. Paths that do not exist are left out. Exported for tests. */
-export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; secrets?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined }): LabelTarget[] {
+export function noReadUpTargets(o: { root: string; appDir: string; allowBack: readonly string[]; extraBack?: readonly string[]; secrets?: readonly string[]; stat?: (p: string) => 'dir' | 'file' | undefined; path?: typeof path }): LabelTarget[] {
+  // The host OS's join by default; a test of Windows paths on POSIX passes path.win32 (w5968 review of #1324).
+  const P = o.path ?? path;
   const stat =
     o.stat ??
     ((p: string) => {
@@ -437,12 +439,12 @@ export function noReadUpTargets(o: { root: string; appDir: string; allowBack: re
   };
   // secrets: every secrets folder (readFence.ts secretsDirs), the Dev Drive host folder's too (B3 of the #1193 lockout review).
   // steam (w5639): steamcmd's cached login and the upload config; the daemon runs the uploads at Medium, which NR leaves alone.
-  const daemonOnly = DAEMON_ONLY_CHILDREN.map((c) => path.join(o.root, c));
-  for (const p of [o.appDir, path.join(o.root, 'daemon'), path.join(o.root, 'secrets'), ...(o.secrets ?? []), ...daemonOnly, path.join(o.root, 'root.json')]) add(p, NO_READ_UP);
+  const daemonOnly = DAEMON_ONLY_CHILDREN.map((c) => P.join(o.root, c));
+  for (const p of [o.appDir, P.join(o.root, 'daemon'), P.join(o.root, 'secrets'), ...(o.secrets ?? []), ...daemonOnly, P.join(o.root, 'root.json')]) add(p, NO_READ_UP);
   // w5731 (N2 of the #1237 review): steam's secret files by name, so one that kept an explicit Low label (BEAST's steam was
   // Low from 2026-11-24 to 2026-11-25) gets NR of its own; the folder's inherited label would not reach it.
-  for (const f of STEAM_SECRET_FILES) add(path.join(o.root, STEAM_CHILD, ...f.split('/')), NO_READ_UP);
-  for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(path.isAbsolute(a) ? a : path.join(o.appDir, a), READ_BACK);
+  for (const f of STEAM_SECRET_FILES) add(P.join(o.root, STEAM_CHILD, ...f.split('/')), NO_READ_UP);
+  for (const a of [...o.allowBack, ...(o.extraBack ?? [])]) add(P.isAbsolute(a) ? a : P.join(o.appDir, a), READ_BACK);
   return out;
 }
 
@@ -561,6 +563,107 @@ export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (
   }
   if (open.length && !(await labelNoReadUp(open, exec, say, o))) return undefined;
   return open.map((x) => x.path);
+}
+
+/**
+ * The C# of relabelInside: walks each root, never into a reparse point nor below a skipped (read-back) folder, leaves the
+ * label targets themselves alone (but walks into them), and on every other path with an EXPLICIT label at Medium or above
+ * adds No-Read-Up (close) or takes it off (open), keeping the label's level, flags and other rights. Prints `set <path>`,
+ * `err <code> <path>` and last `done <looked at> <changed> <failed>`. No `$` or backtick inside: it sits in a PowerShell
+ * here-string.
+ */
+const RELABEL_CS = String.raw`using System; using System.IO; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text.RegularExpressions;
+public static class FfWalk {
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint GetNamedSecurityInfoW(string name, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, out IntPtr sacl, out IntPtr sd);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(IntPtr sd, uint rev, uint info, out IntPtr s, IntPtr len);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint rev, out IntPtr sd, IntPtr size);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr p);
+  static string Label(string p, out uint err) {
+    IntPtr sacl, sd; err = GetNamedSecurityInfoW(p, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out sacl, out sd);
+    if (err != 0) return null;
+    try { IntPtr s; if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, 1, 0x10, out s, IntPtr.Zero)) { err = (uint)Marshal.GetLastWin32Error(); return null; }
+      try { return Marshal.PtrToStringUni(s); } finally { LocalFree(s); } } finally { LocalFree(sd); }
+  }
+  static uint Set(string path, string sddl) {
+    IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();
+    try { bool p, d; IntPtr sacl; if (!GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();
+      return SetNamedSecurityInfoW(path, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl); } finally { LocalFree(sd); }
+  }
+  static int Level(string l) {
+    if (l == "LW") return 0x1000; if (l == "ME") return 0x2000; if (l == "MP") return 0x2100; if (l == "HI") return 0x3000; if (l == "SI") return 0x4000;
+    int n; if (l.StartsWith("S-1-16-") && int.TryParse(l.Substring(7), out n)) return n; return -1;
+  }
+  static bool Inherited(string flags) { for (int i = 0; i + 1 < flags.Length; i += 2) if (flags.Substring(i, 2) == "ID") return true; return false; }
+  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close) {
+    var o = new List<string>(); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var sk = new HashSet<string>(skip, StringComparer.OrdinalIgnoreCase); var tg = new HashSet<string>(targets, StringComparer.OrdinalIgnoreCase);
+    var rx = new Regex(@"\(ML;([A-Z]*);([A-Z]*);;;([A-Z0-9-]+)\)");
+    var st = new Stack<KeyValuePair<string, bool>>(); foreach (var r in roots) st.Push(new KeyValuePair<string, bool>(r, true));
+    int looked = 0, changed = 0, failed = 0;
+    while (st.Count > 0) {
+      var e = st.Pop(); string p = e.Key.TrimEnd('\\'); if (!seen.Add(p) || sk.Contains(p)) continue;
+      FileAttributes a; try { a = File.GetAttributes(p); } catch { continue; }
+      if (!e.Value && (a & FileAttributes.ReparsePoint) != 0) continue;
+      looked++;
+      if (!tg.Contains(p)) {
+        uint err; string l = Label(p, out err);
+        if (l == null) { failed++; o.Add("err " + err + " " + p); }
+        else {
+          Match m = rx.Match(l);
+          if (m.Success && !Inherited(m.Groups[1].Value) && Level(m.Groups[3].Value) >= 0x2000) {
+            string f = m.Groups[1].Value, rights = m.Groups[2].Value, lv = m.Groups[3].Value, want = null;
+            bool nr = rights.Contains("NR");
+            if (close && !nr) want = "S:(ML;" + f + ";" + rights + "NR;;;" + lv + ")";
+            if (!close && nr) { string rest = rights.Replace("NR", ""); want = "S:(ML;" + f + ";" + (rest.Length > 0 ? rest : "NW") + ";;;" + lv + ")"; }
+            if (want != null) { uint se = Set(p, want); if (se == 0) { changed++; o.Add("set " + p); } else { failed++; o.Add("err " + se + " " + p); } }
+          }
+        }
+      }
+      if ((a & FileAttributes.Directory) != 0) {
+        try { foreach (var c in Directory.EnumerateFileSystemEntries(p)) st.Push(new KeyValuePair<string, bool>(c, false)); }
+        catch (Exception x) { failed++; o.Add("err list " + p + " (" + x.GetType().Name + ")"); }
+      }
+    }
+    o.Add("done " + looked + " " + changed + " " + failed); return o.ToArray();
+  }
+}`;
+
+/** The PowerShell that runs RELABEL_CS on these roots. Exported for tests. */
+export function relabelScript(roots: readonly string[], skip: readonly string[], targets: readonly string[], close: boolean): string {
+  const arr = (a: readonly string[]) => `@(${a.map(psq).join(', ')})`;
+  return ["$ErrorActionPreference = 'Stop'", 'Add-Type -TypeDefinition @"', RELABEL_CS, '"@', `[FfWalk]::Run([string[]]${arr(roots)}, [string[]]${arr(skip)}, [string[]]${arr(targets)}, $${close})`].join('\n');
+}
+
+/**
+ * w5968 (review of #1324): a label set on a folder reaches only what inherits it. A file or folder that carries an
+ * EXPLICIT label keeps it, and the first label wins, so a file a High (elevated) process made inside a closed folder,
+ * which gets `S:(ML;;NW;;;HI)` of its own, stayed readable by Low under the folder's No-Read-Up (measured on the Windows
+ * CI runner, which runs elevated). Medium creators give no explicit label, Low ones an explicit Low label, which this leaves
+ * alone (workers write there). So after labelNoReadUp (`close`) every explicitly labelled path at Medium or above inside the
+ * closed folders gets NR too, keeping its level; `open` takes that NR off again. Read-back folders, the label targets
+ * themselves, reparse points and the system drive are never touched. Returns whether every path that needed it was set;
+ * never throws.
+ */
+export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | 'open', exec: Exec, say: (line: string) => void, o: { systemDrive?: (p: string) => boolean } = {}): Promise<boolean> {
+  const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
+  const roots = t.filter((x) => x.sddl === NO_READ_UP.dir && !sys(x.path)).map((x) => x.path);
+  if (!roots.length) return true;
+  const skip = t.filter((x) => x.sddl === READ_BACK.dir).map((x) => x.path);
+  const script = relabelScript(roots, skip, t.map((x) => x.path), mode === 'close');
+  const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
+  const lines = r.stdout.split(/\r?\n/).map((l) => l.trim());
+  const done = lines.map((l) => /^done (\d+) (\d+) (\d+)$/.exec(l)).find(Boolean);
+  if (!done) {
+    say(`worker integrity: could not look for explicit labels inside the closed folders: ${(r.stderr || r.stdout).trim().slice(-300)}`);
+    return false;
+  }
+  const errs = lines.filter((l) => l.startsWith('err '));
+  for (const e of errs.slice(0, 20)) say(`worker integrity: explicit label inside a closed folder: ${e}`);
+  const [looked, changed, failed] = done.slice(1).map(Number);
+  if (changed || failed) say(`worker integrity: ${mode === 'close' ? 'No-Read-Up added to' : 'No-Read-Up taken off'} ${changed} explicitly labelled path(s) inside the closed folders (${looked} looked at${failed ? `, ${failed} could not be` : ''})`);
+  return failed === 0;
 }
 
 /** An empty label SACL: setting it takes a path's explicit label off, so it inherits its parent's again (w5749, measured). */

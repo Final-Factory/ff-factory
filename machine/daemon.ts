@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -3797,8 +3797,9 @@ export class Daemon {
           mirrorDir: path.join(appDir, 'read-fence-precheck'),
           skip: this.labelSystemDrive,
           run: exec,
-          setLabels: (l) => labelNoReadUp(l, exec, say, { systemDrive: () => false, what: 'read fence probe mirror' }),
-          openLabels: async (l) => !!(await openNoReadUp(l, exec, say, { systemDrive: this.labelSystemDrive })),
+          // w5968: and NR on what inside carries an explicit label of its own (relabelInside), as applyReadLabels does.
+          setLabels: async (l) => (await labelNoReadUp(l, exec, say, { systemDrive: () => false, what: 'read fence probe mirror' })) && (await relabelInside(l, 'close', exec, say, { systemDrive: () => false })),
+          openLabels: async (l) => !!(await openNoReadUp(l, exec, say, { systemDrive: this.labelSystemDrive })) && (await relabelInside(l, 'open', exec, say, { systemDrive: this.labelSystemDrive })),
           log,
         });
         if (gen !== this.readProbeGen) {
@@ -3957,11 +3958,15 @@ export class Daemon {
     const t = this.readLabelTargets(appDir);
     if (mode === 'on') {
       if (!(await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      // w5968: a file an elevated process made inside keeps its own High label, which the folder's NR does not override.
+      if (!(await relabelInside(t, 'close', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every explicitly labelled path inside the closed folders got No-Read-Up; Low workers may still read those (the daemon log says which)');
       log('worker integrity: the read fence is on: No-Read-Up labels set');
       return;
     }
     const opened = await openNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive });
     if (!opened) throw new Error('not every No-Read-Up label could be taken off (the daemon log says which)');
+    // w5968: and the NR on explicitly labelled paths inside, which only an earlier on adds (so only when it was on).
+    if (opened.length && !(await relabelInside(t, 'open', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every No-Read-Up label inside the closed folders could be taken off (the daemon log says which)');
     log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
   }
 
