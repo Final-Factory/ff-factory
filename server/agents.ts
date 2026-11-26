@@ -4872,12 +4872,20 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       // The w6088 review: a request the dispatcher placed on a next worker while the start ran read its hand-off already, so
       // that worker gets the message as a forwarded one (as forwardLate does); only a request with no next worker yet carries
       // it in its hand-off, which its next worker reads when it starts.
+      // The w6104 review: only a worker linked after the move began is a next worker; an older one still listed (heirOf's
+      // fallback) is not, and the message never goes to it.
       const back = reqs.filter((x) => x.handedBack?.session === info.id);
-      const placed = back.filter((x) => !!this.heirOf(x, info));
+      const nextOf = (x: WorkItem): SessionInfo | undefined => {
+        const was = new Set(before.get(x.id)?.sessionIds ?? x.sessionIds);
+        const id = x.sessionIds.filter((sid) => sid !== info.id && !was.has(sid)).at(-1);
+        const n = id ? this.store.sessions.get(id) : undefined;
+        return n?.kind === 'worker' ? n : undefined;
+      };
+      const placed = back.filter((x) => !!nextOf(x));
       let told: string[] = [];
       if (text && placed.length) {
         const lq: QueuedSend = { uuid: `w6047-back-${info.id}-${Date.now()}`, id: info.id, text, from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), ...(q?.resumeOf ? { resumeOf: q.resumeOf } : {}), at: new Date().toISOString(), why: 'held by its move, whose requests were handed back meanwhile (w6047)' };
-        told = this.forwardToHeirs(info, placed, lq);
+        told = this.forwardToHeirs(info, placed, lq, nextOf);
       }
       const w = text ? (back.find((x) => !placed.includes(x)) ?? (told.length ? undefined : back[0])) : undefined;
       if (w) this.orchestrators.carryInHandBack(w, info.id, text);

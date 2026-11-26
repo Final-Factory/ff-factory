@@ -338,3 +338,21 @@ test('w6047 (the w6088 review): a hand-back placed on a next worker before the f
   const reached = sent.some((m) => m.id === 'next1' && /go on/.test(m.text)) || sessions.queued().some((m) => m.id === 'next1' && /go on/.test(m.text));
   assert.ok(reached, '"go on" reaches next1, the worker the hand-back went to');
 });
+
+
+test('w6047 (the w6104 review): every request handed back, no next worker yet, an OLDER worker still linked: the held message rides the hand-off', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  x.startMoved = async (info, w) => {
+    agents.orchestrators.handBack(w, info, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+    throw new Error('no agent seat there now');
+  };
+  worker('old0aaaa', { machineId: 'm5', machineSandbox: 'slot3', turns: 4 });
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['old0aaaa', '5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const w = store.work.get('w5869')!;
+  assert.equal(sent.filter((m) => m.id === 'old0aaaa').length, 0, 'not forwarded to the older, stale worker');
+  assert.match(w.handedBack?.message ?? '', /go on/, "the message rides the pause's hand-off for the next worker");
+});

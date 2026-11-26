@@ -105,6 +105,8 @@ export interface MoveBefore {
   handedBack?: WorkItem['handedBack'];
   gateResumes?: WorkItem['gateResumes'];
   link?: NonNullable<WorkItem['links']>[string];
+  /** w6047 (the w6104 review): the workers on it before the move, so a give-back tells a next worker placed meanwhile from an older one. */
+  sessionIds?: string[];
 }
 
 export function moveBeforeOf(w: WorkItem, sessionId: string): MoveBefore {
@@ -114,6 +116,7 @@ export function moveBeforeOf(w: WorkItem, sessionId: string): MoveBefore {
     ...(w.handedBack ? { handedBack: w.handedBack } : {}),
     ...(w.gateResumes ? { gateResumes: [...w.gateResumes] } : {}),
     ...(w.links?.[sessionId] ? { link: w.links[sessionId] } : {}),
+    sessionIds: [...w.sessionIds],
   };
 }
 
