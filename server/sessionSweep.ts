@@ -145,6 +145,8 @@ export interface SweeperDeps {
   root?: string;
   /** The agent temp root, `<install>/tmp`. */
   tempRoot: () => string;
+  /** Medium agents' own temp root (w5862, machine/mediumFolders.ts), once daemon.json `mediumAgentFolders` is "on". */
+  mediumTempRoot?: () => string | undefined;
   /**
    * The portal's welcome has come since the daemon started, so `resumable` is known (w1379): until then every stopped session
    * looks finished, and a daemon restarted while the portal was down would sweep the folders of workers a request waits for.
@@ -210,7 +212,8 @@ export class SessionSweeper {
         const step: 1 | 2 | undefined = t.done < 2 && age >= s.cloneKeepHours * 60 * MIN ? 2 : t.done < 1 && age >= s.graceMin * MIN ? 1 : undefined;
         if (!step) continue;
         const dir = this.d.dirOf(id);
-        if (!this.d.tempRoot() || !within(dir, this.d.tempRoot())) continue;
+        const roots = [this.d.tempRoot(), this.d.mediumTempRoot?.()].filter((t): t is string => !!t);
+        if (!roots.some((t) => within(dir, t))) continue;
         if (!fs.existsSync(dir)) {
           t.done = 2;
           continue;
