@@ -61,6 +61,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
   t.after(async () => {
     rr.stop();
     o.close();
+    agents.close(); // w6152: Agents' timers stop before the folder goes (w5915: a release pass wrote into a removed transcript, ENOENT).
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
