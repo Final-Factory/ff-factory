@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -993,6 +993,24 @@ test("an update drops an older install's home mailbox note from root.json, keepi
   assert.deepEqual(dropStaleSlotsNote(outside, root), [task]);
   assert.deepEqual(dropStaleSlotsNote(outside, root, named), [task, { kind: 'file', name: named }]);
   assert.deepEqual(dropStaleSlotsNote([{ kind: 'file', name: path.join(root, 'unity-slots') }], root).length, 1);
+});
+
+test('w5959: worker update --tools-disk-lock writes toolsDiskLock to daemon.json on Windows only; unset carries it; anything but warn or on is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-tdl-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { toolsDiskLock?: 'warn' | 'on' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('toolsDiskLock' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const m of ['warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { toolsDiskLock: m }).toolsDiskLock, m, m);
+  const had = { ...BEAST_CONFIG, toolsDiskLock: 'on' };
+  assert.equal(written(had, {}).toolsDiskLock, 'on', 'unset carries it');
+  assert.equal(written(had, { toolsDiskLock: 'warn' }).toolsDiskLock, 'warn', 'the way back replaces it');
+  for (const p of ['linux', 'darwin'] as const) assert.throws(() => written(BEAST_CONFIG, { toolsDiskLock: 'on' }, p), /--tools-disk-lock: Windows only/);
+  const cfg = { a: 1 };
+  assert.equal(applyToolsDiskLock(cfg, undefined, 'linux'), cfg, 'unset: the very config, any OS');
+  assert.deepEqual(applyToolsDiskLock(cfg, 'on', 'win32'), { a: 1, toolsDiskLock: 'on' });
+  assert.equal(toolsDiskLockFlag(undefined), undefined);
+  assert.equal(toolsDiskLockFlag('warn'), 'warn');
+  for (const bad of ['off', 'ON', '']) assert.throws(() => toolsDiskLockFlag(bad), /--tools-disk-lock is warn or on/);
 });
 
 test('w6000: worker update --daemon-tmpdir writes daemonTmpdir to daemon.json on every OS; unset carries it; anything but on or off is refused', () => {

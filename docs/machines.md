@@ -1256,6 +1256,12 @@ older daemon ignores it and keeps making worktrees.
   sandbox's own folder (`.git` to `.git.worktree`, `.git.new` to `.git`); a restart cut between them is finished by
   `finishConversion` when the daemon loads its sandboxes. Then the clone's `worktrees/<name>` record is removed, so
   the branch is free there. The old pointer stays as `.git/worktree-pointer`.
+- **A placement converts too** (`SandboxPool.switch`, w5614 fix): on a busy machine a sandbox is free only between a
+  release and the next placement, so the 2-minute look may never see it free (BEAST's slot2 and slot3, 2026-11-26).
+  With `all`, a worktree becomes a slot repo when a worker is placed in it (the switch to its branch), under the same
+  checks except the live agent (the placed one waits on the switch). A failure leaves the worktree whole and the switch
+  goes on. The look logs why it passes a worktree by ("not becoming a slot repo yet: an agent is live there"), once
+  each time the reason changes.
 - **One branch, one sandbox**: git no longer refuses a branch another sandbox holds, since they share no refs, so the
   pool does (`slotBranchHolder`): `switch_branch` and `create_sandbox` to a branch a slot-repo sandbox holds are
   refused with "branch X is checked out in sandbox Y". Between two worktrees git still refuses in its own words.
@@ -1308,6 +1314,10 @@ older daemon ignores it and keeps making worktrees.
   (`warn` or `on`, every OS) writes daemon.json `mediumAgentFolders`; the daemon restarts with it. `on` moves Medium agents
   to `<root>/tmp-medium` and `<root>/cache-medium/cargo`, `warn` only logs the exposure (docs/worker-root.md, "Medium
   agents' temp folders and cargo home"). There is no `off`: unset is `warn`.
+- **A virtual disk in a Low tools child** (w5959; docs/worker-root.md "The enforce switch"): `ops_worker` `machine_update`
+  `tools_disk_lock` (`warn` or `on`, Windows only) writes daemon.json `toolsDiskLock`; the daemon restarts with it. `on`
+  keeps a `<root>\tools` child that holds a `.vhd`/`.vhdx` Medium, so workers cannot write there; `warn` (unset) only logs it
+  and is the way back.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 

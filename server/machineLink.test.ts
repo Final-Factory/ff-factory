@@ -14,7 +14,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
-import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
+import { linkControlWaitMs, PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
 import type { FromDaemon, LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
 import { ANSWERS, SelfUpdater, alive, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobToEnd, keepRootJson, processCommand, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
@@ -1135,4 +1135,10 @@ test('w5546: the read fence goes to warn, on and off again over the link with no
   assert.deepEqual(sent.map((m) => m.ok), [false, false]);
   assert.match(sent[0].error ?? '', /unknown action something-new/);
   assert.match(sent[1].error ?? '', /no read fence switch/);
+});
+
+test('w6089: a read fence switch is waited for long enough to set the Windows labels; a restart is not', () => {
+  // BEAST answered read-fence-on 1 min 18 s to 3 min 13 s after it was sent (2026-11-26), past the old 60 s.
+  for (const a of ['read-fence-off', 'read-fence-warn', 'read-fence-on']) assert.ok(linkControlWaitMs(a) >= 5 * 60_000, a);
+  for (const a of ['restart', 'uninstall']) assert.equal(linkControlWaitMs(a), 60_000, a);
 });
