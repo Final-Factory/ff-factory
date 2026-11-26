@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { ProviderManager, conversationQueryId, conversationView, describeLogs, describeQuery, describeRunFile, devRequestsFrom, ffboxLogsArgs, ffboxRunArgs } from './providers.ts';
+import { ProviderManager, type ProviderOutsideWatch, conversationQueryId, conversationView, describeLogs, describeQuery, describeRunFile, devRequestsFrom, ffboxLogsArgs, ffboxRunArgs } from './providers.ts';
 import { ffboxConversationHref, isFfboxConversationId } from '../shared/ffboxLinks.ts';
 import { devRequestsHealth } from '../shared/devRequestsHealth.ts';
 import { cpuPct, metricsLine, metricsStale, METRICS_STALE_MS } from '../shared/providerMetrics.ts';
@@ -740,7 +740,7 @@ test('outside watch (w5892): the topic goes to a connector that takes it, once p
   assert.equal((await c.next('error')).code, 'bad_message', 'a topic where its hash goes is refused');
   c.send({ ...WATCH_STATUS, outside_watch: { ...WATCH_STATUS.outside_watch, state: 'sideways' } });
   assert.equal((await c.next('error')).code, 'bad_message');
-  assert.equal(pm.outsideWatch?.topicTag, '0123456789ab', 'and the last good one stays');
+  assert.equal((pm.outsideWatch as ProviderOutsideWatch | undefined)?.topicTag, '0123456789ab', 'and the last good one stays');
 });
 
 test('updater: pushed by the connector, kept and shown; ok -> failing -> ok on one link; bad values refused, unknown fields ignored', async (t) => {
