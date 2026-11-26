@@ -108,7 +108,7 @@ import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from '.
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
-import { benchTicketFor, pythonExe, queueTickets, type QueueTicket } from './benchQueue.ts';
+import { benchTicketFor, pythonExe, queueTickets, refreshTrustedBenchAsync, type QueueTicket } from './benchQueue.ts';
 import { runSteamJob } from './steamUpload.ts';
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
@@ -1854,6 +1854,8 @@ export class Daemon {
     if (this.cfg.root) void this.readMachineGh();
     // w5973: the Linux scope probes answer from what this keeps, so an editor's or agent's launch runs no systemd-run on the loop.
     void warmScopeProbes();
+    // w5973 (w5998's review): the trusted bench copy is fetched at start, so the first tickets find it.
+    if (this.cfg.root) void refreshTrustedBenchAsync({ appDir: appDirOfConfig(this.cfg), background: true }, this.cfg.root);
     this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.

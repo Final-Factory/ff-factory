@@ -600,8 +600,13 @@ async function ghFetchBenchAsync(root: string | undefined, appDir: string, cwd: 
 export function refreshTrustedBench(t: TrustedBench, root: string | undefined): string | undefined {
   if (t.background) {
     if (!trustedBenchStale(t)) return undefined;
-    void refreshTrustedBenchAsync(t, root);
-    return fs.existsSync(trustedBenchScript(t.appDir)) ? undefined : `fetching master's ${BENCH_SCRIPT_PATH} in the background (w5973); ask again in a minute`;
+    // A fetch that failed a moment ago is not started again on every call (w5998's review): its error is the answer.
+    const file = trustedBenchScript(t.appDir);
+    const fail = benchFetchFailed.get(file);
+    const recent = fail && (t.now ?? Date.now)() - fail.at < BENCH_FETCH_RETRY_MS;
+    if (!recent) void refreshTrustedBenchAsync(t, root);
+    if (fs.existsSync(file)) return undefined;
+    return recent ? fail.why : `fetching master's ${BENCH_SCRIPT_PATH} in the background (w5973); ask again in a minute`;
   }
   const file = trustedBenchScript(t.appDir);
   const ready = trustedBenchFolder(t);
@@ -634,6 +639,15 @@ function trustedBenchFolder(t: TrustedBench): true | string | undefined {
 
 /** The fetch in flight per trusted copy: one at a time, however many calls find it old (w5973). */
 const benchFetches = new Map<string, Promise<string | undefined>>();
+/** The last failed background fetch per trusted copy, and when: a call within BENCH_FETCH_RETRY_MS answers it. */
+const benchFetchFailed = new Map<string, { why: string; at: number }>();
+const BENCH_FETCH_RETRY_MS = 60_000;
+
+/** Forget the fetches' state (tests). */
+export function resetBenchFetches() {
+  benchFetches.clear();
+  benchFetchFailed.clear();
+}
 
 /**
  * w5973: refreshTrustedBench without blocking the caller's event loop: the same checks and the same write, the fetch
@@ -649,6 +663,8 @@ export function refreshTrustedBenchAsync(t: TrustedBench, root: string | undefin
     const fetch = t.fetchAsync ?? (t.fetch ? async () => t.fetch!() : () => ghFetchBenchAsync(root, t.appDir, path.dirname(file)));
     const got = await fetch().catch((e: Error) => ({ error: e.message }) as { text?: string; error?: string });
     const failed = installTrustedBench(t, got);
+    if (failed) benchFetchFailed.set(file, { why: failed, at: (t.now ?? Date.now)() });
+    else benchFetchFailed.delete(file);
     if (failed && t.background) console.warn(`bench queue: the background fetch of the trusted copy failed: ${failed}`);
     return failed;
   })().finally(() => benchFetches.delete(file));

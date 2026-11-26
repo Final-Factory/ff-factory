@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { benchTicketFor, newestBenchQueueScript, refreshTrustedBench, refreshTrustedBenchAsync, trustedBenchScript, TRUSTED_BENCH_MAX_AGE_MS } from '../machine/benchQueue.ts';
+import { benchTicketFor, newestBenchQueueScript, refreshTrustedBench, refreshTrustedBenchAsync, resetBenchFetches, trustedBenchScript, TRUSTED_BENCH_MAX_AGE_MS } from '../machine/benchQueue.ts';
 
 /**
  * w5572 (from w5542's audit): the daemon and the agent host took their bench tickets with the bench_queue.py of highest
@@ -111,5 +111,24 @@ test('w5973: the daemon fetches the trusted copy in the background, one fetch at
   answer({ error: 'offline' });
   assert.match((await pending) ?? '', /offline/);
   assert.equal(fs.readFileSync(file, 'utf8'), 'RULES_VERSION = 9\n');
+  fs.rmSync(appDir, { recursive: true, force: true });
+});
+
+test("w5973 (w5998's review): a background fetch that just failed is not started again on each call, and its error is the refusal", async () => {
+  resetBenchFetches();
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5973-fail-'));
+  let now = 1_000_000_000_000;
+  let calls = 0;
+  const t = { appDir, background: true, now: () => now, fetchAsync: async () => (calls++, { error: 'HTTP 401: Bad credentials' }) };
+  assert.match(refreshTrustedBench(t, undefined) ?? '', /in the background/);
+  assert.match((await refreshTrustedBenchAsync(t, undefined)) ?? '', /Bad credentials/, 'the call that started it shares its answer');
+  assert.equal(calls, 1);
+  assert.match(refreshTrustedBench(t, undefined) ?? '', /Bad credentials/, "the refusal is gh's error, not 'fetching'");
+  assert.equal(calls, 1, 'no second fetch within the minute');
+  now += 61_000;
+  refreshTrustedBench(t, undefined);
+  await refreshTrustedBenchAsync(t, undefined);
+  assert.equal(calls, 2, 'tried again after a minute');
+  resetBenchFetches();
   fs.rmSync(appDir, { recursive: true, force: true });
 });

@@ -251,6 +251,30 @@ async function killTree(child: ChildProcess | undefined): Promise<void> {
   else child.kill('SIGKILL');
 }
 
+/**
+ * How a leg's player ended: its exit code, `error: ...`, or 'timeout' once it ran past boundMs and its tree was ended.
+ * w5973: the tree's stop now answers later (taskkill as a child the loop does not wait on), so the player's own exit,
+ * caused by that stop, may come first: a leg past its bound is 'timeout' whatever comes first, as it was when the stop
+ * held the loop. The answer waits for the stop, as before. Exported for tests (stop: what ends the tree).
+ */
+export function legExit(child: ChildProcess, boundMs: number, stop: (c: ChildProcess) => Promise<void> = killTree): Promise<number | string> {
+  return new Promise<number | string>((resolve) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void stop(child).catch(() => undefined).then(() => resolve('timeout'));
+    }, boundMs);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      if (!timedOut) resolve(`error: ${e.message}`);
+    });
+    child.on('exit', (c) => {
+      clearTimeout(timer);
+      if (!timedOut) resolve(c ?? -1);
+    });
+  });
+}
+
 /** The machine's mean CPU load over `ms`, all cores, percent. */
 export async function cpuLoad(ms: number): Promise<number> {
   const snap = () => os.cpus().reduce((a, c) => ({ idle: a.idle + c.times.idle, all: a.all + c.times.idle + c.times.user + c.times.sys + c.times.irq + c.times.nice }), { idle: 0, all: 0 });
@@ -972,14 +996,7 @@ export class TimedRunner {
     const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, env, stdio: 'ignore', windowsHide: false })))(launch.cmd, launch.args, path.dirname(exe));
     this.child = child;
     const bound = legTimeoutS(o.settings) * 1000;
-    const code = await new Promise<number | string>((resolve) => {
-      const timer = setTimeout(() => {
-        // As before, the leg ends once the tree is ended (taskkill answered), not while it still runs.
-        void killTree(child).then(() => resolve('timeout'));
-      }, bound);
-      child.on('error', (e) => (clearTimeout(timer), resolve(`error: ${e.message}`)));
-      child.on('exit', (c) => (clearTimeout(timer), resolve(c ?? -1)));
-    });
+    const code = await legExit(child, bound);
     this.child = undefined;
     running = false;
     await sampler;
