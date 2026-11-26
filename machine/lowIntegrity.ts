@@ -358,16 +358,56 @@ export const readOnlyGrants = (account: string) => ['/inheritance:r', '/grant:r'
  * `Everyone:(F)` beside the OWNER RIGHTS entry is not read-only). Exported for tests.
  */
 export function isReadOnlyCopy(icaclsOut: string): boolean {
-  if (!/OWNER RIGHTS:\(RX\)/i.test(icaclsOut) || /\(I\)/.test(icaclsOut)) return false;
-  for (const line of icaclsOut.split(/\r?\n/)) {
-    const m = /^(.*):((?:\([A-Z]+(?:,[A-Z]+)*\))+)\s*$/.exec(line.trim());
-    if (!m || /Mandatory Label\\/i.test(m[1])) continue;
-    if (m[2] === '(RX)') continue;
-    if (m[2] === '(F)' && /(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators)$/i.test(m[1])) continue;
+  if (!/OWNER RIGHTS:\(RX\)/i.test(icaclsOut) || /\(I\)/i.test(icaclsOut)) return false;
+  for (const raw of icaclsOut.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^Successfully processed /i.test(line)) continue;
+    // w5904: icacls prints some rights in mixed case (`Rc`), and a line it cannot read is not read-only.
+    const m = /^(.*):((?:\([A-Za-z]+(?:,[A-Za-z]+)*\))+)$/.exec(line);
+    if (!m) return false;
+    if (/Mandatory Label\\/i.test(m[1])) continue;
+    const rights = m[2].toUpperCase();
+    if (rights === '(RX)') continue;
+    if (rights === '(F)' && /(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators)$/i.test(m[1])) continue;
     return false;
   }
   return true;
 }
+
+/**
+ * The PowerShell that locks a new copy in one call (w5904): the read-only access list (readOnlyGrants' entries, the
+ * account by the daemon's own SID) and the Low label are set together by SetNamedSecurityInfoW, on the `.part` while it
+ * is still Medium, so a Low worker never sees it labelled Low and writable: icacls sets them in two calls, and a write
+ * handle or an entry a worker adds between them survives the second (measured by w5904 on BEAST). Prints `ok` or
+ * `err <win32 error>`. Exported for tests.
+ */
+export function lockCopyScript(p: string): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public static class FfLock {',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint rev, out IntPtr sd, IntPtr size);',
+    '  [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);',
+    '  [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorDacl(IntPtr sd, out bool present, out IntPtr dacl, out bool defaulted);',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] public static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);',
+    '  [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);',
+    '  public static uint Set(string path, string sddl) {',
+    '    IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();',
+    '    try { bool p, d; IntPtr dacl, sacl;',
+    '      if (!GetSecurityDescriptorDacl(sd, out p, out dacl, out d) || !GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();',
+    // DACL (0x4) + LABEL (0x10) + PROTECTED_DACL (0x80000000): one call, no inherited entries.
+    '      return SetNamedSecurityInfoW(path, 1, 0x80000014, IntPtr.Zero, IntPtr.Zero, dacl, sacl); } finally { LocalFree(sd); }',
+    '  }',
+    '}',
+    '"@',
+    '$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    "$r = [FfLock]::Set(" + psqLock(p) + ", \"D:P(A;;0x1200a9;;;OW)(A;;0x1200a9;;;$sid)(A;;FA;;;SY)(A;;FA;;;BA)S:(ML;;NW;;;LW)\")",
+    "if ($r -eq 0) { 'ok' } else { 'err ' + $r }",
+  ].join('\n');
+}
+
+const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 /**
  * The Low-labelled copies of claude, node and gh in `<root>\tools\low` the daemon runs (w5333, w5540, w5430): a process
@@ -453,12 +493,22 @@ export class LowCopies {
       const part = `${copy}.part`;
       fs.rmSync(part, { force: true });
       fs.copyFileSync(exe, part);
+      // w5904: the access list and the Low label in one call, while the `.part` is still Medium (no label: a Low worker
+      // cannot open it for writing), and only then its name. icacls' two calls are the fallback, with a WARNING.
+      const ps = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(lockCopyScript(part), 'utf16le').toString('base64')]);
+      const locked = ps.code === 0 && /^ok$/m.test(ps.stdout);
+      if (!locked) this.say(`worker integrity: WARNING: could not lock the Low copy ${copy} in one call (${(ps.stderr || ps.stdout).trim().slice(-200) || 'no answer'}); labelled and made read-only in two, so a Low worker may write it in between (w5904)`);
       fs.renameSync(part, copy);
-      const r = this.exec('icacls', [copy, '/setintegritylevel', 'low']);
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
-      const g = this.account ? this.exec('icacls', [copy, ...readOnlyGrants(this.account)]) : undefined;
-      const readOnly = g?.code === 0 && isReadOnlyCopy(this.exec('icacls', [copy]).stdout);
-      if (!readOnly) this.say(`worker integrity: WARNING: could not make the Low copy ${copy} read-only (${g ? (g.stderr || g.stdout).trim().slice(-200) || 'its access list still lets someone write it' : 'no account name'}); it is hashed in full before every run, as every copy is (w5838)`);
+      let g: Ran | undefined;
+      if (!locked) {
+        const r = this.exec('icacls', [copy, '/setintegritylevel', 'low']);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
+        g = this.account ? this.exec('icacls', [copy, ...readOnlyGrants(this.account)]) : undefined;
+      }
+      const now = this.exec('icacls', [copy]);
+      if (now.code !== 0 || !isExplicitLow(now.stdout)) throw new Error(`it is not labelled Low (${(now.stderr || now.stdout).trim().slice(-200)})`);
+      const readOnly = (locked || g?.code === 0) && isReadOnlyCopy(now.stdout);
+      if (!readOnly) this.say(`worker integrity: WARNING: could not make the Low copy ${copy} read-only (${g ? (g.stderr || g.stdout).trim().slice(-200) || 'its access list still lets someone write it' : locked ? 'its access list still lets someone write it' : 'no account name'}); it is hashed in full before every run, as every copy is (w5838)`);
       // Checked once it is labelled and read-only, so nothing written before that is run.
       if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
       this.copies.set(copy, { source: exe, readOnly });
