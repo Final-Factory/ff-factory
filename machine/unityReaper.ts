@@ -93,7 +93,8 @@ export interface ReaperDeps {
   places(): ReaperPlace[];
   /** Last write time of a file, or undefined. */
   mtime(file: string): number | undefined;
-  kill(pid: number): void;
+  /** w5973: may answer later (Windows' taskkill, off the daemon's loop); awaited. */
+  kill(pid: number): unknown;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -375,7 +376,7 @@ export class UnityReaper {
     const d = this.d;
     const { kill, spared } = editorTree(procs, u.pid, place.path, d.platform);
     // Children first, so the build cannot start another one while it dies.
-    for (const pid of [...kill].reverse()) d.kill(pid);
+    for (const pid of [...kill].reverse()) await d.kill(pid);
     await d.sleep(1_500);
     const after = await d.procs();
     const left = unityProcesses(after, d.platform).filter((x) => x.project && pathKey(x.project, d.platform) === pathKey(place.path, d.platform));
@@ -394,7 +395,7 @@ export class UnityReaper {
     const wrapper = procs.find((p) => p.pid === u.ppid && isSlotWrapper(p.cmd));
     if (wrapper && after.some((p) => p.pid === wrapper.pid && p.cmd === wrapper.cmd)) {
       if (ownerOf(wrapper, after, new Map(), d.platform).gone) {
-        d.kill(wrapper.pid);
+        await d.kill(wrapper.pid);
         wrapperNote = `; ended its unity-slot wrapper (pid ${wrapper.pid}), left with nobody`;
       } else wrapperNote = `; its unity-slot wrapper (pid ${wrapper.pid}) tells its caller`;
     } else if (wrapper) wrapperNote = `; its unity-slot wrapper (pid ${wrapper.pid}) ended with it`;

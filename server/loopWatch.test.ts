@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { LOOP_BEAT_MS, LOOP_SUMMARY_MS, LoopWatch, beatWasLate, linkBeat } from './loopWatch.ts';
+import { LOOP_BEAT_MS, LOOP_SUMMARY_MS, LoopWatch, beatWasLate, linkBeat, loopLabel, loopRun } from './loopWatch.ts';
 
 test('w1377: beatWasLate tells a timer the event loop held up from one on time', () => {
   assert.equal(beatWasLate(20_000, 0, 20_000), false, 'on time');
@@ -95,4 +95,40 @@ test('w4926: the daemon\'s loop watch names the daemon and logs only blocks of i
   w.beat();
   assert.equal(lines.length, 1);
   assert.match(lines[0], /^event loop: blocked for 50\.0 s .*: the daemon answered nothing meanwhile$/);
+});
+
+test('w5973: the stall line names the labelled run that held the loop longest, else the last one that ran', () => {
+  let t = 0;
+  let clock = 0;
+  const lines: string[] = [];
+  const w = new LoopWatch({ now: () => t, log: (l) => lines.push(l), who: 'the daemon', stallLogMs: 5000 });
+  // A quick timer, then the 30 s gh fetch, then another quick one: the line names the long one, with its own time.
+  loopRun('timer pool.tick', () => (clock += 20), () => clock);
+  loopRun('link bench_ticket', () => (clock += 30_000), () => clock);
+  loopRun('timer slotTick', () => (clock += 5), () => clock);
+  t += LOOP_BEAT_MS + 30_100;
+  w.beat();
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^event loop: blocked for 30\.1 s .*: the daemon answered nothing meanwhile; longest labelled run: link bench_ticket 30\.0 s$/);
+  // A block no labelled run accounts for (time after an await): the line names what ran last.
+  loopLabel('timer reaper.tick', () => undefined)();
+  for (let i = 0; i < 11; i++) {
+    t += LOOP_BEAT_MS;
+    w.beat();
+  }
+  t += LOOP_BEAT_MS + 8000;
+  w.beat();
+  assert.equal(lines.length, 2);
+  assert.match(lines[1], /^event loop: blocked for 8\.0 s .*; last ran: timer reaper\.tick$/);
+  // The record is per beat: a long run before an on-time beat is not blamed for a later block.
+  loopRun('timer long', () => (clock += 9000), () => clock);
+  t += LOOP_BEAT_MS;
+  w.beat();
+  for (let i = 0; i < 11; i++) {
+    t += LOOP_BEAT_MS;
+    w.beat();
+  }
+  t += LOOP_BEAT_MS + 6000;
+  w.beat();
+  assert.match(lines[2], /; last ran: timer long$/);
 });
