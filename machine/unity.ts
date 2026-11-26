@@ -39,7 +39,8 @@ export interface UnityDeps {
   /** Every process: pid, parent, full command line. */
   procs(): Promise<Proc[]>;
   /** Why the signal could not be sent, when the platform says; nothing when sent or already gone (w1983). */
-  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
+  /** w5973: may answer later (Windows' taskkill runs as a child the daemon's loop does not wait on); callers await it. */
+  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void | Promise<string | void>;
   /** Start the editor detached; its pid (the Windows launch goes through PowerShell, so it may be a promise). */
   launch(bin: string, args: string[], cwd: string, env?: Record<string, string>): number | Promise<number>;
   /**
@@ -464,7 +465,7 @@ export class MacUnity {
     const notes: string[] = [];
     if (!eds.length) notes.push('no editor was running');
     if (eds.length && !opts.force) {
-      for (const e of eds) this.d.kill(e.pid, 'SIGTERM');
+      for (const e of eds) await this.d.kill(e.pid, 'SIGTERM');
       const until = this.d.now() + (opts.graceMs ?? 30_000);
       while (this.d.now() < until) {
         await this.d.sleep(1000);
@@ -478,7 +479,7 @@ export class MacUnity {
       const trees = left.map((e) => editorTree(procs, e.pid, this.repo, this.platform));
       const pids = [...new Set(trees.flatMap((t) => t.kill))];
       const spared = trees.flatMap((t) => t.spared);
-      for (const pid of pids) this.d.kill(pid, 'SIGKILL');
+      for (const pid of pids) await this.d.kill(pid, 'SIGKILL');
       notes.push(`${opts.force ? 'force-killed' : 'did not quit in time; force-killed'} pid ${left.map((e) => e.pid).join(', ')} and ${pids.length - left.length} process(es) it started`);
       if (spared.length) notes.push(`left running what it started that is not part of it: ${spared.join(', ')}`);
       for (let i = 0; i < 15; i++) {
@@ -488,7 +489,7 @@ export class MacUnity {
       }
     }
     const reporters = this.reporters(procs);
-    for (const r of reporters) this.d.kill(r.pid, 'SIGKILL');
+    for (const r of reporters) await this.d.kill(r.pid, 'SIGKILL');
     if (reporters.length) notes.push(`closed ${reporters.length} crash reporter(s)`);
     procs = await this.d.procs();
     if (this.editors(procs).length) throw new Error(`the editor is still running after SIGKILL (${notes.join('; ')})`);
@@ -639,11 +640,12 @@ export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string)
       return parseWinProcs(r.stdout);
     },
     // taskkill without /F asks the program to close (the editor may save and quit); /F ends it at once.
-    kill: (pid, signal) => {
+    kill: async (pid, signal) => {
       // w1983: taskkill's own words when it fails (not "not found": already gone), for the leftover watch to say.
-      const r = spawnSync('taskkill.exe', ['/PID', String(pid), ...(signal === 'SIGKILL' ? ['/F'] : [])], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
-      if (r.status === 0) return;
-      const why = `${r.stderr ?? ''} ${r.stdout ?? ''}`.replace(/\s+/g, ' ').trim() || (r.error ? String(r.error.message) : `taskkill exit ${r.status}`);
+      // w5973: run() (execFile), not spawnSync: each call held the daemon's loop for up to 15 s in the reapers.
+      const r = await run('taskkill.exe', ['/PID', String(pid), ...(signal === 'SIGKILL' ? ['/F'] : [])], { timeoutMs: 15_000 });
+      if (r.code === 0) return;
+      const why = `${r.stderr ?? ''} ${r.stdout ?? ''}`.replace(/\s+/g, ' ').trim() || `taskkill exit ${r.code}`;
       return /not found/i.test(why) ? undefined : `taskkill: ${why}`;
     },
     launch: async (bin, args, cwd, env) => {
