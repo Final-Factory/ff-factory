@@ -32,7 +32,7 @@ import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSetting
 import { slotsPointer } from '../../machine/unitySlots.ts';
 import { FFU_SERVER_GROUP, ffuServerExes } from '../../machine/ffuSlots.ts';
 import { rootBackupOf } from '../../machine/selfUpdate.ts';
-import { LIGHT_DIR, isLightId, reposIn } from '../../machine/lightFolders.ts';
+import { LIGHT_DIR, isLightId, scanRepos } from '../../machine/lightFolders.ts';
 import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
@@ -2550,10 +2550,14 @@ export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]>
   const out: SandboxRisk[] = [];
   if (!fs.existsSync(sandboxesDir)) return out;
   // w5924: the clones a worker made in a light agent folder (agent-work/agentN): the folder itself or up to 3 levels down,
-  // found by the same scan the daemon runs before it deletes one (reposIn).
+  // found by the same scan the daemon runs before it deletes one (scanRepos). A folder it could not search to the end is a
+  // risk too (w6031): a clone may sit in it.
   const lightDir = path.join(sandboxesDir, LIGHT_DIR);
   const repos: [string, string][] = fs.readdirSync(sandboxesDir).filter((n) => n !== LIGHT_DIR).map((n) => [n, path.join(sandboxesDir, n)]);
-  for (const repo of reposIn(lightDir, 4)) repos.push([path.relative(sandboxesDir, repo).split(path.sep).join('/'), repo]);
+  const scan = scanRepos(lightDir, 4);
+  const rel = (p: string) => path.relative(sandboxesDir, p).split(path.sep).join('/');
+  for (const repo of scan.repos) repos.push([rel(repo), repo]);
+  for (const d of scan.unsure) out.push({ sandbox: rel(d), unpushed: ['(not searched: it holds folders deeper than the scan looks for clones; check it by hand)'], dirty: [] });
   for (const [name, dir] of repos) {
     if (!fs.existsSync(path.join(dir, '.git'))) continue;
     // A slot repo (w5614, its .git a folder) holds its other branches and its stash itself, not in the kept clone.
