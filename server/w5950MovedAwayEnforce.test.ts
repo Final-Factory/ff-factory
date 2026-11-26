@@ -283,3 +283,64 @@ test('w5950 (the w5975 review, finding 1): a second hello while the worker is be
   assert.equal(saves.length, 1);
   assert.equal(sent.length, 1);
 });
+
+const retiringOf = (agents: Agents) => (agents as unknown as { retiring: Map<string, string[]> }).retiring;
+
+test('w6047 (the w5995 review of #1330, finding 1): a hello that finds the worker live while a "not resumed" retire is under way stops it, without a second save or message', async (t) => {
+  const { agents, sent, saves, worker, live, request, sandbox, settle, reports } = await setup(t);
+  const oldInfo = worker('d732483b', { status: 'running', machineId: 'beast', machineSandbox: 'slot2', movedAway: MOVED });
+  live(worker('0b7e41c2', { status: 'running', machineId: 'biscuit', machineSandbox: 'slot3', turns: 2 }));
+  sandbox('beast', 'slot2', ['d732483b']);
+  request(['0b7e41c2'], { d732483b: MOVED.at });
+  // beast dropped: a resume would wake it, so it is "not resumed"; its retire saves its sandbox (an await) ...
+  assert.equal(agents.enforceMovedAway('beast', ['d732483b'], 'resume').size, 1);
+  assert.ok(retiringOf(agents).has('d732483b'), 'the retire is under way');
+  // ... while beast's daemon says hello with the worker still running.
+  const oldH = live(oldInfo);
+  const again = agents.enforceMovedAway('beast', ['d732483b'], 'live');
+  assert.deepEqual([...again], [['d732483b', ['0b7e41c2']]]);
+  await settle(() => !retiringOf(agents).has('d732483b'));
+  assert.equal(oldH.stops, 1, 'the live process is stopped');
+  assert.equal(oldH.live, false);
+  assert.equal(saves.length, 1, 'saved once');
+  assert.equal(sent.length, 1, 'its new worker told once');
+  assert.match(reports.join('\n'), /retired already, were still running and are stopped: d732483b/);
+});
+
+test('w6047 (the w5995 review of #1330, finding 2): a check after the retire has ended never saves or tells again; a process still live is stopped', async (t) => {
+  const { store, agents, sent, saves, worker, live, request, sandbox, settle } = await setup(t);
+  const oldH = live(worker('d732483b', { status: 'running', machineId: 'beast', machineSandbox: 'slot2', movedAway: MOVED }));
+  live(worker('0b7e41c2', { status: 'running', machineId: 'biscuit', machineSandbox: 'slot3', turns: 2 }));
+  sandbox('beast', 'slot2', ['d732483b']);
+  request(['0b7e41c2'], { d732483b: MOVED.at });
+  agents.enforceMovedAway('beast', ['d732483b'], 'live');
+  await settle(() => !retiringOf(agents).has('d732483b'));
+  assert.equal(saves.length, 1);
+  assert.equal(sent.length, 1);
+  assert.ok(store.sessions.get('d732483b')!.movedAway?.retired, 'marked retired');
+  // A later resume check: not resumed, nothing again.
+  assert.deepEqual([...agents.enforceMovedAway('beast', ['d732483b'], 'resume')], [['d732483b', ['0b7e41c2']]]);
+  // A later hello still reports it running: stopped, nothing again.
+  oldH.live = true;
+  assert.deepEqual([...agents.enforceMovedAway('beast', ['d732483b'], 'live')], [['d732483b', ['0b7e41c2']]]);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(oldH.stops, 2, 'stopped again');
+  assert.equal(saves.length, 1, 'never saved twice');
+  assert.equal(sent.length, 1, 'never told twice');
+});
+
+test('w6047: a retired worker whose new worker is gone is kept running, not stopped (refuse over kill)', async (t) => {
+  const { store, agents, worker, live, request, sandbox, settle } = await setup(t);
+  const oldH = live(worker('d732483b', { status: 'running', machineId: 'beast', machineSandbox: 'slot2', movedAway: MOVED }));
+  const heirH = live(worker('0b7e41c2', { status: 'running', machineId: 'biscuit', machineSandbox: 'slot3', turns: 2 }));
+  sandbox('beast', 'slot2', ['d732483b']);
+  request(['0b7e41c2'], { d732483b: MOVED.at });
+  agents.enforceMovedAway('beast', ['d732483b'], 'live');
+  await settle(() => !retiringOf(agents).has('d732483b'));
+  // The new worker errored since; the old one runs again.
+  heirH.live = false;
+  store.putSession({ ...store.sessions.get('0b7e41c2')!, status: 'error' });
+  oldH.live = true;
+  assert.equal(agents.enforceMovedAway('beast', ['d732483b'], 'live').size, 0, 'kept');
+  assert.equal(oldH.stops, 1, 'not stopped again');
+});

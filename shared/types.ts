@@ -359,7 +359,16 @@ export interface SessionInfo {
    * in that machine's queue are marked away there (Agents.benchPriorities) for BENCH_MOVED_AWAY_MS, so they hold nobody
    * back while its old processes wind down.
    */
-  movedAway?: { machine: string; to: string; at: string };
+  movedAway?: {
+    machine: string;
+    to: string;
+    at: string;
+    /**
+     * w6047: when w5950's enforcing retired it (Agents.retireMovedAway: saved, its new workers told). A later hello or resume
+     * check only stops a process of it still live; it is never saved or its new workers told a second time.
+     */
+    retired?: string;
+  };
   /**
    * Machine sessions (w613): its process ended because its daemon went away (a worker update, a restart, a crash) and
    * not on purpose, at this time. Its sandbox stays its (holdsSandbox, shared/agentState.ts) until it is messaged, stopped

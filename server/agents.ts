@@ -3985,7 +3985,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /** w2046: resumes being moved to a computer with room: session id to the messages that go with it and where it goes. */
-  private readonly roomMoving = new Map<string, { to: string; texts: string[] }>();
+  private readonly roomMoving = new Map<string, { to: string; texts: string[]; first?: QueuedSend }>();
   /** w5950: moved-away workers being retired now (retireMovedAway), with their new workers: retired once (the w5975 review). */
   private readonly retiring = new Map<string, string[]>();
   /** w2046: the last stay or wait reason journalled for a worker whose resume did not move, so each is logged once. */
@@ -3994,6 +3994,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private readonly roomStuck = new Map<string, string>();
   /** w5942: each request's last move and the computers whose daemon refused a start at its cap, so a request moves at most once per wait. */
   readonly moveGuard = new MoveGuard();
+
+  /** A message that arrived while its worker's move runs goes with the move (w2046); the first is kept for its sender (w6047). */
+  private absorbMoved(moving: { texts: string[]; first?: QueuedSend }, q: QueuedSend) {
+    moving.texts.push(movedText(q));
+    moving.first ??= q;
+  }
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -4010,7 +4016,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (away) {
       const moving = this.roomMoving.get(info.id);
       if (moving) {
-        moving.texts.push(movedText(q));
+        this.absorbMoved(moving, q);
         return true;
       }
       if (isMidTurn(info) || info.pendingPermissions.length) return undefined;
@@ -4018,7 +4024,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     }
     const moving = this.roomMoving.get(info.id);
     if (moving) {
-      moving.texts.push(movedText(q));
+      this.absorbMoved(moving, q);
       return true;
     }
     if (now - (Date.parse(q.at) || now) < MOVE_AFTER_MS || info.pendingPermissions.length || isMidTurn(info)) return undefined;
@@ -4106,7 +4112,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (on.machines.includes(here)) return undefined;
     const moving = this.roomMoving.get(info.id);
     if (moving) {
-      moving.texts.push(movedText(q));
+      this.absorbMoved(moving, q);
       return true;
     }
     const forget = () => {
@@ -4392,18 +4398,29 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const taken = new Map<string, string[]>();
     const kept: string[] = [];
     const busy = new Map<string, string[]>();
+    const stoppedAgain: string[] = [];
     for (const sid of sids) {
       const info = this.store.sessions.get(sid);
       const m = info?.movedAway;
       if (!info || !m) continue;
       const going = this.retiring.get(sid);
-      if (going) {
-        busy.set(sid, going);
-        continue;
-      }
       const { facts, moved } = this.movedAwayFacts(info);
       const v = movedAwayVerdict(facts);
       const name = `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
+      // w6047 (the w5995 review of #1330): a worker being retired now, or retired already, is never saved or its new workers
+      // told again. A hello that finds it running still (a "not resumed" retire under way, or a process that outlived the
+      // retire) stops it, but only while the verdict still says every request of it has a started new worker; else the
+      // running copy is kept, as any kept worker is.
+      if (going || (m.retired && v.act === 'enforce')) {
+        const to = going ?? [...new Set((v as { heirs: { heir: string }[] }).heirs.map((x) => x.heir))];
+        if (how === 'live' && this.sessions.sessions.get(sid)?.live) {
+          if (v.act === 'enforce') {
+            if (this.stopRetiredLive(info, machineId, to.join(', '))) stoppedAgain.push(`${sid} (its requests are with ${to.join(', ')})`);
+          } else kept.push(`${name}: kept running while its retire ends, ${v.why}`);
+        }
+        busy.set(sid, to);
+        continue;
+      }
       if (v.act === 'undo') {
         // (a): the w3425 check first: a move that never happened leaves this worker the only one on its requests.
         const undone = this.awayMoveUndone(info, machineId, how === 'live' ? `its daemon reports it running on ${machineId}` : `a resume on ${machineId} found it holding them`);
@@ -4429,9 +4446,28 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       console.log(`machines: ${machineId}: moved-away worker(s) ${how === 'live' ? 'stopped' : 'not resumed'} (w5950): ${line}`);
       this.machines.report?.(`[machines] ${machineId}: ${taken.size} worker(s) whose work moved elsewhere ${how === 'live' ? 'were still running and are stopped' : 'are not resumed'}: ${line}. Their sandboxes' work goes to a side branch and their new workers are told (w5950).`);
     }
-    // The w5975 review's finding 1: a second hello or resume while one is being retired neither stops nor saves it again.
+    if (stoppedAgain.length) {
+      console.log(`machines: ${machineId}: moved-away worker(s) retired already but still running are stopped (w6047): ${stoppedAgain.join(', ')}`);
+      this.machines.report?.(`[machines] ${machineId}: ${stoppedAgain.length} worker(s) whose work moved elsewhere, retired already, were still running and are stopped: ${stoppedAgain.join(', ')}. Nothing was saved or told again (w6047).`);
+    }
+    // The w5975 review's finding 1: a second hello or resume while one is being retired neither saves nor tells it again.
     for (const [sid, to] of busy) taken.set(sid, to);
     return taken;
+  }
+
+  /**
+   * w6047: stop the still-running process of moved-away worker `info`, which retireMovedAway retires now or retired already
+   * (its sandbox saved, its new workers `heirs` told once): its check-in goes and it is retired when free. Nothing is saved or
+   * told again. False when it runs no process here.
+   */
+  private stopRetiredLive(info: SessionInfo, machineId: string, heirs: string): boolean {
+    const h = this.sessions.sessions.get(info.id);
+    if (!h?.live) return false;
+    this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its work moved to ${info.movedAway?.to ?? 'another computer'} and is with ${heirs} now, but ${machineId}'s daemon reports it running while it is retired (w6047).` });
+    h.stop(true);
+    this.waker.cancel(info.id);
+    this.orchestrators.retireWhenFree(info.id);
+    return true;
   }
 
   /**
@@ -4446,7 +4482,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const to = info.movedAway?.to ?? 'another computer';
     this.waker.cancel(info.id);
     const h = this.sessions.sessions.get(info.id);
-    if (how === 'live' && h?.live) {
+    // w6047: a "not resumed" retire that finds the process live after all stops it too, as a hello would.
+    if (h?.live) {
       this.store.append(info.id, { kind: 'system', text: `Stopped by FF Factory: its work moved to ${to} and is with ${heirs} now, but ${machineId}'s daemon came back still running it (w5950).` });
       h.stop(true);
       for (let n = 0; n < 40 && this.sessions.sessions.get(info.id)?.live; n++) await new Promise((r) => setTimeout(r, 250));
@@ -4480,6 +4517,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return id ? this.store.sessions.get(id) : undefined;
     });
     this.store.append(info.id, { kind: 'system', text: `Its requests ${moved.map((w) => w.id).join(', ')} are with ${heirs}: ${saved}; ${told.length ? `told ${told.join(', ')}` : 'its new workers could not be told'} (w5950).` });
+    // w6047: retired once. A later check stops a process of it still running but never saves or tells again.
+    const now = this.store.sessions.get(info.id);
+    if (now?.movedAway) {
+      now.movedAway = { ...now.movedAway, retired: new Date().toISOString() };
+      this.store.putSession(now);
+    }
     this.orchestrators.retireWhenFree(info.id);
   }
 
@@ -4542,7 +4585,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * work) or on an agent seat (work in its own clone), with a hand-off carrying its last report, its brief and the waiting
    * message. Its other open requests, and the request itself when the start fails, go back to the dispatcher Queued for `to`.
    */
-  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend) {
+  private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; first?: QueuedSend; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend): Promise<'moved' | 'given back' | 'handed back' | 'nothing'> {
     const from = `${info.machineId}/${info.machineSandbox}`;
     const reason = entry.reason ?? `${hold}, and ${to} has room (w2046)`;
     const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
@@ -4573,6 +4616,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     this.waker.cancel(info.id);
     this.store.append(info.id, { kind: 'system', text: `Its work moved to ${to}: ${reason}. Its sandbox ${from} is released${saved ? ` (${saved})` : ''}; FF Factory ends what it left running there, and its temp folder goes by itself. Its requests go on in a fresh session on ${to}.` });
     const message = entry.texts.join('\n\n---\n\n');
+    // w6047: messages that come while the fresh session starts (absorbed into entry.texts after `message` was taken) go too.
+    const taken = entry.texts.length;
     const primary = reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
     const back = (w: WorkItem, note: string, msg?: string) => this.orchestrators?.handBack(w, info, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(msg ? { message: msg } : {}), to });
@@ -4596,14 +4641,33 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
         if (undo) others();
+        const late = entry.texts.slice(taken);
+        if (late.length) this.forwardLate(info, primary, late, q ?? entry.first);
       } catch (e) {
         const err = (e as Error).message;
-        if (undo) return this.giveBack(info, reqs, before, to, err, q, entry.texts);
+        if (undo) {
+          this.giveBack(info, reqs, before, to, err, q ?? entry.first, entry.texts, { how, to });
+          return 'given back';
+        }
         console.warn(`room move: starting ${primary.id} on ${to} failed (${err}); handed back to the dispatcher, Queued for ${to}`);
-        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, message);
+        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, entry.texts.join('\n\n---\n\n') || undefined);
+        this.orchestrators?.retireWhenFree(info.id);
+        return 'handed back';
       }
     } else if (undo) others();
     this.orchestrators?.retireWhenFree(info.id);
+    return primary ? 'moved' : 'nothing';
+  }
+
+  /**
+   * w6047 (the w5995 review): messages for a moved worker that came while its fresh session started, after the hand-off's
+   * message was taken. They were absorbed into the move (roomMove answered true), so they go to the request's new worker now
+   * (forwardToHeirs, as a later message to the old worker would), never dropped.
+   */
+  private forwardLate(info: SessionInfo, primary: WorkItem, late: string[], q: QueuedSend | undefined) {
+    const lq: QueuedSend = { uuid: `w6047-late-${info.id}-${Date.now()}`, id: info.id, text: late.join('\n\n---\n\n'), from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), at: new Date().toISOString(), why: 'came during its move (w6047)' };
+    const to = this.forwardToHeirs(info, [primary], lq);
+    if (!to.length) console.warn(`room move: ${late.length} message(s) that came for worker ${info.id} during its move reached no new worker of ${primary.id} (w6047)`);
   }
 
   /**
@@ -4613,18 +4677,21 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * computer, with the message the move took (SessionManager.putBack); `to` is no move target for REFUSED_FOR_MS, so the next
    * drain does not try the same start again, and the worker is not retired.
    */
-  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[]) {
+  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[], move: { how: string; to: string }) {
     const why = `its new session on ${to} did not start (${err})`;
     console.warn(`room move: starting ${reqs.map((w) => w.id).join(', ')} on ${to} failed (${err}); given back to worker ${info.id} on ${info.machineId}/${info.machineSandbox} (w5976)`);
     this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
-    for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why);
+    for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why, move);
     delete info.movedAway;
     this.store.putSession(info);
     this.store.append(info.id, { kind: 'system', text: `Its work stays with it: ${why}. Its sandbox stays released; it resumes when one frees on ${info.machineId} (w5976).` });
     if (q) {
       // One message goes back as it was, with its attachments (w5995). Several joined ones carry each one's attachment ids as
       // text (movedText), so the joined message carries none of its own.
-      const back: QueuedSend = texts.length > 1 ? { ...q, text: texts.join('\n\n---\n\n') } : q;
+      // w6047: a pre-empt passes no message of its own (q is the first absorbed one, its text in texts already), so the
+      // texts are what goes back whenever q's own text is not the one message.
+      const own = texts.length === 1 && texts[0] === movedText(q);
+      const back: QueuedSend = own || !texts.length ? q : { ...q, text: texts.join('\n\n---\n\n') };
       if (back !== q) delete back.attachments;
       this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
     }
@@ -5065,13 +5132,17 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       }
       const reqs = this.openWorkOf(info);
       const lead = `[moved, w2055] FF Factory moved ${reqs.map((x) => x.id).join(', ')} to this computer between turns: its worker ${info.id} on ${from} held the slot timed leg ${w.id} needed (${why}). lothsahn: "If timing runs arrive and small machines (single slot) are working on non timing work, the dispatcher should pre-empt their existing work and move it to make space for the timing work". That worker is stopped (its work was all committed and pushed) and its sandbox released; you carry its work on from where it left off. The handover below says where its work is (its branch, pushed).`;
-      this.roomMoving.set(info.id, { to: v.move!, texts: [] });
+      // w6047 (the w5995 review): one entry, so a message absorbed while it moves (roomMove) goes with the move.
+      const entry: { to: string; texts: string[]; first?: QueuedSend; how: string; lead: string } = { to: v.move!, texts: [], how: `moved by FF Factory: its slot went to timed leg ${w.id} (w2055)`, lead };
+      this.roomMoving.set(info.id, entry);
+      let done: Awaited<ReturnType<Agents['moveForRoom']>>;
       try {
-        await this.moveForRoom(info, reqs, v.move!, `pre-empted for timed leg ${w.id} (w2055)`, hold, { texts: [], how: `moved by FF Factory: its slot went to timed leg ${w.id} (w2055)`, lead });
+        done = await this.moveForRoom(info, reqs, v.move!, `pre-empted for timed leg ${w.id} (w2055)`, hold, entry);
       } finally {
         this.roomMoving.delete(info.id);
       }
-      console.log(`timed preempt (w2055): worker ${info.id} on ${from} (${reqs.map((x) => x.id).join(', ')}) moved to ${v.move} so timed leg ${w.id} can start on ${machine}`);
+      const what = done === 'moved' ? `moved to ${v.move}` : done === 'given back' ? `stays its worker's (its move to ${v.move} did not start, w5976), its sandbox released` : done === 'handed back' ? `handed back to the dispatcher (its move to ${v.move} did not start)` : 'released';
+      console.log(`timed preempt (w2055): worker ${info.id} on ${from} (${reqs.map((x) => x.id).join(', ')}) ${what} so timed leg ${w.id} can start on ${machine}`);
     }
     // The sandbox the leg starts in: free now (a moved worker's release frees it as its process stops).
     let sb: MachineSandbox | undefined;

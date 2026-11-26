@@ -216,3 +216,98 @@ test('w5976 ("warn", the default): a failed start is handed back to the dispatch
   assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0);
   assert.deepEqual(agents.moveGuard.refusals(Date.now()), {});
 });
+
+// ---------------------------------------------------------------- w6047: the w5995 review's minor findings
+
+test('w6047 (finding 3): a start that goes through on a computer clears its cap refusal, never a moved session that did not start there', async () => {
+  const { MoveGuard } = await import('./resumeMove.ts');
+  const g = new MoveGuard();
+  const t0 = Date.now();
+  g.noteRefusal('beast', 'spawn failed', t0, 'a moved session did not start there');
+  g.startedOn('beast');
+  assert.match(g.refusals(t0 + 1000).beast ?? '', /a moved session did not start there .*w5976/, 'still no move target');
+  g.noteRefusal('lothdesktop', 'already 6 agents running', t0);
+  g.startedOn('lothdesktop');
+  assert.equal(g.refusals(t0 + 1000).lothdesktop, undefined, 'a cap refusal is over once a start goes through');
+});
+
+test('w6047 (finding 4, "on"): a hand-back made while the start was under way stands; the failed move does not undo it', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  x.startMoved = async (info, w) => {
+    // biscuit is paused meanwhile: its pause hands the request back to the dispatcher (w1532).
+    agents.orchestrators.handBack(w, info, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+    throw new Error('no agent seat there now');
+  };
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const w = store.work.get('w5869')!;
+  assert.equal(w.status, 'queued', 'Queued for the dispatcher, as the pause said');
+  assert.deepEqual(w.sessionIds, [], 'not linked back to the old worker');
+  assert.match(w.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
+  assert.match(w.log.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n'), /not given back to worker 5449aaaa .*handed back meanwhile/);
+  void sessions;
+});
+
+type PreemptInternals = Internals & {
+  preemptVerdict: () => { move?: string; release?: boolean; stays?: string };
+  runTimedLegStart: (w: WorkItem, machine: string, why: string, moves: readonly { session: string }[]) => Promise<void>;
+};
+
+/** A timed leg pre-empts biscuit's 5449aaaa (moved to beast); a message for it comes while the fresh session starts. */
+async function preemptLeg(t: Parameters<typeof setup>[0], mode: 'on' | 'warn', fail: boolean) {
+  const s = await setup(t, mode);
+  const x = s.agents as unknown as PreemptInternals;
+  const info = s.worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 3 });
+  s.store.putMachine({ id: 'biscuit', host: 'biscuit', portalUrl: 'x', sessionIds: [], sandboxes: [{ id: 'slot1', sessionIds: ['5449aaaa'] } as never] } as never);
+  s.request(['5449aaaa']);
+  const leg = s.request([], 'w6100');
+  x.preemptVerdict = () => ({ move: 'beast' });
+  (s.agents as unknown as { branchNow: () => string }).branchNow = () => 'w5869-fix';
+  (s.agents as unknown as { saveSandboxWork: () => Promise<unknown> }).saveSandboxWork = async () => ({ files: 0, pushed: true, notes: [] });
+  const plain = x.startMoved;
+  let late: QueuedSend | undefined;
+  x.startMoved = async (...a) => {
+    // The message comes while the fresh session starts: roomMove takes it into the move.
+    late = s.queued('5449aaaa', 'one more thing', Date.now());
+    assert.equal(s.roomMove(info, late, BISCUIT_FULL, Date.now()), true, 'taken into the move');
+    if (fail) throw new Error('its session new1 did not start: spawn failed');
+    return plain(...a);
+  };
+  const logs: string[] = [];
+  const log = console.log;
+  console.log = (...m: unknown[]) => void logs.push(m.join(' '));
+  try {
+    await x.runTimedLegStart(leg, 'biscuit', 'w6100 needs biscuit', [{ session: '5449aaaa' }]).catch(() => undefined);
+  } finally {
+    console.log = log;
+  }
+  return { ...s, logs };
+}
+
+test('w6047 (finding 5): a message that comes while a timed-leg pre-empt moves its worker goes to the new worker', async (t) => {
+  const { sent, logs } = await preemptLeg(t, 'on', false);
+  const to = sent.filter((m) => m.id === 'new1');
+  assert.equal(to.length, 1, 'forwarded to the new worker');
+  assert.match(to[0]!.text, /one more thing/);
+  assert.ok(logs.some((l) => /timed preempt .* moved to beast/.test(l)));
+});
+
+test('w6047 (finding 5, "on"): a pre-empt whose move does not start puts the message back for the old worker and says so', async (t) => {
+  const { sessions, store, logs } = await preemptLeg(t, 'on', true);
+  const back = sessions.queued().filter((m) => m.id === '5449aaaa');
+  assert.equal(back.length, 1, 'the message waits for the old worker again');
+  assert.equal(back[0]!.text, 'one more thing');
+  assert.deepEqual(store.work.get('w5869')!.sessionIds, ['5449aaaa']);
+  assert.ok(!logs.some((l) => /timed preempt .* moved to beast/.test(l)), 'no "moved to" after a give-back');
+  assert.ok(logs.some((l) => /timed preempt .* stays its worker's/.test(l)));
+});
+
+test('w6047 (finding 5, "warn"): a pre-empt whose move does not start hands the message back with the request', async (t) => {
+  const { store } = await preemptLeg(t, 'warn', true);
+  const w = store.work.get('w5869')!;
+  assert.equal(w.status, 'queued');
+  assert.match(w.handedBack?.message ?? '', /one more thing/, "the message rides the request's hand-off");
+});

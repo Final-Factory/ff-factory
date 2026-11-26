@@ -2231,10 +2231,19 @@ It is for your part of the work, not an answer to another worker's question.`;
    * hand-off and its Queued state undone. A request the move had not touched yet is left as it is. Without it the request sat
    * Queued with no worker while `s` kept its movedAway mark (the w5950 review: handBack before startMoved succeeds).
    */
-  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string) {
-    if (!isOpen(w)) return;
+  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string, move?: { how: string; to: string }): boolean {
+    if (!isOpen(w)) return false;
     const off = !w.sessionIds.includes(s.id);
-    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return;
+    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return false;
+    // w6047 (the w5995 review): a hand-back made while the start was under way (a pause, a stop_agent move_to) is not this
+    // move's: it stands, Queued for the dispatcher as it said, and is not undone. The move's own is the one with its how and to.
+    const hb = w.handedBack;
+    if (move && hb && hb.session === s.id && hb.at !== before.handedBack?.at && (hb.how !== move.how || hb.to !== move.to)) {
+      this.stamp(w, `not given back to worker ${s.id} (${why}): it was handed back meanwhile (${hb.how}), and that stands (w6047)`);
+      this.store.putWork(w);
+      console.log(`ledger: ${w.id}: not given back to worker ${s.id}: handed back meanwhile (${hb.how}) (w6047)`);
+      return false;
+    }
     if (off) w.sessionIds = [...w.sessionIds, s.id];
     w.links = { ...w.links, [s.id]: before.link ?? { at: this.now().toISOString(), how: 'sent' } };
     if (w.movedOff?.[s.id]) {
@@ -2251,6 +2260,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.stamp(w, `given back to worker ${s.id}: ${why} (w5976)`);
     this.store.putWork(w);
     console.log(`ledger: ${w.id}: given back to worker ${s.id}, its move did not start (w5976): ${why}`);
+    return true;
   }
 
   /**

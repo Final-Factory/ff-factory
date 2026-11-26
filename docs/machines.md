@@ -2761,6 +2761,17 @@ LothDesktop and Beast, not just when BEAST is full").
       whose start failed is no move target for `REFUSED_FOR_MS` ("a moved session did not start there … (w5976)",
       `MoveGuard.noteRefusal`), so the next drain moves it elsewhere or keeps it waiting, never the same start again. `"warn"`
       and `"off"` keep the hand-back. Tests: `server/w5976MoveGiveBack.test.ts`.
+    - **Retired once, and stopped when found running** (w6047, the w5995 review of #1330 and #1336): a retire marks the
+      worker `movedAway.retired` when it ends, and a later hello or resume check of it (or one while its retire runs) never
+      saves its sandbox or tells its new worker again. A hello that finds it running then (a "not resumed" retire under way,
+      or a process that outlived its retire) stops it (`Agents.stopRetiredLive`), but only while `movedAwayVerdict` still
+      says every request has a started new worker; otherwise it keeps running, reported as kept. A "not resumed" retire
+      that finds the process live stops it as a hello would. Under the w5976 give-back: `MoveGuard.startedOn` clears only a
+      cap refusal, never "a moved session did not start there" (that lasts `REFUSED_FOR_MS`); `moveUndone` leaves a
+      hand-back made while the start ran (a pause, a stop_agent move_to: another `how` or `to`) as it is; and a timed-leg
+      pre-empt shares its move entry with `roomMove`, so a message that comes during any move goes with it (to the new
+      worker on a start, `forwardLate`; back to the old one on a give-back; in the hand-off on a hand-back), and its log
+      says which happened. Tests: the w6047 ones in `server/w5950MovedAwayEnforce.test.ts` and `server/w5976MoveGiveBack.test.ts`.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
