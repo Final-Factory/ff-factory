@@ -209,7 +209,7 @@ test('w6044: a pass waits for the first step alone to end before it starts', asy
   assert.deepEqual(overlap.filter(Boolean), [], 'no pass ran beside the alone step');
 });
 
-test('w6044: firstAlonePass removes nothing in stage 3a, and mode off plans nothing', async () => {
+test('w6044: firstAlonePass removes a released target with mode on, says it in dry-run, and plans nothing with mode off', async () => {
   const fs = await import('node:fs');
   const os = await import('node:os');
   const path = await import('node:path');
@@ -229,11 +229,24 @@ test('w6044: firstAlonePass removes nothing in stage 3a, and mode off plans noth
     assert.equal(await firstAlonePass({ mode: 'off', root: [root], guard, first }), undefined);
     assert.equal(await firstAlonePass({ mode: 'on', guard, first }), undefined, 'no root: nothing');
     assert.equal(planned, 0, 'mode off or no root plans nothing');
-    const r = await firstAlonePass({ mode: 'on', root: [root], guard, first });
+    const d = await firstAlonePass({ mode: 'dry-run', root: [root], guard, first });
     assert.equal(planned, 1);
-    assert.deepEqual(said, [undefined], 'said, not removed');
-    assert.equal(r?.removed.length, 0);
-    assert.ok(fs.existsSync(t), 'the target stays in stage 3a');
+    assert.deepEqual(said, [undefined], 'dry-run: said, not removed');
+    assert.equal(d?.removed.length, 0);
+    assert.ok(fs.existsSync(t));
+    const busy = await firstAlonePass({ mode: 'on', root: [root], guard, first, busyNow: async () => 'taken since the plan' });
+    assert.equal(busy?.removed.length, 0, 'a slot taken since the plan keeps its target');
+    assert.ok(fs.existsSync(t));
+    const kept = await firstAlonePass({ mode: 'on', root: [root], guard: { ...guard, keep: [t] }, first });
+    assert.equal(kept?.removed.length, 0, 'a path the guard keeps stays');
+    assert.ok(fs.existsSync(t));
+    const outside = await firstAlonePass({ mode: 'on', root: [path.join(root, 'elsewhere')], guard, first });
+    assert.equal(outside?.removed.length, 0, 'nothing outside the install folder');
+    assert.ok(fs.existsSync(t));
+    const r = await firstAlonePass({ mode: 'on', root: [root], guard, first });
+    assert.deepEqual(r?.removed.map((x) => x.path), [t], 'mode on: the released target goes');
+    assert.ok(r!.bytes >= 100);
+    assert.ok(!fs.existsSync(t));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

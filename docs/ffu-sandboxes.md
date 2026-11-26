@@ -250,7 +250,8 @@ deferring it as it defers a pass. Before it, the runner dropped both (`if (this.
 pass's own first step had run with the 7-day idle rule: on BEAST, 2026-11-26, hourly passes ran 59 to 72 min back to back
 (13:22-14:12, 14:13-15:14, 15:16-16:28Z), so six asked passes were refused "already running" (w6115) while a released
 slot2 held a 78 GB target. The daemon logs `clean-up: ffu slots first, alone during a pass that is not low (<trigger>, ...)
-(w6044): ...`. Stage 3a only says its plan; stage 3b removes it.
+(w6044): ...`. Stage 3a (#1384) only said its plan; stage 3b removes it with the stale-output mode on (dry-run says it,
+off skips it), and writes what it freed to the clean-up history (`cleanup-log.jsonl`, `ffuFirstAlone: true`).
 
 The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
 swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
