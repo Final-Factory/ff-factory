@@ -4000,7 +4000,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         said = config ? `${m.id}: ${lifted}, but${config}` : `${m.id} takes new work again (${lifted}).`;
       }
     } else {
-      const running = this.heldWorkers(m.id).filter((s) => s.midTurn).map((s) => s.id);
+      // A drain set again (to add an except or hours) keeps the workers the drain in force already lets finish: a worker
+      // running at the first drain and between turns now would otherwise be dropped and its resume held (w6055 F1).
+      const was = drainOf(m, now.getTime());
+      const kept = was?.resumes === 'running' ? (was.running ?? []) : [];
+      const running = [...new Set([...kept, ...this.heldWorkers(m.id).filter((s) => s.midTurn).map((s) => s.id)])];
       const d = newDrain({ words: a.words, who: a.who, hours: a.hours, except: a.except, resumes: a.resumes, running }, by, now);
       if (typeof d === 'string') throw new Error(d);
       mm.update(m.id, { drain: d });

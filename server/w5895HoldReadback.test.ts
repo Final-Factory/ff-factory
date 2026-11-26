@@ -137,6 +137,16 @@ test('w5937: a drain lets only its running workers finish by default; another wo
   assert.equal(logs.filter((l) => /pc drain: worker stop1 \(w5475\) resume held, as .* \(w5937\)/.test(l)).length, 1, logs.join('\n'));
 });
 
+test('w5937: a drain set again keeps the workers the first one lets finish (w6055 F1)', async (t) => {
+  const { env, hold, s } = await drained(t);
+  env.store.putSession({ ...env.store.sessions.get('run1')!, status: 'idle' });
+  const again = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', except: ['w5586'], hours: 4, work_id: 'w5814' });
+  assert.ok(!again.isError, again.text);
+  assert.deepEqual(env.store.machines.get('pc')!.drain!.running, ['run1']);
+  assert.equal(hold(s('run1')), undefined, 'run1 was running at the first drain: it still finishes');
+  assert.ok(hold(s('stop1')), 'stop1 is still held');
+});
+
 test('w5937: a drain with resumes all holds no worker already there (w5878\'s behavior)', async (t) => {
   const { hold, s } = await drained(t, { resumes: 'all' });
   assert.equal(hold(s('stop1')), undefined);
