@@ -1,0 +1,1 @@
+- w6031: the clone scan before a light folder is deleted, or a reinstall removes the sandboxes, also finds a clone directly inside a folder named like a build cache (`build/ffr`, `target/x`), and counts a folder it cannot read as possibly holding work (the delete refuses; force overrides). Caches are still not walked deeper.
