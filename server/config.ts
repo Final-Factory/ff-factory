@@ -338,6 +338,13 @@ export interface Config {
    */
   agentAccount?: 'off' | 'warn' | 'on';
   /**
+   * w5950 (server/movedAwayEnforce.ts): a worker whose work moved to another computer (SessionInfo.movedAway) that its
+   * daemon still runs at its hello, or that a resume after its drop would wake. "warn" (unset) journals and reports it
+   * (w5942); "on" stops it (its sandbox's work saved to a side branch) or skips its resume, and tells its new worker, only
+   * when a started new worker holds each of its requests; "off" skips the check (the recovery switch). Read live.
+   */
+  movedAwayWorkers?: 'off' | 'warn' | 'on';
+  /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.
    */

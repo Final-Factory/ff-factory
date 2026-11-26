@@ -154,10 +154,19 @@ test('w1615: against the real bench_queue.py, a shared ticket waits for an exclu
   const script = findBenchQueueScript([GAME])!;
   const env: NodeJS.ProcessEnv = { ...process.env, BENCH_POLL_S: '0.1', BENCH_LEGACY_GRACE_S: '0' };
   delete env.FF_BENCH_TICKET;
+  // w5974: run inside a worker, the tickets would carry its session, and since w2605 (the game repo's own_turn) a
+  // session's shared ticket rides its own running exclusive turn: granted at once, not waiting. Take them as nobody's.
+  delete env.FF_SESSION_ID;
+  delete env.FF_BENCH_SESSION;
+  // w5974: a failed assertion left the helpers holding the run open until it was killed; let every ticket go.
+  const tickets: BenchTicket[] = [];
+  t.after(() => tickets.forEach((k) => k.release()));
   const ex = new BenchTicket({ script, lock, mode: 'exclusive', what: 'probe A', tempDir: dir, env }).take();
+  tickets.push(ex);
   assert.equal((await ex.wait(15_000)).kind, 'granted');
   assert.ok(fs.existsSync(path.join(lock, 'owner')), 'the exclusive holder makes the old-style lock dir');
   const sh = new BenchTicket({ script, lock, mode: 'shared', what: 'unity: build', tempDir: dir, env }).take();
+  tickets.push(sh);
   const waiting = await sh.wait(1500);
   assert.equal(waiting.kind, 'waiting', 'the build waits for the timed run');
   assert.match(waiting.line, /waiting for t00000001 exclusive probe A/);
@@ -173,6 +182,7 @@ test('w1615: against the real bench_queue.py, a shared ticket waits for an exclu
   while (!(fs.existsSync(path.join(dir, 'k')) && fs.readFileSync(path.join(dir, 'k'), 'utf8').startsWith('granted')) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
   owner.kill('SIGKILL');
   const next = new BenchTicket({ script, lock, mode: 'exclusive', what: 'next', tempDir: dir, env }).take();
+  tickets.push(next);
   assert.equal((await next.wait(15_000)).kind, 'granted', 'the killed owner\'s ticket is let go');
   next.release();
 });
