@@ -49,6 +49,15 @@ shared by every slot and every worker's cargo:
   home's `bin`, still on `PATH`.
 - Tests: `server/cargoHome.test.ts`.
 
+## Where an FFU worker works: a light agent folder (w5924)
+
+An FFU request needs only an agent slot (`needs: agent`), so its worker starts in a **light agent folder** of its own
+(`<sandbox_root>/agent-work/agentN`), not in a game sandbox: it takes no game sandbox from game work, and a computer whose
+game sandboxes are all full still takes it while an agent slot is free. Its builds still go through an ffu slot below
+(`ffu-slot take`), whose warm target is the point of this page. An FFU worker placed in a game sandbox before w5924 moves
+to a light folder when it next resumes; its temp folder stays as it was. Details: [machines.md](machines.md), "Light agent
+folders (w5924)".
+
 ## Use (a worker)
 
 ```sh
@@ -142,6 +151,22 @@ so 4 × the 16 GB cap is 64 GB at most.
 runs `cargo build`, `test`, `check`, `clippy`, `run`, `bench` or `nextest` outside `ffu-sandboxes`, its next step carries a
 note to take a slot or wait for one, at most once per 30 min. A machine with no `ffu-sandboxes` folder is left alone. A
 refusal would come in a later, separate change, by lothsahn's lockout rule (warn first).
+
+## On the portal (w5912)
+
+Each machine's ffu slots show on its page, in a set of their own under its sandboxes (`web/src/components/FfuSlots.tsx`),
+and in `list_sandboxes` and `list_machines` (`server/ffuSlotsView.ts`): for each slot, the holder (its title and request
+when the portal knows the session), whether it runs, stopped or is gone, its branch and commit, since when it is held and
+when it was last used, its target's size, and whether the hold is **stale**. Stale is `ffu-slot list`'s own judgement: a
+held slot `slotFree` calls free (its holder is gone with its work pushed, or stopped or waiting past `FFU_SLOT_WAIT_GRACE_MS`, or idle
+past `FFU_SLOT_IDLE_MS`, w5885); the next `take` frees it by itself, so the page has no action.
+
+- The daemon runs `ffu-slot list --json` (`slotsReport`) in a child process every 2 minutes (`FFU_REPORT_MS`,
+  `readFfuSlotsReport`), so the `git rev-parse` and `git status` in each checkout never block it, and sends the result in its
+  15-second stats (`MachineStats.ffuSlots`). A machine with no `slots.json` sends none.
+- A target's size is the one the clean-up pass last measured (the `ffuSized` hook of `planInstallLeftovers`, hourly or on
+  a stale pass), never a `du` of its own; a slot not measured yet shows none.
+- The page state gets each slot without its `why` sentence (`pageStats`), which the tools keep.
 
 ## Clean-up (`server/installLeftovers.ts`, rule `ffu-slot-target`)
 

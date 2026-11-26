@@ -416,7 +416,7 @@ export interface SessionInfo {
   savedWork?: { sha: string; files: number; pushed: boolean; branch: string; at: string; sideRef?: string };
   /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
   /** `shared` (w1135): work that is not the game's, resumed on an agent seat beside another agent; its game tree is that agent's. */
-  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true };
+  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true; light?: true };
   /**
    * Its Live view ended because its sandbox was released while it waited (w1582, server/placeAgain.ts liveLostNote): its
    * next message asks it to stage the view again with these settings, then this goes.
@@ -703,6 +703,44 @@ export interface MachineStats extends HostStats {
   personPlay?: PersonPlayReport;
   /** The ready players its shared player cache holds (w4601, machine/playerCache.ts); absent: an older daemon, or no cache. */
   playerCache?: PlayerCacheReport;
+  /** Its ffu build slots (w5912, machine/ffuSlots.ts slotsReport); absent: an older daemon, or no slot made there yet. */
+  ffuSlots?: FfuSlotsReport;
+}
+
+/**
+ * One ffu build slot (docs/ffu-sandboxes.md) as its daemon judged it (w5912): `free` and `why` are `ffu-slot list`'s own
+ * judgement (machine/ffuSlots.ts slotFree), `stale` a held slot another worker may take now (w5885: its holder finished,
+ * no longer runs with its work pushed, stopped or waits past FFU_SLOT_WAIT_GRACE_MS, or idle past FFU_SLOT_IDLE_MS).
+ */
+export interface FfuSlotView {
+  id: string;
+  /** The session that holds it; absent: released. */
+  holder?: string;
+  /** live: its process runs here; stopped: a request still waits for it; gone: neither; unknown: no fresh facts. */
+  holderIs?: 'live' | 'stopped' | 'gone' | 'unknown';
+  /** The branch it was last given; absent: detached at origin/main. */
+  branch?: string;
+  /** Its checkout's commit (12 hex), when it could be read. */
+  commit?: string;
+  /** When it was taken (ISO). */
+  takenAt?: string;
+  /** When it was last used (ISO, slotLastUsed: its take, its checkout's git files, its target's builds). */
+  usedAt?: string;
+  free: boolean;
+  stale: boolean;
+  /** Why it is or is not free, as `ffu-slot list` says it. Left out of the page state (server/ffuSlotsView.ts pageStats). */
+  why?: string;
+  /** Its target's size as the daemon's last clean-up pass measured it (bytes), and when (ISO); absent: not measured yet. */
+  targetBytes?: number;
+  sizedAt?: string;
+}
+
+export interface FfuSlotsReport {
+  /** When the daemon judged them (ISO). */
+  at: string;
+  /** The slots a machine may make (FF_FFU_SLOTS_MAX). */
+  max: number;
+  slots: FfuSlotView[];
 }
 
 /**
@@ -1310,6 +1348,12 @@ export interface Machine {
 export interface MachineSandbox {
   /** The folder name, also the Unity project and MCP instance name ("<id>@<hash>"). Addressed as "<machine>/<id>". */
   id: string;
+  /**
+   * "light" (w5924, machine/lightFolders.ts): a light agent folder, `<sandbox_root>/agent-work/<id>` (ids agent1, agent2,
+   * ...), for work that needs only an agent slot: a plain folder, no branch, no Library, no editor. It counts against the
+   * machine's agent cap only, never among its game sandboxes (shared/sandboxKind.ts). Unset: a game sandbox.
+   */
+  kind?: 'light';
   branch: string;
   base: string;
   path: string;

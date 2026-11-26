@@ -14,7 +14,7 @@ import type { DesktopSession } from '../shared/desktop.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import type { TimedRunOrder, TimedRunReport } from '../shared/timedRun.ts';
 import type { BenchHourRow } from '../shared/benchHours.ts';
-import type { AttachmentRef, BenchLock, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport, WorkerFenceReport } from '../shared/types.ts';
+import type { AttachmentRef, BenchLock, FfuSlotsReport, BenchPriority, BenchQueueReport, NoTimedRuns, TimedAskMark, BenchState, BenchWarning, CompactionTrigger, CleanupSummary, HostHealth, HostStats, ImageFile, ImageInput, Machine, MachinePause, LiveStageStep, MachineSandbox, PermissionMode, PersonPlayReport, PlayerCacheReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, TranscriptEvent, UnitySlotsReport, WorkerFenceReport } from '../shared/types.ts';
 
 /**
  * Bumped when what the portal and a daemon send each other changes (machineProtocol.test.ts fails until someone
@@ -235,7 +235,7 @@ export type ToDaemon =
    * comes in `sandboxes` snapshots), delete (returns when it is gone), log (the tail of its editor log).
    */
   | { type: 'sandbox'; id: string; op: 'create'; sandbox: string; branch: string; base: string; seedLibrary: boolean; startUnity: boolean }
-  | { type: 'sandbox'; id: string; op: 'delete'; sandbox: string; deleteBranch?: boolean }
+  | { type: 'sandbox'; id: string; op: 'delete'; sandbox: string; deleteBranch?: boolean; force?: boolean }
   | { type: 'sandbox'; id: string; op: 'log'; sandbox: string; lines: number }
   /**
    * Protocol 6: take a worktree that already exists into the pool as it is (the host migration): nothing on disk is
@@ -427,6 +427,8 @@ export type FromDaemon =
       steamInstall?: boolean;
       /** It holds the nightly lab's fixtures (w3939, `<root>/nightly-history/fixtures`, never on C:) and serves `lab_fixture` and `lab_fixture_upload`. An older portal ignores it. */
       labFixtures?: boolean;
+      /** It makes, reports and deletes light agent folders (w5924, machine/lightFolders.ts; ids agent1, agent2, ...). An older portal ignores it, and the portal places agent-only work in a light folder only where it is set. */
+      lightFolders?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */
@@ -492,7 +494,7 @@ export type FromDaemon =
    * `benchLock` (w1600): its bench lock while a timed run holds it (machine/benchLock.ts). `bench` (w1835): its bench
    * queue's mode, holders and waiters (machine/benchState.ts), for the machine view.
    */
-  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport; playerCache?: PlayerCacheReport }
+  | { type: 'stats'; stats: HostStats; unity?: UnitySlotsReport; benchLock?: BenchLock; benchQueue?: BenchQueueReport; benchWarnings?: BenchWarning[]; bench?: BenchState; personPlay?: PersonPlayReport; playerCache?: PlayerCacheReport; ffuSlots?: FfuSlotsReport }
   /** The plan usage of the Mac's own Claude login (not the host token), every config usagePollMinutes and on usage_now (protocol 4+). */
   | { type: 'usage'; account: AccountIdentity; usage: PlanUsage }
   /** A clean-up pass finished; `notice` only when it could not get above the soft threshold (then the orchestrator is told). */
