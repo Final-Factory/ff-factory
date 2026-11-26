@@ -165,7 +165,8 @@ test("w1097: a test leg whose delete Claude Code flags is answered by the sessio
   // Another reason: a person is asked, and sees Claude Code's reason; the transcript keeps it for the prompt count.
   sessions.send(s.info.id, `#permcmd [why: This command uses shell operators that require approval for safety] ${leg}`);
   await until(() => s.info.pendingPermissions.length === 1, 'the prompt for another reason');
-  assert.equal(s.info.pendingPermissions[0].reason, 'This command uses shell operators that require approval for safety');
+  // w5914: the card carries the worker's "no other route" reason beside Claude Code's own.
+  assert.match(s.info.pendingPermissions[0].reason ?? '', /the fake agent needs this exact command \(Claude Code asked because: This command uses shell operators that require approval for safety\)/);
   const ev = store.readTranscript(s.info.id).find((e) => e.kind === 'permission');
   assert.equal(ev && 'reason' in ev && ev.reason, 'This command uses shell operators that require approval for safety');
   s.decide(s.info.pendingPermissions[0].requestId, false);
@@ -189,7 +190,7 @@ test('permission: Deny tells the agent why', async (t) => {
   await until(() => s.info.pendingPermissions.length === 1, 'the permission prompt');
   s.decide(s.info.pendingPermissions[0].requestId, false, 'not today');
   await until(() => s.info.status === 'idle', 'idle');
-  const result = store.readTranscript(s.info.id).find((e) => e.kind === 'tool_result');
+  const result = store.readTranscript(s.info.id).filter((e) => e.kind === 'tool_result').at(-1);
   assert.equal(result && 'text' in result && result.text, 'Permission denied: not today');
   assert.ok(texts(store, s.info.id).includes('Denied: I left the build folder alone.'));
 });
@@ -560,4 +561,120 @@ test('w4067: a message that opened the turn that crashed is not sent again, and 
   const users = store.readTranscript(b.info.id).filter((e) => e.kind === 'user').map((e) => e.text);
   assert.equal(users.filter((x) => /second/.test(x)).length, 2, 'the second message went once more');
   assert.equal(users.filter((x) => /^third/.test(x)).length, 2, 'the third too, after the first crash');
+});
+
+// w5914: a worker's shell command is first answered by FF Factory with a nudge toward another route; a person sees a card
+// only when the worker asks the same command again saying why no other route does it, and the card clears by itself when
+// anything but a person's click settles it.
+
+test('w5914 nudge: a shell command is denied with a request for another route, and no card is raised', async (t) => {
+  const { store, sessions, worker } = setup(t);
+  const s = worker('default');
+  let cards = 0;
+  sessions.events.on('permission', (x) => x === s && cards++);
+  sessions.send(s.info.id, '#perm #comply');
+  await until(() => s.info.status === 'idle', 'idle');
+  assert.equal(cards, 0, 'no person was asked');
+  assert.equal(s.info.pendingPermissions.length, 0);
+  assert.ok(texts(store, s.info.id).includes('Took another route.'));
+  const nudge = store.readTranscript(s.info.id).find((e) => e.kind === 'tool_result');
+  assert.match(nudge && 'text' in nudge ? nudge.text : '', /^\[FF Factory, w5914: no person was asked yet\].*No other route: /s);
+  assert.ok(texts(store, s.info.id).some((x) => x.startsWith('Asked the agent for a route that needs no approval')), 'the transcript says the session answered');
+  assert.equal(store.readTranscript(s.info.id).filter((e) => e.kind === 'permission').length, 0, 'no prompt event');
+});
+
+test('w5914 escalation: "no other route" with a reason raises the card, the reason beside the command', async (t) => {
+  const { sessions, worker } = setup(t);
+  const s = worker('default');
+  sessions.send(s.info.id, '#perm');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card');
+  const p = s.info.pendingPermissions[0];
+  assert.equal(p.noRoute?.reason, 'the fake agent needs this exact command');
+  assert.equal(p.noRoute?.key, 'bash:rm');
+  assert.match(p.reason ?? '', /^No other route, the worker says: the fake agent needs this exact command/);
+  s.decide(p.requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+});
+
+test('w5914 escalation without a reason: the card says the worker gave none', async (t) => {
+  const { sessions, worker } = setup(t);
+  const s = worker('default');
+  sessions.send(s.info.id, '#perm #noreason');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card');
+  const p = s.info.pendingPermissions[0];
+  assert.equal(p.noRoute?.reason, undefined);
+  assert.match(p.reason ?? '', /gave no reason/);
+  s.decide(p.requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+});
+
+test('w5914 loop guard: one nudge per command per turn; another command is nudged; a new turn nudges again', async (t) => {
+  const { store, sessions, worker } = setup(t);
+  const s = worker('default');
+  const nudges = () => texts(store, s.info.id).filter((x) => x.startsWith('Asked the agent for a route')).length;
+  sessions.send(s.info.id, '#permcmd ls /x');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card after one nudge');
+  assert.equal(nudges(), 1, 'the second ask of the same command went to a person, not to another nudge');
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+  // A new turn: the same command is nudged again first.
+  sessions.send(s.info.id, '#permcmd ls /x');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card in the new turn');
+  assert.equal(nudges(), 2);
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+  // Another command: its own nudge.
+  sessions.send(s.info.id, '#permcmd ls /y');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card for another command');
+  assert.equal(nudges(), 3);
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+});
+
+test('w5914: an orchestrator is not nudged; its shell prompt asks a person as before', async (t) => {
+  const { store, sessions, worker } = setup(t);
+  const s = worker('default', 'orchestrator');
+  sessions.send(s.info.id, '#perm');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card');
+  assert.equal(s.info.pendingPermissions[0].reason, undefined);
+  assert.equal(s.info.pendingPermissions[0].noRoute, undefined);
+  assert.equal(texts(store, s.info.id).filter((x) => x.startsWith('Asked the agent for a route')).length, 0);
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle');
+});
+
+for (const from of ['human', 'orchestrator'] as const) {
+  test(`w5914 card clearing: a message from ${from === 'human' ? 'a person' : 'an orchestrator'} denies the waiting shell command and its card goes`, async (t) => {
+    const { store, sessions, worker } = setup(t);
+    const s = worker('default');
+    sessions.send(s.info.id, '#perm');
+    await until(() => s.info.pendingPermissions.length === 1, 'the card');
+    sessions.send(s.info.id, 'use Edit instead', from);
+    await until(() => s.info.pendingPermissions.length === 0, 'the card cleared');
+    await until(() => s.info.status === 'idle', 'idle');
+    const denied = store.readTranscript(s.info.id).filter((e) => e.kind === 'tool_result').at(-1);
+    assert.match(denied && 'text' in denied ? denied.text : '', /^Permission denied: \[FF Factory, w5914\]/);
+  });
+}
+
+test('w5914 card clearing: a system notice does not answer the waiting command', async (t) => {
+  const { sessions, worker } = setup(t);
+  const s = worker('default');
+  sessions.send(s.info.id, '#perm');
+  await until(() => s.info.pendingPermissions.length === 1, 'the card');
+  sessions.send(s.info.id, '[FF Factory] a notice', 'system');
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(s.info.pendingPermissions.length, 1, 'still waiting for a person');
+  s.decide(s.info.pendingPermissions[0].requestId, false);
+  await until(() => s.info.status === 'idle', 'idle', 5000);
+});
+
+test('w5914 card clearing: a subagent command still waiting when the turn ends is denied and its card goes', async (t) => {
+  const { sessions, worker } = setup(t);
+  const s = worker('default');
+  let raised = 0;
+  sessions.events.on('permission', (x) => x === s && raised++);
+  sessions.send(s.info.id, '#permidle');
+  await until(() => raised === 1, 'the card for the subagent command');
+  await until(() => s.info.status === 'idle' && s.info.pendingPermissions.length === 0, 'the turn ended and the card cleared');
 });

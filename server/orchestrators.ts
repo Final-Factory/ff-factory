@@ -1959,6 +1959,12 @@ It is for your part of the work, not an answer to another worker's question.`;
     return keep.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100);
   }
 
+  /** A line in a request's log, saved (w5914: server/routeRequests.ts notes the route requests and the waiting workers). */
+  noteOnWork(w: WorkItem, line: string) {
+    this.stamp(w, line);
+    this.store.putWork(w);
+  }
+
   private stamp(w: WorkItem, line: string) {
     const now = this.now();
     w.log = [...w.log, logLine(now, line)].slice(-40);
@@ -7616,7 +7622,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const now = this.now().getTime();
     // Within one family only: an FFBox review request carries its Discord thread's key too, and is not a repeat of the
     // bug report filed from that thread (nor the other way round).
-    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' || k === 'master-batch' ? k : 'release');
+    const family = (k: WorkSourceKind) => (k.startsWith('discord') ? 'discord' : k.startsWith('ffbox') ? 'ffbox' : k === 'nightly' || k === 'nightly-run' || k === 'nightly-review' || k === 'master-batch' || k === 'harness-route' ? k : 'release');
     const prefix = family(kind);
     const ids = keys.filter((k) => k.startsWith(`${prefix}:`));
     if (!ids.length) return undefined;
