@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
+import { FIXED_GIT_CONFIG, HOOKS, SCANNED_KEYS, parseScan, scannedOverrides, withConfigFirst } from './safeGit.ts';
 
 /**
  * The agent tools publish (w1476; lothsahn, 2026-10-18: "Please create a new work item that deploying the latest tools is
@@ -347,6 +348,34 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
   return EXIT.ok;
 }
 
+/**
+ * w5870: the env registerAgents.sh runs with, fenced like safeGit's calls. Its `claude plugin marketplace update` runs git in
+ * <claudeDir>/plugins/marketplaces/final-factory-agents, and the workers' folder is Low-writable while `worker.ts tools`
+ * runs at Medium (or elevated): a worker could plant a hook, an fsmonitor or a filter there for that git to run. The
+ * fixed keys and the overrides of what that checkout's own config names go in as command-scope entries, which every
+ * git under it reads; a planted key is also said, so a person can look.
+ */
+export async function fencedRegisterEnv(d: Pick<PublishDeps, 'exec' | 'say'>, claudeDir: string, env: NodeJS.ProcessEnv, label = ''): Promise<NodeJS.ProcessEnv | undefined> {
+  const mp = path.join(claudeDir, 'plugins', 'marketplaces', 'final-factory-agents');
+  let rows: ReturnType<typeof parseScan> = [];
+  if (fs.existsSync(mp)) {
+    const r = await d.exec('git', ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${HOOKS}`, '-C', mp, 'config', '--show-scope', '-z', '--get-regexp', SCANNED_KEYS], { env, timeoutMs: 60_000 });
+    // Exit 1 is "no key matched".
+    if (r.code === 0) rows = parseScan(r.stdout);
+    else if (r.code !== 1) d.say(`WARNING: could not read the marketplace checkout's git config${label} (${tail(r)}); its git runs with the fixed fence only.`);
+  }
+  const planted = rows.filter((r) => !['system', 'global', 'command', 'unknown'].includes(r.scope));
+  if (planted.length) d.say(`WARNING: the marketplace checkout ${mp}${label} sets ${[...new Set(planted.map((r) => r.key))].join(', ')} in its own config; the refresh runs with them overridden (w5870). Look at who wrote it, or run registerAgents.sh --reinstall there.`);
+  // A URL rewrite cannot be overridden by value (safeGit refuses the call, w5573): it could point the refresh at another
+  // repository, whose plugins every agent would then load. Refused here too.
+  const rewrite = planted.find((r) => /^url\..+\.(insteadof|pushinsteadof)$/.test(r.key));
+  if (rewrite) {
+    d.say(`FAILED: the marketplace checkout ${mp}${label} rewrites remote URLs (${rewrite.key}), so its refresh could fetch another repository; the plugins stay as they were. Remove it (\`git -C ${mp} config --local --unset-all ${rewrite.key}\`) or run registerAgents.sh --reinstall.`);
+    return undefined;
+  }
+  return withConfigFirst(env, [...FIXED_GIT_CONFIG, ...scannedOverrides(rows)]);
+}
+
 /** One Claude Code folder's part of a publish: registerAgents.sh into it, then the check that every plugin is on master's version. */
 async function registerInto(
   root: string,
@@ -356,7 +385,8 @@ async function registerInto(
   const { co, legacy, base, run, env, sh, marker, claudeDir, latest, label } = x;
   const installed = path.join(claudeDir, 'plugins', 'installed_plugins.json');
   const markerBefore = readText(marker);
-  const registerEnv: NodeJS.ProcessEnv = { ...REGISTER_ENV, ...env };
+  const registerEnv = await fencedRegisterEnv(d, claudeDir, { ...REGISTER_ENV, ...env }, label);
+  if (!registerEnv) return EXIT.failed;
   const register = async () => {
     const x = await d.exec(sh, ['registerAgents.sh', '--claude'], { cwd: run, env: registerEnv, timeoutMs: REGISTER_TIMEOUT_MS });
     for (const l of `${x.stdout}\n${x.stderr}`.split(/\r?\n/).filter((y) => y.trim())) d.say(`  ${l.trimEnd()}`);

@@ -16,11 +16,18 @@
  * holder stopped with work in it stays theirs. The cargo registry is the machine's, inside the install folder (w5501): every
  * slot shares one CARGO_HOME, `<root>/cache/cargo` unless one already sits inside the root (sharedCaches.ts workerCargoHome).
  * Measured design: docs/ffu-sandboxes.md.
+ *
+ * w5870: the slots are in a folder workers write (Low on Windows), so a build there runs build scripts, target binaries and a
+ * slot's `.cargo/config.toml` that any worker could have written. A sandbox agent is a worker itself; a Medium agent (one not
+ * in a sandbox, outside the fences) is not, so `take` and `where` warn it, and refuse it once daemon.json
+ * "mediumAgentCaches" is "on" (the daemon tells it in MEDIUM_AGENT_VAR, machine/mediumFolders.ts): it builds in its own temp
+ * folder instead, which no worker writes.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitSpawnSync } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
@@ -61,6 +68,8 @@ export interface FfuSlotDeps {
   /** The machine's CARGO_HOME inside the root (w5501, sharedCaches.ts workerCargoHome); `take` exports it. */
   cargoHome?: string;
   facts?: CleanupFacts;
+  /** w5870: MEDIUM_AGENT_VAR, set only for a Medium agent: "warn" or "on". */
+  medium?: string;
   now: () => number;
   git: (args: string[], cwd?: string) => Ran;
   freeGB: (dir: string) => number | undefined;
@@ -346,6 +355,17 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     d.say(`ffu-slot: FF_SESSION_ID is not set: run it from a worker of FF Factory\n`);
     return 2;
   }
+  // w5870: a Medium agent and the slots workers write (see the header).
+  const own = 'build ffu in your own temp folder instead, which no worker writes: git clone https://github.com/Final-Factory/ffu.git "$TMPDIR/ffu" and CARGO_TARGET_DIR="$TMPDIR/ffu-target"';
+  if ((cmd === 'take' || cmd === 'where') && (d.medium === 'on' || d.medium === 'warn')) {
+    if (d.medium === 'on') {
+      d.say(`ffu-slot: refused: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write, so a build there would run their build scripts and cargo config outside the fence; ${own} (w5870)
+`);
+      return 4;
+    }
+    d.say(`ffu-slot: WARNING: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write: a build there runs build scripts and a cargo config any worker could have written. Once daemon.json "mediumAgentCaches" is "on" this is refused; ${own} (w5870)
+`);
+  }
   try {
     if (cmd === 'take') {
       const branch = opt('--branch');
@@ -396,6 +416,7 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     cargoHome: workerCargoHome(root, env, '').home, // the home folder only names a seed's source, which take does not need
     max: Number.isInteger(max) && max >= 0 ? max : FFU_SLOTS_DEFAULT_MAX,
     facts,
+    ...(env[MEDIUM_AGENT_VAR] ? { medium: env[MEDIUM_AGENT_VAR] } : {}),
     now: () => Date.now(),
     git: (args, cwd) => {
       const r = gitSpawnSync(args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });

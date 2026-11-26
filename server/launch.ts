@@ -649,7 +649,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
   const agentEnv = withoutLoginPaths((() => {
     // w2012: a sandbox worker learns where the ff-agents scripts are (FF_SKILLS), read on this machine at launch, so it never
     // searches the disk for ui_look.py or pr_evidence.py (server/pluginPaths.ts).
-    const plugins = localPluginEnv(baseEnv, g.workerRoot);
+    // w5870: a launch that is not a sandbox's never falls back to the old checkout workers write.
+    const plugins = localPluginEnv(baseEnv, g.workerRoot, !spec.sandbox);
     const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, ...plugins, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
     // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
     // w5430: a Low worker's gh login (GH_CONFIG_DIR from lowEnv); a GitHub App run keeps its own helper.
