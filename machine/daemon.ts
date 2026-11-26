@@ -87,7 +87,7 @@ import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
-import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
@@ -128,7 +128,7 @@ import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKe
 import { BenchProxy } from './benchProxy.ts';
 import { planMediumFolders, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
-import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -527,6 +527,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** How often the status reads the ffu slots again (w5912): a git status and a few stats per held slot, in a child process. */
+const FFU_REPORT_MS = 2 * 60_000;
 /** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
 const LINK_BEAT_MS = 20_000;
 const LINK_DEAD_MS = 45_000;
@@ -662,6 +664,12 @@ export class Daemon {
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
   private lastStats?: { stats: HostStats; at: number };
+  /** Each ffu slot's target size as the last clean-up pass measured it (w5912): the status reports it, never a du of its own. */
+  private readonly ffuSizes = new Map<string, { bytes: number; at: string }>();
+  /** The last `ffu-slot list --json` (w5912), read again every FFU_REPORT_MS in the background. */
+  private ffuReport?: FfuSlotsReport;
+  private ffuReportAt = 0;
+  private ffuReporting = false;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
@@ -1205,6 +1213,7 @@ export class Daemon {
                 published: readPublished(publishedFile(appDirOfConfig(this.cfg))),
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
+                ffuSized: this.ffuSized,
               }),
             );
           },
@@ -1219,6 +1228,7 @@ export class Daemon {
               self: [process.pid, process.ppid],
               scope: 'cargo-cap',
               closed: this.closedSessionDirs(),
+              ffuSized: this.ffuSized,
             }),
           busyNow: runnerBusyNow(() => this.procs()),
           endStrays: async (strays) => {
@@ -2345,10 +2355,25 @@ export class Daemon {
       const personPlay = this.personPlayReport();
       // The players its shared player cache holds (w4601): a pair leg goes where its commit's player already is.
       const playerCache = readPlayerCache(playerCacheRoot(this.cfg.root));
-      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
+      // Its ffu build slots (w5912): the machine view and list_sandboxes show who holds each, and which holds are stale.
+      this.refreshFfuReport();
+      const ffuSlots = this.ffuReport;
+      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(ffuSlots ? { ffuSlots } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
+  }
+
+  private readonly ffuSized = (slot: string, bytes: number) => void this.ffuSizes.set(slot, { bytes, at: new Date().toISOString() });
+
+  /** Read the ffu slots again in the background once FFU_REPORT_MS passed (w5912); the next stats carry the result. */
+  private refreshFfuReport() {
+    if (!this.cfg.root || this.ffuReporting || Date.now() - this.ffuReportAt < FFU_REPORT_MS) return;
+    this.ffuReporting = true;
+    this.ffuReportAt = Date.now();
+    void readFfuSlotsReport({ root: this.cfg.root, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX, sizes: this.ffuSizes, log })
+      .then((r) => void (this.ffuReport = r))
+      .finally(() => void (this.ffuReporting = false));
   }
 
   /** RAM in use, %: the last stats (a Mac's counts file cache as free), else Windows' own numbers; undefined: unknown. */

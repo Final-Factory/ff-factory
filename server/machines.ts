@@ -34,6 +34,7 @@ import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './
 import type { AttachmentStore } from './attachments.ts';
 import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary, WorkerFenceReport } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
+import { pageStats } from './ffuSlotsView.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
@@ -2842,7 +2843,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), ...(msg.playerCache ? { playerCache: msg.playerCache } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), ...(msg.playerCache ? { playerCache: msg.playerCache } : {}), ...(msg.ffuSlots ? { ffuSlots: msg.ffuSlots } : {}), at: new Date().toISOString() };
         // w1894: a person's game starting or ending there is logged once (portal_logs shows it)
         const was = this.stats.get(id)?.personPlay;
         if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
@@ -2850,7 +2851,7 @@ export class MachineManager {
         if (was && !msg.personPlay) this.onPlayEnded?.(id);
         if (msg.bench) noteBench(this.playerSeen.get(id) ?? this.playerSeen.set(id, new Map()).get(id)!, msg.bench, Date.now());
         this.noteCpu(id, msg.stats.loadPct);
-        emit({ type: 'machine_stats', id, stats });
+        emit({ type: 'machine_stats', id, stats: pageStats(stats) });
         if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);
         return;
       }

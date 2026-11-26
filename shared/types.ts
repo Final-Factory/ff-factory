@@ -698,6 +698,44 @@ export interface MachineStats extends HostStats {
   personPlay?: PersonPlayReport;
   /** The ready players its shared player cache holds (w4601, machine/playerCache.ts); absent: an older daemon, or no cache. */
   playerCache?: PlayerCacheReport;
+  /** Its ffu build slots (w5912, machine/ffuSlots.ts slotsReport); absent: an older daemon, or no slot made there yet. */
+  ffuSlots?: FfuSlotsReport;
+}
+
+/**
+ * One ffu build slot (docs/ffu-sandboxes.md) as its daemon judged it (w5912): `free` and `why` are `ffu-slot list`'s own
+ * judgement (machine/ffuSlots.ts slotFree), `stale` a held slot another worker may take now (w5885: its holder finished,
+ * no longer runs with its work pushed, stopped or waits past FFU_SLOT_WAIT_GRACE_MS, or idle past FFU_SLOT_IDLE_MS).
+ */
+export interface FfuSlotView {
+  id: string;
+  /** The session that holds it; absent: released. */
+  holder?: string;
+  /** live: its process runs here; stopped: a request still waits for it; gone: neither; unknown: no fresh facts. */
+  holderIs?: 'live' | 'stopped' | 'gone' | 'unknown';
+  /** The branch it was last given; absent: detached at origin/main. */
+  branch?: string;
+  /** Its checkout's commit (12 hex), when it could be read. */
+  commit?: string;
+  /** When it was taken (ISO). */
+  takenAt?: string;
+  /** When it was last used (ISO, slotLastUsed: its take, its checkout's git files, its target's builds). */
+  usedAt?: string;
+  free: boolean;
+  stale: boolean;
+  /** Why it is or is not free, as `ffu-slot list` says it. Left out of the page state (server/ffuSlotsView.ts pageStats). */
+  why?: string;
+  /** Its target's size as the daemon's last clean-up pass measured it (bytes), and when (ISO); absent: not measured yet. */
+  targetBytes?: number;
+  sizedAt?: string;
+}
+
+export interface FfuSlotsReport {
+  /** When the daemon judged them (ISO). */
+  at: string;
+  /** The slots a machine may make (FF_FFU_SLOTS_MAX). */
+  max: number;
+  slots: FfuSlotView[];
 }
 
 /**

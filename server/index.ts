@@ -125,6 +125,7 @@ import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { pageSessions, stateSizes } from './pageState.ts';
+import { pageAllStats } from './ffuSlotsView.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
@@ -1193,7 +1194,7 @@ function appState(user: string | undefined): AppState {
     host: hostForUser({ ...host, drain: drainer.status }, me.userId),
     usage: usage.usage,
     accounts: accountsNow(),
-    machineStats: machines.allStats(),
+    machineStats: pageAllStats(machines.allStats()),
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
