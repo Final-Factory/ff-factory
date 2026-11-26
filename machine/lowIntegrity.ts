@@ -86,6 +86,12 @@ export interface LowTargetsInput {
   allowInAppDir?: (string | undefined)[];
   exists?: (p: string) => boolean;
   /**
+   * w5959: the tools children kept Medium because they hold a virtual disk (toolsDiskPlan, daemon.json `toolsDiskLock` "on"),
+   * and those disks. Each child leaves the Low list and joins `medium` (after `tools`), its disks after it, so a Low worker
+   * reads them and writes none. Left out or empty: every tools child but MEDIUM_TOOLS is Low, as before.
+   */
+  toolsKeepMedium?: { children: string[]; disks: string[] };
+  /**
    * w5614: the store lock holds (machine/storeLock.ts): the main clone's git folder is labelled Medium (No-Write-Up), so Low
    * workers read it (the slot repos' borrowed objects) and cannot write it. Off, it is labelled Low as before.
    */
@@ -161,8 +167,13 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   const at = dirs.findIndex((d) => same(d, tools));
   if (at >= 0) {
     if (i.toolsChildren) {
-      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !MEDIUM_TOOLS.includes(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
+      // w5959: a child that holds a virtual disk, with toolsDiskLock on, stays Medium like MEDIUM_TOOLS (toolsDiskPlan).
+      const kept = new Set((i.toolsKeepMedium?.children ?? []).map((c) => c.toLowerCase()));
+      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !MEDIUM_TOOLS.includes(c.name.toLowerCase()) && !kept.has(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
       medium.push(tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)));
+      for (const c of i.toolsChildren) if (c.dir && kept.has(c.name.toLowerCase()) && !MEDIUM_TOOLS.includes(c.name.toLowerCase())) medium.push(path.join(tools, c.name));
+      // Its disks after it: one that inherited Low turned Medium with the folder; one Low on its own is raised itself.
+      medium.push(...(i.toolsKeepMedium?.disks ?? []).filter((d) => medium.some((m) => same(path.dirname(d), m))));
     } else medium.push(path.join(tools, 'node'));
   }
   medium.push(...fenced, ...lockedStore);
@@ -243,7 +254,8 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
         say(`worker integrity: WARNING: left ${p} Low: ${stuck.join(', ')} could not be labelled Low on its own`);
         continue;
       }
-      await setLabel(p, MEDIUM_LABEL);
+      // A file (w5959: a virtual disk in a tools child kept Medium) takes a file's label, with no inheritance flags.
+      await setLabel(p, fs.statSync(p).isDirectory() ? MEDIUM_LABEL : 'medium');
       say(`worker integrity: kept ${p} Medium`);
     } catch (e) {
       say(`worker integrity: WARNING: could not keep ${p} Medium, so Low workers may write it: ${(e as Error).message}`);
@@ -280,8 +292,8 @@ const DISK_IMAGE = /\.vhdx?$/i;
 
 /**
  * The virtual disks that sit in a folder workers write (w5948): each `<root>/tools/<child>/*.vhdx` (or `.vhd`) whose child
- * the fence labels Low (lowTargets: every tools child but node). The daemon says each one loudly after labelling and
- * changes nothing (warn-only, lothsahn's lockout rule). BEAST's `tools/wsl-ffu-sniper/ext4.vhdx` is the disk of the
+ * the fence labels Low (lowTargets: every tools child but MEDIUM_TOOLS). The daemon says each one loudly after labelling and
+ * changes nothing (warn-only, lothsahn's lockout rule), unless daemon.json `toolsDiskLock` is "on" (w5959, toolsDiskPlan). BEAST's `tools/wsl-ffu-sniper/ext4.vhdx` is the disk of the
  * `ffu-sniper` WSL distro (imported 2026-11-06 for FFU's SteamOS build, ffu docs/steamos.md "Setting up a container host on
  * Windows"). A Low worker cannot start WSL (`wsl.exe` answers Wsl/E_ACCESSDENIED at Low, measured on BEAST, w5870), but it can
  * rewrite the disk while the distro is stopped, and the next `wsl -d` by a Medium process runs what it planted as root in
@@ -295,7 +307,7 @@ const DISK_IMAGE = /\.vhdx?$/i;
 export function lowDiskImages(root: string, toolsChildren: { name: string; dir: boolean }[] | undefined, list: (dir: string) => string[] = (d) => { try { return fs.readdirSync(d); } catch { return []; } }): string[] {
   const found: string[] = [];
   for (const c of toolsChildren ?? []) {
-    if (!c.dir || c.name.toLowerCase() === 'node') continue;
+    if (!c.dir || MEDIUM_TOOLS.includes(c.name.toLowerCase())) continue;
     const dir = path.join(root, 'tools', c.name);
     for (const f of list(dir)) if (DISK_IMAGE.test(f)) found.push(path.join(dir, f));
   }
@@ -305,6 +317,32 @@ export function lowDiskImages(root: string, toolsChildren: { name: string; dir: 
 /** The warning the daemon logs for one disk lowDiskImages finds (w5948). Exported for tests. */
 export const lowDiskImageWarning = (disk: string, root: string) =>
   `WARNING worker integrity: the virtual disk ${disk} is in a folder workers write (labelled Low): a Low worker can rewrite it while its VM or WSL distro is stopped, and the next start by a Medium process runs what it planted at Medium (w5948). Nothing was changed: move it into a folder no worker writes, e.g. \`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\` with the distro stopped (\`wsl --list -v\` names the distro), then relabel the moved disk, which keeps its Low label (a move on one volume is a rename): \`icacls ${path.join(root, 'wsl', '<distro>', 'ext4.vhdx')} /setintegritylevel M\`, and check icacls no longer shows Mandatory Label\\Low.`;
+
+/**
+ * daemon.json `toolsDiskLock` (w5959, the enforce step after w5948's warn): what the daemon does about a virtual disk in a
+ * Low tools child. Absent or "warn": the WARNING of w5948 and nothing else. "on": the child that holds it stays Medium
+ * (lowTargets' toolsKeepMedium), so a Low worker can no longer rewrite the disk, nor anything else in that child. Set and
+ * set back by `ops_worker machine_update tools_disk_lock`; read at the daemon's start, so "warn" plus the restart that
+ * update makes labels the child Low again (labelLow gives a child of the Medium tools folder its own Low label).
+ */
+export type ToolsDiskLockMode = 'warn' | 'on';
+
+/**
+ * Which tools children to keep Medium for their virtual disks, and the lines to log (w5959). Pure: `disks` is what
+ * lowDiskImages found. Chosen over refusing to start the distro: the daemon starts no WSL distro or VM (a person, or a
+ * Medium agent, runs `wsl -d`), so there is nothing of its own to refuse, while the label it already sets at every start is
+ * what keeps a Low worker from writing the disk. Exported for tests.
+ */
+export function toolsDiskPlan(root: string, disks: readonly string[], mode: ToolsDiskLockMode | undefined): { keep: { children: string[]; disks: string[] }; lines: string[] } {
+  const tools = path.join(root, 'tools');
+  if (mode !== 'on') return { keep: { children: [], disks: [] }, lines: disks.map((d) => `${lowDiskImageWarning(d, root)} daemon.json "toolsDiskLock": "on" (ops_worker machine_update tools_disk_lock on) keeps its folder Medium (w5959).`) };
+  const children = [...new Set(disks.map((d) => path.relative(tools, d).split(/[\\/]/)[0]))];
+  const lines = children.map((c) => {
+    const held = disks.filter((d) => path.relative(tools, d).split(/[\\/]/)[0] === c);
+    return `WARNING worker integrity: kept ${path.join(tools, c)} Medium (daemon.json "toolsDiskLock": "on", w5959): it holds the virtual disk${held.length > 1 ? 's' : ''} ${held.join(', ')}, which a Low worker could rewrite while its VM or WSL distro is stopped. Workers can no longer write anything in ${path.join(tools, c)}. Move the disk out (\`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\`, then \`icacls <moved disk> /setintegritylevel M\`), or set it back with ops_worker machine_update tools_disk_lock warn, which labels the folder Low again at the daemon's next start.`;
+  });
+  return { keep: { children, disks: [...disks] }, lines };
+}
 
 /** The account the daemon runs as, as icacls names it (DOMAIN\\user), or undefined off Windows. */
 export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | undefined =>
@@ -863,6 +901,11 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
     todo.push(x);
   }
   if (!todo.length) return true;
+  // w5980: the given-back paths first. Setting a closed folder's label walks everything inside it, so a given-back folder
+  // labelled after its closed parent sat closed until the walk reached its own label: on LothDesktop the gh shim's
+  // app\machine\ghApp.ts read as missing to Low workers for minutes (15:54-15:55 UTC, 2026-11-26). A given-back folder that
+  // already carries its explicit label keeps it through the parent's walk (the explicit label comes first and wins).
+  todo.sort((a, b) => Number(a.sddl.includes('NWNR')) - Number(b.sddl.includes('NWNR')));
   const runOnce = async (list: readonly LabelTarget[]) => {
     const script = labelScript(list);
     const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });

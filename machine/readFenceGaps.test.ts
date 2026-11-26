@@ -273,8 +273,10 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     fs.mkdirSync(path.join(real, 'app', 'logs'), { recursive: true });
     fs.writeFileSync(path.join(real, 'app', 'daemon.json'), '{}');
     fs.writeFileSync(path.join(real, 'app', 'sandboxes.json'), '[]');
+    // w5980: a file inside a given-back folder (as app\\machine\\ghApp.ts), read after the closed parent's walk.
+    fs.writeFileSync(path.join(real, 'app', 'logs', 'inside.log'), 'x');
     const labels = noReadUpTargets({ root: real, appDir: path.join(real, 'app'), allowBack: ['logs', 'sandboxes.json'] });
-    const t = { closed: [path.join(real, 'app', 'daemon.json')], open: [path.join(real, 'app', 'logs'), path.join(real, 'app', 'sandboxes.json')] };
+    const t = { closed: [path.join(real, 'app', 'daemon.json')], open: [path.join(real, 'app', 'logs'), path.join(real, 'app', 'logs', 'inside.log'), path.join(real, 'app', 'sandboxes.json')] };
     const lines: string[] = [];
     const say = (s: string) => void lines.push(s);
     const deps = { labels, t, lowNode: node, mirrorDir: path.join(d, 'mirror'), skip: () => false, run: exec, log: (l: string) => void lines.push(l),
@@ -305,7 +307,7 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
       return ok;
     } });
     assert.equal(w.blocks, false, lines.join('\n'));
-    assert.match(w.line, /1\/1 closed paths refused, 2\/2 given-back paths open; no failures/);
+    assert.match(w.line, /1\/1 closed paths refused, 3\/3 given-back paths open; no failures/);
     // The real labels, then on's probe of the real paths; then a given-back file rewritten by rename loses its give-back
     // (N5's gap), which on's probe finds and undoes.
     assert.ok(await deps.setLabels(labels));
@@ -323,7 +325,7 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     // The labels came off by themselves: a Low child reads the given-back file again (and the closed one, as in off).
     const reverted = await probeReadFenceWin({ ...deps, mode: 'on' });
     assert.deepEqual([reverted.blocks, reverted.reverted], [true, false], lines.join('\n'));
-    assert.match(reverted.line, /0\/1 closed paths refused, 2\/2 given-back paths open/);
+    assert.match(reverted.line, /0\/1 closed paths refused, 3\/3 given-back paths open/);
   } finally {
     // Labels at Medium do not stop the test (Medium) removing its own folder.
     fs.rmSync(d, { recursive: true, force: true });

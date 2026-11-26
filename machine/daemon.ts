@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -286,6 +286,12 @@ export interface DaemonConfig {
    * machine_update daemon_tmpdir`, read at the daemon's start; "off" is the recovery.
    */
   daemonTmpdir?: 'on' | 'off';
+  /**
+   * w5959: a virtual disk (a WSL distro's ext4.vhdx) in a Low `<root>/tools` child, Windows only (machine/lowIntegrity.ts
+   * toolsDiskPlan). Absent or "warn" (the default): w5948's WARNING only. "on": that child is kept Medium, so workers cannot
+   * write there. Set remotely by `ops_worker machine_update tools_disk_lock`, read at the daemon's start; "warn" is the recovery.
+   */
+  toolsDiskLock?: ToolsDiskLockMode;
   /**
    * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
    * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
@@ -3736,11 +3742,14 @@ export class Daemon {
       } catch {
         toolsChildren = undefined;
       }
+      // w5948, w5959: a virtual disk in a Low tools child: said (warn), or its child kept Medium (toolsDiskLock on).
+      const disks = toolsDiskPlan(root, lowDiskImages(root, toolsChildren), this.cfg.toolsDiskLock);
       const targets = lowTargets({
         root,
         appDir: appDirOfConfig(this.cfg),
         children,
         toolsChildren,
+        toolsKeepMedium: disks.keep,
         extra: [...(this.cfg.extraRoots ?? []), this.cfg.tempDir, this.sandboxRoot(), ...allow.filter((a) => !isFile(a))],
         files: allow.filter(isFile),
         allowInAppDir: allow,
@@ -3768,7 +3777,7 @@ export class Daemon {
         fs.mkdirSync(sessions, { recursive: true });
         // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
         ensureReadBackDirs(appDir, this.cfg.root);
-        await this.applyReadLabels(readFenceMode(appDir), exec, say);
+        await this.applyReadLabelsInTurn(exec, say);
         this.watchLoginLabels(exec, say);
         for (const f of this.loginFiles.left) say(`worker integrity: left the Claude login ${f} without a read label: it is on the system drive, which the fence touches only on ${[...LOGIN_LABEL_ON_SYSTEM_DRIVE].join(', ')} (w5559)`);
       } catch (e) {
@@ -3777,8 +3786,7 @@ export class Daemon {
       // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
       if (ownerGameData) log(await ownerGameDataLock(ownerGameData, exec));
       for (const exe of await lowRunners(root, exec)) log(`worker integrity: CI runner job exe ${exe} is still labelled Low, so its jobs start at Low and Git Bash dies (0xC0000022); label its folder Medium`);
-      // w5948: a virtual disk (a WSL distro's ext4.vhdx) in a Low tools child: said, not moved (warn-only).
-      for (const disk of lowDiskImages(root, toolsChildren)) log(lowDiskImageWarning(disk, root));
+      for (const line of disks.lines) log(line);
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
@@ -4181,18 +4189,26 @@ export class Daemon {
    * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
    * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
    * one, so a switch or a revert leaves no read label behind (lockout review B1). A path without NR is not touched: setting
-   * a folder's label walks everything in it.
+   * a folder's label walks everything in it. `still` (w5980): whether this mode is still the one wanted; an on pass stops
+   * between its steps once it is not, so a slow pass cannot close the fence again after a switch back to warn or off.
    */
-  private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+  private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void, still: () => boolean = () => true): Promise<void> {
     if (!this.cfg.root) return;
+    const stopped = () => {
+      if (still()) return false;
+      say(`worker integrity: the read fence's ${mode} labels stopped part way: the mode changed meanwhile, and the next pass sets the new one`);
+      return true;
+    };
     // w5749: the owner's secrets on the system drive (LothDesktop only), apart: their failure is said and leaves the rest.
     await this.applyOwnerLabels(mode, exec, say).catch((e) => say(`worker integrity: owner secrets: ${(e as Error).message}`));
+    if (mode === 'on' && stopped()) return;
     const appDir = appDirOfConfig(this.cfg);
     // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
     ensureDaemonOnlyDirs(this.cfg.root);
     const t = this.readLabelTargets(appDir);
     if (mode === 'on') {
       if (!(await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      if (stopped()) return;
       // w5968: a file an elevated process made inside keeps its own High label, which the folder's NR does not override.
       if (!(await relabelInside(t, 'close', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every explicitly labelled path inside the closed folders got No-Read-Up; Low workers may still read those (the daemon log says which)');
       log('worker integrity: the read fence is on: No-Read-Up labels set');
@@ -4203,6 +4219,36 @@ export class Daemon {
     // w5968: and the NR on explicitly labelled paths inside, which only an earlier on adds (so only when it was on).
     if (opened.length && !(await relabelInside(t, 'open', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every No-Read-Up label inside the closed folders could be taken off (the daemon log says which)');
     log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
+  }
+
+  /** The label pass running now, or the last one (w5980). */
+  private readLabelPass: Promise<void> = Promise.resolve();
+  /**
+   * w5980 (measured on LothDesktop, 2026-11-26): the switch to on at 15:45 was still labelling (its label runs and the
+   * relabelling inside walk the daemon's whole folder) when the switch to warn came at 15:52; the two passes ran side by
+   * side, warn's opened what on had closed so far (15:56), and on's finished last (16:00), leaving the daemon's folder
+   * closed under warn. So one switch's pass at a time: each waits for the one before, sets the mode the mode file says
+   * when it starts, stops early when the file changes under it (applyReadLabels `still`), and runs again for the new mode,
+   * so the last switch always wins. (on's probe reverting its own labels and the login watcher still label outside it.)
+   */
+  private applyReadLabelsInTurn(exec: Exec, say: (line: string) => void): Promise<void> {
+    const appDir = appDirOfConfig(this.cfg);
+    const pass = this.readLabelPass.then(async () => {
+      for (let i = 0; ; i++) {
+        const mode = readFenceMode(appDir);
+        let failure: unknown;
+        await this.applyReadLabels(mode, exec, say, () => readFenceMode(appDir) === mode).catch((e) => void (failure = e));
+        const now = readFenceMode(appDir);
+        if (now === mode || i >= 4) {
+          if (failure) throw failure;
+          if (now !== mode) say(`worker integrity: the read fence changed again while its labels were set (now ${now}); the next switch or start sets them`);
+          return;
+        }
+        say(`worker integrity: the read fence turned ${now} while its ${mode} labels were set: setting the ${now} labels`);
+      }
+    });
+    this.readLabelPass = pass.catch(() => {});
+    return pass;
   }
 
   /**
@@ -4222,7 +4268,7 @@ export class Daemon {
     log(`read fence: ${mode} for runs started from now on (daemon_control)`);
     if (process.platform === 'win32' && this.cfg.workerIntegrity === 'low' && this.cfg.root) {
       const exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000 });
-      await this.applyReadLabels(mode, exec, (l) => log(l));
+      await this.applyReadLabelsInTurn(exec, (l) => log(l));
     }
     void this.probeReadFence();
   }

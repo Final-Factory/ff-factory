@@ -178,6 +178,16 @@ export class UpdateNotReached extends Error {}
 /** How long the portal waits for a daemon to take an update or tools publish over its link (self_update_ack, w1641). */
 export const LINK_ACK_MS = 12 * 60_000;
 
+/**
+ * How long the portal waits for a daemon's answer to a daemon_control over its link (w6089). A restart or an unload answers
+ * at once. A read fence switch answers only after the daemon has set or taken off the Windows No-Read-Up labels
+ * (machine/daemon.ts setReadFence), and on BEAST that took 1 min 18 s to 3 min 13 s on 2026-11-26 (measured, portal
+ * journal): three read-fence-on calls were reported as timeouts after 60 s, though each was applied.
+ */
+export function linkControlWaitMs(action: string): number {
+  return action.startsWith('read-fence') ? 10 * 60_000 : 60_000;
+}
+
 /** How long a call that timed out is remembered, so its late answer is still logged with what it was (w1641). */
 const LATE_KEEP_MS = 6 * 3_600_000;
 const LATE_KEEP_MAX = 200;
