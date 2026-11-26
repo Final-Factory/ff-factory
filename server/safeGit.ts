@@ -210,7 +210,7 @@ export function fenceArgs(args: string[]): string[] {
  * call (an editor, a hook such as reference-transaction, fsmonitor). Reading an object is the trap (w5996's review): a
  * repository that plants extensions.partialClone and a promisor remote makes git lazy-fetch a missing object in a child
  * process, which runs the planted core.sshCommand; merge-base, show-ref, for-each-ref and `rev-parse X^{commit}` all did
- * (measured, git 2.56.1). So `rev-parse` skips only with plain names (no `^`, `~`, `:`, `@{`) and options from REV_PARSE_OPTS,
+ * (measured, git 2.56.1). So `rev-parse` skips only with plain names (no `^`, `~`, `:`, `@{`, and no `..`: `A...B` reads commits for a merge base, w6005) and options from REV_PARSE_OPTS,
  * `worktree` only as `list` and `prune` (`add` checks files out, `remove` runs status), and those calls also carry
  * GIT_NO_LAZY_FETCH=1 (git 2.45.1 on; an older git ignores it, and the list alone holds). Every scan is one more process
  * start, about a third of ffu-slot's (w5991: 266 of 861 in server/ffuSlots.test.ts). A per-repository cache of the scan was
@@ -228,7 +228,7 @@ export function needsScan(args: string[]): boolean {
   const rest = args.slice(sub + 1);
   if (NO_SCAN.has(name)) return false;
   if (name === 'worktree' && /^(list|prune)$/.test(rest[0] ?? '')) return false;
-  if (name === 'rev-parse') return !rest.every((a) => (a.startsWith('-') ? REV_PARSE_OPTS.has(a) : !/[\^~:@{}\s\*?[]/.test(a)));
+  if (name === 'rev-parse') return !rest.every((a) => (a.startsWith('-') ? REV_PARSE_OPTS.has(a) : !/[\^~:@{}\s\\*?[]|\.\./.test(a)));
   return true;
 }
 
