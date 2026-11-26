@@ -1592,6 +1592,21 @@ export class Daemon {
         this.send({ type: 'host_health', health: { checkedAt: h.checkedAt, sandboxRoot: h.sandboxRoot, level: h.level, ...(h.detail ? { detail: h.detail } : {}), ...(h.blocked ? { blocked: h.blocked } : {}) } });
       },
       log: (line: string) => log(`host guard: ${line}`),
+      // w5906: an idle agent with a pending check-in or a timed run keeps its sandbox through a grow; any other is stopped
+      // for it through the stop op a pause uses, and waited for (up to 20 s) so the grow runs in the same look.
+      idleHold: (id: string) => {
+        const at = this.wakes.get(id);
+        if (at !== undefined) return `a check-in at ${new Date(at).toISOString()}`;
+        return this.timed?.active().includes(id) ? 'a timed run' : undefined;
+      },
+      stopIdle: async (id: string) => {
+        const e = this.entries.get(id);
+        if (!e?.s.live) return true;
+        log(`agent ${id}: stopped between turns for the Dev Drive grow (w5906); it resumes at its next message`);
+        e.s.stop();
+        for (let i = 0; i < 40 && e.s.live; i++) await new Promise((r) => setTimeout(r, 500));
+        return !e.s.live;
+      },
       // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
       poolFloor: () => {
         const p = this.currentPool();

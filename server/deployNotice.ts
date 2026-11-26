@@ -96,14 +96,16 @@ export function estimateMinutes(samples: readonly RestartSample[], update: boole
 }
 
 /** What is going out: "deploying 1a2b3c4d5 (#12 Title, #13 Title)", or the restart's reason. */
-export function whatLine(p: Pick<PendingNotice, 'update' | 'to' | 'prs' | 'reason'>): string {
+export function whatLine(p: Pick<PendingNotice, 'update' | 'to' | 'prs' | 'reason' | 'from'>): string {
   if (!p.update) return `restarting (${clip(p.reason, 120)})`;
+  // w5887: an update to the commit that already runs (an automatic deploy asked for what fffctl update had just put out).
+  if (p.from && p.to && sameCommit(p.from, p.to)) return `deploying ${short(p.to)} again, the commit it already runs`;
   const prs = (p.prs ?? []).map((x) => `#${x.number}${x.title ? ` ${clip(x.title, 60)}` : ''}`);
   const list = prs.length > 6 ? [...prs.slice(0, 6), `${prs.length - 6} more`] : prs;
   return `deploying ${p.to ? short(p.to) : 'new code'}${list.length ? ` (${list.join(', ')})` : ''}`;
 }
 
-export function startLine(p: Pick<PendingNotice, 'update' | 'to' | 'prs' | 'reason'>, est: { minutes: number; n: number } | undefined): string {
+export function startLine(p: Pick<PendingNotice, 'update' | 'to' | 'prs' | 'reason' | 'from'>, est: { minutes: number; n: number } | undefined): string {
   const how = est
     ? `about ${est.minutes} minute${est.minutes === 1 ? '' : 's'} (the median of the last ${est.n} restart${est.n === 1 ? '' : 's'}, measured)`
     : 'a few minutes (no restart of this portal measured yet)';
@@ -114,6 +116,12 @@ export function doneLine(p: Pick<PendingNotice, 'update' | 'startedAt'>, o: { ru
   const took = minutesText(o.upAt - Date.parse(p.startedAt));
   const down = o.stoppedAt ? `, down ${minutesText(o.upAt - Date.parse(o.stoppedAt))}` : '';
   return `[portal] Portal ${p.update ? 'update' : 'restart'} done: now on ${o.running ? short(o.running) : 'unknown code'}, took ${took} since the start line${down}.`;
+}
+
+/** The pull request numbers an automatic deploy's reason names: "update to <sha> (auto-deploy: #1295, #1289)". */
+export function prsInReason(reason: string): BatchPr[] {
+  const list = /\(auto-deploy: ([^)]*)\)/.exec(reason)?.[1] ?? '';
+  return [...list.matchAll(/#(\d+)/g)].map((m) => ({ number: Number(m[1]) }));
 }
 
 /** The pull requests a deploy brings: merge commits in the prepared release between the running commit and it. */
@@ -171,7 +179,9 @@ export class DeployNotice {
   started(req: Pick<RestartRequest, 'reason' | 'update'>, o: { from?: string; to?: string; prs?: BatchPr[] } = {}) {
     try {
       const to = o.to ?? /\bupdate to ([0-9a-f]{7,40})\b/i.exec(req.reason)?.[1];
-      const p: PendingNotice = { startedAt: new Date(this.now()).toISOString(), reason: req.reason, update: req.update, ...(o.from ? { from: o.from } : {}), ...(to ? { to } : {}), ...(o.prs?.length ? { prs: o.prs } : {}), told: [] };
+      // With no titles found, the numbers fff-update put in the reason ("update to <sha> (auto-deploy: #1295, #1289)").
+      const prs = o.prs?.length ? o.prs : prsInReason(req.reason);
+      const p: PendingNotice = { startedAt: new Date(this.now()).toISOString(), reason: req.reason, update: req.update, ...(o.from ? { from: o.from } : {}), ...(to ? { to } : {}), ...(prs.length ? { prs } : {}), told: [] };
       const est = estimateMinutes(this.state.samples, req.update);
       if (est) p.estimateMinutes = est.minutes;
       p.told = this.post(startLine(p, est));
