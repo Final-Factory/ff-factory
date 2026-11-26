@@ -59,6 +59,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `public-identity.gitconfig` | no longer written or read (w3093: the identity rides `GIT_CONFIG_*` itself); an old one is harmless | daemon (`FF_APP_DIR`) | M | no | — |
 | `unity-slots/` (+ its `unity-slot` shims, put first on workers' PATH) | the Unity slot mailbox (w469) | daemon | M | no | `machine/unitySlots.ts:23-24`, `machine/daemon.ts:440,713-720` |
 | `unity-mcp/<place>/` | each place's own `UNITY_MCP_STATUS_DIR` | daemon | S | no | `machine/unityMcp.ts:16-17,62` |
+| `tmp/bench/ff-bench-<pid>-<hex>` (+ `.release`, `.tmp`) | a bench ticket's status files, written by its `bench_queue.py hold` helper (w5905: in the OS temp folder before, `/tmp` for a Linux or macOS daemon); removed when the helper exits on its release, and swept for gone holders by the first ticket each process takes | daemon, and a worker's own ticket | M | no | `machine/benchQueue.ts` (`benchStatusDir`, `sweepBenchStatus`, `BenchTicket.release`) |
 | `agents/<id>/` | standing agents assigned to the machine (`NOTES.md`) | portal via daemon | M | no | `server/machineDeploy.ts:353`; docs/machines.md "Standing agents" |
 
 ### 1.2 Per-agent and per-place things outside `app_dir`
@@ -168,6 +169,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   agents/<id>/                   standing agents assigned to this machine
   scratch/                       long-lived scratch (today's _scratch, ffsb-scratch, F:\tmp)
   tmp/ffa-<session>/             agents' TMP/TEMP/TMPDIR (temp_dir)
+  tmp/bench/                     bench tickets' status files (w5905)
   tmp-medium/ffa-<session>/      Medium agents' TMP/TEMP/TMPDIR with daemon.json "mediumAgentFolders": "on" (w5862): read-only to workers
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
   claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
