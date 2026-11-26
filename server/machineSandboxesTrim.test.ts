@@ -716,6 +716,7 @@ test('w5614: slot repos "all" on a busy machine: a worktree that is never free c
   assert.ok(isWorktree(dir), 'an agent is live there: the look leaves it');
   const said = logs.filter((l) => /sb1: not becoming a slot repo yet: an agent is live there/.test(l));
   assert.equal(said.length, 1, `the reason, once: ${JSON.stringify(logs)}`);
+  await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
   const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
   assert.ok(isSlotRepo(dir), `converted at the placement: ${JSON.stringify(logs)}`);
   assert.equal(res.to, 'sandbox/placed');
@@ -732,6 +733,8 @@ for (const how of ['hangs', 'throws'] as const) {
     await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
     await ready(p, 'sb1');
     const dir = path.join(r.sbRoot, 'sb1');
+    // create's provision ends ready before its busy mark is cleared: a switch in that gap rightly skips the conversion.
+    await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
     p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
     const inner = p as unknown as { convertAtPlacementMs: number; d: { git: (a: string[], o?: { signal?: AbortSignal; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }> } };
     inner.convertAtPlacementMs = 300;
