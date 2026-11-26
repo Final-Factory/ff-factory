@@ -32,6 +32,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
+import { pathFenceLine, pathFenceMode, watchShimBin } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -259,6 +260,12 @@ export interface DaemonConfig {
    * editor_tmpdir`, read at the daemon's start, and off is the recovery. Windows editors have `<root>/tmp/unity` always.
    */
   editorTmpdir?: 'on' | 'off';
+  /**
+   * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
+   * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
+   * watch, the recovery. macOS and Linux only; set remotely by `ops_worker machine_update path_fence`.
+   */
+  pathFence?: 'off' | 'warn';
   /**
    * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
    * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
@@ -1659,6 +1666,10 @@ export class Daemon {
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
+    // w5863: the path fence, warn-only: log each write to the shims folder the daemon did not make (machine/pathFence.ts).
+    const pf = pathFenceMode(this.cfg.pathFence);
+    if (process.platform !== 'win32') log(pathFenceLine(pf, this.slotBin, this.cfg.root));
+    if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
     // GitHub Apps (w1519): the gh shim and git helper a run the portal named apps for gets (machine/ghApp.ts).
     try {
       const p = ghAppPaths(appDirOfConfig(this.cfg));
