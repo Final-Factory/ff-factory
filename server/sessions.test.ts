@@ -78,15 +78,18 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
   state('running');
   await settle();
   const update = sessions.send(s.info.id, '[worker update] w602 finished a turn', 'system');
-  assert.equal(s.turnFrom, 'human', 'delivered mid-turn: the turn stays the person\'s');
-  // w5507: but relayed text joined it, and it is marked as not theirs.
-  assert.equal(s.turnRelayed, true);
+  assert.equal(s.turnFrom, 'human', "sent mid-turn: the turn stays the person's");
+  // w5931: an orchestrator's harness message waits for its person's turn to end, so it never joins it (w5507's mark is moot).
+  assert.equal(s.turnRelayed, false);
   await settle();
-  assert.ok(seen.at(-1)!.text.endsWith(RELAYED_MARK), seen.at(-1)!.text);
+  assert.equal(seen.length, 1, 'the update is held');
   assert.ok(!seen[0].text.includes(RELAYED_MARK), "the person's own message is not marked");
-  // The CLI answers the person's message alone; the update waited and gets a turn of its own: the harness's.
   result([person]);
+  state('idle');
   await settle();
+  // The update goes in at the turn's end, in a turn of its own: the harness's.
+  assert.equal(seen.length, 2);
+  assert.ok(!seen[1].text.includes(RELAYED_MARK), 'a turn of its own: no relayed mark');
   assert.equal(s.turnFrom, 'system');
   assert.equal(s.turnRelayed, false, 'a harness turn is no relayed turn of a person');
   result([update]);
@@ -94,19 +97,17 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
   await settle();
   // No turn now: the last sender, as before.
   assert.equal(s.turnFrom, 'system');
-  // Folded: a person's message and an update answered by one result keep the person's turn to the end.
   const go = sessions.send(s.info.id, 'go', 'human');
   state('running');
   await settle();
-  assert.equal(s.turnRelayed, false, 'their own turn, nothing joined yet');
-  const later = sessions.send(s.info.id, `[dispatch] w596 started\n\n${RELAYED_MARK}`, 'system');
+  const later = sessions.send(s.info.id, '[dispatch] w596 started', 'system');
   assert.equal(s.turnFrom, 'human');
-  assert.equal(s.turnRelayed, true);
+  assert.equal(s.turnRelayed, false);
+  result([go]);
+  state('idle');
   await settle();
-  assert.equal(seen.at(-1)!.text.split(RELAYED_MARK).length, 2, 'marked once, not again on a resend');
-  result([go, later]);
-  await settle();
-  assert.equal(s.turnFrom, 'human');
+  assert.equal(s.turnFrom, 'system', 'the held dispatch opened its own turn');
+  result([later]);
   state('idle');
   await settle();
   assert.equal(seen.length, 4);
