@@ -53,7 +53,7 @@ test('runner: a pass in flight is marked on disk, and the next start says it was
     now += 67 * 60_000;
     new CleanupRunner({ ...deps, pass: async () => ({ removed: [], failed: [], bytes: 0 }) });
     assert.equal(cut.length, 1);
-    assert.match(cut[0], /the previous low-space pass, started 2026-11-25 13:57Z, was cut off 67 min later, before it finished: nothing it had planned was removed/);
+    assert.match(cut[0], /the previous low-space pass, started 2026-11-25 13:57Z, was cut off 67 min later, before it finished: it had removed nothing by then/);
     assert.equal(marker.load(), undefined, 'said once: the marker goes');
     new CleanupRunner({ ...deps, pass: async () => ({ removed: [], failed: [], bytes: 0 }) });
     assert.equal(cut.length, 1);
@@ -78,7 +78,6 @@ test('runner: a dry run neither marks nor reports a start (w5795)', async () => 
       done: () => undefined,
       marker,
       started: (t) => void started.push(t),
-      quick: async () => assert.fail('no quick plan in a dry run'),
     });
     await r.run('asked', { dryRun: true });
     assert.equal(during, undefined);
@@ -88,48 +87,22 @@ test('runner: a dry run neither marks nor reports a start (w5795)', async () => 
   }
 });
 
-test('runner: a low pass plans the quick scope first and reports what it would free; an hourly pass does not (w5795, report-only)', async () => {
-  let free = 20 * GB;
-  let order: string[] = [];
+test('runner: a low pass goes straight to the pass, and its step timings reach the summary (w5795: no quick plan first)', async () => {
+  const order: string[] = [];
   const r = new CleanupRunner({
     settings: () => ({ everyMinutes: 60, softFreeGB: 30 }),
     diskPaths: () => ['V:/'],
-    statfs: async () => ({ free, total: 320 * GB }),
-    pass: async () => (order.push('pass'), { removed: [], failed: [], bytes: 0, phasesMs: { regular: 1, cap: 2 } }),
+    statfs: async () => ({ free: 20 * GB, total: 320 * GB }),
+    pass: async (low) => (order.push(low ? 'low pass' : 'pass'), { removed: [], failed: [], bytes: 0, phasesMs: { regular: 1, cap: 2 } }),
     consumers: async () => [],
     log: () => undefined,
     done: () => undefined,
-    quick: async () => {
-      order.push('quick');
-      return [
-        { path: 'V:/ffw/ffu-slots/slot3/target', bytes: 24 * GB, rule: 'ffu-slot-target' },
-        { path: 'V:/ffw/tmp/ffa-1/ffu-target', bytes: 2 * GB, rule: 'cargo-target-cap' },
-      ];
-    },
   });
   const low = await r.tick();
-  assert.deepEqual(order, ['quick', 'pass'], 'the quick plan first, then the full pass as before');
-  assert.equal(low?.quick?.items, 2);
-  assert.equal(low?.quick?.bytes, 26 * GB);
-  assert.equal(low?.quick?.top?.[0].rule, 'ffu-slot-target');
+  assert.equal(low?.trigger, 'low-space');
+  assert.deepEqual(order, ['low pass'], 'nothing planned before the pass');
+  assert.ok(!("quick" in (low ?? {})), "no quick report in the summary");
   assert.deepEqual(low?.phasesMs, { regular: 1, cap: 2 }, "the pass's step timings reach the summary");
-
-  free = 200 * GB;
-  order = [];
-  const r2 = new CleanupRunner({
-    settings: () => ({ everyMinutes: 60, softFreeGB: 30 }),
-    diskPaths: () => ['V:/'],
-    statfs: async () => ({ free, total: 320 * GB }),
-    pass: async () => (order.push('pass'), { removed: [], failed: [], bytes: 0 }),
-    consumers: async () => [],
-    log: () => undefined,
-    done: () => undefined,
-    quick: async () => (order.push('quick'), []),
-  });
-  const hourly = await r2.tick();
-  assert.equal(hourly?.trigger, 'hourly');
-  assert.deepEqual(order, ['pass']);
-  assert.equal(hourly?.quick, undefined);
 });
 
 test('describeCutOff rounds the minutes and never goes negative (w5795)', () => {
@@ -173,7 +146,7 @@ test('runner: a pass cut off mid-step names the step and the steps it had done (
     now += 57 * 60_000;
     new CleanupRunner({ ...deps, pass: async () => ({ removed: [], failed: [], bytes: 0 }) });
     assert.equal(cut.length, 1);
-    assert.match(cut[0], /started 2026-11-25 19:54Z, was cut off 61 min later, in its stale step \(57 min in it\), before it finished: nothing it had planned was removed; steps done before: regular 4 min \(w5795\)/);
+    assert.match(cut[0], /started 2026-11-25 19:54Z, was cut off 61 min later, in its stale step \(57 min in it\), before it finished: it had removed nothing by then; steps done before: regular 4 min \(w5795\)/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -190,4 +163,63 @@ test('cleanupPass says each step as it begins, with the steps done (w5795)', asy
     stale: async () => ({ items: [], listed: [] }),
   } as never);
   assert.deepEqual(seen.slice(0, 2), ['regular<>', 'stale<regular>']);
+});
+
+// w5795: four low passes in a row on LothDesktop (2026-11-25 21:28Z to 23:58Z) were cut off by daemon restarts after 26-58 min
+// of planning, in or before their one remove step, and removed nothing. Each step's plan now goes as soon as it is planned.
+test('cleanupPass removes each step\'s plan before the next step plans, and a hang later keeps what went (w5795)', async () => {
+  const { cleanupPass } = await import('./staleOutput.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-perstep-'));
+  try {
+    const put = (name: string) => {
+      const p = path.join(root, name);
+      fs.mkdirSync(p, { recursive: true });
+      fs.writeFileSync(path.join(p, 'f'), 'x'.repeat(1000));
+      return p;
+    };
+    const reg = put('old-temp');
+    const stale = put('old-build');
+    const guard = { keep: [], inUse: [], home: path.join(root, 'nobody') };
+    const item = (p: string, rule: string) => ({ path: p, rule, why: 'test' });
+    const marks: { step: string; removed: number }[] = [];
+    let regularGoneAtStale: boolean | undefined;
+    const r = await cleanupPass({
+      opts: { stale: true, dryRun: false, step: (n: string, _d: Record<string, number>, s?: { removed: number }) => void marks.push({ step: n, removed: s?.removed ?? 0 }) },
+      guard,
+      mode: 'on',
+      regular: async () => [item(reg, 'temp-old')],
+      stale: async () => {
+        regularGoneAtStale = !fs.existsSync(reg);
+        return { items: [item(stale, 'build-output')], listed: [] };
+      },
+      root,
+    });
+    assert.equal(regularGoneAtStale, true);
+    assert.ok(!fs.existsSync(stale));
+    assert.deepEqual(r.removed.map((x) => x.path).sort(), [reg, stale].sort());
+    assert.deepEqual(marks.map((m) => m.step), ['regular', 'remove', 'stale', 'removeStale', 'listed']);
+    assert.equal(marks.find((m) => m.step === 'stale')?.removed, 1);
+
+    // A stale plan that never ends (a restart cuts the pass off there): the regular items are gone all the same.
+    const reg2 = put('old-temp-2');
+    void cleanupPass({ opts: { stale: true, dryRun: false }, guard, mode: 'on', regular: async () => [item(reg2, 'temp-old')], stale: () => new Promise(() => undefined), root });
+    for (let i = 0; i < 50 && fs.existsSync(reg2); i++) await new Promise((res) => setTimeout(res, 20));
+    assert.ok(!fs.existsSync(reg2));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('describeCutOff says what a cut-off pass had removed by then (w5795)', () => {
+  const at = Date.parse('2026-11-25T23:04:00Z');
+  const text = describeCutOff({ startedAt: at, trigger: 'low-space', step: 'stale', stepAt: at + 5 * 60_000, done: { regular: 3 * 60_000, remove: 2 * 60_000 }, soFar: { removed: 12, bytes: 40 * GB } }, at + 55 * 60_000);
+  assert.match(text, /was cut off 55 min later, in its stale step \(50 min in it\), before it finished: it had removed 12 items \(40\.0 GB\) by then; steps done before: regular 3 min, remove 2 min \(w5795\)/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-marker-'));
+  try {
+    const m = passMarkerFile(dir);
+    m.save({ startedAt: at, trigger: 'hourly', step: 'stale', stepAt: at, soFar: { removed: 2, bytes: 5 } });
+    assert.deepEqual(m.load()?.soFar, { removed: 2, bytes: 5 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

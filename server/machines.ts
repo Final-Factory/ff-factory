@@ -1554,7 +1554,7 @@ export class MachineManager {
   register(m: Omit<Machine, 'online' | 'sessionIds' | 'createdAt'> & Partial<Pick<Machine, 'sessionIds' | 'createdAt'>>): { machine: Machine; token: string } {
     if (!MACHINE_ID.test(m.id)) throw new Error(`machine id "${m.id}" must be lower-case letters, digits and dashes`);
     const prev = this.store.machines.get(m.id);
-    const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...m };
+    const machine: Machine = { online: this.isOnline(m.id), sessionIds: prev?.sessionIds ?? [], createdAt: prev?.createdAt ?? new Date().toISOString(), ...(prev?.drain ? { drain: prev.drain } : {}), ...m };
     const token = stageMachineToken(this.cfg.dataDir, m.id);
     this.store.putMachine(machine);
     return { machine, token };

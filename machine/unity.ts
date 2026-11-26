@@ -7,6 +7,7 @@ import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, ty
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
 import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
+import { fencedEditorEnv, fencedEditorEnvWarning } from './editorEnv.ts';
 import { editorTempEnv } from './sharedCaches.ts';
 import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
@@ -401,7 +402,8 @@ export class MacUnity {
   /** The editor's own log (-logFile), for a sandbox editor (machine/sandboxes.ts); unset: Unity's default Editor.log. */
   readonly logFile?: string;
   /** w5557: variables the editor starts with on top of the daemon's (a sandbox editor's own FF_GAME_DATA_DIR). */
-  readonly env: Record<string, string>;
+  /** The editor's own environment, read at each start (w5833: a sandbox editor's TMPDIR folder is made then). */
+  private readonly envOf: () => Record<string, string>;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
   /** w5270: what the last start() found of the Burst EditorPref when it was off (undefined: it was on). */
@@ -411,12 +413,13 @@ export class MacUnity {
   /** w5540: whether the last start() was fenced, and why not when it was not. */
   fenced?: { on: boolean; why?: string; warn?: boolean };
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> } = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> | (() => Record<string, string>) } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.logFile = opts.logFile;
     this.fence = opts.fence;
-    this.env = opts.env ?? {};
+    const env = opts.env ?? {};
+    this.envOf = typeof env === 'function' ? env : () => env;
     this.d = deps ?? realDeps(platform);
     this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
   }
@@ -510,6 +513,7 @@ export class MacUnity {
     this.burstNote = await this.d.burstPrefOn?.().catch((e: Error) => `could not check Unity's Burst EditorPref: ${e.message}`);
     let bin = this.bin();
     await this.noAppNap(bin);
+    const env = this.envOf();
     const args = ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])];
     const wanted = this.fence?.();
     const seatbelt = this.platform === 'darwin' && isSeatbeltFence(wanted) ? wanted : undefined;
@@ -521,21 +525,21 @@ export class MacUnity {
       if (this.d.launchFenced) {
         const lc = await this.d.licensingClient?.(bin).catch((e: Error) => `could not start Unity's licensing client: ${e.message}`);
         if (lc) this.burstNote = this.burstNote ? `${this.burstNote}. ${lc}` : lc;
-        pid = await this.d.launchFenced(seatbelt, bin, args, this.repo, this.env);
+        pid = await this.d.launchFenced(seatbelt, bin, args, this.repo, env);
         this.fenced = { on: true, ...(seatbelt.warn ? { warn: true } : {}) };
       } else {
         this.fenced = { on: false, why: 'no fenced launcher here' };
-        pid = await this.d.launch(bin, args, this.repo, this.env);
+        pid = await this.d.launch(bin, args, this.repo, env);
       }
     } else if (fence && fencedBin && this.d.launchFenced) {
       bin = fencedBin;
-      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, this.env);
+      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, env);
       this.fenced = { on: true };
     } else {
       // A fence the editor cannot use (no junction for its version, a unity_path not shaped <version>\Editor\Unity.exe):
       // it starts unfenced, as agents do when their fence cannot be set up, and says so.
       this.fenced = fence ? { on: false, why: !fencedBin ? `no junction under ${fence.unityDir} for ${bin}` : 'no fenced launcher here' } : undefined;
-      pid = await this.d.launch(bin, args, this.repo, this.env);
+      pid = await this.d.launch(bin, args, this.repo, env);
     }
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);
@@ -615,7 +619,7 @@ export function winLaunchScript(bin: string, args: string[], cwd: string): strin
 }
 
 /** The real machine: ps, signals and a detached launch on a Mac (and Linux, without App Nap); CIM, taskkill and Start-Process on Windows. */
-export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
+export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string) => void = () => undefined): UnityDeps {
   const base: UnityDeps = { ...realDepsMac(), burstPrefOn: () => ensureBurstPrefOn(realBurstPrefDeps(platform)) };
   if (platform === 'linux') {
     const { noAppNap: _n, launchFenced: _f, ...linux } = base;
@@ -656,6 +660,8 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
       for (const k of ['APPDATA', 'LOCALAPPDATA', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
+      // w5864, warn-only: the editor still gets the daemon's whole environment; the log names what the minimal one would leave out.
+      log(fencedEditorEnvWarning(cwd, fencedEditorEnv(process.env, temp, fence.env, env)));
       const r = await run(fence.launcher, ['-e', FENCED_LAUNCH_SCRIPT, bin, cwd, JSON.stringify(args)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...fence.env, ...env } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin} at Low integrity: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);

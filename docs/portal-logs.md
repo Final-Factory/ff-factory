@@ -209,7 +209,16 @@ message:
   passed nothing back, as a failing Funnel does; w5318); `why=?` is a page from before w4723. `gap` is how long the page
   was without a live socket; `tries` (w5318) how many attempts failed since its last open socket, so a long `gap` with a
   few `tries` is a page that waited on hung attempts or a sleeping tab, and many `tries` a path that kept refusing.
-  `state` is what building the first full state took; the page's "open" waits on it.
+  `state` is what building the first full state took and its size in JSON; the page's "open" waits on it, and since
+  w5861 it is the only copy the page loads (it no longer fetches `/api/state` first, unless an attempt fails or has not
+  opened after 2.5 s).
+- `page socket first state sent: <login> via <path>, <ms>ms after the open` (w5861): only when handing the first state to
+  the network took a second or more, which on a slow path means the page was still taking it in.
+- `page state sizes: <top fields with KB>; <n> sessions, by field: <session fields with KB>` (w5861): where the first
+  state's bytes go, at most once an hour (server/pageState.ts, `stateSizes`). The page's sessions leave out the fields no
+  page code reads and, for a session no shown request names and idle 3 days, its last report (`pageSessions`).
+- A page's socket is not ended by the ping timeout in its first 60 s (w5861): a first state still downloading holds the
+  ping behind it, and lothsahn's page was dropped eight times in four minutes at 15-27 s open on 2026-11-25.
 - **"Unavailable" while the orchestrator answered** (w5318, lothsahn 2026-11-23: "You were just unavailable for a long
   time"): read the person's `page socket` lines before the agent's timing. Their page had no open socket from 18:53:06 to
   19:07:17Z (a close `by network` 3 s after their message, the next open `why=error gap=622.9s`), while the orchestrator
