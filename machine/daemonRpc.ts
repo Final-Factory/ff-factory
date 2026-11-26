@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { loopRun } from '../server/loopWatch.ts';
 
 /** Who called: the session the token was made for, and the sandbox it ran in (none for a standing agent or the daemon's own). */
 export interface Caller {
@@ -169,7 +170,7 @@ export class DaemonRpc {
       }
       const body = raw ? (JSON.parse(raw) as unknown) : {};
       if (!body || typeof body !== 'object' || Array.isArray(body)) return answer(400, { ok: false, error: 'the body is a JSON object' });
-      const out = await handler(caller, body as Record<string, unknown>);
+      const out = await loopRun(`rpc ${m![1]}`, () => handler(caller, body as Record<string, unknown>));
       answer(200, { ok: true, ...(out && typeof out === 'object' ? out : {}) });
     } catch (e) {
       const err = e as Error;

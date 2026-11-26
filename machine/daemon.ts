@@ -19,17 +19,18 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowDiskImageWarning, lowDiskImages, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
-import { compilerServers } from './compilerServer.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowDiskImageWarning, lowDiskImages, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
-import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
+import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
+import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
-import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
+import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
 import { pathFenceLine, pathFenceMode, watchShimBin } from './pathFence.ts';
@@ -42,11 +43,13 @@ import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts
 import { HOST_WATCH, HostWatch, folderLastWrite, lingeringRefusal, realHostProcs, removeHostDir, type LingeringHost } from './hostWatch.ts';
 /** The exit code of a daemon that ends for a newer one of its machine: its supervisor stops instead of starting it again. */
 export const DAEMON_YIELD_EXIT = 75;
-import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
+import { MachineGuard, realGuardEffects, runnerRestartScript, type MachineGuardEffects, type MachineGuardSettings } from './hostGuard.ts';
 import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
+import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
+import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
@@ -57,6 +60,7 @@ import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, w
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { run } from '../server/proc.ts';
+import { probeReadFenceWin } from './readFenceWin.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
 import { publishFromMachine } from './review.ts';
@@ -87,7 +91,7 @@ import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
-import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
@@ -101,12 +105,14 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
+import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
+import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
-import { benchTicketFor, pythonExe, queueTickets, type QueueTicket } from './benchQueue.ts';
+import { benchTicketFor, pythonExe, queueTickets, refreshTrustedBenchAsync, type QueueTicket } from './benchQueue.ts';
 import { runSteamJob } from './steamUpload.ts';
 import { holdsOwnTicket, resumeRevokes, revokeTicket } from './benchRevoke.ts';
 import { readBenchHours } from './benchHours.ts';
@@ -126,9 +132,9 @@ import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type Gh
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
-import { planMediumFolders, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
+import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
-import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
 export interface DaemonConfig {
   /**
@@ -186,6 +192,12 @@ export interface DaemonConfig {
    * agents get <root>/tmp-medium and <root>/cache-medium/cargo, keeping today's folders with a WARNING when they cannot.
    */
   mediumAgentFolders?: MediumFoldersMode;
+  /**
+   * w5870: Medium agents' own tool caches (npm, pip, NuGet, .NET, Playwright, Unity's), the user PATH and ffu slots
+   * (machine/mediumFolders.ts planMediumCaches). Absent or "warn": WARNINGs only; "on": Medium agents get <root>/cache-medium's
+   * caches, the user PATH loses its entries in folders workers write, and `ffu-slot take` refuses a Medium agent.
+   */
+  mediumAgentCaches?: MediumCachesMode;
   /**
    * Paths outside the worker root that Low workers may write, labelled Low with the root (w5377): the person's decision,
    * never a default (lothsahn: "under no circumstances should workers write outside of ffw"). A path that is a file now is
@@ -267,6 +279,12 @@ export interface DaemonConfig {
    * editor_tmpdir`, read at the daemon's start, and off is the recovery. Windows editors have `<root>/tmp/unity` always.
    */
   editorTmpdir?: 'on' | 'off';
+  /**
+   * w6000: "on" (the default when unset) points the daemon's own TMPDIR, TEMP and TMP at `<root>/tmp-daemon`
+   * (machine/daemonTemp.ts), so its os.tmpdir() and what it starts write inside the worker root. Set remotely by `ops_worker
+   * machine_update daemon_tmpdir`, read at the daemon's start; "off" is the recovery.
+   */
+  daemonTmpdir?: 'on' | 'off';
   /**
    * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
    * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
@@ -453,7 +471,7 @@ export function readToken(cfg: Pick<DaemonConfig, 'token' | 'tokenFile'>, read: 
 export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) => cfg.appDir || path.join(home, '.ff-factory');
 
 /** Where agents' own temp folders go: the machine's temp_dir, else the system's. Exported for tests. */
-export const agentTempRoot = (tempDir: string | undefined) => tempDir || os.tmpdir();
+export const agentTempRoot = (tempDir: string | undefined) => tempDir || systemTempDir();
 
 /** The `claude` folder of each agent's temp folder (<temp root>/<ffa-session>/claude): Claude Code's background task output. */
 export function cliTempFolders(tempRoot: string): string[] {
@@ -527,6 +545,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** How often the status reads the ffu slots again (w5912): a git status and a few stats per held slot, in a child process. */
+const FFU_REPORT_MS = 2 * 60_000;
 /** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
 const LINK_BEAT_MS = 20_000;
 const LINK_DEAD_MS = 45_000;
@@ -597,6 +617,8 @@ export class Daemon {
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
   readonly pool: SandboxPool;
+  /** Light agent folders (w5924, machine/lightFolders.ts): agent-only workers' plain folders under the sandbox root, reported with the sandboxes. */
+  readonly light: LightFolders;
   /** Each sandbox's local test runs, sent to the portal's per-test history (w4922, machine/testHistorySpool.ts). */
   private readonly testHistory: TestHistorySpool;
   /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
@@ -624,6 +646,8 @@ export class Daemon {
   readonly benchRunners: BenchRunners;
   readonly loadGate: LoadGate;
   readonly runnerUnits: RunnerUnits;
+  /** w5999: the macOS and Windows runners' temp folders inside the worker root (machine/runnerEnv.ts). */
+  readonly runnerEnv?: RunnerEnv;
   readonly ciFirst: CiFirst;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
@@ -662,6 +686,12 @@ export class Daemon {
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
   private lastStats?: { stats: HostStats; at: number };
+  /** Each ffu slot's target size as the last clean-up pass measured it (w5912): the status reports it, never a du of its own. */
+  private readonly ffuSizes = new Map<string, { bytes: number; at: string }>();
+  /** The last `ffu-slot list --json` (w5912), read again every FFU_REPORT_MS in the background. */
+  private ffuReport?: FfuSlotsReport;
+  private ffuReportAt = 0;
+  private ffuReporting = false;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
@@ -863,7 +893,7 @@ export class Daemon {
         worker: {
           sandboxIds: () => (this.pool ? this.pool.list().map((sb) => sb.id) : []),
           ticket: (o) =>
-            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
+            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg), background: true }, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
         },
       });
     }
@@ -877,7 +907,7 @@ export class Daemon {
     if (cfg.root) {
       this.benchProxy = new BenchProxy({
         dir: path.join(appDirOfConfig(cfg), 'bench-holds'),
-        trusted: { appDir: appDirOfConfig(cfg) },
+        trusted: { appDir: appDirOfConfig(cfg), background: true },
         lock: () => benchLockDir(cfg.root!),
         root: cfg.root,
         sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
@@ -987,6 +1017,8 @@ export class Daemon {
       signal: (pid, sig) => (!real ? 'not a real daemon' : process.platform === 'win32' && sig !== 'SIGTERM' ? winSuspend(pid, sig === 'SIGCONT') : sendSignal(pid, sig)),
       diag: (root) => (real ? readListenerLog(root) : undefined),
       opsRunner: (root) => real && isOpsRunner(root),
+      // w5916: a listener the load gate or a hold suspended stays the gate's: a turn's end never continues it
+      othersPaused: () => new Set(this.loadGate.state().suspended.map((p) => p.pid)),
       read: () => (cfg.root ? readRunnersFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeRunnersFile(cfg.root, st, log),
       log: (line) => log(line),
@@ -1004,6 +1036,20 @@ export class Daemon {
         return winSuspend(pid, resume);
       },
       diag: (root) => (real ? readListenerLog(root) : undefined),
+      // w5916: a person's hold drains every runner but an operations runner, and leaves a turn's paused ones to the turn
+      opsRunner: (root) => real && isOpsRunner(root),
+      othersPaused: () => new Set(this.benchRunners.paused().map((p) => p.pid)),
+      ...(real && process.platform === 'win32'
+        ? {
+            start: async (root: string) => {
+              const r = await new Promise<{ code: number; out: string; err: string }>((resolve) =>
+                execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
+              );
+              if (r.code !== 0) throw new Error((r.err || r.out || `exit ${r.code}`).trim());
+              return r.out.trim() || 'started';
+            },
+          }
+        : {}),
       read: () => (cfg.root ? readLoadGateFile(cfg.root) : undefined),
       write: (st) => cfg.root && writeLoadGateFile(cfg.root, st, log),
       log: (line) => log(line),
@@ -1051,6 +1097,35 @@ export class Daemon {
       log: (line) => log(line),
       now: () => Date.now(),
     });
+    // w5999: the macOS and Windows runners' temp folders inside the worker root, as runnerUnits does for Linux
+    // (machine/runnerEnv.ts): TMPDIR (and Windows' TEMP and TMP) and DOTNET_EnableDiagnostics=0 in each runner's launchd
+    // plist or .env, and an idle listener started without them restarted once
+    if (real && (process.platform === 'darwin' || process.platform === 'win32')) {
+      const envPlatform = process.platform;
+      this.runnerEnv = new RunnerEnv({
+        platform: envPlatform,
+        ...runnerEnvOps({
+          platform: envPlatform,
+          workerRoot: cfg.root,
+          home: os.homedir(),
+          uid: process.getuid?.() ?? 0,
+          exec: (runnerEnvCmd, args) =>
+            new Promise((resolve, reject) =>
+              execFile(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
+            ),
+        }),
+        held: (r) => {
+          const st = this.loadGate.state();
+          return !!st.hold || (st.startOnLift ?? []).some((x) => sameRoot(x, r.root, envPlatform));
+        },
+        opsRunner: (root) => isOpsRunner(root),
+        census: async () => runnerCensus(await pd.procs()),
+        diag: (root) => readListenerLog(root),
+        paused: () => new Set([...this.benchRunners.paused(), ...this.loadGate.state().suspended].map((p) => p.pid)),
+        log: (line) => log(line),
+        now: () => Date.now(),
+      });
+    }
     // w5322: on a CI-first machine (CI_FIRST: biscuit) FF Factory's own scopes run below its CI runners (machine/ciFirst.ts)
     const userctl = (args: string[]) =>
       new Promise<string>((resolve, reject) =>
@@ -1067,6 +1142,7 @@ export class Daemon {
       census: async () => runnerCensus(await pd.procs()),
       log: (line) => log(line),
     });
+    this.light = new LightFolders({ root: () => this.sandboxRoot(), onChange: () => this.reportSandboxes() });
     this.pool = new SandboxPool(
       {
         repoPath: cfg.repoPath,
@@ -1098,7 +1174,7 @@ export class Daemon {
         // own sandbox's timed leg (rides_along: "running editor <sandbox>", with the sandbox in the ticket)
         // w1962: under a session of its own (editor:<sandbox>, at its sandbox's worker's priority in priorities.json), which
         // FF_BENCH_SESSION gives it: FF_SESSION_ID would make it a worker's, whose leftovers FF Factory ends
-        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg), background: true }, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
       },
       pd,
     );
@@ -1140,7 +1216,7 @@ export class Daemon {
     } catch {
       // never sent yet: the defaults
     }
-    const env = hostCleanupEnv(cfg.tempDir);
+    const env = hostCleanupEnv(cfg.tempDir, cfg.root);
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
@@ -1219,6 +1295,7 @@ export class Daemon {
                 published: readPublished(publishedFile(appDirOfConfig(this.cfg))),
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
+                ffuSized: this.ffuSized,
               }),
             );
           },
@@ -1233,7 +1310,15 @@ export class Daemon {
               self: [process.pid, process.ppid],
               scope: 'cargo-cap',
               closed: this.closedSessionDirs(),
+              ffuSized: this.ffuSized,
             }),
+          // w6044: the released ffu slots' targets planned first, before the slow steps a restart cuts off; report-only for now.
+          first: {
+            plan: async () =>
+              planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+            report: (items, ms) =>
+              log(`clean-up: ffu slots first (report-only, w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`),
+          },
           busyNow: runnerBusyNow(() => this.procs()),
           endStrays: async (strays) => {
             for (const st of strays) {
@@ -1338,14 +1423,37 @@ export class Daemon {
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
   private mediumMemo?: MediumFolders;
+  /** Folders the fences open whole wherever they are (w5869, w5871's F3; mediumFolders.ts workerWritable's `opened`). */
+  private fenceOpened(): string[] {
+    const c = this.cfg;
+    return [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])];
+  }
   /** w5862: Medium agents' own temp root and cargo home (machine/mediumFolders.ts), decided and logged once. */
   mediumFolders(): MediumFolders {
     if (!this.mediumMemo) {
       const c = this.cfg;
-      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])] });
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
       for (const line of this.mediumMemo.lines) log(line);
     }
     return this.mediumMemo;
+  }
+
+  private cachesMemo?: MediumCaches;
+  /** w5870: Medium agents' own tool caches (machine/mediumFolders.ts planMediumCaches), decided and logged once. */
+  mediumCaches(): MediumCaches {
+    if (!this.cachesMemo) {
+      const c = this.cfg;
+      this.cachesMemo = planMediumCaches({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
+      for (const line of this.cachesMemo.lines) log(line);
+    }
+    return this.cachesMemo;
+  }
+
+  /** w5870: the user PATH's entries in folders workers write, warned of or taken off once at start (Windows). */
+  async checkUserPath(): Promise<void> {
+    const c = this.cfg;
+    const runPs = (script: string) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
+    for (const line of await fixUserPath({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened(), runPs })) log(line);
   }
 
   /** The agents' temp roots: the one every agent had, and Medium agents' own once w5862's switch is on. */
@@ -1373,13 +1481,20 @@ export class Daemon {
 
   /**
    * A new agent's TMP, TEMP and TMPDIR (cleanup.ts sessionTempEnv) and, for a Medium agent once w5862's switch is on, its
-   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root.
+   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root. w5870: a
+   * Medium agent also gets its own tool caches once that switch is on, and MEDIUM_AGENT_VAR either way (ffu-slot reads it):
+   * "on" only once its own temp folder was made too, since ffu-slot then sends it to build there (w5946 F5).
    */
   private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
     const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
-    const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    // Its own folder only when sessionTempEnv made it there (w6024 review, point 1): its fallback names the system temp,
+    // which must not pass for the Medium folder and skip the shared root and this warning.
+    const want = m.tempRoot ? sessionTempDir(m.tempRoot, id) : undefined;
+    const made = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    const own = want && made.TMP === want ? made : {};
     if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
-    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}) };
+    const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' && own.TMP ? 'on' : 'warn' };
+    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}), ...caches };
   }
 
   private sandboxRoot(): string | undefined {
@@ -1410,7 +1525,7 @@ export class Daemon {
       inUse: [
         ...[...this.entries.values()].filter((e) => e.s.live).flatMap((e) => this.sessionTemps(e.s.info.id)),
         // Every bash of this user uses it as /tmp, whichever session's folder it was.
-        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
+        ...[keepGitBashTmp(this.bashTmp, [systemTempDir(), os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
       ],
       home: HOME,
       // Before the portal's welcome nobody knows which stopped workers a request waits for (w1379): every worker folder stays.
@@ -1623,6 +1738,8 @@ export class Daemon {
         return !e.s.live;
       },
       // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
+      // w5916: runners a grow ended while this machine is held start when the hold lifts, not now
+      deferRunners: (roots: string[]) => this.loadGate.deferStart(roots),
       poolFloor: () => {
         const p = this.currentPool();
         return p ? { warnGB: p.diskWarnGB, criticalGB: p.diskCriticalGB } : undefined;
@@ -1687,18 +1804,18 @@ export class Daemon {
         message: (m) => this.onTray(m),
       });
       void this.tray.start();
-      this.timers.push(setInterval(() => this.trayState(), 30_000));
+      this.timers.push(setInterval(loopLabel('timer trayState', () => this.trayState()), 30_000));
     } else this.pause.setTray(process.platform === 'win32' ? 'off (daemon.json tray)' : 'none (Windows only)');
     // The machine's gh login and its token's scopes (w1463): read now, every 30 minutes, and when gh's hosts file changes.
     if (this.probes.gh) {
       this.ghLogin = new GhLoginWatch({ run: this.probes.gh, look: () => lookHostsFile(), now: () => new Date(), send: (gh) => this.send({ type: 'gh_login', gh }), log: (line) => log(line) });
-      this.timers.push(setInterval(() => void this.ghLogin!.tick(), GH_LOOK_EVERY_MS));
+      this.timers.push(setInterval(loopLabel('timer ghLogin.tick', () => void this.ghLogin!.tick()), GH_LOOK_EVERY_MS));
       void this.ghLogin.tick();
     }
     // The machine's Steam client (w2459): read now and every 5 minutes, for pair runs that need Steam.
     if (this.probes.steam) {
       this.steamClient = new SteamClientWatch({ ...this.probes.steam(), send: (steam, desktop) => this.send({ type: 'steam_client', steam, ...(desktop ? { desktop } : {}) }), log: (line) => log(line) });
-      this.timers.push(setInterval(() => void this.steamClient!.tick(), STEAM_READ_EVERY_MS));
+      this.timers.push(setInterval(loopLabel('timer steamClient.tick', () => void this.steamClient!.tick()), STEAM_READ_EVERY_MS));
       void this.steamClient.tick();
     }
     // The GPU Whisper (w615): installs in the background if needed, then loads and stays loaded while VRAM allows.
@@ -1708,14 +1825,14 @@ export class Daemon {
     }
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
     // A first look at once: until it, the portal shows every sandbox's git as "not read yet" (and its editor stopped).
-    this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
+    this.timers.push(setInterval(loopLabel('timer pool.tick', () => void this.pool.tick()), 30_000));
     void this.pool.tick();
     // w4672: a hello that offered no update over the link (root.json unreadable then: its Dev Drive not yet attached) is
     // offered again once the install record is back, without waiting for the next reconnect.
-    this.timers.push(setInterval(() => this.offerSelfUpdate(), REOFFER_MS.value));
+    this.timers.push(setInterval(loopLabel('timer offerSelfUpdate', () => this.offerSelfUpdate()), REOFFER_MS.value));
     // w5377: the worker fence, set up in the background (Windows labels folders); w5555: sandbox workers wait until it is
     // decided, and are held if it failed, never started unfenced.
-    void this.fenceSetup();
+    this.fenceReady = this.fenceSetup().catch(() => undefined);
     // w5546: the read fence's probe (warn and on modes), in the background; runs start without read rules until it passes.
     void this.probeReadFence();
     this.startRpc();
@@ -1744,24 +1861,25 @@ export class Daemon {
     } catch (e) {
       log(`github apps: could not write the gh shim: ${(e as Error).message}`);
     }
-    this.timers.push(setInterval(() => void this.slotTick(), 5_000));
+    this.timers.push(setInterval(loopLabel('timer slotTick', () => void this.slotTick()), 5_000));
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
-    this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.loadGate.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
-    if (this.ciFirst.enabled) this.timers.push(setInterval(() => void this.ciFirst.tick(), 60_000));
+    this.timers.push(setInterval(loopLabel('timer benchTurn.tick', () => void this.benchTurn.tick()), 5_000));
+    this.timers.push(setInterval(loopLabel('timer benchRunners.tick', () => void this.benchRunners.tick()), 5_000));
+    this.timers.push(setInterval(loopLabel('timer loadGate.tick', () => void this.loadGate.tick().then(() => this.sendRunnerHold())), 5_000));
+    this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
+    if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
+    if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
-    this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
+    this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
-    this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
-    if (this.procsBroker) this.timers.push(setInterval(() => void this.procsBroker?.tick(), PROCS_POLL_MS));
+    this.timers.push(setInterval(loopLabel('timer reaper.tick', () => void this.reaper.tick()), 15_000));
+    if (this.procsBroker) this.timers.push(setInterval(loopLabel('timer procsBroker.tick', () => void this.procsBroker?.tick()), PROCS_POLL_MS));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
-    if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick().then(() => this.feedPersonPlay()), 15_000));
+    if (this.cfg.leftovers !== false) this.timers.push(setInterval(loopLabel('timer leftovers.tick', () => void this.leftovers.tick().then(() => this.feedPersonPlay())), 15_000));
     // The ledger facts for a clean-up worker's deletes (w1379): written every 30 s, so a stale file means a daemon that is not running.
-    this.timers.push(setInterval(() => this.writeCleanupFacts(), 30_000));
+    this.timers.push(setInterval(loopLabel('timer writeCleanupFacts', () => this.writeCleanupFacts()), 30_000));
     this.writeCleanupFacts();
     // Agent hosts nobody follows (w799): an orphan is stopped, a gone host's folder removed after a while.
     if (this.hosted) {
@@ -1779,10 +1897,10 @@ export class Daemon {
         now: () => Date.now(),
       });
       this.timers.push(
-        setInterval(() => {
+        setInterval(loopLabel('timer hostWatch.tick', () => {
           for (const [id, s] of this.hostSessions) if (!s.followed && this.entries.get(id)?.s !== s) this.hostSessions.delete(id);
           void this.hostWatch!.tick().catch((e) => log(`agent hosts: the watch failed: ${(e as Error).message}`));
-        }, HOST_WATCH.LOOK_EVERY_MS),
+        }), HOST_WATCH.LOOK_EVERY_MS),
       );
     }
     // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
@@ -1810,34 +1928,41 @@ export class Daemon {
       }
       addMcpStatusDir(editors);
     }
-    this.timers.push(setInterval(() => void this.refreshMcpScopes(), 5_000));
-    this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
+    this.timers.push(setInterval(loopLabel('timer refreshMcpScopes', () => void this.refreshMcpScopes()), 5_000));
+    this.timers.push(setInterval(loopLabel('timer syncHostEditors', () => this.syncHostEditors()), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
-    this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
-    this.timers.push(setInterval(() => this.heartbeat(), LINK_BEAT_MS));
+    this.timers.push(setInterval(loopLabel('timer outsideWatch.tick', () => void this.outsideWatch?.tick()), 60_000));
+    this.timers.push(setInterval(loopLabel('timer heartbeat', () => this.heartbeat()), LINK_BEAT_MS));
+    // w5973: the machine gh login's token is read off the loop; read it now, so the first runs after a start get it.
+    if (this.cfg.root) void this.readMachineGh();
+    // w5973: the Linux scope probes answer from what this keeps, so an editor's or agent's launch runs no systemd-run on the loop.
+    void warmScopeProbes();
+    // w5973 (w5998's review): the trusted bench copy is fetched at start, so the first tickets find it.
+    if (this.cfg.root) void refreshTrustedBenchAsync({ appDir: appDirOfConfig(this.cfg), background: true }, this.cfg.root);
+    this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
-    this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
-    this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
-    this.timers.push(setInterval(() => void this.reportBenchHours(), BENCH_HOURS_MS));
+    this.timers.push(setInterval(loopLabel('timer selfUpdate.tick', () => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`))), 10_000));
+    this.timers.push(setInterval(loopLabel('timer reportStats', () => void this.reportStats()), STATS_MS));
+    this.timers.push(setInterval(loopLabel('timer reportBenchHours', () => void this.reportBenchHours()), BENCH_HOURS_MS));
     this.timers.push(
-      setInterval(() => {
+      setInterval(loopLabel('timer testHistory.tick', () => {
         if (this.ws?.readyState !== WebSocket.OPEN) return;
         try {
           this.testHistory.tick();
         } catch (e) {
           log(`test history: ${(e as Error).message}`);
         }
-      }, TEST_HISTORY_MS),
+      }), TEST_HISTORY_MS),
     );
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
-    this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
+    this.timers.push(setInterval(loopLabel('timer sweeper.tick', () => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`))), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
     // A timed run defers the clean-up (its legs measure the disk), but not below disk_warn_gb + 5 GB (w3700: CleanupRunnerDeps.hold).
-    this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
+    this.timers.push(setInterval(loopLabel('timer cleaner.tick', () => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`))), 60_000));
     // Its own logs (w2038): every run's kept, the old ones gzipped, the folder capped (machine/logRetention.ts).
     const logsDir = path.join(appDirOfConfig(this.cfg), 'logs');
     const keepLogs = () => {
@@ -1845,11 +1970,11 @@ export class Daemon {
       if (line) log(line);
     };
     keepLogs();
-    this.timers.push(setInterval(keepLogs, LOG_MAINTAIN_EVERY_MS));
+    this.timers.push(setInterval(loopLabel('timer keepLogs', keepLogs), LOG_MAINTAIN_EVERY_MS));
     // Git Bash's /tmp (Windows, w603): kept out of clean-up and made again if anything else removes it.
     if (process.platform === 'win32') {
       void this.ensureBashTmp();
-      this.timers.push(setInterval(() => void this.ensureBashTmp(), 5 * 60_000));
+      this.timers.push(setInterval(loopLabel('timer ensureBashTmp', () => void this.ensureBashTmp()), 5 * 60_000));
     }
     // What agents here did as Max (the ffdiscord CLI's lines of the agents that are not fenced): forwarded, and queued while
     // the link is down. w5552: only this one file, in the daemon's folder; the root's `max` folder and the daemon folder's
@@ -1875,7 +2000,7 @@ export class Daemon {
       if (file === maxFile) this.maxTail = tail;
       let saved = offset;
       this.timers.push(
-        setInterval(() => {
+        setInterval(loopLabel('timer maxTail.poll', () => {
           tail.poll();
           if (tail.position !== saved) {
             saved = tail.position;
@@ -1885,7 +2010,7 @@ export class Daemon {
               /* read again after a restart: the portal drops duplicates */
             }
           }
-        }, 3000),
+        }), 3000),
       );
     }
   }
@@ -2038,7 +2163,8 @@ export class Daemon {
     ws.on('message', (d) => {
       this.lastPong = Date.now();
       try {
-        this.onMessage(JSON.parse(String(d)) as ToDaemon);
+        const m = JSON.parse(String(d)) as ToDaemon;
+        loopRun(`link ${m.type}`, () => this.onMessage(m));
       } catch (e) {
         log('bad message:', (e as Error).message);
       }
@@ -2168,6 +2294,18 @@ export class Daemon {
     ws.ping();
   }
 
+  /** The last runner hold report sent on this link (w5916), so it goes only when it changes. */
+  private runnerHoldKey?: string;
+
+  /** w5916: tell the portal what a hold does to this machine's CI runners (draining, stopped), when that changes. */
+  sendRunnerHold() {
+    const report = this.loadGate.holdReport() ?? null;
+    const key = JSON.stringify(report);
+    if (key === this.runnerHoldKey || this.ws?.readyState !== WebSocket.OPEN) return;
+    this.runnerHoldKey = key;
+    this.send({ type: 'runner_hold', report });
+  }
+
   private send(msg: FromDaemon) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
   }
@@ -2275,6 +2413,8 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
+      lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
@@ -2360,10 +2500,25 @@ export class Daemon {
       const personPlay = this.personPlayReport();
       // The players its shared player cache holds (w4601): a pair leg goes where its commit's player already is.
       const playerCache = readPlayerCache(playerCacheRoot(this.cfg.root));
-      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}) });
+      // Its ffu build slots (w5912): the machine view and list_sandboxes show who holds each, and which holds are stale.
+      this.refreshFfuReport();
+      const ffuSlots = this.ffuReport;
+      this.send({ type: 'stats', stats, ...(playerCache?.entries.length ? { playerCache } : {}), ...(ffuSlots ? { ffuSlots } : {}), ...(unity ? { unity } : {}), ...(benchLock ? { benchLock } : {}), ...(benchQueue ? { benchQueue } : {}), ...(benchWarnings.length ? { benchWarnings } : {}), ...(bench ? { bench } : {}), ...(personPlay ? { personPlay } : {}), agents: this.census() });
     } catch (e) {
       log('stats:', (e as Error).message);
     }
+  }
+
+  private readonly ffuSized = (slot: string, bytes: number) => void this.ffuSizes.set(slot, { bytes, at: new Date().toISOString() });
+
+  /** Read the ffu slots again in the background once FFU_REPORT_MS passed (w5912); the next stats carry the result. */
+  private refreshFfuReport() {
+    if (!this.cfg.root || this.ffuReporting || Date.now() - this.ffuReportAt < FFU_REPORT_MS) return;
+    this.ffuReporting = true;
+    this.ffuReportAt = Date.now();
+    void readFfuSlotsReport({ root: this.cfg.root, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX, sizes: this.ffuSizes, log })
+      .then((r) => void (this.ffuReport = r))
+      .finally(() => void (this.ffuReporting = false));
   }
 
   /** RAM in use, %: the last stats (a Mac's counts file cache as free), else Windows' own numbers; undefined: unknown. */
@@ -2445,6 +2600,9 @@ export class Daemon {
     // w5746: and the folder an editor it starts itself writes its status in (unity-slot run sets it as that editor's
     // UNITY_MCP_STATUS_DIR): the synced folder above is in the daemon's folder, which the worker fences keep read-only.
     if (spec.sandbox && this.cfg.root) env.FF_UNITY_MCP_EDITOR_STATUS_DIR = workerEditorStatusDir(this.cfg.root);
+    // w5961: and on a Mac with the Seatbelt worker fence on, the home a fenced editor gets (`<root>/home`): unity-slot run
+    // gives it to an interactive Unity editor a worker opens itself (a peer run's clone), which otherwise hangs on a modal.
+    if (spec.sandbox && this.cfg.root && process.platform === 'darwin' && this.workerFence) env.FF_UNITY_EDITOR_HOME = path.posix.join(this.cfg.root, 'home');
     // The root's agent node (w1742) after unity-slot: one fixed node path per machine, which the firewall rule names,
     // so no worker unpacks its own node into its temp folder (a new path, and a firewall prompt, every session).
     const first = [this.slotBin, agentNodePathDir(this.cfg.root)].filter((d): d is string => !!d);
@@ -2506,7 +2664,12 @@ export class Daemon {
       const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
       return here.length ? { ...sb, lingering: here } : sb;
     });
-    this.send({ type: 'sandboxes', list, disk: this.pool.diskState() });
+    // w5924: the light agent folders ride along, `kind: "light"`; a portal that predates them never asks for one, so finds none.
+    const light = this.light.list().map((sb) => {
+      const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
+      return here.length ? { ...sb, lingering: here } : sb;
+    });
+    this.send({ type: 'sandboxes', list: [...list, ...light], disk: this.pool.diskState() });
   }
 
   /**
@@ -3262,14 +3425,30 @@ export class Daemon {
    * `gh auth token` outside every fence and kept 30 minutes. Its value is never logged; only whether there was one.
    */
   private machineGh(): Record<string, string> {
-    const now = Date.now();
-    if (!this.ghMemo || now - this.ghMemo.at > 30 * 60_000) {
-      const had = this.ghMemo ? Boolean(this.ghMemo.token) : undefined;
-      const token = machineGhToken();
-      this.ghMemo = { at: now, token };
-      if (had !== Boolean(token)) log(token ? 'owner secrets: runs with no vault GitHub token get the machine gh login as GH_TOKEN (w5548)' : "owner secrets: gh auth token gave no machine login token; runs with no vault GitHub token fall back to the login's folder (w5548)");
-    }
-    return machineGhEnv({}, this.ghMemo.token);
+    // w5973: read off the event loop (gh auth token took up to 30 s on it). A stale token is used while the next read
+    // runs; before the first read lands (the daemon starts one at once), a run gets none and takes the folder fallback.
+    if (!this.ghMemo || Date.now() - this.ghMemo.at > 30 * 60_000) void this.readMachineGh();
+    return machineGhEnv({}, this.ghMemo?.token);
+  }
+
+  private ghReading?: Promise<void>;
+  /** w5973: machineGh's read, one at a time; awaited by the async callers that need a fresh token. */
+  private readMachineGh(): Promise<void> {
+    if (this.ghReading) return this.ghReading;
+    const had = this.ghMemo ? Boolean(this.ghMemo.token) : undefined;
+    this.ghReading = machineGhToken()
+      .then((token) => {
+        this.ghMemo = { at: Date.now(), token };
+        if (had !== Boolean(token)) log(token ? 'owner secrets: runs with no vault GitHub token get the machine gh login as GH_TOKEN (w5548)' : "owner secrets: gh auth token gave no machine login token; runs with no vault GitHub token fall back to the login's folder (w5548)");
+      })
+      .finally(() => (this.ghReading = undefined));
+    return this.ghReading;
+  }
+
+  /** machineGh once a read has landed (the probes, which run off the launch path and may wait for it). */
+  private async machineGhRead(): Promise<Record<string, string>> {
+    if (!this.ghMemo || Date.now() - this.ghMemo.at > 30 * 60_000) await this.readMachineGh();
+    return machineGhEnv({}, this.ghMemo?.token);
   }
 
   /**
@@ -3367,6 +3546,9 @@ export class Daemon {
     this.low = undefined;
     log(`worker integrity: ${why}; sandbox workers are held (w5555)`);
   }
+
+  /** w5957: the start's fence setup; the Windows read probe waits for it, since it sets the labels the probe checks. */
+  private fenceReady?: Promise<void>;
 
   /**
    * Decides the worker fence once at start (w5555): Windows sets up the Low fence (lowSetup), macOS and Linux probe theirs.
@@ -3505,7 +3687,7 @@ export class Daemon {
         const sessions = ghAppPaths(appDir).sessions;
         fs.mkdirSync(sessions, { recursive: true });
         // workerIntegrityAllow paths inside it keep their explicit Low label (labelLow above), which has no NR.
-        ensureReadBackDirs(appDir);
+        ensureReadBackDirs(appDir, this.cfg.root);
         await this.applyReadLabels(readFenceMode(appDir), exec, say);
         this.watchLoginLabels(exec, say);
         for (const f of this.loginFiles.left) say(`worker integrity: left the Claude login ${f} without a read label: it is on the system drive, which the fence touches only on ${[...LOGIN_LABEL_ON_SYSTEM_DRIVE].join(', ')} (w5559)`);
@@ -3562,9 +3744,13 @@ export class Daemon {
         void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
-      this.timers.push(setInterval(() => {
+      // w5938: off the event loop (compilerServersAsync), and one look at a time.
+      let looking = false;
+      this.timers.push(setInterval(loopLabel('timer strayLowServers', async () => {
+        if (looking) return;
+        looking = true;
         try {
-          for (const pid of strayLowServers(compilerServers(), root)) {
+          for (const pid of strayLowServers(await compilerServersAsync(), root)) {
             log(`worker integrity: ending Low compiler server ${pid}, which runs from the install's own path (w5347)`);
             try {
               process.kill(pid);
@@ -3574,8 +3760,10 @@ export class Daemon {
           }
         } catch {
           /* the next look */
+        } finally {
+          looking = false;
         }
-      }, 15_000));
+      }), 15_000));
     } catch (e) {
       this.lowFail((e as Error).message);
     }
@@ -3641,7 +3829,7 @@ export class Daemon {
       if (!copy) return loud('no Low copy of gh to test with');
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
       // the daemon read one, which is the only route left once the owner's gh folder carries No-Read-Up; else the folder.
-      const token = this.machineGh().GH_TOKEN;
+      const token = (await this.machineGhRead()).GH_TOKEN;
       const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
       const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token:/i.test(l));
@@ -3680,11 +3868,11 @@ export class Daemon {
    */
   private watchLoginLabels(exec: Exec, say: (line: string) => void): void {
     if (this.loginRelabel || !this.loginFiles.closed.length) return;
-    this.loginRelabel = setInterval(() => {
+    this.loginRelabel = setInterval(loopLabel('timer loginRelabel', () => {
       if (!this.cfg.root || readFenceMode(appDirOfConfig(this.cfg)) !== 'on') return;
       const t = this.loginFiles.closed.filter((f) => fs.existsSync(f)).map((f) => ({ path: f, sddl: NO_READ_UP.file }));
       if (t.length) void labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }).catch((e) => say(`worker integrity: login read labels: ${(e as Error).message}`));
-    }, 60_000);
+    }), 60_000);
     this.loginRelabel.unref();
   }
 
@@ -3723,12 +3911,12 @@ export class Daemon {
       return;
     }
     try {
-      ensureReadBackDirs(appDir);
+      ensureReadBackDirs(appDir, root);
       fs.mkdirSync(ghAppPaths(appDir).sessions, { recursive: true });
       // w5747 (w5733's review of #1232): the probe runs the owner-secret rules too, as a run that holds a token gets them in
       // on mode (the most closed case: the gh login's folder closed), so a passing probe has run every rule on mode adds.
       const owner = ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: true });
-      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
+      const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, rootBack: fenceRootReadBack(root), owner });
       // w5749: on Windows the owner's secrets are closed by labels on this machine's system drive, where lothsahn allowed it.
       if (process.platform === 'win32') {
         // The plan first: gh is asked where its login is only on a machine with a plan (w5849's review of #1278), so on every
@@ -3747,8 +3935,35 @@ export class Daemon {
             ? ['python3', FF_LANDLOCK, ...lock, ...this.readLock, ...owner.flatMap((o) => ['--no-read', o]), ...(owner.length ? ownerSocketDenyArgs(process.env.XDG_RUNTIME_DIR) : []), '--', cmd, ...args]
             : undefined;
       const argv = fenced(process.execPath, ['-e', READ_PROBE_SCRIPT, ...t.closed, ...t.open]);
+      if (!argv && process.platform === 'win32' && this.cfg.workerIntegrity === 'low') {
+        await this.fenceReady;
+        // w5957 (N7): a Low node opens each path; warn on a mirror of the labels on would set, on the real ones in on (where a
+        // path workers need found refused takes the labels off again by itself). readFenceWin.ts says how.
+        const exec = (cmd: string, args: string[], o?: { timeoutMs?: number; cwd?: string }) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000, cwd: o?.cwd });
+        const say = (l: string) => log(l);
+        const labels = this.readLabelTargets(appDir);
+        const w = await probeReadFenceWin({
+          mode,
+          labels,
+          t,
+          lowNode: await lowCopy(root, process.execPath, exec, say),
+          mirrorDir: path.join(appDir, 'read-fence-precheck'),
+          skip: this.labelSystemDrive,
+          run: exec,
+          // w5968: and NR on what inside carries an explicit label of its own (relabelInside), as applyReadLabels does.
+          setLabels: async (l) => (await labelNoReadUp(l, exec, say, { systemDrive: () => false, what: 'read fence probe mirror' })) && (await relabelInside(l, 'close', exec, say, { systemDrive: () => false })),
+          openLabels: async (l) => !!(await openNoReadUp(l, exec, say, { systemDrive: this.labelSystemDrive })) && (await relabelInside(l, 'open', exec, say, { systemDrive: this.labelSystemDrive })),
+          log,
+        });
+        if (gen !== this.readProbeGen) {
+          log(`read fence (${mode}): a newer probe started while this one ran; its verdict is the one that counts`);
+          return;
+        }
+        this.readProbeBlocks = w.blocks;
+        return;
+      }
       if (!argv) {
-        // Windows (labels, set only in on mode by lowSetup), or no fence here: nothing a probe child could show.
+        // Windows with Medium workers (no labels to probe), or no fence here: nothing a probe child could show.
         this.readProbeBlocks = process.platform !== 'win32';
         log(`read fence (${mode}): ${process.platform === 'win32' ? `${mode === 'warn' ? 'warn only: no No-Read-Up label set; on would close' : 'closes'} ${t.closed.join(', ')} and give back ${t.open.length} paths` : 'no worker fence runs here (workerFence on macOS, writeLock on Linux), so there is nothing to probe or enforce'}`);
         return;
@@ -3789,7 +4004,7 @@ export class Daemon {
     const appDir = appDirOfConfig(this.cfg);
     const holdFile = keychainHoldFile(appDir);
     const version = readVersion();
-    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: this.machineGh().GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env), keychainHeld: keychainHeld(holdFile, version) });
+    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: (await this.machineGhRead()).GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env), keychainHeld: keychainHeld(holdFile, version) });
     const said: ToolLegVerdict[] = [];
     for (const leg of legs) {
       const argv = fenced(leg.cmd, leg.args);
@@ -3875,6 +4090,11 @@ export class Daemon {
     }
   }
 
+  /** The read fence's Windows labels (applyReadLabels), and what the probe's mirror copies (w5957). */
+  private readLabelTargets(appDir: string) {
+    return noReadUpTargets({ root: this.cfg.root!, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions, ...fenceRootReadBack(this.cfg.root!)], secrets: this.secretsDirs });
+  }
+
   /**
    * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
    * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
@@ -3888,14 +4108,18 @@ export class Daemon {
     const appDir = appDirOfConfig(this.cfg);
     // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
     ensureDaemonOnlyDirs(this.cfg.root);
-    const t = noReadUpTargets({ root: this.cfg.root, appDir, allowBack: FENCE_READ_ALLOW, extraBack: [ghAppPaths(appDir).sessions], secrets: this.secretsDirs });
+    const t = this.readLabelTargets(appDir);
     if (mode === 'on') {
       if (!(await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      // w5968: a file an elevated process made inside keeps its own High label, which the folder's NR does not override.
+      if (!(await relabelInside(t, 'close', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every explicitly labelled path inside the closed folders got No-Read-Up; Low workers may still read those (the daemon log says which)');
       log('worker integrity: the read fence is on: No-Read-Up labels set');
       return;
     }
     const opened = await openNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive });
     if (!opened) throw new Error('not every No-Read-Up label could be taken off (the daemon log says which)');
+    // w5968: and the NR on explicitly labelled paths inside, which only an earlier on adds (so only when it was on).
+    if (opened.length && !(await relabelInside(t, 'open', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every No-Read-Up label inside the closed folders could be taken off (the daemon log says which)');
     log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
   }
 
@@ -3940,7 +4164,7 @@ export class Daemon {
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
           args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
-          ensureReadBackDirs(appDirOfConfig(this.cfg));
+          ensureReadBackDirs(appDirOfConfig(this.cfg), this.cfg.root);
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
           const probe = probeFence(['python3', FF_LANDLOCK, ...args, ...this.readLock, '--', '/bin/true']);
           if (probe.ok) {
@@ -4201,7 +4425,19 @@ export class Daemon {
    * (w384). Idle agents, their process up or not, take no slot; the portal queues a message until one is free.
    */
   private runningIn(sandbox: string | undefined | '*') {
-    return [...this.entries.values()].filter((e) => isMidTurn(e.s.info) && (sandbox === '*' ? !!e.spec?.sandbox : e.spec?.sandbox === sandbox)).length;
+    return this.countedIn(sandbox).length;
+  }
+
+  /** The agents runningIn counts, by id, place and state (w5972): a refusal names them, and the stats carry them (the census). */
+  private countedIn(sandbox: string | undefined | '*'): CensusAgent[] {
+    return [...this.entries]
+      .filter(([, e]) => isMidTurn(e.s.info) && (sandbox === '*' ? !!e.spec?.sandbox : e.spec?.sandbox === sandbox))
+      .map(([id, e]) => ({ id, ...(e.spec?.sandbox ? { sandbox: e.spec.sandbox } : {}), status: e.s.info.status, live: e.s.live }));
+  }
+
+  /** What the agent limits count here, sandboxes' and standing agents together (w5972): sent with every stats report. */
+  private census(): AgentCensus {
+    return { midTurn: [...this.countedIn('*'), ...this.countedIn(undefined)] };
   }
 
   /**
@@ -4226,17 +4462,19 @@ export class Daemon {
     if (!spec.sandbox) {
       // No agent works in the main clone (w536); a standing agent works in its own folder, under the machine's cap.
       if (path.resolve(spec.cwd).toLowerCase() === path.resolve(this.cfg.repoPath).toLowerCase()) return "this machine runs workers in sandboxes only: start it in one of this machine's sandboxes";
-      const all = this.runningIn('*') + this.runningIn(undefined);
-      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions})` : undefined;
+      const counted = this.census().midTurn;
+      const all = counted.length;
+      return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions}); counted: ${describeCounted(counted)}` : undefined;
     }
-    const sb = this.pool.list().find((s) => s.id === spec.sandbox);
+    const sb = this.pool.list().find((s) => s.id === spec.sandbox) ?? (isLightId(spec.sandbox) ? this.light.list().find((s) => s.id === spec.sandbox) : undefined);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
     if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
     if (path.resolve(sb.path).toLowerCase() !== path.resolve(spec.cwd).toLowerCase()) return `sandbox ${sb.id} is at ${sb.path}, not ${spec.cwd}`;
     const max = this.poolSettings?.maxAgentsPerSandbox ?? this.cfg.sandboxes?.maxAgentsPerSandbox ?? 2;
-    if (this.runningIn(sb.id) >= max) return `already ${max} agents mid-turn in sandbox ${sb.id} (max_agents_per_sandbox)`;
-    const inSandboxes = this.runningIn('*');
-    return totalAgentsRefusal(inSandboxes, this.currentPool());
+    const inThis = this.countedIn(sb.id);
+    if (inThis.length >= max) return `already ${max} agents mid-turn in sandbox ${sb.id} (max_agents_per_sandbox); counted: ${describeCounted(inThis)}`;
+    const inSandboxes = this.countedIn('*');
+    return totalAgentsRefusal(inSandboxes.length, this.currentPool(), inSandboxes);
   }
 
   /** The pool settings the portal last sent (welcome). */
@@ -4294,6 +4532,10 @@ export class Daemon {
         this.pause.setActivity(msg.config);
         return;
       }
+      case 'runner_hold':
+        // w5916: a person's hold on this machine (placement.hold or a drain): its CI runners drain, and start again on the lift
+        void this.loadGate.setHold(typeof msg.why === 'string' && msg.why.trim() ? msg.why.trim() : undefined).then(() => this.sendRunnerHold());
+        return;
       case 'cleanup_config': {
         this.cleanupSettings = { ...msg.config };
         try {
@@ -4416,6 +4658,9 @@ export class Daemon {
         void this.reportBenchHours();
         // The worker fence's state (w5555): the portal alerts on a failed one and places no worker here.
         this.send({ type: 'worker_fence', fence: this.fence.state });
+        // w5916: what a hold does to the runners, again for this link (the portal sends its hold after the welcome)
+        this.runnerHoldKey = undefined;
+        this.sendRunnerHold();
         // A portal from before protocol 5 sends no pool settings: keep daemon.json's. So does a worker root install
         // (w513) whose record has no pool yet (an enrollment, never deployed from the portal): its hello tells it.
         if (msg.sandboxes !== undefined && !(msg.sandboxes === null && this.cfg.root)) {
@@ -4444,7 +4689,11 @@ export class Daemon {
         const deliver = (attachments?: Awaited<ReturnType<typeof fetchAttachments>>) => {
           try {
             const why = refusal();
-            if (why) throw new Error(why);
+            if (why) {
+              // w5972: which agents a refusal counted, in this log too (the portal's queue line quotes it).
+              log(`start of ${id} refused: ${why}`);
+              throw new Error(why);
+            }
             const e = this.entry(msg.info, msg.lastSeq);
             e.spec = msg.spec;
             // The vault's secrets for this run (docs/vault.md): this daemon's log redacts them by value too.
@@ -4553,6 +4802,16 @@ export class Daemon {
             (text) => this.send({ type: 'sandbox_result', id: msg.id, ok: true, text }),
             (err) => this.send({ type: 'sandbox_result', id: msg.id, ok: false, text: (err as Error).message }),
           );
+        // w5924: a light agent folder (an id agent1, agent2, ...): a plain folder, no worktree, no Library, no editor.
+        if (isLightId(msg.sandbox) && (msg.op === 'create' || msg.op === 'delete' || msg.op === 'release' || msg.op === 'log')) {
+          const live = msg.op === 'create' || msg.op === 'log' ? 0 : this.liveIn(msg.sandbox);
+          if (live) reply(Promise.reject(new Error(`${live} agent(s) still run in light folder ${msg.sandbox}; stop them first`)));
+          else if (msg.op === 'create') reply(Promise.resolve().then(() => this.light.create(msg.sandbox)));
+          else if (msg.op === 'delete') reply(this.light.remove(msg.sandbox, msg.force === true));
+          else if (msg.op === 'log') reply(Promise.resolve(`light folder ${msg.sandbox} has no editor, so no editor log`));
+          else reply(Promise.resolve(`light folder ${msg.sandbox} released (it stays on disk until it is deleted)`));
+          return;
+        }
         if (msg.op === 'create') {
           reply(this.pool.create({ id: msg.sandbox, branch: msg.branch, base: msg.base, seedLibrary: msg.seedLibrary, startUnity: msg.startUnity }).then((s) => `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.`));
         } else if (msg.op === 'delete') {
@@ -4749,6 +5008,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   const cargo = cfg.root ? workerCargoHome(cfg.root, process.env, HOME) : undefined;
   if (cargo) process.env.CARGO_HOME = cargo.home;
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
+  // w6000: the daemon's own temp folder inside the root (machine/daemonTemp.ts); a folder that cannot be made only warns.
+  log(applyDaemonTmpdir(process.env, cfg.root, cfg.daemonTmpdir).line);
   // w5565: the workers' uv cache carried over from an older daemon moves to the Medium one too.
   const mediumUv = cfg.root ? mediumUvCacheFor(process.env, cfg.root) : undefined;
   if (mediumUv) process.env.UV_CACHE_DIR = mediumUv;
@@ -4786,6 +5047,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // w5862: says at start where Medium agents' temp root and cargo home are exposed to workers, or moves them (mediumAgentFolders).
   const medium = d.mediumFolders();
   if (medium.cargoHome && fs.existsSync(path.join(HOME, '.cargo'))) void seedCargoHome(path.join(HOME, '.cargo'), medium.cargoHome).then((m) => log(m));
+  // w5870: the same for Medium agents' other tool caches, and the user PATH's entries in folders workers write (mediumAgentCaches).
+  d.mediumCaches();
+  void d.checkUserPath();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
   const quit = () => {
     log('shutting down: agents in agent hosts run on for the next daemon; any others stop');

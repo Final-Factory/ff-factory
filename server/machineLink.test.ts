@@ -3,7 +3,8 @@
 // OS's own is a stand-in that writes what scripts/worker/linkJob.ts writes (scripts/worker/linkJob.test.ts tests that job).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { Worker } from 'node:worker_threads';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -14,9 +15,9 @@ import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
-import type { LinkUpdateReport } from './machineProtocol.ts';
+import type { FromDaemon, LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, alive, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobToEnd, keepRootJson, processCommand, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -536,10 +537,10 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   const f2 = await downloadBundle(whole.url, 'tok', b, path.join(dir, 'c'), fetch, { stallMs: 300 });
   assert.equal(createHash('sha256').update(fs.readFileSync(f2)).digest('hex'), b.sha256);
 
-  // Every try stalls: it gives up with the reason, the part file gone.
+  // Every try stalls: it gives up with the reason, and keeps what it got for the next call (w5898).
   const never = await bundleServer(t, body, () => 'stall');
   await assert.rejects(downloadBundle(never.url, 'tok', b, path.join(dir, 'd'), fetch, { stallMs: 200, attempts: 2 }), /the bundle's download stalled \(no byte in 0 s\) at \d+ of 200000 bytes, after 2 attempt\(s\)/);
-  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), []);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), [`${b.sha256.slice(0, 16)}.bundle.part`]);
 
   // A refusal is not retried.
   const refused = await bundleServer(t, body, () => 404);
@@ -547,6 +548,367 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   assert.equal(refused.seen.length, 1);
 
   assert.equal(fetchError(Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }) })), 'terminated (UND_ERR_BODY_TIMEOUT: Body Timeout Error)');
+});
+
+test('w5898: a cut download keeps its part and the next call resumes it; a bad part falls back to a full download from 0', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 13) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const name = `${b.sha256.slice(0, 16)}.bundle.part`;
+
+  // beast's case: one call runs out (here: its one attempt stalls at half); the next call asks only for the rest.
+  const d1 = path.join(dir, 'resume');
+  const first = await bundleServer(t, body, () => 'stall');
+  const lines: string[] = [];
+  await assert.rejects(downloadBundle(first.url, 'tok', b, d1, fetch, { stallMs: 200, attempts: 1, log: (l) => lines.push(l) }), /stalled/);
+  assert.equal(fs.statSync(path.join(d1, name)).size, 100_000, 'the bytes of the cut attempt stay');
+  assert.match(lines.at(-1) ?? '', /kept the 100000 of 200000 bytes of the bundle in .*\.bundle\.part; the next attempt resumes from there/);
+  const second = await bundleServer(t, body, () => 'serve');
+  lines.length = 0;
+  const file = await downloadBundle(second.url, 'tok', b, d1, fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.deepEqual(second.seen, ['bytes=100000-'], 'the second call asks only for the rest');
+  assert.ok(fs.readFileSync(file).equals(body));
+  assert.match(lines[0] ?? '', /resuming the bundle's download from the 100000 of 200000 bytes an earlier attempt kept/);
+  assert.deepEqual(fs.readdirSync(d1), [path.basename(file)], 'the part became the bundle');
+
+  // A kept part whose bytes are wrong: the whole file's SHA-256 refuses it, the part goes, and it downloads again from 0.
+  const d2 = path.join(dir, 'bad');
+  fs.mkdirSync(d2);
+  fs.writeFileSync(path.join(d2, name), Buffer.alloc(100_000, 0xff));
+  const bad = await bundleServer(t, body, () => 'serve');
+  lines.length = 0;
+  const f2 = await downloadBundle(bad.url, 'tok', b, d2, fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.deepEqual(bad.seen, ['bytes=100000-', undefined], 'a resume, then the whole bundle from 0');
+  assert.ok(fs.readFileSync(f2).equals(body));
+  assert.ok(lines.some((l) => /did not match what the portal said .*the kept part is deleted and the download starts again from 0/.test(l)), lines.join('\n'));
+  assert.deepEqual(fs.readdirSync(d2), [path.basename(f2)]);
+
+  // A part as long as the bundle or longer, or a folder in its place: removed, and a plain download from 0.
+  for (const [sub, make] of [
+    ['long', (f: string) => fs.writeFileSync(f, Buffer.alloc(200_001))],
+    ['full', (f: string) => fs.writeFileSync(f, body)],
+    ['empty', (f: string) => fs.writeFileSync(f, '')],
+    ['folder', (f: string) => fs.mkdirSync(f)],
+  ] as const) {
+    const d = path.join(dir, sub);
+    fs.mkdirSync(d);
+    make(path.join(d, name));
+    const s = await bundleServer(t, body, () => 'serve');
+    const f = await downloadBundle(s.url, 'tok', b, d, fetch, { stallMs: 5000 });
+    assert.deepEqual(s.seen, [undefined], `${sub}: from 0`);
+    assert.ok(fs.readFileSync(f).equals(body), sub);
+  }
+
+  // A portal that will not serve the kept range (416): from 0 on the next try, not a refusal.
+  const d4 = path.join(dir, 'range');
+  fs.mkdirSync(d4);
+  fs.writeFileSync(path.join(d4, name), body.subarray(0, 100_000));
+  const r416 = await bundleServer(t, body, (n) => (n === 1 ? 416 : 'serve'));
+  const f4 = await downloadBundle(r416.url, 'tok', b, d4, fetch, { stallMs: 5000 });
+  assert.deepEqual(r416.seen, ['bytes=100000-', undefined]);
+  assert.ok(fs.readFileSync(f4).equals(body));
+
+  // A refusal keeps nothing; parts of other bundles beyond the newest one go.
+  const d5 = path.join(dir, 'refused');
+  fs.mkdirSync(d5);
+  fs.writeFileSync(path.join(d5, name), body.subarray(0, 100_000));
+  fs.writeFileSync(path.join(d5, 'aaaaaaaaaaaaaaaa.bundle.part'), 'old');
+  fs.utimesSync(path.join(d5, 'aaaaaaaaaaaaaaaa.bundle.part'), new Date(1_000_000), new Date(1_000_000));
+  fs.writeFileSync(path.join(d5, 'bbbbbbbbbbbbbbbb.bundle.part'), 'newer');
+  const refused = await bundleServer(t, body, () => 404);
+  await assert.rejects(downloadBundle(refused.url, 'tok', b, d5, fetch, { stallMs: 5000 }), /the portal answered 404/);
+  assert.deepEqual(fs.readdirSync(d5), ['bbbbbbbbbbbbbbbb.bundle.part']);
+});
+
+test('w5938: a stall check that comes late (the daemon blocked its own loop) is not a stall; the bytes that came meanwhile are read', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 11) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  // The portal in a thread of its own, so it sends while this thread's loop is blocked: 1000 bytes, the rest 200 ms later.
+  const portal = new Worker(
+    `const http = require('node:http'); const { parentPort } = require('node:worker_threads');
+     const body = Buffer.from(Array.from({ length: 200000 }, (_, i) => (i * 11) % 251));
+     const s = http.createServer((req, res) => {
+       parentPort.postMessage({ range: req.headers.range ?? null });
+       res.writeHead(200, { 'content-length': String(body.length) });
+       res.write(body.subarray(0, 1000));
+       setTimeout(() => res.end(body.subarray(1000)), 200);
+     });
+     s.listen(0, '127.0.0.1', () => parentPort.postMessage({ port: s.address().port }));`,
+    { eval: true },
+  );
+  t.after(async () => {
+    await portal.terminate();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+  const seen: (string | null)[] = [];
+  const port = await new Promise<number>((r) => portal.on('message', (m: { port?: number; range?: string | null }) => (m.port ? r(m.port) : seen.push(m.range ?? null))));
+  // beast, 2026-11-26: LoopWatch logged the loop blocked 40-72 s; here 1.2 s, outside a timer (a sync call in an I/O or
+  // immediate callback), so the next turn of the loop runs the due stall check before it reads the socket.
+  const run = async (sub: string, lateMs: number) => {
+    const lines: string[] = [];
+    setTimeout(() => setImmediate(() => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1200)), 100);
+    const file = await downloadBundle(`http://127.0.0.1:${port}`, 'tok', b, path.join(dir, sub), fetch, { stallMs: 300, lateMs, log: (l) => lines.push(l) });
+    assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), b.sha256);
+    return lines;
+  };
+  // Before w5938 (no check of lateness): the late check is taken for a stall and the download starts again.
+  const before = await run('before', 1e9);
+  assert.match(before.join('\n'), /stalled \(no byte in 0 s\) at 1000 of 200000 bytes; attempt 2 of 6/);
+  assert.deepEqual(seen.splice(0), [null, 'bytes=1000-']);
+  const lines = await run('after', 200);
+  assert.deepEqual(seen, [null], 'one request: no retry');
+  assert.equal(lines.length, 1, lines.join('\n'));
+  assert.match(lines[0], /the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 200000 bytes: not a stall/);
+});
+
+test('w5938: jobToEnd ends a job only past its limit: staged and never taken, its process gone or another program, or hung; never a live one writing its log', () => {
+  const at = Date.parse('2026-11-26T06:11:26Z');
+  const job = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir: 'a', service: 's', createdAt: new Date(at).toISOString(), phase: 'running', pid: process.pid } as UpdateJob;
+  const mine = { command: 'node /x/src/scripts/worker/linkJob.ts --job /x/update/job.json' };
+  const staged = { ...job, phase: 'staged', pid: undefined } as UpdateJob;
+  const gone = { ...job, pid: 2 ** 30 };
+  const lim = JOB_LIMIT.inFlightMs;
+  const watched = { watchedMs: JOB_LIMIT.watchMs };
+  // Inside its limit: never touched, whatever its process does.
+  assert.equal(jobToEnd(job, at + 15.5 * 60_000, { ...mine, logAt: at }), undefined, "beast's 15.5 min job (977d56f7) is within its limit");
+  assert.equal(jobToEnd(staged, at + JOB_LIMIT.stagedMs - 60_000, watched), undefined, 'a job staged 9 min ago is left for its process');
+  assert.equal(jobToEnd(gone, at + lim - 60_000, watched), undefined, 'a job whose process went 44 min in is left (a restart at logon takes it over)');
+  assert.equal(jobToEnd({ ...job, phase: 'done' }, at + 10 * lim), undefined, 'a job that ended is not ended again');
+  // Past it, alive and progressing, or not known to be the job's: never ended, and the hold says which.
+  assert.equal(jobToEnd(job, at + 3 * 60 * 60_000, { ...mine, logAt: at + 3 * 60 * 60_000 - 60_000 })?.hold, 'its process is alive and still writing its log', 'a live job process that wrote its log a minute ago is left, 3 h in');
+  assert.match(jobToEnd(job, at + 10 * lim, { logAt: at })?.hold ?? '', /its command line could not be read, so it is not known to be the job's/, 'a live pid whose command line cannot be read is never ended');
+  // Staged or gone, but not yet watched so for 5 min (after a reboot its logon task goes first): held.
+  assert.match(jobToEnd(gone, at + 8 * 60 * 60_000, { watchedMs: 0 })?.hold ?? '', /watched it so for 0 of the 5 min it waits for the job's own task/);
+  assert.match(jobToEnd(staged, at + JOB_LIMIT.stagedMs + 60_000, { watchedMs: JOB_LIMIT.watchMs - 60_000 })?.hold ?? '', /watched it so for 4 of the 5 min/);
+  // Past it and stuck: ended, with why.
+  assert.deepEqual(jobToEnd(staged, at + JOB_LIMIT.stagedMs + 60_000, watched), { reason: 'job 977d56f7 (update) was staged 11 min ago and its process never took it (limit 10 min)', kill: false });
+  assert.deepEqual(jobToEnd(gone, at + lim + 60_000, watched), { reason: `job 977d56f7 (update) has run 46 min (limit 45 min) and its process (pid ${2 ** 30}) is gone without a result`, kill: false });
+  assert.deepEqual(jobToEnd(job, at + lim + 60_000, { command: 'firefox', logAt: at + lim, ...watched }), { reason: `job 977d56f7 (update) has run 46 min (limit 45 min) and its pid ${process.pid} is now another program's, so its process is gone without a result`, kill: false });
+  assert.deepEqual(jobToEnd(job, at + lim + 60_000, { ...mine, logAt: at + lim + 60_000 - JOB_LIMIT.quietMs - 60_000 }), { reason: `job 977d56f7 (update) has run 46 min (limit 45 min) and its process (pid ${process.pid}) is hung: its log unwritten for 16 min while this daemon watched (limit 15 min)`, kill: true });
+  assert.equal(jobToEnd(job, at + lim + 60_000, { ...mine, logAt: at + lim + 60_000 - JOB_LIMIT.quietMs + 60_000 })?.kill, false, 'quiet 14 min: not yet hung');
+  assert.match(inFlightRefusal(job, at + lim + 60_000), /^an update job of this machine is still running: job 977d56f7 .* past its 45 min limit, but its process is alive and still writing its log, so it is not ended \(w5938\)$/);
+  assert.match(inFlightRefusal(job, at + lim + 60_000, 'its process did not end when stopped'), /, but its process did not end when stopped, so it is not ended \(w5938\)$/);
+  assert.equal(inFlightRefusal(job, at + 3 * 60_000), 'an update job of this machine is still running (job 977d56f7, update, 3 min since it was made)');
+});
+
+/** A daemon's updater over a job fixture (w5938) on a clock of its own: its logs, what it sent, and the files. */
+function overdueFixture(
+  t: { after: (fn: () => unknown) => void },
+  job: Partial<UpdateJob>,
+  o: { command?: (pid: number) => Promise<string | undefined>; stop?: (pid: number, sig: NodeJS.Signals) => void } = {},
+) {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjob-'));
+  t.after(() => fs.rmSync(appDir, { recursive: true, force: true }));
+  const f = updateFiles(appDir);
+  const full = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir, service: 's', createdAt: new Date().toISOString(), phase: 'running', commit: 'c'.repeat(40), before: 'b'.repeat(40), ...job } as UpdateJob;
+  writeJson(f.job, full);
+  const logs: string[] = [];
+  const sent: FromDaemon[] = [];
+  const stopped: string[] = [];
+  const clock = { now: Date.now() };
+  const u = new SelfUpdater({
+    appDir,
+    portalUrl: () => 'http://x',
+    token: 't',
+    send: (m) => (sent.push(m), true),
+    exit: () => undefined,
+    log: (...a) => logs.push(a.join(' ')),
+    remove: async () => undefined,
+    now: () => clock.now,
+    command: o.command ?? (async () => undefined),
+    kill: (pid, sig) => void (stopped.push(`${pid} ${sig}`), (o.stop ?? ((p, s) => process.kill(p, s)))(pid, sig)),
+    stopWaitMs: 500,
+  });
+  /** The daemon looks every 10 s for `ms`, awake: its clock moves with each look. */
+  const watch = async (ms: number) => {
+    for (const end = clock.now + ms; clock.now < end; ) {
+      clock.now += 10_000;
+      await u.tick();
+    }
+  };
+  return { u, f, logs, sent, stopped, clock, watch, job: full };
+}
+
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const writeLog = (file: string) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${new Date().toISOString()} FF Factory update job 977d56f7-1030-442b-bcad-bd6ac62ab798: update to ff-factory cccccccccccc (w1596).\nRunning the installer...\n`);
+};
+/** A stand-in job process: its command line names linkJob.ts, and it runs until it is stopped. */
+const standIn = (t: { after: (fn: () => unknown) => void }) => {
+  const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'linkJob.ts'], { stdio: 'ignore' });
+  t.after(() => void p.kill('SIGKILL'));
+  return p;
+};
+const linuxCommand = (pid: number) => processCommand(pid);
+
+test('w5938: a staged job past 10 min is ended by the tick once watched 5 min: failed with the reason in update-job.log and the daemon log, reported, and taken off the machine', async (t) => {
+  const x = overdueFixture(t, { phase: 'staged', createdAt: ago(JOB_LIMIT.stagedMs + 60_000) });
+  await x.u.tick();
+  assert.equal(readJson<UpdateJob>(x.f.job)?.phase, 'staged', 'first sight (a reboot, a restart): its own task may still take it');
+  assert.ok(x.logs.some((l) => /WARNING job 977d56f7 .* staged and never taken .*; this daemon has watched it so for 0 of the 5 min/.test(l)), x.logs.join('\n'));
+  await x.watch(JOB_LIMIT.watchMs);
+  const job = readJson<UpdateJob>(x.f.job)!;
+  assert.equal(job.phase, 'done');
+  const r = readJson<LinkUpdateReport>(x.f.result)!;
+  assert.deepEqual([r.id, r.ok, r.exit, r.form, r.before], [x.job.id, false, 1, 'update', 'b'.repeat(40)]);
+  assert.match(r.note!, /^the daemon ended the job: job 977d56f7 \(update\) was staged 16 min ago and its process never took it \(limit 10 min\); this machine takes updates again, its daemon runs on \(w5938\)$/);
+  const log = fs.readFileSync(x.f.log, 'utf8');
+  assert.match(log, /FF Factory update job 977d56f7-1030-442b-bcad-bd6ac62ab798: update to ff-factory cccccccccccc \(never started by its process\)\.\n.* job 977d56f7-1030-442b-bcad-bd6ac62ab798: FAILED \(the daemon ended the job: .*\)\.\n$/);
+  assert.match(r.log, /FAILED \(the daemon ended the job/, "the report carries the job's own log section");
+  assert.ok(x.logs.some((l) => l.startsWith('update over the link: FAILED the daemon ended the job: job 977d56f7')), x.logs.join('\n'));
+  assert.ok(x.sent.some((m) => m.type === 'self_update_report' && m.report.id === x.job.id && !m.report.ok), 'the failed result went to the portal');
+  await x.u.tick();
+  assert.equal(readJson<UpdateJob>(x.f.job)?.removed, true, 'its task or LaunchAgent is removed, as after any job');
+  assert.equal(x.logs.filter((l) => /FAILED the daemon ended/.test(l)).length, 1, 'ended once');
+});
+
+test('w5938: a job whose process is gone is ended only past 45 min and once watched 5 min awake; after a long reboot its logon task goes first', async (t) => {
+  const young = overdueFixture(t, { pid: 2 ** 30, createdAt: ago(JOB_LIMIT.inFlightMs - 10 * 60_000) });
+  await young.watch(JOB_LIMIT.watchMs);
+  assert.equal(readJson<UpdateJob>(young.f.job)?.phase, 'running');
+  assert.equal(fs.existsSync(young.f.result), false, 'inside its limit: never touched');
+
+  // w5983's review, probe B: a job made 8 h ago whose process a reboot cut off. The daemon's first look leaves it.
+  const old = overdueFixture(t, { pid: 2 ** 30, createdAt: ago(8 * 60 * 60_000) });
+  await old.u.tick();
+  assert.equal(readJson<UpdateJob>(old.f.job)?.phase, 'running', "first look: the job's logon task may resume it");
+  // Its logon task takes it over meanwhile (a new pid, its own): the daemon's watch starts again and nothing is ended.
+  const resumed = standIn(t);
+  await until('the stand-in up', () => alive(resumed.pid));
+  writeJson(old.f.job, { ...old.job, pid: resumed.pid });
+  writeLog(old.f.log);
+  await old.watch(JOB_LIMIT.watchMs + 60_000);
+  assert.equal(readJson<UpdateJob>(old.f.job)?.pid, resumed.pid);
+  assert.equal(fs.existsSync(old.f.result), false, 'the resumed job is left to finish');
+
+  // Nobody takes it: ended after 5 min awake, and a sleep in between starts the watch again.
+  const dead = overdueFixture(t, { pid: 2 ** 30, createdAt: ago(8 * 60 * 60_000) });
+  await dead.watch(JOB_LIMIT.watchMs - 60_000);
+  dead.clock.now += 20 * 60_000; // asleep 20 min
+  await dead.watch(JOB_LIMIT.watchMs - 60_000);
+  assert.equal(readJson<UpdateJob>(dead.f.job)?.phase, 'running', 'two 4 min watches with a sleep between are not 5 min');
+  await dead.watch(2 * 60_000);
+  assert.equal(readJson<UpdateJob>(dead.f.job)?.phase, 'done');
+  assert.match(readJson<LinkUpdateReport>(dead.f.result)!.note!, /has run \d+ min \(limit 45 min\) and its process \(pid \d+\) is gone without a result/);
+  assert.deepEqual(dead.stopped, [], 'nothing to stop');
+});
+
+test('w5938: a live job process past 45 min is stopped and ended only when its log has been quiet 15 min while the daemon watched; one still writing, or frozen by sleep, is never touched', async (t) => {
+  const busy = standIn(t);
+  await until('the stand-in up', () => alive(busy.pid));
+  const live = overdueFixture(t, { pid: busy.pid, createdAt: ago(3 * 60 * 60_000) }, { command: linuxCommand });
+  writeLog(live.f.log);
+  for (let i = 0; i < 4; i++) {
+    await live.watch(10 * 60_000);
+    writeLog(live.f.log);
+  }
+  assert.equal(readJson<UpdateJob>(live.f.job)?.phase, 'running', 'a live job writing its log is left, 3 h in');
+  assert.ok(alive(busy.pid), 'and its process runs on');
+  assert.deepEqual(live.stopped, []);
+  assert.equal(live.logs.filter((l) => /WARNING job 977d56f7 .* past its 45 min limit; its process is alive and still writing its log/.test(l)).length, 1, live.logs.join('\n'));
+
+  // w5983's review, probe A: a job 40 min in wrote its log, then the computer slept 20 min. Waking is no quiet log.
+  const sleeper = standIn(t);
+  await until('the stand-in up', () => alive(sleeper.pid));
+  const slept = overdueFixture(t, { pid: sleeper.pid, createdAt: ago(40 * 60_000) }, { command: linuxCommand });
+  writeLog(slept.f.log);
+  await slept.u.tick();
+  slept.clock.now += 20 * 60_000;
+  await slept.u.tick();
+  await slept.watch(JOB_LIMIT.quietMs - 60_000);
+  assert.deepEqual(slept.stopped, [], 'quiet 14 min while watched, after a 20 min sleep: not hung');
+  assert.equal(readJson<UpdateJob>(slept.f.job)?.phase, 'running');
+  // A long blocked loop between two looks counts the same way: not watched.
+  slept.clock.now += 10 * 60_000;
+  await slept.watch(JOB_LIMIT.quietMs - 60_000);
+  assert.deepEqual(slept.stopped, [], 'a 10 min gap is not watched quiet time');
+  // Quiet 16 min while the daemon watched: hung, stopped with TERM, ended.
+  await slept.watch(2 * 60_000);
+  assert.deepEqual(slept.stopped, [`${sleeper.pid} SIGTERM`]);
+  assert.equal(alive(sleeper.pid), false, 'the hung process was stopped');
+  assert.equal(readJson<UpdateJob>(slept.f.job)?.phase, 'done');
+  assert.match(readJson<LinkUpdateReport>(slept.f.result)!.note!, /is hung: its log unwritten for 1[56] min while this daemon watched \(limit 15 min\)/);
+
+  // A live pid that is not a job process (its pid taken by another program) is never stopped: the job alone is ended.
+  const other = overdueFixture(t, { pid: process.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: async () => 'node --test server/machineLink.test.ts' });
+  await other.watch(JOB_LIMIT.watchMs + 10_000);
+  assert.deepEqual(other.stopped, []);
+  assert.match(readJson<LinkUpdateReport>(other.f.result)!.note!, /is now another program's/);
+});
+
+test('w5938: a hung job that ignores TERM gets KILL; one that will not end is left in flight and the refusal says so; one its process takes back meanwhile is not ended', async (t) => {
+  const quietFor = async (x: ReturnType<typeof overdueFixture>) => {
+    writeLog(x.f.log);
+    await x.watch(JOB_LIMIT.quietMs + 60_000);
+  };
+  // TERM ignored, KILL ends it.
+  const deaf = standIn(t);
+  await until('the stand-in up', () => alive(deaf.pid));
+  const a = overdueFixture(t, { pid: deaf.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: linuxCommand, stop: (p, s) => void (s === 'SIGKILL' && process.kill(p, s)) });
+  await quietFor(a);
+  assert.deepEqual(a.stopped, [`${deaf.pid} SIGTERM`, `${deaf.pid} SIGKILL`]);
+  assert.equal(readJson<UpdateJob>(a.f.job)?.phase, 'done');
+
+  // Neither ends it: left in flight, warned once, and a new update's refusal says why.
+  const stubborn = standIn(t);
+  await until('the stand-in up', () => alive(stubborn.pid));
+  const b = overdueFixture(t, { pid: stubborn.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: linuxCommand, stop: () => undefined });
+  await quietFor(b);
+  await b.watch(60_000);
+  assert.equal(readJson<UpdateJob>(b.f.job)?.phase, 'running');
+  assert.equal(fs.existsSync(b.f.result), false);
+  assert.equal(b.logs.filter((l) => /WARNING .* is hung: .*; its process did not end when stopped, so the job is left in flight/.test(l)).length, 1, b.logs.join('\n'));
+  assert.deepEqual(b.stopped, [`${stubborn.pid} SIGTERM`, `${stubborn.pid} SIGKILL`], 'tried once, not at every tick');
+  await b.watch(5 * 60_000);
+  assert.equal(b.stopped.length, 4, 'and again 5 min later');
+
+  // Its process takes the job back while it is being stopped (a new pid): the job as it was seen is not ended.
+  const old = standIn(t);
+  await until('the stand-in up', () => alive(old.pid));
+  const fresh = standIn(t);
+  await until('the stand-in up', () => alive(fresh.pid));
+  const c = overdueFixture(t, { pid: old.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, {
+    command: linuxCommand,
+    stop: (p, s) => {
+      writeJson(c.f.job, { ...c.job, pid: fresh.pid });
+      process.kill(p, s);
+    },
+  });
+  writeLog(c.f.log);
+  c.clock.now += 10_000;
+  await c.u.tick();
+  for (let i = 0; i < 96 && c.stopped.length === 0; i++) {
+    c.clock.now += 10_000;
+    await c.u.tick();
+  }
+  assert.deepEqual(c.stopped, [`${old.pid} SIGTERM`]);
+  assert.equal(readJson<UpdateJob>(c.f.job)?.pid, fresh.pid);
+  assert.equal(fs.existsSync(c.f.result), false, 'the re-check leaves the job its process took back');
+});
+
+test('w5938: an update sent while an overdue job holds the lock is taken: the stale job is ended first and the new one starts', async (t) => {
+  const s = await setup(t);
+  await until('online, its hello read', () => s.mm.canLink('mx'));
+  s.d.selfUpdate.deps.launch = finishing(s, {});
+  s.d.selfUpdate.deps.remove = async () => undefined;
+  const f = updateFiles(s.appDir);
+  writeJson(f.job, { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'tools', root: s.root, appDir: s.appDir, service: 'com.fffactory.linktest', createdAt: ago(JOB_LIMIT.stagedMs + 60_000), phase: 'staged' } satisfies UpdateJob);
+  // The daemon has watched it 5 min: a clock of its own, a look every 10 s.
+  const clock = { now: Date.now() };
+  s.d.selfUpdate.deps.now = () => clock.now;
+  for (let i = 0; i < JOB_LIMIT.watchMs / 10_000; i++) {
+    clock.now += 10_000;
+    await s.d.selfUpdate.endOverdue();
+  }
+  assert.equal(readJson<UpdateJob>(f.job)?.phase, 'staged', 'not yet ended');
+  clock.now += 10_000;
+  const r = await s.mm.linkUpdate('mx');
+  assert.equal(r.ok, true, 'not refused for the stale job');
+  assert.notEqual(readJson<UpdateJob>(f.job)?.id, '977d56f7-1030-442b-bcad-bd6ac62ab798');
+  assert.match(fs.readFileSync(f.log, 'utf8'), /job 977d56f7-1030-442b-bcad-bd6ac62ab798: FAILED \(the daemon ended the job: job 977d56f7 \(tools\) was staged \d+ min ago/);
 });
 
 test('w1641: an answer the link could not carry goes again when it is back; one sent just before a drop too; the portal ignores a repeat', async () => {

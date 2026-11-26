@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -77,6 +77,15 @@ test('worker install: every missing prerequisite is named before anything change
   const four = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: ['slot1', 'slot2', 'slot3', 'slot4'] } };
   assert.match(bad({ portal: four }, { maxSandboxes: 3 }), /--max-sandboxes 3 is below the 4 sandboxes there \(slot1, slot2, slot3, slot4\): delete 1 first/);
   assert.deepEqual(preflightProblems({ ...GOOD, portal: four }, { ...OPTS, maxSandboxes: 4 }), [], 'as many as there are is fine (w576)');
+  // w5924: lothdesktop's update was refused, "--max-sandboxes 5 is below the 12 sandboxes there (slot1…slot5, agent1…agent7)".
+  const lights = ['agent1', 'agent2', 'agent3', 'agent4', 'agent5', 'agent6', 'agent7'];
+  const five = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: ['slot1', 'slot2', 'slot3', 'slot4', 'slot5'], lights } };
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: five }, { ...OPTS, maxSandboxes: 5 }), [], 'light agent folders never count (w5924)');
+  const mixed = { ok: true as const, me: { ...five.me, sandboxes: [...five.me.sandboxes, ...lights] } };
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: mixed }, { ...OPTS, maxSandboxes: 5 }), [], 'nor when a portal also lists them as sandboxes');
+  const old = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: mixed.me.sandboxes } };
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: old }, { ...OPTS, maxSandboxes: 5 }), [], 'nor against a portal with no lights field');
+  assert.match(bad({ portal: five }, { maxSandboxes: 4 }), /--max-sandboxes 4 is below the 5 sandboxes there \(slot1, slot2, slot3, slot4, slot5\): delete 1 first/);
   assert.equal(preflightProblems({ ...GOOD, elevated: true, git: [2, 1], gitLfs: false }, OPTS).length, 3, 'all of them at once');
 });
 
@@ -984,4 +993,22 @@ test("an update drops an older install's home mailbox note from root.json, keepi
   assert.deepEqual(dropStaleSlotsNote(outside, root), [task]);
   assert.deepEqual(dropStaleSlotsNote(outside, root, named), [task, { kind: 'file', name: named }]);
   assert.deepEqual(dropStaleSlotsNote([{ kind: 'file', name: path.join(root, 'unity-slots') }], root).length, 1);
+});
+
+test('w6000: worker update --daemon-tmpdir writes daemonTmpdir to daemon.json on every OS; unset carries it; anything but on or off is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-dtmp-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { daemonTmpdir?: 'on' | 'off' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('daemonTmpdir' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: on)');
+  for (const p of ['linux', 'darwin', 'win32'] as const) for (const m of ['on', 'off'] as const) assert.equal(written(BEAST_CONFIG, { daemonTmpdir: m }, p).daemonTmpdir, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, daemonTmpdir: 'off' };
+  assert.equal(written(had, {}).daemonTmpdir, 'off', 'unset carries it');
+  assert.equal(written(had, { daemonTmpdir: 'on' }).daemonTmpdir, 'on', 'the switch replaces it');
+  const cfg = { a: 1 };
+  assert.equal(applyDaemonTmpdirSetting(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyDaemonTmpdirSetting(cfg, 'off'), { a: 1, daemonTmpdir: 'off' });
+  assert.equal(daemonTmpdirFlag(undefined), undefined);
+  assert.equal(daemonTmpdirFlag('off'), 'off');
+  assert.throws(() => daemonTmpdirFlag('yes'), /--daemon-tmpdir is on or off/);
+  assert.throws(() => daemonTmpdirFlag(''), /--daemon-tmpdir is on or off/);
 });

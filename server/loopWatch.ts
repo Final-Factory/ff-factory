@@ -41,6 +41,40 @@ export function linkBeat(now: number, lastBeat: number, lastHeard: number, every
   return now - lastHeard > deadMs ? 'dead' : 'ping';
 }
 
+/**
+ * What ran on the loop (w5973): the known long callers (the daemon's timers, its link messages) run inside `loopRun`, which
+ * times their synchronous part. A stall line then names the labelled run that held the loop longest since the beat before,
+ * or the last one that ran, so the next block is traced by measurement instead of by reading the code. Time spent after an
+ * `await` inside a labelled run is not counted: it ran later, under no label, and the line says "last ran" for it.
+ */
+let ranLast: string | undefined;
+let ranLongest: { label: string; ms: number } | undefined;
+
+/** Runs `fn` under `label`, timing its synchronous part for the stall line (w5973). Cheap: two clock reads. */
+export function loopRun<T>(label: string, fn: () => T, clock: () => number = performance.now.bind(performance)): T {
+  const t0 = clock();
+  try {
+    return fn();
+  } finally {
+    const ms = clock() - t0;
+    ranLast = label;
+    if (!ranLongest || ms > ranLongest.ms) ranLongest = { label, ms };
+  }
+}
+
+/** `fn` wrapped in loopRun, for setInterval and event handlers: `setInterval(loopLabel('pool.tick', () => ...), 30_000)`. */
+export function loopLabel<A extends unknown[]>(label: string, fn: (...a: A) => unknown): (...a: A) => void {
+  return (...a: A) => void loopRun(label, () => fn(...a));
+}
+
+/** What the stall line says ran (and empties the record for the next beat): "; longest labelled run: X 12.1 s" or "; last ran: X". */
+export function takeLoopRan(): string {
+  const longest = ranLongest;
+  ranLongest = undefined;
+  if (longest && longest.ms >= 100) return `; longest labelled run: ${longest.label} ${(longest.ms / 1000).toFixed(1)} s`;
+  return ranLast ? `; last ran: ${ranLast}` : '';
+}
+
 export class LoopWatch {
   private last: number;
   private timer?: NodeJS.Timeout;
@@ -48,6 +82,8 @@ export class LoopWatch {
   private lags: [number, number][] = [];
   private loggedAt = 0;
   private unlogged = 0;
+  /** What ran during the longest unlogged block (takeLoopRan), for its line. */
+  private unloggedRan = '';
   /** Since the last summary line: when it began, its worst lag and its beats at least LOOP_STALL_LOG_MS late. */
   private summaryFrom: number;
   private summaryWorst = 0;
@@ -98,7 +134,11 @@ export class LoopWatch {
     this.last = now;
     if (lag > 0) this.lags.push([now, lag]);
     while (this.lags.length && now - this.lags[0][0] > LAG_WINDOW_MS) this.lags.shift();
-    if (lag >= this.stallLogMs) this.unlogged = Math.max(this.unlogged, lag);
+    const ran = takeLoopRan();
+    if (lag >= this.stallLogMs && lag > this.unlogged) {
+      this.unlogged = lag;
+      this.unloggedRan = ran;
+    }
     this.summaryWorst = Math.max(this.summaryWorst, lag);
     if (lag >= this.stallLogMs) this.summaryStalls++;
     if (now - this.summaryFrom >= LOOP_SUMMARY_MS) {
@@ -110,8 +150,9 @@ export class LoopWatch {
     }
     if (!this.unlogged || now - this.loggedAt < LOG_EVERY_MS) return;
     this.loggedAt = now;
-    this.log(`event loop: blocked for ${(this.unlogged / 1000).toFixed(1)} s (the longest since the last such line): ${this.who} answered nothing meanwhile`);
+    this.log(`event loop: blocked for ${(this.unlogged / 1000).toFixed(1)} s (the longest since the last such line): ${this.who} answered nothing meanwhile${this.unloggedRan}`);
     this.unlogged = 0;
+    this.unloggedRan = '';
   }
 
   /** The worst lag of the last minute, in ms (0: every beat on time). */

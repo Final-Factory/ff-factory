@@ -205,6 +205,16 @@ before redeploying by hand.
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).
+- **Count census** (w5972, warn only). The two counts can disagree. On 2026-11-26 placement counted beast at "2 of 6"
+  while its daemon counted six agent hosts it had adopted at start, some of them stale copies of moved requests. The
+  daemon's agent-cap refusals now name the agents they counted (`; counted: 11a84ee9 (slot1, running), d732483b (slot3,
+  running, no process)`, `describeCounted` in `server/agentCensus.ts`). Its `stats` (every 15 s) carry `agents`, the list
+  its `runningIn` counts. The portal compares that list with its own count of the machine (sessions reported mid-turn,
+  plus turns sent but not yet reported) by session id (`CensusWatch`, `noteCensus` in `server/machines.ts`). A
+  difference that outlasts 60 s and two reports is logged as one `agent count:` warning naming each id counted on only
+  one side and what the portal holds of it. The warning repeats when the set changes and every 30 minutes, and one
+  line follows when the counts agree again. Nothing is stopped, dropped or placed by it: making placement use the
+  daemon's count is a separate stage.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
@@ -795,6 +805,21 @@ said them, and optionally `hours` (it lifts by itself) and `except` (requests th
   dispatcher's notes, and the w2046 moves put w5838, w5857, w5863 and w5834 on LothDesktop between 17:54 and 19:12
   (-07:00) on 2026-11-25, each logging "first with room in placement.prefer" with no hold named.
 
+### A person's hold reaches what sets it, and is read back (w5895)
+
+lothsahn answered w5814's card at 22:08 UTC on 2026-11-25 ("Hold new work on LothDesktop and let the running workers
+finish"); LothDesktop was held only at 03:47 the next day. Each cause and its fix:
+
+| Cause | Fix |
+|---|---|
+| The orchestrator recorded the words as a note outside lothsahn's own turn, so `humanAsked` was false and every `set_app_config` of the dispatcher's (22:08, 23:50, 01:54) was refused by the `USER_ASKED_TOOLS` guard. | `update_work hold {machine, action, except?}` with the person's words (`Orchestrators.holdAsked`): in their own turn it drains the machine at once (`Agents.holdMachine`, the same path as `hold_machine`); otherwise it is kept as `WorkItem.holdAsk`, the result says **HOLD ASKED, NOT SET**, and the dispatcher's notice names the `hold_machine` call. `userAskedProblem` lets `hold_machine` through for an unset ask of the same machine and action on that request, even after a later note cleared `humanAsked`. A lift ask also passes the guard; a lift with no ask keeps the old rule. |
+| The worker's "It needs the hold set by the orchestrator" (03:42) matched no `[orchestrator step]` route (w2870), and workers have no hold tool. | `orchestratorAskIn` (`shared/workState.ts`, `ORCHESTRATOR_HOLD`) routes such a line to the orchestrator, and `orchestratorStepText` tells it to use `update_work hold`. |
+| Nothing showed the decision as unset: system_status and list_machines showed LothDesktop NOT held. | `Agents.unsetHoldAsks`: a `HOLD ASKED, NOT SET: wNNN …` line in system_status and under the machine in list_machines, naming the `hold_machine` call, until the machine is held (by any route). |
+| Nothing read the state back after a change. | `hold_machine` and `update_work hold` end with `Read back live:` (`holdReadback` in `server/machineDrain.ts`, from `placement()` and the store). `set_app_config` re-reads the live config (`readBackSetting`, `server/appConfig.ts`) and fails loudly on a mismatch; `placement.hold` adds each named machine's read-back. The `hold_machine` and `update_work hold` descriptions say to check it before telling the person (the briefs are at their size caps). |
+| The 03:47 config hold excepted w5475, w5586, w5656 and w5796, whose workers were stopped; a config hold's `holdExcept` lets those requests' workers resume, so w5475's resumed at its check-in (04:39). | The read-back names each excepted request with no running worker there ("w5475: worker … stopped; will resume here at its check-in 04:39Z"). A drain now defaults to `resumes: 'running'`: it snapshots the workers mid-turn (`MachineDrain.running`), and only those and the excepted requests' workers should resume. **This is warn-only** (lothsahn's lockout rule: warn and enforce in separate PRs): `machineHold` logs `drain: worker … resumes there … warn-only: it would be held once enforced` once per worker and drain, and the read-back marks the resume AGAINST it. `resumes: 'all'` is w5878's behavior, and a drain set before w5895 counts as `'all'`. |
+
+Recovery needs nobody at the computer: `hold_machine lift`, `update_work hold {action: lift}`, or `hours`.
+
 ## Offline and paused computers take no work
 
 One rule, in `shared/availability.ts` and `server/machineAway.ts`, holds on every path that picks or plans a computer:
@@ -1190,6 +1215,18 @@ the process does. The legacy `unity-mcp-port.json` stays the sandbox editor's. T
 `<sandbox>_clone_<n>@<hash>`, and the guard lets a worker pin its own sandbox's clones (`server/guard.ts`) and no
 other. No fence changed.
 
+**A clone editor's home on a fenced Mac** (w5961, found in w5806): a second editor a worker opens itself under
+`unity-slot run` inherits the worker's Seatbelt profile but not the fenced editor's environment, so with the real home
+Unity is refused its window layout in `~/Library/Preferences/Unity/Editor-5.x` and stops on a hidden "Moving file failed"
+modal with no MCP bridge (measured on m5: the log ends at `[LAYOUT] About to save layout` and `Curl error 23`, 10+
+minutes; HOME alone did not help, Foundation's home follows `CFFIXED_USER_HOME`). Now `slotEnv` gives a sandbox agent on
+a Mac with the worker fence on `FF_UNITY_EDITOR_HOME` (`<root>/home`, the home `macEditorFenceFor` gives the daemon's own
+fenced editors), and `unity-slot run` sets `HOME` and `CFFIXED_USER_HOME` to it when its command is the Unity editor
+binary without `-batchmode` (`editorHomeEnv`, `machine/unitySlots.ts`). A script keeps the person's home (git, gh); a
+script that opens an editor itself can pass `FF_UNITY_EDITOR_HOME` on. A batch run keeps it too: under a moved home with
+no licensing client running, Unity starts its own there and quits unlicensed. No fence changed; `<root>/home` is already
+writable to every worker.
+
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
@@ -1297,6 +1334,53 @@ runs `registerAgents.sh` from a fresh shallow clone in a new temp folder, made w
 `server/safeGit.test.ts` fails on a git spawn that skips the helper and shows with a marker file that the daemon's status,
 diff, commit and log calls run no planted fsmonitor, filter, textconv, `diff.external` or hook, in a `git worktree` and
 behind a `.git` file.
+
+### Light agent folders (w5924)
+
+lothsahn's request (w5924): work that needs only an agent slot gets a light working folder instead of a game sandbox,
+counted against the machine's agent cap only, so "a machine whose game sandboxes are all full but has an agent slot free
+takes such work".
+
+- **What one is.** An empty folder of its own, `<sandbox_root>/agent-work/agentN` (`machine/lightFolders.ts`
+  `LightFolders`, `LIGHT_DIR`, ids `agent1`, `agent2`, ...): no game checkout, no Library, no Unity editor. The daemon
+  reports them in its `sandboxes` message with `kind: 'light'` (`MachineSandbox.kind`), and its hello says it makes them
+  (`lightFolders: true`); `MachineManager.offersLight` reads that. They sit inside the sandbox root, which every OS's fence
+  already opens to workers (Landlock, Seatbelt, the Windows integrity label), so **the fence, its link and its update path
+  are unchanged**: no new allowed folder. Writes stay inside ffw.
+- **Who gets one.** A request whose `needs` is `agent` (any repo that is not the game's, FFU, a review: `needsOf`),
+  started without `extra_agent` and outside a pair run. start_agent (`server/agents.ts` `lightTarget`) takes the computer
+  of the sandbox or machine named, makes a new folder there (`MachineManager.createLightFolder`, op `create` with no
+  branch), and starts the worker in it. Its brief (`machineSandboxBrief`, `isLight`) says it is a light folder: clone here
+  or in `$TMPDIR`, ffu builds still take an ffu slot (`ffu-slot take`), never `unity` or `switch_branch` (both refuse:
+  `LIGHT_NO_UNITY`, and `MachineManager.switchBranch`), and leave nothing unpushed. No Unity MCP server is set up for it
+  (`unityMcp: !isLight(sb)`). Game work, and a computer whose daemon is older (no `lightFolders` in its hello), place as
+  before.
+- **What it counts against.** Only the agent cap: a light folder is never a FREE game sandbox (`Agents.free`), is never
+  counted in max_sandboxes (`createSandbox`, `places`, `sandboxUseText`), and where its daemon makes them the computer's
+  `agentSeats` is unset, so `hasAgentRoom` is the agent cap less mid-turn agents. The Capacity block's line ends
+  `; light folders: F free of N, a new one made per agent-only start` (`server/placement.ts` `capacityLines`);
+  `list_sandboxes` lists them under each computer after its game sandboxes ("Light agent folders (w5924; ...)"), and
+  system_status's `sandboxes:` line counts them apart (`shared/sandboxKind.ts` `lightUseText`). The page shows them as
+  their own "Light agent folders" group under each computer, after the game sandboxes (`shared/fleet.ts`
+  `FleetComputer.lights`, `web/src/components/Fleet.tsx`), and the capacity line adds "N light".
+- **What a game sandbox gave that it keeps.** The worker fence and write scope (the guard's own path is the folder), the
+  transcript lock, the agent caps (the send queue and the daemon's own count), the urgent keep-between-turns rule (w5260;
+  `keepFor` reads the request, not the folder), holds (`placement.hold`, its except list, a pause, a drain or a coming
+  build: start_agent's `awayProblem` refuses a light start on a held computer before `createLightFolder` makes the folder),
+  the locked-screen and leg holds, and the FFU low-disk check (`cargoShortOf`, on the light folder's computer).
+- **Resume.** A stopped worker in its own light folder is never released for other work (the release pass skips it: the
+  folder holds no game sandbox) and resumes there. **An agent-only worker already in a game sandbox** (FFU workers placed
+  before w5924) moves when it next resumes (`PlaceAgain.lightDue`, then `toLight`): only once it is stopped, holds no
+  permission, and its computer makes light folders. Its clones live in its temp folder (`ffa-<session>`), which stays;
+  the game sandbox's tree and branch are not its, and uncommitted files left there fall to the orphan save (w2358), as for
+  any release, so nothing is lost. It is told so (`movedNote`, `movedFrom.light`).
+- **Clean-up.** Each release pass (`PlaceAgain.lightSweep`) deletes a light folder older than `LIGHT_GRACE_MS` (15 min)
+  whose workers are all stopped with their work over, or that holds none. Those workers are marked released first, so a
+  reopen places them in a new folder. The daemon refuses the delete while a repository in the folder holds uncommitted or
+  untracked files, commits on no remote branch, or a stash (`unsavedWork`), and nothing is deleted then; the portal says
+  so once and tries again after `LIGHT_RETRY_MS` (6 h). A game sandbox is never deleted or recreated by any of this.
+- Tests: `server/lightFolders.test.ts` (the store, the refusal, a real daemon and portal, counting, the Capacity line,
+  the move on resume, the sweep).
 
 ### Placing work
 
@@ -1816,6 +1900,32 @@ LothDesktop and Beast, not just when BEAST is full").
     - New placement on a held computer was never refused, only noted ("… is held …"), so `start_agent` for w1785 there
       needs no exception.
     - Tests: the w1863 cases in `server/resumeRules.test.ts` and `server/appConfig.test.ts`.
+  - **A hold drains the computer's CI runners (w5916).** lothsahn, 2026-11-26: "Make it so a portal hold shuts down CI
+    workers when they finish." A person's hold (`placement.hold`, or a drain, "A person's drain" above) goes to the
+    computer's daemon (`runner_hold`, at each connect, when it changes and every 10 minutes: `MachineManager.syncRunnerHolds`).
+    The daemon's CI load gate (`machine/loadRunners.ts` `LoadGate.setHold`) then suspends each self-hosted runner's listener
+    once it is idle and settled, the game runners and the `ffu-<machine>-N` runners alike, by the same steps as the CPU gate
+    (w3305: NtSuspendProcess on Windows, SIGSTOP elsewhere; a fresh listing after the suspend resumes one that took a job in
+    that instant). A listener running a job finishes it and is suspended after. An operations runner (`ff-ops-runner`) is never
+    held, so deploys still land. Nothing on GitHub changes: no runner is deregistered, and no configuration or token is touched.
+    - **Shown beside the hold.** `list_machines` has a `CI runners (w5916): ...` line, `list_sandboxes` adds `; CI ...` to the
+      machine's header, and the machine page has a CI chip: "runners draining (1 busy: ffu-lothdesktop-2; 2 stopped)", then
+      "runners stopped by hold (actions-runner, ffu-lothdesktop-1, ffu-lothdesktop-2)". From the daemon's `runner_hold` report.
+    - **A restart keeps them stopped.** The hold and the suspended pids are kept in `<root>/tmp/ci-load-gate.json`, each pid
+      written before its suspend, so a daemon that dies between the two still resumes it. A restarted daemon keeps them
+      suspended until the portal speaks; a restarted portal sends the hold again at the connect.
+    - **The lift always brings them back, with nobody at the machine.** The portal sends `why: null` at once (a config change,
+      `hold_machine` lift), and at every connect, so a hold lifted while the link was down lifts when it comes back. Each
+      suspended listener is resumed. If the portal is gone for good, the daemon lets a hold it has not heard repeated for 12 h
+      lapse (`HOLD_LAPSE_MS`). A Dev Drive grow while held (it ends every process on the drive, w3721) leaves its runners in
+      `startOnLift`; the lift starts them (`runnerRestartScript`), and one that fails is tried again at each look.
+    - **A hold of weeks costs no registration.** GitHub removes a non-ephemeral runner it has not seen connect for 14 days
+      ([changelog 2022-08-03](https://github.blog/changelog/2022-08-03-github-actions-remove-offline-self-hosted-runners)), so a
+      listener suspended 7 days (`RECONNECT_AFTER_MS`) is resumed for 10 minutes to reconnect; it may take a job then and is
+      suspended again after it.
+    - **A timed run's pause is left to it.** A listener the bench paused (w3112) counts as stopped and is not touched; a turn's
+      end never continues one the hold suspended. Tests: `server/w5916RunnerHold.test.ts`; the real suspend, crash and lift on
+      a fake `Runner.Listener.exe`: the PR's evidence.
 - **A computer can be reserved for higher work** (w1643, lothsahn, 2026-10-20: "Instead of a single setting, let's make
   the setting the minimum priority work that can go to a machine. If normal (all work), if high, high and urgent, if
   urgent, urgent only"). `placement.minPriority`, set with `set_app_config` and kept across restarts, names each computer's
@@ -1934,6 +2044,17 @@ LothDesktop and Beast, not just when BEAST is full").
     `machines.githubFromVault` is on: such a machine counts as able for them (`GithubTokens.entryFor`), and the brief names
     the vault entry instead. Its Workflows permission (required of every vault token, 13.2) cannot be probed without
     writing, so the brief says what to do if GitHub refuses the push anyway.
+  - **A login GitHub refuses (401)** (w5932): gh 2.102.0 answers an invalid, expired or revoked token with exit 0,
+    `"state":"error"`, an empty login and an error naming "401 Unauthorized" in its JSON form, and "Failed to log in … The
+    token in keyring is invalid." in its text form (measured on BEAST with a made-up token). Both read as "GitHub refused
+    the token (HTTP 401 …)" (`REFUSED_401`, `ghLoginRefused`), and a connected machine with such a reading gets a
+    `WARNING: gh login (w5932)` line in system_status (`ghLoginStatusLines`) and an owners' banner (`ghLoginBanner`, kind
+    `gh-login`). **A 401 over ssh is not a bad login**: on 2026-11-26 the ops worker's `ssh beast 'gh api …'` got
+    "Requires authentication (HTTP 401)" ("The token in default is invalid", the same on 2026-11-08) while beast's daemon
+    read `bryding (gist, read:org, repo, workflow)` at 05:14Z and 06:19Z and a worker's `gh api user` there answered 200.
+    A Windows ssh session with key sign-in cannot read Credential Manager (a Mac's ssh cannot read the login Keychain), so
+    gh sends no token at all; GitHub's "Bad credentials" is the sign of a token that is really refused. Check a machine's
+    gh from its daemon's reading (list_machines) or a worker there, never over ssh.
   - **Fixing a machine:** on it, as its user, `gh auth refresh -h github.com -s workflow` (a browser sign-in); the daemon
     sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
     `server/orchestrators*.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,
@@ -2600,6 +2721,61 @@ LothDesktop and Beast, not just when BEAST is full").
     takes it first (w3507, w4620: strict priority holds; the wait is capped, so it never holds work back past 15 min). A
     worker released idle or with a far check-in, a hold on its computer (w4238) and an away computer (w2544) move as before.
     An urgent or frantic resume does not wait (w5260, above): it frees a sandbox from idle lower work there, else moves.
+  - **A request moves at most once per wait, and a warm worker waits for its seat** (w5942, lothsahn, 2026-11-25). That
+    morning beast's daemon was stuck mid-update (job 977d56f7 answered 13 min late and failed; it went offline at 06:04:45Z,
+    06:20:37Z, 06:23:31Z and 06:37:50Z). Biscuit sat at its agent cap of 4, and the portal counted beast at 2 of 6 mid-turn
+    while beast's daemon counted 6 live and refused every start ("N agents mid-turn on beast by its daemon's count", which
+    `ROOM_WAIT` reads as room to move for). w5869 went biscuit → beast (81122653, refused) → biscuit (aa98e369 placed again)
+    → lothdesktop (19889673) within 20 min, w5892 went c89b46d1 → c1e9dd0c → c89b46d1, and w5932's fresh workers 60a433cb
+    and d4f2c3ca never ran a turn (measured, the portal journal). The fixes (`server/resumeMove.ts`, `Agents.roomMove`):
+    - A request moved within `HOME_WAIT_MS` (15 min) waits where it went (`MoveGuard.movedLately`, noted in `moveForRoom` once
+      the fresh session started, for room and away moves; a failed start goes back unheld), Queued "… moves at most once per wait (w5942)". Urgent work and away moves (w2544) are not held.
+    - A worker that ran a turn (`SessionInfo.turns > 0`) and waits only for an agent seat on its own computer (`SEAT_WAIT`:
+      "no agent seat is free on", "N agents mid-turn", by the portal's count) waits there up to `HOME_WAIT_MS` from when it
+      first waited at its turn count (`warmWait`, `MoveGuard.waitingSince`: a message queued again does not start it afresh), as the
+      w4738 wait does for a released one. Placing it again in its own sandbox clears `placeReleased`, and so the w4738 wait.
+      One that never ran a turn moves after `MOVE_AFTER_MS` as before. Both checks run after the w2079 hand-over, so an old
+      worker whose requests went elsewhere never holds a message for them. A refusal by its daemon's count is no seat wait:
+      `requeueRefused` queues it again with a fresh time on every refusal (the w5949 review, B1).
+    - A computer whose daemon refused a start at its agent cap (`machines.ts` `capRefused`, `AGENT_CAP_REFUSAL`) is no move
+      target, whatever the portal's count says (`MoveFacts.held`), until a start there goes through (`capStarted`, its first
+      mid-turn report) or `REFUSED_FOR_MS` (30 min, a judgment past beast's measured 10 to 18 min miscount; a reconnect is no
+      news, since beast reconnected between refusals with its count still wrong).
+    - A message for a worker whose requests all went to other workers is forwarded to the worker each request is with now
+      (`Agents.forwardToHeirs`: "[forwarded, w5942] This message was queued for worker …", keeping its sender), not dropped.
+      A gate resume (`resumeOf`) or a check-in (`[wake_me] …`) stays dropped: the new worker sets its own wait.
+    - Warn only (lothsahn's lockout rule): a worker whose work moved off it (`movedAway`) and that its daemon's hello still
+      reports live, or that a resume after a drop would wake, is journalled and reported "[machines] … (w5942, warn only)"
+      (`Machines.warnMovedAway`). On 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50 while w5869
+      and w5891 ran on biscuit too: two live workers on one request.
+    - **Enforcing it** (w5950, a separate, independently reviewed change per lothsahn's lockout rule): the owner's setting
+      `movedAwayWorkers` (set_app_config, read live, no restart; `server/movedAwayEnforce.ts`) is `"warn"` (unset, the
+      default: the warn lines above, nothing stopped), `"on"` or `"off"` (no check at all). With `"on"`,
+      `Machines.movedAwayCheck` hands such workers to `Agents.enforceMovedAway`: one still live at its daemon's hello is
+      stopped, one a resume would wake (`resumeCutOff`) is not resumed. In both cases its check-in is cancelled, its
+      sandbox's uncommitted work is saved as a WIP commit pushed only to a side branch (`saveWork` with `holdPush`, so the
+      branch its new worker carries is never pushed from there), and each new worker gets "[forwarded, w5942] … [w5950] Your
+      request's old worker … " naming where that work went. Only when `movedAwayVerdict` holds the w5949 review's conditions:
+      (a) its open requests no longer list it (else `awayMoveUndone`, w3425, clears the mark); (b) every request moved off it
+      has another worker (a failed start hands the request back with none: kept; with "on" it is given back instead, w5976 below); (c) that worker is in another sandbox and
+      started (live, mid-turn, or ran a turn), not errored or stopped on purpose, a live one preferred; (d) the save is
+      skipped when another agent works in its sandbox, its process did not end within 10 s or its branch is unknown, and
+      said so in the message; (e) the "too long ago to resume" report names a moved-away worker's new worker to message,
+      not the old one. A worker that fails a condition keeps its work and is reported "[machines] … kept, since enforcing
+      could stop the only copy of the work: … (w5950)". The side branch is local-first: the sandbox's branch is one WIP
+      commit ahead until that sandbox is switched or cleaned. Recovery needs nobody at any machine: an owner's request to
+      the dispatcher, set_app_config `movedAwayWorkers` `"off"` (or `null` for `"warn"`).
+    - **A move that does not start gives the work back** (w5976, under the same `"on"`): `Agents.moveForRoom` sets
+      `movedAway` before `startMoved` succeeds, and a failed start used to hand the request back Queued with no worker
+      (`Orchestrators.handBack`). With `"on"` the other requests are handed back only once the fresh session started, and a
+      failed start (no seat there, an error status, a link refused, before or after `movedForRoom` took it off) gives every
+      request back to the old worker (`Agents.giveBack`, `Orchestrators.moveUndone`): linked again with its link, gate
+      resumes, hand-off and Queued state as they were before the move (`moveBeforeOf`), its `movedAway` mark cleared, and the
+      message the move took queued for it again with its first time (`SessionManager.putBack`). Its sandbox stays released
+      (its work was saved), so it resumes when a sandbox frees on its own computer, and it is not retired. The computer
+      whose start failed is no move target for `REFUSED_FOR_MS` ("a moved session did not start there … (w5976)",
+      `MoveGuard.noteRefusal`), so the next drain moves it elsewhere or keeps it waiting, never the same start again. `"warn"`
+      and `"off"` keep the hand-back. Tests: `server/w5976MoveGiveBack.test.ts`.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,

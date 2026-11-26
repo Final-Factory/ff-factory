@@ -76,6 +76,11 @@ export interface MachineGuardPorts {
    * portal's idle release; it resumes at its next message as any stopped worker does. Resolves true once its host is gone.
    */
   stopIdle?(sessionId: string): Promise<boolean>;
+  /**
+   * w5916: these runners' listeners ended in a grow while a person's hold is on (machine/loadRunners.ts): answers true when
+   * the hold takes them, to start when it lifts; false (or absent) and the guard starts them again at once.
+   */
+  deferRunners?(roots: string[]): boolean;
 }
 
 /**
@@ -300,7 +305,15 @@ export class MachineGuard {
   private async restartRunners(roots: string[]) {
     const up = new Set(((await this.fx.runners?.().catch(() => [])) ?? []).map((r) => flatLower(r.root)));
     const gone = roots.filter((r) => !up.has(flatLower(r)));
-    if (!gone.length || !this.fx.restartRunner) return;
+    if (!gone.length) return;
+    // w5916: a held machine's runners stay off: the hold starts them when it lifts.
+    if (this.ports.deferRunners?.(gone)) {
+      const text = `the grow ended ${gone.length} CI runner listener(s) on the drive (${gone.map(runnerName).join(', ')}); this machine is held, so they start again when the hold lifts`;
+      this.ports.log(`host guard: ${text}`);
+      this.ports.report('Dev Drive: CI runners wait for the hold', text);
+      return;
+    }
+    if (!this.fx.restartRunner) return;
     const lines: string[] = [];
     let failed = 0;
     for (const root of gone) {

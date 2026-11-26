@@ -331,7 +331,13 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    published branch, its own repository (daemon.json `updateOrigin`). A download that stalls (30 s without a byte) or breaks resumes from
    the bytes it has with a Range request, up to 6 tries within 8 minutes, each logged in the daemon's log with its cause
    (`machine/selfUpdate.ts` `DOWNLOAD`; w1641: beast's stalled at 7 of 18.5 MB and Node's fetch sat 300 s before it said
-   "terminated"). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
+   "terminated"). A call that runs out keeps its bytes in `<appDir>/update/<sha256 prefix>.bundle.part`, and the next update
+   of the same bundle hashes them again and asks only for the rest (w5898: beast fetched one 29.3 MB bundle four times from
+   0 on 2026-11-25, reaching 16.6, 19.5, 22.0 and 8.9 MB). Each call keeps its 8 minutes. The SHA-256 of the whole file is
+   still checked before anything installs: a resumed bundle that does not match deletes the part and downloads again from 0
+   in the time left; a part that is empty, not a file, or not shorter than the bundle, or a resume the portal answers 416, is
+   dropped the same way; a refusal keeps nothing; and only the newest part of another bundle stays beside it. Recovery needs
+   nobody at the machine. The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
    An answer the link could not carry (it was down, or it was sent less than a minute before a drop, since a dead link
    looks open for up to 45 s) is kept 30 minutes and sent again after the next hello (`ANSWERS`; w1641: at the 450f7d53c
    rollout the portal VM's Tailscale restarted 4.5 minutes into beast's update). The portal ignores a repeat, takes a
@@ -354,6 +360,21 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
 6. **The report**: `<daemon>/update/result.json`, sent by the daemon that runs afterwards (`self_update_report`, the new one
    or the old one put back); then the job's task or LaunchAgent is removed. The report carries the installer's lines
    (`Before:`, `After:`, any `~ key: before -> after`), never a credential (any `ffm_` token is cut to its machine id).
+7. **A job that never ends is ended by the daemon** (w5938, `machine/selfUpdate.ts` `JOB_LIMIT`, `jobToEnd`, `endOverdue`):
+   while a job is in flight every update and tools run is refused, so on beast, 2026-11-26, job 977d56f7 (15.5 min, the
+   longest of its last 179) refused the agent tools update. At each 10 s tick, and before a new update or an unload is
+   weighed, a job **staged over 10 min** (its process never took it) or **running over 45 min** whose process is gone, whose
+   pid is now another program's (its command line does not name `linkJob.ts`), or which is hung (alive, its
+   `update-job.log` unwritten for 15 min; the hung process is stopped, TERM then KILL) gets a failed result with the reason,
+   in `update-job.log` and the daemon log (`update over the link: FAILED the daemon ended the job: ...`). The tick reports it
+   and removes the job's task like any other; the daemon runs on its current code and takes the next update. A live job
+   process still writing its log is never ended, however old: it is warned of once and the refusal says why. A pid whose
+   command line cannot be read is never stopped, and the command line is read again just before a stop. Both clocks count
+   only time the daemon was awake to look (w5983's review): a look over 3 min after the last (the computer slept, the loop
+   was blocked, the daemon restarted) starts them again, so a job frozen by sleep is not taken for hung when the computer
+   wakes. A staged job, or one whose process is gone, is ended only after the daemon has watched it so for 5 min, so after a
+   reboot the job's own logon task resumes it (or puts the old code back) first. On Windows the stop ends the job's whole
+   process tree (`taskkill /T /F`); a process that does not end is left in flight, said so, and tried again in 5 min.
 
 **Who uses it.** The rollout after a verified deploy, for the daemon step and the agent tools ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887));
 `ops_worker machine_update`, which the portal then runs itself (no ssh, no worker job) and reports to the caller's

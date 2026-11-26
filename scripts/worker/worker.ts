@@ -32,6 +32,7 @@ import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSetting
 import { slotsPointer } from '../../machine/unitySlots.ts';
 import { FFU_SERVER_GROUP, ffuServerExes } from '../../machine/ffuSlots.ts';
 import { rootBackupOf } from '../../machine/selfUpdate.ts';
+import { LIGHT_DIR, isLightId, scanRepos } from '../../machine/lightFolders.ts';
 import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
@@ -40,6 +41,7 @@ import { agentGitDir, ensureAgentGit } from '../../server/agentGit.ts';
 import { gitFence, isGit } from '../../server/safeGit.ts';
 import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
+import { isLink, removeLink } from '../../server/fsLink.ts';
 
 export const LAYOUT_VERSION = 1;
 export const DEFAULT_REPO = 'https://github.com/Final-Factory/FinalFactory.git';
@@ -419,7 +421,10 @@ export interface WhoAmI {
   outdated?: string;
   root?: string;
   agents: { id: string; title: string; sandbox?: string; midTurn: boolean }[];
+  /** The game sandboxes (w5924: a portal from #1323 until this fix listed the light agent folders here too). */
   sandboxes: string[];
+  /** The light agent folders (w5924, `<sandbox root>/agent-work/agentN`): they count against no --max-sandboxes. */
+  lights?: string[];
 }
 
 /**
@@ -511,7 +516,10 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   else if (f.credentialId && f.portal.me.id !== f.credentialId) p.push(`the portal says this credential is machine ${f.portal.me.id}, not ${f.credentialId}`);
   if (!f.credentialId) p.push('the credential is not a machine credential (it starts ffm_<machine id>_)');
   // The count sets the player-folder pairs (w576): lowering it below the sandboxes there would leave one without its pair.
-  const there = f.portal.ok ? f.portal.me.sandboxes : [];
+  // w5924: light agent folders are no game sandboxes and have no player folders, so they never count here.
+  // A portal from before this fix has no `lights` and lists them as sandboxes: their ids (agentN) tell them apart then.
+  const lights = new Set(f.portal.ok ? (f.portal.me.lights ?? f.portal.me.sandboxes.filter(isLightId)) : []);
+  const there = f.portal.ok ? f.portal.me.sandboxes.filter((id) => !lights.has(id)) : [];
   if (there.length > o.maxSandboxes) {
     p.push(`--max-sandboxes ${o.maxSandboxes} is below the ${there.length} sandboxes there (${there.join(', ')}): delete ${there.length - o.maxSandboxes} first (delete_sandbox)`);
   }
@@ -1034,7 +1042,7 @@ async function giveRoot(l: Layout, owner: string) {
   // A root on its Dev Drive keeps the daemon's folder and the credential in the host folder (w1070): those too.
   if (path.dirname(l.daemon) !== l.root) await giveTo(owner, [l.daemon, l.secrets]);
   // Not through the Dev Drive's junctions (w900: that is the sandboxes' and the seed's whole trees), nor the attached VHDX.
-  const skip = (e: string) => e === 'sandboxes' || e === 'devdrive.vhdx' || fs.lstatSync(path.join(l.root, e)).isSymbolicLink();
+  const skip = (e: string) => e === 'sandboxes' || e === 'devdrive.vhdx' || isLink(path.join(l.root, e));
   await giveTo(owner, fs.readdirSync(l.root).filter((e) => !skip(e)).map((e) => path.join(l.root, e)));
 }
 
@@ -1161,7 +1169,7 @@ function newDriveMaxGB(o: Pick<InstallOptions, 'devDriveMaxGB' | 'maxSandboxes' 
 /** Whether a folder is a real one (not a junction) with something in it. */
 const realAndUsed = (dir: string) => {
   try {
-    return !fs.lstatSync(dir).isSymbolicLink() && fs.readdirSync(dir).length > 0;
+    return !isLink(dir) && fs.readdirSync(dir).length > 0;
   } catch {
     return false;
   }
@@ -1406,7 +1414,7 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
     // Everything of the old install goes, its daemon folder and credential included (the token is in hand): only what it carries stays.
     if (n === '.reinstall') continue;
     const p = path.join(l.root, n);
-    if (fs.lstatSync(p).isSymbolicLink()) fs.rmSync(p, { force: true, recursive: false });
+    if (isLink(p)) removeLink(p);
     else await exec('cmd.exe', ['/d', '/c', fs.lstatSync(p).isDirectory() ? 'rd' : 'del', ...(fs.lstatSync(p).isDirectory() ? ['/s', '/q'] : ['/f', '/q']), p], { timeoutMs: 60 * 60_000 });
     if (fs.existsSync(p)) throw new Error(`could not delete ${p} (a process holds a file in it?); run the reinstall again once it is free`);
     say(`Deleted ${p}.`);
@@ -1757,13 +1765,6 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 
   // 1. The root and its manifest.
   // A junction to a Dev Drive that is detached right now dangles (mkdir would refuse it): setupDevDrive attaches the drive and looks after those two.
-  const isLink = (d: string) => {
-    try {
-      return fs.lstatSync(d).isSymbolicLink();
-    } catch {
-      return false;
-    }
-  };
   for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) if (!isLink(d)) fs.mkdirSync(d, { recursive: true });
   const now = new Date().toISOString();
   const prev = readManifest(l.root);
@@ -1961,6 +1962,8 @@ export interface UpdateFlags {
   pathFence?: 'off' | 'warn';
   /** Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md), every OS: written as daemon.json's `mediumAgentFolders`; unset carries daemon.json's. */
   mediumAgentFolders?: 'warn' | 'on';
+  /** The daemon's own temp folder (w6000, machine/daemonTemp.ts), every OS: written as daemon.json's `daemonTmpdir`; unset carries daemon.json's (absent: on). */
+  daemonTmpdir?: 'on' | 'off';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2075,6 +2078,18 @@ export function mediumAgentFoldersFlag(v: string | undefined): 'warn' | 'on' | u
   return v;
 }
 
+/** `--daemon-tmpdir on|off` (w6000): anything else is refused, never guessed at. Exported for tests. */
+export function daemonTmpdirFlag(v: string | undefined): 'on' | 'off' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'on' && v !== 'off') throw new Error(`--daemon-tmpdir is on or off, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the daemon's own temp folder set, "off" written as "off" (w6000); every platform. Exported for tests. */
+export function applyDaemonTmpdirSetting(config: Record<string, unknown>, setting: 'on' | 'off' | undefined): Record<string, unknown> {
+  return setting ? { ...config, daemonTmpdir: setting } : config;
+}
+
 /** daemon.json with Medium agents' folder mode set (w5862, w5869); every platform. Exported for tests. */
 export function applyMediumAgentFolders(config: Record<string, unknown>, setting: 'warn' | 'on' | undefined): Record<string, unknown> {
   return setting ? { ...config, mediumAgentFolders: setting } : config;
@@ -2116,7 +2131,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2356,6 +2371,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.editorTmpdir) say(`editor tmpdir: ${f.editorTmpdir}`);
   if (f.pathFence) say(`path fence: ${f.pathFence}`);
   if (f.mediumAgentFolders) say(`medium agent folders: ${f.mediumAgentFolders}`);
+  if (f.daemonTmpdir) say(`daemon tmpdir: ${f.daemonTmpdir}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2548,8 +2564,16 @@ export interface SandboxRisk {
 export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]> {
   const out: SandboxRisk[] = [];
   if (!fs.existsSync(sandboxesDir)) return out;
-  for (const name of fs.readdirSync(sandboxesDir)) {
-    const dir = path.join(sandboxesDir, name);
+  // w5924: the clones a worker made in a light agent folder (agent-work/agentN): the folder itself or up to 3 levels down,
+  // found by the same scan the daemon runs before it deletes one (scanRepos). A folder it could not search to the end is a
+  // risk too (w6031): a clone may sit in it.
+  const lightDir = path.join(sandboxesDir, LIGHT_DIR);
+  const repos: [string, string][] = fs.readdirSync(sandboxesDir).filter((n) => n !== LIGHT_DIR).map((n) => [n, path.join(sandboxesDir, n)]);
+  const scan = scanRepos(lightDir, 4);
+  const rel = (p: string) => path.relative(sandboxesDir, p).split(path.sep).join('/');
+  for (const repo of scan.repos) repos.push([rel(repo), repo]);
+  for (const d of scan.unsure) out.push({ sandbox: rel(d), unpushed: ['(not searched: it holds folders deeper than the scan looks for clones; check it by hand)'], dirty: [] });
+  for (const [name, dir] of repos) {
     if (!fs.existsSync(path.join(dir, '.git'))) continue;
     // A slot repo (w5614, its .git a folder) holds its other branches and its stash itself, not in the kept clone.
     const slot = fs.statSync(path.join(dir, '.git')).isDirectory();
@@ -2949,6 +2973,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--medium-agent-folders warn|on] (w5862, w5869, every OS: on moves Medium agents' temp root and cargo home to <root>/tmp-medium
              and <root>/cache-medium/cargo, warn only logs the exposure, daemon.json mediumAgentFolders; default: as daemon.json has it;
              docs/worker-root.md)
+            [--daemon-tmpdir on|off] (w6000, every OS: on points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps
+             the system temp folder, the recovery; daemon.json daemonTmpdir; default: as daemon.json has it, on if it has none)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -3051,6 +3077,7 @@ export async function main(argv = process.argv.slice(2)) {
     const editorTmpdir = flags.has('editor-tmpdir') ? editorTmpdirFlag('') : editorTmpdirFlag(opts['editor-tmpdir']);
     const pathFence = flags.has('path-fence') ? pathFenceFlag('') : pathFenceFlag(opts['path-fence']);
     const mediumAgentFolders = flags.has('medium-agent-folders') ? mediumAgentFoldersFlag('') : mediumAgentFoldersFlag(opts['medium-agent-folders']);
+    const daemonTmpdir = flags.has('daemon-tmpdir') ? daemonTmpdirFlag('') : daemonTmpdirFlag(opts['daemon-tmpdir']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3068,6 +3095,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(editorTmpdir ? { editorTmpdir } : {}),
       ...(pathFence ? { pathFence } : {}),
       ...(mediumAgentFolders ? { mediumAgentFolders } : {}),
+      ...(daemonTmpdir ? { daemonTmpdir } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

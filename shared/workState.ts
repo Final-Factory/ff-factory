@@ -452,9 +452,14 @@ export const orchestratorWaitIn = (line: string) => ORCHESTRATOR_WAIT.test(line)
 const ORCHESTRATOR_ONLY_WAIT = /\b(?:waiting|waits|wait) (?:for|on) (?:the |my |its |your |[a-z]+'s )?orchestrator\b/i;
 const ORCHESTRATOR_ACTS =
   /\b(?:the|my|its|your|[a-z]+'s) orchestrator(?: (?:must|needs to|has to|should|will|can|to|then|first))? (?:runs?|sends?|calls?|starts?|files?|passes?|relays?|posts?|fetch(?:es)?|reads?|asks?|tells?|forwards?|does|uses?|checks?|confirms?|pulls?|gets?|downloads?|uploads?)\b/i;
+/**
+ * w5895: a machine hold only the orchestrator can set, as a worker says it (w5814's worker 74e5a46e, 2026-11-26 03:42 UTC:
+ * "It needs the hold set by the orchestrator"; workers have no hold tool, and the line matched neither form above).
+ */
+const ORCHESTRATOR_HOLD = /\b(?:hold|drain)\b[^.;]{0,60}?\b(?:set|lifted|placed|applied|done) by (?:the|my|its|your|[a-z]+'s) orchestrator\b|\b(?:the|my|its|your|[a-z]+'s) orchestrator(?: (?:must|needs to|has to|should|will|can|to|then|first))? (?:sets?|lifts?|holds?|drains?)\b/i;
 const NOT_THE_ORCHESTRATORS = /\b(?:pair (?:run|check|worker)s?|two-machine|second machine|request_pair)\b/i;
 export const orchestratorAskIn = (line: string) =>
-  (ORCHESTRATOR_ONLY_WAIT.test(line) || ORCHESTRATOR_ACTS.test(line)) && !NOT_THE_ORCHESTRATORS.test(line) && !ownWorkWait(line) && !restartWait(line);
+  (ORCHESTRATOR_ONLY_WAIT.test(line) || ORCHESTRATOR_ACTS.test(line) || ORCHESTRATOR_HOLD.test(line)) && !NOT_THE_ORCHESTRATORS.test(line) && !ownWorkWait(line) && !restartWait(line);
 /**
  * Work a worker does itself (w1841, w1685: "waiting on the orchestrator to run the two-machine check"): a pair or two-machine
  * check, a build, its CI, a test or audit run. Not a second machine's worker, which only the dispatcher starts.
@@ -1225,7 +1230,7 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
     // w2046: a resume waiting for room on its full computer moves to one with room (Agents.roomMove); one that says it stays on
     // purpose, or that no other computer can take it, is right to wait. Any other such wait beside room elsewhere is WRONG.
     // w4738: one released while it waited waits a while for its own computer first (resumeMove.ts HOME_MARK), right too.
-    if (/\((?:w2046|w4738)\)/.test(held.why ?? '') || /^being placed again/.test(held.why ?? '')) return { state: 'queued', why };
+    if (/\((?:w2046|w4738|w5942)\)/.test(held.why ?? '') || /^being placed again/.test(held.why ?? '')) return { state: 'queued', why };
     const { kind, fits } = roomFor(w, f, undefined);
     const age = (id: string) => (f.roomSince ? f.now - (f.roomSince[`${kind}:${id}`] ?? f.now) : Infinity);
     const elsewhere = fits.filter((id) => id.toLowerCase() !== held.s.machineId?.toLowerCase() && age(id) >= ROOM_STAND_MS);

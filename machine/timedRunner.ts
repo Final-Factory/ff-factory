@@ -9,7 +9,7 @@
 // The ticket: a play-only machine has no game checkout and no python, so the daemon writes its ticket in the queue's own
 // format (<root>/daemon/bench.queue/tNNNNNNNN, bench.lock/owner; machine/benchQueue.ts reads it), the holder being the daemon
 // itself. Only it takes tickets there; it still waits while a live ticket of anyone else's is in the queue, or a person plays.
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -24,7 +24,9 @@ import { benchLockDir, pidAlive } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
 import { sendChunks } from './review.ts';
 import { PLAYER_EXE } from './timedRunPack.ts';
+import { systemTempEnv } from './daemonTemp.ts';
 import { exeReadsGameDataDir, playerHomeEnv, preparePlayerHome, savesDirsFor } from './gameData.ts';
+import { run as runAsync } from '../server/proc.ts';
 import { fencedPlayer, playerFenceFor, playerWritable, type PlayerFence } from './playerFence.ts';
 
 
@@ -243,11 +245,35 @@ export function linkInto(src: string, slot: string, files: { path: string }[], k
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** End a leg's player and what it started (taskkill /T on Windows). */
-function killTree(child: ChildProcess | undefined) {
+/** End a leg's player and what it started (taskkill /T on Windows; w5973: a child the daemon's loop does not wait on). */
+async function killTree(child: ChildProcess | undefined): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  if (child.pid && process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+  if (child.pid && process.platform === 'win32') await runAsync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeoutMs: 30_000 });
   else child.kill('SIGKILL');
+}
+
+/**
+ * How a leg's player ended: its exit code, `error: ...`, or 'timeout' once it ran past boundMs and its tree was ended.
+ * w5973: the tree's stop now answers later (taskkill as a child the loop does not wait on), so the player's own exit,
+ * caused by that stop, may come first: a leg past its bound is 'timeout' whatever comes first, as it was when the stop
+ * held the loop. The answer waits for the stop, as before. Exported for tests (stop: what ends the tree).
+ */
+export function legExit(child: ChildProcess, boundMs: number, stop: (c: ChildProcess) => Promise<void> = killTree): Promise<number | string> {
+  return new Promise<number | string>((resolve) => {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      void stop(child).catch(() => undefined).then(() => resolve('timeout'));
+    }, boundMs);
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      if (!timedOut) resolve(`error: ${e.message}`);
+    });
+    child.on('exit', (c) => {
+      clearTimeout(timer);
+      if (!timedOut) resolve(c ?? -1);
+    });
+  });
 }
 
 /** The machine's mean CPU load over `ms`, all cores, percent. */
@@ -540,7 +566,7 @@ export class TimedRunner {
     if (this.stop?.id === id) return true;
     this.stop = { id, why };
     this.d.log(`timed run ${id}: cancelled: ${why}; ending its leg and giving its ticket back`);
-    killTree(this.child);
+    void killTree(this.child);
     for (const w of [...this.wakers]) w();
     return true;
   }
@@ -950,7 +976,9 @@ export class TimedRunner {
     // w5344: and a home of its own under FF_PLAYER_HOME, so Unity's own PlayerPrefs stay inside the install (Linux, macOS)
     const home = playerHomeEnv(process.env, exeReadsGameDataDir(exe));
     preparePlayerHome(home);
-    const env = { ...timedRunEnv(process.env, o.session, o.id), ...home };
+    // w6000: the system temp folder it had before, not the daemon's own <root>/tmp-daemon, which its fence closes (a Low
+    // player on Windows, the write fence on Linux and macOS).
+    const env = { ...timedRunEnv(process.env, o.session, o.id), ...systemTempEnv(process.env), ...home };
     this.checkStop(o.id);
     // w5564: on Linux and macOS the player, a file in a folder workers write, runs inside a write fence of its own
     const fence = this.d.playerFence ? this.d.playerFence() : this.d.spawnPlayer ? ({ kind: 'none' } as const) : this.ownFence();
@@ -971,14 +999,7 @@ export class TimedRunner {
     const child = (this.d.spawnPlayer ?? ((e, a, cwd) => spawn(e, a, { cwd, env, stdio: 'ignore', windowsHide: false })))(launch.cmd, launch.args, path.dirname(exe));
     this.child = child;
     const bound = legTimeoutS(o.settings) * 1000;
-    const code = await new Promise<number | string>((resolve) => {
-      const timer = setTimeout(() => {
-        killTree(child);
-        resolve('timeout');
-      }, bound);
-      child.on('error', (e) => (clearTimeout(timer), resolve(`error: ${e.message}`)));
-      child.on('exit', (c) => (clearTimeout(timer), resolve(c ?? -1)));
-    });
+    const code = await legExit(child, bound);
     this.child = undefined;
     running = false;
     await sampler;

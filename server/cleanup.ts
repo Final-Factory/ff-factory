@@ -10,6 +10,7 @@ import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 import { renameAway } from './renameAway.ts';
 import { clearDeadMounts } from './deadMounts.ts';
+import { daemonTempDir, systemTempDir, systemTempEnv } from '../machine/daemonTemp.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -33,8 +34,10 @@ export type CleanupPlatform = 'win32' | 'darwin' | 'linux';
 export interface CleanupEnv {
   platform: CleanupPlatform;
   home: string;
-  /** The system temp folder (os.tmpdir()). */
+  /** The system temp folder (os.tmpdir() before the daemon moved its own, machine/daemonTemp.ts systemTempDir). */
   tmp: string;
+  /** The daemon's own temp folder, <root>/tmp-daemon (w6000), whenever there is a root: aged as a temp root of its own. */
+  daemonTemp?: string;
   /** Windows: %LOCALAPPDATA%. */
   localAppData?: string;
   /** The agents' own temp root when it is not `tmp` (a machine's temp_dir). */
@@ -49,10 +52,13 @@ export interface CleanupEnv {
   gameDataRoots?: string[];
 }
 
-export function hostCleanupEnv(agentTemp?: string): CleanupEnv {
+export function hostCleanupEnv(agentTemp?: string, root?: string): CleanupEnv {
   const platform: CleanupPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux';
   const home = os.homedir();
-  return { platform, home, tmp: os.tmpdir(), localAppData: platform === 'win32' ? process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local') : undefined, agentTemp };
+  // w6000: the daemon's own temp folder (<root>/tmp-daemon) is a temp root of its own whenever there is a root, on or off,
+  // wherever the agents' temp folder is (N3 of the #1345 review): a folder that is not there is skipped.
+  const daemonTemp = root ? daemonTempDir(root) : undefined;
+  return { platform, home, tmp: systemTempDir(), localAppData: platform === 'win32' ? process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local') : undefined, agentTemp, ...(daemonTemp ? { daemonTemp } : {}) };
 }
 
 /** One allowlisted folder: its entries (files or folders) that match `names` go once untouched for `olderThanHours`. */
@@ -242,7 +248,7 @@ export { LIBRARY_CACHES };
  */
 export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRule[] {
   const j = (...a: string[]) => P(a[0]).join(...a);
-  const temps = [...new Set([env.tmp, env.agentTemp, env.mediumTemp].filter((x): x is string => !!x))];
+  const temps = [...new Set([env.tmp, env.agentTemp, env.mediumTemp, env.daemonTemp].filter((x): x is string => !!x))];
   const rules: CleanupRule[] = [];
   for (const t of temps) {
     rules.push(
@@ -1098,12 +1104,19 @@ export async function sizePlan(items: CleanupItem[]): Promise<{ path: string; by
 
 // ---------------------------------------------------------------- the log
 
-/** Append one pass to `<dir>/cleanup-log.jsonl` (kept under ~5 MB: the older half moves to .1). */
+/**
+ * Append one pass to `<dir>/cleanup-log.jsonl` (kept under ~5 MB: past it the log is copied to .1 and emptied). The roll
+ * keeps the file itself (w5957): workers' fences give it back (server/daemonReads.ts FENCE_FILE_WRITERS), and a
+ * renamed-away log would leave a new file they cannot read.
+ */
 export function appendCleanupLog(dir: string, entry: object) {
   try {
     const file = path.join(dir, 'cleanup-log.jsonl');
     fs.mkdirSync(dir, { recursive: true });
-    if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) fs.renameSync(file, `${file}.1`);
+    if ((fs.statSync(file, { throwIfNoEntry: false })?.size ?? 0) > 5 * 1024 * 1024) {
+      fs.copyFileSync(file, `${file}.1`);
+      fs.truncateSync(file, 0);
+    }
     fs.appendFileSync(file, JSON.stringify(entry) + '\n');
   } catch {
     // the log is best-effort; the summary still reaches system_status
@@ -1617,7 +1630,9 @@ export function sessionTempEnv(root: string, sessionId: string): Record<string, 
   try {
     fs.mkdirSync(d, { recursive: true });
   } catch {
-    return {}; // the system temp folder then
+    // The system temp folder then, named outright (w6000): inherited, it would be the daemon's own <root>/tmp-daemon,
+    // which a fenced agent can neither write nor read.
+    return systemTempEnv();
   }
   return { TMP: d, TEMP: d, TMPDIR: d };
 }

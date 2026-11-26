@@ -90,6 +90,7 @@ import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf
 import { GithubApps } from './githubApps.ts';
 import { startGhCallLog } from './ghBudget.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
+import { ghLoginBanner, ghLoginStatusLines } from '../shared/ghLogin.ts';
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -110,9 +111,10 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { originOf, tailnetDeviceAddress, tailnetOnly } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress, tailnetOnly, tailnetAddress as tailnetIp } from './remoteChat.ts';
 import { OWNER_DEVICE_APPROVAL_DEFAULT } from './devices.ts';
-import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { clientAddress, configureClientAddress, directAddress } from './clientAddress.ts';
+import { MID_TRANSFER_CHECK_MS, TailscalePathProbe, slowBundleReason, slowRunningReason } from './tailscalePath.ts';
 import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -126,8 +128,10 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
+import { pageAllStats } from './ffuSlotsView.ts';
 import { pageNamedSessions, pageSession, pageSessions, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
+import { drainOf, drainHold } from './machineDrain.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
 // process starts anything that could inherit it.
@@ -389,6 +393,8 @@ function joinHttpScript(kind: keyof typeof JOIN_FILES): string | undefined {
     return undefined;
   }
 }
+/** w5897: the Tailscale path of a slow or cut update bundle, one journal line per probe. */
+const tailscalePath = new TailscalePathProbe(runProc);
 const joinWhois = async (addr: string) => tailscaleWhois((await import('./proc.ts')).run, addr);
 const joinHttp = machineJoinHttp({
   codes: machines.joins,
@@ -435,6 +441,11 @@ machines.fenceAlert = (_machineId, title, text) => {
 machines.linkRefusedAlert = (_machineId, title, text) => {
   notifier.host(title, text);
   machines.report?.(text);
+};
+// w5916: a person's hold on a machine (a drain, or config placement.hold) drains its CI runners (machine/loadRunners.ts)
+machines.runnerHoldFor = (id) => {
+  const d = drainOf(store.machines.get(id));
+  return d ? drainHold(d) : cfg.placement?.hold?.[id] || undefined;
 };
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
@@ -1225,7 +1236,7 @@ function appState(user: string | undefined, have?: string | null): AppState {
     host: hostForUser({ ...host, drain: drainer.status }, me.userId),
     usage: usage.usage,
     accounts: accountsNow(),
-    machineStats: machines.allStats(),
+    machineStats: pageAllStats(machines.allStats()),
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
@@ -2524,7 +2535,21 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       const start = parseRange(req.headers.range, updateBundle.size);
       const sent = sendStream(req, res, new StreamReply('application/octet-stream', updateBundle.file, updateBundle.size, 'attachment; filename="ff-factory.bundle"'));
-      res.on('close', () => console.log(bundleServedLine(updateBundle.machineId, { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished })));
+      // w5897: a cut or slow bundle also logs the Tailscale path to that machine (server/tailscalePath.ts), read-only.
+      const peerAddr = directAddress(req);
+      const tailnetPeer = tailnetIp(peerAddr) ? peerAddr : undefined;
+      const midCheck = setTimeout(() => {
+        const why = slowRunningReason(sent(), Date.now() - t0, updateBundle.size);
+        if (why) void tailscalePath.probe(updateBundle.machineId, why, tailnetPeer);
+      }, MID_TRANSFER_CHECK_MS);
+      midCheck.unref();
+      res.on('close', () => {
+        clearTimeout(midCheck);
+        const served = { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished };
+        console.log(bundleServedLine(updateBundle.machineId, served));
+        const why = slowBundleReason(served);
+        if (why) void tailscalePath.probe(updateBundle.machineId, why, tailnetPeer);
+      });
       return;
     }
     // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its
@@ -3136,10 +3161,12 @@ agents.usagePollChanged = () => {
   machines.pushUsageConfig();
 };
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
+/** Each machine's own gh login as the warnings read it (w5932). */
+const ghLoginMachines = () => machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), ...(m.gh ? { gh: m.gh } : {}) }));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   const idle = liveIdleStatusLine(cfg.live?.enabled === true, cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES, machines.list(), liveIdle.keptOpen());
-  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...ghLoginStatusLines(ghLoginMachines()), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -3194,6 +3221,9 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
+  // A machine's own gh login that GitHub refuses with 401 (w5932): for the owners, whose login it is.
+  const ghl = ghLoginBanner(ghLoginMachines());
+  if (ghl) warnings.push({ id: 'gh-login', kind: 'gh-login', owners: true, text: ghl });
   // A GitHub token that lacks a required repository or permission (w904), or GitHub rate limiting its account (w1186): for its person and the owners.
   for (const b of github.banners()) warnings.push({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };

@@ -564,8 +564,10 @@ test('readEnvs on this machine finds the session of a process started with it, a
   }
 });
 
-// Git Bash on Windows (not WSL's System32\bash.exe), bash elsewhere.
-const BASH = process.platform === 'win32' ? ['C:\\Program Files\\Git\\bin\\bash.exe'].find((b) => fs.existsSync(b)) : '/bin/bash';
+// Git Bash on Windows (not WSL's System32\bash.exe), bash elsewhere. The agents' own Git Bash first (w5915): a Low-integrity
+// worker's is <root>/tools/git (machine/lowIntegrity.ts), since Program Files' msys bash dies at Low integrity
+// (NtCreateDirectoryObject 0xC0000022, measured on BEAST).
+const BASH = process.platform === 'win32' ? [process.env.CLAUDE_CODE_GIT_BASH_PATH, 'C:\\Program Files\\Git\\bin\\bash.exe'].find((b) => !!b && fs.existsSync(b)) : '/bin/bash';
 
 test('on this machine: `ff-leftovers end` run through its shim from a bash pipeline ends the agent\'s background job, never the agent or its shell (w1219)', { skip: (!BASH && 'no Git Bash') || PS_REFUSED }, async () => {
   // A throwaway session of its own: only this test's processes carry it, so nothing else can be listed or ended.

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { MEDIUM_CHILDREN, lowTargets, openChildren } from '../machine/lowIntegrity.ts';
-import { mediumCargoHomeDir, mediumTempRoot, planMediumFolders, workerWritable } from '../machine/mediumFolders.ts';
+import { MEDIUM_AGENT_VAR, mediumCargoHomeDir, mediumTempRoot, planMediumFolders, workerWritable } from '../machine/mediumFolders.ts';
 import { LOCKED_CHILDREN } from '../machine/writeLock.ts';
 import { DEFAULT_CLEANUP, cleanupRules, hostCleanupEnv, sessionTempDir, sessionTempEnv } from './cleanup.ts';
 import { READ_ONLY_IN_ROOT } from './workerFence.ts';
@@ -180,3 +180,52 @@ for (const mode of ['on', 'warn'] as const) {
     }
   });
 }
+
+// w5946 F5: ffu-slot refuses a Medium agent ("on") only once its own temp folder (mediumAgentFolders) is outside the workers' too.
+for (const [mode, folders, said] of [['on', undefined, 'warn'], ['on', 'on', 'on'], ['warn', 'on', 'warn']] as const) {
+  test(`w5870: a launch's env with mediumAgentCaches "${mode}" and mediumAgentFolders ${folders ?? 'unset'}: Medium agents ${mode === 'on' ? 'get cache-medium' : 'keep the workers\' caches'} and ffu-slot says "${said}", a sandbox agent gets neither`, (t) => {
+    const root = install(t);
+    const tempDir = path.join(root, 'tmp');
+    const d = new Daemon(
+      { portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(root, 'repo'), appDir: path.join(root, 'daemon'), root, tempDir, maxEventsFile: null, workerIntegrity: 'low', writeLock: true, workerFence: 'seatbelt', mediumAgentCaches: mode, ...(folders ? { mediumAgentFolders: folders } : {}) },
+      () => {
+        throw new Error('no sessions here');
+      },
+      PROBES,
+    );
+    t.after(() => d.shutdown());
+    const i = d as unknown as Inside;
+    const medium = i.agentTempEnv('med-1', false);
+    const sandbox = i.agentTempEnv('sb-1', true);
+    assert.equal(medium[MEDIUM_AGENT_VAR], said);
+    assert.equal(sandbox[MEDIUM_AGENT_VAR], undefined);
+    assert.equal(sandbox.DOTNET_CLI_HOME, undefined, 'a sandbox agent inherits the workers\' caches');
+    if (mode === 'on') {
+      assert.equal(medium.DOTNET_CLI_HOME, path.join(root, 'cache-medium', 'dotnet'));
+      assert.ok(!workerWritable(medium.PIP_CACHE_DIR, root, [tempDir]));
+    } else assert.equal(medium.DOTNET_CLI_HOME, undefined);
+  });
+}
+
+test('w6000 (w6024 review, point 1): a Medium agent whose own temp folder cannot be made falls back to the shared root, not to the system temp', (t) => {
+  const root = install(t);
+  const tempDir = path.join(root, 'tmp');
+  const was = process.env.FF_SYSTEM_TMPDIR;
+  process.env.FF_SYSTEM_TMPDIR = path.join(root, 'sys-tmp');
+  t.after(() => (was === undefined ? delete process.env.FF_SYSTEM_TMPDIR : (process.env.FF_SYSTEM_TMPDIR = was)));
+  const d = new Daemon(
+    { portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(root, 'repo'), appDir: path.join(root, 'daemon'), root, tempDir, maxEventsFile: null, workerIntegrity: 'low', writeLock: true, workerFence: 'seatbelt', mediumAgentFolders: 'on' },
+    () => {
+      throw new Error('no sessions here');
+    },
+    PROBES,
+  );
+  t.after(() => d.shutdown());
+  assert.equal(d.mediumFolders().tempRoot, mediumTempRoot(root), 'planned');
+  // Its root turns into a file after the plan: sessionTempEnv cannot make the session's folder there.
+  fs.rmSync(mediumTempRoot(root), { recursive: true, force: true });
+  fs.writeFileSync(mediumTempRoot(root), '');
+  assert.equal(sessionTempEnv(mediumTempRoot(root), 'med-x').TMP, process.env.FF_SYSTEM_TMPDIR, 'sessionTempEnv alone names the system temp');
+  const env = (d as unknown as Inside).agentTempEnv('med-x', false);
+  for (const k of ['TMP', 'TEMP', 'TMPDIR']) assert.equal(env[k], sessionTempDir(tempDir, 'med-x'), k);
+});

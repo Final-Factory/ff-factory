@@ -13,6 +13,7 @@ import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeUpSince } from '../server/unityHang.ts';
 import { sandboxGameDataEnv } from './gameData.ts';
 import { editorTmpdirEnv, sandboxUvEnv } from './sharedCaches.ts';
+import { editorSystemTempEnv } from './daemonTemp.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
 import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
@@ -26,6 +27,7 @@ import type { BenchTicket } from './benchQueue.ts';
 import type { IdleCloseResult } from './liveIdle.ts';
 import { isPersonTicket } from './personPlay.ts';
 import type { DiskLevel, GitStatus, MachineSandboxIdleClosed, MachineSandboxUnity, SandboxPoolSettings, SandboxStatus } from '../shared/types.ts';
+import { describeCounted, type CensusAgent } from '../server/agentCensus.ts';
 
 const SLUG = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const GB = 1024 ** 3;
@@ -268,9 +270,10 @@ export function samePath(a: string, b: string, platform: NodeJS.Platform = proce
 }
 
 /** Live agents across a machine's sandboxes against the pool's total (maxAgents), as a refusal, or undefined. Exported for tests. */
-export function totalAgentsRefusal(liveInSandboxes: number, settings: Pick<SandboxPoolSettings, 'maxAgents'> | undefined | null): string | undefined {
+export function totalAgentsRefusal(liveInSandboxes: number, settings: Pick<SandboxPoolSettings, 'maxAgents'> | undefined | null, counted?: readonly CensusAgent[]): string | undefined {
   const max = settings?.maxAgents;
-  return max !== undefined && liveInSandboxes >= max ? `already ${liveInSandboxes} agents running in this machine's sandboxes (max_sandbox_agents ${max}); stop one first` : undefined;
+  // w5972: the agents it counted, by id: beast's refusal of 06:37:34Z on 2026-11-26 named none, while the portal counted 2.
+  return max !== undefined && liveInSandboxes >= max ? `already ${liveInSandboxes} agents running in this machine's sandboxes (max_sandbox_agents ${max}); stop one first${counted ? `; counted: ${describeCounted(counted)}` : ''}` : undefined;
 }
 
 /** Running editors to stop for being idle: up, no agent mid-turn there, nothing done there for `idleMinutes`. Exported for tests. */
@@ -311,7 +314,9 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
  * No root: none.
  */
 export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...editorTmpdirEnv(root, sandbox, tmpdir, platform) };
+  // w6000: without its own TMPDIR the editor gets the system temp folder back, not the daemon's (<root>/tmp-daemon).
+  const own = editorTmpdirEnv(root, sandbox, tmpdir, platform);
+  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
 }
 
 /**
@@ -328,7 +333,8 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
   } catch (e) {
     log(`editor TMPDIR ${env.TMPDIR} is not usable (${(e as Error).message}): it starts with the system temp folder`);
     const { TMPDIR: _, ...rest } = env;
-    return rest;
+    // w6000: the system temp folder named again, not the daemon's own (<root>/tmp-daemon) inherited from its environment.
+    return { ...rest, ...editorSystemTempEnv(process.env) };
   }
 }
 
@@ -359,7 +365,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     procs,
     editor: (sb, logFile, report) => {
       const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform);
-      if (editorTmpdir && platform !== 'win32' && !env.TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
+      if (editorTmpdir && platform !== 'win32' && !editorTmpdirEnv(root, sb.id, true, platform).TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
       const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },
@@ -460,7 +466,7 @@ export class SandboxPool {
     // would forget its sandboxes, and the portal their labels and agents with them (w424).
     let rows: Rec[] | undefined;
     try {
-      rows = readJsonDurable<Rec[]>(this.o.stateFile, { check: checkArray });
+      rows = readJsonDurable<Rec[]>(this.o.stateFile, { check: checkArray, inPlace: true });
     } catch (e) {
       this.o.onEvent({ text: `could not read ${this.o.stateFile}: ${(e as Error).message}` });
     }
@@ -485,8 +491,9 @@ export class SandboxPool {
   private save() {
     try {
       fs.mkdirSync(path.dirname(this.o.stateFile), { recursive: true });
-      // Fsynced, then renamed into place, with the last good versions kept beside it (server/durable.ts).
-      writeJsonDurable(this.o.stateFile, [...this.recs.values()], { indent: 2 });
+      // Fsynced, with the last good versions kept beside it (server/durable.ts). In place (w5957): workers' fences give
+      // sandboxes.json back (server/daemonReads.ts FENCE_FILE_WRITERS), and a rename would make a file they cannot read.
+      writeJsonDurable(this.o.stateFile, [...this.recs.values()], { indent: 2, inPlace: true });
     } catch (e) {
       this.o.onEvent({ text: `could not save ${this.o.stateFile}: ${(e as Error).message}` });
     }

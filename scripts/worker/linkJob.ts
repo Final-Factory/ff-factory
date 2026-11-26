@@ -50,6 +50,41 @@ export interface JobDeps {
   save: (job: UpdateJob) => void;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+  /** w5967: the tools run's limit (default TOOLS_JOB_MS); tests shorten it. */
+  toolsMs?: number;
+}
+
+/**
+ * w5967: a tools job (a marketplace pull, plugin installs, the agents' node and Git) that has not ended in this long is
+ * failed with the reason, and the job ends: while it runs, its job.json keeps the machine's update lock (machine/selfUpdate.ts
+ * jobInFlight), so every update and tools run sent there is refused. beast's runs took 2 to 12.5 minutes on 2026-11-25/26
+ * (the portal's journal); job 442c5638 on 2026-11-26 ran past 15 and held the lock. The portal waits longer
+ * (server/machineRollout.ts ROLLOUT_LIMITS.toolsLinkMs), so this job's failed report reaches it.
+ */
+export const TOOLS_JOB_MS = 30 * 60_000;
+
+/** The note of a tools run stopped at its limit. Exported for tests. */
+export const toolsTimedOut = (ms: number) =>
+  `the agent tools run did not end within ${Math.round(ms / 60_000)} min, so the job stopped it and ended: this machine takes updates again (w5967)`;
+
+/** The tools run, failed with the reason at its limit (w5967). Exported for tests. */
+export async function toolsWithLimit(job: UpdateJob, d: Pick<JobDeps, 'tools' | 'toolsMs' | 'say'>): Promise<{ code: number; late: boolean }> {
+  const ms = d.toolsMs ?? TOOLS_JOB_MS;
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<'late'>((resolve) => {
+    timer = setTimeout(() => resolve('late'), ms);
+  });
+  const run = d.tools(job).catch((e) => {
+    d.say(`FAILED: ${(e as Error).message}`);
+    return 1;
+  });
+  const r = await Promise.race([run, late]);
+  clearTimeout(timer);
+  if (r === 'late') {
+    d.say(`FAILED: ${toolsTimedOut(ms)}.`);
+    return { code: 1, late: true };
+  }
+  return { code: r, late: false };
 }
 
 type Outcome = Omit<LinkUpdateReport, 'id' | 'form' | 'commit' | 'log' | 'at'>;
@@ -103,8 +138,8 @@ export async function putBack(job: UpdateJob, d: JobDeps): Promise<Outcome> {
 /** Run one job to its outcome. A job started again after a reboot only checks and puts back. Exported for tests. */
 export async function runJob(job: UpdateJob, d: JobDeps, resumed = false): Promise<Outcome> {
   if (job.form === 'tools') {
-    const code = await d.tools(job);
-    return { ok: code === 0, exit: code, ...(code === 0 ? {} : { note: `the agent tools run exited ${code}` }) };
+    const { code, late } = await toolsWithLimit(job, d);
+    return { ok: code === 0, exit: code, ...(code === 0 ? {} : { note: late ? toolsTimedOut(d.toolsMs ?? TOOLS_JOB_MS) : `the agent tools run exited ${code}` }) };
   }
   if (job.form === 'uninstall') {
     await d.uninstall(job);
@@ -194,6 +229,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.editorTmpdir === 'on' || f.editorTmpdir === 'off' ? { editorTmpdir: f.editorTmpdir } : {}),
     ...(f.pathFence === 'off' || f.pathFence === 'warn' ? { pathFence: f.pathFence } : {}),
     ...(f.mediumAgentFolders === 'warn' || f.mediumAgentFolders === 'on' ? { mediumAgentFolders: f.mediumAgentFolders } : {}),
+    ...(f.daemonTmpdir === 'on' || f.daemonTmpdir === 'off' ? { daemonTmpdir: f.daemonTmpdir } : {}),
   };
 }
 
@@ -293,6 +329,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     if (process.platform === 'win32') await shell('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Unregister-ScheduledTask -TaskName '${name}' -Confirm:$false -ErrorAction SilentlyContinue`]);
     else if (process.platform === 'darwin') fs.rmSync(path.join(os.homedir(), 'Library', 'LaunchAgents', `${name}.plist`), { force: true });
   }
+  // w5967: a tools run stopped at its limit may leave work running inside this process (a spawn, a download) that would keep
+  // it, and so the job's task or LaunchAgent, alive: its result and its done phase are on disk, so it ends here.
+  if (job.form === 'tools' && out.note === toolsTimedOut(TOOLS_JOB_MS)) setTimeout(() => process.exit(out.exit), 1_000).unref();
   return out.exit;
 }
 

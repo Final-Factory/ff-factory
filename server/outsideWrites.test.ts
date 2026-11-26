@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { rootEnv } from '../machine/daemon.ts';
 import { editorLaunchEnv, sandboxEditorEnv } from '../machine/sandboxes.ts';
@@ -31,7 +32,7 @@ test('outside writes: every folder in the daemon\'s environment is inside the ro
 });
 
 test('outside writes: a daemon-started editor on Windows keeps its temp files in the root', () => {
-  assert.deepEqual(editorTempEnv({ FF_WORKER_ROOT: ROOT }, 'win32'), { TMP: path.join(ROOT, 'tmp', 'unity'), TEMP: path.join(ROOT, 'tmp', 'unity') });
+  assert.deepEqual(editorTempEnv({ FF_WORKER_ROOT: ROOT }, 'win32'), { TMP: path.join(ROOT, 'tmp', 'unity'), TEMP: path.join(ROOT, 'tmp', 'unity'), TMPDIR: path.join(ROOT, 'tmp', 'unity') });
   assert.deepEqual(editorTempEnv({}, 'win32'), {}, 'no root: unchanged');
   assert.deepEqual(editorTempEnv({ FF_WORKER_ROOT: ROOT }, 'darwin'), {}, 'macOS and Linux: editorTmpdirEnv');
 });
@@ -55,7 +56,7 @@ test('w5833: a sandbox editor on macOS and Linux gets TMPDIR in the root only wi
 });
 
 test('w5833 (review F1): the editor makes its TMPDIR at each start, and starts with the system temp when it cannot', () => {
-  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'w5833-f1-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5833-f1-'));
   const lines: string[] = [];
   const t = path.join(dir, 'tmp', 'editor-slot1');
   const env = { A: '1', TMPDIR: t };
@@ -94,9 +95,10 @@ test('outside writes: a batch Unity run without -logFile gets one in the worker\
  * the write into it if it can (rootEnv, sharedCaches.ts), else add it to docs/worker-root.md 2.6 and raise the count here.
  */
 const KNOWN: Record<string, [number, string]> = {
-  'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given (docs 2.6)'],
+  'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given, warned in the log (w5834: <root>/tmp/bench-status otherwise)'],
   'machine/burstPref.ts': [1, 'exception: Unity\'s Burst EditorPref (registry, plist, ~/.local/share/unity3d)'],
-  'machine/daemon.ts': [10, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads); the owner secrets a run may not read (w5553, ownerReadDenied: reads, writes nothing; and the owner targets of the read-fence probe, w5747, reads only; the owner-secret label plan named in the read-fence probe line on LothDesktop, w5749, reads only; and on LothDesktop in on mode the owner gh folder and ~/.ssh get their No-Read-Up label, w5749, lothsahn go for C:)'],
+  'machine/daemon.ts': [11, 'the no-root defaults; the macOS CI runners LaunchAgent plists get TMPDIR inside the root (w5999, the runner service own configuration, said in its PR); the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads); the owner secrets a run may not read (w5553, ownerReadDenied: reads, writes nothing; and the owner targets of the read-fence probe, w5747, reads only; the owner-secret label plan named in the read-fence probe line on LothDesktop, w5749, reads only; and on LothDesktop in on mode the owner gh folder and ~/.ssh get their No-Read-Up label, w5749, lothsahn go for C:)'],
+  'machine/daemonTemp.ts': [13, 'w6000: moves the daemon\'s own temp into <root>/tmp-daemon; reads os.tmpdir() only to keep it in FF_SYSTEM_TMPDIR (server/w6000SystemTemp.test.ts census)'],
   'machine/ownerSecrets.ts': [3, 'the owner secret paths (gh login, ~/.ssh, browsers, Keychain) the fences close to reads (w5548, w5553): names them, writes nothing there'],
   'machine/lowIntegrity.ts': [2, "reads: where the daemon user's gh keeps its login, for a Low worker's GH_CONFIG_DIR (w5430)"],
   'machine/prFlow.ts': [1, 'names APPDATA in the gh refusal (w5430, reads)'],
@@ -115,7 +117,7 @@ const KNOWN: Record<string, [number, string]> = {
   'server/agentAccount.ts': [2, "reads: Claude Code's folder (CLAUDE_CONFIG_DIR, else ~/.claude) named to the agents' launcher (w5598), and the VM's switch file FFF_AGENT_SWITCH names (w5651); writes nothing"],
   'server/agentTools.ts': [2, 'exception: the person\'s ~/.claude plugin marker'],
   'server/appConfig.ts': [1, 'the no-root default config folder'],
-  'server/cleanup.ts': [4, 'reads: measures Unity\'s caches'],
+  'server/cleanup.ts': [4, 'reads: measures Unity\'s caches; w6000: the system temp rules (systemTempDir)'],
   'server/cliTranscript.ts': [2, 'reads only: Claude Code\'s folder where CLAUDE_CONFIG_DIR is unset, and the legacy ~/.claude a pre-w5305 transcript is in'],
   'server/sessions.ts': [1, 'reads only (w5305): the legacy ~/.claude a resumed pre-switch transcript is copied from, into <root>/claude'],
   'server/daemonReads.ts': [1, 'guard: reads only'],
@@ -132,6 +134,7 @@ const KNOWN: Record<string, [number, string]> = {
   'server/privileged.ts': [1, 'reads'],
   'server/reaper.ts': [3, 'reads'],
   'server/rootFence.ts': [5, 'guard: path lists only'],
+  'server/tmpWriteFence.ts': [5, 'guard (w6008): path patterns it warns on; writes nothing'],
   'server/secretGuard.ts': [3, 'guard: path lists only'],
   'server/standingGuard.ts': [1, 'guard: path lists only'],
   'server/testHistoryCi.ts': [1, 'the portal\'s own scratch'],

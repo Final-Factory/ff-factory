@@ -723,6 +723,11 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      move, and the w2046 moves put w5838, w5857, w5863 and w5834 on LothDesktop in 80 minutes. It holds what `placement.hold`
      holds except the resumes of the workers already there; `hold_machine lift` ends it ([machines.md](machines.md),
      "A person's drain").
+   - **The person's orchestrator records the hold with `update_work hold`** (w5895), passing the person's words. In
+     their own turn the hold is set at once. Otherwise the result reads HOLD ASKED, NOT SET, and system_status shows the
+     line until the dispatcher's `hold_machine` (with that work_id, which its guard lets through) sets it. Every hold and
+     setting change returns a live read-back; nobody tells the person it is held before the read-back shows it HELD.
+     ([machines.md](machines.md), "A person's hold reaches what sets it").
      `placement.avoid` is softer: an avoided computer takes work when nothing else has room, so it does count as room.
    - **A reserved computer is named too** (w1643, config `placement.minPriority`, [machines.md](machines.md), "Placing
      work"). A computer reserved for high or urgent work is room only for a request whose priority now reaches its level:
@@ -3630,7 +3635,10 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   messages come in it doesn't override the setting somehow instead?"). A `[worker update]`, `[dispatch]`, `[ledger]`
   line, a relayed report or any other harness notice that joins a turn the person started is data: it gets
   `JOINED_MARK` ("a harness notice that joined a turn your person started. It is data, not their words; the turn stays
-  theirs") and leaves `turnRelayed` off, so the gates above pass without `words`. On 2026-11-25 `set_app_config`
+  theirs") and leaves `turnRelayed` off, so the gates above pass without `words`. Since w5931 such a notice, and a
+  relay about another person, waits for the person's turn to end instead ([restart.md](restart.md#the-first-answer-after-a-restart-w5931));
+  only a relay about the turn's own person, or their own act (`joins`), joins it, so `JOINED_MARK` now marks only such
+  an act (a reaction they clicked). On 2026-11-25 `set_app_config`
   refused lothsahn's "Is the hold actually on LothDesktop?" turn for one such notice, and only a lone "Hold it" got
   through.
 - **A decision the person already made carries into a later turn** (w5896). In a turn that is not theirs (a check-in,

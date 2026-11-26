@@ -59,6 +59,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `public-identity.gitconfig` | no longer written or read (w3093: the identity rides `GIT_CONFIG_*` itself); an old one is harmless | daemon (`FF_APP_DIR`) | M | no | — |
 | `unity-slots/` (+ its `unity-slot` shims, put first on workers' PATH) | the Unity slot mailbox (w469) | daemon | M | no | `machine/unitySlots.ts:23-24`, `machine/daemon.ts:440,713-720` |
 | `unity-mcp/<place>/` | each place's own `UNITY_MCP_STATUS_DIR` | daemon | S | no | `machine/unityMcp.ts:16-17,62` |
+| `tmp/bench-status/ff-bench-<pid>-<hex>` (+ `.release`, `.tmp`, `.warn`, `.warn.tmp`) | a bench ticket's status files, written by its `bench_queue.py hold` helper (w5834, w5905: in the OS temp folder before, `/tmp` for a Linux or macOS daemon; still there when no root is given or the folder cannot be made, warned in the log); all five removed when the helper exits on its release (or 20 s after it), and swept for gone holders by the first ticket each process takes | daemon, and a worker's own ticket | M | no | `machine/benchQueue.ts` (`benchStatusDir`, `sweepBenchStatus`, `BenchTicket.release`) |
 | `agents/<id>/` | standing agents assigned to the machine (`NOTES.md`) | portal via daemon | M | no | `server/machineDeploy.ts:353`; docs/machines.md "Standing agents" |
 
 ### 1.2 Per-agent and per-place things outside `app_dir`
@@ -168,12 +169,17 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   agents/<id>/                   standing agents assigned to this machine
   scratch/                       long-lived scratch (today's _scratch, ffsb-scratch, F:\tmp)
   tmp/ffa-<session>/             agents' TMP/TEMP/TMPDIR (temp_dir)
+  tmp/bench-status/              bench tickets' status files (w5834, w5905)
+  tmp/runner-env.json            CI runners restarted for their temp folder, until seen back (w5999)
+  tmp/runner-env/                each macOS plist's and Windows .env's original, kept once (w5999)
+  runner-tmp/<runner folder>/    temp folder of a CI runner outside the root (w5834, w5999)
   tmp-medium/ffa-<session>/      Medium agents' TMP/TEMP/TMPDIR with daemon.json "mediumAgentFolders": "on" (w5862): read-only to workers
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
   claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
   cache-medium/uv/               the daemon's and Medium agents' UV_CACHE_DIR (the Unity MCP server's uvx, w5565): read-only to workers
   cache-medium/uv-tools/         the daemon's and Medium agents' UV_TOOL_DIR (w5693): read-only to workers
   cache-medium/cargo/            Medium agents' CARGO_HOME with "mediumAgentFolders": "on" (w5862): read-only to workers
+  cache-medium/<tool>/           Medium agents' pip, npm, upm, asset-store, nuget, dotnet, ms-playwright (and xdg) caches with "mediumAgentCaches": "on" (w5870)
   cache/uv-tools/                sandbox agents' and editors' UV_TOOL_DIR (uvx's temp files, w5693, w5745)
   cache/uv-bin/                  sandbox agents' and editors' UV_TOOL_BIN_DIR (`uv tool install`'s commands, w5745)
   steam/                         steamcmd, its config and cached login, FFBox's release scripts: the daemon's alone (w5551, steam-upload.md)
@@ -290,6 +296,7 @@ the daemon's `process.env`). The editors the daemon starts inherit it too. So th
 | `XDG_CACHE_HOME` (macOS, Linux) | `cache/xdg` | every XDG-following tool's cache (gh, Mesa's shader cache, Unity's Linux editor cache). Not `XDG_CONFIG_HOME` or `XDG_DATA_HOME`: Unity's Linux licence and gh's login live there | **in use** (w5297); `server/outsideWrites.test.ts` fails if either is set |
 | `GH_NO_UPDATE_NOTIFIER=1` | — | gh's update check (`state.yml` in its config folder) | **in use** (w5297); sourced: `gh help environment` |
 | `TMP`, `TEMP` of a daemon-started editor (Windows) | `tmp/unity` | the sandbox editor's temp files (crash folders, Bee and shader-compiler scratch), not `%LOCALAPPDATA%\Temp` | **in use** (w5297): `machine/unity.ts` Windows `launch`, `editorTempEnv` |
+| `TMPDIR`, `TEMP` and `TMP` of the daemon (every OS) | `tmp-daemon` | every `os.tmpdir()` and `mkdtemp` of the daemon and the portal code it runs, and the temp files of every git, gh, ssh, python, PowerShell, player or script it starts that inherits its environment, in place of `/tmp`, `/var/folders/...` or `%LOCALAPPDATA%\Temp` | **on by default** (w6000): daemon.json `daemonTmpdir` (`machine/daemonTemp.ts` `applyDaemonTmpdir`, at the daemon's start). Warn-safe: `off`, no root, a folder that cannot be made, or a root whose `tmp-daemon` is longer than 50 characters on macOS or Linux (`DAEMON_TMPDIR_MAX`, the socket path limit) keeps the system temp and says so in the log; nothing is refused. `ops_worker machine_update daemon_tmpdir off` is the recovery (read at the next start). The old folder is kept in `FF_SYSTEM_TMPDIR` for what reads or cleans it (the clean-up's temp rules, the browser reaper, Git Bash's `/tmp`, `systemTempDir()`); a sandbox editor on macOS or Linux gets it back as its `TMPDIR` while `editorTmpdir` is off, so that switch alone decides an editor's temp. Agents keep their `tmp/ffa-<session>`. `tmp-daemon` is a daemon-only root child (`DAEMON_ONLY_CHILDREN`: no worker reads or writes it on any OS), so a fenced process the daemon starts (a Low timed-run player, a fenced agent without its `ffa-` folder) gets the system temp named back (`systemTempEnv`) and a Windows editor gets `TMPDIR` in `tmp/unity` too. The clean-up ages `tmp-daemon`'s entries like a temp folder whenever there is a root, and `ff-leftovers remove` never removes it whole |
 | `TMPDIR` of a sandbox editor (macOS, Linux) | `tmp/editor-<sandbox>` | `Path.GetTempPath()` of the editor and the game's tests, .NET's diagnostic and IPC sockets, Roslyn's `VBCSCompiler` scratch folder (its pipe stays in `/tmp`, 2.6), `UnityCBMCrashes`, in place of `/tmp` (Linux) or `/var/folders/...` (macOS) | **behind a switch** (w5833): daemon.json `editorTmpdir: "on"`, `machine/sharedCaches.ts` `editorTmpdirEnv` via `sandboxEditorEnv`. Read at the daemon's start; `editor_tmpdir off` is the recovery. The folder is made at each editor start; one that cannot be made or written is logged and the editor starts with the system temp (`machine/sandboxes.ts` `editorLaunchEnv`, review F1). Kept under 50 characters (`EDITOR_TMPDIR_MAX`) for the 104-byte socket path limit. Unity's own sockets stay in `/tmp` (2.6). Measured on biscuit with Unity 6000.3.19f1: a batch editor of the game with TMPDIR moved licensed ("Successfully resolved entitlement details" through `/tmp/Unity-LicenseClient-<user>.sock`), resolved its 87 packages over `/tmp/Unity-Upm-<pid>.sock`, exited 0, and left nothing new in `/tmp` (`ls -A /tmp` before and after). Live, through the daemon with the switch on (biscuit, 2026-11-26, w5833): the slot1 editor's `Path.GetTempPath()` was `<root>/tmp/editor-slot1/`, it licensed, registered 87 packages, ran 54 EditMode tests (`DesyncReportArtifactTest`, `ContinuousAuditJournalTest`, `LocalMultiplayerAutomationStatusWriteTest`) green, and after a clean quit `/tmp` gained only Roslyn's pipe and the daemon's own `ff-bench-<pid>-*` files. macOS not measured; w5333's Seatbelt profile lists the same `/tmp` sockets there |
 | `-logFile` of a batch run | `<TMPDIR>/unity-<label>-<time>.log` | `unity-slot run -- <Unity> -batchmode ...` without its own `-logFile` wrote the person's Editor.log | **in use** (w5297): `machine/unitySlots.ts` run, `batchUnityLogFile` |
 | `UV_CACHE_DIR` | `cache/uv` | uv's cache: every `uv run --with` environment the worker prompt prescribes (36.9 GB in `~/.cache/uv` on m5, 2026-11-23); the daemon runs `uv cache prune` on it daily (w5281) | **in use**: `machine/daemon.ts` `rootEnv`, `machine/sharedCaches.ts` |
@@ -394,8 +401,10 @@ when a new place in the daemon names the home folder, AppData or the system temp
 | XDG caches (gh, Mesa, Unity's Linux cache) | — | `~/.cache` | `~/.cache` | **fixed** (w5297): `cache/xdg` |
 | gh's update check | `%APPDATA%\GitHub CLI\state.yml` | `~/.config/gh/state.yml` | same | **fixed** (w5297): `GH_NO_UPDATE_NOTIFIER` |
 | A batch Unity run's log with no `-logFile` | `%LOCALAPPDATA%\Unity\Editor\Editor.log` | `~/Library/Logs/Unity/Editor.log` | `~/.config/unity3d/Editor.log` | **fixed** (w5297): the worker's `TMPDIR` |
+| The daemon's own temp files (its `os.tmpdir()`, and children that inherit its environment) | `%LOCALAPPDATA%\Temp` | `/var/folders/...` | `/tmp` | **fixed** (w6000): `tmp-daemon`, daemon.json `daemonTmpdir` (default on; `ops_worker machine_update daemon_tmpdir off` the recovery). `server/w6000SystemTemp.test.ts` holds the census of every place left in `machine/`, `server/` and `shared/` that names the system temp, each with why it stays (readers, comments, portal-VM-only code, test kits, the Linux write lock's `/tmp` rule for Unity's sockets). A program `ff-leftovers launch` starts for a person gets that person's own temp folder (`personEnv`): it is theirs, not the worker's |
 | A sandbox editor's temp files | `%LOCALAPPDATA%\Temp` | `/var/folders/...` | `/tmp` | **fixed** on Windows (`tmp/unity`); on macOS and Linux `tmp/editor-<sandbox>` behind daemon.json `editorTmpdir: "on"` (w5833, off by default; `ops_worker machine_update editor_tmpdir`) |
 | Unity's own IPC sockets: `Unity-LicenseClient-<user>.sock` (and `-notifications`), `Unity-Upm-<pid>.sock`, `Unity-ShaderCompilerIPC-<pid>-<n>.sock`, `ilpp.sock-<hash>`, `Unity-hubIPCService.sock`; Roslyn's compiler server pipe `<43-character hash>` (the `-pipename:` of `VBCSCompiler.dll`) | named pipes | `/tmp` | `/tmp` | **exception** (w5833, measured on biscuit): the editor builds these paths on `/tmp` whatever TMPDIR says, and the licensing client and Hub that own two of them are the person's. A cleanly closed editor removes its UPM and shader-compiler sockets; one killed leaves `Unity-Upm-<pid>.sock` behind (27 on biscuit, 2026-11-25). Roslyn (`DotNetSdkRoslyn/VBCSCompiler.dll` and `csc.dll` hold a literal `/tmp`) puts its compiler server's pipe at `/tmp/<hash of user and compiler folder>` whatever TMPDIR says; the server outlives the editor by a few minutes and leaves that socket behind when it exits (measured on biscuit, 2026-11-26), one entry per user and Unity version, reused by the next editor |
+| CI runners' temp files: .NET's `clr-debug-pipe-<pid>-*` and `dotnet-diagnostic-<pid>-*-socket`, a job's tools' scratch | `%LOCALAPPDATA%\Temp` | `/var/folders/.../T` | `/tmp` | **fixed**: `<runner folder>/_tmp` inside the root, `runner-tmp/<runner folder name>` for one outside it, with `DOTNET_EnableDiagnostics=0`. Linux: a systemd drop-in (w5834, `machine/runnerUnits.ts`); macOS: the runner's LaunchAgent plist `EnvironmentVariables` (outside the root: the service's own configuration); Windows: the runner's `.env` (TEMP, TMP, TMPDIR) (w5999, `machine/runnerEnv.ts`). Each idle listener started without it is restarted once; originals kept in `tmp/runner-env/`, restarts in `tmp/runner-env.json` |
 | Agents' temp | — | — | — | already inside: `tmp/ffa-<session>` |
 | Claude Code's folder (transcripts, plugins, settings) | `%USERPROFILE%\.claude` | `~/.claude` | `~/.claude` | **fixed** (w5305): `claude/`, once the tools publish has installed the plugins there ([2.8](#28-claude-codes-folder-w5305)); the machine's own login and registerAgents.sh's marker stay (**exception**) |
 | The game's data folder (saves, settings, AgentControl, desync reports, playtest sessions, timed runs' save copy) | `AppData\LocalLow\Never Games\finalfactory` | `~/Library/Application Support/Never Games/finalfactory` | `~/.config/unity3d/Never Games/finalfactory` | **fixed** (w5306): the daemon sets `FF_GAME_DATA_DIR=<root>/gamedata` (`rootEnv`, `machine/gameData.ts`), which `GameDataPaths.Root` takes since game PR #4237; since w5557 a sandbox's editor and agent get their own `<root>/gamedata/sandboxes/<sandbox>` (`sandboxGameDataEnv`: the editor's launch env in `machine/sandboxes.ts`, the agent's in `slotEnv`, so the players and batch runs it starts inherit it), while timed and nightly runs keep `<root>/gamedata`; the daemon's readers and clean-up list each sandbox's folder (`gameDataRoots`), and so do the game's `scripts/game_data.py where` and `player_slots.py` (`FF_GAME_DATA_ROOT` first, then `FF_GAME_DATA_DIR`, w5307). A branch or player build from before #4237 ignores it and still writes the old folder, so the daemon's readers look in both: the live view's session files (`machine/live.ts` `agentControlDirs`, the override first) and the timed run's save copy (`machine/timedRunner.ts`: `savesDirsFor` reads each build's `FFCore.dll` for the variable's literal and copies the save where that build loads it, both folders when it cannot tell) |
@@ -520,8 +529,38 @@ config's temp folder is always a fence extra). A fenced worker could plant a scr
   `transcriptLock` is not on; w5869, w5871's F3).
 - A folder that cannot be made, or one a worker could still write, keeps today's with a `WARNING medium agent folders:
   could not make ...` line, so the switch never stops an agent and needs nobody at the machine. No fence, no change.
-Still Low-writable and not covered: an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`.
+Still Low-writable then: the other tool caches, an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`
+(the next paragraph).
 Tests: `server/mediumFolders.test.ts` (every path the Medium env names lies outside `lowTargets` and `openChildren`).
+
+**Medium agents' other tool caches, the user PATH, ffu slots and the tools checkouts** (w5870, w5862's follow-up; the same
+warn-only-first rule, lothsahn). What a Medium agent or the daemon still ran from a folder workers write:
+- The tool caches `workerToolCacheEnv` (`machine/sharedCaches.ts`) gives every agent in `<root>/cache`: a .NET global tool
+  under `DOTNET_CLI_HOME`, a Playwright browser, an npm or pip package, a NuGet package's build targets. `planMediumCaches`
+  (`machine/mediumFolders.ts`) decides once at start under daemon.json `mediumAgentCaches`: absent or `"warn"` logs one
+  `WARNING medium agent caches: ...` line; `"on"` gives Medium agents `<root>/cache-medium/<same name>` (`mediumCacheFor`),
+  sandbox agents keep `cache`. A folder that cannot be made keeps the workers' one with a WARNING. The daemon's own env keeps
+  `cache`: sandbox agents inherit it, and the daemon runs none of those tools.
+- The user PATH: .NET's first run adds `$DOTNET_CLI_HOME/.dotnet/tools` to HKCU's PATH (BEAST's held
+  `F:\ffw\cache\dotnet\.dotnet\tools`, measured), which every Medium process of the account searches. `fixUserPath` (Windows,
+  at start) warns; with `"on"` it writes the PATH back without the entries in worker-writable folders, its registry kind kept.
+  The value goes both ways as base64 of its UTF-8 bytes (a non-ASCII entry survives, and no quote reaches the script); the
+  write happens only if the PATH is still what was read, is read back, and puts the old value back on a mismatch (w5946).
+  "Folders workers write" here and for the caches includes what the fences open whole: workerIntegrityAllow,
+  writeLockExtra and the transcripts folder while transcriptLock is off (the same list as `planMediumFolders`).
+- The ffu slots (`<root>/ffu-sandboxes/slotN`, checkout and target): the daemon tells a Medium agent the switch in
+  `FF_MEDIUM_AGENT_CACHES`; `ffu-slot take` and `where` then warn, or refuse (exit 5, `EXIT_MEDIUM_REFUSED`; 4 is "no slot
+  free") and say to build in a clone in its own `$TMPDIR`. The daemon says `"on"` only when `mediumAgentCaches` is `"on"`
+  and w5862's `mediumAgentFolders` made the agent's own temp folder, so that `$TMPDIR` is one no worker writes (w5946 F5).
+  A Medium agent's `take` and `where` print no CARGO_HOME: it keeps its own, never the workers' `<root>/cache/cargo` (w5947).
+- Always, no switch: a Medium agent's `FF_SKILLS` fallback is only `tools-medium` (`server/pluginPaths.ts` `medium`), never
+  the old `<root>/tools` checkout; and the plugin refresh `worker.ts tools` runs (`registerAgents.sh`, then claude's own git
+  in `<CLAUDE_CONFIG_DIR>/plugins/marketplaces/final-factory-agents`) gets safeGit's fence as command-scope config
+  (`fencedRegisterEnv`, `server/agentTools.ts`): the fixed keys, a planted program key overridden and named in a WARNING, a
+  planted URL rewrite removed from that checkout's config with a WARNING (`git config --local --unset-all`, fenced; only one
+  that cannot be removed stops that folder's refresh). The Medium agents' folder is refreshed even when the workers' one
+  failed (w5946 F6).
+Tests: `server/mediumCaches.test.ts`, `server/mediumFolders.test.ts`.
 
 **uv's tool folder, split the same way** (w5693). `uvx` takes a temp file in uv's tool folder (`UV_TOOL_DIR`, default
 `~/.local/share/uv/tools`; `%APPDATA%\uv\tools` on Windows) on every run. No fence lets a worker write the person's home, so
@@ -816,6 +855,90 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   longer make a new folder in `tools`; a tool that needs one makes it from the daemon or `worker.ts tools`. A daemon
   from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
   `server/toolsLabelsWin.test.ts` on the Windows runner.
+  - **A node.exe planted before w5717 deployed is found and replaced** (w5839). `worker.ts tools` keeps a record of
+    the agents' node in `<root>\daemon\agent-node\record.json`: the version, the SHA-256 of every file in `tools\node`
+    and that folder's identity (`folderId`: its volume and NTFS file id, which a rename keeps and a new folder never has,
+    measured on BEAST's F:), written from the pinned download it unpacked. The record and the unpacking stage both live
+    in `daemon\agent-node`: `daemon` and `secrets` are the only root children every daemon version keeps Medium, from
+    the first Windows fence on (w5377, 02cd43ca); before w5539 every other root child, `tools-medium` too, was labelled
+    Low, and nothing labels it Medium again (w5876's review). A Low worker can make a folder of the pinned bytes while a
+    rolled-back daemon has `tools` Low, keep write handles open on its files, and those handles outlive the Medium relabel
+    (w5868's review), so only a folder this run made is trusted, and its files are Medium from birth. The record's folder
+    is read with icacls too before the record is: one with a Low label or an access entry of its own is put aside
+    (`daemon\agent-node.old-<ms>`, deleted) for a new one and nothing in it is trusted; one that cannot be put aside
+    leaves the node there with a WARNING. The records of before, `tools\node.json` and `tools-medium\agent-node.json`,
+    are never read and are deleted. Every tools run hashes the folder again (1994 files in about 360 ms on BEAST,
+    measured) and never runs the installed node.exe. The record itself must be the pinned one: its node.exe hash is
+    `AGENT_NODE.exeSha256` and the digest of its whole file list is `AGENT_NODE.treeSha256` (`treeDigest`), so a record a
+    Low worker left in the old Low `tools` cannot vouch for another node or for a DLL it added (w5854's review). A
+    junction or link at `tools\node` is refused (Node's `lstat` calls a junction a folder on Windows, measured on
+    v24.22.1, so `notAFolder` compares its real path). Matching bytes are not enough either (w5866's review): a Low
+    process can give a file it wrote a Low label of its own (`Mandatory Label\Low Mandatory Level:(NW)`, no `(I)`;
+    measured from a Low sandbox on BEAST, 2026-11-25), and a file's own label beats the Medium one it would inherit, so a
+    pinned copy a Low worker put there while `tools` was Low stays writable from Low, npm's scripts included. So each
+    run first reads `icacls tools\node /T /C` (`labelProblem`): any label below Medium, any access entry a file or
+    folder holds of its own (all but the folder's own Medium label are inherited on BEAST's live copy, 2459 entries),
+    a failure or output it cannot read, all mean a fresh copy. The read takes about 5 s on BEAST (measured; the
+    parse 12 ms). Labels are read in English, as in `machine/lowIntegrity.ts`. A file that differs, is missing or was added, or no record at
+    all, means a fresh pinned download swapped in at the same path, even when the files there match: a folder this run
+    unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. A handle outlives a relabel, so
+    labels, hashes and identity can all be right while a Low process that survived two rollbacks still holds a write
+    handle on the real folder (w5882's review). So after the labels (once they refuse Low a new write open, w5951's
+    review), each run reads which processes below Medium hold
+    anything under `tools\node` or `daemon\agent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
+    list, `NtQueryInformationProcess` class 51, its file and section handles and its mapped views; the system-wide handle
+    table is refused to a Low session, 0xC0000022, measured), each folder resolved first to the final form Windows names an
+    open file by, so a short 8.3 name, a junction or a subst drive in the root still matches (w5926's review). A File
+    handle is matched by its file's identity, not its path (w5951's review): the volume serial and 128-bit file id
+    (`FILE_ID_INFO`) of every file and folder under the two folders are read first, and each handle's are compared, so a
+    handle opened through a second hard link deleted since (Windows then gives it no path) is still found. A write handle
+    the read cannot copy, or one on the node's volume whose file id cannot be read, is a holder, never skipped; so is a
+    writable file view whose name on that volume no longer opens. The C# goes gzipped into `-EncodedCommand`, which
+    passed Windows' 32,767-character command line as plain text. Only access that can change the files counts there: a
+    File handle with write, append, attribute, EA, delete, DACL or owner rights, a Section with map-write, a view mapped
+    writable (w5886's review). A Low worker that runs this node or works in its folder holds read handles only, since the
+    Medium label refuses it any other open, and is left alone (measured: a Low node with its working folder in
+    `tools\node` and npm's `index.js` open, and the node verified). It says a WARNING naming the writers and does not
+    trust the node, so it is swapped; nothing is ended in this stage (lothsahn's lockout rule: warn first, w5926's review).
+    A process whose handles it cannot read (Windows' own sandboxed services, as DefenderAiPlatformHost on the CI runner)
+    is not named, and a failed read means a fresh copy. A file with a second hard link is
+    never trusted either: a handle opened through that name has a path outside the folder (w5886's review; the pinned
+    download has one name per file, and BEAST's live copy has none with two, measured). The read covers 110 to 122 Low
+    processes and about 30k handles in 3 to 6 s on BEAST (measured). A rename refused because a file in the folder is
+    held open is tried three times, the Low processes holding anything in it (reads too) named once in a WARNING and not
+    ended; a folder still held keeps its node, with a WARNING, until a later rollout finds it free, and until then
+    agents keep running that untrusted node, since `agentNodePathDir` puts `tools\node` on their PATH once node.exe is
+    there (w5951's review, N2: the warn-only stage never leaves a machine without node) (measured on BEAST: a Low
+    writer on npm's `index.js` gave `busy` and kept running, and the run after it exited swapped the node). A node.exe that runs does not block the rename (measured). Each run stages in
+    `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
+    may be another rollout's, still unpacking). **Every rollout swaps the node, even one that passes every check**
+    (w5964's review, B1): a Low process can hide a write handle from the holder read by moving it to a new handle value
+    in a loop while the read copies them one at a time (measured from a Low sandbox: about 10 million moves in 150 s, the
+    writer named in 0 of 12 reads, then `PLANTED` written into the file), and can pass it between two Low processes. The
+    fresh copy is Medium from birth and a handle to the old one stays on the old files (`tools\node.old-<ms>`), so the
+    checks no longer decide whether to swap, only what the line says and which writers it names. The swap unpacks the zip
+    kept in `daemon\agent-node\<zip>` when its SHA-256 is the pinned one (hashed in memory and those same bytes unpacked),
+    else downloads it and keeps it (`pinnedZip`), so a rollout needs no network once a machine has it. A Low process that
+    puts an empty access list on itself is never listed as Low by the read (w5964's review, N1): the swap does not rest on
+    the read. What the swap costs (w5986, measured on LothDesktop in test folders): `tools\node` is missing between its
+    two renames for 151 µs at the median and 607 µs at most (127 swaps), and 249 node starts while 4 processes started
+    node in a loop all ran; a start that lands in that gap gets ENOENT by full path, or by `PATH` the next node on it (here
+    `C:\Program Files\nodejs`, which Low cannot write). A node still starting holds node.exe open and refuses the
+    first rename (EPERM, 23 of 150 swaps), which is the retry and the busy line below, never a missing node. A Low
+    process holding a write handle to `tools` from before its label was raised cannot create `node` through it in the
+    gap: Windows checks the folder's label as it is now (measured one level down: a thread impersonating Untrusted
+    opened `tools` while it was labelled Untrusted; after the label was raised to Low, creating `node` relative to that
+    handle was refused with 0xC0000022). The label read (`icacls /T`, 5.6 s on LothDesktop's 2459 entries) stays: it
+    is the only check that sees a label any Low process could use, and the holder read now runs after it even when it
+    fails, so the writers of such a node are named for w5952's stage. The rollout log says
+    `Agent node: node reinstalled (verified: ...; swapped anyway, ...): ...` for a node that passed every check,
+    `Agent node: node reinstalled (<why>): ...` for one that did not, or
+    `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or
+    swap failed: the machine is never left without node (if even moving the old folder back fails, the line says
+    `tools\node is MISSING` and where it is, and the next rollout puts one there). Windows lets `tools\node` be renamed
+    aside while a node.exe in it runs but not deleted (EPERM, measured on BEAST), so the old folder stays as
+    `tools\node.old-<ms>` until a later run deletes it. A Low session cannot label a folder Medium ("may not be
+    assigned as the label", measured), so the end-to-end run from a sandbox fakes only `icacls`.
   - **A test of what a Low worker can do on Windows must drop privileges, not only lower the label.** A GitHub runner's
     token is elevated, and a Low copy of it keeps SeBackupPrivilege and SeRestorePrivilege, which pass any integrity
     label and access list. In run 45641049172 the runner's Low node renamed `tools\node` under a Medium `tools`, and the

@@ -30,18 +30,25 @@ EOF
 # The network as this test has it: m3 and Loth2800 answer with their own keys, the m5 with an impostor's, beast not at
 # all. ssh gets into the m3 and beast; Loth2800 refuses the portal's key.
 mkdir -p "$T/bin"
+# Like ssh-keyscan, every host after the options in one call (w5888: --fix asks them all at once), each call logged.
 cat >"$T/bin/ssh-keyscan" <<EOF
 #!/usr/bin/env bash
-h=\${!#}
-case "\$h" in
-  m3) echo "m3 ssh-ed25519 $(pub m3)" ;;
-  m5) echo "m5 ssh-ed25519 $(pub impostor)" ;;
-  loth2800) echo "loth2800 ssh-ed25519 $(pub lothx)" ;;
-  biscuit) echo "biscuit ssh-ed25519 $(pub biscuit)" ;;
-  newpc) echo "newpc ssh-ed25519 $(pub newpc)" ;;
-  kh2pc) echo "kh2pc ssh-ed25519 $(pub kh2pc)" ;;
-  *) exit 1 ;;
-esac
+echo "ssh-keyscan \$*" >>"$T/keyscan-calls"
+while [ "\$#" -gt 0 ]; do case "\$1" in -T | -t) shift 2 ;; *) break ;; esac; done
+rc=1
+for h in "\$@"; do
+  case "\$h" in
+    m3) echo "m3 ssh-ed25519 $(pub m3)" ;;
+    m5) echo "m5 ssh-ed25519 $(pub impostor)" ;;
+    loth2800) echo "loth2800 ssh-ed25519 $(pub lothx)" ;;
+    biscuit) echo "biscuit ssh-ed25519 $(pub biscuit)" ;;
+    newpc) echo "newpc ssh-ed25519 $(pub newpc)" ;;
+    kh2pc) echo "kh2pc ssh-ed25519 $(pub kh2pc)" ;;
+    *) continue ;;
+  esac
+  rc=0
+done
+exit \$rc
 EOF
 cat >"$T/bin/ssh" <<EOF
 #!/usr/bin/env bash
@@ -83,8 +90,10 @@ matches -F "known_hosts: ANOTHER key ($(fpr impostor))" "$T/out" || fail "1: bea
 ok "--check changes nothing and names what is missing"
 
 # 2. --fix: aliases first in the config (the person's own block kept), keys pinned, the impostor refused.
+rm -f "$T/keyscan-calls"
 run --fix
 [ "$rc" = 1 ] || fail "2: --fix exit $rc, not 1 (the m5 is refused, Loth2800 refuses the key)"
+[ "$(wc -l <"$T/keyscan-calls")" = 1 ] || fail "2: --fix ran ssh-keyscan $(wc -l <"$T/keyscan-calls") times, not once for every machine together"
 [ "$(head -n 1 "$HOME/.ssh/config")" = '# >>> fff machines (written by fff-machine-ssh from machines.ssh: change it there) >>>' ] || fail "2: the managed block is not first"
 matches -x 'Host other' "$HOME/.ssh/config" || fail "2: the config's own block was lost"
 [ "$(stat -c %a "$HOME/.ssh/config")" = 600 ] || fail "2: the config is not 0600"

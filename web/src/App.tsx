@@ -270,6 +270,11 @@ function HostBanner({ host, app }: { host?: HostStatus; app: AppState }) {
       bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'A GitHub token needs updating.', rest: w.text, action: { label: 'Re-check now', onClick: () => void recheckGithub() } });
       continue;
     }
+    // A machine's own gh login that GitHub refuses (w5932): a person signs gh in again at that computer.
+    if (w.kind === 'gh-login') {
+      bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'GitHub refuses a computer\'s gh login.', rest: w.text });
+      continue;
+    }
     // GitHub's rate limit on a token's account (w1186): no permission is missing, so nothing to edit on github.com.
     if (w.kind === 'github-rate-limit') {
       bars.push({ key: `token-${w.id}`, kind: 'warn', lead: 'GitHub is rate limiting us.', rest: w.text, action: { label: 'Re-check now', onClick: () => void recheckGithub() } });

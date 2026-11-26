@@ -20,7 +20,7 @@ async function drained(t: Parameters<typeof twoComputers>[0], extra: Record<stri
   asked(env);
   const r = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn', work_id: 'w5878', ...extra });
   assert.ok(!r.isError, r.text);
-  assert.match(r.text, /^pc is drained: no new work, move or pair leg goes there.*worker\(s\) there finish/);
+  assert.match(r.text, /^pc is drained: no new work, move or pair leg goes there.*worker\(s\) running there finish/);
   return env;
 }
 

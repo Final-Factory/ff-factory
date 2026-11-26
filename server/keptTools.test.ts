@@ -10,6 +10,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CATALOG } from './launch.ts';
 import { refreshKeptTools, refreshKeptToolsAsync, sdkToolsNow, type ToolNow } from './keptTools.ts';
+import { scanFile } from './keptToolsScan.ts';
+import { threadGenForTests } from './transcriptThreadClient.ts';
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -208,4 +210,52 @@ test("w2626: a worker's resumed conversation, in a new process with a tool that 
   assert.deepEqual(seen, ['symbols', 'reports', 'diagnosis', 'threads', 'open_threads']);
   const note = store.readTranscript('sess-2626').find((e) => e.kind === 'system' && /w2626/.test(e.text));
   assert.ok(note, 'the session says which schemas it refreshed');
+});
+
+test('w5888: the windowed scan in the transcript thread drops the same records as one pass, at any window, and on the event loop when the thread is off', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-kept-thread-'));
+  try {
+    const before = await listed(server([['list_ffbox_files', OLD_SHAPE], ['wake_me', SHAPES.wake_me, 'Old words.']]));
+    const now = sdkToolsNow({ machine: server([['list_ffbox_files', SHAPES.list_ffbox_files], ['wake_me', SHAPES.wake_me]]) });
+    const lines: string[] = [];
+    for (let i = 0; i < 60; i++) {
+      lines.push(userLine(`u${i}`, i ? `r${i - 1}` : null, 'x'.repeat(i * 37)));
+      lines.push(recordLine(`r${i}`, `u${i}`, [['mcp__machine__list_ffbox_files', before.get('mcp__machine__list_ffbox_files')!], ['mcp__machine__wake_me', before.get('mcp__machine__wake_me')!]]));
+    }
+    // the last record line not ended, as Claude Code leaves it between writes
+    const text = lines.join('\n');
+    const ref = path.join(dir, 'ref.jsonl');
+    fs.writeFileSync(ref, text);
+    const dropped = refreshKeptTools(ref, now).sort();
+    const want = fs.readFileSync(ref);
+    assert.ok(dropped.length > 0 && !want.equals(Buffer.from(text)), 'the one pass changed the file');
+    for (const window of [1, 64, 1000, 4096, 1 << 20]) {
+      const f = path.join(dir, `w${window}.jsonl`);
+      fs.writeFileSync(f, text);
+      const s = scanFile(f, now, window);
+      assert.deepEqual([...s.dropped].sort(), dropped, `window ${window}`);
+      const fd = fs.openSync(f, 'r+');
+      for (const w of s.writes) fs.writeSync(fd, w.bytes, 0, w.bytes.length, w.at);
+      fs.closeSync(fd);
+      assert.ok(fs.readFileSync(f).equals(want), `window ${window}: the same bytes`);
+    }
+    const t = path.join(dir, 'thread.jsonl');
+    fs.writeFileSync(t, text);
+    assert.deepEqual((await refreshKeptToolsAsync(t, now)).sort(), dropped);
+    assert.ok(threadGenForTests() > 0, 'the scan ran in the thread');
+    assert.ok(fs.readFileSync(t).equals(want));
+    const l = path.join(dir, 'loop.jsonl');
+    fs.writeFileSync(l, text);
+    process.env.FFF_TRANSCRIPT_THREAD = 'off';
+    try {
+      assert.deepEqual((await refreshKeptToolsAsync(l, now)).sort(), dropped);
+    } finally {
+      delete process.env.FFF_TRANSCRIPT_THREAD;
+    }
+    assert.ok(fs.readFileSync(l).equals(want));
+    // a file the thread cannot read is left alone, as before
+    assert.deepEqual(await refreshKeptToolsAsync(path.join(dir, 'none.jsonl'), now), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

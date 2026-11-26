@@ -1,0 +1,6 @@
+#!/bin/sh
+# FF Factory (w6038): refuse a rebase in an ffu slot another session holds before it touches a file (slot-guard.sh);
+# reference-transaction would refuse its ref updates, but only after the first checkout.
+. "${0%/*}/slot-guard.sh"
+ffu_slot_guard "git rebase" || exit 1
+exit 0

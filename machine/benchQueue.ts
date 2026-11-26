@@ -17,6 +17,7 @@ import { rpcCall, RpcRefused } from './daemonRpc.ts';
 import { trustedGh, trustedPython } from './evidenceGate.ts';
 import { ghAppPaths, readGhAppTokens } from './ghApp.ts';
 import { appTokenFor } from '../shared/githubAppRoute.ts';
+import { run as runAsync } from '../server/proc.ts';
 
 export type BenchMode = 'shared' | 'exclusive';
 
@@ -108,6 +109,48 @@ export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv =
   return r ? path.join(r, 'daemon', 'bench.lock') : undefined;
 }
 
+/** w5905: the status files' names start with this, then `<pid>-<hex>` of the process that holds the ticket. */
+export const BENCH_STATUS_PREFIX = 'ff-bench-';
+
+const pidAlive = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
+
+/**
+ * w5905: remove the status files in `dir` whose holder is gone (a daemon that restarted between a release and its
+ * clean-up, a worker killed while it held a ticket). This process's own and a live process's files stay. Answers the
+ * names removed. Runs needing nobody at the machine: the first ticket a process takes sweeps its folder.
+ */
+export function sweepBenchStatus(dir: string, o: { selfPid?: number; alive?: (pid: number) => boolean } = {}): string[] {
+  const self = o.selfPid ?? process.pid;
+  const alive = o.alive ?? pidAlive;
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const gone: string[] = [];
+  for (const n of names.sort()) {
+    const m = /^ff-bench-(\d+)-[0-9a-f]+(\.release|\.tmp|\.warn|\.warn\.tmp)?$/.exec(n);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    if (pid === self || alive(pid)) continue;
+    try {
+      fs.rmSync(path.join(dir, n), { force: true });
+      gone.push(n);
+    } catch {
+      // the next sweep
+    }
+  }
+  return gone;
+}
+
 /**
  * w5834 (lothsahn: "under no circumstances should workers write outside of ffw"): a ticket's status file goes in
  * <root>/tmp/bench-status, not the OS temp folder (biscuit's /tmp held the daemon's 19-byte ff-bench-<pid>-<hex> files of
@@ -129,11 +172,19 @@ export function benchStatusDir(root: string | undefined, mkdir: (p: string) => v
   return { dir: os.tmpdir(), why };
 }
 
-/** A ticket's status folder: the caller's, else benchStatusDir's (its fallback warned). */
+const swept = new Set<string>();
+/**
+ * A ticket's status folder: the caller's, else benchStatusDir's (its fallback warned). A folder inside the root is swept of
+ * gone holders' files once per process (w5905).
+ */
 function statusDirFor(tempDir: string | undefined, root: string | undefined): string {
   if (tempDir) return tempDir;
   const st = benchStatusDir(root);
   if (st.why) console.warn(`bench queue (w5834): ${st.why}`);
+  else if (!swept.has(st.dir)) {
+    swept.add(st.dir);
+    sweepBenchStatus(st.dir);
+  }
   return st.dir;
 }
 
@@ -210,7 +261,17 @@ export class BenchTicket {
 
   constructor(o: BenchTicketOptions) {
     this.o = o;
-    this.status = path.join(statusDirFor(o.tempDir, undefined), `ff-bench-${process.pid}-${randomBytes(4).toString('hex')}`);
+    this.status = path.join(statusDirFor(o.tempDir, undefined), `${BENCH_STATUS_PREFIX}${process.pid}-${randomBytes(4).toString('hex')}`);
+  }
+
+  private removeFiles(): void {
+    for (const f of [this.status, `${this.status}.release`, `${this.status}.tmp`, `${this.status}.warn`, `${this.status}.warn.tmp`]) {
+      try {
+        fs.rmSync(f, { force: true });
+      } catch {
+        // swept by the next process's sweepBenchStatus
+      }
+    }
   }
 
   /** The earlier place this ticket was taken at (w4624), when the helper was asked to keep one. */
@@ -278,10 +339,13 @@ export class BenchTicket {
       // the helper also ends when this process does
     }
     const c = this.child;
-    if (c && c.exitCode === null) setTimeout(() => c.exitCode === null && c.kill(), 15_000).unref();
-    setTimeout(() => {
-      for (const f of [this.status, `${this.status}.release`, `${this.status}.tmp`]) fs.rmSync(f, { force: true });
-    }, 20_000).unref();
+    // w5905: the files go as soon as the helper has let go (it exits on the release file); the timer stays for a helper
+    // that never started or hangs, and sweepBenchStatus takes what a process that died first left behind.
+    if (c && c.exitCode === null && c.signalCode === null) {
+      c.once('exit', () => this.removeFiles());
+      setTimeout(() => c.exitCode === null && c.kill(), 15_000).unref();
+    }
+    setTimeout(() => this.removeFiles(), 20_000).unref();
   }
 }
 
@@ -470,6 +534,14 @@ export interface TrustedBench {
   appDir: string;
   /** For tests: what fetches the file (default `gh api` of FinalFactory's master). */
   fetch?: () => { text?: string; error?: string };
+  /**
+   * w5973: the daemon's calls. A missing or old copy is never fetched on the caller's thread (two `gh api` calls of up to
+   * 30 s each held the daemon's event loop): one fetch starts in the background (refreshTrustedBenchAsync) and the call
+   * goes on with the copy it has; with none yet, it is refused as before, saying the fetch has started.
+   */
+  background?: boolean;
+  /** For tests: what fetches the file in the background (default `fetch` when a test gave one, else `gh api` without blocking). */
+  fetchAsync?: () => Promise<{ text?: string; error?: string }>;
   now?: () => number;
   exists?: (p: string) => boolean;
   platform?: NodeJS.Platform;
@@ -486,18 +558,38 @@ export const TRUSTED_BENCH_MAX_AGE_MS = 10 * 60_000;
  * Fetches master's bench_queue.py with gh on a trusted PATH, in the daemon's folder: the machine's gh login (or the host's
  * GH_TOKEN), and when that cannot read it, a GitHub App installation token the portal gave this daemon (machine/ghApp.ts).
  */
+const GH_BENCH_ARGS = ['api', '-H', 'Accept: application/vnd.github.raw+json', `repos/${BENCH_REPO}/contents/${BENCH_SCRIPT_PATH}?ref=master`];
+const ghBenchEnv = (extra: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...process.env, GH_PROMPT_DISABLED: '1', ...extra });
+/** The GitHub App token to try when the gh login cannot read the file, if the portal gave one. */
+function benchAppToken(appDir: string): string | undefined {
+  const tokens = readGhAppTokens(ghAppPaths(appDir).file);
+  return appTokenFor(tokens, BENCH_REPO.toLowerCase(), [...new Set(tokens.map((t) => t.app))], Date.now())?.token;
+}
+const ghBenchError = (why: string) => ({ error: `gh api ${BENCH_SCRIPT_PATH}: ${why.replace(/\s+/g, ' ').trim().slice(0, 200)}` });
+
 function ghFetchBench(root: string | undefined, appDir: string, cwd: string): { text?: string; error?: string } {
-  const run = (extra: NodeJS.ProcessEnv) => spawnSync(trustedGh(root, appDir), ['api', '-H', 'Accept: application/vnd.github.raw+json', `repos/${BENCH_REPO}/contents/${BENCH_SCRIPT_PATH}?ref=master`], {
+  const run = (extra: NodeJS.ProcessEnv) => spawnSync(trustedGh(root, appDir), GH_BENCH_ARGS, {
     encoding: 'utf8', timeout: 30_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true, cwd, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, GH_PROMPT_DISABLED: '1', ...extra },
+    env: ghBenchEnv(extra),
   });
   let r = run({});
   if (r.status !== 0) {
-    const tokens = readGhAppTokens(ghAppPaths(appDir).file);
-    const app = appTokenFor(tokens, BENCH_REPO.toLowerCase(), [...new Set(tokens.map((t) => t.app))], Date.now());
-    if (app) r = run({ GH_TOKEN: app.token });
+    const token = benchAppToken(appDir);
+    if (token) r = run({ GH_TOKEN: token });
   }
-  if (r.status !== 0) return { error: `gh api ${BENCH_SCRIPT_PATH}: ${String(r.stderr || r.error?.message || `exit ${r.status}`).replace(/\s+/g, ' ').trim().slice(0, 200)}` };
+  if (r.status !== 0) return ghBenchError(String(r.stderr || r.error?.message || `exit ${r.status}`));
+  return { text: r.stdout };
+}
+
+/** ghFetchBench off the event loop (w5973): the same two tries, as child processes the loop does not wait on. */
+async function ghFetchBenchAsync(root: string | undefined, appDir: string, cwd: string): Promise<{ text?: string; error?: string }> {
+  const once = (extra: NodeJS.ProcessEnv) => runAsync(trustedGh(root, appDir), GH_BENCH_ARGS, { cwd, timeoutMs: 30_000, env: ghBenchEnv(extra) });
+  let r = await once({});
+  if (r.code !== 0) {
+    const token = benchAppToken(appDir);
+    if (token) r = await once({ GH_TOKEN: token });
+  }
+  if (r.code !== 0) return ghBenchError(r.stderr || `exit ${r.code}`);
   return { text: r.stdout };
 }
 
@@ -506,19 +598,84 @@ function ghFetchBench(root: string | undefined, appDir: string, cwd: string): { 
  * and renamed into place, so a helper never starts half a file. Answers what failed; a failed fetch keeps the copy it had.
  */
 export function refreshTrustedBench(t: TrustedBench, root: string | undefined): string | undefined {
+  if (t.background) {
+    if (!trustedBenchStale(t)) return undefined;
+    // A fetch that failed a moment ago is not started again on every call (w5998's review): its error is the answer.
+    const file = trustedBenchScript(t.appDir);
+    const fail = benchFetchFailed.get(file);
+    const recent = fail && (t.now ?? Date.now)() - fail.at < BENCH_FETCH_RETRY_MS;
+    if (!recent) void refreshTrustedBenchAsync(t, root);
+    if (fs.existsSync(file)) return undefined;
+    return recent ? fail.why : `fetching master's ${BENCH_SCRIPT_PATH} in the background (w5973); ask again in a minute`;
+  }
   const file = trustedBenchScript(t.appDir);
+  const ready = trustedBenchFolder(t);
+  if (ready !== true) return ready;
+  const got = (t.fetch ?? (() => ghFetchBench(root, t.appDir, path.dirname(file))))();
+  return installTrustedBench(t, got);
+}
+
+/** Whether the trusted copy is missing or older than TRUSTED_BENCH_MAX_AGE_MS. */
+function trustedBenchStale(t: TrustedBench): boolean {
   const now = t.now ?? Date.now;
   try {
-    if (now() - fs.statSync(file).mtimeMs < TRUSTED_BENCH_MAX_AGE_MS) return undefined;
+    return now() - fs.statSync(trustedBenchScript(t.appDir)).mtimeMs >= TRUSTED_BENCH_MAX_AGE_MS;
   } catch {
-    // none yet
+    return true;
   }
+}
+
+/** Whether a fetch is due: true when the copy is old or missing and its folder is there; undefined when fresh; else why not. */
+function trustedBenchFolder(t: TrustedBench): true | string | undefined {
+  if (!trustedBenchStale(t)) return undefined;
+  const file = trustedBenchScript(t.appDir);
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
   } catch (e) {
     return `${path.dirname(file)}: ${(e as Error).message}`;
   }
-  const got = (t.fetch ?? (() => ghFetchBench(root, t.appDir, path.dirname(file))))();
+  return true;
+}
+
+/** The fetch in flight per trusted copy: one at a time, however many calls find it old (w5973). */
+const benchFetches = new Map<string, Promise<string | undefined>>();
+/** The last failed background fetch per trusted copy, and when: a call within BENCH_FETCH_RETRY_MS answers it. */
+const benchFetchFailed = new Map<string, { why: string; at: number }>();
+const BENCH_FETCH_RETRY_MS = 60_000;
+
+/** Forget the fetches' state (tests). */
+export function resetBenchFetches() {
+  benchFetches.clear();
+  benchFetchFailed.clear();
+}
+
+/**
+ * w5973: refreshTrustedBench without blocking the caller's event loop: the same checks and the same write, the fetch
+ * as a child process the loop does not wait on. Calls while one runs share it. Answers what failed, as the sync one does.
+ */
+export function refreshTrustedBenchAsync(t: TrustedBench, root: string | undefined): Promise<string | undefined> {
+  const file = trustedBenchScript(t.appDir);
+  const inFlight = benchFetches.get(file);
+  if (inFlight) return inFlight;
+  const ready = trustedBenchFolder(t);
+  if (ready !== true) return Promise.resolve(ready);
+  const p = (async () => {
+    const fetch = t.fetchAsync ?? (t.fetch ? async () => t.fetch!() : () => ghFetchBenchAsync(root, t.appDir, path.dirname(file)));
+    const got = await fetch().catch((e: Error) => ({ error: e.message }) as { text?: string; error?: string });
+    const failed = installTrustedBench(t, got);
+    if (failed) benchFetchFailed.set(file, { why: failed, at: (t.now ?? Date.now)() });
+    else benchFetchFailed.delete(file);
+    if (failed && t.background) console.warn(`bench queue: the background fetch of the trusted copy failed: ${failed}`);
+    return failed;
+  })().finally(() => benchFetches.delete(file));
+  benchFetches.set(file, p);
+  return p;
+}
+
+/** Writes a fetched copy beside the trusted one and renames it into place; answers what failed. */
+function installTrustedBench(t: TrustedBench, got: { text?: string; error?: string }): string | undefined {
+  const file = trustedBenchScript(t.appDir);
+  const now = t.now ?? Date.now;
   if (!got.text) return got.error ?? 'nothing fetched';
   if (!/^RULES_VERSION = \d+/m.test(got.text)) return `the fetched ${BENCH_SCRIPT_PATH} has no RULES_VERSION`;
   try {

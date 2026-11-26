@@ -237,6 +237,7 @@ export const CATALOG = {
     timed: z.boolean().optional().describe('A leg takes timing measurements (exclusive bench tickets): no leg goes on a computer that takes no timed runs (m5).'),
     steam: z.string().max(300).optional().describe('Why the legs need Steam (a lobby, a Steam host or join): legs then go only on computers signed in to Steam, each on a different account. Default: read from what and brief. "none": they need none.'),
     menus: z.string().max(300).optional().describe('What its legs click in the game\'s menus (a menu, a dialog; a Steam pair always does): legs then go only on computers whose screen is unlocked. Default: read from what and brief. "none": they click none.'),
+    legacy_data: z.string().max(300).optional().describe('w5965: why the player its legs run predates w5297 (a pre-1.0 or 0.50 build, which never reads FF_GAME_DATA_DIR and writes the owner\'s own data folder): legs then go only on computers whose worker fence is off, never Linux. Default: read from what and brief (pre-1.0, 0.50.x). "none": it does not.'),
     split: z.string().max(300).optional().describe('w4468: why its peers are spread over its computers, leg 1 the host and the others its clients (a pair lab such as lab.pair-m5-beast.json, the pair relay): its host leg starts no client, so a Mac may host it. Default: read from its words. "none" clears it on an open run.'),
     request: z.string().max(16).optional().describe('The request ("w665") it is for, when you serve several; default: the one you are on.'),
     retry: z.boolean().optional().describe('w2041: your open pair run is running but cannot deliver (a leg is stuck): cancel it and file a fresh one. A run one of whose legs already reported, or whose computer is offline, is retried without it.'),
@@ -649,7 +650,8 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
   const agentEnv = withoutLoginPaths((() => {
     // w2012: a sandbox worker learns where the ff-agents scripts are (FF_SKILLS), read on this machine at launch, so it never
     // searches the disk for ui_look.py or pr_evidence.py (server/pluginPaths.ts).
-    const plugins = localPluginEnv(baseEnv, g.workerRoot);
+    // w5870: a launch that is not a sandbox's never falls back to the old checkout workers write.
+    const plugins = localPluginEnv(baseEnv, g.workerRoot, !spec.sandbox);
     const env: Record<string, string | undefined> = { MCP_TIMEOUT: '120000', ...baseEnv, ...plugins, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never', ...publicGitEnvFor(spec, baseEnv), ...spec.env };
     // A vault GitHub token (GH_TOKEN): gh reads it itself; git gets a helper that reads it (githubCredentialEnv).
     // w5430: a Low worker's gh login (GH_CONFIG_DIR from lowEnv); a GitHub App run keeps its own helper.

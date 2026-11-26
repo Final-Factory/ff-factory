@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { readBenchLock } from '../machine/benchLock.ts';
-import { BenchTicket, benchQueueDir, benchStatusDir, benchTicketFor, findBenchQueueScript, heldTicket, newestBenchQueueScript, queueTickets, rulesVersion } from '../machine/benchQueue.ts';
+import { BenchTicket, benchQueueDir, benchStatusDir, benchTicketFor, sweepBenchStatus, findBenchQueueScript, heldTicket, newestBenchQueueScript, queueTickets, rulesVersion } from '../machine/benchQueue.ts';
 
 /**
  * w1615: the bench queue is the game repo's scripts/bench/bench_queue.py (its own tests kill holders and waiters with
@@ -110,9 +110,11 @@ test('w1615: BenchTicket runs the helper for this process, hears its place, its 
   assert.deepEqual(s.kind === 'granted' && s.ticket, 't00000002');
   assert.match(lines[0], /place 2, waiting for t00000001/);
   k.release();
+  // w5905: the helper lets go on the release file and exits, and its status files go with it (not 20 s later).
   const deadline = Date.now() + 5000;
-  while (!fs.readFileSync(k.status, 'utf8').startsWith('released') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-  assert.match(fs.readFileSync(k.status, 'utf8'), /^released t00000002/);
+  while (fs.existsSync(k.status) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(fs.existsSync(k.status), false, 'the status file is removed once the helper exits');
+  assert.equal(fs.existsSync(`${k.status}.release`), false, 'and the release file with it');
   const bad = new BenchTicket({ script, lock: path.join(dir, 'bench.lock'), mode: 'shared', what: 'x', python: process.execPath, tempDir: dir, env: { ...process.env, FAKE_FAIL: '1' } }).take();
   assert.equal((await bad.wait(10_000)).kind, 'failed', 'a helper that dies before its grant fails the ticket: the caller goes on without');
   const none = new BenchTicket({ script, lock: 'x', mode: 'shared', what: 'x', python: path.join(dir, 'no-such-python'), tempDir: dir }).take();
@@ -152,10 +154,19 @@ test('w1615: against the real bench_queue.py, a shared ticket waits for an exclu
   const script = findBenchQueueScript([GAME])!;
   const env: NodeJS.ProcessEnv = { ...process.env, BENCH_POLL_S: '0.1', BENCH_LEGACY_GRACE_S: '0' };
   delete env.FF_BENCH_TICKET;
+  // w5974: run inside a worker, the tickets would carry its session, and since w2605 (the game repo's own_turn) a
+  // session's shared ticket rides its own running exclusive turn: granted at once, not waiting. Take them as nobody's.
+  delete env.FF_SESSION_ID;
+  delete env.FF_BENCH_SESSION;
+  // w5974: a failed assertion left the helpers holding the run open until it was killed; let every ticket go.
+  const tickets: BenchTicket[] = [];
+  t.after(() => tickets.forEach((k) => k.release()));
   const ex = new BenchTicket({ script, lock, mode: 'exclusive', what: 'probe A', tempDir: dir, env }).take();
+  tickets.push(ex);
   assert.equal((await ex.wait(15_000)).kind, 'granted');
   assert.ok(fs.existsSync(path.join(lock, 'owner')), 'the exclusive holder makes the old-style lock dir');
   const sh = new BenchTicket({ script, lock, mode: 'shared', what: 'unity: build', tempDir: dir, env }).take();
+  tickets.push(sh);
   const waiting = await sh.wait(1500);
   assert.equal(waiting.kind, 'waiting', 'the build waits for the timed run');
   assert.match(waiting.line, /waiting for t00000001 exclusive probe A/);
@@ -171,6 +182,7 @@ test('w1615: against the real bench_queue.py, a shared ticket waits for an exclu
   while (!(fs.existsSync(path.join(dir, 'k')) && fs.readFileSync(path.join(dir, 'k'), 'utf8').startsWith('granted')) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
   owner.kill('SIGKILL');
   const next = new BenchTicket({ script, lock, mode: 'exclusive', what: 'next', tempDir: dir, env }).take();
+  tickets.push(next);
   assert.equal((await next.wait(15_000)).kind, 'granted', 'the killed owner\'s ticket is let go');
   next.release();
 });
@@ -191,4 +203,38 @@ test('w1962: a ticket runs under the copy of bench_queue.py with the newest rule
   assert.equal(newestBenchQueueScript([path.join(root, 'sandboxes', 'slot3')], root), fresh, 'a tie keeps the checkout\'s own copy');
   assert.equal(newestBenchQueueScript([undefined], root), other);
   assert.equal(newestBenchQueueScript([undefined], undefined), undefined);
+});
+
+test('w5905: a ticket from benchTicketFor keeps its status files in <root>/tmp/bench-status, never the OS temp folder, and removes them on release', async (t) => {
+  const root = tmp(t);
+  const checkout = path.join(root, 'sandboxes', 'slot1');
+  fs.mkdirSync(path.join(checkout, 'scripts', 'bench'), { recursive: true });
+  fs.writeFileSync(path.join(checkout, 'scripts', 'bench', 'bench_queue.py'), FAKE);
+  const { BENCH_LOCK: _l, FF_WORKER_ROOT: _r, ...env } = process.env;
+  const before = new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(`ff-bench-${process.pid}-`)));
+  const { ticket: k, why } = benchTicketFor({ mode: 'shared', what: 'running editor slot1', checkouts: [checkout], root, python: process.execPath, env });
+  if (!k) throw new Error(why);
+  assert.equal(path.dirname(k.status), benchStatusDir(root).dir);
+  assert.equal(benchStatusDir(root).dir, path.join(root, 'tmp', 'bench-status'));
+  const until = Date.now() + 10_000;
+  while (k.state().line === 'taking a ticket' && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
+  fs.writeFileSync(`${k.status}.grant`, '');
+  assert.equal((await k.wait(10_000)).kind, 'granted');
+  fs.writeFileSync(`${k.status}.warn`, 'the helper\'s warning (review w5945 F1)');
+  k.release();
+  const gone = Date.now() + 5000;
+  while (fs.readdirSync(benchStatusDir(root).dir).some((n) => n.startsWith('ff-bench-') && !n.endsWith('.grant')) && Date.now() < gone) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(fs.readdirSync(benchStatusDir(root).dir).filter((n) => n.startsWith('ff-bench-') && !n.endsWith('.grant')), [], 'nothing of the ticket is left after its release');
+  const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(`ff-bench-${process.pid}-`) && !before.has(n));
+  assert.deepEqual(after, [], 'nothing new in the OS temp folder');
+});
+
+test('w5905: sweepBenchStatus removes the status files of a gone holder and keeps its own, a live one and anything else', (t) => {
+  const dir = tmp(t);
+  const names = ['ff-bench-111-28b4c907', 'ff-bench-111-28b4c907.release', 'ff-bench-111-aa.tmp', 'ff-bench-111-28b4c907.warn', 'ff-bench-111-28b4c907.warn.tmp', 'ff-bench-222-0f', 'ff-bench-222-0f.warn', 'ff-bench-333-0e', 'ff-bench-333-0e.release', 'notes.txt', 'ff-bench-x-1'];
+  for (const n of names) fs.writeFileSync(path.join(dir, n), 'granted t00000071 shared pid 4028549');
+  const gone = sweepBenchStatus(dir, { selfPid: 222, alive: (pid) => pid === 333 });
+  assert.deepEqual(gone, ['ff-bench-111-28b4c907', 'ff-bench-111-28b4c907.release', 'ff-bench-111-28b4c907.warn', 'ff-bench-111-28b4c907.warn.tmp', 'ff-bench-111-aa.tmp']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['ff-bench-222-0f', 'ff-bench-222-0f.warn', 'ff-bench-333-0e', 'ff-bench-333-0e.release', 'ff-bench-x-1', 'notes.txt']);
+  assert.deepEqual(sweepBenchStatus(path.join(dir, 'none')), [], 'a folder not made yet: nothing to sweep');
 });

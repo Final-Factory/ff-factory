@@ -19,11 +19,21 @@
  * elsewhere. The cargo registry is the machine's, inside the install folder (w5501): every
  * slot shares one CARGO_HOME, `<root>/cache/cargo` unless one already sits inside the root (sharedCaches.ts workerCargoHome).
  * Measured design: docs/ffu-sandboxes.md.
+ *
+ * w5870: the slots are in a folder workers write (Low on Windows), so a build there runs build scripts, target binaries and a
+ * slot's `.cargo/config.toml` that any worker could have written. A sandbox agent is a worker itself; a Medium agent (one not
+ * in a sandbox, outside the fences) is not, so `take` and `where` warn it, and refuse it (exit 5) once the daemon says "on" in
+ * MEDIUM_AGENT_VAR (machine/mediumFolders.ts): daemon.json "mediumAgentCaches" is "on" and w5862's "mediumAgentFolders" gave
+ * the agent its own temp folder, which no worker writes, so it builds there instead (w5946 F5). A Medium agent's `take` keeps its
+ * own CARGO_HOME and never gets the workers' `<root>/cache/cargo` (w5947): crates and build scripts a worker could have planted.
  */
+import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { gitSpawnSync } from '../server/safeGit.ts';
+import { gitSpawnSync, splitGlobal } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
+import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
@@ -103,6 +113,10 @@ export interface FfuSlotDeps {
   /** The machine's CARGO_HOME inside the root (w5501, sharedCaches.ts workerCargoHome); `take` exports it. */
   cargoHome?: string;
   facts?: CleanupFacts;
+  /** w5870: MEDIUM_AGENT_VAR, set only for a Medium agent: "warn" or "on". */
+  medium?: string;
+  /** w6038: the folder the slots' core.hooksPath names; default FFU_SLOT_HOOKS. */
+  hooks?: string;
   /** Read cleanup-facts.json again (`take --wait` polls with it); absent: the facts stay as given. */
   readFacts?: () => CleanupFacts | undefined;
   now: () => number;
@@ -157,6 +171,85 @@ function writeSlotState(root: string, s: FfuSlotState): void {
   const f = stateFile(root);
   fs.writeFileSync(`${f}.tmp`, `${JSON.stringify(s, null, 2)}\n`);
   fs.renameSync(`${f}.tmp`, f);
+  writeHolderFiles(root, s);
+}
+
+/**
+ * w6038: the hooks every slot's checkout runs (ffuSlotHooks/: reference-transaction, pre-push, pre-rebase), in FF Factory's
+ * own code, which no worker writes. `take` points the shared clone's core.hooksPath here, so a worker's own git in a slot
+ * refuses a write when its session does not hold the slot, or when the checkout is on a branch other than the one recorded.
+ * FF Factory's git (gitSpawnSync, ff-pr) runs with core.hooksPath on server/gitHooks and never meets them: take, the rescue
+ * and the daemon's reads stay as they were, and ff-pr checks the same with slotWriteRefusal.
+ */
+export const FFU_SLOT_HOOKS = path.join(import.meta.dirname, 'ffuSlotHooks');
+
+/** w6038: `<slot>/holder`, what the hooks read (shell builtins only, no JSON): `holder <session>` and `branch <branch>` lines. */
+export const slotHolderFile = (root: string, id: string) => path.join(slotDir(root, id), 'holder');
+
+export function holderText(s: FfuSlot): string {
+  return `# Written by FF Factory's ffu-slot with slots.json (w6038): who may run a git write in this slot's checkout.\nholder ${s.holder ?? ''}\nbranch ${s.branch ?? ''}\n`;
+}
+
+function writeHolderFiles(root: string, st: FfuSlotState): void {
+  for (const s of st.slots) {
+    if (!fs.existsSync(slotDir(root, s.id))) continue;
+    const f = slotHolderFile(root, s.id);
+    const text = holderText(s);
+    try {
+      if (fs.existsSync(f) && fs.readFileSync(f, 'utf8') === text) continue;
+      fs.writeFileSync(`${f}.tmp`, text);
+      fs.renameSync(`${f}.tmp`, f);
+    } catch {
+      // best effort: with no holder file the hooks let every write through, as before w6038
+    }
+  }
+}
+
+/** w6038: parse a holder file; undefined when it cannot be read. */
+export function readHolderFile(file: string): { holder: string; branch: string } | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const v = (k: string) => new RegExp(`^${k}[ \\t]*(.*?)\\s*$`, 'm').exec(text)?.[1] ?? '';
+  return { holder: v('holder'), branch: v('branch') };
+}
+
+/** w6038: the branch a checkout is on, read from its HEAD file (no git runs); '' when detached or unreadable. */
+export function checkoutBranch(checkout: string): string {
+  try {
+    let gd = path.join(checkout, '.git');
+    if (fs.statSync(gd).isFile()) gd = path.resolve(checkout, /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(gd, 'utf8'))?.[1] ?? '.git');
+    return /^ref: refs\/heads\/(.+?)\s*$/m.exec(fs.readFileSync(path.join(gd, 'HEAD'), 'utf8'))?.[1] ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * w6038: why `what` (a git write) may not run in `cwd` for `session`, as the slot hooks say it (ffuSlotHooks/slot-guard.sh),
+ * or undefined: not in a slot's checkout, no session, no holder file, or the session holds the slot and is on its branch
+ * (or detached). For ff-pr, whose git runs with FF Factory's hooks and not the slot's.
+ */
+export function slotWriteRefusal(cwd: string, session: string | undefined, what: string): string | undefined {
+  if (!session) return undefined;
+  const m = /^(.*\/ffu-sandboxes\/(slot\d+))\/ffu(?:\/|$)/.exec(fwd(path.resolve(cwd)));
+  if (!m) return undefined;
+  const rec = readHolderFile(path.join(m[1], 'holder'));
+  if (!rec) return undefined;
+  const checkout = `${m[1]}/ffu`;
+  const on = rec.branch || 'origin/main, detached';
+  const fix = `Take your own slot and work there: eval "$(ffu-slot take --branch <your branch>)" (ffu-slot where --branch <b> names the one you hold) (w6038).`;
+  if (rec.holder !== session) {
+    return rec.holder
+      ? `ffu-slot: refused: ${what} in ffu slot ${m[2]} (${checkout}), which session ${rec.holder} holds on branch ${on}; you are session ${session}. That is another worker's checkout. ${fix}`
+      : `ffu-slot: refused: ${what} in ffu slot ${m[2]} (${checkout}), which no session holds (released; last on branch ${on}); you are session ${session}. ${fix}`;
+  }
+  const cur = rec.branch ? checkoutBranch(checkout) : '';
+  if (cur && cur !== rec.branch) return `ffu-slot: refused: ${what} on branch ${cur} in ffu slot ${m[2]} (${checkout}): your session ${session} holds this slot for branch ${rec.branch}, and ffu-slot recorded no other. Go back with git switch ${rec.branch}, or take a slot for ${cur}: eval "$(ffu-slot take --branch ${cur})" (w6038).`;
+  return undefined;
 }
 
 /** The lock every change to the slots takes: a folder made atomically, taken over when older than LOCK_STALE_MS. */
@@ -261,6 +354,34 @@ export function slotFree(d: FfuSlotDeps, s: FfuSlot): { free: boolean; why: stri
 }
 
 /**
+ * Every slot as `ffu-slot list` judges it, for the daemon's status (w5912, lothsahn: "Can we show those on the portal?"):
+ * the same slotFree, so the portal's free, held and stale are the shim's own. Run by `ffu-slot list --json`.
+ */
+export function slotsReport(d: FfuSlotDeps): FfuSlotsReport {
+  const f = d.facts;
+  const fresh = !!f?.at && d.now() - Date.parse(f.at) <= FACTS_FRESH_MS;
+  const slots = readSlotState(d.root).slots.map((s): FfuSlotView => {
+    const j = slotFree(d, s);
+    const used = slotLastUsed(d, s);
+    const head = fs.existsSync(slotCheckout(d.root, s.id)) ? d.git(['rev-parse', '--short=12', 'HEAD'], slotCheckout(d.root, s.id)) : undefined;
+    const holderIs = !s.holder ? undefined : !fresh ? 'unknown' : f!.live.includes(s.holder) ? 'live' : f!.resumable.includes(s.holder) ? 'stopped' : 'gone';
+    return {
+      id: s.id,
+      ...(s.holder ? { holder: s.holder, holderIs } : {}),
+      ...(s.branch ? { branch: s.branch } : {}),
+      ...(head?.code === 0 && head.out.trim() ? { commit: head.out.trim() } : {}),
+      ...(s.takenAt ? { takenAt: s.takenAt } : {}),
+      ...(used ? { usedAt: new Date(used).toISOString() } : {}),
+      free: j.free,
+      // A held slot another worker may take now: w5885's notion of a stale hold, which the next take frees by itself.
+      stale: !!s.holder && j.free,
+      why: j.why,
+    };
+  });
+  return { at: new Date(d.now()).toISOString(), max: d.max, slots };
+}
+
+/**
  * w5885: save the work a freed slot's holder left in its checkout before the slot is reset (lothsahn: "Unpushed work is pushed
  * or kept safe first, never dropped"): uncommitted changes are committed, and the tip is kept as branch
  * `rescue/ffu-slot/<slot>-<holder>-<sha8>` in the shared clone (a local branch: fetch --prune never drops it) and pushed to
@@ -323,6 +444,9 @@ function ensureRepo(d: FfuSlotDeps, remote: string): void {
   }
   must(d.git(['fetch', '--prune', '--quiet', 'origin'], repo), 'git fetch');
   d.git(['worktree', 'prune'], repo);
+  // w6038: the slots' own git runs FF Factory's slot hooks. --local: gitSpawnSync's command-scope core.hooksPath would answer.
+  const hooks = fwd(d.hooks ?? FFU_SLOT_HOOKS);
+  if (d.git(['config', '--local', '--get', 'core.hooksPath'], repo).out.trim() !== hooks) must(d.git(['config', '--local', 'core.hooksPath', hooks], repo), 'git config');
 }
 
 /**
@@ -559,9 +683,16 @@ export function releaseSlot(d: FfuSlotDeps, which: { branch?: string; slot?: str
   });
 }
 
-export const USAGE = `usage: ffu-slot take [--branch <b>] [--base <b>] [--wait <minutes>] | where [--branch <b>] | release [--branch <b> | --slot <id>] | list | sweep
+/** `take` and `where`'s exit when a Medium agent is refused a slot (w5870; 4 is "no slot free", w5946 F4). */
+export const EXIT_MEDIUM_REFUSED = 5;
+
+/** The CARGO_HOME `take` exports: the machine's one in the root for a worker; none for a Medium agent, which keeps its own (w5947). */
+export const slotCargoHome = (d: Pick<FfuSlotDeps, 'cargoHome' | 'medium'>) => (d.medium ? undefined : d.cargoHome);
+
+export const USAGE = `usage: ffu-slot take [--branch <b>] [--base <b>] [--wait <minutes>] | where [--branch <b>] | release [--branch <b> | --slot <id>] | list [--json] | sweep
   take: eval "$(ffu-slot take --branch <your branch>)" gives you an ffu checkout with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR) and cds into it
     exit 4: no slot is free; --wait <minutes> waits for one. Never build ffu elsewhere: wait, or end your turn with wake_me and take again
+    exit 5: refused to an agent outside the worker fences (w5870): build in a clone in your own temp folder, as the message says
     a second branch gets a second slot of its own (its own checkout and target), up to ${FFU_SLOTS_PER_WORKER} per worker; never two checkouts in one target
   where: the same lines for the slot you hold on --branch, else the one you used last (exit 1 if none)
   release: give your slots back (or the one on --branch, or --slot) once your work is pushed (a stopped worker's pushed slot frees itself)
@@ -579,6 +710,17 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     d.say(`ffu-slot: FF_SESSION_ID is not set: run it from a worker of FF Factory\n`);
     return 2;
   }
+  // w5870: a Medium agent and the slots workers write (see the header).
+  const own = 'build ffu in your own temp folder instead, which no worker writes: git clone https://github.com/Final-Factory/ffu.git "$TMPDIR/ffu" and CARGO_TARGET_DIR="$TMPDIR/ffu-target"';
+  if ((cmd === 'take' || cmd === 'where') && (d.medium === 'on' || d.medium === 'warn')) {
+    if (d.medium === 'on') {
+      d.say(`ffu-slot: refused: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write, so a build there would run their build scripts and cargo config outside the fence; ${own} (w5870)
+`);
+      return EXIT_MEDIUM_REFUSED;
+    }
+    d.say(`ffu-slot: WARNING: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write: a build there runs build scripts and a cargo config any worker could have written. Once daemon.json "mediumAgentFolders" and "mediumAgentCaches" are both "on" (your own temp folder then no worker writes) this is refused (w5870)
+`);
+  }
   try {
     if (cmd === 'take') {
       const branch = opt('--branch');
@@ -586,7 +728,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
       const wait = opt('--wait');
       if (wait !== undefined && !(Number(wait) >= 0)) throw new Error(`not a number of minutes: ${wait}`);
       const id = wait ? takeSlotWaiting(d, { branch, base: opt('--base') }, Number(wait)) : takeSlot(d, { branch, base: opt('--base') });
-      d.write(envLines(d.root, id, d.cargoHome));
+      d.write(envLines(d.root, id, slotCargoHome(d)));
       d.say(`ffu-slot: ${id}: ${fwd(slotCheckout(d.root, id))} (target ${fwd(slotTarget(d.root, id))})\n`);
       return 0;
     }
@@ -602,7 +744,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
         d.say(`ffu-slot: you hold no slot: take one with eval "$(ffu-slot take --branch <your branch>)"\n`);
         return 1;
       }
-      d.write(envLines(d.root, mine.id, d.cargoHome));
+      d.write(envLines(d.root, mine.id, slotCargoHome(d)));
       return 0;
     }
     if (cmd === 'release') {
@@ -610,10 +752,18 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
       d.say(ids.length ? `ffu-slot: released ${ids.join(', ')}; ${ids.length > 1 ? 'their targets stay' : 'its target stays'} warm for the next worker\n` : 'ffu-slot: you hold no slot\n');
       return 0;
     }
+    if (cmd === 'list' && rest.includes('--json')) {
+      d.write(`${JSON.stringify(slotsReport(d))}\n`);
+      return 0;
+    }
     if (cmd === 'list') {
       const st = readSlotState(d.root);
       if (!st.slots.length) d.write(`no ffu slots yet in ${fwd(slotsBase(d.root))} (max ${d.max})\n`);
-      for (const s of st.slots) d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${s.usedAt ?? '-'}\t${slotFree(d, s).why}\n`);
+      // w5912: the last use slotFree and the portal's report read (slotLastUsed), not only the stamp a take wrote in slots.json.
+      for (const s of st.slots) {
+        const used = slotLastUsed(d, s);
+        d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${used ? new Date(used).toISOString() : '-'}\t${slotFree(d, s).why}\n`);
+      }
       for (const r of st.rescues ?? []) d.write(`rescue\t${r.branch}\t${r.at}\t${r.holder}'s work from ${r.slot}${r.pushed ? ', pushed to origin' : ', in the shared clone only'}\n`);
       return 0;
     }
@@ -628,6 +778,20 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     d.say(`ffu-slot: ${(e as Error).message}\n`);
     return e instanceof NoFreeSlot ? 4 : 3;
   }
+}
+
+/**
+ * The environment of ffu-slot's own git calls (w5991): no hooks but on a push. server/safeGit.ts points core.hooksPath at
+ * git-lfs's hooks; their post-checkout and post-commit start `sh` on every checkout and commit (seconds each on a busy
+ * Windows machine) to do git-lfs locking, which ffu has none of, and ffu-slot never merges. A push keeps them: pre-push
+ * uploads LFS objects, should the rescue branch ever carry any. A core.hooksPath naming a regular file runs no hook
+ * (safeGit.test.ts), and this file is FF Factory's code, which no worker writes. Caller entries come after safeGit's fixed
+ * keys and win.
+ */
+export function slotGitEnv(args: string[], env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (args[splitGlobal(args).sub] === 'push') return env;
+  const n = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
+  return { ...env, GIT_CONFIG_COUNT: String(n + 1), [`GIT_CONFIG_KEY_${n}`]: 'core.hooksPath', [`GIT_CONFIG_VALUE_${n}`]: import.meta.filename };
 }
 
 export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDeps {
@@ -648,10 +812,11 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     cargoHome: workerCargoHome(root, env, '').home, // the home folder only names a seed's source, which take does not need
     max: Number.isInteger(max) && max >= 0 ? max : FFU_SLOTS_DEFAULT_MAX,
     facts,
+    ...(env[MEDIUM_AGENT_VAR] ? { medium: env[MEDIUM_AGENT_VAR] } : {}),
     readFacts,
     now: () => Date.now(),
     git: (args, cwd) => {
-      const r = gitSpawnSync(args, { cwd, encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
+      const r = gitSpawnSync(args, { cwd, env: slotGitEnv(args), encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024, timeout: 20 * 60_000 });
       return { code: r.status ?? (r.error ? 127 : 1), out: r.stdout ?? '', err: r.stderr ?? (r.error ? r.error.message : '') };
     },
     freeGB: (dir) => {
@@ -680,6 +845,36 @@ export function installFfuSlotShim(bin: string, factsFile: string, max: number, 
   fs.chmodSync(`${sh}.tmp`, 0o755);
   fs.renameSync(`${sh}.tmp`, sh);
   fs.writeFileSync(`${sh}.cmd`, `@echo off\r\nrem FF Factory: ffu sandboxes (machine/ffuSlots.ts).\r\nset "FF_CLEANUP_FACTS=${factsFile}"\r\nset "FF_FFU_SLOTS_MAX=${max}"\r\n${[node, ...nodeArgs, script].map((s) => `"${s}"`).join(' ')} %*\r\n`);
+}
+
+/**
+ * The daemon's ffu slot report (w5912): `ffu-slot list --json` run as its own process, so the git reads slotFree makes never
+ * hold the daemon's event loop, with each target's size as the last clean-up pass measured it (`sizes`, never a du here).
+ * Undefined when no slot was made here yet, or the run failed (said in `log`).
+ */
+export function readFfuSlotsReport(o: { root: string; factsFile: string; max: number; sizes?: ReadonlyMap<string, { bytes: number; at: string }>; log?: (s: string) => void; script?: string }): Promise<FfuSlotsReport | undefined> {
+  if (!fs.existsSync(stateFile(o.root))) return Promise.resolve(undefined);
+  const env = { ...process.env, FF_WORKER_ROOT: o.root, FF_CLEANUP_FACTS: o.factsFile, FF_FFU_SLOTS_MAX: String(o.max), FF_SESSION_ID: '' };
+  const args = [...process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), o.script ?? import.meta.filename, 'list', '--json'];
+  return new Promise((resolve) => {
+    execFile(process.execPath, args, { env, timeout: 60_000, windowsHide: true, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        o.log?.(`ffu slots: list --json failed: ${(stderr || err.message).trim().slice(0, 200)}`);
+        return resolve(undefined);
+      }
+      try {
+        const r = JSON.parse(stdout) as FfuSlotsReport;
+        for (const s of r.slots) {
+          const z = o.sizes?.get(s.id);
+          if (z) Object.assign(s, { targetBytes: z.bytes, sizedAt: z.at });
+        }
+        resolve(r);
+      } catch (e) {
+        o.log?.(`ffu slots: list --json printed no report: ${(e as Error).message}`);
+        resolve(undefined);
+      }
+    });
+  });
 }
 
 // Run when started directly (the ffu-slot shim).
