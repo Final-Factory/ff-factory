@@ -326,23 +326,47 @@ export async function cleanupPass(o: {
   };
   // w5795: each step timed, for the summary (LothDesktop's low passes took over an hour to plan, longer than its daemon ran).
   const phasesMs: Record<string, number> = {};
+  // What this pass has removed so far: each step's plan goes as soon as the step is planned (w5795), so the marker says it too.
+  const r: CleanupRun = { removed: [], failed: [], bytes: 0 };
+  const add = (x: CleanupRun) => {
+    r.removed.push(...x.removed);
+    r.failed.push(...x.failed);
+    r.bytes += x.bytes;
+  };
   const timed = async <T>(name: string, f: () => Promise<T>): Promise<T> => {
     const t = Date.now();
-    o.opts.step?.(name, { ...phasesMs });
+    o.opts.step?.(name, { ...phasesMs }, { removed: r.removed.length, bytes: r.bytes });
     try {
       return await f();
     } finally {
       phasesMs[name] = Date.now() - t;
     }
   };
-  const regular = fence(await timed('regular', o.regular));
-  const planned: StalePlan = o.opts.stale && o.mode !== 'off' ? await timed('stale', o.stale) : o.mode === 'on' && o.cap ? await timed('cap', o.cap) : { items: [], listed: [] };
-  const plan = { ...planned, items: fence(planned.items) };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
   // A failure there must not cost the regular pass: nothing of it is removed then.
   const ownPlan = o.own;
+  // Planned first (w5795): the removals of each step below keep clear of what it keeps or removes itself (withoutOverlap).
   const own0 = ownPlan ? await timed('own', () => ownPlan.plan().catch(() => none)) : none;
   const own = { ...own0, items: fence(own0.items) };
+  const dry = !!o.opts.dryRun;
+  // Each step's plan removed at once, not after every step is planned (w5795): LothDesktop's low passes planned for about
+  // 55 min, its daemon restarted about hourly, and four passes in a row were cut off having removed nothing.
+  const attempted: CleanupItem[] = [];
+  const removeNow = async (name: string, items: CleanupItem[]) => {
+    if (dry || !items.length) return;
+    const { first } = withoutOverlap(items, own);
+    attempted.push(...first);
+    if (first.length) add(await timed(name, () => runCleanup(first, o.guard, o.busyNow)));
+  };
+  const regular = fence(await timed('regular', o.regular));
+  await removeNow('remove', regular);
+  const planned: StalePlan = o.opts.stale && o.mode !== 'off' ? await timed('stale', o.stale) : o.mode === 'on' && o.cap ? await timed('cap', o.cap) : { items: [], listed: [] };
+  const plan = { ...planned, items: fence(planned.items) };
+  if (!dry && o.mode === 'on') {
+    // Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends).
+    if (plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
+    await removeNow('removeStale', plan.items);
+  }
   const listed: NonNullable<CleanupRun['listed']> = [];
   // On Windows nothing off the install drive is measured or listed (w1755, lothsahn: "You need to only look at v:.  Stop
   // messing with my c:"): a listed C: folder was a clean-up worker's cue to measure it.
@@ -354,18 +378,9 @@ export async function cleanupPass(o: {
   listed.sort((a, b) => b.bytes - a.bytes);
   const held = (plan.held ?? []).filter((h) => onDrive(h.path)).sort((a, b) => b.bytes - a.bytes);
   const kept = { ...(held.length ? { held } : {}), phasesMs };
-  if (o.opts.dryRun) return { removed: [], failed: [], bytes: 0, planned: await timed('size', () => sizePlan([...regular, ...plan.items, ...own.items])), listed, ...kept };
-  const live = o.mode === 'on' ? plan.items : [];
-  if (o.mode === 'on' && plan.strays?.length && o.endStrays) await o.endStrays(plan.strays).catch(() => undefined);
-  const { first, own: ownItems } = withoutOverlap([...regular, ...live], own);
-  own.items = ownItems;
-  const r = await timed('remove', () => runCleanup(first, o.guard, o.busyNow));
-  if (ownPlan && own.items.length) {
-    const r2 = await timed('ownRemove', () => ownPlan.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun));
-    r.removed.push(...r2.removed);
-    r.failed.push(...r2.failed);
-    r.bytes += r2.bytes;
-  }
+  if (dry) return { removed: [], failed: [], bytes: 0, planned: await timed('size', () => sizePlan([...regular, ...plan.items, ...own.items])), listed, ...kept };
+  own.items = withoutOverlap(attempted, own).own;
+  if (ownPlan && own.items.length) add(await timed('ownRemove', () => ownPlan.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun)));
   return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed, ...kept };
 }
 
