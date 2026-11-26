@@ -1166,7 +1166,8 @@ export class Daemon {
       settings: real && process.platform === 'win32' ? WIN_CI_FIRST[cfg.id.toLowerCase()] : undefined,
       procs: () => pd.procs(),
       census: (procs) => runnerCensus(procs),
-      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid! })),
+      // the host writes its own start to its record (agentHost.ts), so a pid Windows gave to another process started later
+      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid!, startedAt: hostStartedAt(h.dir) })),
       priorityOf: (pid) => priorityOf(pid),
       facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
       machineBusyMs: () => machineBusyMs(),
@@ -1919,7 +1920,12 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
-    if (this.winCiFirst.enabled) this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`))), 60_000));
+    if (this.winCiFirst.enabled) {
+      const tick = () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`));
+      this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
+      // what an earlier daemon lowered is raised back (or kept, in enforce) soon after the start, not a minute later
+      if (Object.keys(this.winCiFirst.loweredNow()).length) setTimeout(tick, 10_000).unref();
+    }
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
@@ -4461,6 +4467,7 @@ export class Daemon {
       log: (line) => log(line),
       capsMode: () => capsModeOf(this.cfg.workerCaps),
       toolsCpu: (pid) => this.toolsCpu(pid),
+      toolsLowered: (pid) => this.winCiFirst.toolsLowered(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {
         const sandbox = holder.e?.spec?.sandbox ?? hostPlace(h.dir)?.sandbox;

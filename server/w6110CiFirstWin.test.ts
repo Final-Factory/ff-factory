@@ -42,7 +42,20 @@ const BASE: WinProc[] = [
   { pid: 31, ppid: 30, cmd: 'claude.exe' },
 ];
 
-function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[]; mode?: WinCiFirstMode; record?: Lowered; prio?: [number, number][] } = {}) {
+interface RigOpts {
+  settings?: WinCiFirstSettings | null;
+  procs?: WinProc[];
+  mode?: WinCiFirstMode;
+  record?: Lowered;
+  prio?: [number, number][];
+  /** When each host wrote its own record (its start), by pid. */
+  hostStart?: Record<number, number>;
+  noRecord?: boolean;
+  onFacts?: (r: Rig) => void;
+}
+type Rig = ReturnType<typeof rig>;
+
+function rig(o: RigOpts = {}) {
   let procs = o.procs ?? BASE;
   const prio = new Map<number, number>([...[10, 11, 12, 20, 21, 22, 30].map((p) => [p, P.PRIORITY_NORMAL] as [number, number]), [23, P.PRIORITY_BELOW_NORMAL], [31, P.PRIORITY_ABOVE_NORMAL]]);
   const started = new Map<number, number>(procs.map((p) => [p.pid, 100 + p.pid])); // parents start before children
@@ -54,7 +67,10 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[]; mode?
   let fail = false;
   let factsFail = false;
   let held = false;
+  let writeFail = false;
+  let setFail = false;
   let record: Lowered = o.record ?? {};
+  let api: Rig | undefined;
   const set: [number, number][] = [];
   const d: WinCiFirstDeps = {
     settings: o.settings === null ? undefined : (o.settings ?? LOTHDESKTOP_CI_FIRST),
@@ -64,13 +80,14 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[]; mode?
     },
     census: (ps) => runnerCensus(ps),
     hosts: () => [
-      { session: 'aaaa1111', pid: 20 },
-      { session: 'bbbb2222', pid: 30 },
+      { session: 'aaaa1111', pid: 20, startedAt: o.hostStart?.[20] },
+      { session: 'bbbb2222', pid: 30, startedAt: o.hostStart?.[30] },
     ],
     priorityOf: (pid) => prio.get(pid),
     facts: async (pids) => {
       if (factsFail) throw new Error('inspecting processes failed (1)');
       asked.push(pids);
+      if (api) o.onFacts?.(api);
       return pids.filter((p) => procs.some((x) => x.pid === p)).map((p): ProcFact => ({ pid: p, startedAt: started.get(p), cpuMs: cpuMs.get(p) ?? 0 }));
     },
     machineBusyMs: () => busy,
@@ -78,18 +95,28 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[]; mode?
     mode: o.mode,
     held: () => held,
     setPriority: (pid, p) => {
-      if (!prio.has(pid)) return false;
+      if (!prio.has(pid) || setFail) return false;
       prio.set(pid, p);
       set.push([pid, p]);
       return true;
     },
-    record: { read: () => ({ ...record }), write: (l) => void (record = { ...l }) },
+    record: o.noRecord
+      ? undefined
+      : {
+          read: () => ({ ...record }),
+          write: (l) => {
+            if (writeFail) throw new Error('EPERM: operation not permitted, rename');
+            record = { ...l };
+          },
+        },
     now: () => now,
     log: (l) => void lines.push(l),
   };
   for (const [pid, p] of o.prio ?? []) prio.set(pid, p);
-  return {
+  const out = {
     cf: new WinCiFirst(d),
+    setWriteFail: (f: boolean) => void (writeFail = f),
+    setSetFail: (f: boolean) => void (setFail = f),
     set,
     record: () => record,
     setHeld: (h: boolean) => void (held = h),
@@ -106,6 +133,8 @@ function rig(o: { settings?: WinCiFirstSettings | null; procs?: WinProc[]; mode?
     setFail: (f: boolean) => void (fail = f),
     setFactsFail: (f: boolean) => void (factsFail = f),
   };
+  api = out;
+  return out;
 }
 
 test('lothdesktop is the one Windows CI-first machine, BelowNormal', () => {
@@ -314,7 +343,7 @@ test("enforce: beside a job only an agent's tools go to BelowNormal, recorded wi
   assert.deepEqual(r.set, [[22, P.PRIORITY_BELOW_NORMAL]]);
   for (const pid of [10, 11, 12, 20, 21, 24, 30]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `pid ${pid}`);
   assert.equal(r.prio.get(31), P.PRIORITY_ABOVE_NORMAL);
-  assert.deepEqual(r.record(), { '22@122': { prev: P.PRIORITY_NORMAL, at: 1_000_000 } });
+  assert.deepEqual(r.record(), { '22@122': { prev: P.PRIORITY_NORMAL, at: 1_000_000, host: 20 } });
   assert.match(r.lines.join('\n'), /lowered 1 of the agents' tools' process\(es\) to BelowNormal beside the CI job\(s\), so the jobs go first \(w6110\): 22 python\.exe/);
   assert.match(r.lines.join('\n'), /1 of their tools' process\(es\) lowered to BelowNormal so far/);
   // the next tick finds it BelowNormal already: nothing set again
@@ -335,7 +364,7 @@ test('warn (the default) sets nothing even with a way to set', async () => {
 test("enforce: a bench or a person's turn raises what was lowered (and what it started since) back, and lowers nothing until it ends", async () => {
   const procs = [...BASE, { pid: 25, ppid: 22, cmd: 'python.exe child.py' }, { pid: 26, ppid: 22, cmd: 'python.exe old.py' }];
   const r = rig({ procs, mode: 'enforce', prio: [[26, P.PRIORITY_BELOW_NORMAL]] });
-  r.started.set(25, 2_000_000); // started after 22 was lowered, so it inherited BelowNormal
+  r.started.set(25, 1_010_000); // started after 22 was lowered (1_000_000), so it inherited BelowNormal
   r.prio.set(25, P.PRIORITY_BELOW_NORMAL);
   await r.cf.tick();
   assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
@@ -405,4 +434,106 @@ test('the record file: written atomically under <root>/tmp, bad entries dropped,
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ---- the independent review's cases (pid reuse, orphans, the record, a turn mid-read) ----
+
+test("enforce: a tool's pid that another process took after the listing (it started later) is left alone", async () => {
+  const r = rig({ mode: 'enforce' });
+  r.started.set(22, 1_000_000); // pid 22 is now a process started after the listing could have been taken
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.deepEqual(r.set, []);
+});
+
+test("enforce: a host's pid a job's process got (it started after the host's own record) is the job's: its children are not lowered", async () => {
+  // host 20 died; a CI rustc (child of the job's cargo 12) now has pid 20, started after host 20 wrote its record
+  const procs = BASE.filter((p) => ![20, 21, 22, 23].includes(p.pid)).concat([
+    { pid: 20, ppid: 12, cmd: 'rustc.exe' },
+    { pid: 41, ppid: 20, cmd: 'rustc.exe' },
+    { pid: 42, ppid: 41, cmd: 'cc.exe' },
+  ]);
+  const r = rig({ procs, mode: 'enforce', prio: [[41, P.PRIORITY_NORMAL], [42, P.PRIORITY_NORMAL]], hostStart: { 20: 50 } });
+  r.started.set(20, 900_000);
+  r.started.set(41, 900_100);
+  r.started.set(42, 900_200);
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.deepEqual(r.set, []);
+  assert.match(r.lines[0], /1 agent\(s\) beside them/);
+});
+
+test('raise: what a lowered tool started stays BelowNormal after it ends (Windows keeps no new parent) unless raised: it is raised too', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  // 22 ends; what it started (inheriting BelowNormal) runs on, its parent pid now pointing at nothing
+  r.setProcs([...BASE.filter((p) => p.pid !== 22), { pid: 27, ppid: 22, cmd: 'sccache.exe' }, { pid: 28, ppid: 27, cmd: 'rustc.exe' }]);
+  r.started.set(27, 1_010_000);
+  r.started.set(28, 1_020_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.prio.set(28, P.PRIORITY_BELOW_NORMAL);
+  r.started.delete(22);
+  r.setHeld(true);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.equal(res?.raised, 2);
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(28), P.PRIORITY_NORMAL);
+  assert.deepEqual(r.record(), {});
+});
+
+test("raise: a child of a recorded pid's new holder (started after it) is that process's, and is not raised", async () => {
+  const r = rig({ mode: 'warn', record: { '22@122': { prev: P.PRIORITY_NORMAL, at: 500 } } });
+  r.started.set(22, 900_000); // pid 22 is another process now
+  r.setProcs([...BASE, { pid: 29, ppid: 22, cmd: 'child.exe' }]);
+  r.started.set(29, 950_000);
+  r.prio.set(29, P.PRIORITY_BELOW_NORMAL);
+  r.prio.set(22, P.PRIORITY_BELOW_NORMAL);
+  assert.equal((await r.cf.tick())?.raised, 0);
+  assert.equal(r.prio.get(29), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+});
+
+test('enforce: a record that cannot be written puts this tick back and lowers nothing that could not be undone', async () => {
+  const r = rig({ mode: 'enforce' });
+  r.setWriteFail(true);
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.deepEqual(r.cf.loweredNow(), {});
+  assert.match(r.lines.join('\n'), /could not write the record of lowered processes/);
+  assert.match(r.lines.join('\n'), /put 1 process\(es\) back as they were/);
+  r.setWriteFail(false);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.lowered, 1);
+  assert.match(r.lines.join('\n'), /the record of lowered processes is written again/);
+});
+
+test('enforce: without a record to undo from, nothing is lowered', async () => {
+  const r = rig({ mode: 'enforce', noRecord: true });
+  await r.cf.tick();
+  assert.deepEqual(r.set, []);
+});
+
+test("enforce: a turn that begins during the processes' read is honoured: nothing lowered", async () => {
+  const r = rig({ mode: 'enforce', onFacts: (x) => x.setHeld(true) });
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+});
+
+test('raise: one that fails is tried again, then given up with a line in the log; toolsLowered names the host meanwhile', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.cf.toolsLowered(20), true);
+  assert.equal(r.cf.toolsLowered(30), false);
+  r.setSetFail(true);
+  r.setHeld(true);
+  for (let i = 0; i < 3; i++) {
+    r.advance(60_000);
+    await r.cf.tick();
+  }
+  assert.match(r.lines.join('\n'), /gave up raising process 22 back after 3 tries/);
+  assert.deepEqual(r.cf.loweredNow(), {});
+  assert.equal(r.cf.toolsLowered(20), false);
 });

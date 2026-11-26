@@ -309,15 +309,23 @@ tools' processes run above BelowNormal. Editors the daemon starts are not under 
 With `winCiFirst` `enforce` (set by `ops_worker machine_update win_ci_first enforce`, Windows only; read at the daemon's
 start) the same tick lowers those tools' processes to BelowNormal while a job runs, and what they start inherits it:
 - **What is lowered**: an agent's tools only, what its claude starts (shells, cargo, rustc, python, players). The host and
-  its direct children (claude) keep their priority, so the agent's own loop and its heartbeat are not starved; nor is the
-  hang watch's reading of claude's CPU (it waits 30 min of silence, and Windows' balance-set manager boosts a starved
-  thread now and then). No Unity editor or what it started is lowered, nor the daemon, another host or a runner's tree.
+  its direct children (claude) keep their priority, so the agent's own loop and its heartbeat are not starved. No Unity
+  editor or what it started is lowered (one a lowered tool starts later inherits BelowNormal), nor the daemon, another
+  host or a runner's tree. Windows reuses pids, so each tick reads every candidate's start time: a process started after
+  the listing could have been taken is left alone, and a host whose pid started after the host wrote its own record is no
+  host (a job's process that got it stays the job's).
+- **The hang watch** (w3673) reads exactly those tools' CPU; a silent agent whose tools run lowered is kept and looked at
+  again (`toolsLowered`), since starved tools say little about a hang.
+- **Only with a record**: if `<root>/tmp/ci-first-lowered.json` cannot be written, that tick's lowering is put back at
+  once, so nothing is lowered that a restart could not undo.
 - **The record**: each lowered process, by pid and start time, with the priority it had, in
   `<root>/tmp/ci-first-lowered.json`; each lowering is a `ci first: lowered N ...` line naming the pids and images.
 - **Raised back**: once no CI job runs; while a bench or a person's play turn holds the machine (nothing is lowered then,
   so a timed run measures what it always did); and by a daemon started with `warn` or `off` while the record holds
   anything. Each recorded process still running with the same start time goes back to the priority it had, and so does
-  what it started since it was lowered that still runs at BelowNormal; a pid Windows gave to another process is left alone.
+  what it started since it was lowered that still runs at BelowNormal, even once it ended (Windows gives an orphan no new
+  parent, so its parent pid still names the recorded one); a pid Windows gave to another process, and what that one
+  started, are left alone. A raise that fails is tried again for 3 ticks, then given up with a line in the log.
 - **Recovery**: `ops_worker machine_update win_ci_first warn` (or `off`, which also stops the logging); the daemon restarts
   with it and raises everything back, needing nobody at the machine.
 

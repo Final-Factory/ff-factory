@@ -299,6 +299,11 @@ export interface HostDeps {
    * `pid@start`, in ms; undefined when the machine cannot tell. Without it the hang watch counts its tools as idle.
    */
   toolsCpu?: (hostPid: number) => Promise<Map<string, number> | undefined>;
+  /**
+   * Some of its tools run lowered below a CI job (w6110, machine/ciFirstWin.ts): their CPU then says little, and the hang
+   * watch keeps the host and looks again rather than end it.
+   */
+  toolsLowered?: (hostPid: number) => boolean;
   /** The hang watch's limits (HANG_WATCH); tests shorten them. */
   hang?: Partial<typeof HANG_WATCH>;
 }
@@ -743,6 +748,11 @@ export class HostedSession implements SessionHandle {
         if (used !== undefined && used >= lim.BUSY_CPU_MS) {
           this.hang = { since: Date.now(), cpu };
           this.flag(`no progress from its agent for ${silent} mid-turn (since ${last}), but its tools are at work (${usedText}): kept, looked at again in ${look} (w3673)`);
+          return;
+        }
+        if (pid && this.deps.toolsLowered?.(pid)) {
+          this.hang = { since: Date.now(), cpu };
+          this.flag(`no progress from its agent for ${silent} mid-turn (since ${last}), and its tools used ${usedText}, but they run lowered below a CI job (w6110), so that says little: kept, looked at again in ${look} (w3673)`);
           return;
         }
         this.deps.log(`agent host ${id}: its agent looks hung: ${silent} without progress mid-turn, its tools used ${usedText}`);
