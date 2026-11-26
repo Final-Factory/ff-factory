@@ -93,9 +93,9 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, mod
     assert.equal(agents.isMoving(id), false, 'the move finished');
   };
   // What reached each worker's send (a delivery to a worker of another computer is SessionManager's business, tested there).
-  const sent: { id: string; text: string; from: string }[] = [];
-  sessions.send = ((id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human') => {
-    sent.push({ id, text, from });
+  const sent: { id: string; text: string; from: string; images?: unknown[] }[] = [];
+  sessions.send = ((id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: unknown[]) => {
+    sent.push({ id, text, from, ...(images ? { images } : {}) });
     return 'queued';
   }) as SessionManager['send'];
   return { store, sessions, agents, machines, starts, worker, request, queued, roomMove, settled, sent };
@@ -683,3 +683,101 @@ for (const mode of ['on', 'warn'] as const) {
     });
   }
 }
+
+// w6047 (the w6177 review): a give-back whose requests were all handed back meanwhile, and forwardLate, route each held message by its own send.
+// F1: giveBack's handed-back-meanwhile branch passes each message's own send to deliverHeld.
+test(`w6047 (the w6177 review, F1, "on"): a person's message absorbed behind a CI resume, request handed back meanwhile and on a next worker`, async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const person: QueuedSend = { uuid: 'u-person', id: '5449aaaa', text: 'lothsahn: also rename the flag', from: 'human', at: new Date(Date.now() - 50_000).toISOString(), why: BISCUIT_FULL };
+  (agents as unknown as { liveHub: unknown }).liveHub = {
+    endFor: async () => {
+      const b = store.work.get('w5870')!;
+      agents.orchestrators.handBack(b, store.sessions.get('5449aaaa')!, pausedHb);
+      const n = nextW('next1', 'lothdesktop');
+      store.putSession(n);
+      agents.orchestrators.linkWorker(b.id, n, 'started worker next1 in lothdesktop/slot2');
+      assert.equal(roomMove(s, person, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+      return undefined;
+    },
+    running: () => false,
+  };
+  request(['5449aaaa'], 'w5870');
+  const resume: QueuedSend = { ...queued('5449aaaa', 'w5870: its CI cleared', Date.now() - 60_000, 'system'), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+  assert.equal(roomMove(s, resume, BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const reached = sent.filter((m) => m.id === 'next1' && /rename the flag/.test(m.text)).length + sessions.queued().filter((m) => m.id === 'next1' && /rename the flag/.test(m.text)).length;
+  assert.equal(reached, 1, "the person's message reaches next1");
+});
+
+for (const mode of ['on', 'warn'] as const) test(`w6047 (the w6177 review, F2, "${mode}"): a late person's message behind the old worker's own [wake_me] still reaches the new worker`, async (t) => {
+  const { sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, mode);
+  const x = agents as unknown as Internals;
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const start = x.startMoved;
+  x.startMoved = async (info, w, to, why, hold, branch, lead, hb) => {
+    const gate: QueuedSend = { uuid: 'u-gate', id: '5449aaaa', text: "[wake_me] Woken early: w5869's block ended. Your note: waiting on CI", from: 'system', at: new Date().toISOString(), why: BISCUIT_FULL, resumeOf: { work: 'w5869', note: 'waiting on CI' } };
+    assert.equal(roomMove(s, gate, BISCUIT_FULL, Date.now()), true);
+    const person: QueuedSend = { uuid: 'u-late-person', id: '5449aaaa', text: 'lothsahn: stop, use the other API', from: 'human', at: new Date().toISOString(), why: BISCUIT_FULL };
+    assert.equal(roomMove(s, person, BISCUIT_FULL, Date.now()), true);
+    return start(info, w, to, why, hold, branch, lead, hb);
+  };
+  request(['5449aaaa'], 'w5869');
+  assert.equal(roomMove(s, queued('5449aaaa', 'lothsahn: first message', Date.now() - 60_000, 'human'), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const hit = (m: { id: string; text: string }) => m.id !== '5449aaaa' && /use the other API/.test(m.text);
+  assert.equal(sent.filter(hit).length + sessions.queued().filter(hit).length, 1, "the late person's message reaches the new worker");
+});
+
+// w6047 (the w6177 fix): forwardLate sends each late message on its own, so each gets its own uuid; two in one millisecond
+// must not collapse into one (the queue drops a uuid it already holds).
+for (const mode of ['on', 'warn'] as const) test(`w6047 (the w6177 fix, "${mode}"): two late person's messages behind an own [wake_me] both reach the new worker`, async (t) => {
+  const { sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, mode);
+  const x = agents as unknown as Internals;
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const start = x.startMoved;
+  x.startMoved = async (info, w, to, why, hold, branch, lead, hb) => {
+    const gate: QueuedSend = { uuid: 'u-gate', id: '5449aaaa', text: "[wake_me] Woken early: w5869's block ended. Your note: waiting on CI", from: 'system', at: new Date().toISOString(), why: BISCUIT_FULL, resumeOf: { work: 'w5869', note: 'waiting on CI' } };
+    assert.equal(roomMove(s, gate, BISCUIT_FULL, Date.now()), true);
+    for (const n of ['one', 'two']) {
+      const person: QueuedSend = { uuid: `u-late-${n}`, id: '5449aaaa', text: `lothsahn: late message ${n}`, from: 'human', at: new Date().toISOString(), why: BISCUIT_FULL };
+      assert.equal(roomMove(s, person, BISCUIT_FULL, Date.now()), true);
+    }
+    // Every late forward from here on reads one millisecond.
+    const pinned = Date.now();
+    Date.now = () => pinned;
+    return start(info, w, to, why, hold, branch, lead, hb);
+  };
+  const now = Date.now;
+  t.after(() => { Date.now = now; });
+  request(['5449aaaa'], 'w5869');
+  assert.equal(roomMove(s, queued('5449aaaa', 'lothsahn: first message', Date.now() - 60_000, 'human'), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  Date.now = now;
+  for (const n of ['one', 'two']) {
+    const hit = (m: { id: string; text: string }) => m.id !== '5449aaaa' && new RegExp(`late message ${n}`).test(m.text);
+    assert.equal(sent.filter(hit).length + sessions.queued().filter(hit).length, 1, `late message ${n} reaches the new worker, once`);
+  }
+});
+
+// w6047 (the w6177 review, F3): a late message forwarded on its own keeps its own sender and images, not the move's first.
+for (const mode of ['on', 'warn'] as const) test(`w6047 (the w6177 review, F3, "${mode}"): a late person's message in a move a system resume started goes as the person's, with its images`, async (t) => {
+  const { agents, worker, request, queued, roomMove, settled, sent } = await setup(t, mode);
+  const x = agents as unknown as Internals;
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const start = x.startMoved;
+  const images = [{ mediaType: 'image/png', data: 'iVBORw0KGgo=' }] as unknown as QueuedSend['images'];
+  x.startMoved = async (info, w, to, why, hold, branch, lead, hb) => {
+    const person: QueuedSend = { uuid: 'u-late-img', id: '5449aaaa', text: 'lothsahn: see this still', from: 'human', images, at: new Date().toISOString(), why: BISCUIT_FULL };
+    assert.equal(roomMove(s, person, BISCUIT_FULL, Date.now()), true);
+    return start(info, w, to, why, hold, branch, lead, hb);
+  };
+  request(['5449aaaa'], 'w5869');
+  const resume: QueuedSend = { ...queued('5449aaaa', 'w5869: its CI cleared', Date.now() - 60_000, 'system'), resumeOf: { work: 'w5869', note: 'its CI cleared' } };
+  assert.equal(roomMove(s, resume, BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const got = sent.filter((m) => m.id !== '5449aaaa' && /see this still/.test(m.text));
+  assert.equal(got.length, 1, 'reaches the new worker once');
+  assert.equal(got[0]!.from, 'human', "as the person's");
+  assert.deepEqual(got[0]!.images, images, 'with its images');
+});

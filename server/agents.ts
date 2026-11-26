@@ -4926,7 +4926,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         }
         const late = split(taken);
         toSiblings(late.groups);
-        if (late.rest.length) this.forwardLate(info, primary, late.rest, q ?? entry.first);
+        // w6047 (the w6177 review, F2): each late message goes on its own with its own send, so one old worker's own
+        // [wake_me] at the front drops only itself in forwardToHeirs, never a person's message joined behind it.
+        if (late.rest.length) this.forwardLate(info, primary, late.rest, q ?? entry.first, late.restSends);
       } catch (e) {
         const err = (e as Error).message;
         if (undo) {
@@ -4949,8 +4951,15 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * message was taken. They were absorbed into the move (roomMove answered true), so they go to the request's new worker now
    * (forwardToHeirs, as a later message to the old worker would), never dropped.
    */
-  private forwardLate(info: SessionInfo, primary: WorkItem, late: string[], q: QueuedSend | undefined) {
-    const lq: QueuedSend = { uuid: `w6047-late-${info.id}-${Date.now()}`, id: info.id, text: late.join('\n\n---\n\n'), from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), at: new Date().toISOString(), why: 'came during its move (w6047)' };
+  private forwardLate(info: SessionInfo, primary: WorkItem, late: string[], q: QueuedSend | undefined, sends?: QueuedSend[]) {
+    if (late.length > 1 && sends?.length === late.length) {
+      late.forEach((t, i) => this.forwardLate(info, primary, [t], sends[i], [sends[i]!]));
+      return;
+    }
+    // w6047 (the w6177 review, F3): one message with its own send keeps its own sender and images; its uuid is its own too.
+    const own = late.length === 1 && sends?.length === 1 ? sends[0] : undefined;
+    const by = own ?? q;
+    const lq: QueuedSend = { uuid: `w6047-late-${info.id}-${own?.uuid ?? Date.now()}`, id: info.id, text: late.join('\n\n---\n\n'), from: by?.from ?? 'system', ...(by?.requestedBy ? { requestedBy: by.requestedBy } : {}), ...(own?.images?.length ? { images: own.images } : {}), at: new Date().toISOString(), why: 'came during its move (w6047)' };
     const to = this.forwardToHeirs(info, [primary], lq);
     if (!to.length) console.warn(`room move: ${late.length} message(s) that came for worker ${info.id} during its move reached no new worker of ${primary.id} (w6047)`);
   }
@@ -5037,7 +5046,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     delete info.movedAway;
     this.store.putSession(info);
     if (!given.length) {
-      this.deliverHeld(info, reqs, q, texts);
+      this.deliverHeld(info, reqs, q, texts, undefined, sends);
       console.warn(`room move: starting ${reqs.map((x) => x.id).join(', ')} on ${to} failed (${err}); handed back meanwhile, so not given back to worker ${info.id} (w6047)`);
       this.store.append(info.id, { kind: 'system', text: `Its move did not start (${why}), but its requests were handed back meanwhile, and that stands (w6047).` });
       this.orchestrators.retireWhenFree(info.id);
