@@ -833,12 +833,12 @@ test('w5833: --editor-tmpdir takes on or off and refuses anything else, before t
   assert.equal(fs.existsSync(none), false);
 });
 
-test('w5863: worker update --path-fence writes off or warn to daemon.json as pathFence on macOS and Linux; unset carries it', () => {
+test('w5863: worker update --path-fence writes on, warn or off to daemon.json as pathFence on macOS and Linux; unset carries it', () => {
   const root = path.join(os.tmpdir(), `ffw-update-pfence-${process.pid}`);
   const l = layoutOf(root);
-  const written = (config: Record<string, unknown>, f: { pathFence?: 'off' | 'warn' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  const written = (config: Record<string, unknown>, f: { pathFence?: 'off' | 'warn' | 'on' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
   assert.equal('pathFence' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
-  for (const p of ['linux', 'darwin'] as const) for (const m of ['off', 'warn'] as const) assert.equal(written(BEAST_CONFIG, { pathFence: m }, p).pathFence, m, `${p} ${m}`);
+  for (const p of ['linux', 'darwin'] as const) for (const m of ['off', 'warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { pathFence: m }, p).pathFence, m, `${p} ${m}`);
   const had = { ...BEAST_CONFIG, pathFence: 'off' };
   assert.equal(written(had, {}).pathFence, 'off', 'unset carries it');
   assert.equal(written(had, { pathFence: 'warn' }).pathFence, 'warn', 'the switch replaces it');
@@ -851,14 +851,14 @@ test('w5863: worker update --path-fence writes off or warn to daemon.json as pat
   assert.throws(() => written(BEAST_CONFIG, { pathFence: 'off' }, 'win32'), /macOS and Linux only/);
 });
 
-test('w5863: --path-fence takes off or warn and refuses anything else, before the update touches anything', async () => {
+test('w5863: --path-fence takes on, warn or off and refuses anything else, before the update touches anything', async () => {
   assert.deepEqual(parseArgs(['update', '--root', '/r', '--path-fence', 'warn']).opts, { root: '/r', 'path-fence': 'warn' });
   assert.equal(pathFenceFlag(undefined), undefined);
-  for (const m of ['off', 'warn'] as const) assert.equal(pathFenceFlag(m), m);
-  for (const bad of ['on', 'OFF', 'enforce', '']) assert.throws(() => pathFenceFlag(bad), /--path-fence is off or warn/);
+  for (const m of ['off', 'warn', 'on'] as const) assert.equal(pathFenceFlag(m), m);
+  for (const bad of ['OFF', 'enforce', '']) assert.throws(() => pathFenceFlag(bad), /--path-fence is on, warn or off/);
   const none = path.join(os.tmpdir(), `ffw-pfence-none-${process.pid}`);
-  await assert.rejects(main(['update', '--root', none, '--path-fence', 'maybe']), /--path-fence is off or warn, not "maybe"/);
-  await assert.rejects(main(['update', '--root', none, '--path-fence']), /--path-fence is off or warn/);
+  await assert.rejects(main(['update', '--root', none, '--path-fence', 'maybe']), /--path-fence is on, warn or off, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--path-fence']), /--path-fence is on, warn or off/);
   assert.equal(fs.existsSync(none), false);
 });
 

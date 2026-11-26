@@ -136,8 +136,8 @@ export interface LinkUpdateFlags {
   storeLock?: 'off' | 'warn' | 'on';
   /** The editor temp folder on or off (w5833), macOS and Linux only: daemon.json `editorTmpdir`; unset: carried. A daemon that predates it ignores it. */
   editorTmpdir?: 'on' | 'off';
-  /** The path fence off or warn (w5863), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
-  pathFence?: 'off' | 'warn';
+  /** The path fence on, warn or off (w5863, w5899), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
+  pathFence?: 'off' | 'warn' | 'on';
   /** Medium agents' own temp root and cargo home, warn or on (w5862, w5869; docs/worker-root.md), any OS: daemon.json `mediumAgentFolders`; unset: carried. A daemon that predates it ignores it. */
   mediumAgentFolders?: 'warn' | 'on';
   /** The daemon's own temp folder on or off (w6000), any OS: daemon.json `daemonTmpdir`; unset: carried. A daemon that predates it ignores it. */

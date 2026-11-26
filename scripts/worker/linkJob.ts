@@ -227,7 +227,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.transcriptLock === 'on' || f.transcriptLock === 'off' ? { transcriptLock: f.transcriptLock } : {}),
     ...(f.storeLock === 'off' || f.storeLock === 'warn' || f.storeLock === 'on' ? { storeLock: f.storeLock } : {}),
     ...(f.editorTmpdir === 'on' || f.editorTmpdir === 'off' ? { editorTmpdir: f.editorTmpdir } : {}),
-    ...(f.pathFence === 'off' || f.pathFence === 'warn' ? { pathFence: f.pathFence } : {}),
+    ...(f.pathFence === 'off' || f.pathFence === 'warn' || f.pathFence === 'on' ? { pathFence: f.pathFence } : {}),
     ...(f.mediumAgentFolders === 'warn' || f.mediumAgentFolders === 'on' ? { mediumAgentFolders: f.mediumAgentFolders } : {}),
     ...(f.daemonTmpdir === 'on' || f.daemonTmpdir === 'off' ? { daemonTmpdir: f.daemonTmpdir } : {}),
     ...(f.toolsDiskLock === 'warn' || f.toolsDiskLock === 'on' ? { toolsDiskLock: f.toolsDiskLock } : {}),

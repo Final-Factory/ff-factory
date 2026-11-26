@@ -48,8 +48,14 @@ export interface WriteLockPaths {
   home?: string;
   /** The system temp folder Unity writes whatever TMPDIR says (default /tmp): create-only, its .dotnet writable. */
   tmp?: string;
-  /** More writable folders, each with its reason in daemon.json (`writeLockExtra`). */
+  /**
+   * More writable folders, each with its reason in daemon.json (`writeLockExtra`). One that holds a folder kept read-only
+   * (the root, one of the locked children such as tools-medium, or a folder in one, the shims among them) is left out, told through `dropped`:
+   * Landlock grants add up and cannot be denied back (w5899, w5872's review).
+   */
   extra?: string[];
+  /** Told of each `extra` or `extraRoots` folder left out, and why. */
+  dropped?: (folder: string, why: string) => void;
   /** The configured temp and sandboxes folders: one in the root opens its root child too (w5569). */
   workFolders?: (string | undefined)[];
   /**
@@ -90,7 +96,15 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // w5702: off, the transcripts folder is open whole, and made ahead (makeOpenRootChildren) even before any `on`, so a
   // claude locked before the switch keeps its own transcript once the switch moves them there (w5718's review).
   if (!p.transcriptLock) args.push('--rw', path.join(root, TRANSCRIPTS));
-  for (const r of p.extraRoots ?? []) args.push('--rw', r);
+  // w5899: a grant over a locked folder would open it (tools-medium/shims is first on every agent's PATH).
+  const locked = [...except].map((c) => path.join(root, c));
+  const opens = (e: string) => locked.find((l) => l === path.resolve(e) || l.startsWith(path.resolve(e) + path.sep) || path.resolve(e).startsWith(l + path.sep));
+  const keep = (e: string) => {
+    const l = opens(e);
+    if (l) p.dropped?.(e, `it holds or is inside ${l}, which workers must not write`);
+    return !l;
+  };
+  for (const r of (p.extraRoots ?? []).filter(keep)) args.push('--rw', r);
   if (p.unitySlots) args.push('--rw', p.unitySlots);
   if (p.runtimeDir) args.push('--sock', path.join(p.runtimeDir, 'cc-socks'));
   // w5562: the user bus and the systemd user manager's own sockets, through which `systemd-run --user` starts a job
@@ -109,7 +123,7 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
     const tmp = p.tmp ?? '/tmp';
     args.push('--create', tmp, '--rw', path.join(tmp, DOTNET_DIR));
   }
-  for (const e of p.extra ?? []) args.push('--rw', e);
+  for (const e of (p.extra ?? []).filter(keep)) args.push('--rw', e);
   return args;
 }
 
