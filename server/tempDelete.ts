@@ -164,7 +164,9 @@ export function tempOnlyDelete(cmd: string, ctx: TempDeleteContext): TempDeleteV
   const drive = /^[a-zA-Z]:\//.test(tmpRaw);
   const tmp = norm(tmpRaw, drive);
   const tag = (ctx.tag ?? path.posix.basename(tmpRaw)).toLowerCase();
-  const real = ctx.real ?? ((p: string) => { try { return fs.realpathSync(p); } catch { return undefined; } });
+  // w5915: the native realpath. A junction a Low-integrity process makes (every BEAST worker) points at \??\Global\F:\...,
+  // which Node's JavaScript realpath does not follow: it answered the link's own path, so a delete through it passed.
+  const real = ctx.real ?? ((p: string) => { try { return fs.realpathSync.native(p); } catch { return undefined; } });
   if (cmd.length > 4000) return no('a long command');
   if (/`|\$\(|<|\$\{[^}]*[:#%/!][^}]*\}/.test(cmd)) return no('a substitution, a redirect from a file or a computed variable');
   // Redirects: only to /dev/null or into a stream (2>&1).
@@ -549,7 +551,7 @@ function leadingCd(text: string, ctx: TempDeleteContext): string | undefined {
   const within = (x: string, root: string) => norm(x, d) === norm(root, d) || norm(x, d).startsWith(norm(root, d) + '/');
   const sandbox = ctx.sandbox && SANDBOX_DIR.test(slash(ctx.sandbox).replace(/\/+$/, '')) ? slash(ctx.sandbox).replace(/\/+$/, '') : undefined;
   if (!within(p, tmpRaw) && !(sandbox && within(p, sandbox))) return undefined;
-  const real = ctx.real ?? ((x: string) => { try { return fs.realpathSync(x); } catch { return undefined; } });
+  const real = ctx.real ?? ((x: string) => { try { return fs.realpathSync.native(x); } catch { return undefined; } });
   const r = real(p);
   if (m[4] !== '&&' && r === undefined) return undefined;
   if (r !== undefined) {

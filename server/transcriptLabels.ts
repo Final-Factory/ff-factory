@@ -25,6 +25,7 @@ import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sd
 import { findTranscript, projectSlug } from './claudeHome.ts';
 import { sessionIdOf } from './workerFence.ts';
 import { currentAccount, type Exec } from '../machine/lowIntegrity.ts';
+import { isLink } from './fsLink.ts';
 
 /** The folder label (inherited by what is made inside) and the file label. */
 const DIR_LOW = '(OI)(CI)low';
@@ -98,22 +99,7 @@ export const icaclsOf =
     }
   };
 
-/** A junction, a mount point or a symbolic link: Node's lstat answers each as a link on Windows. Missing: false. */
-export function isLink(p: string): boolean {
-  try {
-    if (fs.lstatSync(p).isSymbolicLink()) return true;
-  } catch {
-    return false;
-  }
-  // lstat alone is not enough: on LothDesktop's Node 24.22 it called a junction a plain folder (isSymbolicLink false,
-  // measured, w5774). Where `p` really is (the system resolves every redirect) differs from its folder's place plus its name.
-  try {
-    const real = fs.realpathSync.native(p);
-    return real.toLowerCase() !== path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)).toLowerCase();
-  } catch {
-    return true;
-  }
-}
+export { isLink } from './fsLink.ts';
 
 function* setLabelSteps(p: string, label: string, account: string | undefined): Steps<void> {
   if (isLink(p)) throw new Error(`${p} is a junction or link; not labelled (w5703)`);

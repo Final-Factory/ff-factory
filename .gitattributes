@@ -1,2 +1,7 @@
 # w5583: git hooks run under sh; CRLF from core.autocrlf on Windows must not reach them.
 server/gitHooks/* text eol=lf
+# w5915: the VM scripts and the POSIX installers run under bash on Linux and macOS, and prepush's shellcheck step
+# (deploy/vm/test/lint.sh) reads them on Windows too: a CRLF checkout from core.autocrlf breaks bash -n and shellcheck
+# (SC1017) there. Their test fixtures are compared byte for byte, so they stay LF as well.
+*.sh text eol=lf
+deploy/vm/** text eol=lf
