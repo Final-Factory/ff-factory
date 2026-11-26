@@ -147,8 +147,10 @@ The VM keeps no git and no GitHub token of its own: its network reaches only Ant
 (`fff-ops@.service` `IPAddressDeny=any`), and a token there would be one more secret in a shell that people's
 orchestrators drive. The route is the machines' own logins, over the ssh the worker already has:
 
-- **Where**: m3 first (its gh login), else beast (Ben's gh login, docs/vault.md section 13); never a machine on hold or
-  one the job rules out. Check first: `ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'`
+- **Where**: m3 first (its gh login), else biscuit; never a machine on hold or one the job rules out, and never a
+  Windows PC (beast, lothdesktop). gh on Windows keeps its login in Credential Manager, which an ssh session signed in
+  with a key cannot read: gh then sends no token and says "The token in default is invalid" (HTTP 401) while the login
+  is good (w5546, 2026-11-26; docs/machines.md, "A login GitHub refuses"). Check first: `ssh m3 'export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH; gh auth status 2>&1 | grep -v Token'`
   and `gh api repos/OWNER/REPO --jq .permissions`. A Mac's non-interactive ssh shell has no Homebrew on its PATH, hence the
   export.
 - **A branch delete** needs no clone: `gh api repos/OWNER/REPO/branches/BRANCH --jq .commit.sha` (it is there),
