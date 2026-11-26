@@ -128,7 +128,8 @@ test('w1996: a borrowed player-slot pair is one no live lease holds; it is lease
   const alive = (pid: number) => pid === 4242;
   lease('slot1-1', 4242); // slot1's client is playing
   lease('slot2-0', 999); // a dead pid: stale
-  lease('slot3-0', 1, 'beast'); // a fresh lease from another host counts
+  // w5915: never this machine's own name (it was 'beast', so the test failed on BEAST, where pid 1 is not alive).
+  lease('slot3-0', 1, `not-${os.hostname().toLowerCase()}`); // a fresh lease from another host counts
   assert.equal(slotFree(path.join(root, 'slot1-1'), alive), false);
   assert.equal(slotFree(path.join(root, 'slot2-0'), alive), true);
   assert.equal(slotFree(path.join(root, 'slot3-0'), alive), false);
