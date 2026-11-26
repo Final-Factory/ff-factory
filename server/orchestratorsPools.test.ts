@@ -379,6 +379,39 @@ test("w2231: a worker whose Claude pool is held is Blocked on that pool, gives u
   assert.equal(store.sessions.get(a.id)!.machineSandbox, 'beta', 'placed again on a free sandbox');
 });
 
+test("w6092: a dispatcher's message_agent naming a request, parked on a held pool, is linked before it is sent, so a 'running' drain holds it, never drops it", async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const held = heldVault(t);
+  const { store, agents, o, dispatcher, call, sessions } = env;
+  agentsRoom(agents, ['pc']);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2' }, { id: 'w3' }]);
+  const { pool, pools, usageClear } = lothPool();
+  (agents as unknown as { usageRef: (ref: string) => unknown }).usageRef = (ref) => poolForRef(ref, pools());
+  const watch = new BlockerWatch({ store, orchestrators: o, usageClear, now: () => Date.parse('2026-10-12T12:35:00Z') });
+  const a = await startedFor(env, 'w1', { extra_agent: false });
+  // The dispatcher sends it the next request (as w6092 came to w5937's worker) while its pool is held: the message parks.
+  held.on = true;
+  const sent = await call(dispatcher().info, 'message_agent', { session_id: a.id, work_id: 'w2', title: 'follow-up', session: 'same', session_reason: 'a fix for what it shipped', text: 'A follow-up for you.' });
+  assert.equal(sent.isError, false, sent.text);
+  assert.equal(sessions.parked(a.id).length, 1, 'parked on its pool');
+  // Its own request closes while the message waits, and a drain that lets only its running workers finish is set on pc meanwhile.
+  store.putWork({ ...store.work.get('w1')!, status: 'done' });
+  store.putWork({ ...store.work.get('w3')!, humanAsked: true });
+  const drain = await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: 'Hold new work on pc and let the running workers finish', who: 'Lothsahn', work_id: 'w3' });
+  assert.ok(!drain.isError, drain.text);
+  assert.equal(store.machines.get('pc')!.drain?.resumes, 'running');
+  // The pool frees: the parked message is unparked, and the drain holds it (w2 open, on it), never drops it.
+  held.on = false;
+  pool.serving = true;
+  await watch.tick();
+  sessions.drain();
+  await new Promise((res) => setImmediate(res));
+  assert.ok(!store.readTranscript(a.id).some((e) => e.kind === 'system' && /was not delivered/.test(e.text)), store.readTranscript(a.id).filter((e) => e.kind === 'system').map((e) => e.text).join(' | '));
+  assert.ok(sessions.queued().some((q) => q.id === a.id && q.text.includes('A follow-up for you.')), 'held on the drain until it is lifted');
+  // w2 was linked to its worker before the send, not left for a resume that never links it (another worker could be started on it).
+  assert.ok(store.work.get('w2')!.sessionIds.includes(a.id));
+});
+
 test("w1463: a machine's gh login reaches list_machines, the Capacity block, start_agent's note and the worker's brief, as names only", async (t) => {
   const token = 'gho_' + 'Z9y8X7w6V5u4T3s2R1q0P9o8N7m6L5k4J3i2';
   const logs: string[] = [];

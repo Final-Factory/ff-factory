@@ -7661,11 +7661,20 @@ ${w.repo ?? ''}
             const fresh = item && unsent;
             // w4608: where a worker between turns was, and why its sandbox stays its, read before the send places it.
             const before = w.live ? undefined : { sandbox: w.info.machineSandbox, released: !!w.info.placeReleased, stay: this.placeAgain.stayWhy(w.info) };
-            await this.sendWithAttachments(session_id, `${wrap}${text}${why ? `
+            // w6092: the request is linked before the send, so the send queue sees the worker on it from its first pass. Linked
+            // after, a message parked on its Claude pool (w2231) was never linked at all, and once the worker's own request
+            // closed, a 'running' drain dropped it as a worker with no open request (Agents.drainOrphan). A send that parks now
+            // blocks this request on the pool with the rest (poolHoldBlocked); a send refused outright puts the request back.
+            const was = work_id ? structuredClone(this.store.work.get(work_id)) : undefined;
+            if (work_id) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
+            try {
+              await this.sendWithAttachments(session_id, `${wrap}${text}${why ? `
 
 [session] ${item!.id} came to this session, not a new one: ${why}` : ''}${fresh ? requestAsFiled(item, text) : ''}${fresh && item.source ? workerRules(item, this.sandboxBranchOf({ machine: w.info.machineId, machineSandbox: w.info.machineSandbox })) : ''}${fresh ? requestLineRule(item) : ''}`, from, { requestedBy, attachments: files });
-            // w2231: a message parked on its Claude pool has just Blocked the request on that pool; the link waits for its resume.
-            if (work_id && !this.sessions.parked(session_id).length) this.orchestrators.linkWorker(work_id, w.info, `sent to ${this.orchestrators.workerLine(w.info.id)}, already on it`, { overrideGate: override_gate });
+            } catch (e) {
+              if (was) this.store.putWork(was);
+              throw e;
+            }
             if (newTitle) this.sessions.setTitle(session_id, newTitle);
             return `Sent, for ${requestedBy.displayName}${work_id ? ` (${work_id})` : ''}${sent(files.length)}.${why ? ` Same session (${why}).` : ''}${newTitle ? ` It is now "${newTitle}".` : ''}${Agents.goneLine(files)}${this.queuedLine(session_id)}${before ? this.resumeWhere(session_id, before) : ''}`;
           }),
