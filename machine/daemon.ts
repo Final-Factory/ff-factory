@@ -77,7 +77,7 @@ import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
-import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
+import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
@@ -1319,10 +1319,12 @@ export class Daemon {
           first: {
             plan: async () =>
               planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
-            report: (items, ms) =>
-              log(`clean-up: ffu slots first (report-only, w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`),
+            report: (items, ms, run) =>
+              log(
+                `clean-up: ffu slots first (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
+              ),
           },
-          busyNow: runnerBusyNow(() => this.procs()),
+          busyNow: anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard())),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
