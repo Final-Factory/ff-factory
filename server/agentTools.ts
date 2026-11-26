@@ -331,16 +331,18 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
     // The workers' folder first (its lines are the ones the rollout reads, machineRollout.ts), then the Medium agents' one.
     const x = { co: keepCo, legacy, base, run, env, sh, marker, latest };
     const code = await registerInto(root, d, { ...x, claudeDir, label: '' });
-    if (code !== EXIT.ok) return code;
     const medium = o.medium && path.resolve(o.medium) !== path.resolve(claudeDir) ? o.medium : undefined;
     if (medium) {
       fs.mkdirSync(medium, { recursive: true });
       const mBefore = installedVersions(readJson(path.join(medium, 'plugins', 'installed_plugins.json')));
       const label = ` (Medium agents, ${medium})`;
       d.say(`${LINE.before.replace(/:$/, label + ':')} ${formatVersions(mBefore)}`);
+      // The Medium agents' folder is refreshed even when the workers' one failed (w5946 F6): what a worker can do to its own
+      // folder must not keep Medium agents on old plugins. The first failure is still the answer.
       const m = await registerInto(root, d, { ...x, env: { ...env, CLAUDE_CONFIG_DIR: medium }, claudeDir: medium, label });
-      if (m !== EXIT.ok) return m;
+      if (code === EXIT.ok && m !== EXIT.ok) return m;
     }
+    if (code !== EXIT.ok) return code;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -358,8 +360,9 @@ export async function publishAgentTools(root: string, d: PublishDeps, o: { claud
 export async function fencedRegisterEnv(d: Pick<PublishDeps, 'exec' | 'say'>, claudeDir: string, env: NodeJS.ProcessEnv, label = ''): Promise<NodeJS.ProcessEnv | undefined> {
   const mp = path.join(claudeDir, 'plugins', 'marketplaces', 'final-factory-agents');
   let rows: ReturnType<typeof parseScan> = [];
+  const fence = ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${HOOKS}`];
   if (fs.existsSync(mp)) {
-    const r = await d.exec('git', ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${HOOKS}`, '-C', mp, 'config', '--show-scope', '-z', '--get-regexp', SCANNED_KEYS], { env, timeoutMs: 60_000 });
+    const r = await d.exec('git', [...fence, '-C', mp, 'config', '--show-scope', '-z', '--get-regexp', SCANNED_KEYS], { env, timeoutMs: 60_000 });
     // Exit 1 is "no key matched".
     if (r.code === 0) rows = parseScan(r.stdout);
     else if (r.code !== 1) d.say(`WARNING: could not read the marketplace checkout's git config${label} (${tail(r)}); its git runs with the fixed fence only.`);
@@ -367,11 +370,15 @@ export async function fencedRegisterEnv(d: Pick<PublishDeps, 'exec' | 'say'>, cl
   const planted = rows.filter((r) => !['system', 'global', 'command', 'unknown'].includes(r.scope));
   if (planted.length) d.say(`WARNING: the marketplace checkout ${mp}${label} sets ${[...new Set(planted.map((r) => r.key))].join(', ')} in its own config; the refresh runs with them overridden (w5870). Look at who wrote it, or run registerAgents.sh --reinstall there.`);
   // A URL rewrite cannot be overridden by value (safeGit refuses the call, w5573): it could point the refresh at another
-  // repository, whose plugins every agent would then load. Refused here too.
-  const rewrite = planted.find((r) => /^url\..+\.(insteadof|pushinsteadof)$/.test(r.key));
-  if (rewrite) {
-    d.say(`FAILED: the marketplace checkout ${mp}${label} rewrites remote URLs (${rewrite.key}), so its refresh could fetch another repository; the plugins stay as they were. Remove it (\`git -C ${mp} config --local --unset-all ${rewrite.key}\`) or run registerAgents.sh --reinstall.`);
-    return undefined;
+  // repository, whose plugins every agent would then load. So it is taken out of that config, said, and the refresh goes on
+  // (w5946 F6: a worker who plants one must not be able to stop every refresh); only a rewrite that stays stops this folder's.
+  for (const key of new Set(planted.filter((r) => /^url\..+\.(insteadof|pushinsteadof)$/.test(r.key)).map((r) => r.key))) {
+    const u = await d.exec('git', [...fence, '-C', mp, 'config', '--local', '--unset-all', key], { env, timeoutMs: 60_000 });
+    if (u.code !== 0 && u.code !== 5) {
+      d.say(`FAILED: the marketplace checkout ${mp}${label} rewrites remote URLs (${key}), so its refresh could fetch another repository, and the rewrite could not be removed (${tail(u)}); this folder's plugins stay as they were. Remove it (\`git -C ${mp} config --local --unset-all ${key}\`) or run registerAgents.sh --reinstall.`);
+      return undefined;
+    }
+    d.say(`WARNING: the marketplace checkout ${mp}${label} rewrote remote URLs (${key}), so its refresh could have fetched another repository; it is removed from that checkout's config (w5870). Look at who wrote it.`);
   }
   return withConfigFirst(env, [...FIXED_GIT_CONFIG, ...scannedOverrides(rows)]);
 }

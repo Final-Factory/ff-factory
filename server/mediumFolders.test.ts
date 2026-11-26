@@ -181,12 +181,13 @@ for (const mode of ['on', 'warn'] as const) {
   });
 }
 
-for (const mode of ['on', 'warn'] as const) {
-  test(`w5870: a launch's env with mediumAgentCaches "${mode}": Medium agents ${mode === 'on' ? 'get cache-medium' : 'are told the switch'}, a sandbox agent gets neither`, (t) => {
+// w5946 F5: ffu-slot refuses a Medium agent ("on") only once its own temp folder (mediumAgentFolders) is outside the workers' too.
+for (const [mode, folders, said] of [['on', undefined, 'warn'], ['on', 'on', 'on'], ['warn', 'on', 'warn']] as const) {
+  test(`w5870: a launch's env with mediumAgentCaches "${mode}" and mediumAgentFolders ${folders ?? 'unset'}: Medium agents ${mode === 'on' ? 'get cache-medium' : 'keep the workers\' caches'} and ffu-slot says "${said}", a sandbox agent gets neither`, (t) => {
     const root = install(t);
     const tempDir = path.join(root, 'tmp');
     const d = new Daemon(
-      { portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(root, 'repo'), appDir: path.join(root, 'daemon'), root, tempDir, maxEventsFile: null, workerIntegrity: 'low', writeLock: true, workerFence: 'seatbelt', mediumAgentCaches: mode },
+      { portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(root, 'repo'), appDir: path.join(root, 'daemon'), root, tempDir, maxEventsFile: null, workerIntegrity: 'low', writeLock: true, workerFence: 'seatbelt', mediumAgentCaches: mode, ...(folders ? { mediumAgentFolders: folders } : {}) },
       () => {
         throw new Error('no sessions here');
       },
@@ -196,7 +197,7 @@ for (const mode of ['on', 'warn'] as const) {
     const i = d as unknown as Inside;
     const medium = i.agentTempEnv('med-1', false);
     const sandbox = i.agentTempEnv('sb-1', true);
-    assert.equal(medium[MEDIUM_AGENT_VAR], mode);
+    assert.equal(medium[MEDIUM_AGENT_VAR], said);
     assert.equal(sandbox[MEDIUM_AGENT_VAR], undefined);
     assert.equal(sandbox.DOTNET_CLI_HOME, undefined, 'a sandbox agent inherits the workers\' caches');
     if (mode === 'on') {

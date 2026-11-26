@@ -22,9 +22,10 @@
  *
  * w5870: the slots are in a folder workers write (Low on Windows), so a build there runs build scripts, target binaries and a
  * slot's `.cargo/config.toml` that any worker could have written. A sandbox agent is a worker itself; a Medium agent (one not
- * in a sandbox, outside the fences) is not, so `take` and `where` warn it, and refuse it once daemon.json
- * "mediumAgentCaches" is "on" (the daemon tells it in MEDIUM_AGENT_VAR, machine/mediumFolders.ts): it builds in its own temp
- * folder instead, which no worker writes.
+ * in a sandbox, outside the fences) is not, so `take` and `where` warn it, and refuse it (exit 5) once the daemon says "on" in
+ * MEDIUM_AGENT_VAR (machine/mediumFolders.ts): daemon.json "mediumAgentCaches" is "on" and w5862's "mediumAgentFolders" gave
+ * the agent its own temp folder, which no worker writes, so it builds there instead (w5946 F5). A Medium agent's `take` keeps its
+ * own CARGO_HOME and never gets the workers' `<root>/cache/cargo` (w5947): crates and build scripts a worker could have planted.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -525,9 +526,16 @@ export function releaseSlot(d: FfuSlotDeps): string | undefined {
   });
 }
 
+/** `take` and `where`'s exit when a Medium agent is refused a slot (w5870; 4 is "no slot free", w5946 F4). */
+export const EXIT_MEDIUM_REFUSED = 5;
+
+/** The CARGO_HOME `take` exports: the machine's one in the root for a worker; none for a Medium agent, which keeps its own (w5947). */
+export const slotCargoHome = (d: Pick<FfuSlotDeps, 'cargoHome' | 'medium'>) => (d.medium ? undefined : d.cargoHome);
+
 export const USAGE = `usage: ffu-slot take [--branch <b>] [--base <b>] [--wait <minutes>] | where | release | list | sweep
   take: eval "$(ffu-slot take --branch <your branch>)" gives you an ffu checkout with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR) and cds into it
     exit 4: no slot is free; --wait <minutes> waits for one. Never build ffu elsewhere: wait, or end your turn with wake_me and take again
+    exit 5: refused to an agent outside the worker fences (w5870): build in a clone in your own temp folder, as the message says
   where: the same lines for the slot you hold (exit 1 if none)
   release: give your slot back once your work is pushed (a stopped worker's pushed slot frees itself)
   list: every slot, its holder, branch and whether it is free
@@ -550,9 +558,9 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     if (d.medium === 'on') {
       d.say(`ffu-slot: refused: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write, so a build there would run their build scripts and cargo config outside the fence; ${own} (w5870)
 `);
-      return 4;
+      return EXIT_MEDIUM_REFUSED;
     }
-    d.say(`ffu-slot: WARNING: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write: a build there runs build scripts and a cargo config any worker could have written. Once daemon.json "mediumAgentCaches" is "on" this is refused; ${own} (w5870)
+    d.say(`ffu-slot: WARNING: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write: a build there runs build scripts and a cargo config any worker could have written. Once daemon.json "mediumAgentFolders" and "mediumAgentCaches" are both "on" (your own temp folder then no worker writes) this is refused (w5870)
 `);
   }
   try {
@@ -562,7 +570,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
       const wait = opt('--wait');
       if (wait !== undefined && !(Number(wait) >= 0)) throw new Error(`not a number of minutes: ${wait}`);
       const id = wait ? takeSlotWaiting(d, { branch, base: opt('--base') }, Number(wait)) : takeSlot(d, { branch, base: opt('--base') });
-      d.write(envLines(d.root, id, d.cargoHome));
+      d.write(envLines(d.root, id, slotCargoHome(d)));
       d.say(`ffu-slot: ${id}: ${fwd(slotCheckout(d.root, id))} (target ${fwd(slotTarget(d.root, id))})\n`);
       return 0;
     }
@@ -572,7 +580,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
         d.say(`ffu-slot: you hold no slot: take one with eval "$(ffu-slot take --branch <your branch>)"\n`);
         return 1;
       }
-      d.write(envLines(d.root, mine.id, d.cargoHome));
+      d.write(envLines(d.root, mine.id, slotCargoHome(d)));
       return 0;
     }
     if (cmd === 'release') {

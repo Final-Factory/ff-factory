@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
@@ -122,6 +122,16 @@ test('w3764: no new slot below the free-disk floor, and take prints the lines ev
   // w5501: the machine's cargo home inside the root, where a fenced worker can fetch a new crate.
   assert.match(lines, /^export CARGO_HOME='.*\/cache\/cargo'$/m);
   assert.match(lines, /^cd '.*ffu-sandboxes\/slot1\/ffu'$/m);
+  // w5947: an agent outside the fences (the daemon set MEDIUM_AGENT_VAR) keeps its own CARGO_HOME, never the workers' one.
+  for (const medium of ['warn', 'on'] as const) {
+    for (const cmd of ['take', 'where']) {
+      const m = Object.assign(deps(root, 'aaaa1111'), { medium });
+      ffuSlotMain([cmd], m);
+      assert.doesNotMatch(m.out.join(''), /CARGO_HOME/, `${medium} ${cmd}`);
+    }
+  }
+  assert.equal(slotCargoHome({ cargoHome: '/w/cache/cargo', medium: 'warn' }), undefined);
+  assert.equal(slotCargoHome({ cargoHome: '/w/cache/cargo' }), '/w/cache/cargo');
 });
 
 // ---- the clean-up rule

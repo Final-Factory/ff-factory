@@ -146,6 +146,8 @@ export interface MediumCachesInput {
   fenced: boolean;
   mode?: string;
   extra?: (string | undefined)[];
+  /** Folders the fences open whole wherever they are (workerWritable's `opened`; w5946 F3). */
+  opened?: (string | undefined)[];
   platform?: NodeJS.Platform;
   mkdir?: (dir: string) => void;
 }
@@ -161,8 +163,9 @@ export function planMediumCaches(i: MediumCachesInput): MediumCaches {
   const { root } = i;
   if (!root || !i.fenced) return { env: {}, lines: [] };
   const extra = i.extra ?? [];
+  const opened = i.opened ?? [];
   const mkdir = i.mkdir ?? ((d: string) => fs.mkdirSync(d, { recursive: true }));
-  const exposed = Object.entries(workerToolCacheEnv(root, i.platform)).filter(([, v]) => path.isAbsolute(v) && workerWritable(v, root, extra));
+  const exposed = Object.entries(workerToolCacheEnv(root, i.platform)).filter(([, v]) => path.isAbsolute(v) && workerWritable(v, root, extra, opened));
   if (!exposed.length) return { env: {}, lines: [] };
   const why = 'a fenced worker could plant a browser, a .NET tool, a package or a wheel there that a Medium agent then runs outside the fence';
   if (i.mode !== 'on') {
@@ -172,7 +175,7 @@ export function planMediumCaches(i: MediumCachesInput): MediumCaches {
   const kept: string[] = [];
   for (const [k, v] of exposed) {
     const to = mediumCacheFor(root, v);
-    if (!to || workerWritable(to, root, extra)) {
+    if (!to || workerWritable(to, root, extra, opened)) {
       kept.push(`${k} (${to ?? v} is in a folder workers write)`);
       continue;
     }
@@ -193,11 +196,11 @@ export function planMediumCaches(i: MediumCachesInput): MediumCaches {
  * The user PATH's entries inside a folder workers write, and the PATH without them (w5870). `value` is the raw registry value
  * (a REG_EXPAND_SZ one unexpanded); `expand` turns an entry's %VARS% into a path. Exported for tests.
  */
-export function planUserPath(value: string, root: string, extra: (string | undefined)[], expand: (s: string) => string): { exposed: string[]; kept: string } {
+export function planUserPath(value: string, root: string, extra: (string | undefined)[], expand: (s: string) => string, opened: (string | undefined)[] = []): { exposed: string[]; kept: string } {
   const parts = value.split(';');
   const bad = (e: string) => {
     const p = expand(e.trim()).replace(/^"|"$/g, '');
-    return !!p && path.isAbsolute(p) && workerWritable(p, root, extra);
+    return !!p && path.isAbsolute(p) && workerWritable(p, root, extra, opened);
   };
   return { exposed: parts.filter((e) => e.trim() && bad(e)), kept: parts.filter((e) => !(e.trim() && bad(e))).join(';') };
 }
@@ -205,32 +208,45 @@ export function planUserPath(value: string, root: string, extra: (string | undef
 /** Runs a PowerShell script and answers its output (the exec seam tests replace). */
 export type RunPs = (script: string) => Promise<{ code: number | null; stdout: string; stderr: string }>;
 
-const PS_READ = "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'); if ($k -and $k.GetValueNames() -contains 'Path') { $k.GetValueKind('Path').ToString(); $k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') }";
-const psQuote = (s: string) => `'${s.replace(/'/g, "''")}'`;
-/** The PowerShell that writes the user PATH back with its registry type kept. Exported for tests. */
-export const psWritePath = (value: string, kind: string) =>
-  `$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); $k.SetValue('Path', ${psQuote(value)}, [Microsoft.Win32.RegistryValueKind]::${kind === 'ExpandString' ? 'ExpandString' : 'String'}); $k.Close(); 'ok'`;
+// The PATH goes both ways as base64 of its UTF-8 bytes (w5946 F1, F2): PowerShell's console output would decode a non-ASCII
+// entry through the OEM code page, and the script then carries only [A-Za-z0-9+/=], so no quote of any kind can end its string.
+const PS_READ = "$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment'); if ($k -and $k.GetValueNames() -contains 'Path') { $k.GetValueKind('Path').ToString(); [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames'))) }";
+const b64 = (s: string) => Buffer.from(s, 'utf8').toString('base64');
+/**
+ * The PowerShell that writes the user PATH back with its registry type kept (exported for tests). It writes only if the value
+ * is still `old` (another writer since the read wins), reads its own write back, and on a mismatch puts `old` back: it prints
+ * ok, changed or restored.
+ */
+export const psWritePath = (value: string, kind: string, old: string) => {
+  const t = `[Microsoft.Win32.RegistryValueKind]::${kind === 'ExpandString' ? 'ExpandString' : 'String'}`;
+  const dec = (s: string) => `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${b64(s)}'))`;
+  return `$k = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true); $old = ${dec(old)}; $new = ${dec(value)}; ` +
+    `if ([string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -cne $old) { 'changed' } else { $k.SetValue('Path', $new, ${t}); ` +
+    `if ([string]$k.GetValue('Path', '', 'DoNotExpandEnvironmentNames') -cne $new) { $k.SetValue('Path', $old, ${t}); 'restored' } else { 'ok' } }; $k.Close()`;
+};
 
 /**
  * The user PATH check at the daemon's start (Windows only; no other OS keeps a PATH in a registry): warn, or with the switch
  * on take the exposed entries off, the value's kind kept (REG_EXPAND_SZ stays expandable). Processes started after the next
  * sign-in see it; running ones keep theirs. Never throws: answers the lines to log.
  */
-export async function fixUserPath(o: { root?: string; fenced: boolean; mode?: string; extra?: (string | undefined)[]; platform?: NodeJS.Platform; runPs: RunPs; expand?: (s: string) => string }): Promise<string[]> {
+export async function fixUserPath(o: { root?: string; fenced: boolean; mode?: string; extra?: (string | undefined)[]; opened?: (string | undefined)[]; platform?: NodeJS.Platform; runPs: RunPs; expand?: (s: string) => string }): Promise<string[]> {
   if (!o.root || !o.fenced || (o.platform ?? process.platform) !== 'win32') return [];
   const root = o.root;
   const expand = o.expand ?? ((s: string) => s.replace(/%([^%]+)%/g, (m, n: string) => process.env[n] ?? m));
   try {
     const r = await o.runPs(PS_READ);
     if (r.code !== 0) return [`WARNING medium agent caches: could not read the user PATH (${(r.stderr || r.stdout).trim().slice(0, 200)}); it stays as it is (w5870)`];
-    const [kind, ...rest] = r.stdout.replace(/\r/g, '').split('\n');
+    const [kind, enc = ''] = r.stdout.replace(/\r/g, '').split('\n');
     if (!kind?.trim()) return [];
-    const plan = planUserPath(rest.join('\n').replace(/\n+$/, ''), root, o.extra ?? [], expand);
+    const value = Buffer.from(enc.trim(), 'base64').toString('utf8');
+    if (value.includes('\uFFFD')) return ['WARNING medium agent caches: the user PATH did not read back as UTF-8; it stays as it is (w5870)'];
+    const plan = planUserPath(value, root, o.extra ?? [], expand, o.opened ?? []);
     if (!plan.exposed.length) return [];
     const list = plan.exposed.join(', ');
     if (o.mode !== 'on') return [`WARNING medium agent caches: the user PATH holds ${list}, in a folder workers write; every Medium process of this account searches it, so a program planted there runs outside the fence. daemon.json "mediumAgentCaches": "on" takes it off (w5870)`];
-    const w = await o.runPs(psWritePath(plan.kept, kind.trim()));
-    if (w.code !== 0 || !/ok/.test(w.stdout)) return [`WARNING medium agent caches: could not take ${list} off the user PATH (${(w.stderr || w.stdout).trim().slice(0, 200)}); it stays as it is (w5870)`];
+    const w = await o.runPs(psWritePath(plan.kept, kind.trim(), value));
+    if (w.code !== 0 || w.stdout.trim() !== 'ok') return [`WARNING medium agent caches: could not take ${list} off the user PATH (${(w.stderr || w.stdout).trim().slice(0, 200)}); it stays as it is (w5870)`];
     return [`medium agent caches: took ${list} off the user PATH (a folder workers write); processes started after the next sign-in no longer search it (w5870)`];
   } catch (e) {
     return [`WARNING medium agent caches: the user PATH check failed (${(e as Error).message}); it stays as it is (w5870)`];

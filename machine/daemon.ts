@@ -1330,11 +1330,16 @@ export class Daemon {
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
   private mediumMemo?: MediumFolders;
+  /** Folders the fences open whole wherever they are (w5869, w5871's F3; mediumFolders.ts workerWritable's `opened`). */
+  private fenceOpened(): string[] {
+    const c = this.cfg;
+    return [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])];
+  }
   /** w5862: Medium agents' own temp root and cargo home (machine/mediumFolders.ts), decided and logged once. */
   mediumFolders(): MediumFolders {
     if (!this.mediumMemo) {
       const c = this.cfg;
-      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])] });
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
       for (const line of this.mediumMemo.lines) log(line);
     }
     return this.mediumMemo;
@@ -1345,7 +1350,7 @@ export class Daemon {
   mediumCaches(): MediumCaches {
     if (!this.cachesMemo) {
       const c = this.cfg;
-      this.cachesMemo = planMediumCaches({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()] });
+      this.cachesMemo = planMediumCaches({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
       for (const line of this.cachesMemo.lines) log(line);
     }
     return this.cachesMemo;
@@ -1355,7 +1360,7 @@ export class Daemon {
   async checkUserPath(): Promise<void> {
     const c = this.cfg;
     const runPs = (script: string) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
-    for (const line of await fixUserPath({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], runPs })) log(line);
+    for (const line of await fixUserPath({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened(), runPs })) log(line);
   }
 
   /** The agents' temp roots: the one every agent had, and Medium agents' own once w5862's switch is on. */
@@ -1384,13 +1389,14 @@ export class Daemon {
   /**
    * A new agent's TMP, TEMP and TMPDIR (cleanup.ts sessionTempEnv) and, for a Medium agent once w5862's switch is on, its
    * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root. w5870: a
-   * Medium agent also gets its own tool caches once that switch is on, and MEDIUM_AGENT_VAR either way (ffu-slot reads it).
+   * Medium agent also gets its own tool caches once that switch is on, and MEDIUM_AGENT_VAR either way (ffu-slot reads it):
+   * "on" only once its own temp folder was made too, since ffu-slot then sends it to build there (w5946 F5).
    */
   private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
     const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
     const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
     if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
-    const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' ? 'on' : 'warn' };
+    const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' && own.TMP ? 'on' : 'warn' };
     return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}), ...caches };
   }
 

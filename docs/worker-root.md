@@ -534,16 +534,24 @@ warn-only-first rule, lothsahn). What a Medium agent or the daemon still ran fro
   sandbox agents keep `cache`. A folder that cannot be made keeps the workers' one with a WARNING. The daemon's own env keeps
   `cache`: sandbox agents inherit it, and the daemon runs none of those tools.
 - The user PATH: .NET's first run adds `$DOTNET_CLI_HOME/.dotnet/tools` to HKCU's PATH (BEAST's held
-  `F:fw\cache\dotnet\.dotnet	ools`, measured), which every Medium process of the account searches. `fixUserPath` (Windows,
+  `F:\ffw\cache\dotnet\.dotnet\tools`, measured), which every Medium process of the account searches. `fixUserPath` (Windows,
   at start) warns; with `"on"` it writes the PATH back without the entries in worker-writable folders, its registry kind kept.
+  The value goes both ways as base64 of its UTF-8 bytes (a non-ASCII entry survives, and no quote reaches the script); the
+  write happens only if the PATH is still what was read, is read back, and puts the old value back on a mismatch (w5946).
+  "Folders workers write" here and for the caches includes what the fences open whole: workerIntegrityAllow,
+  writeLockExtra and the transcripts folder while transcriptLock is off (the same list as `planMediumFolders`).
 - The ffu slots (`<root>/ffu-sandboxes/slotN`, checkout and target): the daemon tells a Medium agent the switch in
-  `FF_MEDIUM_AGENT_CACHES`; `ffu-slot take` and `where` then warn, or with `"on"` refuse (exit 4) and say to build in its own
-  `$TMPDIR`. Not covered yet: the CARGO_HOME `take` exports is the workers' one.
+  `FF_MEDIUM_AGENT_CACHES`; `ffu-slot take` and `where` then warn, or refuse (exit 5, `EXIT_MEDIUM_REFUSED`; 4 is "no slot
+  free") and say to build in a clone in its own `$TMPDIR`. The daemon says `"on"` only when `mediumAgentCaches` is `"on"`
+  and w5862's `mediumAgentFolders` made the agent's own temp folder, so that `$TMPDIR` is one no worker writes (w5946 F5).
+  A Medium agent's `take` and `where` print no CARGO_HOME: it keeps its own, never the workers' `<root>/cache/cargo` (w5947).
 - Always, no switch: a Medium agent's `FF_SKILLS` fallback is only `tools-medium` (`server/pluginPaths.ts` `medium`), never
   the old `<root>/tools` checkout; and the plugin refresh `worker.ts tools` runs (`registerAgents.sh`, then claude's own git
   in `<CLAUDE_CONFIG_DIR>/plugins/marketplaces/final-factory-agents`) gets safeGit's fence as command-scope config
   (`fencedRegisterEnv`, `server/agentTools.ts`): the fixed keys, a planted program key overridden and named in a WARNING, a
-  planted URL rewrite refused (the plugins stay as they were).
+  planted URL rewrite removed from that checkout's config with a WARNING (`git config --local --unset-all`, fenced; only one
+  that cannot be removed stops that folder's refresh). The Medium agents' folder is refreshed even when the workers' one
+  failed (w5946 F6).
 Tests: `server/mediumCaches.test.ts`, `server/mediumFolders.test.ts`.
 
 **uv's tool folder, split the same way** (w5693). `uvx` takes a temp file in uv's tool folder (`UV_TOOL_DIR`, default
