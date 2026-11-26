@@ -7,7 +7,7 @@ import { Daemon, type Probes } from '../machine/daemon.ts';
 import { MEDIUM_CHILDREN, lowTargets, openChildren } from '../machine/lowIntegrity.ts';
 import { MEDIUM_AGENT_VAR, mediumCargoHomeDir, mediumTempRoot, planMediumFolders, workerWritable } from '../machine/mediumFolders.ts';
 import { LOCKED_CHILDREN } from '../machine/writeLock.ts';
-import { sessionTempDir, sessionTempEnv } from './cleanup.ts';
+import { DEFAULT_CLEANUP, cleanupRules, hostCleanupEnv, sessionTempDir, sessionTempEnv } from './cleanup.ts';
 import { READ_ONLY_IN_ROOT } from './workerFence.ts';
 
 // w5862 (w5838's planting audit): Medium agents' TMP and CARGO_HOME sat in folders the worker fences let workers write
@@ -101,6 +101,27 @@ test("w5862: a folder that cannot be made keeps today's with a WARNING; the othe
   assert.ok(m.lines.some((l) => /^WARNING medium agent folders: could not make .*tmp-medium \(EACCES.*keep TMP\/TEMP root/.test(l)), m.lines.join('\n'));
 });
 
+test('w5869 (F3): a folder a fence opens whole (workerIntegrityAllow, writeLockExtra, transcripts) counts as one workers write', (t) => {
+  const root = install(t);
+  const allow = path.join(os.tmpdir(), 'medium-folders-allowed');
+  assert.ok(workerWritable(path.join(allow, 'cargo'), root, [], [allow]), 'outside the root');
+  assert.ok(workerWritable(path.join(root, 'transcripts', 'x'), root, [], [path.join(root, 'transcripts')]), 'a root child');
+  assert.ok(!workerWritable(path.join(root, 'cache-medium', 'cargo'), root, [], [path.join(root, 'transcripts')]));
+  // A CARGO_HOME there is exposed (warned, then moved); a target there is refused with a WARNING.
+  const warn = planMediumFolders({ root, fenced: true, tempRoot: path.join(os.tmpdir(), 'not-the-root'), cargoHome: path.join(allow, 'cargo'), opened: [allow] });
+  assert.match(warn.lines[0] ?? '', /^WARNING .*CARGO_HOME .*medium-folders-allowed/);
+  const blocked = planMediumFolders({ root, fenced: true, mode: 'on', tempRoot: path.join(root, 'tmp'), opened: [path.join(root, 'tmp-medium')], mkdir: () => assert.fail('nothing is made') });
+  assert.equal(blocked.tempRoot, undefined);
+  assert.match(blocked.lines[0] ?? '', /^WARNING medium agent folders: .*tmp-medium is in a folder workers write/);
+});
+
+test("w5869 (F2): the age-based clean-up rules cover Medium agents' temp root too", () => {
+  const medium = path.join(os.tmpdir(), 'ffw', 'tmp-medium');
+  const rules = cleanupRules({ ...hostCleanupEnv(path.join(os.tmpdir(), 'ffw', 'tmp')), mediumTemp: medium }, DEFAULT_CLEANUP);
+  const ids = rules.filter((r) => r.dir === medium).map((r) => r.id);
+  for (const id of ['agent-temp', 'temp-old']) assert.ok(ids.includes(id), `${id}: ${ids}`);
+});
+
 const PROBES: Probes = {
   stats: async () => ({}) as Awaited<ReturnType<Probes['stats']>>,
   usage: async () => ({ account: { email: 'someone@example.com', plan: 'Claude Max' }, reply: { subscription_type: 'max', rate_limits_available: false } }) as Awaited<ReturnType<Probes['usage']>>,
@@ -137,6 +158,21 @@ for (const mode of ['on', 'warn'] as const) {
       assert.equal(i.sessionTemp('med-1'), sessionTempDir(mediumTempRoot(root), 'med-1'));
       assert.equal(i.sessionTemp('sb-1'), sessionTempDir(tempDir, 'sb-1'));
       assert.deepEqual(i.sessionTemps('x'), [sessionTempDir(tempDir, 'x'), sessionTempDir(mediumTempRoot(root), 'x')]);
+      // w5869 (w5871's F1): a Medium agent started before the switch went on (or whose own folder could not be made) runs
+      // in the shared root: sessionTemp gives that folder, not a tmp-medium one that does not exist, so timed_run,
+      // publish_attachment and the sweeper still find it. A sandbox session gets the shared one even if a tmp-medium one exists.
+      const entries = (d as unknown as { entries: Map<string, unknown> }).entries;
+      entries.set('old-1', { spec: { sandbox: undefined } });
+      entries.set('sb-2', { spec: { sandbox: 'slot1' } });
+      fs.mkdirSync(sessionTempDir(tempDir, 'old-1'), { recursive: true });
+      fs.mkdirSync(sessionTempDir(mediumTempRoot(root), 'sb-2'), { recursive: true });
+      assert.equal(i.sessionTemp('old-1'), sessionTempDir(tempDir, 'old-1'));
+      assert.equal(i.sessionTemp('sb-2'), sessionTempDir(tempDir, 'sb-2'));
+      fs.mkdirSync(sessionTempDir(mediumTempRoot(root), 'old-1'), { recursive: true });
+      assert.equal(i.sessionTemp('old-1'), sessionTempDir(mediumTempRoot(root), 'old-1'), 'once its own folder exists, that one');
+      // Out before d.shutdown (an after hook registered first), which stops every entry's session.
+      entries.delete('old-1');
+      entries.delete('sb-2');
     } else {
       assert.equal(medium.TMP, sessionTempDir(tempDir, 'med-1'));
       assert.equal(medium.CARGO_HOME, undefined);

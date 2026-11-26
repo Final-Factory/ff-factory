@@ -36,11 +36,14 @@ const inside = (child: string, parent: string) => {
 /**
  * Whether a worker fence lets a worker write `p`: inside a root child workers write (lowIntegrity.ts openChildren, the
  * children labelled Low on Windows and opened by Landlock and Seatbelt), or inside an extra the fences open outside the
- * root (the config's temp and sandboxes folders). Case-blind, as Windows and macOS file systems are. Exported for tests.
+ * root (the config's temp and sandboxes folders), or inside a folder `opened` names, in the root or out of it (w5869, w5871's
+ * F3: workerIntegrityAllow, writeLockExtra, the transcripts folder while transcriptLock is off). Case-blind, as Windows and
+ * macOS file systems are. Exported for tests.
  */
-export function workerWritable(p: string, root: string, extra: (string | undefined)[] = []): boolean {
+export function workerWritable(p: string, root: string, extra: (string | undefined)[] = [], opened: (string | undefined)[] = []): boolean {
   const low = (s: string) => path.resolve(s).toLowerCase();
   const lp = low(p);
+  if (opened.some((o) => !!o && inside(lp, low(o)))) return true;
   if (extra.some((e) => !!e && !inside(low(e), low(root)) && inside(lp, low(e)))) return true;
   if (!inside(lp, low(root)) || lp === low(root)) return false;
   const first = path.relative(low(root), lp).split(/[\\/]/)[0];
@@ -59,6 +62,8 @@ export interface MediumFoldersInput {
   cargoHome?: string;
   /** The folders outside the root the fences open to workers (the config's extra roots, temp and sandboxes folders). */
   extra?: (string | undefined)[];
+  /** Folders the fences open whole wherever they are (workerWritable's `opened`). */
+  opened?: (string | undefined)[];
   mkdir?: (dir: string) => void;
 }
 
@@ -76,10 +81,11 @@ export function planMediumFolders(i: MediumFoldersInput): MediumFolders {
   const { root } = i;
   if (!root || !i.fenced) return { lines: [] };
   const extra = i.extra ?? [];
+  const opened = i.opened ?? [];
   const mkdir = i.mkdir ?? ((d: string) => fs.mkdirSync(d, { recursive: true }));
   const exposed: { what: string; now: string; to: string; key: 'tempRoot' | 'cargoHome' }[] = [];
-  if (workerWritable(i.tempRoot, root, extra)) exposed.push({ what: 'TMP/TEMP root', now: i.tempRoot, to: mediumTempRoot(root), key: 'tempRoot' });
-  if (i.cargoHome && workerWritable(i.cargoHome, root, extra)) exposed.push({ what: 'CARGO_HOME', now: i.cargoHome, to: mediumCargoHomeDir(root), key: 'cargoHome' });
+  if (workerWritable(i.tempRoot, root, extra, opened)) exposed.push({ what: 'TMP/TEMP root', now: i.tempRoot, to: mediumTempRoot(root), key: 'tempRoot' });
+  if (i.cargoHome && workerWritable(i.cargoHome, root, extra, opened)) exposed.push({ what: 'CARGO_HOME', now: i.cargoHome, to: mediumCargoHomeDir(root), key: 'cargoHome' });
   if (!exposed.length) return { lines: [] };
   const why = 'a fenced worker could plant a script, DLL or cargo config.toml there that a Medium agent then runs outside the fence';
   if (i.mode !== 'on') {
@@ -89,7 +95,7 @@ export function planMediumFolders(i: MediumFoldersInput): MediumFolders {
   }
   const out: MediumFolders = { lines: [] };
   for (const e of exposed) {
-    if (workerWritable(e.to, root, extra)) {
+    if (workerWritable(e.to, root, extra, opened)) {
       out.lines.push(`WARNING medium agent folders: ${e.to} is in a folder workers write; Medium agents keep ${e.what} ${e.now} (${why}; w5862)`);
       continue;
     }
