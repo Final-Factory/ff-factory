@@ -4997,7 +4997,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // to it. The w6118 review: a next worker is one linked at or after the hand-back that stands (linkWorker stamps the
     // link on every send), so one already on the request and sent it again counts, and so does one placed before the
     // move took its MoveBefore; the newest such link wins.
-    const back = reqs.filter((x) => x.handedBack?.session === info.id);
+    // w6047 (the w6182 review, B): a closed request's hand-off is read by nobody, so it never carries the message.
+    const back = reqs.filter((x) => isOpen(x) && x.handedBack?.session === info.id);
     const nextOf = (x: WorkItem): SessionInfo | undefined => {
       const since = x.handedBack?.at;
       if (!since) return undefined;
@@ -5042,11 +5043,14 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (refuse) this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
     for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why, move);
     // With this worker after it: given back, or never taken off (a start that failed before the move took it).
-    const given = reqs.filter((w) => w.sessionIds.includes(info.id) && !w.movedOff?.[info.id] && w.handedBack?.session !== info.id);
+    // w6047 (the w6182 review, B): a request closed while the start ran is neither given back nor handed back meanwhile; its
+    // hand-off is read by nobody. With no open request left, the messages go back to this worker as before (w5976).
+    const open = reqs.filter((w) => isOpen(w));
+    const given = open.filter((w) => w.sessionIds.includes(info.id) && !w.movedOff?.[info.id] && w.handedBack?.session !== info.id);
     delete info.movedAway;
     this.store.putSession(info);
-    if (!given.length) {
-      this.deliverHeld(info, reqs, q, texts, undefined, sends);
+    if (!given.length && open.length) {
+      this.deliverHeld(info, open, q, texts, undefined, sends);
       console.warn(`room move: starting ${reqs.map((x) => x.id).join(', ')} on ${to} failed (${err}); handed back meanwhile, so not given back to worker ${info.id} (w6047)`);
       this.store.append(info.id, { kind: 'system', text: `Its move did not start (${why}), but its requests were handed back meanwhile, and that stands (w6047).` });
       this.orchestrators.retireWhenFree(info.id);
@@ -5057,7 +5061,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // that stands) goes with that request's hand-back, never back to this worker, which would resume work it gave up.
     // The w6149 review: only that message goes there; every other one (a person's, a resume of a request it still holds)
     // goes back to this worker as before. Each message is routed by its own send (the move entry's sends, one per text).
-    const goneOf = (m: QueuedSend | undefined) => (m?.resumeOf?.work ? reqs.find((w) => w.id === m.resumeOf!.work && !given.includes(w) && w.handedBack?.session === info.id) : undefined);
+    const goneOf = (m: QueuedSend | undefined) => (m?.resumeOf?.work ? open.find((w) => w.id === m.resumeOf!.work && !given.includes(w) && w.handedBack?.session === info.id) : undefined);
     const all = sends?.length === texts.length && texts.length ? sends : undefined;
     let keep = texts.map((_, i) => i);
     if (all) {
@@ -5069,14 +5073,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         else keep.push(i);
       });
       for (const [g, is] of byGone) this.deliverHeld(info, [g], all[is[0]!], is.map((i) => texts[i]!), g.id, is.map((i) => all[i]!));
-      if (keep.length) {
-        // One message goes back as it was, with its attachments (w5995); several joined ones carry each one's attachment ids
-        // as text (movedText), so the joined message carries none of its own, and no resume but the first kept one's.
-        const first = all[keep[0]!]!;
-        const back: QueuedSend = keep.length === 1 ? first : { ...first, text: keep.map((i) => texts[i]!).join('\n\n---\n\n') };
-        if (back !== first) delete back.attachments;
-        this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
-      }
+      // Each kept message goes back as it was, on its own, with its own sender, attachments, images and resume (w5995).
+      // w6047 (the w6182 review, A): joined under the first one's resume, a person's words went with it when the drain's
+      // staleResume dropped that resume (w1128). putBack puts each before the worker's queued ones, so the last goes first.
+      for (const i of [...keep].reverse()) this.sessions.putBack(all[i]!, `${why}; it waits for a sandbox on ${info.machineId}`);
     } else if (goneOf(q) && (!texts.length || (texts.length === 1 && texts[0] === movedText(q!)))) {
       this.deliverHeld(info, [goneOf(q)!], q, texts);
     } else if (q) {
@@ -5088,7 +5088,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const back: QueuedSend = own || !texts.length ? q : { ...q, text: texts.join('\n\n---\n\n') };
       if (back !== q) {
         delete back.attachments;
-        if (goneOf(q)) delete back.resumeOf;
+        // w6047 (the w6182 review, A): with no send per text, a joined message is no one resume, so the drain's staleResume
+        // never drops a person's words with it (at worst a stale resume is delivered, never a person's message lost).
+        delete back.resumeOf;
       }
       this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
     }
