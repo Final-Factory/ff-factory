@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin } from './pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -1882,6 +1882,7 @@ export class Daemon {
       installFfuSlotShim(bin, cleanupFactsFile(appDirOfConfig(this.cfg)), FFU_SLOTS_DEFAULT_MAX);
       return bin;
     };
+    let shimModes: ShimModeGuard | undefined;
     try {
       // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
       // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
@@ -1899,18 +1900,8 @@ export class Daemon {
         const dir = enforcedShimDir(this.cfg.root);
         this.slotBin = dir;
         log(`path fence: could not write the shims in ${dir} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); agents run what is there until a write succeeds, tried again each minute. Not put in ${oldBin}, which fenced workers can write. Recovery: path_fence off`);
-        const retry = setInterval(() => {
-          try {
-            readyShimDir(dir);
-            shims(writeShims(dir));
-            clearInterval(retry);
-            log(`path fence: wrote the shims in ${dir}`);
-          } catch {
-            // Logged once above; the next minute tries again.
-          }
-        }, 60_000);
-        retry.unref?.();
-        this.timers.push(retry);
+        // w6144 (w6103 note 1): once a retry writes them, the mode guard (started below with nothing to guard) learns them.
+        this.timers.push(retryShimWrite(dir, { write: (d) => void shims(writeShims(d)), wrote: () => shimModes?.learn(), log }));
       }
     }
     if (process.platform === 'win32') {
@@ -1927,7 +1918,7 @@ export class Daemon {
       // w5899, w5872's review: agents started before the move keep the old bin first on their PATH; it holds only the
       // daemon's shims until they have ended, then goes.
       // w6074 E: the modes it wrote in <root>/tools-medium/shims are put back while it runs.
-      if (pf === 'on' && this.cfg.root && this.slotBin === enforcedShimDir(this.cfg.root)) guardShimModes(this.slotBin, { log });
+      if (pf === 'on' && this.cfg.root && this.slotBin === enforcedShimDir(this.cfg.root)) shimModes = guardShimModes(this.slotBin, { log });
       if (pf === 'on' && this.cfg.root && this.slotBin && this.slotBin !== oldBin) guardOldShimBin(oldBin, { target: this.slotBin, quarantine: shimQuarantineDir(this.cfg.root), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, oldBin) : []), log });
       if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
     }
