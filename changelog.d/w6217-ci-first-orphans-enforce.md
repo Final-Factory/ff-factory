@@ -1,0 +1,1 @@
+- On LothDesktop, with CI-first enforce on, agents' tools whose starting process has exited now go to Idle beside an ffu CI job too, and come back when it ends. A CI runner's or job's own process, or one that starts a runner, is never lowered (w6217, `machine/ciFirstWin.ts`).
