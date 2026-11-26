@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, watchShimBin } from './pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, shimQuarantineDir, watchShimBin } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -1888,7 +1888,7 @@ export class Daemon {
       log(pathFenceLine(pf, this.slotBin, this.cfg.root));
       // w5899, w5872's review: agents started before the move keep the old bin first on their PATH; it holds only the
       // daemon's shims until they have ended, then goes.
-      if (pf === 'on' && this.slotBin && this.slotBin !== oldBin) guardOldShimBin(oldBin, { restore: () => void shims(installShims(this.slotMailbox)), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, oldBin) : []), log });
+      if (pf === 'on' && this.cfg.root && this.slotBin && this.slotBin !== oldBin) guardOldShimBin(oldBin, { target: this.slotBin, quarantine: shimQuarantineDir(this.cfg.root), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, oldBin) : []), log });
       if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
     }
     // GitHub Apps (w1519): the gh shim and git helper a run the portal named apps for gets (machine/ghApp.ts).

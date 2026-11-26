@@ -594,12 +594,15 @@ Two more holes, from w5872's review:
 - **Agents started before the move.** Agent hosts outlive a daemon restart, each with the PATH it started with, so
   they still run the mailbox's `bin` first, which a worker can still write or make again, with any name (`git`,
   `node`). Each host now records its PATH in its `place.json` (`machine/agentHost.ts` hostsWithPathDir; a host with no
-  record is older, and counts). While one runs, `guardOldShimBin` keeps that folder holding only the daemon's shims:
-  on every change it sees there, and every minute, a name the daemon did not write goes, a changed shim is written
-  back (removed first, so a planted link is not written through), and the folder, removed or replaced by a link, is
-  made again; `path fence: undid a change ...` in the daemon's log. When none runs, the folder goes (`path fence:
-  removed the old shims folder ...`). A worker's write there runs until it is undone: a narrow race, for those older
-  agents only.
+  record is older, and counts). While one runs, `guardOldShimBin` makes that folder one symbolic link to
+  `<root>/tools-medium/shims` (w6063's review), so those agents run the daemon's own shims and a write through the
+  link is refused by the fence. On every change it sees at `bin` in the mailbox, and every minute, anything else there
+  (a folder, a planted file, a link elsewhere, there before the daemon started or made since) is renamed into
+  `<root>/tools-medium/quarantine`, which workers cannot write, and removed there, then the link is made again;
+  `path fence: undid a change ...` in the daemon's log. It never deletes through a path a worker can swap: a `bin`
+  swapped for a link to another folder moves as the link, and the folder it named is left alone. When none runs, the
+  link goes the same way (`path fence: removed the old shims folder ...`). A worker that swaps the link for its own
+  folder wins until it is undone: a narrow race, for those older agents only.
 - **Grants add up.** A `writeLockExtra` (or `extraRoots`) folder that holds a locked one, or sits in one (the root,
   `tools-medium`, the shims), would open it again on Linux; `writeLockArgs` leaves it out and the daemon logs `write
   lock: left out the extra writable folder ...`. On macOS Seatbelt's later deny already wins.

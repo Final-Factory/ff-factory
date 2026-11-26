@@ -94,21 +94,49 @@ export function watchShimBin(bin: string, log: (l: string) => void, o: { now?: (
   };
 }
 
+/** Where guardOldShimBin moves what it takes out of the old shims folder: inside `<root>/tools-medium`, which workers cannot write. */
+export const shimQuarantineDir = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, 'quarantine');
+
 /**
- * w5899, w5872's review: the old shims folder (the mailbox's `bin`) while agents started before the move still run with
- * it first on their PATH. `waits` answers them (session ids); none: the folder goes at once. Otherwise `restore` writes the
- * daemon's shims there, and on every change seen there, and every `everyMs`, anything else in it goes and a shim changed
- * is written back (removed first, so a planted link is not written through); the folder itself, removed or replaced, is
- * made again. Once `waits` is empty the folder goes. A worker's write there still runs until it is put back: the guard
- * narrows the hole to a race for those agents only, and new agents never have the folder on their PATH. Returns a stop.
+ * w5899, w5872's and w6063's reviews: the old shims folder (the mailbox's `bin`) while agents started before the move
+ * still run with it first on their PATH. `waits` answers them (session ids); none: the old folder goes at once.
+ * Otherwise `bin` becomes one symbolic link to `target` (`<root>/tools-medium/shims`, which workers cannot write), so
+ * those agents run the daemon's own shims and a write through the link is refused by the fence. Whatever is at `bin`
+ * and is not that link (a folder, a planted file, a link elsewhere, there before the daemon started or made since) is
+ * renamed into `quarantine` (a daemon-only folder) and removed there, never through a path a worker can swap (w6063
+ * probe C deleted a folder outside the mailbox through a swapped `bin`); then the link is made again. On every change
+ * to `bin` seen in the mailbox, and every `everyMs`. Once `waits` is empty the link goes the same way. A worker can still
+ * swap the link for its own folder and win the moment before the guard undoes it: the hole is narrowed to a race for
+ * those agents only, and new agents never have the folder on their PATH. Returns a stop.
  */
-export function guardOldShimBin(bin: string, o: { restore: () => void; waits: () => string[]; log: (l: string) => void; everyMs?: number; now?: () => number }): () => void {
+export function guardOldShimBin(bin: string, o: { target: string; quarantine: string; waits: () => string[]; log: (l: string) => void; everyMs?: number; now?: () => number }): () => void {
   const now = o.now ?? Date.now;
+  let n = 0;
+  /** Take whatever is at `bin` out of the mailbox: rename it into the quarantine, then remove it there. */
+  const evict = (): boolean => {
+    const st = lstat(bin);
+    if (!st) return false;
+    fs.mkdirSync(o.quarantine, { recursive: true, mode: 0o700 });
+    const away = path.join(o.quarantine, `bin-${process.pid}-${now()}-${n++}`);
+    try {
+      // rename moves the entry itself (a link stays a link), never what it points to.
+      fs.renameSync(bin, away);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return false;
+      // Another file system: a link can still be unlinked (unlink never follows; a folder swapped in meanwhile fails it).
+      if (code === 'EXDEV' && st.isSymbolicLink()) {
+        fs.unlinkSync(bin);
+        return true;
+      }
+      throw e;
+    }
+    fs.rmSync(away, { recursive: true, force: true });
+    return true;
+  };
   const drop = (why: string) => {
     try {
-      if (!fs.existsSync(bin) && !isLink(bin)) return;
-      fs.rmSync(bin, { recursive: !isLink(bin), force: true });
-      o.log(`path fence: removed the old shims folder ${bin}: ${why}`);
+      if (evict()) o.log(`path fence: removed the old shims folder ${bin}: ${why}`);
     } catch (e) {
       o.log(`path fence: could not remove the old shims folder ${bin}: ${(e as Error).message}`);
     }
@@ -118,72 +146,43 @@ export function guardOldShimBin(bin: string, o: { restore: () => void; waits: ()
     drop('no agent started before the move runs');
     return () => undefined;
   }
-  o.log(`path fence: keeping the old shims folder ${bin} for ${first.length} agent${first.length === 1 ? '' : 's'} started before the move (${first.join(', ')}): their PATH still names it. Until they end it holds the daemon's shims only, and anything else written there is undone`);
-  let snap = new Map<string, { data: Buffer; mode: number }>();
-  try {
-    o.restore();
-    snap = new Map(fs.readdirSync(bin).map((n) => [n, { data: fs.readFileSync(path.join(bin, n)), mode: fs.statSync(path.join(bin, n)).mode & 0o7777 }]));
-  } catch (e) {
-    o.log(`path fence: could not write the old shims folder ${bin} (${(e as Error).message}); agents started before the move may not find unity-slot`);
-  }
+  o.log(`path fence: keeping the old shims folder ${bin} for ${first.length} agent${first.length === 1 ? '' : 's'} started before the move (${first.join(', ')}): their PATH still names it. Until they end it is a link to ${o.target}, and anything else put there is undone`);
   const said = new Map<string, number>();
-  const mend = (fromParent = false) => {
-    const fixed: string[] = [];
+  let started = false;
+  const mend = () => {
+    let fixed: string | undefined;
     try {
       const st = lstat(bin);
-      if (!st || !st.isDirectory()) {
-        if (st) fs.rmSync(bin, { force: true });
-        fs.mkdirSync(bin, { recursive: true, mode: 0o755 });
-        fixed.push(bin);
-      }
-      for (const n of fs.readdirSync(bin)) {
-        if (snap.has(n)) continue;
-        fs.rmSync(path.join(bin, n), { recursive: !isLink(path.join(bin, n)), force: true });
-        fixed.push(path.join(bin, n));
-      }
-      for (const [n, s] of snap) {
-        const p = path.join(bin, n);
-        const l = lstat(p);
-        if (l?.isFile() && (l.mode & 0o7777) === s.mode && fs.readFileSync(p).equals(s.data)) continue;
-        if (l) fs.rmSync(p, { recursive: l.isDirectory(), force: true });
-        fs.writeFileSync(p, s.data, { mode: s.mode, flag: 'wx' });
-        fs.chmodSync(p, s.mode);
-        fixed.push(p);
-      }
+      if (st?.isSymbolicLink() && fs.readlinkSync(bin) === o.target) return;
+      const had = evict();
+      fs.symlinkSync(o.target, bin, 'dir');
+      // The first mend replaces the daemon's own old folder (the line above says so); a change after that is a worker's.
+      if (had && started) fixed = bin;
     } catch (e) {
-      fixed.push(`${bin} (not mended: ${(e as Error).message})`);
+      fixed = `${bin} (not mended: ${(e as Error).message})`;
+    } finally {
+      started = true;
     }
+    if (!fixed) return;
     const t = now();
-    const fresh = fixed.filter((f) => (said.get(f) ?? -Infinity) <= t - 3600_000);
-    for (const f of fresh) said.set(f, t);
-    if (fresh.length) o.log(`path fence: undid a change the daemon did not make in the old shims folder, which agents started before the move still run first on their PATH: ${fresh.join(', ')}`);
-    if (fromParent || !binW || fixed.includes(bin)) rewatch();
+    if ((said.get(fixed) ?? -Infinity) > t - 3600_000) return;
+    said.set(fixed, t);
+    o.log(`path fence: undid a change the daemon did not make in the old shims folder, which agents started before the move still run first on their PATH: ${fixed}`);
   };
-  let binW: fs.FSWatcher | undefined;
-  const watch = (dir: string, only?: string) => {
-    try {
-      const w = fs.watch(dir, { persistent: false }, (_ev, name) => {
-        if (only !== undefined && name !== only) return;
-        mend(only !== undefined);
-      });
-      w.on('error', () => undefined);
-      return w;
-    } catch {
-      return undefined;
-    }
-  };
-  // A bin made again is a new folder (the inode number can repeat on ext4): every mend watches it afresh.
-  const rewatch = () => {
-    binW?.close();
-    binW = watch(bin);
-  };
-  const parentW = watch(path.dirname(bin), path.basename(bin));
+  let parentW: fs.FSWatcher | undefined;
+  try {
+    parentW = fs.watch(path.dirname(bin), { persistent: false }, (_ev, name) => {
+      if (name === null || name === path.basename(bin)) mend();
+    });
+    parentW.on('error', () => undefined);
+  } catch {
+    parentW = undefined;
+  }
   mend();
   let stopped = false;
   const stop = () => {
     stopped = true;
     clearInterval(timer);
-    binW?.close();
     parentW?.close();
   };
   const timer = setInterval(() => {
@@ -204,4 +203,3 @@ const lstat = (p: string) => {
     return undefined;
   }
 };
-const isLink = (p: string) => !!lstat(p)?.isSymbolicLink();

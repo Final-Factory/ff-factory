@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, watchShimBin } from '../machine/pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, shimQuarantineDir, watchShimBin } from '../machine/pathFence.ts';
 import { hostsWithPathDir } from '../machine/agentHost.ts';
 import { FF_LANDLOCK, LOCKED_CHILDREN, readLockArgs, writeLockArgs } from '../machine/writeLock.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
@@ -201,75 +201,160 @@ test('w5899: an agent host counts for the old shims folder while it runs with it
   }
 });
 
-test('w5899: with no agent started before the move, the old shims folder goes at once', () => {
+// The old shims folder's guard (machine/pathFence.ts guardOldShimBin). The options go in a variable, not a literal, so the
+// same tests also type-check against the guard before w6063 (restore, a snapshot of the folder), which they fail.
+const SHIM = '#!/bin/sh\necho real-ff-pr\n';
+function guardRoot() {
   const root = fakeRoot();
   const bin = path.join(root, 'unity-slots', 'bin');
+  const target = enforcedShimDir(root);
+  fs.mkdirSync(target, { recursive: true });
+  for (const n of ['ff-pr', 'unity-slot']) fs.writeFileSync(path.join(target, n), SHIM, { mode: 0o755 });
   const lines: string[] = [];
+  const opts = (waits: () => string[], everyMs = 100) => ({
+    target,
+    quarantine: shimQuarantineDir(root),
+    // Only the guard before w6063 calls it: it wrote the daemon's shims into the old folder itself.
+    restore: () => {
+      fs.mkdirSync(bin, { recursive: true });
+      for (const n of ['ff-pr', 'unity-slot']) fs.writeFileSync(path.join(bin, n), SHIM, { mode: 0o755 });
+    },
+    waits,
+    log: (l: string) => lines.push(l),
+    everyMs,
+  });
+  // What an agent started before the move finds first on its PATH.
+  const runs = (n: string) => fs.existsSync(path.join(bin, n)) && fs.statSync(path.join(bin, n)).isFile() && fs.readFileSync(path.join(bin, n), 'utf8') === SHIM;
+  const only = () => runs('ff-pr') && runs('unity-slot') && fs.readdirSync(bin).sort().join() === 'ff-pr,unity-slot';
+  return { root, bin, target, lines, opts, runs, only };
+}
+
+test('w5899: with no agent started before the move, the old shims folder goes at once', () => {
+  const g = guardRoot();
   try {
-    fs.writeFileSync(path.join(bin, 'ff-pr'), 'old');
-    guardOldShimBin(bin, { restore: () => assert.fail('nothing to restore for'), waits: () => [], log: (l) => lines.push(l) })();
-    assert.equal(fs.existsSync(bin), false);
-    assert.ok(fs.existsSync(path.join(root, 'unity-slots')), 'the mailbox stays');
-    assert.match(lines.join('\n'), /removed the old shims folder/);
+    fs.writeFileSync(path.join(g.bin, 'ff-pr'), 'old');
+    guardOldShimBin(g.bin, g.opts(() => []))();
+    assert.equal(fs.existsSync(g.bin), false);
+    assert.ok(fs.existsSync(path.join(g.root, 'unity-slots')), 'the mailbox stays');
+    assert.match(g.lines.join('\n'), /removed the old shims folder/);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(g.root, { recursive: true, force: true });
   }
 });
 
 // fs.watch on Windows differs, and the path fence never runs there (pathFenceMode is off on Windows).
-test('w5899, w5872 review: while agents started before the move run, the old shims folder holds only the daemon\'s shims, then goes', { skip: process.platform === 'win32' && 'the path fence is off on Windows' }, async () => {
-  const root = fakeRoot();
-  const bin = path.join(root, 'unity-slots', 'bin');
-  const shim = path.join(bin, 'ff-pr');
-  const lines: string[] = [];
+const notWin = { skip: process.platform === 'win32' && 'the path fence is off on Windows' };
+
+test('w5899, w5872 review: while agents started before the move run, the old shims folder runs only the daemon\'s shims, then goes', notWin, async () => {
+  const g = guardRoot();
   let waits = ['s1'];
-  const stop = guardOldShimBin(bin, {
-    restore: () => {
-      fs.mkdirSync(bin, { recursive: true });
-      fs.writeFileSync(shim, '#!/bin/sh\necho real-ff-pr\n', { mode: 0o755 });
-    },
-    waits: () => waits,
-    log: (l) => lines.push(l),
-    everyMs: 100,
-  });
-  const real = () => fs.existsSync(shim) && fs.readFileSync(shim, 'utf8') === '#!/bin/sh\necho real-ff-pr\n' && (fs.statSync(shim).mode & 0o777) === 0o755;
-  const only = () => fs.existsSync(bin) && fs.readdirSync(bin).join() === 'ff-pr' && real();
+  const stop = guardOldShimBin(g.bin, g.opts(() => waits));
   try {
-    assert.ok(only(), 'the daemon\'s shims are written for those agents');
-    assert.match(lines[0], /keeping the old shims folder .* 1 agent started before the move \(s1\)/);
-    fs.writeFileSync(path.join(bin, 'git'), '#!/bin/sh\necho planted\n', { mode: 0o755 });
-    assert.ok(await waitFor(() => !fs.existsSync(path.join(bin, 'git'))), 'a planted name is removed');
-    fs.writeFileSync(shim, '#!/bin/sh\necho planted\n');
-    assert.ok(await waitFor(real), 'a changed shim is written back');
-    fs.chmodSync(shim, 0o777);
-    assert.ok(await waitFor(real), 'a changed mode is put back');
-    const elsewhere = path.join(root, 'tmp', 'target');
-    fs.writeFileSync(elsewhere, 'keep');
-    fs.rmSync(shim);
-    fs.linkSync(elsewhere, shim);
-    assert.ok(await waitFor(real), 'a hard link planted in place is replaced');
-    assert.equal(fs.readFileSync(elsewhere, 'utf8'), 'keep', 'never written through');
-    fs.rmSync(bin, { recursive: true });
-    fs.mkdirSync(bin);
-    fs.writeFileSync(path.join(bin, 'node'), 'planted');
-    assert.ok(await waitFor(only), 'a folder made again is mended too');
-    fs.rmSync(bin, { recursive: true });
-    fs.symlinkSync(path.join(root, 'tmp'), bin);
-    assert.ok(await waitFor(() => !fs.lstatSync(bin).isSymbolicLink() && only()), 'a link in its place is replaced by the folder');
-    assert.ok(fs.existsSync(elsewhere), 'the link\'s target is left alone');
-    assert.match(lines.join('\n'), /undid a change the daemon did not make in the old shims folder/);
+    assert.ok(g.only(), 'those agents find the daemon\'s shims');
+    assert.match(g.lines[0], /keeping the old shims folder .* 1 agent started before the move \(s1\)/);
+    assert.ok(fs.lstatSync(g.bin).isSymbolicLink() && fs.readlinkSync(g.bin) === g.target, 'a link to <root>/tools-medium/shims, which the fence keeps read-only');
+    fs.rmSync(g.bin);
+    fs.mkdirSync(g.bin);
+    fs.writeFileSync(path.join(g.bin, 'ff-pr'), '#!/bin/sh\necho planted\n', { mode: 0o755 });
+    assert.ok(await waitFor(g.only), 'a folder put in its place is taken out');
+    const elsewhere = path.join(g.root, 'tmp');
+    fs.writeFileSync(path.join(elsewhere, 'keep'), 'keep');
+    fs.rmSync(g.bin);
+    fs.symlinkSync(elsewhere, g.bin);
+    assert.ok(await waitFor(g.only), 'a link elsewhere is replaced');
+    assert.equal(fs.readFileSync(path.join(elsewhere, 'keep'), 'utf8'), 'keep', 'the link\'s target is left alone');
+    fs.rmSync(g.bin);
+    fs.writeFileSync(g.bin, 'x');
+    assert.ok(await waitFor(g.only), 'a file in its place is replaced');
+    assert.match(g.lines.join('\n'), /undid a change the daemon did not make in the old shims folder/);
+    assert.ok(fs.readdirSync(shimQuarantineDir(g.root)).length === 0, 'what was taken out is removed from the quarantine');
     waits = [];
-    assert.ok(await waitFor(() => !fs.existsSync(bin)), 'it goes once they have ended');
-    assert.match(lines.at(-1)!, /removed the old shims folder .*every agent started before the move has ended/);
-    fs.mkdirSync(bin);
-    fs.writeFileSync(path.join(bin, 'git'), 'x');
+    assert.ok(await waitFor(() => !fs.existsSync(g.bin) && !lstatOrUndefined(g.bin)), 'it goes once they have ended');
+    assert.ok(fs.existsSync(path.join(g.target, 'ff-pr')), 'the real shims stay');
+    assert.match(g.lines.at(-1)!, /removed the old shims folder .*every agent started before the move has ended/);
+    fs.mkdirSync(g.bin);
+    fs.writeFileSync(path.join(g.bin, 'git'), 'x');
     await new Promise((r) => setTimeout(r, 300));
-    assert.ok(fs.existsSync(path.join(bin, 'git')), 'the guard has stopped: no agent has that folder on its PATH any more');
+    assert.ok(fs.existsSync(path.join(g.bin, 'git')), 'the guard has stopped: no agent has that folder on its PATH any more');
   } finally {
     stop();
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(g.root, { recursive: true, force: true });
   }
 });
+
+test('w6063 probe A: a name a worker planted in the old shims folder before the daemon starts is gone, and stays gone', notWin, async () => {
+  const g = guardRoot();
+  fs.writeFileSync(path.join(g.bin, 'gh'), '#!/bin/sh\necho planted\n', { mode: 0o755 });
+  const stop = guardOldShimBin(g.bin, g.opts(() => ['s1']));
+  try {
+    assert.ok(!fs.existsSync(path.join(g.bin, 'gh')), 'the planted gh is not kept');
+    assert.ok(g.only(), 'only the daemon\'s shims');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(!fs.existsSync(path.join(g.bin, 'gh')), 'nor written back');
+  } finally {
+    stop();
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6063 probe B: a folder a worker made in the old shims folder before the daemon starts does not strip unity-slot or ff-pr', notWin, async () => {
+  const g = guardRoot();
+  fs.mkdirSync(path.join(g.bin, 'x'));
+  const stop = guardOldShimBin(g.bin, g.opts(() => ['s1']));
+  try {
+    assert.ok(g.runs('unity-slot') && g.runs('ff-pr'), 'those agents still find unity-slot and ff-pr');
+    fs.writeFileSync(path.join(g.root, 'unity-slots', 'req-1'), '');
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(g.only(), 'and still do after the guard has run again');
+    assert.doesNotMatch(g.lines.join('\n'), /could not write the old shims folder/);
+  } finally {
+    stop();
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6063 probe C: the old shims folder swapped for a link while the guard mends it deletes nothing behind the link', notWin, () => {
+  const g = guardRoot();
+  const victim = path.join(g.root, 'sandboxes', 'victim');
+  fs.mkdirSync(path.join(victim, 'precious'), { recursive: true });
+  fs.writeFileSync(path.join(victim, 'precious', 'work.txt'), 'keep');
+  fs.writeFileSync(path.join(g.bin, 'gh'), 'planted');
+  // A worker's swap timed exactly between the guard's look at the folder and what it does next.
+  const real = fs.lstatSync;
+  let swapped = false;
+  (fs as { lstatSync: unknown }).lstatSync = (p: fs.PathLike, ...rest: unknown[]) => {
+    const st = (real as (...a: unknown[]) => fs.Stats)(p, ...rest);
+    if (!swapped && String(p) === g.bin && st?.isDirectory()) {
+      swapped = true;
+      fs.renameSync(g.bin, `${g.bin}.away`);
+      fs.symlinkSync(victim, g.bin);
+    }
+    return st;
+  };
+  let stop = () => undefined as void;
+  try {
+    stop = guardOldShimBin(g.bin, g.opts(() => ['s1'], 60_000));
+  } catch {
+    // The guard may refuse; it must not delete.
+  } finally {
+    (fs as { lstatSync: unknown }).lstatSync = real;
+  }
+  try {
+    assert.ok(swapped, 'the swap happened');
+    assert.equal(fs.readFileSync(path.join(victim, 'precious', 'work.txt'), 'utf8'), 'keep', 'nothing behind the link is deleted');
+  } finally {
+    stop();
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+const lstatOrUndefined = (p: string) => {
+  try {
+    return fs.lstatSync(p);
+  } catch {
+    return undefined;
+  }
+};
 
 test('live w5899 enforce: an extra writable folder over the root does not open <root>/tools-medium/shims', { skip: !landlock && 'needs Linux with Landlock' }, () => {
   const root = fakeRoot();
