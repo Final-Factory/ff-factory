@@ -833,21 +833,23 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. A handle outlives a relabel, so
     labels, hashes and identity can all be right while a Low process that survived two rollbacks still holds a write
     handle on the real folder (w5882's review). So before the labels, each run reads which processes below Medium hold
-    anything under `tools
-ode` or `daemongent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
+    anything under `tools\node` or `daemon\agent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
     list, `NtQueryInformationProcess` class 51, its file and section handles and its mapped views; the system-wide handle
-    table is refused to a Low session, 0xC0000022, measured). Only access that can change the files counts there: a
+    table is refused to a Low session, 0xC0000022, measured), each folder resolved first to the final form Windows names an
+    open file by, so a short 8.3 name, a junction or a subst drive in the root still matches (w5926's review). Only access that can change the files counts there: a
     File handle with write, append, attribute, EA, delete, DACL or owner rights, a Section with map-write, a view mapped
     writable (w5886's review). A Low worker that runs this node or works in its folder holds read handles only, since the
     Medium label refuses it any other open, and is left alone (measured: a Low node with its working folder in
-    `tools\node` and npm's `index.js` open, and the node verified). It says a WARNING naming the writers, ends them, and
-    swaps the node; a process whose handles it cannot read is never ended (Windows' own sandboxed services are such:
-    DefenderAiPlatformHost on the CI runner), and a failed read means a fresh copy. A file with a second hard link is
+    `tools\node` and npm's `index.js` open, and the node verified). It says a WARNING naming the writers and does not
+    trust the node, so it is swapped; nothing is ended in this stage (lothsahn's lockout rule: warn first, w5926's review).
+    A process whose handles it cannot read (Windows' own sandboxed services, as DefenderAiPlatformHost on the CI runner)
+    is not named, and a failed read means a fresh copy. A file with a second hard link is
     never trusted either: a handle opened through that name has a path outside the folder (w5886's review; the pinned
     download has one name per file, and BEAST's live copy has none with two, measured). The read covers 110 to 122 Low
     processes and about 30k handles in 3 to 6 s on BEAST (measured). A rename refused because a file in the folder is
-    held open is tried three times, every Low process holding anything in it (reads too) ended between tries; a folder only a Medium process holds is never
-    forced, and the node there stays with a WARNING. A node.exe that runs does not block the rename (measured). Each run stages in
+    held open is tried three times, the Low processes holding anything in it (reads too) named once in a WARNING and not
+    ended; a folder still held keeps its node, with a WARNING, until a later rollout finds it free (measured on BEAST: a Low
+    writer on npm's `index.js` gave `busy` and kept running, and the run after it exited swapped the node). A node.exe that runs does not block the rename (measured). Each run stages in
     `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
     may be another rollout's, still unpacking). The rollout log says
     `Agent node: node verified: ...`, `Agent node: node reinstalled (<why>): ...`, or

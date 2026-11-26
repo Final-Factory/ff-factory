@@ -49,7 +49,6 @@ public static class FfHolders {
   [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern IntPtr CreateFileMappingW(IntPtr f, IntPtr sa, int p, int hi, int lo, string n);
   [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr MapViewOfFile(IntPtr h, int a, int hi, int lo, IntPtr n);
   [DllImport("kernel32.dll")] static extern bool UnmapViewOfFile(IntPtr a);
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] static extern int QueryDosDeviceW(string d, StringBuilder b, int n);
   [StructLayout(LayoutKind.Sequential)] struct MBI { public IntPtr Base, AllocBase; public int AllocProtect; public IntPtr Size; public int State, Protect, Type; }
 
   static int Rid(int pid) {
@@ -104,12 +103,22 @@ public static class FfHolders {
 
   public static string[] Find(string[] dirs, int[] skip, bool writesOnly) {
     if (IntPtr.Size != 8) throw new Exception("needs a 64-bit PowerShell");
+    // Each folder in the final form Windows names an open file by, the DOS one and the device one (w5926's review): a short
+    // 8.3 name, a junction, a symlink or a subst drive in the path as given would otherwise match no handle, and the read
+    // would name nobody with no error. A folder that cannot be resolved fails the read, which is never "nobody".
     var dos = new List<string>(); var dev = new List<string>();
     foreach (var d0 in dirs) {
-      string d = d0.TrimEnd('\\'); dos.Add(d.ToLowerInvariant());
-      var sb = new StringBuilder(1024);
-      if (QueryDosDeviceW(d.Substring(0, 2), sb, 1024) == 0) throw new Exception("QueryDosDevice " + d.Substring(0, 2));
-      dev.Add((sb.ToString() + d.Substring(2)).ToLowerInvariant());
+      IntPtr dh = CreateFileW(d0, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+      if (dh == new IntPtr(-1)) throw new Exception("could not open " + d0 + ": error " + Marshal.GetLastWin32Error());
+      try {
+        var sb = new StringBuilder(32768);
+        int n = GetFinalPathNameByHandleW(dh, sb, 32768, 0); if (n <= 0 || n >= 32768) throw new Exception("could not resolve " + d0);
+        string p = sb.ToString(); if (p.StartsWith("\\\\?\\")) p = p.Substring(4);
+        dos.Add(p.TrimEnd('\\').ToLowerInvariant());
+        sb = new StringBuilder(32768);
+        n = GetFinalPathNameByHandleW(dh, sb, 32768, 2); if (n <= 0 || n >= 32768) throw new Exception("could not resolve " + d0 + " to its device");
+        dev.Add(sb.ToString().TrimEnd('\\').ToLowerInvariant());
+      } finally { CloseHandle(dh); }
     }
     int me = Process.GetCurrentProcess().Id; IntPtr self = GetCurrentProcess();
     // Our own folder handle and section say which type index is File and which is Section on this Windows.

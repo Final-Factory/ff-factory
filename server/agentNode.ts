@@ -51,8 +51,6 @@ export interface AgentNodeDeps {
   pin?: { exeSha256: string; treeSha256: string };
   /** The processes below Medium that hold anything under these folders (agentNodeHolders.ts by default); throws when it cannot tell. */
   holders?: (dirs: string[], o: { writesOnly: boolean }) => Promise<Holder[]>;
-  /** Ends a process (process.kill by default). */
-  kill?: (pid: number) => void;
   /** Tests: how long to wait between tries of a rename refused while the holders end (2 s). */
   retryMs?: number;
 }
@@ -275,15 +273,16 @@ async function readHolders(dirs: string[], writesOnly: boolean, d: AgentNodeDeps
 }
 
 /**
- * Ends every process below Medium that holds the node's folder or its record's folder (w5882's review). With
- * `writesOnly` (the check before the node is trusted), only access that can change them counts: a write handle a Low
+ * Names, in a WARNING, every process below Medium that holds the node's folder or its record's folder (w5882's review).
+ * With `writesOnly` (the check before the node is trusted), only access that can change them counts: a write handle a Low
  * worker took while an old daemon had `tools` Low outlives the relabel, so it could write node.exe after the check, while a
- * Low worker that runs this node or works in its folder holds read handles only and is left alone (w5886's review).
+ * Low worker that runs this node or works in its folder holds read handles only and is not named (w5886's review).
  * Without it (a swap the folder refused), any handle or view counts, since any file or folder held open stops the rename.
- * The WARNING that names them is said before they are ended, and the processes are never Medium ones (no agent's node, no
- * editor). Answers why the node cannot be trusted this run, or nothing when no Low process held either folder.
+ * Nothing is ended: this is the warn-only stage lothsahn's lockout rule asks for first (w5926's review); a node some Low
+ * process can write is swapped instead, and the old one moved aside leaves that handle on a file nothing runs. Answers why
+ * the node cannot be trusted this run, or nothing when no Low process held either folder.
  */
-async function endLowHolders(dirs: string[], writesOnly: boolean, d: AgentNodeDeps): Promise<string | undefined> {
+async function warnLowHolders(dirs: string[], writesOnly: boolean, d: AgentNodeDeps): Promise<string | undefined> {
   const there = dirs.filter((x) => fs.existsSync(x));
   if (!there.length) return undefined;
   let held: Holder[];
@@ -296,18 +295,10 @@ async function endLowHolders(dirs: string[], writesOnly: boolean, d: AgentNodeDe
   const list = held.map((h) => `${h.name} (${h.pid}) ${h.path}`).join('; ');
   d.say(
     writesOnly
-      ? `WARNING: Agent node: processes below Medium integrity hold write access to the node's folders, so they could change it after the check: ${list}; ending them.`
-      : `WARNING: Agent node: processes below Medium integrity hold the node's folder open, so the swap cannot pass: ${list}; ending them.`,
+      ? `WARNING: Agent node: processes below Medium integrity hold write access to the node's folders, so they could change it after the check: ${list}; the node is not trusted, and they are not ended.`
+      : `WARNING: Agent node: processes below Medium integrity hold the node's folder open, so the swap cannot pass: ${list}; they are not ended.`,
   );
-  const left: string[] = [];
-  for (const h of held) {
-    try {
-      (d.kill ?? ((pid: number) => process.kill(pid)))(h.pid);
-    } catch (e) {
-      left.push(`${h.pid} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
-    }
-  }
-  return `${writesOnly ? 'Low processes held write access to it' : 'Low processes held it open'}: ${held.map((h) => `${h.name} (${h.pid})`).join(', ')}${left.length ? `; could not end ${left.join(', ')}` : ''}`;
+  return `${writesOnly ? 'Low processes held write access to it' : 'Low processes held it open'}: ${held.map((h) => `${h.name} (${h.pid})`).join(', ')}`;
 }
 
 /** How long a stage folder is taken to be another rollout's, still running (an unpack takes seconds: 1.8 s measured). */
@@ -394,10 +385,10 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     remove(aside);
   }
   // Then the processes below Medium with write access to either folder (w5882's review): a handle outlives a relabel, so
-  // a folder some Low process can still write is never trusted, whatever its labels and hashes say. They are ended, and
-  // the node swapped. A Low process with read handles only (running this node, working in its folder) is left alone
-  // (w5886's review).
-  const held = notAFolder(dir) ? undefined : await endLowHolders([dir, medium], true, d);
+  // a folder some Low process can still write is never trusted, whatever its labels and hashes say. They are named, not
+  // ended (w5926's review), and the node swapped. A Low process with read handles only (running this node, working in its
+  // folder) is not named (w5886's review).
+  const held = notAFolder(dir) ? undefined : await warnLowHolders([dir, medium], true, d);
   // The labels next: once nothing Low can write the files, what is hashed next stays what runs.
   const lab = !homeBad && !held && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
   const st = homeBad
@@ -443,9 +434,10 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     if (fs.existsSync(dir) || notAFolder(dir)) {
       old = path.join(tools, `node.old-${(d.now ?? Date.now)()}`);
       // A file or folder in it held open refuses the rename (w5882's review: a Low process holding one kept a planted node
-      // in place on every rollout). The Low holders are ended and the rename tried again; one a Medium process holds
-      // (an agent's node reading its own files) is waited for a moment, never ended.
+      // in place on every rollout). The holders below Medium are named once, nothing is ended (w5926's review: the warn-only
+      // stage), and the rename tried again after a moment; a folder still held keeps its node until the next rollout.
       let busy: string | undefined;
+      let named: string | undefined;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           fs.renameSync(dir, old);
@@ -454,13 +446,12 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
         } catch (e) {
           busy = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
           if (attempt === 2) break;
-          const ended = await endLowHolders([dir], false, d);
-          if (ended?.startsWith('could not tell')) busy += `; ${ended}`;
+          if (attempt === 0) named = await warnLowHolders([dir], false, d);
           await new Promise((res) => setTimeout(res, d.retryMs ?? 2000));
         }
       }
       if (busy) {
-        d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is still in use (${busy}) after any process below Medium that held it was ended (a Medium one is never ended); the node there stays until the next rollout.`);
+        d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is still in use (${busy}${named ? `; ${named}` : ''}); nothing is ended, and the node there stays until the next rollout.`);
         remove(stage);
         return 'busy';
       }
