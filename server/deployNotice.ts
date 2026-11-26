@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { readJsonDurable, writeJsonDurable } from './durable.ts';
 import { prsInMessages, sameCommit, type BatchPr } from './autoDeploy.ts';
+import { gitExecFileSync } from './safeGit.ts';
 import type { RestartRequest } from './restart.ts';
 
 /**
@@ -118,7 +118,7 @@ export function doneLine(p: Pick<PendingNotice, 'update' | 'startedAt'>, o: { ru
 
 /** The pull requests a deploy brings: merge commits in the prepared release between the running commit and it. */
 export function prsInRelease(dir: string, from: string, to: string): BatchPr[] {
-  const out = execFileSync('git', ['-C', dir, 'log', '--first-parent', '--format=%B%x00', `${from}..${to}`], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] });
+  const out = gitExecFileSync(['-C', dir, 'log', '--first-parent', '--format=%B%x00', `${from}..${to}`], { encoding: 'utf8', timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
   return prsInMessages(out.split('\0').map((m) => m.trim()));
 }
 
