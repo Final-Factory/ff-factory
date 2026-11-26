@@ -233,7 +233,9 @@ test('w2046: a released worker whose resume waits for room on its full computer 
   assert.ok(sessions.queued().some((q) => q.id === a.id), 'it waits a moment first: a turn ending there now frees it');
   sessions.drain(Date.now() + MOVE_AFTER_MS + 1000);
   assert.ok(!sessions.queued().some((q) => q.id === a.id), 'the message went with its work');
-  await until('its fresh session on beast', () => store.work.get('w1')!.sessionIds.some((id) => store.sessions.get(id)?.machineId === 'beast'));
+  // w5915: the move's own end, not a time: its switch on beast runs some 30 git processes, which outran 5 s on a loaded BEAST.
+  await env.agents.settled();
+  assert.ok(store.work.get('w1')!.sessionIds.some((id) => store.sessions.get(id)?.machineId === 'beast'), 'its fresh session on beast (a failed move says why in the log above)');
   const w = store.work.get('w1')!;
   const b = store.sessions.get(w.sessionIds.find((id) => store.sessions.get(id)?.machineId === 'beast')!)!;
   assert.equal(b.machineSandbox, 'slot1');

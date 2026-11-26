@@ -291,7 +291,11 @@ export async function startedFor(env: Awaited<ReturnType<typeof setupOnMachine>>
   assert.equal(started.isError, false, started.text);
   // w5278: a sandbox handed over first (a released worker's branch) answers at once; the worker starts once it is switched.
   const fresh = () => (store.work.get(wid)?.sessionIds ?? []).find((x) => !before.has(x));
-  if (/^Starting /.test(started.text)) await until(`${wid}'s worker starts after the hand-over`, () => !!fresh());
+  if (/^Starting /.test(started.text)) {
+    // w5915: the hand-over's own end, not a time: it runs some 30 git processes, which outran a 5 s wait on a loaded BEAST.
+    await env.agents.settled();
+    assert.ok(fresh(), `${wid}'s worker did not start after the hand-over (its reason is in the log above)`);
+  }
   const id = /Started agent (\w+)/.exec(started.text)?.[1] ?? fresh()!;
   const info = store.sessions.get(id)!;
   await firstTurn(info);

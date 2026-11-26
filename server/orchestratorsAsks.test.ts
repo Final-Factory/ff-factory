@@ -405,7 +405,9 @@ test('w2867: a question its requester hands to another person ("Ask ben") waits 
   assert.equal(heard(loth.id, '[needs you]').length, 1, 'lothsahn never hears it again');
   assert.match(await live(), /Waiting on input on Ben/);
 
-  // Ben answers in his own words: the question clears.
+  // Ben answers in his own words, in a turn of his: the question clears. The turn the second [needs you] opened ends first
+  // (w5915: answered inside it, the note was FF Factory's turn, not his, and the question stayed open).
+  await until("Ben's orchestrator ends the second ask's turn", () => chat(BEN).info.status === 'idle');
   chat(BEN).lastFrom = 'human';
   const answered = await call(ben, 'update_work', { id: 'w1', note: 'Add asteroids' });
   assert.equal(answered.isError, false, answered.text);

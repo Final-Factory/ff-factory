@@ -76,6 +76,9 @@ test('probe', () => {
     for (const name of Object.keys(planted)) assert.equal(env[name], undefined, 'visible: ' + name + '=' + env[name]);
     for (const value of Object.values(planted)) assert.ok(!Object.values(env).includes(value), 'a planted value is visible: ' + value);
   }
+  // w5915: a program a test starts with process.execArgv (this guard again) keeps an FF_ setting the test hands it.
+  const handed = execFileSync(process.execPath, [...process.execArgv, '-e', 'process.stdout.write(String(process.env.FF_HANDED_W5915))'], { encoding: 'utf8', env: { ...process.env, FF_HANDED_W5915: 'kept' } });
+  assert.equal(handed, 'kept', 'the guard took a setting the test handed its program');
 });
 `,
   );
@@ -83,6 +86,8 @@ test('probe', () => {
   // The run below is a test run of its own, not part of this one's (or its coverage).
   delete env.NODE_TEST_CONTEXT;
   delete env.NODE_V8_COVERAGE;
+  // and starts clean, as from a worker's shell: this run's own guard has marked its environment done.
+  delete env.FF_TEST_ENV_CLEAN;
   const run = (args: string[]) => spawnSync(process.execPath, [...args, '--test', '--test-reporter=tap', probe], { cwd: ROOT, env, encoding: 'utf8', timeout: 60_000 });
 
   // Without the guard the plant is visible (the probe fails): the check below is a real one.
