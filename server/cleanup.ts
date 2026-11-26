@@ -39,6 +39,8 @@ export interface CleanupEnv {
   localAppData?: string;
   /** The agents' own temp root when it is not `tmp` (a machine's temp_dir). */
   agentTemp?: string;
+  /** Medium agents' own temp root (<root>/tmp-medium) once daemon.json mediumAgentFolders is on (w5862, w5869). */
+  mediumTemp?: string;
   /** Folders of sandboxes (the host's sandbox root): their Builds folders' old entries go, though sandboxes are kept. */
   sandboxRoots?: string[];
   /** Folders of sandboxes whose Unity Library caches (BuildCache, BurstCache) are capped and aged out (w898). */
@@ -240,7 +242,7 @@ export { LIBRARY_CACHES };
  */
 export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRule[] {
   const j = (...a: string[]) => P(a[0]).join(...a);
-  const temps = [...new Set([env.tmp, env.agentTemp].filter((x): x is string => !!x))];
+  const temps = [...new Set([env.tmp, env.agentTemp, env.mediumTemp].filter((x): x is string => !!x))];
   const rules: CleanupRule[] = [];
   for (const t of temps) {
     rules.push(
