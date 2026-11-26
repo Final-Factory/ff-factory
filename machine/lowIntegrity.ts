@@ -1029,18 +1029,18 @@ public static class FfWalk {
     int n; if (l.StartsWith("S-1-16-") && int.TryParse(l.Substring(7), out n)) return n; return -1;
   }
   static bool Inherited(string flags) { for (int i = 0; i + 1 < flags.Length; i += 2) if (flags.Substring(i, 2) == "ID") return true; return false; }
-  static bool Wanted(string stopFile, string want) {
+  static bool Wanted(string stopFile, string wantMode) {
     if (stopFile.Length == 0) return true;
-    try { return File.ReadAllText(stopFile).Trim() == want; } catch { return false; }
+    try { return File.ReadAllText(stopFile).Trim() == wantMode; } catch { return false; }
   }
-  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close, string stopFile, string want) {
+  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close, string stopFile, string wantMode) {
     var o = new List<string>(); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var sk = new HashSet<string>(skip, StringComparer.OrdinalIgnoreCase); var tg = new HashSet<string>(targets, StringComparer.OrdinalIgnoreCase);
     var rx = new Regex(@"\(ML;([A-Z]*);([A-Z]*);;;([A-Z0-9-]+)\)");
     var st = new Stack<KeyValuePair<string, bool>>(); foreach (var r in roots) st.Push(new KeyValuePair<string, bool>(r, true));
     int looked = 0, changed = 0, failed = 0, steps = 0;
     while (st.Count > 0) {
-      if (steps++ % 256 == 0 && !Wanted(stopFile, want)) { o.Add("stopped " + looked); break; }
+      if (steps++ % 256 == 0 && !Wanted(stopFile, wantMode)) { o.Add("stopped " + looked); break; }
       var e = st.Pop(); string p = e.Key.TrimEnd('\\'); if (!seen.Add(p) || sk.Contains(p)) continue;
       FileAttributes a; try { a = File.GetAttributes(p); } catch { continue; }
       if (!e.Value && (a & FileAttributes.ReparsePoint) != 0) continue;

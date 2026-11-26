@@ -212,8 +212,9 @@ and no retry once the mode changed, while a given-back one still does; and the w
 file every 256 paths and stops. A closed path left unlabelled that way stays open, which only ever lets a worker read
 more, never less, and the next pass (the new mode's) sets everything it wants. Once a pass has seen the mode change it
 stays stopped, even if the file says `on` again (`on`, `warn`, `on`): the later switch has queued a pass of its own.
-`warn` and `off` passes only open, so they always run to the end. So an `off` sent during a first `on` waits for at most
-one Set's walk, not the whole label run.
+`warn` and `off` passes only open, so they always run to the end. So an `off` sent during a first `on` waits only for the step
+already running, not the whole label run: one Set's walk, or one `icacls /grant (OI)(CI)` of WRITE_OWNER, which also
+walks the folder (its timeout is 30 minutes, `labelNoReadUp`).
 
 The login watcher's minute tick (w5559, No-Read-Up on new Claude login files) runs in the same queue, and only while
 the file says `on` when its turn comes: beside a pass it could label a login file after an `off` pass had opened it. A
