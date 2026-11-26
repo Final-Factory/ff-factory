@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { GithubTokens, PORTAL_MACHINE, githubFromVault, githubProblems, inGithubOrg, githubHealthLine, githubPersonOf, parseExpiry, parseGhInclude, rateLimitOf } from './githubTokens.ts';
+import { GithubTokens, PORTAL_MACHINE, githubBannerText, githubFromVault, githubProblems, inGithubOrg, githubHealthLine, githubPersonOf, parseExpiry, parseGhInclude, rateLimitOf } from './githubTokens.ts';
 import { GITHUB_REQUIRED_PERMISSIONS, GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { Vault, newKeyText } from './vault.ts';
 import { ghChecks } from './blockerWatch.ts';
@@ -170,7 +170,7 @@ function fakeGithub(byToken: Record<string, { deny?: string[]; status?: number; 
     const m = /^repos\/Final-Factory\/([^/]+)(?:\/(.*))?$/.exec(p)!;
     const [, repo, rest = ''] = m;
     if (deny.has(`repo:${repo}`)) return reply(404);
-    const perm = rest.startsWith('actions/') ? 'actions' : rest.startsWith('pulls') ? 'pull-requests' : rest.startsWith('issues') ? 'issues' : rest.endsWith('/status') ? 'commit-statuses' : rest.startsWith('commits') ? 'contents' : 'metadata';
+    const perm = rest.startsWith('actions/runners') ? 'administration' : rest.startsWith('actions/') ? 'actions' : rest.startsWith('pulls') ? 'pull-requests' : rest.startsWith('issues') ? 'issues' : rest.endsWith('/status') ? 'commit-statuses' : rest.startsWith('commits') ? 'contents' : 'metadata';
     return reply(deny.has(`${perm}@${repo}`) ? 403 : 200, []);
   };
   return { fetch, seen };
@@ -507,6 +507,22 @@ test('w1463: entryFor names the vault GitHub entry a person\'s runs on a machine
   assert.equal(on.entryFor('beast', 'sam'), undefined, 'nobody else\'s own token');
   assert.equal(on.entryFor('beast', undefined), 'vault-ben-github …bbbb', 'no person: the system payer\'s');
   for (const name of [on.entryFor('beast', 'ben')!, on.entryFor('beast', 'lothsahn')!]) assert.ok(!name.includes(BEN) && !name.includes(LOTH) && !name.includes('b'.repeat(5)));
+});
+
+test("ffu's runner list (w5928): a token without Administration: read on ffu has the gap named; one with it, none", async (t) => {
+  const { vault } = setup(t);
+  const without = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: { deny: ['administration@ffu'] } }).fetch, probePortalLogin: false });
+  await without.tick();
+  const ben = without.list().find((h) => h.name === 'vault-ben-github')!;
+  assert.equal(ben.repos!.find((r) => r.repo === 'Final-Factory/ffu')!.access.administration, 'denied');
+  assert.equal(ben.repos!.find((r) => r.repo === 'Final-Factory/FinalFactory')!.access.administration, undefined, 'asked of ffu alone');
+  assert.deepEqual(ben.problems, ['Administration: Read-only on Final-Factory/ffu (read refused)']);
+  assert.match(githubBannerText(ben), /lacks: Administration: Read-only on Final-Factory\/ffu \(read refused\)\./);
+  const withIt = tokens(vault, {}, undefined, { fetch: fakeGithub({ [BEN]: {} }).fetch, probePortalLogin: false });
+  await withIt.tick();
+  const ok = withIt.list().find((h) => h.name === 'vault-ben-github')!;
+  assert.equal(ok.repos!.find((r) => r.repo === 'Final-Factory/ffu')!.access.administration, 'read');
+  assert.deepEqual(ok.problems, []);
 });
 
 test('Final-Factory/ffu is required (w2898): a token without it warns, one with it does not', async (t) => {
