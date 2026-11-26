@@ -2279,6 +2279,7 @@ export class Agents {
       ...(typeof a.split === 'string' ? { split: a.split } : {}),
       ...(typeof a.steam === 'string' && a.steam.trim() ? { steam: a.steam } : {}),
       ...(typeof a.menus === 'string' && a.menus.trim() ? { menus: a.menus } : {}),
+      ...(typeof a.legacy_data === 'string' && a.legacy_data.trim() ? { legacy_data: a.legacy_data } : {}),
       ...(typeof a.request === 'string' && a.request.trim() ? { request: a.request } : {}),
       ...(a.retry === true ? { retry: true } : {}),
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
@@ -6594,6 +6595,8 @@ A report is for a person who asked for one, and people want very few. File one w
         online: this.machines.isOnline(m.id) && (!!st || !!m.local),
         // w5555: its daemon holds every sandbox worker while its worker fence has failed, so placement sends work elsewhere.
         ...(m.fence?.state === 'failed' ? { fenceFailed: m.fence.why ?? 'no reason given' } : {}),
+        // w5965: a pair run of a pre-w5297 player goes only where the fence is off.
+        ...(m.fence ? { fence: m.fence.state } : {}),
         live: mine.filter((s) => s.live).length,
         midTurn: mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),
