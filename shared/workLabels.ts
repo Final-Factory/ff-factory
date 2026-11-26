@@ -29,6 +29,8 @@ export function sourceLabel(s: WorkSource): string {
       if (s.masterBatch?.kind === 'gate-miss') return `Merge-gate tuning ${s.masterBatch.tip}`;
       if (s.masterBatch?.kind === 'hung') return 'Master batch hung';
       return `Master batch red${s.masterBatch?.pr ? ` (#${s.masterBatch.pr})` : ''}`;
+    case 'harness-route':
+      return 'Route for workers (w5914)';
   }
 }
 

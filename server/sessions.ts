@@ -16,6 +16,7 @@ import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
 import { checkObject, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { dryRun, dryRunStartRefusal } from './dryRun.ts';
 import { selfAnswer, type SelfAnswer } from './selfAnswer.ts';
+import { MESSAGE_WHILE_WAITING, SHELL_TOOLS, TURN_ENDED_WHILE_WAITING, commandOf, insistedReason, noRouteReason, nudgeKey, nudgeMessage, nudges, routeKey } from './bashNudge.ts';
 import { isRealModelId } from '../shared/models.ts';
 import { ContextMeter, IMAGE_CHARS, MIN_BASE, carriedTotals, type Cumulative, type MeterState, type TurnUsage } from '../shared/spend.ts';
 import type { MeterStates } from './meterStates.ts';
@@ -585,7 +586,11 @@ export class AgentSession implements SessionHandle {
   private resumeClock?: ResumeClock;
   private input?: InputQueue;
   private abort?: AbortController;
-  private readonly pending = new Map<string, { resolve: (r: PermissionResult) => void; seq: number; input: Record<string, unknown> }>();
+  private readonly pending = new Map<string, { resolve: (r: PermissionResult) => void; seq: number; input: Record<string, unknown>; toolName?: string }>();
+  /** w5914's loop guard: the shell commands nudged toward another route in this turn (server/bashNudge.ts nudgeKey). */
+  private readonly nudged = new Set<string>();
+  /** What the main agent said last (w5914: its "no other route" reason when the call's description has none). */
+  private lastSaid = '';
   /** Who sent the message that started the current turn; the orchestrator only hears about turns it started. */
   lastFrom: 'human' | 'orchestrator' | 'system' = 'human';
   /** The last message's uuid (turnId without a turn, w1867). */
@@ -729,7 +734,12 @@ export class AgentSession implements SessionHandle {
     if (opens) {
       this.costAtTurnOpen = this.info.costUsd;
       this.resetTurnBudget();
+      this.nudged.clear();
     }
+    // w5914 (lothsahn: "When you deny a bash request the harness should remove the card from my panel"): a message from a
+    // person or an orchestrator that reaches a worker while its shell command waits for a person (w5869's "use Edit
+    // instead") answers that command: it is denied, so the card clears and the worker reads the message.
+    if (from !== 'system') this.denyShellPending(MESSAGE_WHILE_WAITING);
     // w1949: a refused editor start (SessionInfo.editorRefused) is the wait of the stop it ended; a new turn tries again.
     this.update({ status: 'running', statusDetail: undefined, ...(opens ? { turnOpenSince: new Date().toISOString(), editorRefused: undefined } : {}) });
     if (opens) this.store.flushSoon?.();
@@ -825,7 +835,7 @@ export class AgentSession implements SessionHandle {
       allowDangerouslySkipPermissions: true,
       includePartialMessages: true,
       abortController: this.abort,
-      canUseTool: (toolName, input, { signal, blockedPath, decisionReason }) => this.askPermission(toolName, input, signal, blockedPath, decisionReason),
+      canUseTool: (toolName, input, { signal, blockedPath, decisionReason, agentID }) => this.askPermission(toolName, input, signal, blockedPath, decisionReason, agentID),
       ...(this.info.sdkSessionId ? { resume: this.info.sdkSessionId } : {}),
       // Opt in to session_state_changed: the authoritative "turn is over" signal. A `result` alone is
       // not — background subagents and tasks can re-invoke the session after it.
@@ -955,6 +965,9 @@ export class AgentSession implements SessionHandle {
           else if (m.state === 'idle') {
             // Idle means the input queue is drained: everything sent has been answered.
             this.clearOutstanding();
+            // w5914: a shell command still waiting (a background subagent's, w5869) has nobody to read its answer now.
+            this.denyShellPending(TURN_ENDED_WHILE_WAITING);
+            this.nudged.clear();
             this.update({ status: this.pending.size ? 'waiting_permission' : 'idle', turnOpenSince: undefined });
             this.store.flushSoon?.();
             this.emitTurnEnd(this.lastTurnText);
@@ -1033,7 +1046,10 @@ export class AgentSession implements SessionHandle {
             else if (b.type === 'thinking') this.meter.addAssistant(b.thinking.length);
             else if (b.type === 'tool_use') this.meter.addToolUse(b.id, b.name, b.input, JSON.stringify(b.input ?? {}).length);
           }
-          if (b.type === 'text' && !sub && b.text.trim()) this.store.append(id, { kind: 'assistant', text: b.text });
+          if (b.type === 'text' && !sub && b.text.trim()) {
+            this.lastSaid = b.text;
+            this.store.append(id, { kind: 'assistant', text: b.text });
+          }
           else if (b.type === 'thinking' && !sub && b.thinking.trim()) this.store.append(id, { kind: 'thinking', text: b.thinking });
           else if (b.type === 'tool_use') this.store.append(id, { kind: 'tool_use', toolUseId: b.id, name: b.name, input: b.input, parentToolUseId: sub });
         }
@@ -1439,7 +1455,7 @@ export class AgentSession implements SessionHandle {
     return selfAnswer({ toolName, input, why, permissionMode: this.info.permissionMode, tempDir: this.tempDir, cwd: this.cwd });
   }
 
-  private askPermission(toolName: string, input: Record<string, unknown>, signal: AbortSignal, blockedPath?: string, decisionReason?: string): Promise<PermissionResult> {
+  private askPermission(toolName: string, input: Record<string, unknown>, signal: AbortSignal, blockedPath?: string, decisionReason?: string, agentId?: string): Promise<PermissionResult> {
     const own = this.ownAnswer(toolName, input, decisionReason);
     if (own.ok) {
       // A line in the transcript, so a count of the questions sees what the session answered and why (w5148).
@@ -1447,23 +1463,51 @@ export class AgentSession implements SessionHandle {
       if (own.route === 'refuse-unparsed') return Promise.resolve({ behavior: 'deny', message: own.deny });
       return Promise.resolve({ behavior: 'allow', updatedInput: input });
     }
-    const requestId = randomUUID();
     // Claude Code's own reason for asking (w1097): what a person sees on the card, and what the prompt count groups by.
-    const reason = decisionReason ? decisionReason.slice(0, 600) : blockedPath ? `touches ${blockedPath}` : undefined;
-    const ev = this.store.append(this.info.id, { kind: 'permission', requestId, toolName, input, ...(reason ? { reason } : {}) });
+    const asked = decisionReason ? decisionReason.slice(0, 600) : blockedPath ? `touches ${blockedPath}` : undefined;
+    // What the card shows: Claude Code's reason, and (w5914) the worker's "no other route" reason beside it.
+    let reason = asked;
+    let noRoute: { reason?: string; key: string } | undefined;
+    // w5914: a shell command is first answered by the session, with a deny that asks for another route; only the same
+    // command asked again in the turn (the loop guard: once per command, per agent, per turn) reaches a person, with the
+    // worker's reason. This never allows anything: it denies, or asks a person as before.
+    if (nudges(this.info.kind, toolName)) {
+      const key = nudgeKey(toolName, input, agentId);
+      if (!this.nudged.has(key)) {
+        this.nudged.add(key);
+        this.lastSaid = '';
+        this.store.append(this.info.id, { kind: 'system', text: `Asked the agent for a route that needs no approval before asking a person (w5914): ${toolName} ${commandOf(input).slice(0, 200)}` });
+        return Promise.resolve({ behavior: 'deny', message: nudgeMessage(toolName) });
+      }
+      const why = noRouteReason(input, agentId ? undefined : this.lastSaid);
+      noRoute = { ...(why ? { reason: why } : {}), key: routeKey(toolName, commandOf(input)) };
+      reason = insistedReason(reason, why).slice(0, 900);
+    }
+    const requestId = randomUUID();
+    // The transcript keeps Claude Code's own reason: the prompt count groups by it (w1097).
+    const ev = this.store.append(this.info.id, { kind: 'permission', requestId, toolName, input, ...(asked ? { reason: asked } : {}) });
     const p: PendingPermission = {
       requestId,
       toolName,
       input,
       reason,
+      ...(noRoute ? { noRoute } : {}),
       createdAt: new Date().toISOString(),
     };
-    this.update({ status: 'waiting_permission', pendingPermissions: [...this.info.pendingPermissions, p] });
-    this.events.emit('permission', this, p);
-    return new Promise<PermissionResult>((resolve) => {
-      this.pending.set(requestId, { resolve, seq: ev.seq, input });
+    const answer = new Promise<PermissionResult>((resolve) => {
+      this.pending.set(requestId, { resolve, seq: ev.seq, input, toolName });
       signal.addEventListener('abort', () => this.decide(requestId, false, 'aborted'), { once: true });
     });
+    // The answer is waited for before anyone hears of the prompt, so a listener may answer it at once (w5914: a route that
+    // is live already denies the card it would have raised, server/routeRequests.ts).
+    this.update({ status: 'waiting_permission', pendingPermissions: [...this.info.pendingPermissions, p] });
+    this.events.emit('permission', this, p);
+    return answer;
+  }
+
+  /** w5914: deny every shell command that waits for a person (its card clears), with what the agent reads. */
+  private denyShellPending(message: string) {
+    for (const [id, p] of [...this.pending]) if (p.toolName && SHELL_TOOLS.has(p.toolName)) this.decide(id, false, message);
   }
 
   decide(requestId: string, allow: boolean, message?: string) {
@@ -2096,7 +2140,8 @@ export class SessionManager {
       // Removed only once delivered (w496: a worker's brief was dropped when LothDesktop's daemon was outdated):
       // tried again on the next pass, given up only after QUEUE_HOLD_MS, or POOL_HOLD_MS while only its pool holds it (w1129).
       const why = (e as Error).message;
-      const pool = s.info.kind === 'worker' && poolHeld(e);
+      // w5921: the dispatcher waits for its pool's reset like a worker (a weekly reset can be days away), but parks nothing.
+      const pool = (s.info.kind === 'worker' || (s.info.kind === 'orchestrator' && s.info.orchestratorRole === 'dispatcher')) && poolHeld(e);
       if (pool !== (q.on === 'pool')) {
         q.on = pool ? 'pool' : 'machine';
         this.saveQueue();
@@ -2109,7 +2154,7 @@ export class SessionManager {
       }
       held.add(q.id);
       // w2231: its pool held the start: its requests go Blocked on the pool's usage limit and its sandbox is released.
-      if (pool && this.parkOnPool(s, e)) return false;
+      if (pool && s.info.kind === 'worker' && this.parkOnPool(s, e)) return false;
       if (q.lastError !== why) {
         q.lastError = why;
         this.saveQueue();
