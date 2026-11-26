@@ -11,10 +11,11 @@
  * with `gh auth token` and gives it to that run as GH_TOKEN, as a vault token is given. So the files stay denied to every
  * fenced run, and the login reaches only the runs that have no token of their own (docs/worker-fence.md, "Owner secrets").
  */
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { trustedGh } from './evidenceGate.ts';
+import { run } from '../server/proc.ts';
 import { NO_READ_UP, type LabelTarget } from './lowIntegrity.ts';
 
 export type OwnerSecretKind = 'gh' | 'ssh' | 'browser' | 'keychain' | 'credentials';
@@ -205,23 +206,24 @@ export function machineGhEnv(specEnv: Record<string, string | undefined> | undef
   return { GH_TOKEN: token };
 }
 
-export type TokenRun = (cmd: string, args: string[], o: { env: NodeJS.ProcessEnv; timeoutMs: number }) => { status: number | null; stdout: string };
+export type TokenRun = (cmd: string, args: string[], o: { env: NodeJS.ProcessEnv; timeoutMs: number }) => Promise<{ status: number | null; stdout: string }>;
 
-const realTokenRun: TokenRun = (cmd, args, o) => {
-  const r = spawnSync(cmd, args, { env: o.env, timeout: o.timeoutMs, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-  return { status: r.status, stdout: r.stdout ?? '' };
+const realTokenRun: TokenRun = async (cmd, args, o) => {
+  const r = await run(cmd, args, { env: o.env, timeoutMs: o.timeoutMs });
+  return { status: r.code, stdout: r.stdout };
 };
 
 /**
  * The machine's gh login's token, read by the daemon (never a worker) with `gh auth token`, or undefined. The value is
- * never logged: only whether there was one.
+ * never logged: only whether there was one. w5973: a child process the daemon's loop does not wait on (the spawnSync
+ * before held it for up to 30 s).
  */
-export function machineGhToken(run: TokenRun = realTokenRun): string | undefined {
+export async function machineGhToken(runToken: TokenRun = realTokenRun): Promise<string | undefined> {
   const env: NodeJS.ProcessEnv = { ...process.env, GH_PROMPT_DISABLED: '1', GH_NO_UPDATE_NOTIFIER: '1' };
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   try {
-    const r = run(trustedGh(), ['auth', 'token', '--hostname', 'github.com'], { env, timeoutMs: 30_000 });
+    const r = await runToken(trustedGh(), ['auth', 'token', '--hostname', 'github.com'], { env, timeoutMs: 30_000 });
     const t = r.status === 0 ? r.stdout.trim() : '';
     return /^[A-Za-z0-9_]{20,255}$/.test(t) ? t : undefined;
   } catch {
