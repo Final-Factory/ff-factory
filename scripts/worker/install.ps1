@@ -55,6 +55,10 @@
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
   machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp-daemon, off keeps the
   system temp folder (the recovery). Left out: the install keeps what it has.
+.PARAMETER ToolsDiskLock
+  With -Update (w5959, docs/worker-root.md): set what the daemon does about a virtual disk (.vhd, .vhdx) in a Low
+  <root>\tools child in daemon.json (toolsDiskLock), as ops_worker machine_update tools_disk_lock does: on keeps that
+  child Medium, so workers cannot write there; warn only logs it (the recovery). Left out: the install keeps what it has.
 .PARAMETER MediumAgentFolders
   With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
   temp root and cargo home in daemon.json (mediumAgentFolders), as ops_worker machine_update medium_agent_folders does:
@@ -118,6 +122,7 @@ param(
     [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
+    [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -287,6 +292,7 @@ if ($Update) {
     if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
+    if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }

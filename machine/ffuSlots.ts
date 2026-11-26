@@ -27,7 +27,8 @@
  * the agent its own temp folder, which no worker writes, so it builds there instead (w5946 F5). A Medium agent's `take` keeps its
  * own CARGO_HOME and never gets the workers' `<root>/cache/cargo` (w5947): crates and build scripts a worker could have planted.
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitSpawnSync, splitGlobal } from '../server/safeGit.ts';
@@ -35,6 +36,7 @@ import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
 import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
+import { guardRemoteSync } from '../server/remoteGuard.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
 export const FFU_SLOTS_DIR = 'ffu-sandboxes';
@@ -115,7 +117,7 @@ export interface FfuSlotDeps {
   facts?: CleanupFacts;
   /** w5870: MEDIUM_AGENT_VAR, set only for a Medium agent: "warn" or "on". */
   medium?: string;
-  /** w6038: the folder the slots' core.hooksPath names; default FFU_SLOT_HOOKS. */
+  /** w6038: the folder the slots' core.hooksPath names; default slotHooksDir's pick (w6062). */
   hooks?: string;
   /** Read cleanup-facts.json again (`take --wait` polls with it); absent: the facts stay as given. */
   readFacts?: () => CleanupFacts | undefined;
@@ -182,6 +184,85 @@ function writeSlotState(root: string, s: FfuSlotState): void {
  * and the daemon's reads stay as they were, and ff-pr checks the same with slotWriteRefusal.
  */
 export const FFU_SLOT_HOOKS = path.join(import.meta.dirname, 'ffuSlotHooks');
+
+/**
+ * w6062: on Windows the slots run a native reference-transaction (ffuSlotHooks/native/reference_transaction.rs, the same
+ * check as the shell one). Git runs that hook at every phase of every ref transaction, 7 times per `git commit`, and each
+ * start of Git Bash's sh cost about 30 ms on LothDesktop: the shell hooks added about 210 ms per commit (measured). `take`
+ * builds it once per version of the hooks with rustc into `<install>/ffu-sandboxes/hooks/<hash>/` beside copies of the
+ * shell pre-push, pre-rebase and slot-guard.sh, as the worker it runs as: that folder is as much a worker's to write as the
+ * shared clone's core.hooksPath, which `take` sets in that same folder tree. No rustc, or a build that fails: the shell hooks.
+ */
+const NATIVE_HOOK_SRC = path.join(FFU_SLOT_HOOKS, 'native', 'reference_transaction.rs');
+const NATIVE_HOOK_SHELL = ['pre-push', 'pre-rebase', 'slot-guard.sh'];
+export const nativeSlotHooksBase = (root: string) => path.join(slotsBase(root), 'hooks');
+
+/** rustc for the native hook (w6062): on PATH, else in the machine's cargo homes (LothDesktop's `<root>/tools/cargo`, with its rustup beside it as ffu-build-test's ci_local.sh finds it), never the home folder (server/outsideWrites.test.ts). */
+export function findRustc(env: NodeJS.ProcessEnv, root: string): { cmd: string; env: NodeJS.ProcessEnv } | undefined {
+  const exe = process.platform === 'win32' ? 'rustc.exe' : 'rustc';
+  const runs = (cmd: string, e: NodeJS.ProcessEnv) => spawnSync(cmd, ['-V'], { env: e, windowsHide: true, timeout: 60_000 }).status === 0;
+  if (runs('rustc', env)) return { cmd: 'rustc', env };
+  const homes = [env.CARGO_HOME, root && path.join(root, 'tools', 'cargo'), root && path.join(root, 'cache', 'cargo')];
+  for (const h of homes) {
+    if (!h) continue;
+    const cmd = path.join(h, 'bin', exe);
+    if (!fs.existsSync(cmd)) continue;
+    if (runs(cmd, env)) return { cmd, env };
+    // A rustup proxy with no toolchain where RUSTUP_HOME points (LothDesktop's ~/.rustup has none set): its rustup beside it.
+    const rustup = path.join(path.dirname(h), 'rustup');
+    const e = { ...env, RUSTUP_HOME: rustup };
+    if (fs.existsSync(path.join(rustup, 'toolchains')) && runs(cmd, e)) return { cmd, env: e };
+  }
+  return undefined;
+}
+
+/**
+ * The native slot hooks folder for this version of the hooks (w6062), built under `base` if it is not there yet; undefined
+ * when rustc is missing or the build fails (said with `say`), and the shell hooks stay. Two takes building at once each
+ * build in a folder of their own and the first rename wins.
+ */
+export function ensureNativeSlotHooks(base: string, o: { env?: NodeJS.ProcessEnv; root?: string; say?: (s: string) => void } = {}): string | undefined {
+  const exe = process.platform === 'win32' ? 'reference-transaction.exe' : 'reference-transaction';
+  const sum = createHash('sha256').update(process.platform).update(fs.readFileSync(NATIVE_HOOK_SRC));
+  for (const f of NATIVE_HOOK_SHELL) sum.update(fs.readFileSync(path.join(FFU_SLOT_HOOKS, f)));
+  const dir = path.join(base, sum.digest('hex').slice(0, 12));
+  if (fs.existsSync(path.join(dir, exe))) return dir;
+  const say = o.say ?? (() => {});
+  const rustc = findRustc(o.env ?? process.env, o.root ?? '');
+  if (!rustc) {
+    say('ffu-slot: no rustc found, so the slot runs the shell git hooks (about 0.2 s slower per commit on Windows, w6062)\n');
+    return undefined;
+  }
+  const tmp = path.join(base, `.build-${process.pid}-${Date.now()}`);
+  try {
+    fs.mkdirSync(tmp, { recursive: true });
+    for (const f of NATIVE_HOOK_SHELL) {
+      fs.copyFileSync(path.join(FFU_SLOT_HOOKS, f), path.join(tmp, f));
+      fs.chmodSync(path.join(tmp, f), 0o755);
+    }
+    const r = spawnSync(rustc.cmd, ['--edition', '2021', '-O', '-C', 'panic=abort', '-C', 'debuginfo=0', '--crate-name', 'reference_transaction', '-o', path.join(tmp, exe), NATIVE_HOOK_SRC], { env: rustc.env, encoding: 'utf8', windowsHide: true, timeout: 300_000 });
+    if (r.status !== 0) throw new Error(`rustc: ${(r.stderr || r.error?.message || '').trim().slice(0, 300)}`);
+    for (const f of fs.readdirSync(tmp)) if (f.endsWith('.pdb')) fs.rmSync(path.join(tmp, f), { force: true });
+    try {
+      fs.renameSync(tmp, dir);
+    } catch (e) {
+      if (!fs.existsSync(path.join(dir, exe))) throw e; // else another take built it first
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+    return dir;
+  } catch (e) {
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 });
+    say(`ffu-slot: could not build the native slot git hook, so the slot runs the shell ones (w6062): ${(e as Error).message}\n`);
+    return undefined;
+  }
+}
+
+/** The folder the shared clone's core.hooksPath names (w6062): the native hooks on Windows when they build, else the shell ones. */
+export function slotHooksDir(d: Pick<FfuSlotDeps, 'root' | 'hooks' | 'say'>, platform = process.platform): string {
+  if (d.hooks) return d.hooks;
+  if (platform !== 'win32') return FFU_SLOT_HOOKS;
+  return ensureNativeSlotHooks(nativeSlotHooksBase(d.root), { root: d.root, say: d.say }) ?? FFU_SLOT_HOOKS;
+}
 
 /** w6038: `<slot>/holder`, what the hooks read (shell builtins only, no JSON): `holder <session>` and `branch <branch>` lines. */
 export const slotHolderFile = (root: string, id: string) => path.join(slotDir(root, id), 'holder');
@@ -407,7 +488,12 @@ export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
     const onOrigin = d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${from}`], repo).code === 0;
     must(d.git(onOrigin ? ['branch', '-f', from, `refs/remotes/origin/${from}`] : ['branch', '-D', from], repo), 'git branch');
   }
-  const push = d.git(['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], repo);
+  // w6099: workers write the shared clone's config, origin's URL included.
+  const no = guardRemoteSync((a) => {
+    const g = d.git(a, repo);
+    return g.code === 0 ? g.out : undefined;
+  }, `the rescue push in ${fwd(repo)}`);
+  const push = no ? { code: 1, out: '', err: no } : d.git(['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], repo);
   const r: FfuRescue = { holder, slot: s.id, branch, sha, ...(from ? { from } : {}), pushed: push.code === 0, at: new Date(d.now()).toISOString() };
   d.say(`ffu-slot: saved ${holder}'s work in ${s.id} (${sha.slice(0, 8)}) on branch ${branch}${r.pushed ? ', pushed to origin' : ` in ${fwd(repo)} (push failed: ${(push.err || push.out).trim().slice(0, 160)})`}\n`);
   return r;
@@ -445,7 +531,7 @@ function ensureRepo(d: FfuSlotDeps, remote: string): void {
   must(d.git(['fetch', '--prune', '--quiet', 'origin'], repo), 'git fetch');
   d.git(['worktree', 'prune'], repo);
   // w6038: the slots' own git runs FF Factory's slot hooks. --local: gitSpawnSync's command-scope core.hooksPath would answer.
-  const hooks = fwd(d.hooks ?? FFU_SLOT_HOOKS);
+  const hooks = fwd(slotHooksDir(d));
   if (d.git(['config', '--local', '--get', 'core.hooksPath'], repo).out.trim() !== hooks) must(d.git(['config', '--local', 'core.hooksPath', hooks], repo), 'git config');
 }
 

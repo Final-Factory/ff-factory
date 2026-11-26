@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, toolsDiskPlan, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -828,4 +828,88 @@ test("lowDiskImages names each virtual disk in a Low tools child, never node's, 
   assert.match(w, /Nothing was changed/);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>')), w);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>', 'ext4.vhdx') + ' /setintegritylevel M'), w); // a same-volume move keeps the Low label (w5958)
+});
+
+// w5959: BEAST's layout before w6010's move, as w5870's worker measured it: F:\ffw\tools held cargo, git, node, low, shims
+// and wsl-ffu-sniper, whose ext4.vhdx (the ffu-sniper WSL distro's disk, ~18 GB) was Low on its own child folder.
+const SNIPER = { name: 'wsl-ffu-sniper', dir: true };
+const BEAST_TOOLS = [{ name: 'cargo', dir: true }, { name: 'git', dir: true }, { name: 'node', dir: true }, { name: 'low', dir: true }, { name: 'shims', dir: true }, SNIPER, { name: 'git.json', dir: false }];
+const sniperDisk = path.join(R, 'tools', 'wsl-ffu-sniper', 'ext4.vhdx');
+const beastList = (d: string) => (d === path.join(R, 'tools', 'wsl-ffu-sniper') ? ['ext4.vhdx'] : d === path.join(R, 'tools', 'low') ? ['old.vhdx'] : []);
+const beastTargets = (keep?: { children: string[]; disks: string[] }) =>
+  lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: [{ name: 'tools', dir: true }, { name: 'sandboxes', dir: true }], toolsChildren: BEAST_TOOLS, toolsKeepMedium: keep, exists: () => false });
+
+test("w5959: toolsDiskLock warn (the default) keeps w5948's warning and labels ffu-sniper's tools child Low as before", () => {
+  const disks = lowDiskImages(R, BEAST_TOOLS, beastList);
+  assert.deepEqual(disks, [sniperDisk], 'tools/low is the daemon\'s own (MEDIUM_TOOLS), never named');
+  for (const mode of [undefined, 'warn'] as const) {
+    const plan = toolsDiskPlan(R, disks, mode);
+    assert.deepEqual(plan.keep, { children: [], disks: [] }, String(mode));
+    assert.equal(plan.lines.length, 1);
+    assert.match(plan.lines[0], /^WARNING worker integrity: the virtual disk .*Nothing was changed/);
+    assert.ok(plan.lines[0].includes('"toolsDiskLock": "on"'), plan.lines[0]);
+    const t = beastTargets(plan.keep);
+    assert.ok(t.dirs.includes(path.join(R, 'tools', 'wsl-ffu-sniper')), 'still Low');
+    assert.ok(!t.medium.includes(sniperDisk));
+  }
+  // The same targets as a daemon that predates the switch computes.
+  assert.deepEqual(beastTargets(toolsDiskPlan(R, disks, 'warn').keep), beastTargets(undefined));
+});
+
+test("w5959: toolsDiskLock on keeps ffu-sniper's tools child Medium, its disk after it, and every other child as it was", () => {
+  const plan = toolsDiskPlan(R, lowDiskImages(R, BEAST_TOOLS, beastList), 'on');
+  assert.deepEqual(plan.keep, { children: ['wsl-ffu-sniper'], disks: [sniperDisk] });
+  assert.equal(plan.lines.length, 1);
+  assert.match(plan.lines[0], /^WARNING worker integrity: kept .*wsl-ffu-sniper Medium \(daemon.json "toolsDiskLock": "on", w5959\)/);
+  assert.match(plan.lines[0], /Workers can no longer write anything in/);
+  assert.match(plan.lines[0], /machine_update tools_disk_lock warn/, 'the line names the way back');
+  const t = beastTargets(plan.keep);
+  const tools = path.join(R, 'tools');
+  assert.deepEqual(t.dirs.filter((d) => d.startsWith(tools)).sort(), [path.join(tools, 'cargo'), path.join(tools, 'git')]);
+  const m = t.medium.filter((d) => d.startsWith(tools));
+  assert.deepEqual(m, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)), path.join(tools, 'wsl-ffu-sniper'), sniperDisk], 'tools first, the child after it, the disk last');
+  // A disk lowDiskImages did not place in a kept child (a stale plan) is never labelled.
+  assert.ok(!beastTargets({ children: [], disks: [sniperDisk] }).medium.includes(sniperDisk));
+  // Two disks in one child are one line, one kept child.
+  const two = toolsDiskPlan(R, [sniperDisk, path.join(R, 'tools', 'wsl-ffu-sniper', 'swap.vhdx')], 'on');
+  assert.deepEqual(two.keep.children, ['wsl-ffu-sniper']);
+  assert.equal(two.lines.length, 1);
+  // No disk: nothing kept, nothing said.
+  assert.deepEqual(toolsDiskPlan(R, [], 'on'), { keep: { children: [], disks: [] }, lines: [] });
+});
+
+test('w5959: labelLow raises the kept child and a disk Low on its own (a file label), and warn labels the child Low again', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-disk-'));
+  const tools = path.join(dir, 'tools');
+  const cargo = path.join(tools, 'cargo');
+  const sniper = path.join(tools, 'wsl-ffu-sniper');
+  const disk = path.join(sniper, 'ext4.vhdx');
+  for (const d of [cargo, sniper]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(disk, '');
+  // After w5717's rollout: tools Medium, each child Low on its own; the disk Low on its own too (the worst case).
+  const label = new Map<string, string>([
+    [tools, 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)'],
+    [cargo, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'],
+    [sniper, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'],
+    [disk, 'Mandatory Label\\Low Mandatory Level:(NW)'],
+  ]);
+  const calls: string[][] = [];
+  const exec: Exec = async (_c, args) => {
+    calls.push(args);
+    if (args.length === 1) return { code: 0, stdout: `${args[0]} ${label.get(args[0]) ?? ''}`, stderr: '' };
+    const lvl = args[2].endsWith('low') ? 'Low' : 'Medium';
+    label.set(args[0], `Mandatory Label\\${lvl} Mandatory Level:${args[2].startsWith('(OI)') ? '(OI)(CI)' : ''}(NW)`);
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const said: string[] = [];
+  assert.equal(await labelLow({ dirs: [cargo], files: [], medium: [tools, sniper, disk] }, exec, (l) => void said.push(l)), true);
+  const sets = () => calls.filter((c) => c.length > 1).map((c) => `${path.basename(c[0])} ${c[2]}`);
+  assert.deepEqual(sets(), ['wsl-ffu-sniper (OI)(CI)medium', 'ext4.vhdx medium'], 'the child a folder label, the disk a file label; cargo and tools untouched');
+  assert.ok(said.includes(`worker integrity: kept ${sniper} Medium`), said.join('\n'));
+  // The way back (toolsDiskLock warn): the child is a Low target again, right inside the Medium tools.
+  calls.length = 0;
+  assert.equal(await labelLow({ dirs: [cargo, sniper], files: [], medium: [tools] }, exec, () => {}), true);
+  assert.deepEqual(sets(), ['wsl-ffu-sniper (OI)(CI)low']);
+  assert.match(label.get(sniper)!, /Low/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
