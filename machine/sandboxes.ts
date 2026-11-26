@@ -13,6 +13,7 @@ import { diskLevel } from '../server/hostHealth.ts';
 import { bridgeUpSince } from '../server/unityHang.ts';
 import { sandboxGameDataEnv } from './gameData.ts';
 import { editorTmpdirEnv, sandboxUvEnv } from './sharedCaches.ts';
+import { editorSystemTempEnv } from './daemonTemp.ts';
 import { copyTree, lowerPriority, removeTree, run, type RunResult } from '../server/proc.ts';
 import { LIBRARY_CACHES, staleUnityLibraries } from '../server/cleanup.ts';
 import { TRIM_DEFAULTS, projectOpen, trimLibraryCaches, type TrimPolicy, type TrimResult } from '../server/cacheTrim.ts';
@@ -311,7 +312,9 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
  * No root: none.
  */
 export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...editorTmpdirEnv(root, sandbox, tmpdir, platform) };
+  // w6000: without its own TMPDIR the editor gets the system temp folder back, not the daemon's (<root>/tmp/daemon).
+  const own = editorTmpdirEnv(root, sandbox, tmpdir, platform);
+  return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
 }
 
 /**
@@ -328,7 +331,8 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
   } catch (e) {
     log(`editor TMPDIR ${env.TMPDIR} is not usable (${(e as Error).message}): it starts with the system temp folder`);
     const { TMPDIR: _, ...rest } = env;
-    return rest;
+    // w6000: the system temp folder named again, not the daemon's own (<root>/tmp/daemon) inherited from its environment.
+    return { ...rest, ...editorSystemTempEnv(process.env) };
   }
 }
 
@@ -359,7 +363,7 @@ export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: s
     procs,
     editor: (sb, logFile, report) => {
       const env = sandboxEditorEnv(process.env, sb.id, root, editorTmpdir, platform);
-      if (editorTmpdir && platform !== 'win32' && !env.TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
+      if (editorTmpdir && platform !== 'win32' && !editorTmpdirEnv(root, sb.id, true, platform).TMPDIR) log(`sandbox ${sb.id}: editorTmpdir is on but ${root ?? 'no root'} is too long for it (or unset): the editor keeps the system temp folder`);
       const unity = new MacUnity(sb.path, shared, undefined, platform, where, { logFile, fence, env: () => editorLaunchEnv(env, fs, (line) => log(`sandbox ${sb.id}: ${line}`)) });
       return { unity, watch: new MacUnityWatch(unity, report, { log }) };
     },

@@ -10,6 +10,7 @@ import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 import { renameAway } from './renameAway.ts';
 import { clearDeadMounts } from './deadMounts.ts';
+import { systemTempDir } from '../machine/daemonTemp.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -33,8 +34,10 @@ export type CleanupPlatform = 'win32' | 'darwin' | 'linux';
 export interface CleanupEnv {
   platform: CleanupPlatform;
   home: string;
-  /** The system temp folder (os.tmpdir()). */
+  /** The system temp folder (os.tmpdir() before the daemon moved its own, machine/daemonTemp.ts systemTempDir). */
   tmp: string;
+  /** The daemon's own temp folder, <root>/tmp/daemon (w6000), when the agents' temp root is <root>/tmp: aged as a temp root of its own. */
+  daemonTemp?: string;
   /** Windows: %LOCALAPPDATA%. */
   localAppData?: string;
   /** The agents' own temp root when it is not `tmp` (a machine's temp_dir). */
@@ -52,7 +55,9 @@ export interface CleanupEnv {
 export function hostCleanupEnv(agentTemp?: string): CleanupEnv {
   const platform: CleanupPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux';
   const home = os.homedir();
-  return { platform, home, tmp: os.tmpdir(), localAppData: platform === 'win32' ? process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local') : undefined, agentTemp };
+  // w6000: the daemon's own temp folder is inside the agents' temp root (<root>/tmp/daemon) once it moved there.
+  const daemonTemp = agentTemp && path.resolve(os.tmpdir()) === path.resolve(agentTemp, 'daemon') ? os.tmpdir() : undefined;
+  return { platform, home, tmp: systemTempDir(), localAppData: platform === 'win32' ? process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local') : undefined, agentTemp, ...(daemonTemp ? { daemonTemp } : {}) };
 }
 
 /** One allowlisted folder: its entries (files or folders) that match `names` go once untouched for `olderThanHours`. */
@@ -234,6 +239,12 @@ export function fenceToRoot<T extends { path: string }>(items: T[], root: string
 
 const H = 1;
 const D = 24;
+/**
+ * Folders of the agents' temp root (<root>/tmp) the daemon uses as it runs, which temp-old never removes whole (w6000):
+ * the daemon's own temp folder (os.tmpdir() of the daemon, machine/daemonTemp.ts; gone, every mkdtemp under it fails until
+ * the next start) is aged entry by entry as a temp root of its own (daemonTemp).
+ */
+export const TEMP_OLD_KEEP = ['daemon'];
 export { LIBRARY_CACHES };
 
 /**
@@ -242,7 +253,7 @@ export { LIBRARY_CACHES };
  */
 export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRule[] {
   const j = (...a: string[]) => P(a[0]).join(...a);
-  const temps = [...new Set([env.tmp, env.agentTemp, env.mediumTemp].filter((x): x is string => !!x))];
+  const temps = [...new Set([env.tmp, env.agentTemp, env.mediumTemp, env.daemonTemp].filter((x): x is string => !!x))];
   const rules: CleanupRule[] = [];
   for (const t of temps) {
     rules.push(
@@ -250,7 +261,7 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
       { id: 'agent-temp', dir: t, names: ['ffa-*'], olderThanHours: policy.sessionTempHours, what: "a finished agent session's own temp folder" },
       ...(policy.cloneOlderThanDays > 0 ? [{ id: 'temp-clones', dir: t, names: policy.clonePatterns, olderThanHours: policy.cloneOlderThanDays * D, repos: 'pushed' as const, what: 'an agent temp clone with nothing unpushed' }] : []),
       // Anything else in temp nobody touched for a week, clones included when fully pushed.
-      { id: 'temp-old', dir: t, except: ['claude', 'claude-*'], olderThanHours: policy.tempAnyOlderThanDays * D, repos: 'pushed', what: 'temp entry untouched for a long time' },
+      { id: 'temp-old', dir: t, except: ['claude', 'claude-*', ...TEMP_OLD_KEEP], olderThanHours: policy.tempAnyOlderThanDays * D, repos: 'pushed', what: 'temp entry untouched for a long time' },
     );
   }
   // Claude Code's task files (background task and subagent output) per project and session: the transcripts

@@ -51,6 +51,10 @@
   machine_update store_lock does: on makes the main clone read-only to the Low integrity workers once every sandbox is a
   slot repo (held off until then), warn refuses nothing and logs each write the daemon did not make, off opens it again.
   Left out: the install keeps what it has.
+.PARAMETER DaemonTmpdir
+  With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
+  machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp\daemon, off keeps the
+  system temp folder (the recovery). Left out: the install keeps what it has.
 .PARAMETER MediumAgentFolders
   With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
   temp root and cargo home in daemon.json (mediumAgentFolders), as ops_worker machine_update medium_agent_folders does:
@@ -113,6 +117,7 @@ param(
     [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
     [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
+    [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -281,6 +286,7 @@ if ($Update) {
     if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
     if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
+    if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
