@@ -175,7 +175,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
 // w5703 (no bump): LaunchSpec `transcriptLabels`, set by the machine's own daemon for its own agent host; an older host
 // ignores it (the conversation is then not labelled, as with the switch off).
-const DECIDED = { protocol: 9, fingerprint: '06643f713ae88528' };
+// w5924 (no bump): `lightFolders` in the hello; MachineSandbox `kind: 'light'`; sandbox op delete takes `force`. The portal
+// makes and deletes light folders only on a daemon whose hello offered lightFolders, so an older daemon never gets one, and an
+// older portal never asks and shows a light folder (if any) as a sandbox.
+const DECIDED = { protocol: 9, fingerprint: '84226db7dfc77c51' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

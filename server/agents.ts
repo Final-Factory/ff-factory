@@ -6855,7 +6855,7 @@ A report is for a person who asked for one, and people want very few. File one w
             const lockedNo = pinOn && w && needsWindow(w, a.prompt) ? windowLacks(pinOn, this.store.machines.get(pinOn)?.desktop) : undefined;
             if (lockedNo) throw new Error(`${w!.id} draws a window (a capture, a screenshot, play mode, the FFU client's window; read from its words, or decide_work window true) and ${lockedNo}: a window there draws no frames (w4868, lothsahn: "Only run work on m3 it can do with the screen locked"). Start it on a computer whose screen is unlocked, or leave it Queued (decide_work queue): it waits for one, never for a person. If it runs headless (batchmode, EditMode tests, code), say so with decide_work window false and start it here.`);
             // w3396: no new FFU (cargo) worker on a sandbox drive under 30 GB free; it stays Queued (unfitWhy says the same).
-            const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? this.newWorkOn(a.sandbox, a.machine) : undefined;
+            const cargoOn = ctx.role === 'dispatcher' && w && isCargoRepo(w.repo) && !a.disk_cleanup ? (lightOn ?? this.newWorkOn(a.sandbox, a.machine)) : undefined;
             const cargoNo = cargoOn ? cargoShortOf(this.machines.diskRoom(cargoOn)?.freeBytes) : undefined;
             if (cargoNo) throw new Error(`${w!.id} is FFU (Rust) work and ${cargoOn}: ${cargoNo}. Leave it Queued: it starts there, or on a computer with room, once the clean-up frees the drive.`);
             // w4553, w5197: an ffu row that would edit files other ffu work in flight edits starts all the same, told so.

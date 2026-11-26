@@ -49,6 +49,15 @@ shared by every slot and every worker's cargo:
   home's `bin`, still on `PATH`.
 - Tests: `server/cargoHome.test.ts`.
 
+## Where an FFU worker works: a light agent folder (w5924)
+
+An FFU request needs only an agent slot (`needs: agent`), so its worker starts in a **light agent folder** of its own
+(`<sandbox_root>/agent-work/agentN`), not in a game sandbox: it takes no game sandbox from game work, and a computer whose
+game sandboxes are all full still takes it while an agent slot is free. Its builds still go through an ffu slot below
+(`ffu-slot take`), whose warm target is the point of this page. An FFU worker placed in a game sandbox before w5924 moves
+to a light folder when it next resumes; its temp folder stays as it was. Details: [machines.md](machines.md), "Light agent
+folders (w5924)".
+
 ## Use (a worker)
 
 ```sh

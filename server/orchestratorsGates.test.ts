@@ -846,21 +846,29 @@ test('w1098: a request on a repo that is not the game\'s needs an agent slot onl
 
 test("w1089: start_agent refuses a request's worker into a sandbox another request's agent occupies; extra_agent puts it beside on purpose, never past max_agents_per_sandbox", async (t) => {
   shortSlowTurns(t);
-  const { store, sessions, agents, dispatcher, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
+  const { store, sessions, agents, machines, dispatcher, call } = await setupOnMachine(t, {}, { maxAgentsPerSandbox: 2 });
   agentsRoom(agents, ['pc']);
   // w2 and w3 need only an agent slot: game work never goes beside a mid-turn worker (w1607).
-  putRequests(store, [{ id: 'w1' }, { id: 'w2', needs: 'agent' }, { id: 'w3', needs: 'agent' }, { id: 'w4' }]);
+  putRequests(store, [{ id: 'w1' }, { id: 'w2', needs: 'agent' }, { id: 'w3', needs: 'agent' }, { id: 'w4' }, { id: 'w5', needs: 'agent' }]);
+  // w5924: where the daemon makes light agent folders, agent-only work named to a full sandbox starts in a new one instead.
+  const lightOn = machines.offersLight.bind(machines);
   const start = (wid: string, extra: Record<string, unknown> = {}) => call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: `#slow ${wid}`, title: `${wid}: job`, work_id: wid, ...extra });
   const first = await start('w1');
   assert.equal(first.isError, false, first.text);
   const a = /Started agent (\w+)/.exec(first.text)![1];
   await until('a is mid-turn', () => sessions.get(a).info.status === 'running');
+  assert.equal(lightOn('pc'), true, 'the test daemon makes light folders');
+  const light = await start('w5');
+  assert.equal(light.isError, false, light.text);
+  assert.match(light.text, /in sandbox pc\/agent1/);
+  // Without light folders (an older daemon), the w1089 refusal stands.
+  machines.offersLight = () => false;
   // 2026-10-12 ~05:50 UTC: a request's worker was started in slot5 where two agents were Working, and only queued there.
   const refused = await start('w2');
   assert.equal(refused.isError, true);
   assert.match(refused.text, /sandbox pc\/alpha is not free: \w+ "w1: job" \(Working\)\. A request's worker goes into a FREE sandbox .*pass extra_agent: true/);
   assert.equal(store.work.get('w2')!.status, 'new', 'nothing was started or linked');
-  assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 1, 'no second worker was made');
+  assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 2, 'no worker was made beside w1 (w5 is in its light folder)');
   // On purpose: a second agent beside it (one seat is left).
   const second = await start('w2', { extra_agent: true });
   assert.equal(second.isError, false, second.text);
@@ -871,7 +879,7 @@ test("w1089: start_agent refuses a request's worker into a sandbox another reque
   assert.equal(full.isError, true);
   assert.match(full.text, /sandbox pc\/alpha is full: .*2 agents mid-turn there \(max_agents_per_sandbox 2\), so a worker started there would only wait in the send queue/);
   assert.equal(store.work.get('w3')!.status, 'new');
-  assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 2);
+  assert.equal([...sessions.sessions.values()].filter((s) => s.info.kind === 'worker').length, 3);
 });
 
 test('w1607: a request that needs only an agent slot, started with extra_agent beside a worker with a background build, sits beside it and never switches the sandbox branch', async (t) => {

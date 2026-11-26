@@ -1298,6 +1298,53 @@ runs `registerAgents.sh` from a fresh shallow clone in a new temp folder, made w
 diff, commit and log calls run no planted fsmonitor, filter, textconv, `diff.external` or hook, in a `git worktree` and
 behind a `.git` file.
 
+### Light agent folders (w5924)
+
+lothsahn's request (w5924): work that needs only an agent slot gets a light working folder instead of a game sandbox,
+counted against the machine's agent cap only, so "a machine whose game sandboxes are all full but has an agent slot free
+takes such work".
+
+- **What one is.** An empty folder of its own, `<sandbox_root>/agent-work/agentN` (`machine/lightFolders.ts`
+  `LightFolders`, `LIGHT_DIR`, ids `agent1`, `agent2`, ...): no game checkout, no Library, no Unity editor. The daemon
+  reports them in its `sandboxes` message with `kind: 'light'` (`MachineSandbox.kind`), and its hello says it makes them
+  (`lightFolders: true`); `MachineManager.offersLight` reads that. They sit inside the sandbox root, which every OS's fence
+  already opens to workers (Landlock, Seatbelt, the Windows integrity label), so **the fence, its link and its update path
+  are unchanged**: no new allowed folder. Writes stay inside ffw.
+- **Who gets one.** A request whose `needs` is `agent` (any repo that is not the game's, FFU, a review: `needsOf`),
+  started without `extra_agent` and outside a pair run. start_agent (`server/agents.ts` `lightTarget`) takes the computer
+  of the sandbox or machine named, makes a new folder there (`MachineManager.createLightFolder`, op `create` with no
+  branch), and starts the worker in it. Its brief (`machineSandboxBrief`, `isLight`) says it is a light folder: clone here
+  or in `$TMPDIR`, ffu builds still take an ffu slot (`ffu-slot take`), never `unity` or `switch_branch` (both refuse:
+  `LIGHT_NO_UNITY`, and `MachineManager.switchBranch`), and leave nothing unpushed. No Unity MCP server is set up for it
+  (`unityMcp: !isLight(sb)`). Game work, and a computer whose daemon is older (no `lightFolders` in its hello), place as
+  before.
+- **What it counts against.** Only the agent cap: a light folder is never a FREE game sandbox (`Agents.free`), is never
+  counted in max_sandboxes (`createSandbox`, `places`, `sandboxUseText`), and where its daemon makes them the computer's
+  `agentSeats` is unset, so `hasAgentRoom` is the agent cap less mid-turn agents. The Capacity block's line ends
+  `; light folders: F free of N, a new one made per agent-only start` (`server/placement.ts` `capacityLines`);
+  `list_sandboxes` lists them under each computer after its game sandboxes ("Light agent folders (w5924; ...)"), and
+  system_status's `sandboxes:` line counts them apart (`shared/sandboxKind.ts` `lightUseText`). The page shows them as
+  their own "Light agent folders" group under each computer, after the game sandboxes (`shared/fleet.ts`
+  `FleetComputer.lights`, `web/src/components/Fleet.tsx`), and the capacity line adds "N light".
+- **What a game sandbox gave that it keeps.** The worker fence and write scope (the guard's own path is the folder), the
+  transcript lock, the agent caps (the send queue and the daemon's own count), the urgent keep-between-turns rule (w5260;
+  `keepFor` reads the request, not the folder), holds (`placement.hold`, its except list, a pause, a drain or a coming
+  build: start_agent's `awayProblem` refuses a light start on a held computer before `createLightFolder` makes the folder),
+  the locked-screen and leg holds, and the FFU low-disk check (`cargoShortOf`, on the light folder's computer).
+- **Resume.** A stopped worker in its own light folder is never released for other work (the release pass skips it: the
+  folder holds no game sandbox) and resumes there. **An agent-only worker already in a game sandbox** (FFU workers placed
+  before w5924) moves when it next resumes (`PlaceAgain.lightDue`, then `toLight`): only once it is stopped, holds no
+  permission, and its computer makes light folders. Its clones live in its temp folder (`ffa-<session>`), which stays;
+  the game sandbox's tree and branch are not its, and uncommitted files left there fall to the orphan save (w2358), as for
+  any release, so nothing is lost. It is told so (`movedNote`, `movedFrom.light`).
+- **Clean-up.** Each release pass (`PlaceAgain.lightSweep`) deletes a light folder older than `LIGHT_GRACE_MS` (15 min)
+  whose workers are all stopped with their work over, or that holds none. Those workers are marked released first, so a
+  reopen places them in a new folder. The daemon refuses the delete while a repository in the folder holds uncommitted or
+  untracked files, commits on no remote branch, or a stash (`unsavedWork`), and nothing is deleted then; the portal says
+  so once and tries again after `LIGHT_RETRY_MS` (6 h). A game sandbox is never deleted or recreated by any of this.
+- Tests: `server/lightFolders.test.ts` (the store, the refusal, a real daemon and portal, counting, the Capacity line,
+  the move on resume, the sweep).
+
 ### Placing work
 
 A sandbox whose agent is **between turns** (w475, w509, w643; [orchestrators.md](orchestrators.md), "Agent states": alive

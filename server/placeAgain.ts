@@ -1319,6 +1319,9 @@ export class PlaceAgain {
    */
   private lightDue(info: SessionInfo): void {
     if (!info.machineId || !info.machineSandbox || this.d.isLive(info.id) || info.status !== 'stopped' || info.pendingPermissions.length) return;
+    // A worker's first turn starts where start_agent put it (extra_agent beside another, or a computer that made no light
+    // folder then): only a worker that already ran there moves, on a later resume.
+    if (info.turns === 0 && !info.sdkSessionId) return;
     if (!this.d.light?.(info.machineId) || !this.d.makeLight) return;
     const m = this.d.machine(info.machineId);
     const sb = m?.sandboxes?.find((x) => x.id === info.machineSandbox);
