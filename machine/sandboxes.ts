@@ -315,7 +315,7 @@ export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: 
 /** The real machine: git in the main clone, robocopy/cp for the Library, the daemon's Unity code. */
 export function realPoolDeps(platform: 'darwin' | 'win32' | 'linux', repoPath: string, where: UnityLocation = {}, log: (line: string) => void = () => undefined, fence?: () => EditorFence | undefined, root?: string): PoolDeps {
   // One process listing serves every sandbox's watch in a look (a CIM query costs seconds on Windows).
-  const base = realDeps(platform);
+  const base = realDeps(platform, log);
   let cached: { at: number; p: Promise<Proc[]> } | undefined;
   const procs = () => {
     if (!cached || Date.now() - cached.at > 5000) cached = { at: Date.now(), p: base.procs() };
