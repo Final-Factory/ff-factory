@@ -1050,6 +1050,21 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--path-fence warn']);
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, 'off'), [], 'Windows: no flag, install.ps1 has none');
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on', 'off'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on', '--path-fence off']);
+  // w5862, w5869: Medium agents' folders: warn or on and nothing else, on every OS (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', mediumAgentFolders: 'off' as never }), /medium_agent_folders: warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', mediumAgentFolders: '' as never }), /medium_agent_folders: warn or on/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', mediumAgentFolders: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const mfLin = store.readTranscript(OPS_ID, 260).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(mfLin.text.includes(`--worker-fence on --medium-agent-folders on'`), mfLin.text);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', mediumAgentFolders: 'warn' });
+  await new Promise((r) => setTimeout(r, 300));
+  const mfWin = store.readTranscript(OPS_ID, 280).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(mfWin.text.includes(`-MediumAgentFolders warn"'`), mfWin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-MediumAgentFolders on']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--medium-agent-folders warn']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on', 'off', 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on', '--path-fence off', '--medium-agent-folders on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its setting');
   ops.close();
 });
 
