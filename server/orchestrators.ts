@@ -1502,16 +1502,21 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // w2433: with the Latest line it answers, which shows as answered until the request's next report.
     r.answered = { by: by.displayName, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}), ...(forWho?.length ? { for: forWho } : {}) };
-    const sid = r.worker;
+    // w6047 (the w6214 review, F1): a question whose request has since moved off the worker that asked it (a room move,
+    // moveOff) is answered to the request's worker now: the old one's resume would be refused (staleResume, w2079) and the
+    // person's answer would reach nobody. The old worker never takes it, so it never picks the request up again.
+    const asker = r.worker;
+    const movedOn = asker && w.movedOff?.[asker] && !w.sessionIds.includes(asker) ? latestWorker(w) : undefined;
+    const sid = movedOn && movedOn !== asker ? movedOn : asker;
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
     // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
     const share = questionShareKey(r.key);
     const also = share && sid
-      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === sid && questionShareKey(x.needsYou.key) === share)
+      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === asker && questionShareKey(x.needsYou.key) === share)
       : [];
     for (const x of also) {
       x.needsYou!.answered = { ...r.answered, on: w.id, outcome: x.outcome };
-      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${sid}, not asked again (w1812)`);
+      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${asker}, not asked again (w1812)`);
       this.store.putWork(x);
     }
     const both = also.length ? ` (the same question on ${also.map((x) => x.id).join(', ')}: answered there too)` : '';
@@ -1521,7 +1526,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const cleared = this.clearReportedGates(w, sid);
     const text =
       `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
-      `It answers what you waited on: "${clip(r.question, 300)}"${also.length ? `, which you asked on ${[w, ...also].map((x) => x.id).join(' and ')}: it answers it on all of them` : ''}. Carry on with it.`;
+      `It answers what ${sid !== asker ? `worker ${asker} asked before ${w.id} moved to you` : 'you waited on'}: "${clip(r.question, 300)}"${also.length ? `, which you asked on ${[w, ...also].map((x) => x.id).join(' and ')}: it answers it on all of them` : ''}. Carry on with it.`;
     if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent`;
     return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)${cleared}`;
   }
@@ -4945,7 +4950,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     // w6047 (the w6193 review): a person's answer or note goes even when its request closed while it waited: the person's
     // words are never dropped; the worker sees the request closed. A moved-off worker still does not take one (w2079 below):
-    // a person's resume for it goes to the request's new worker instead (forwardToHeirs).
+    // an answer to a question it asked goes to the request's new worker (answerNeedsYou, the w6214 review), and a move
+    // forwards what was queued for it there (forwardToHeirs).
     if (!isOpen(w) && w.status !== 'stalled' && !answer) return `${w.id} is ${w.status}`;
     // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
     // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.

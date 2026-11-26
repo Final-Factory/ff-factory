@@ -4898,12 +4898,30 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     let kept = false;
     const toSiblings = (groups: Map<WorkItem, { texts: string[]; sends: QueuedSend[] }>, orElse?: (texts: string[], sends: QueuedSend[]) => void) => {
       for (const [g, e] of groups) {
-        // w6193 (R3): a sibling no hand-back of this worker's holds any more (closed, or handed back by a worker placed on it
-        // meanwhile) takes nothing; once the move started, its messages go to the new worker, never back to this moved one.
-        if ((!isOpen(g) || g.handedBack?.session !== info.id) && orElse) {
+        const toOrElse = () => {
           const go = e.sends.map((m, i) => (ownWait(m) ? -1 : i)).filter((i) => i >= 0);
-          if (go.length) orElse(go.map((i) => e.texts[i]!), go.map((i) => e.sends[i]!));
+          if (go.length) orElse!(go.map((i) => e.texts[i]!), go.map((i) => e.sends[i]!));
+        };
+        if (!isOpen(g) && orElse) {
+          toOrElse();
           continue;
+        }
+        // w6047 (the w6193 review, R3, and the w6214 review, F2): a sibling another worker took meanwhile (before the start or
+        // while it ran) is that worker's: a message for it goes into the hand-back it made or to its next worker (deliverHeld
+        // with anyHandBack), else to the worker that holds it now, never back to this one, which may be moving.
+        if (isOpen(g) && g.handedBack?.session !== info.id) {
+          if (g.handedBack) {
+            this.deliverHeld(info, [g], e.sends[0], e.texts, g.id, e.sends, true);
+            continue;
+          }
+          if (this.heirOf(g, info)) {
+            this.forwardLate(info, g, e.texts, e.sends[0], e.sends);
+            continue;
+          }
+          if (orElse) {
+            toOrElse();
+            continue;
+          }
         }
         if (this.deliverHeld(info, [g], e.sends[0], e.texts, g.id, e.sends)) kept = true;
       }
@@ -4912,7 +4930,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       if (!kept) this.orchestrators?.retireWhenFree(info.id);
     };
     const held = split(0);
-    const message = held.rest.join('\n\n---\n\n');
+    // w6047 (the w6214 review, F2): before the start, a message no sibling takes goes with the move's own request's hand-off.
+    const extra: string[] = [];
+    const toHandOff = (texts: string[]) => {
+      extra.push(...texts);
+    };
     // w6047: messages that come while the fresh session starts (absorbed into entry.texts after `message` was taken) go too.
     const taken = entry.texts.length;
     if (primary && meanwhile.has(primary.id)) {
@@ -4933,8 +4955,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     }
     if (!undo) {
       others();
-      toSiblings(held.groups);
+      toSiblings(held.groups, primary ? toHandOff : undefined);
     }
+    const message = [...held.rest, ...extra].join('\n\n---\n\n');
     if (primary) {
       const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
       let started: string;
@@ -4950,7 +4973,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         // A message split off for a sibling that closed meanwhile goes with the move's request (split checks again now).
         const late = split(taken);
         toSiblings(late.groups);
-        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, [...held.rest, ...late.rest].join('\n\n---\n\n') || undefined);
+        back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, [...held.rest, ...extra, ...late.rest].join('\n\n---\n\n') || undefined);
         retire();
         return 'handed back';
       }
@@ -5007,7 +5030,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w6047: the message a move held, when every request it had was handed back meanwhile and that stands (giveBack's
    * hand-backs made during the move): to a next worker placed meanwhile, else into a standing hand-off, never to this worker.
    */
-  private deliverHeld(info: SessionInfo, reqs: WorkItem[], q: QueuedSend | undefined, texts: string[], first?: string, sends?: QueuedSend[]): boolean {
+  private deliverHeld(info: SessionInfo, reqs: WorkItem[], q: QueuedSend | undefined, texts: string[], first?: string, sends?: QueuedSend[], anyHandBack = false): boolean {
     // w6047 (the w6159 review, 2): a gate resume or a check-in is the old worker's own wait. A next worker placed on its request
     // read its hand-off already and sets its own (forwardToHeirs never forwards one, the w5949 review), so a resume goes only
     // into the hand-off of the request it resumes while that has no next worker yet, never into one already read; the other
@@ -5018,13 +5041,13 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (own && own.some(resume) && !own.every(resume)) {
       const plain = own.map((m, i) => (resume(m) ? -1 : i)).filter((i) => i >= 0);
       const res = own.map((m, i) => (resume(m) ? i : -1)).filter((i) => i >= 0);
-      let kept = this.deliverHeld(info, reqs, own[plain[0]!], plain.map((i) => texts[i]!), first, plain.map((i) => own[i]!));
-      for (const i of res) if (this.deliverHeld(info, reqs, own[i], [texts[i]!], first, [own[i]!])) kept = true;
+      let kept = this.deliverHeld(info, reqs, own[plain[0]!], plain.map((i) => texts[i]!), first, plain.map((i) => own[i]!), anyHandBack);
+      for (const i of res) if (this.deliverHeld(info, reqs, own[i], [texts[i]!], first, [own[i]!], anyHandBack)) kept = true;
       return kept;
     }
     if (own && own.length > 1 && own.every(resume)) {
       let kept = false;
-      for (let i = 0; i < own.length; i++) if (this.deliverHeld(info, reqs, own[i], [texts[i]!], first, [own[i]!])) kept = true;
+      for (let i = 0; i < own.length; i++) if (this.deliverHeld(info, reqs, own[i], [texts[i]!], first, [own[i]!], anyHandBack)) kept = true;
       return kept;
     }
     // w6047 (the w6056 review, 2): every request was handed back meanwhile (a pause, a stop_agent move_to), and that stands:
@@ -5038,7 +5061,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // link on every send), so one already on the request and sent it again counts, and so does one placed before the
     // move took its MoveBefore; the newest such link wins.
     // w6047 (the w6182 review, B): a closed request's hand-off is read by nobody, so it never carries the message.
-    const back = reqs.filter((x) => isOpen(x) && x.handedBack?.session === info.id);
+    // w6047 (the w6214 review, F2): `anyHandBack` (a sibling another worker took and handed back during the move) takes
+    // that worker's hand-back too, so the message goes to its next worker or into that hand-off, never back to this one.
+    const back = reqs.filter((x) => isOpen(x) && (x.handedBack?.session === info.id || (anyHandBack && !!x.handedBack)));
     const nextOf = (x: WorkItem): SessionInfo | undefined => {
       const since = x.handedBack?.at;
       if (!since) return undefined;
