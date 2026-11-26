@@ -281,7 +281,16 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
       // and a High creator's file carries an explicit High label: the w5968 finding).
       setLabels: async (l: readonly LabelTarget[]) => (await labelNoReadUp(l, exec, say, { systemDrive: () => false })) && (await relabelInside(l, 'close', exec, say, { systemDrive: () => false })),
       openLabels: async (l: readonly LabelTarget[]) => !!(await openNoReadUp(l, exec, say, { systemDrive: () => false })) && (await relabelInside(l, 'open', exec, say, { systemDrive: () => false })) };
-    const w = await probeReadFenceWin({ ...deps, mode: 'warn' });
+    // The child must run Low (S-1-16-4096), or every path reads and the probe means nothing.
+    const who = spawnSync(node, ['-e', "process.stdout.write(require('child_process').execSync('whoami /groups').toString())"], { encoding: 'utf8', windowsHide: true });
+    assert.match(who.stdout ?? '', /S-1-16-4096\b/, `the Low copy of node is not Low: ${(who.stdout ?? '').split(/\r?\n/).filter((l) => /Mandatory/i.test(l)).join(' | ')} ${who.stderr ?? ''}`);
+    // What the mirror's labels are once set, for the failure message (icacls names each path's mandatory label).
+    const w = await probeReadFenceWin({ ...deps, mode: 'warn', setLabels: async (l: readonly LabelTarget[]) => {
+      const ok = await deps.setLabels(l);
+      const seen = spawnSync('icacls', [deps.mirrorDir, '/T', '/C'], { encoding: 'utf8', windowsHide: true });
+      lines.push(`icacls of the mirror after setLabels: ${(seen.stdout ?? '').split(/\r?\n/).filter((x) => /Mandatory|^\S/.test(x)).join(' || ')}`);
+      return ok;
+    } });
     assert.equal(w.blocks, false, lines.join('\n'));
     assert.match(w.line, /1\/1 closed paths refused, 2\/2 given-back paths open; no failures/);
     // The real labels, then on's probe of the real paths; then a given-back file rewritten by rename loses its give-back
