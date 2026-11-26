@@ -105,7 +105,7 @@ function rig(o: RigOpts = {}) {
       : {
           read: () => ({ ...record }),
           write: (l) => {
-            if (writeFail) throw new Error('EPERM: operation not permitted, rename');
+            if (writeFail && Object.keys(l).length) throw new Error('EPERM: operation not permitted, rename'); // as writeLowered: an empty one is a delete
             record = { ...l };
           },
         },
@@ -272,7 +272,7 @@ test('a failing process listing or CPU read is survived and said once per streak
   assert.match(r.lines.at(-1)!, /read again/);
 });
 
-test('ticks never overlap: one still waiting on its listing makes the next return at once', async () => {
+test('ticks never overlap: one still waiting on its listing makes the next return at once, and runs once more after it', async () => {
   let release!: () => void;
   const gate = new Promise<void>((res) => (release = res));
   let calls = 0;
@@ -296,7 +296,7 @@ test('ticks never overlap: one still waiting on its listing makes the next retur
   assert.equal(await cf.tick(), undefined);
   release();
   assert.equal((await a)?.jobs, 0);
-  assert.equal(calls, 1);
+  assert.equal(calls, 2, 'run once more after, never beside it');
 });
 
 test('cpuBetween: a difference for one read twice, in full for one new in the window, nothing for a reused pid from before', () => {
@@ -499,7 +499,7 @@ test("raise: a child of a recorded pid's new holder (started after it) is that p
   assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
 });
 
-test('enforce: a record that cannot be written puts this tick back and lowers nothing that could not be undone', async () => {
+test('enforce: a record that cannot be written lowers nothing (it is written before anything is lowered)', async () => {
   const r = rig({ mode: 'enforce' });
   r.setWriteFail(true);
   const res = await r.cf.tick();
@@ -507,7 +507,8 @@ test('enforce: a record that cannot be written puts this tick back and lowers no
   assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
   assert.deepEqual(r.cf.loweredNow(), {});
   assert.match(r.lines.join('\n'), /could not write the record of lowered processes/);
-  assert.match(r.lines.join('\n'), /put 1 process\(es\) back as they were/);
+  assert.match(r.lines.join('\n'), /lowered none of 1 process\(es\), since the record/);
+  assert.deepEqual(r.set, [], 'nothing was set, so nothing needs putting back');
   r.setWriteFail(false);
   r.advance(60_000);
   assert.equal((await r.cf.tick())?.lowered, 1);
@@ -580,6 +581,111 @@ test('enforce: a record that stays unwritable lowers nothing tick after tick (no
     await r.cf.tick();
     r.advance(60_000);
   }
-  assert.equal(r.set.filter(([pid, pr]) => pid === 22 && pr === P.PRIORITY_BELOW_NORMAL).length, 1, 'lowered once, put back, then left alone');
+  assert.deepEqual(r.set, []);
   assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.equal(r.lines.filter((l) => /could not be written|could not write/.test(l)).length, 2, 'said once for the streak');
+});
+
+// ---- the final check's cases ----
+
+test('toolsLowered stays true while a tick is under way and after a failed read, while the tools stay lowered', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  let mid: boolean | undefined;
+  const r2 = r; // read it during the next tick's facts read
+  r.setFactsFail(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  mid = r2.cf.toolsLowered(20);
+  assert.equal(mid, true, 'a failed read keeps what the last good tick saw');
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+});
+
+test('toolsLowered is true during the facts read of a tick', async () => {
+  let during: boolean | undefined;
+  let n = 0;
+  const r = rig({ mode: 'enforce', onFacts: (x) => void (n++ === 1 && (during = x.cf.toolsLowered(20))) });
+  await r.cf.tick();
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(during, true);
+});
+
+test('prune: an entry whose process the listing still shows is kept (what it started after the listing is not seen yet)', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  // 22 is in the (cached) listing but has ended by the facts read; it started 27 after the listing, which inherited BelowNormal
+  r.started.delete(22);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.ok(r.record()['22@122'], 'kept: the listing still shows 22');
+  r.setProcs([...BASE.filter((p) => p.pid !== 22), { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.started.set(27, r.now() - 30_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.setProcs([...BASE.filter((p) => p.pid !== 11 && p.pid !== 12 && p.pid !== 22), { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL, 'raised once the job ended');
+});
+
+test('raise: raisedAt is the time the raise was done, so a child started during the raise read is caught by the next look', async () => {
+  let k = 0;
+  const r = rig({
+    mode: 'enforce',
+    // the raise's facts read takes 20 s; meanwhile 22 starts 27 (still lowered, so it inherits BelowNormal)
+    onFacts: (x) => {
+      if (k++ !== 1) return;
+      x.advance(20_000);
+      x.setProcs([...BASE, { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+      x.started.set(27, x.now() - 10_000);
+      x.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+    },
+  });
+  await r.cf.tick();
+  r.setHeld(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  r.advance(8_000); // the next look comes soon (a 5 s turn check)
+  await r.cf.tick();
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
+});
+
+test('raise: the second look raises neither the raised process nor what it started after its raise', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  r.setHeld(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  // after its raise, 22 set itself BelowNormal and started 27 at BelowNormal: its own choice
+  r.prio.set(22, P.PRIORITY_BELOW_NORMAL);
+  r.setProcs([...BASE, { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.started.set(27, r.now() + 1_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.raised, 0);
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(27), P.PRIORITY_BELOW_NORMAL);
+  assert.deepEqual(r.record(), {});
+});
+
+test('tick: one asked for while a tick runs runs once more after it (a turn that begins mid-tick is acted on)', async () => {
+  let inner: Promise<unknown> | undefined;
+  let k = 0;
+  const r = rig({
+    mode: 'enforce',
+    onFacts: (x) => {
+      if (k++ !== 1) return;
+      x.setHeld(true);
+      inner = x.cf.tick();
+    },
+  });
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(await inner, undefined, 'the inner call returns at once');
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL, 'the rerun saw the turn and raised');
 });

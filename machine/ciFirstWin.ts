@@ -221,6 +221,8 @@ export class WinCiFirst {
   private factsFailing = false;
   private recordFailing = false;
   private ticking = false;
+  /** A tick was asked for while one ran (a turn began or ended meanwhile): run once more when it ends. */
+  private again = false;
   private heldSaid = false;
   private lowered: Lowered = {};
   private raiseFails = new Map<string, number>();
@@ -259,10 +261,19 @@ export class WinCiFirst {
 
   async tick(): Promise<WinCiFirstResult | undefined> {
     const s = this.d.settings;
-    if (!s || this.ticking) return undefined;
+    if (!s) return undefined;
+    if (this.ticking) {
+      this.again = true;
+      return undefined;
+    }
     this.ticking = true;
     try {
-      return await this.step(s);
+      let res = await this.step(s);
+      while (this.again) {
+        this.again = false;
+        res = await this.step(s);
+      }
+      return res;
     } finally {
       this.ticking = false;
     }
@@ -285,11 +296,12 @@ export class WinCiFirst {
    * Raise back each recorded process still running (the same pid and start time) to the priority it had, and what it
    * started since it was lowered that still runs at the lowered priority (it inherited it) to that same priority, whether
    * the recorded process still runs or not (Windows never gives an orphan a new parent). `cutoff`: a process started later
-   * may not be the one the listing showed under that pid, and is left alone: so a raised entry is kept (raisedAt) until a
-   * raise whose cutoff is past it has looked again (the parent is back at its priority by then, and so is what it starts).
+   * may not be the one the listing showed under that pid, and is left alone: so a raised entry is kept (raisedAt, the time
+   * its raise was done) until a raise whose cutoff is past it has looked again, for what it started before raisedAt only
+   * (after that the parent was back at its priority, and what it started then is not ours to raise).
    * What could not be raised stays recorded and is tried again, RAISE_TRIES ticks.
    */
-  private async raise(procs: WinProc[], why: string, s: WinCiFirstSettings, cutoff: number, asked: number): Promise<number> {
+  private async raise(procs: WinProc[], why: string, s: WinCiFirstSettings, cutoff: number): Promise<number> {
     const rec = Object.entries(this.lowered).map(([k, l]) => ({ k, pid: Number(k.split('@')[0]), start: Number(k.split('@')[1]), ...l }));
     if (!rec.length || !this.d.setPriority) return 0;
     const pids = [...new Set(rec.map((r) => r.pid))];
@@ -319,13 +331,14 @@ export class WinCiFirst {
       return false;
     };
     const entry = (r: (typeof rec)[number], raisedAt?: number) => ({ prev: r.prev, at: r.at, ...(r.host !== undefined ? { host: r.host } : {}), ...(raisedAt !== undefined ? { raisedAt } : {}) });
+    const stamp: string[] = []; // raised here: raisedAt is the time the raise is done, set below
     for (const r of rec) {
       const now = byPid.get(r.pid)?.startedAt;
       const same = now === r.start;
       let failedHere = false;
       if (same) {
         alive++;
-        if (!done.has(r.pid) && !up(r.pid, r.prev)) {
+        if (r.raisedAt === undefined && !done.has(r.pid) && !up(r.pid, r.prev)) {
           failedHere = true;
           const tries = (this.raiseFails.get(r.k) ?? 0) + 1;
           this.raiseFails.set(r.k, tries);
@@ -334,11 +347,13 @@ export class WinCiFirst {
         }
       }
       // raised now (or ended): looked at once more by a raise whose cutoff is past this one
-      if (!failedHere && !(r.raisedAt !== undefined && cutoff > r.raisedAt)) keep[r.k] = entry(r, r.raisedAt ?? asked);
+      if (!failedHere && r.raisedAt === undefined) stamp.push(r.k);
+      else if (!failedHere && cutoff <= r.raisedAt!) keep[r.k] = entry(r, r.raisedAt);
+      const until = Math.min(cutoff, r.raisedAt ?? Infinity);
       // What it started since it was lowered: started after r.at and before its pid's new holder (when another has it).
       const firsts = (kids.get(r.pid) ?? []).filter((c) => {
         const cs = started.get(c);
-        if (cs === undefined || done.has(c) || stop.has(c) || cs > cutoff || cs + 1_000 < Math.max(r.at, r.start)) return false;
+        if (cs === undefined || done.has(c) || stop.has(c) || cs > until || cs + 1_000 < Math.max(r.at, r.start)) return false;
         return same || now === undefined || cs < now;
       });
       const below = agentTrees(firsts, procs, stop, started);
@@ -348,6 +363,8 @@ export class WinCiFirst {
         up(c, r.prev);
       }
     }
+    const raisedAt = this.d.now();
+    for (const r of rec) if (stamp.includes(r.k)) keep[r.k] = entry(r, raisedAt);
     for (const k of [...this.raiseFails.keys()]) if (!keep[k] || keep[k].raisedAt !== undefined) this.raiseFails.delete(k);
     this.lowered = keep;
     this.save();
@@ -391,17 +408,18 @@ export class WinCiFirst {
     const raiseIf = async (why: string) => {
       if (!Object.keys(this.lowered).length) return 0;
       try {
-        return await this.raise(procs, why, s, cutoff, asked);
+        return await this.raise(procs, why, s, cutoff);
       } catch (e) {
         this.d.log(`ci first: could not raise the lowered processes back yet (${why}): ${(e as Error).message.slice(0, 200)}`);
         return 0;
       }
     };
     let raised = 0;
-    this.lowHosts.clear();
     if (!enforcing) raised = await raiseIf(`winCiFirst is ${this.mode}`);
     else if (held) raised = await raiseIf("a bench or a person's turn holds this machine");
     else if (!census.workers.length) raised = await raiseIf('no CI job runs now');
+    // nothing lowered now beside a job (kept as it was while a read is slow or fails: the hang watch reads it meanwhile)
+    if (!enforcing || held || !census.workers.length) this.lowHosts = new Set();
     if (this.mode === 'off') return { jobs: 0, above: 0, raised };
 
     const key = census.workers
@@ -476,51 +494,68 @@ export class WinCiFirst {
     let above = 0;
     const loweredNow: { k: string; pid: number; prev: number }[] = [];
     let lowerFailed = 0;
-    // a turn that began during the read is honoured now; a record that could not be written is tried first
-    const lowering = enforcing && !held && !isHeld() && (!this.recordFailing || this.save());
+    const low = new Set<number>(); // hosts with a tool at the lowered priority now
+    const lowering = enforcing && !held && !isHeld(); // a turn that began during the read is honoured now
+    const cands: { k: string; pid: number; prev: number; host: number }[] = [];
     for (const [pid, host] of tools) {
       const p = this.d.priorityOf(pid);
-      if (p === s.priority && enforcing && !held && census.workers.length) this.lowHosts.add(host);
+      if (p === s.priority && lowering) low.add(host);
       if (p === undefined || p >= s.priority) continue;
       above++;
       const f = byPid.get(pid);
       if (!lowering || f?.startedAt === undefined || f.startedAt > cutoff) continue;
-      if (this.d.setPriority!(pid, s.priority)) {
-        const k = keyOf(f);
-        const was = this.lowered[k];
-        this.lowered[k] = { prev: was?.prev ?? p, at: was?.at ?? now, host };
-        loweredNow.push({ k, pid, prev: p });
-        this.lowHosts.add(host);
-      } else lowerFailed++;
+      cands.push({ k: keyOf(f), pid, prev: p, host });
     }
-    let undone = false;
-    if (loweredNow.length && !this.save()) {
-      // No record, no undo after a restart: put this tick's back, and lower nothing until the record can be written.
-      for (const l of loweredNow) {
-        this.d.setPriority!(l.pid, l.prev);
-        delete this.lowered[l.k];
+    // No record, no undo after a restart: what is to be lowered is written first, and nothing is lowered if it cannot be.
+    let unwritten = false;
+    const wasFailing = this.recordFailing;
+    if (cands.length) {
+      const before = this.lowered;
+      this.lowered = { ...before };
+      for (const c of cands) {
+        const was = before[c.k];
+        this.lowered[c.k] = { prev: was?.prev ?? c.prev, at: was?.at ?? now, host: c.host };
       }
-      this.lowHosts.clear();
-      undone = true;
-      this.d.log(`ci first: put ${loweredNow.length} process(es) back as they were, since the record of what was lowered could not be written`);
+      if (!this.save()) {
+        this.lowered = before;
+        unwritten = true;
+      } else {
+        for (const c of cands) {
+          if (this.d.setPriority!(c.pid, s.priority)) {
+            loweredNow.push(c);
+            low.add(c.host);
+          } else {
+            lowerFailed++;
+            if (!before[c.k]) delete this.lowered[c.k];
+          }
+        }
+        if (lowerFailed) this.save();
+      }
+    }
+    if (enforcing) this.lowHosts = low;
+    if (unwritten) {
+      if (!wasFailing) this.d.log(`ci first: lowered none of ${cands.length} process(es), since the record of what would be lowered could not be written`);
     } else if (loweredNow.length || lowerFailed) {
       const names = loweredNow.map((l) => `${l.pid} ${imageOf(procOf.get(l.pid))}`);
       this.d.log(
         `ci first: lowered ${loweredNow.length} of the agents' tools' process(es) to ${priorityName(s.priority)} beside the CI job(s), so the jobs go first (w6110)${lowerFailed ? `; ${lowerFailed} could not be lowered` : ''}${names.length ? `: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}` : ''}`,
       );
     }
-    // An entry whose process ended and left nothing it started (no listed process has its pid as parent) is done.
-    const parents = new Set(procs.map((p) => p.ppid));
-    let pruned = false;
-    for (const k of Object.keys(this.lowered)) {
-      const [pid, st] = k.split('@').map(Number);
-      if (byPid.get(pid)?.startedAt !== st && !parents.has(pid)) {
-        delete this.lowered[k];
-        pruned = true;
+    // An entry whose process had ended by the listing (not in it, nor running now) and left nothing it started (no listed
+    // process has its pid as parent) is done: what it started after the listing, it started before the listing.
+    if (enforcing) {
+      const parents = new Set(procs.map((p) => p.ppid));
+      let pruned = false;
+      for (const k of Object.keys(this.lowered)) {
+        const [pid, st] = k.split('@').map(Number);
+        if (byPid.get(pid)?.startedAt !== st && !procOf.has(pid) && !parents.has(pid)) {
+          delete this.lowered[k];
+          pruned = true;
+        }
       }
+      if (pruned) this.save();
     }
-    if (pruned && !undone) this.save();
-    const res: WinCiFirstResult = { jobs: census.workers.length, above, lowered: undone ? 0 : loweredNow.length, raised };
+    const res: WinCiFirstResult = { jobs: census.workers.length, above, lowered: loweredNow.length, raised };
     const jobFacts = [...jobPids].flatMap((p) => byPid.get(p) ?? []);
     const agentFacts = (root: number) => (trees.get(root) ?? []).flatMap((p) => byPid.get(p) ?? []);
     if (this.last && !changed && now > this.last.at) {
