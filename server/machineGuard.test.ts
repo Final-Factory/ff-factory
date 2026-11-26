@@ -449,6 +449,7 @@ test('w3721: the runner restart script starts the scheduled task naming the runn
   assert.match(s, /Start-Process -FilePath \(Join-Path \$root 'run\.cmd'\)/);
   assert.throws(() => runnerRestartScript("V:/x'; Write-Host hi"), /not a runner folder/);
   assert.throws(() => runnerRestartScript('/home/x/runner'), /not a runner folder/);
+  assert.throws(() => runnerRestartScript('V:/x\u2019; Write-Host hi'), /not a runner folder/);
 });
 
 test("w3328: below the critical line a disk clean-up request's worker starts on the machine while an ordinary worker is still refused; under the 3 GB floor it waits too", async () => {

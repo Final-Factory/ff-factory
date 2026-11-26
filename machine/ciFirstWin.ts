@@ -45,7 +45,8 @@ export interface WinCiFirstSettings {
 
 // Idle, not BelowNormal: LothDesktop's runners run their jobs at BelowNormal themselves (the daemon restarts a runner
 // with Start-ScheduledTask, whose default task priority 7 is BelowNormal, and a job's processes inherit it; measured
-// 2026-11-26 17:46Z, both workers at BelowNormal). BelowNormal would only put the agents' tools level with the jobs.
+// 2026-11-26 17:46Z, both workers at BelowNormal). BelowNormal would only put the agents' tools level with the jobs. Since
+// w6163 machine/runnerPriority.ts raises LothDesktop's runners to Normal; Idle keeps the tools below the jobs either way.
 export const LOTHDESKTOP_CI_FIRST: WinCiFirstSettings = {
   priority: os.constants.priority.PRIORITY_LOW,
   warnCores: 4,

@@ -259,10 +259,16 @@ Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
 - It raises each of those processes below Normal to Normal in all three priorities (SetPriorityClass, ProcessIoPriority,
   ProcessMemoryPriority) and reads them back, so the jobs started after that run at Normal.
 - Nothing is restarted, a job already running keeps its priority, and a process above Normal is left alone.
+- A runner running a job has its task set at the first tick it is between jobs.
+- A "parent" that started after its child is a stranger with a reused pid: the chain ends there and it is left alone.
+- A raise that fails or does not hold is tried again after 30 minutes, not every minute.
 
-The first step lists no machine, so everywhere it only logs `runner priority:` lines (lothsahn's lockout rule). BEAST stays
-log-only, under Ben's standing hold on its system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`)
-overrides the default at the daemon's start. A failure is logged once and changes nothing else. ffu's
+The first step listed no machine and only logged (lothsahn's lockout rule). Its lines on LothDesktop (2026-11-26 20:22Z)
+showed both tasks at 7 and both listeners at BelowNormal, I/O 1, memory 2, read at the daemon's Medium integrity. The
+second step lists LothDesktop. BEAST stays log-only, in code as well as in the list, under Ben's standing hold on its
+system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`) overrides the default at the daemon's start;
+`ops_worker machine_update runner_priority warn` sets it with nobody at the machine, and is the recovery. A failure is
+logged once and changes nothing else. ffu's
 `install-ffu-runner.ps1` registers new tasks at 4 with no 72-hour limit (ffu #1204).
 
 ### Runner temp folders on macOS and Windows (w5999)
