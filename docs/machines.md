@@ -2000,6 +2000,25 @@ LothDesktop and Beast, not just when BEAST is full").
     timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
     start it now" where its computer has room.
   - Tests: the two w1863 cases in `server/orchestrators*.test.ts`.
+- **A held leg keeps its place in the queue** (w5860, lothsahn's rule from w4620: every queue is strict priority, then oldest
+  first). On 2026-11-26 w5833 (high) had a leg Queued for biscuit from 23:50Z while freed biscuit places went to later work of
+  the same priority (w5855 at 00:04Z, w5859): no placement path read `WorkItem.legs`.
+  - `Agents.legHoldProblem(machine, w, takes)`: a computer's next free sandbox (when the legs ahead are game work and as
+    many free sandboxes are left as they need) or its next agent slot is held for the legs of other open requests that are
+    ahead of `w` (higher priority, or the same priority and filed earlier, by `createdAt`). Higher work, the leg's own
+    request and older work pass. It lapses `LEG_HOLD_MS` (30 minutes, a judgment) after that computer's room began
+    (`roomFacts().since`), as the pair and timed holds do, so a leg nobody starts never keeps a computer idle.
+  - Read by `start_agent` (refused for the dispatcher, with the leg to start first or drop), by `heldFor` (the room/WRONG
+    flag, room moves, timed starts) and by `reclaimPressure` (a priority reclaim does not take a slot a leg ahead waits for).
+  - The leg is not started by itself: its request usually has a worker running elsewhere, so a second one is the
+    dispatcher's call (`start_agent` with `work_id`, `override_duplicate` when that worker still runs).
+  - Moves (w2046, the agent-cap move, resume into another sandbox): a request's legs pin it like `queuedFor.needs` and
+    `decide_work pin` do (`moveFacts` `pinned`; at 00:23Z the agent-cap move took w5857, Queued for beast or biscuit to
+    keep it off lothdesktop, to lothdesktop/slot1), and `moveDecision` now skips a computer in `held` for work of either
+    kind, not only game work.
+  - A machine hold reaches placement and every move only through config `placement.hold` (`holdReason`): lothsahn's
+    "Hold new work on LothDesktop" on w5814 was never set there, so nothing read it.
+  - Tests: `server/w5860LegHold.test.ts`.
 - **Pair runs are placed as one unit** (w1945, lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues
   work properly that requires running together across multiple machines and doesn't waste slots?"). That evening w665's
   worker d558ba14 held m3's only sandbox (so m3 took no work, and 15 requests read "WRONG: m3 has room") while the
