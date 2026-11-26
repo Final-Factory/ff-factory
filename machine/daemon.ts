@@ -15,6 +15,7 @@ import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFac
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
 import { probeFence } from './fenceProbe.ts';
+import { integrityArgv, measureAgentIntegrity } from './agentIntegrity.ts';
 import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
@@ -1836,6 +1837,8 @@ export class Daemon {
     // w5377: the worker fence, set up in the background (Windows labels folders); w5555: sandbox workers wait until it is
     // decided, and are held if it failed, never started unfenced.
     this.fenceReady = this.fenceSetup().catch(() => undefined);
+    // w6003: then the level a sandbox agent really runs at, measured and reported with the fence.
+    void this.fenceReady.then(() => this.measureIntegrity()).catch(() => undefined);
     // w5546: the read fence's probe (warn and on modes), in the background; runs start without read rules until it passes.
     void this.probeReadFence();
     this.startRpc();
@@ -3641,6 +3644,33 @@ export class Daemon {
     }
     const f = this.fence.state;
     if (f.state === 'failed') log(`worker fence: FAILED on ${this.cfg.id} (${f.why}): sandbox workers are held until it is fixed (a daemon restart probes again) or switched off with worker_fence off (w5555)`);
+  }
+
+  /**
+   * w6003: on Windows, the integrity level a sandbox agent's commands get, measured (machine/agentIntegrity.ts) once the
+   * fence is decided and sent with it: placement of a pre-w5297 pair run reads that level, never the fence setting
+   * (w6002 went on lothdesktop/slot5, whose fence setting was not read as Low, and its worker measured itself at Low).
+   */
+  private async measureIntegrity(): Promise<void> {
+    if (process.platform !== 'win32' || process.env.FF_MEASURE_INTEGRITY === 'off') return;
+    try {
+      const s = this.fence.state.state;
+      if (s === 'failed' || s === 'setting_up') return; // no sandbox agent starts here now
+      const root = this.cfg.root;
+      const lowBash = s === 'on' && this.low?.git && root ? agentGitBash(root) : undefined;
+      if (s === 'on' && !lowBash) {
+        this.fence.measured({ why: 'the Low fence is on, and agents have no Git bash at <root>\tools\git to measure by' });
+        log("worker integrity: sandbox agents' level not measured: no agent Git bash; no pre-w5297 pair run goes here (w6003)");
+        return;
+      }
+      const argv = integrityArgv({ lowBash, systemRoot: process.env.SystemRoot });
+      const m = await measureAgentIntegrity(argv, (cmd, args, o) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 30_000, ...(lowBash ? { env: bareEnv() } : {}) }));
+      this.fence.measured(m);
+      const how = lowBash ? 'whoami /groups in the agent Git bash' : 'whoami /groups from the daemon, whose token unfenced agents inherit';
+      log('level' in m ? `worker integrity: sandbox agents measured at ${m.level} (${how}); a pre-w5297 pair run goes here only at medium or above (w6003)` : `worker integrity: sandbox agents' level could not be measured (${how}: ${m.why}); no pre-w5297 pair run goes here (w6003)`);
+    } catch (e) {
+      log(`worker integrity: measuring sandbox agents' level failed: ${(e as Error).message}`);
+    }
   }
 
   /** w5540: the fence sandbox editors start in (Windows Low, macOS Seatbelt), while the agents' fence is on and editors may join it. */
