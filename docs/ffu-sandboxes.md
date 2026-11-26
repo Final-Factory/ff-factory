@@ -243,6 +243,15 @@ daemon logs `clean-up: ffu slots first (w6044): N item(s) planned in S s, M remo
 04:09Z; the 09:10Z low pass was cut off 4 min into its `regular` step, before the ffu rule ran in its `stale` step. Stage 1
 (#1353) only said the plan; stage 2 removes it.
 
+**Alone during a pass that is not low (w6044 stage 3).** A low-space tick, an asked pass or a critical one that meets a
+pass in flight that is not low (an hourly one) runs the first step alone, at low (`CleanupRunner`'s `firstAlone`,
+`server/cleanup.ts`; the daemon's `ffuFirstAlone`, `machine/daemon.ts`): a tick at most every 15 min, a hold (a timed run)
+deferring it as it defers a pass. Before it, the runner dropped both (`if (this.running) return undefined`), and the hourly
+pass's own first step had run with the 7-day idle rule: on BEAST, 2026-11-26, hourly passes ran 59 to 72 min back to back
+(13:22-14:12, 14:13-15:14, 15:16-16:28Z), so six asked passes were refused "already running" (w6115) while a released
+slot2 held a 78 GB target. The daemon logs `clean-up: ffu slots first, alone during a pass that is not low (<trigger>, ...)
+(w6044): ...`. Stage 3a only says its plan; stage 3b removes it.
+
 The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
 swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
 2026-11-25 04:40 UTC, before w5499 reached it: the slot targets were 4.1, 19.2, 32.1 and 25.6 GB. Of that, 0, 6.5, 19.9

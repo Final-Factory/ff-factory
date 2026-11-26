@@ -76,7 +76,7 @@ import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard, type CleanupItem, type CleanupRun } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
@@ -1321,16 +1321,9 @@ export class Daemon {
               closed: this.closedSessionDirs(),
               ffuSized: this.ffuSized,
             }),
-          // w6044: the released ffu slots' targets planned first, before the slow steps a restart cuts off; report-only for now.
-          first: {
-            plan: async () =>
-              planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
-            report: (items, ms, run) =>
-              log(
-                `clean-up: ffu slots first (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
-              ),
-          },
-          busyNow: anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard())),
+          // w6044: the released ffu slots' targets taken first, before the slow steps a restart cuts off.
+          first: this.ffuFirstStep(low, guard, ''),
+          busyNow: this.cleanupBusyNow(),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
@@ -1366,6 +1359,46 @@ export class Daemon {
         log(text);
         appendCleanupLog(appDirOfConfig(cfg), { at: new Date().toISOString(), trigger: m.trigger, cutOff: true, startedAt: new Date(m.startedAt).toISOString(), removed: 0, freedBytes: 0 });
       },
+      // w6044 stage 3: a low trigger that meets a pass in flight that is not low runs the released ffu slots' first step alone.
+      firstAlone: (trigger) => this.ffuFirstAlone(trigger),
+    });
+  }
+
+  /** Asked right before each removal (runnerBusyNow, ffuSlotBusyNow): a runner's job or a slot taken since the plan keeps it. */
+  private cleanupBusyNow() {
+    return anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard()));
+  }
+
+  /** The released ffu slots' first step (w6044), its plan at `low` and its log line; `mid` names a step run apart from a pass. */
+  private ffuFirstStep(low: boolean, guard: CleanupGuard, mid: string) {
+    return {
+      plan: async () =>
+        planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+      report: (items: CleanupItem[], ms: number, run?: CleanupRun) =>
+        log(
+          `clean-up: ffu slots first${mid} (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
+        ),
+    };
+  }
+
+  /**
+   * w6044 stage 3: the released ffu slots' first step alone, at low, while a pass that is not low runs (CleanupRunner
+   * firstAlone). That pass's own first step ran with the 7-day idle rule, and it runs on for an hour or more (BEAST, 2026-11-26).
+   * Report-only for now: it plans and says what it would take, and removes nothing (the stale-output mode dry-run).
+   */
+  private async ffuFirstAlone(trigger: string) {
+    const mode = staleOutputSettings(this.cleanupSettings.staleOutput).mode;
+    if (mode === 'off' || !this.cfg.root) return;
+    const guard = this.cleanupGuard();
+    await cleanupPass({
+      opts: { stale: false, dryRun: false },
+      guard,
+      mode: 'dry-run',
+      regular: async () => [],
+      stale: async () => ({ items: [], listed: [] }),
+      first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}, report-only)`),
+      busyNow: this.cleanupBusyNow(),
+      root: [this.cfg.root, ...(this.cfg.extraRoots ?? [])],
     });
   }
 

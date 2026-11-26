@@ -1383,6 +1383,13 @@ export interface CleanupRunnerDeps {
   started?(trigger: CleanupSummary['trigger'], low: boolean): void;
   /** The words for a pass this start found cut off (describeCutOff), said once at construction. */
   cutOff?(text: string, m: PassMarker): void;
+  /**
+   * The released ffu slots' first step alone, at low (w6044 stage 3): run when a low trigger (a low-space tick, an asked or a
+   * critical pass) meets a pass in flight that is not low. That pass's own first step ran at its start with the 7-day idle
+   * rule, and it runs on for an hour or more (BEAST, 2026-11-26: hourly passes of 59 to 72 min back to back, so a low tick
+   * and six asked passes were all dropped, while free space can swing 40 GB in minutes). `trigger` says which. Absent: none.
+   */
+  firstAlone?(trigger: CleanupSummary['trigger']): Promise<unknown>;
 }
 
 /** When to run a pass, and what to say about it. Shared by the host guard and the machine daemons. */
@@ -1392,6 +1399,11 @@ export class CleanupRunner {
   private lastStaleAt: number;
   private noticeAt = 0;
   private running = false;
+  /** The pass in flight is low (its first step took the released ffu slot targets at low already). */
+  private runningLow = false;
+  /** The last firstAlone, and whether one is in flight (w6044): at most one per LOW_PASS_MINUTES from a tick. */
+  private aloneAt = 0;
+  private aloneRunning = false;
   /** What deferred the last due pass, while it still does (said once). */
   private heldBy?: string;
   last?: CleanupSummary;
@@ -1449,7 +1461,10 @@ export class CleanupRunner {
 
   /** The periodic look (the host guard's tick, the daemon's timer). */
   async tick(): Promise<CleanupSummary | undefined> {
-    if (this.running) return undefined;
+    if (this.running) {
+      await this.midPassLow();
+      return undefined;
+    }
     const v = await this.volumes();
     const trigger = this.due(v.free, undefined, this.d.fitSoftToVolume ? v.total : undefined);
     if (!trigger) return undefined;
@@ -1471,7 +1486,11 @@ export class CleanupRunner {
    * included, remove nothing; its summary is returned and logged, and not reported as the last pass.
    */
   async run(trigger: CleanupSummary['trigger'], opts: { dryRun?: boolean } = {}): Promise<CleanupSummary | undefined> {
-    if (this.running) return undefined;
+    if (this.running) {
+      // w6044: an asked or critical pass that meets a pass in flight that is not low still has the released targets taken.
+      if (!opts.dryRun && (trigger === 'asked' || trigger === 'critical')) await this.alone(trigger);
+      return undefined;
+    }
     this.running = true;
     try {
       const s = this.d.settings();
@@ -1479,6 +1498,7 @@ export class CleanupRunner {
       const first = await this.volumes();
       const before = first.free;
       const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? first.total : undefined));
+      if (!dryRun) this.runningLow = low;
       const st = s.staleOutput;
       const withStale = !!st && st.mode !== 'off' && (dryRun || low || staleDue(this.now(), this.lastStaleAt, st.everyHours, this.d.localHour?.(this.now())));
       if (!dryRun) {
@@ -1549,6 +1569,32 @@ export class CleanupRunner {
     } finally {
       if (!opts.dryRun) this.d.marker?.clear();
       this.running = false;
+      this.runningLow = false;
+    }
+  }
+
+  /** A tick during a pass (w6044): below the soft threshold, a non-low pass in flight, no hold: the first step alone. */
+  private async midPassLow() {
+    if (!this.d.firstAlone || this.runningLow || this.aloneRunning) return;
+    if (this.now() - this.aloneAt < LOW_PASS_MINUTES * 60_000) return;
+    const v = await this.volumes();
+    const s = this.d.settings();
+    if (v.free === undefined || v.free >= softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? v.total : undefined)) return;
+    const floor = this.d.holdFloorGB?.();
+    if (this.d.hold?.() && !(floor !== undefined && v.free < floor * GB)) return;
+    await this.alone('low-space');
+  }
+
+  private async alone(trigger: CleanupSummary['trigger']) {
+    if (!this.d.firstAlone || this.runningLow || this.aloneRunning) return;
+    this.aloneRunning = true;
+    this.aloneAt = this.now();
+    try {
+      await this.d.firstAlone(trigger);
+    } catch {
+      // its own log line says it; the pass in flight goes on
+    } finally {
+      this.aloneRunning = false;
     }
   }
 }
