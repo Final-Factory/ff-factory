@@ -713,7 +713,7 @@ had room, which read as "LothDesktop can take more work but the queue isn't movi
      computer is not "room" for the WRONG test: a request waiting while only held computers have room is correctly Queued.
    - **A person's drain is `hold_machine`** (w5878). When a person asks to hold new work off a computer and let its
      workers finish (lothsahn on w5814: "Hold new work on LothDesktop and let the running workers finish"), the dispatcher
-     calls `hold_machine` with the computer, `action: hold`, the person's words quoted and who said them (`hours` to lift
+     calls `hold_machine` (a user-asked tool: pass the work_id of their request) with the computer, `action: hold`, the person's words quoted and who said them (`hours` to lift
      it by itself, `except` for requests they let through), never a note only: a hold kept in notes reached no automatic
      move, and the w2046 moves put w5838, w5857, w5863 and w5834 on LothDesktop in 80 minutes. It holds what `placement.hold`
      holds except the resumes of the workers already there; `hold_machine lift` ends it ([machines.md](machines.md),

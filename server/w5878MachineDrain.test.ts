@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import type { SessionInfo, WorkItem } from '../shared/types.ts';
 import { moveDecision, type MoveFacts } from './resumeMove.ts';
 import type { Computer } from './placement.ts';
+import { USER_ASKED_TOOLS } from './belts.ts';
 import { drainHolds, drainOf, newDrain } from './machineDrain.ts';
 import { BEN, putRequests, T0, twoComputers } from './orchestratorsTestKit.ts';
 
@@ -12,10 +13,12 @@ import { BEN, putRequests, T0, twoComputers } from './orchestratorsTestKit.ts';
 // hold_machine keeps a person's drain on the machine's record, and placement() carries it to every path. pc is LothDesktop.
 
 const WORDS = 'Hold new work on LothDesktop and let the running workers finish';
+const asked = (env: Awaited<ReturnType<typeof twoComputers>>) => putRequests(env.store, [{ id: 'w5878', status: 'active', humanAsked: true }]);
 
 async function drained(t: Parameters<typeof twoComputers>[0], extra: Record<string, unknown> = {}) {
   const env = await twoComputers(t);
-  const r = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn', ...extra });
+  asked(env);
+  const r = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn', work_id: 'w5878', ...extra });
   assert.ok(!r.isError, r.text);
   assert.match(r.text, /^pc is drained: no new work, move or pair leg goes there.*worker\(s\) there finish/);
   return env;
@@ -24,16 +27,19 @@ async function drained(t: Parameters<typeof twoComputers>[0], extra: Record<stri
 test('w5878: hold_machine needs the person\'s quoted words and who; it holds new work (placement()) and not the resumes of pc\'s own workers (placement(false)); lift ends it', async (t) => {
   const env = await twoComputers(t);
   const { agents, call, dispatcher, store } = env;
-  const bare = await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', who: 'lothsahn' });
+  asked(env);
+  // The dispatcher runs it only for a request its person asked in their own words (belts.ts USER_ASKED_TOOLS).
+  assert.ok(USER_ASKED_TOOLS.has('hold_machine'), "the dispatcher's runs only when a person asked");
+  const bare = await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', who: 'lothsahn', work_id: 'w5878' });
   assert.equal(bare.isError, true);
   assert.match(bare.text, /the person's own words/);
   assert.equal(agents.placement().hold?.pc, undefined);
-  assert.ok(!(await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn' })).isError);
+  assert.ok(!(await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn', work_id: 'w5878' })).isError);
   assert.match(agents.placement().hold?.pc ?? '', /^drained: lothsahn: "Hold new work on LothDesktop and let the running workers finish" \(set by the dispatcher at/);
   assert.equal(agents.placement(false).hold?.pc, undefined, "pc's own workers still resume there (machineHold)");
   assert.equal(agents.placement().hold?.beast, undefined);
   assert.ok(store.machines.get('pc')!.drain, 'kept on the machine record');
-  const lift = await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift' });
+  const lift = await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5878' });
   assert.match(lift.text, /^pc takes new work again/);
   assert.equal(agents.placement().hold?.pc, undefined);
 });
@@ -68,6 +74,7 @@ const FLEET: Computer[] = [pc('beast', { live: 7, midTurn: 6, sandboxes: 6, maxS
 test('w5878: the w2046 room move and the agent-cap move (moveDecision on the worker\'s own facts) never pick a drained computer', async (t) => {
   const env = await twoComputers(t);
   const { store, agents, call, dispatcher } = env;
+  asked(env);
   putRequests(store, [{ id: 'w5834', priority: 'high', status: 'active' }]);
   const info = { id: 'd2a4daef', machineId: 'beast', machineSandbox: 'slot1' } as SessionInfo;
   const facts = (): MoveFacts => ({
@@ -78,7 +85,7 @@ test('w5878: the w2046 room move and the agent-cap move (moveDecision on the wor
     const before = moveDecision({ ...facts(), requests: facts().requests.map((r) => ({ ...r, kind })) });
     assert.ok('move' in before && before.move.to === 'pc', `${kind}, not drained: ${JSON.stringify(before)}`);
   }
-  await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn' });
+  await call(dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'lothsahn', work_id: 'w5878' });
   for (const kind of ['game', 'agent'] as const) {
     const d = moveDecision({ ...facts(), requests: facts().requests.map((r) => ({ ...r, kind })) });
     assert.ok(!('move' in d), `${kind}, drained: ${JSON.stringify(d)}`);
@@ -94,4 +101,17 @@ test('w5878: a pair run\'s leg on a drained computer is refused, and nothing sta
     assert.match(r.text, /on pc\/alpha: pc is drained: lothsahn.*Nothing was started\./);
     assert.deepEqual(store.work.get('w2')!.sessionIds, []);
   }
+});
+
+test("w5878: a drain's except lets its requests past the drain only, never past a coming build's or a config hold on the same computer", async (t) => {
+  const { agents, cfg } = await drained(t, { except: ['w9'] });
+  assert.deepEqual(agents.placement().holdExcept?.pc, ['w9'], 'drain alone: w9 may go');
+  const b = agents as unknown as { builds?: { holds(): Record<string, string> } };
+  const builds = b.builds;
+  b.builds = { ...(builds ?? {}), holds: () => ({ pc: 'a build is coming (w1606)' }) } as typeof builds;
+  assert.equal(agents.placement().holdExcept?.pc, undefined, 'a build lets nothing through (w1863)');
+  assert.match(agents.placement().hold?.pc ?? '', /a build is coming/);
+  b.builds = builds;
+  cfg.placement = { ...cfg.placement, hold: { pc: 'Ben testing' } };
+  assert.equal(agents.placement().holdExcept?.pc, undefined, "a config hold's exceptions are its own");
 });
