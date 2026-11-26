@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -89,8 +89,8 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
-import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -1592,6 +1592,21 @@ export class Daemon {
         this.send({ type: 'host_health', health: { checkedAt: h.checkedAt, sandboxRoot: h.sandboxRoot, level: h.level, ...(h.detail ? { detail: h.detail } : {}), ...(h.blocked ? { blocked: h.blocked } : {}) } });
       },
       log: (line: string) => log(`host guard: ${line}`),
+      // w5906: an idle agent with a pending check-in or a timed run keeps its sandbox through a grow; any other is stopped
+      // for it through the stop op a pause uses, and waited for (up to 20 s) so the grow runs in the same look.
+      idleHold: (id: string) => {
+        const at = this.wakes.get(id);
+        if (at !== undefined) return `a check-in at ${new Date(at).toISOString()}`;
+        return this.timed?.active().includes(id) ? 'a timed run' : undefined;
+      },
+      stopIdle: async (id: string) => {
+        const e = this.entries.get(id);
+        if (!e?.s.live) return true;
+        log(`agent ${id}: stopped between turns for the Dev Drive grow (w5906); it resumes at its next message`);
+        e.s.stop();
+        for (let i = 0; i < 40 && e.s.live; i++) await new Promise((r) => setTimeout(r, 500));
+        return !e.s.live;
+      },
       // The sandbox volume's floor is the pool's (w1581): what the portal's welcome last sent, else daemon.json's.
       poolFloor: () => {
         const p = this.currentPool();
@@ -3607,11 +3622,14 @@ export class Daemon {
       if (!exe) return loud("gh is not on the daemon's PATH");
       const copy = await lowCopy(root, exe, exec, say);
       if (!copy) return loud('no Low copy of gh to test with');
-      const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, gh), GH_TOKEN: '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
+      // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
+      // the daemon read one, which is the only route left once the owner's gh folder carries No-Read-Up; else the folder.
+      const token = this.machineGh().GH_TOKEN;
+      const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
-      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token/i.test(l));
+      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token:/i.test(l));
       if (r.code !== 0) return loud(`gh auth status at Low exited ${r.code}: ${said.slice(0, 3).join(' / ').trim().slice(0, 300)}`);
-      log(`worker integrity: gh authenticates for Low workers (${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
+      log(`worker integrity: gh authenticates for Low workers (${token ? "the machine login's token as GH_TOKEN" : 'the login folder'}: ${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
     } catch (e) {
       loud((e as Error).message);
     }
@@ -3694,7 +3712,14 @@ export class Daemon {
       // on mode (the most closed case: the gh login's folder closed), so a passing probe has run every rule on mode adds.
       const owner = ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: true });
       const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
-      log(sayOwnerRules(mode, process.platform, owner));
+      // w5749: on Windows the owner's secrets are closed by labels on this machine's system drive, where lothsahn allowed it.
+      if (process.platform === 'win32') {
+        // The plan first: gh is asked where its login is only on a machine with a plan (w5849's review of #1278), so on every
+        // other Windows machine nothing on the system drive is looked at.
+        const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+        const st = plan.label.length || plan.left.length ? await run(trustedGh(), ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 30_000, env: machineGhStatusEnv() }).catch(() => undefined) : undefined;
+        log(sayOwnerLabels(mode, plan, st ? ghLoginStorage(`${st.stdout}\n${st.stderr}`) : undefined));
+      } else log(sayOwnerRules(mode, process.platform, owner));
       const fence = this.workerFence;
       const lock = this.writeLock;
       const ownerFence = fence && { ...fence, secretsDirs: this.secretsDirs, readOff: false, readDenied: [...(fence.readDenied ?? []), ...owner], ...(owner.length ? { ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : {}) };
@@ -3797,6 +3822,43 @@ export class Daemon {
   }
 
   /**
+   * w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"; "Do only
+   * that on C:. Keep a tested way back"): on a machine in OWNER_LABEL_ON_SYSTEM_DRIVE, in on mode the gh login moves from
+   * Credential Manager into its folder's hosts.yml (ghLoginToFile, checked before the entries are deleted) and the gh folder
+   * and ~/.ssh get No-Read-Up, with no grant (labelNoReadUp grant false). In off and warn, the way back: the labels come off
+   * (unlabelNoReadUp: no explicit label, as before) and, when the note says the daemon moved it, the login goes back into
+   * Credential Manager. Other machines: nothing, and nothing on their system drive is looked at.
+   */
+  private async applyOwnerLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+    const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+    if (!plan.label.length) return;
+    const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
+    const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
+    if (mode === 'on') {
+      // The note is written before gh's login call (w5849's review of #1281), so a daemon that dies mid-move still moves it
+      // back in warn or off; a note left by a move that did not happen is harmless (the way back finds the login in the keyring).
+      const writeNote = () => fs.writeFileSync(note, JSON.stringify({ movedAt: new Date().toISOString(), why: 'w5749: the read fence moved the gh login out of Credential Manager; off or warn moves it back' }));
+      const m = await ghLoginToFile(realGhRun, writeNote);
+      tell(m.line);
+      if (m.ok && m.deleteFrom?.length) {
+        const d = await deleteGenericCreds(m.deleteFrom, exec);
+        tell(`Credential Manager: ${d.deleted.length ? `deleted ${d.deleted.join(', ')}` : 'no gh entry left'}${d.failed.length ? `; could NOT delete ${d.failed.join(', ')}, which a Low worker can still read` : ''}`);
+      }
+      const ok = await labelNoReadUp(plan.label, exec, say, { systemDrive: () => false, grant: false, what: "No-Read-Up on the owner's gh folder and ~\\.ssh, w5749" });
+      const st = await realGhRun(['auth', 'status', '--hostname', 'github.com']);
+      log(sayOwnerLabels('on', plan, ghLoginStorage(`${st.stdout}\n${st.stderr}`)) + (ok ? '' : ' (not every label could be set: the lines above say which)'));
+      return;
+    }
+    const off = await unlabelNoReadUp(plan.label.map((t) => t.path), exec, say);
+    tell(off === undefined ? 'not every read label could be taken off (the line above says which)' : off.length ? `read labels taken off ${off.join(', ')}` : "no read label on the owner's folders");
+    if (fs.existsSync(note)) {
+      const b = await ghLoginToKeyring(realGhRun);
+      tell(b.line);
+      if (b.ok) fs.rmSync(note, { force: true });
+    }
+  }
+
+  /**
    * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
    * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
    * one, so a switch or a revert leaves no read label behind (lockout review B1). A path without NR is not touched: setting
@@ -3804,6 +3866,8 @@ export class Daemon {
    */
   private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     if (!this.cfg.root) return;
+    // w5749: the owner's secrets on the system drive (LothDesktop only), apart: their failure is said and leaves the rest.
+    await this.applyOwnerLabels(mode, exec, say).catch((e) => say(`worker integrity: owner secrets: ${(e as Error).message}`));
     const appDir = appDirOfConfig(this.cfg);
     // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
     ensureDaemonOnlyDirs(this.cfg.root);

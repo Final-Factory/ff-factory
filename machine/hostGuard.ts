@@ -41,6 +41,9 @@ const HOLDS_SANDBOX = new Set(['starting', 'running', 'waiting_permission', 'idl
 const EDITOR_HELD = new Set(['running', 'starting', 'blocked']);
 /** A grow that failed is tried again after this long, not on every look. */
 export const GROW_RETRY_MS = 30 * 60_000;
+/** w5906: a pending grow's reason is said again when what holds it changes, at most this often (logged; the portal's report less often). */
+export const GROW_NOTE_LOG_MS = 2 * 60_000;
+export const GROW_NOTE_REPORT_MS = 15 * 60_000;
 
 /** What the guard sees of the daemon and asks of it. */
 export interface MachineGuardPorts {
@@ -63,6 +66,16 @@ export interface MachineGuardPorts {
    * wrote from the pool's values and every update carried, then held a Dev Drive at a floor nobody could change.
    */
   poolFloor?(): { warnGB: number; criticalGB: number } | undefined;
+  /**
+   * w5906: why an agent between turns must still hold its sandbox through a grow (its pending check-in, a timed run of its
+   * own), or undefined when nothing of it would lose work. Without stopIdle every idle agent holds, as before.
+   */
+  idleHold?(sessionId: string): string | undefined;
+  /**
+   * w5906: stop an idle agent's host through the daemon's own stop op (as a pause does), so a grow need not wait for the
+   * portal's idle release; it resumes at its next message as any stopped worker does. Resolves true once its host is gone.
+   */
+  stopIdle?(sessionId: string): Promise<boolean>;
 }
 
 /**
@@ -124,8 +137,11 @@ export class MachineGuard {
   private readonly ports: MachineGuardPorts;
   /** The Dev Drive's maximum being grown to (w1918): new agents and editors wait meanwhile. */
   private growing?: number;
-  /** The last grow that waited or failed, said once each (the portal hears it), and when a failed one is tried again. */
-  private growNote?: string;
+  /**
+   * The last grow that waited or failed: said at once for each wanted size and outcome, and again (rate-limited, w5906)
+   * when what holds it changes, so the line never names agents that left long ago. And when a failed one is tried again.
+   */
+  private growNote?: { key: string; text: string; loggedAt: number; reportedAt: number; reported: string };
   private growRetryAt = 0;
   /** The config the monitor judges by: a grow raises its devDriveMaxGB, so the VHDX's room is the new maximum's (w1947). */
   private readonly cfg: Config;
@@ -198,27 +214,47 @@ export class MachineGuard {
 
   /**
    * Grow the Dev Drive to its wanted maximum through ffsb-helper-grow (w1918, lothsahn: "having the daemon drop and recreate
-   * the drive when the setting changes and there's no active workers also seems fine"): only when no agent and no editor is
-   * in a sandbox and the drive is there; new ones wait (blockReason) until it is back. Until then it is pending, and says why
-   * once. ReFS cannot shrink, so a smaller maximum is not done here: making the drive again is a reinstall.
+   * the drive when the setting changes and there's no active workers also seems fine"): only when nothing in a sandbox
+   * would lose work and the drive is there; new ones wait (blockReason) until it is back. An agent mid-turn, waiting on a
+   * permission, mid-tool, with a pending check-in or a timed run, or an editor up, holds it. An agent between turns with
+   * none of those does not (w5906, lothsahn: "An agent host pid was blocking the grow"): once nothing else holds the grow,
+   * its host is stopped through the daemon's stop op and the grow runs in the same look. Until then it is pending, and says
+   * why, again whenever that changes. ReFS cannot shrink, so a smaller maximum is not done here: making the drive again is a
+   * reinstall.
    */
   private async growIfIdle() {
     const p = this.pendingGrow();
     if (!p) return void (this.growNote = undefined);
     const now = this.fx.now?.() ?? Date.now();
-    // Once per wanted size and outcome, not at every change of who is in the sandboxes.
+    // At once for each wanted size and outcome; again when the reason changes, rate-limited (w5906: the one line named
+    // slot2 and slot5 long after they had cleared).
     const say = (title: string, text: string) => {
       const key = `${title} ${p.wantGB}`;
-      if (this.growNote === key) return;
-      this.growNote = key;
-      this.ports.log(`host guard: ${text}`);
-      this.ports.report(title, text);
+      const n = this.growNote;
+      if (n?.key !== key) {
+        this.ports.log(`host guard: ${text}`);
+        this.ports.report(title, text);
+        this.growNote = { key, text, loggedAt: now, reportedAt: now, reported: text };
+        return;
+      }
+      if (n.text !== text && now - n.loggedAt >= GROW_NOTE_LOG_MS) {
+        this.ports.log(`host guard: ${text}`);
+        Object.assign(n, { text, loggedAt: now });
+      }
+      if (n.reported !== text && now - n.reportedAt >= GROW_NOTE_REPORT_MS) {
+        this.ports.report(title, text);
+        Object.assign(n, { reported: text, reportedAt: now });
+      }
     };
-    const agents = this.ports.sessions().filter((s) => s.sandboxId && HOLDS_SANDBOX.has(s.status));
+    const sessions = this.ports.sessions().filter((s) => s.sandboxId && HOLDS_SANDBOX.has(s.status));
+    // An agent between turns that nothing of its own keeps (w5906); without the daemon's stop, every agent holds.
+    const holdOf = (s: SessionInfo) => (s.status !== 'idle' ? s.status : s.activeTool ? `mid-tool, ${s.activeTool.name}` : this.ports.idleHold?.(s.id));
+    const idle = this.ports.stopIdle ? sessions.filter((s) => !holdOf(s)) : [];
+    const agents = sessions.filter((s) => !idle.includes(s));
     const editors = this.ports.sandboxes().filter((s) => EDITOR_HELD.has(s.unity.state));
     if (agents.length || editors.length) {
-      const what = [agents.length ? `${agents.length} agent(s) (${agents.map((s) => s.sandboxId).join(', ')})` : '', editors.length ? `${editors.length} editor(s) (${editors.map((s) => s.id).join(', ')})` : ''].filter(Boolean).join(' and ');
-      return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once no agent or editor is in a sandbox; ${what} there now`);
+      const what = [agents.length ? `${agents.length} agent(s) (${agents.map((s) => `${s.sandboxId}: ${holdOf(s) ?? s.status}`).join(', ')})` : '', editors.length ? `${editors.length} editor(s) (${editors.map((s) => s.id).join(', ')})` : ''].filter(Boolean).join(' and ');
+      return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once no agent that would lose work and no editor is in a sandbox; ${what} there now`);
     }
     if (this.monitor.status.sandboxRoot !== 'ok' || now < this.growRetryAt) return;
     // w3721: the grow detaches the drive, which ends every process run from it, CI runners' listeners included (LothDesktop's
@@ -228,6 +264,16 @@ export class MachineGuard {
     const onDrive = runners.filter((r) => sameDrive(r.root, this.cfg.sandboxRoot));
     const jobs = onDrive.filter((r) => r.busy);
     if (jobs.length) return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once no CI job runs on a runner on the drive; ${jobs.length} runner(s) (${jobs.map((r) => runnerName(r.root)).join(', ')}) run one now`);
+    // w5906: only now, with nothing else in the way, are the idle agents' hosts stopped; one still up waits for the next look.
+    if (idle.length) {
+      this.ports.log(`host guard: stopping ${idle.length} idle agent(s) (${idle.map((s) => `${s.id.slice(0, 8)} in ${s.sandboxId}`).join(', ')}) for the Dev Drive grow; each resumes at its next message`);
+      const gone = await Promise.all(idle.map((s) => this.ports.stopIdle!(s.id).catch(() => false)));
+      const up = idle.filter((_, i) => !gone[i]);
+      if (up.length) return say('Dev Drive: grow pending', `the Dev Drive grows from ${p.maxGB} to ${p.wantGB} GB once the idle agent(s) it stopped have ended; ${up.length} (${up.map((s) => s.sandboxId).join(', ')}) still up`);
+      // One that started a turn meanwhile holds it again.
+      const back = this.ports.sessions().filter((s) => s.sandboxId && HOLDS_SANDBOX.has(s.status) && !idle.some((x) => x.id === s.id));
+      if (back.length) return;
+    }
     this.growing = p.wantGB;
     this.ports.log(`host guard: growing the Dev Drive from ${p.maxGB} to ${p.wantGB} GB (ffsb-helper-grow); new agents and editors wait`);
     try {

@@ -41,6 +41,7 @@ function sources(): string[] {
 const NOT_GIT: Record<string, string> = {
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
+  'machine/ownerSecrets.ts|trustedGh(': 'gh auth status, token and login for the owner gh login move (realGhRun, w5749)',
   'machine/timedRunner.ts|process.execPath': 'a node watchdog',
   'machine/timedRunner.ts|e': 'the game player',
   'machine/agentHost.ts|cmd.bin': 'the agent CLI',

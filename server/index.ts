@@ -3306,8 +3306,9 @@ function deployWhat(req: RestartRequest): { from?: string; to?: string; prs?: Ba
     // not a VM deploy, or not prepared yet
   }
   const to = prepared.sha ?? autoDeploy.state.requested?.sha;
-  const asked = autoDeploy.state.requested;
-  if (asked && to && sameCommit(asked.sha, to) && asked.prs.length) return { from, to, prs: asked.prs };
+  // The automatic deploy's batch, or a recent one of the same commit (it may be done already: fffctl update put it out).
+  const asked = [autoDeploy.state.requested, ...autoDeploy.state.history].find((r) => r && to && sameCommit(r.sha, to) && r.prs.length);
+  if (asked) return { from, to, prs: asked.prs };
   let prs: BatchPr[] | undefined;
   if (prepared.dir && from && to) {
     try {

@@ -1,0 +1,1 @@
+- **Deploy notices name their pull requests** (w5887): a start line lists the automatic deploy's pull requests even when that batch is already done, falls back to the numbers in fff-update's reason, and says so when it deploys the commit that already runs.
