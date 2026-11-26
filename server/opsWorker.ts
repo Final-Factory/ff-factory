@@ -694,6 +694,8 @@ export interface OpsDeps {
    * (w5507), only with `words` found in their own message in it.
    */
   personTurn: (orchestratorId: string, words?: string) => boolean;
+  /** w5896: what would pass a gate reserved for the person's own words in that chat now (Orchestrators.ownWordsNeed). */
+  personTurnNeed?: (orchestratorId: string, words?: string) => string | undefined;
   /**
    * w1039: whether a click of the person's (👍 ✅ on their orchestrator's proposal) is their own words for `need` now, and spends
    * it. Optional: a portal without it takes only a typed turn.
@@ -970,11 +972,13 @@ export class OpsWorker {
       throw new Error(`follow_up: ${why}, so there is nothing to follow up. Send it again, in full, with no follow_up: that is a new job`);
     }
     const h = this.handle();
+    // w5896: each refusal says exactly what passes (Orchestrators.ownWordsNeed).
+    const need = () => this.d.personTurnNeed?.(caller.id, words) ?? `a turn ${person.displayName} started with a message of their own, or their own words that decided it quoted verbatim in words`;
     if (!theirTurn && jobOpen && this.now() - Date.parse(this.job!.at) >= OPS_LIMITS.harnessFollowUpMs) {
-      throw new Error(`a follow-up in a harness turn (a check-in, a timer or a relayed report) is accepted only in the first ${OPS_LIMITS.harnessFollowUpMs / 60_000} minutes of the job; this job is older, so it needs a turn ${person.displayName} started with a message of their own: a new job, or follow_up: true there`);
+      throw new Error(`a follow-up in a harness turn (a check-in, a timer or a relayed report) is accepted only in the first ${OPS_LIMITS.harnessFollowUpMs / 60_000} minutes of the job; this job is older, so it needs a turn ${person.displayName} started with a message of their own: a new job, or follow_up: true there. What passes: ${need()}`);
     }
     const opening = fresh || !jobOpen || (theirTurn && !followUp);
-    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it: then quote ${person.displayName}'s own words from it in words, w5507)`);
+    if (opening && !theirTurn) throw new Error(`a new job for the orchestration worker needs a turn ${person.displayName} started with a message of their own, or their own words: ${need()}`);
     if (opening && !fresh && jobOpen && isMidTurn(h.info)) {
       throw new Error(`the orchestration worker is busy with your open job (${this.job!.what}), and a new job starts a fresh conversation, which would cut that turn off. Wait for its [ops worker] report, send follow_up: true to add to that job, ops_worker interrupt to end its turn, or fresh: true to cut it off and start over`);
     }
@@ -1097,7 +1101,7 @@ export class OpsWorker {
     if (!person || !caller) throw new Error(OPS_REFUSED);
     // w5507: in a turn a relayed message joined, the deploy's text (their own words, as they said them) or words must be
     // found in their own message in it.
-    if (!this.d.personTurn(caller.id, words) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words in this turn (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it, and neither text nor words quotes their own message in it, w5507); ask them`);
+    if (!this.d.personTurn(caller.id, words) && !this.d.reactionCovers?.(caller.id, { verb: o.noun })) throw new Error(`a portal ${o.noun} needs ${person.displayName}'s own words: ${this.d.personTurnNeed?.(caller.id, words) ?? 'a turn they started with a message of their own, or their words quoted in words'}`);
     const ids = this.workIdsOf(workIds);
     const at = new Date(this.now());
     const h = this.handle();

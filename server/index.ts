@@ -1121,8 +1121,9 @@ providers.dev = new DevRequests(
     identity,
     orchestrators: agents.orchestrators,
     attachments,
-    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy }),
-    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy }),
+    // w5896: what FFBox hands over besides an operator's own words is a third party's text relayed: it demotes a person's turn.
+    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy, relay: true }),
+    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy, relay: true }),
     // An operator's own authenticated words: a turn of theirs, as if typed in FF Factory (w831).
     sendAsPerson: (person, text) => void agents.operatorTurn(person, text),
   },

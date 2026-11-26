@@ -2473,6 +2473,11 @@ export interface WorkItem {
   requesters: Requester[];
   /** Filed in a turn the person started (their own message), which the destructive tools require. */
   humanAsked: boolean;
+  /**
+   * w5896: humanAsked rests only on an earlier message of the person's quoted verbatim, not on a turn of theirs: the
+   * dispatcher's destructive tools (DESTRUCTIVE_TOOLS, server/belts.ts) still need their words in a turn of their own.
+   */
+  askedFromRecord?: boolean;
   status: WorkStatus;
   createdAt: string;
   updatedAt: string;

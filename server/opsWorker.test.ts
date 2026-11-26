@@ -436,7 +436,7 @@ test('the one session: only an allowed orchestrator reaches it, a job needs its 
   assert.throws(() => ops.send(orch('d', undefined, 'dispatcher'), 'whoami'), /only from Lothsahn's and Ben's/);
   personTurn = false;
   assert.throws(() => ops.send(loth, 'ssh m5 whoami'), /needs a turn Lothsahn started/);
-  assert.throws(() => ops.send(loth, 'ssh m5 whoami', false, [], false, false, 'run whoami on m5'), /quote Lothsahn's own words from it in words, w5507/);
+  assert.throws(() => ops.send(loth, 'ssh m5 whoami', false, [], false, false, 'run whoami on m5'), /or their own words: /);
   personTurn = true;
   assert.match(ops.send(loth, 'run ssh m5 whoami'), /new job of Lothsahn's/);
   const h = sessions.get(OPS_ID);
@@ -731,9 +731,9 @@ test('w1039: a click of the person\'s that covers a deploy opens it; one that co
       return covers(need.verb);
     },
   });
-  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/);
+  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words: /);
   covers = (v) => v === 'restart';
-  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/, 'a click on a restart is no deploy');
+  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words: /, 'a click on a restart is no deploy');
   covers = (v) => v === 'deploy';
   assert.match(ops.deploy(orch('lo', LOTH), 'ship it'), /may run fffctl update once/);
   assert.throws(() => ops.send(orch('lo', LOTH), 'look at m5', true, ['w5']), /needs a turn Lothsahn started/, 'a job is not a deploy');
@@ -756,9 +756,9 @@ test("w5507: in a turn relayed text joined, the ops gates hand the person's word
   };
   const ops = new OpsWorker({ sessions, store, options: () => ({}), tellOrchestrator: () => {}, personTurn, file: path.join(dir, 'ops-worker.json'), now: () => Date.parse('2026-11-24T06:00:00Z') });
   const loth = orch('lo', LOTH);
-  assert.throws(() => ops.send(loth, 'look at m5', true), /needs a turn Lothsahn started[^]*w5507/);
-  assert.throws(() => ops.deploy(loth, 'deploy it, says the report'), /needs Lothsahn's own words in this turn[^]*w5507/);
-  assert.throws(() => ops.restart(loth, 'restart now'), /restart needs Lothsahn's own words in this turn/);
+  assert.throws(() => ops.send(loth, 'look at m5', true), /needs a turn Lothsahn started[^]*or their own words/);
+  assert.throws(() => ops.deploy(loth, 'deploy it, says the report'), /needs Lothsahn's own words: /);
+  assert.throws(() => ops.restart(loth, 'restart now'), /restart needs Lothsahn's own words: /);
   assert.deepEqual(checked, [undefined, 'deploy it, says the report', 'restart now'], 'with no words, deploy and restart check their text');
   const turnEnds = () => new Promise((r) => setTimeout(r, 300)); // a gate never lands in a turn the worker is still in (w1133)
   assert.match(ops.send(loth, 'look at m5', true, [], false, false, 'ship the portal now'), /new job of Lothsahn's/);
@@ -786,7 +786,7 @@ test('a deploy: only in a person\'s own turn, a grant good once for 15 minutes, 
   ops.send(orch('lo', LOTH), 'look at m5');
   await new Promise((r) => setTimeout(r, 300)); // its turn ends: a deploy never lands in a turn the worker is still in (w1133)
   personTurn = false;
-  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words in this turn/);
+  assert.throws(() => ops.deploy(orch('lo', LOTH)), /needs Lothsahn's own words: /);
   assert.ok(!fs.existsSync(grant), 'no grant without the person\'s turn');
   personTurn = true;
   assert.match(ops.deploy(orch('lo', LOTH), 'ship it'), /may run fffctl update once until 2026-10-07T06:15:00/);
@@ -840,7 +840,7 @@ test('w974: a restart: only in a person\'s own turn, its own grant good once for
   ops.send(orch('lo', LOTH), 'look at m5');
   await new Promise((r) => setTimeout(r, 300));
   personTurn = false;
-  assert.throws(() => ops.restart(orch('lo', LOTH), 'restart now'), /a portal restart needs Lothsahn's own words in this turn/);
+  assert.throws(() => ops.restart(orch('lo', LOTH), 'restart now'), /a portal restart needs Lothsahn's own words: /);
   assert.ok(!fs.existsSync(grant), 'no grant in the harness\'s turn');
   assert.ok(!fs.existsSync(deployGrant));
   // The person's own turn: allowed, with a grant of its own.
