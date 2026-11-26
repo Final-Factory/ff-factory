@@ -7,6 +7,7 @@ import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
 import { displayName, fmtRelative, isUnused, machineGlance, machineLabel, machineTone, navigate, useNow } from '../util';
 import { BenchStopButtons } from './BenchStop';
+import { FfuSlotsSection } from './FfuSlots';
 import { GitFacts } from './Git';
 import { DetailsSection, DetailsSheet, PanelHeader, useDetailsOpen } from './PanelChrome';
 import { Chip, Confirm, CopyButton, Icon, Modal, StateText } from './ui';
@@ -212,6 +213,8 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
             </div>
           </DetailsSection>
         )}
+        {/* Its ffu build slots (w5912), their own set beside the game sandboxes. */}
+        {m.online && app.machineStats?.[m.id]?.ffuSlots && <FfuSlotsSection app={app} report={app.machineStats[m.id]!.ffuSlots!} now={now} />}
       </DetailsSheet>
 
       <div className="panel-empty">

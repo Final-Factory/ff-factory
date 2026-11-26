@@ -819,6 +819,8 @@ export async function planInstallLeftovers(o: {
   alive?: (pid: number) => boolean;
   /** A runner's listener log tail (tests; default benchRunners.ts readListenerLog). */
   runnerLog?: (runner: string) => string | undefined;
+  /** Each ffu slot's target size this pass measured (w5912): the daemon caches it for its status, so a report never runs a du. */
+  ffuSized?: (slot: string, bytes: number) => void;
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -1249,6 +1251,7 @@ export async function planInstallLeftovers(o: {
       const keptSlot = async (why: string) => {
         if (!o.low && !cap) return;
         const b = await sizeOf(target, 300_000);
+        o.ffuSized?.(e.name, b);
         if (o.low ? b >= (o.heldMinBytes ?? 256 * 1024 ** 2) : b > cap) held.push({ path: target, bytes: b, why: `an ffu slot's cargo target kept: ${why}` });
       };
       // Only a build in it stops the sweep (since: Infinity reads processes only). A recent write does not: a slot in steady use
@@ -1267,6 +1270,7 @@ export async function planInstallLeftovers(o: {
       const recent = newest > now - settleMs ? `written ${agoText(now - newest)} ago, within the settle time` : undefined;
       const kept = holding ?? running ?? recent;
       const bytes = await sizeOf(target);
+      o.ffuSized?.(e.name, bytes);
       const incremental = path.join(target, 'debug', 'incremental');
       const inc = await sizeOf(incremental);
       const whole = (why: string) => items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target (${gbs(bytes)}), ${why}; the next build in the slot rebuilds it`, base: slot });

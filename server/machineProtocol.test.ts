@@ -181,7 +181,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // w5924 (no bump): `lightFolders` in the hello; MachineSandbox `kind: 'light'`; sandbox op delete takes `force`. The portal
 // makes and deletes light folders only on a daemon whose hello offered lightFolders, so an older daemon never gets one, and an
 // older portal never asks and shows a light folder (if any) as a sandbox.
-const DECIDED = { protocol: 9, fingerprint: '1710b4aa363525ee' };
+// w5912 (no bump): `ffuSlots` on `stats`, optional; an older portal drops it and an older daemon never sends it (the machine
+// page then shows no ffu slots section).
+const DECIDED = { protocol: 9, fingerprint: 'cd489b8402dba9d4' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {
