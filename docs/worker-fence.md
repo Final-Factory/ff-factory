@@ -644,27 +644,70 @@ determined forger. The broker runs only on macOS: elsewhere there is no worker f
 zsh writes heredocs under `TMPPREFIX` (default `/tmp/zsh`), refused by the fence ("can't create temp file for here
 document"); the fence's environment sets `TMPPREFIX=<root>/tmp/zsh`.
 
-## The agents' PATH folders (w5863, macOS and Linux)
+## The agents' PATH folders (w5863, w5899, macOS and Linux)
 
 Every agent the daemon starts, fenced or not, finds the daemon's shims first on its PATH (`machine/daemon.ts` slotEnv):
-unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. Off Windows they live in the Unity slots mailbox's `bin`
+unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. Off Windows they lived in the Unity slots mailbox's `bin`
 (`machine/unitySlots.ts` installShims), and both fences let a worker write the whole mailbox (Landlock `--rw <mailbox>`
 in `machine/writeLock.ts`, Seatbelt's extraWritable in `server/workerFence.ts`): a fenced worker could replace `ff-pr`
 and have it run outside the fence in the next unfenced agent. Windows moved its shims to `<root>/tools/shims` (w5838).
 
-The fix moves them to `<root>/tools-medium/shims` (`enforcedShimDir` in `machine/pathFence.ts`), a folder both fences
-already keep read-only (`LOCKED_CHILDREN`, `READ_ONLY_IN_ROOT`), so no fence rule changes. A deny of `bin` alone is not
+With the path fence **on** (w5899, the default) the shims live in `<root>/tools-medium/shims` (`enforcedShimDir` in
+`machine/pathFence.ts`), a folder both fences already keep read-only (`LOCKED_CHILDREN`, `READ_ONLY_IN_ROOT`), so no
+fence rule changes, and every agent started from then on has it first on its PATH. A deny of `bin` alone is not
 possible on Linux: Landlock only grants, and workers make `req-*` files directly in the mailbox, so it cannot be granted
 child by child. `<root>/tools/node` is not part of it off Windows: no agent runs it there (`server/agentNode.ts`
 agentNodePathDir is Windows only).
 
-It comes in two stages (lothsahn's lockout rule). Now, **warn**: the shims stay in the mailbox, and the daemon logs each
-change in their folder it did not make, `path fence (warn): <path> changed and the daemon did not write it ...`, once per
-name per hour; nothing is refused. Later, a separate pull request moves the shims (enforce). The switch is the daemon
-setting `pathFence` (`off` or `warn`; unset is `warn`), set from anywhere with `ops_worker machine_update path_fence off`,
-so recovery needs nobody at the machine.
+Two more holes, from w5872's review:
 
-Proof (`server/pathFence.test.ts`, live on Linux with Landlock): under the lock a sandbox worker runs with today, a write
-to `<root>/unity-slots/bin/ff-pr` succeeds and is logged; in `<root>/tools-medium/shims` the shim runs from PATH while an
-overwrite, append, truncate, new file, remove, rename in or out, or a move of the folder is refused. On macOS the
-Seatbelt deny of `tools-medium` is checked in the profile text; a live run on a Mac is still to do.
+- **Agents started before the move.** Agent hosts outlive a daemon restart, each with the PATH it started with, so
+  they still run the mailbox's `bin` first, which a worker can still write or make again, with any name (`git`,
+  `node`). Each host now records its PATH in its `place.json` (`machine/agentHost.ts` hostsWithPathDir; a host with no
+  record is older, and counts). While one runs, `guardOldShimBin` makes that folder one symbolic link to
+  `<root>/tools-medium/shims` (w6063's review), so those agents run the daemon's own shims and a write through the
+  link is refused by the fence. On every change it sees at `bin` in the mailbox, and every minute, anything else there
+  (a folder, a planted file, a link elsewhere, there before the daemon started or made since) is renamed into
+  `<root>/tools-medium/quarantine`, which workers cannot write, and removed there, then the link is made again;
+  `path fence: undid a change ...` in the daemon's log. It never deletes through a path a worker can swap: a `bin`
+  swapped for a link to another folder moves as the link, and the folder it named is left alone. When none runs, the
+  link goes the same way (`path fence: removed the old shims folder ...`). A worker that swaps the link for its own
+  folder wins until it is undone: a narrow race, for those older agents only.
+- **chmod is not a write to Landlock** (w6074's review, measured on biscuit). A fenced worker can change modes where
+  it cannot write. Two holes followed, both closed in `machine/pathFence.ts`:
+  - **A folder at `bin` set to 555.** Moving a folder to another parent needs write on the folder itself (its `..`), so
+    the rename into the quarantine failed for good, and older agents ran the planted `ff-pr`. The guard now opens the
+    folder without following a link and `fchmod`s it to 0700 before each rename (`ownFolderMode`), retrying a few
+    times, and makes folders in the quarantine writable before removing them. A failure is logged once an hour by its
+    error code, not its message, which names a new quarantine path each try.
+  - **The real shims.** `chmod 000 ff-pr` in `tools-medium/shims` took ff-pr from every agent, and `chmod 500` on the
+    folder made the daemon's next `writeShims` fail, and so fall back to warn. Before writing them the daemon gives the
+    folder 0755 and each file in it owner read and write again (`readyShimDir`). While it runs, `guardShimModes` puts
+    back the modes it wrote, on every change it sees there and every minute, logged as `path fence: put back the mode
+    ...`. A worker still wins the moment before that.
+  - **One folder up** (w6080's review, measured on biscuit). `chmod 500` of `tools-medium/quarantine` stopped every
+    rename into it, so a worker's folder stayed at `bin` (P12). `chmod 000` of `tools-medium`, or 555 before the shims
+    folder exists (a first deploy), made `writeShims` fail at start (P13r, P15), and the fallback to warn then wrote the
+    shims into the mailbox's `bin`, which workers write, so their own `ff-pr` ran. Now each eviction gives the mailbox
+    owner rwx, `tools-medium` 0755 and the quarantine 0700 first; `readyShimDir` and `guardShimModes` cover
+    `tools-medium` as well as the shims folder; and in `on` there is no fallback into the mailbox at all (below). A
+    folder whose owner may not read it cannot be opened, even by its owner: then a real folder gets owner rwx back by
+    path, and the handle opened after is refused if it is not the folder looked at.
+  - Other locked folders (`secrets`, the daemon's) can be made unreadable the same way: a denial of service, not a way
+    to run code, and not covered here.
+- **Grants add up.** A `writeLockExtra` (or `extraRoots`) folder that holds a locked one, or sits in one (the root,
+  `tools-medium`, the shims), would open it again on Linux; `writeLockArgs` leaves it out and the daemon logs `write
+  lock: left out the extra writable folder ...`. On macOS Seatbelt's later deny already wins.
+
+The switch is the daemon setting `pathFence`: `on` (unset is `on`), `warn` (w5863's stage: the shims stay in the
+mailbox, and each change there the daemon did not make is logged, `path fence (warn): ...`, once per name per hour) or
+`off` (in the mailbox, unwatched). Set it from anywhere with `ops_worker machine_update path_fence off`, so recovery
+needs nobody at the machine: the daemon then writes the shims to the mailbox again, and new agents get that on their
+PATH. If the daemon cannot write `tools-medium/shims`, it stays in `on`: agents run whatever shims are there, the guards run, the write is tried again each minute, and the log line names `path_fence off` as the recovery. It never falls back to the mailbox's `bin`, which fenced workers write (w6080). In off and warn, a link the guard left at `bin` is taken away before the shims are written there, so they go into a real folder.
+
+Proof (`server/pathFence.test.ts`, live on Linux with Landlock): under the lock a sandbox worker runs with, in
+`<root>/tools-medium/shims` the shim runs from PATH while an overwrite, append, truncate, new file, remove, rename in or
+out, or a move of the folder is refused, also with an extra writable folder over the root; the old folder's guard
+undoes a planted name, a changed shim or mode, a hard link, the folder made again and a link in its place, then
+removes the folder once no older agent runs. On macOS the Seatbelt deny of `tools-medium` is checked in the profile
+text.
