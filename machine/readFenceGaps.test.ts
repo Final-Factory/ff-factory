@@ -256,7 +256,7 @@ test('w5968: relabelInside walks only the closed folders off the system drive, s
 const lowSelf = () => /S-1-16-4096\b/.test(spawnSync(path.join(process.env.SystemRoot ?? process.env.windir ?? '', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8', windowsHide: true }).stdout ?? '');
 
 // The real thing, on Windows only: a Low-labelled node opens a test folder labelled as on labels the daemon folder.
-test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a given-back one inside it', { skip: process.platform !== 'win32' ? 'not Windows' : lowSelf() ? 'this process is Low (a fenced worker): a Medium label cannot be set from Low (1299); the daemon runs this check on its own start' : false }, async () => {
+test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a given-back one inside it', { skip: process.platform !== 'win32' ? 'not Windows' : lowSelf() ? 'this process is Low (a fenced worker): a Medium label cannot be set from Low (1299); the daemon runs this check on its own start' : false }, async (tc) => {
   const d = tmp('low');
   try {
     const node = path.join(d, 'node-low.exe');
@@ -286,6 +286,16 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     const whoExe = path.join(process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows', 'System32', 'whoami.exe');
     const who = spawnSync(node, ['-e', `process.stdout.write(require('child_process').execFileSync(${JSON.stringify(whoExe)}, ['/groups']).toString())`], { encoding: 'utf8', windowsHide: true });
     assert.match(who.stdout ?? '', /S-1-16-4096\b/, `the Low copy of node is not Low: ${(who.stdout ?? '').split(/\r?\n/).filter((l) => /Mandatory/i.test(l)).join(' | ')} ${who.stderr ?? ''}`);
+    // node opens every file with FILE_FLAG_BACKUP_SEMANTICS (libuv), so a child holding SeBackupPrivilege enabled reads
+    // past any label: an elevated runner's token may. A Medium daemon's Low workers hold no such privilege, so there the
+    // probe means what it says; here it cannot, and the leg stops with what it saw.
+    const priv = spawnSync(node, ['-e', `process.stdout.write(require('child_process').execFileSync(${JSON.stringify(whoExe)}, ['/priv']).toString())`], { encoding: 'utf8', windowsHide: true });
+    const backup = (priv.stdout ?? '').split(/\r?\n/).find((l) => /^SeBackupPrivilege\b/.test(l.trim())) ?? '';
+    lines.push(`the Low child's backup privilege: ${backup.trim().replace(/\s+/g, ' ') || 'not held'}`);
+    if (/Enabled\s*$/i.test(backup.trim())) {
+      tc.skip(`the Low child holds SeBackupPrivilege enabled (${backup.trim().replace(/\s+/g, ' ')}), which reads past every label; a Medium daemon's workers do not`);
+      return;
+    }
     // What the mirror's labels are once set, for the failure message (icacls names each path's mandatory label).
     const w = await probeReadFenceWin({ ...deps, mode: 'warn', setLabels: async (l: readonly LabelTarget[]) => {
       const ok = await deps.setLabels(l);
