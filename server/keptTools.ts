@@ -11,15 +11,14 @@
 // the current tool. A tool no longer served keeps its record. Dropping a record that was current changes nothing the model sees.
 // docs/machines.md "A resumed conversation sees each tool as it is now" (w2626).
 import fs from 'node:fs';
-import { isDeepStrictEqual } from 'node:util';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { normalizeObjectSchema } from '@modelcontextprotocol/sdk/server/zod-compat.js';
 import { toJsonSchemaCompat } from '@modelcontextprotocol/sdk/server/zod-json-schema-compat.js';
+import { MARK, scanRecords, type Stale, type ToolNow } from './keptToolsScan.ts';
+import { ThreadGone, askThread } from './transcriptThreadClient.ts';
 
-export interface ToolNow {
-  description: string;
-  input_schema: unknown;
-}
+export type { ToolNow };
+
 
 const EMPTY_OBJECT = { type: 'object', properties: {} };
 
@@ -47,7 +46,6 @@ export function sdkToolsNow(mcpServers: Options['mcpServers']): Map<string, Tool
   return out;
 }
 
-const MARK = Buffer.from('"deferred_tools_record"');
 
 /**
  * Drop from the transcript's deferred-tool records each entry whose tool is in `now` with another description or input schema.
@@ -81,24 +79,19 @@ const SCAN_SLICE_MS = 50;
  * refreshKeptTools off the event loop's long tasks (w3855: after a portal restart one turn end started every person's orchestrator
  * in one task, each reading its whole transcript; 3.7 s blocked on 2026-11-09 15:11:04 UTC): the file is read and written by the
  * thread pool, and the scan lets the loop run every SCAN_SLICE_MS. `gone`, asked after each wait: the start was stopped meanwhile,
- * so nothing is written. The same records are dropped as refreshKeptTools drops (keptTools.test.ts).
+ * so nothing is written. The same records are dropped as refreshKeptTools drops (keptTools.test.ts). w5888: the scan runs in the
+ * transcript thread (server/transcriptThread.ts), a window at a time, and on the event loop as before when that thread is gone.
  */
 export async function refreshKeptToolsAsync(file: string | undefined, now: Map<string, ToolNow>, gone: () => boolean = () => false, wrote?: { first?: number }): Promise<string[]> {
   if (!file || now.size === 0) return [];
-  let buf: Buffer;
+  let out: Stale | undefined;
   try {
-    buf = await fs.promises.readFile(file);
-  } catch {
-    return [];
+    out = await scanInThread(file, now);
+  } catch (e) {
+    if (!(e instanceof ThreadGone)) return []; // unreadable: left as it is
   }
-  const out: Stale = { writes: [], dropped: new Set() };
-  for (let hit = buf.indexOf(MARK); hit >= 0; ) {
-    if (gone()) return [];
-    const until = performance.now() + SCAN_SLICE_MS;
-    hit = scanRecords(buf, now, hit, out, () => performance.now() >= until);
-    if (hit >= 0) await new Promise((r) => setImmediate(r));
-  }
-  if (out.writes.length === 0 || gone()) return [];
+  out ??= await scanOnLoop(file, now, gone);
+  if (!out || out.writes.length === 0 || gone()) return [];
   const fh = await fs.promises.open(file, 'r+');
   try {
     for (const w of out.writes) {
@@ -112,39 +105,26 @@ export async function refreshKeptToolsAsync(file: string | undefined, now: Map<s
   return [...out.dropped];
 }
 
-interface Stale {
-  writes: { at: number; bytes: Buffer }[];
-  dropped: Set<string>;
+/** w5888: the scan in the transcript thread, where a 1.49 GB transcript waits behind nothing; ThreadGone when it is gone or off. */
+async function scanInThread(file: string, now: Map<string, ToolNow>): Promise<Stale> {
+  const { ok } = await askThread<{ writes: { at: number; bytes: Uint8Array }[]; dropped: string[] }>({ op: 'scan', file, now });
+  return { writes: ok.writes.map((w) => ({ at: w.at, bytes: Buffer.from(w.bytes.buffer, w.bytes.byteOffset, w.bytes.byteLength) })), dropped: new Set(ok.dropped) };
 }
 
-/** The record lines from `hit` on, into `out`; returns where to go on when `stop` said so, else -1. */
-function scanRecords(buf: Buffer, now: Map<string, ToolNow>, hit: number, out: Stale, stop: () => boolean = () => false): number {
-  const { writes, dropped } = out;
-  while (hit >= 0) {
-    if (stop()) return hit;
-    const start = buf.lastIndexOf(0x0a, hit) + 1;
-    let end = buf.indexOf(0x0a, hit);
-    if (end < 0) end = buf.length;
-    hit = buf.indexOf(MARK, end);
-    const raw = buf.subarray(start, end);
-    let line: { attachment?: { type?: string; entries?: { name?: string; description?: unknown; input_schema?: unknown }[] } };
-    try {
-      line = JSON.parse(raw.toString('utf8'));
-    } catch {
-      continue; // a line still being written, or not JSON: not ours to touch
-    }
-    const a = line?.attachment;
-    if (a?.type !== 'deferred_tools_record' || !Array.isArray(a.entries)) continue;
-    const stale = a.entries.filter((e) => {
-      const cur = typeof e?.name === 'string' ? now.get(e.name) : undefined;
-      return cur !== undefined && (e.description !== cur.description || !isDeepStrictEqual(e.input_schema, cur.input_schema));
-    });
-    if (stale.length === 0) continue;
-    a.entries = a.entries.filter((e) => !stale.includes(e));
-    const json = Buffer.from(JSON.stringify(line), 'utf8');
-    if (json.length > raw.length) continue;
-    writes.push({ at: start, bytes: Buffer.concat([json.subarray(0, json.length - 1), Buffer.alloc(raw.length - json.length, 0x20), json.subarray(json.length - 1)]) });
-    for (const e of stale) dropped.add(e.name as string);
+/** The scan on the event loop, a SCAN_SLICE_MS slice at a time (w3855); undefined when unreadable or stopped. */
+async function scanOnLoop(file: string, now: Map<string, ToolNow>, gone: () => boolean): Promise<Stale | undefined> {
+  let buf: Buffer;
+  try {
+    buf = await fs.promises.readFile(file);
+  } catch {
+    return undefined;
   }
-  return -1;
+  const out: Stale = { writes: [], dropped: new Set() };
+  for (let hit = buf.indexOf(MARK); hit >= 0; ) {
+    if (gone()) return undefined;
+    const until = performance.now() + SCAN_SLICE_MS;
+    hit = scanRecords(buf, now, hit, out, () => performance.now() >= until);
+    if (hit >= 0) await new Promise((r) => setImmediate(r));
+  }
+  return out;
 }
