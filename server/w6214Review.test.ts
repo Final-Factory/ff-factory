@@ -166,4 +166,7 @@ test('w6214 F2 ("warn"): a sibling handed back by another worker during the wait
   assert.deepEqual(env.starts, ['beast:new1'], 'w5869 started on the new worker');
   const info = env.store.sessions.get('5449aaaa')!;
   assert.ok(info.movedAway, `the old worker lost its movedAway mark although w5869 moved to new1; queued for it: ${JSON.stringify(env.sessions.queued().map((m) => m.id))}`);
+  // The w6223 review, F1: and the person's [note] reaches w5870's hand-off (worker yyyyyyyy's), for its next worker.
+  assert.match(env.store.work.get('w5870')!.handedBack?.message ?? '', /old flag/, 'the [note] about w5870 goes with its hand-back');
+  assert.ok(!env.sessions.queued().some((m) => m.id === '5449aaaa' && /old flag/.test(m.text)), 'and never back to the moved worker');
 });

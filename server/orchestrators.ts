@@ -1520,6 +1520,12 @@ It is for your part of the work, not an answer to another worker's question.`;
       this.store.putWork(x);
     }
     const both = also.length ? ` (the same question on ${also.map((x) => x.id).join(', ')}: answered there too)` : '';
+    // w6047 (the w6223 review, F2): a request handed back since it asked (Queued, no worker on it now) carries the answer in
+    // its hand-off, which its next worker reads when it starts; the asking worker's resume would be refused (w2079).
+    if (asker && sid === asker && !w.sessionIds.includes(asker) && w.handedBack) {
+      const words = `${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\nIt answers what worker ${asker} asked before ${w.id} was handed back: "${clip(r.question, 300)}". Carry on with it.`;
+      if (this.carryInHandBack(w, asker, words, true)) return `answers the [needs you] question${both}: ${w.id} was handed back since worker ${asker} asked, so the answer goes with its hand-off to its next worker (nothing for you to pass on)`;
+    }
     const s = sid ? this.store.sessions.get(sid) : undefined;
     if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
     if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent`;
@@ -2267,12 +2273,15 @@ It is for your part of the work, not an answer to another worker's question.`;
    * w6047 (the w6056 review, 2): a message a failed move held for worker `sid`, whose hand-back of `w` (made meanwhile) stands,
    * goes into that hand-off's message, so the request's next worker gets it.
    */
-  carryInHandBack(w: WorkItem, sid: string, text: string) {
+  carryInHandBack(w: WorkItem, sid: string, text: string, anyHandBack = false): boolean {
     const hb = w.handedBack;
-    if (!hb || hb.session !== sid || !text) return;
+    // w6047 (the w6223 review, F1): `anyHandBack` takes a hand-back another worker made (a sibling it took and handed back
+    // during the move), so the message goes with it to the request's next worker instead of nowhere.
+    if (!hb || (hb.session !== sid && !anyHandBack) || !text) return false;
     w.handedBack = { ...hb, message: hb.message ? `${hb.message}\n\n---\n\n${text}` : text };
-    this.stamp(w, `the message its move held for worker ${sid} goes with its hand-back (w6047)`);
+    this.stamp(w, `the message its move held for worker ${sid} goes with its hand-back${hb.session !== sid ? ` (made by worker ${hb.session})` : ''} (w6047)`);
     this.store.putWork(w);
+    return true;
   }
 
   moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string, move?: { how: string; to: string }): boolean {

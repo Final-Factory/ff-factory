@@ -5089,7 +5089,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const isResume = resume(q) && (!!own || texts.length <= 1);
     const its = isResume ? (q!.resumeOf?.work ?? first) : undefined;
     const w = !text ? undefined : isResume ? (its ? open.find((x) => x.id === its) : open[0]) : (want.map((id) => open.find((x) => x.id === id)).find((x) => !!x) ?? open[0] ?? (told.length ? undefined : back[0]));
-    if (w) this.orchestrators.carryInHandBack(w, info.id, text);
+    if (w) this.orchestrators.carryInHandBack(w, info.id, text, anyHandBack);
     else if (text && isResume) console.log(`room move: a resume held by worker ${info.id}'s move${its ? ` (${its})` : ''} went to no hand-off: its request's next worker read its hand-off already and sets its own wait (w6047, w5949)`);
     else if (text && !told.length) {
       // w6047 (the w6190 review, F1): no open request takes it (each closed meanwhile), so it goes back to this worker as it
