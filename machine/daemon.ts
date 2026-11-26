@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -51,7 +51,7 @@ import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
-import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -682,6 +682,8 @@ export class Daemon {
   private welcomed = false;
   /** Where the `unity-slot` commands are, once written (first on agents' PATH). */
   private slotBin?: string;
+  /** w5838: the Low copies of claude, node and gh, checked against their sources before each run (lowIntegrity.ts LowCopies). */
+  private lowCopies?: LowCopies;
   /** The GitHub App shims and tokens' file (w1519, machine/ghApp.ts), once written. */
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
@@ -1838,7 +1840,17 @@ export class Daemon {
     this.startRpc();
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
     try {
-      this.slotBin = installShims(this.slotMailbox);
+      // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
+      // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
+      this.slotBin = process.platform === 'win32' && this.cfg.root ? writeShims(toolsShimsDir(this.cfg.root)) : installShims(this.slotMailbox);
+      // w5838 review: the old shims, in a folder Low workers write, go, so no stale PATH or copied command line runs them.
+      if (this.slotBin !== path.join(this.slotMailbox, 'bin')) {
+        try {
+          removeEntry(path.join(this.slotMailbox, 'bin'));
+        } catch (e) {
+          log(`unity slots: could not remove the old shim folder ${path.join(this.slotMailbox, 'bin')}: ${(e as Error).message}`);
+        }
+      }
       // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
       installLeftoversShim(this.slotBin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
       // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
@@ -3412,11 +3424,37 @@ export class Daemon {
     // gets an empty gh folder of its own in the root. Windows already moves gh's APPDATA into the root (lowEnv).
     const { ghOwn } = ow;
     const lowVars = low && this.cfg.root ? { ...lowEnv(this.cfg.root, low.git, pathKey, lowPath, ghDir), ...(low.unity ? { FF_UNITY_EDITOR_ROOT: low.unity } : {}) } : {};
-    const claudeExecutable = low ? low.claude : (spec.claudeExecutable ?? this.cfg.claude);
+    const claudeExecutable = low ? this.checkedLowClaude(low) : (spec.claudeExecutable ?? this.cfg.claude);
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
     return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+  }
+
+  /**
+   * w5838: the Low claude a sandbox agent runs, checked against its source just before (lowIntegrity.ts LowCopies.check):
+   * a copy a worker replaced is made again from the source and never run with the agent's tokens. Throws when there is
+   * none, so the run is held, never started unfenced (as runSpec's fence gate does).
+   */
+  private checkedLowClaude(low: { claude: string }): string {
+    const ok = this.lowCopies?.check(low.claude);
+    if (!ok) throw new Error(`worker integrity: the Low claude copy ${low.claude} could not be checked or made again; sandbox runs are held (w5838)`);
+    low.claude = ok;
+    return ok;
+  }
+
+  /**
+   * w5838: a fence probe of a Low copy with nothing of the daemon's environment (maxEventsFence.ts bareEnv). Warn-only, so a
+   * program that needs more to start never turns the fence off: a failure there is tried once more with Windows' own
+   * variables (PROBE_ENV_KEYS: PATH, the profile and temp folders; never the vault tokens or daemon.json `env`, w5838
+   * review) and said as a WARNING.
+   */
+  private bareProbe(argv: string[], what: string): ReturnType<typeof probeFence> {
+    const bare = probeFence(argv, { timeoutMs: 60_000, env: bareEnv() });
+    if (bare.ok) return bare;
+    const more = probeFence(argv, { timeoutMs: 60_000, env: { ...bareEnv(), ...pickEnv(PROBE_ENV_KEYS) } });
+    if (more.ok) log(`worker integrity: WARNING: ${what} did not run with a bare environment (${bare.why}) but did with Windows' own variables; its probe keeps those (w5838)`);
+    return more;
   }
 
   private ghMemo?: { at: number; token?: string };
@@ -3587,7 +3625,17 @@ export class Daemon {
   private editorFence(): EditorFence | undefined {
     if (this.cfg.editorFence === false) return undefined;
     if (process.platform === 'darwin') return this.macEditorFence();
-    return this.low?.editor;
+    const ed = this.low?.editor;
+    if (!ed) return undefined;
+    // w5838: the launcher is checked against the daemon's node before each editor start; one that cannot be checked or made
+    // again leaves that editor Medium, as before the fence (warn-only), and never runs the replaced program.
+    const launcher = this.lowCopies?.check(ed.launcher);
+    if (!launcher) {
+      log(`worker integrity: WARNING: the Low node launcher ${ed.launcher} could not be checked or made again; this editor starts Medium (w5838)`);
+      return undefined;
+    }
+    ed.launcher = launcher;
+    return ed;
   }
 
   private macEditorMemo?: { fence?: SeatbeltEditorFence };
@@ -3700,11 +3748,12 @@ export class Daemon {
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
-      const claude = await lowCopy(root, sdkClaude, exec, say);
+      this.lowCopies ??= new LowCopies(root, say); // w5877: one per daemon run, which never takes over another run's copies
+      const claude = this.lowCopies.make(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');
       }
-      const probe = probeFence([claude, '--version'], { timeoutMs: 60_000 });
+      const probe = this.bareProbe([claude, '--version'], 'the Low claude');
       if (!probe.ok) {
         return this.lowFail(`the Low claude could not run (${probe.why})`);
       }
@@ -3783,8 +3832,8 @@ export class Daemon {
       return false;
     }
     if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
-    const node = await lowCopy(root, process.execPath, exec, say);
-    const probe = node ? probeTranscriptLock(node, projects) : 'no Low node copy';
+    const node = this.lowCopies?.make(process.execPath);
+    const probe = node ? probeTranscriptLock(node, projects, undefined, bareEnv()) : 'no Low node copy';
     log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
     return true;
   }
@@ -3795,9 +3844,9 @@ export class Daemon {
    * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
    */
   private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<LowEditorFence | undefined> {
-    const launcher = await lowCopy(root, process.execPath, exec, say);
+    const launcher = this.lowCopies?.make(process.execPath);
     if (!launcher) return undefined;
-    const probe = probeFence([launcher, '-e', '0'], { timeoutMs: 60_000 });
+    const probe = this.bareProbe([launcher, '-e', '0'], 'the Low node launcher');
     if (!probe.ok) {
       log(`worker integrity: the Low node launcher could not run (${probe.why}); sandbox editors stay Medium`);
       return undefined;
@@ -3823,12 +3872,13 @@ export class Daemon {
       const where = await exec('where.exe', ['gh'], { timeoutMs: 30_000 });
       const exe = where.code === 0 ? where.stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) : undefined;
       if (!exe) return loud("gh is not on the daemon's PATH");
-      const copy = await lowCopy(root, exe, exec, say);
+      const copy = this.lowCopies?.make(exe);
       if (!copy) return loud('no Low copy of gh to test with');
+      // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
       // the daemon read one, which is the only route left once the owner's gh folder carries No-Read-Up; else the folder.
       const token = (await this.machineGhRead()).GH_TOKEN;
-      const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
+      const env = { ...bareEnv(), ...pickEnv(['USERPROFILE']), ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
       const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token:/i.test(l));
       if (r.code !== 0) return loud(`gh auth status at Low exited ${r.code}: ${said.slice(0, 3).join(' / ').trim().slice(0, 300)}`);
@@ -3944,7 +3994,7 @@ export class Daemon {
           mode,
           labels,
           t,
-          lowNode: await lowCopy(root, process.execPath, exec, say),
+          lowNode: this.lowCopies?.make(process.execPath),
           mirrorDir: path.join(appDir, 'read-fence-precheck'),
           skip: this.labelSystemDrive,
           run: exec,
