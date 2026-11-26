@@ -845,3 +845,45 @@ test('fleet: an urgent release holding a machine says so, with no turn limit, an
   }
   await proof(page, 'bench-urgent-release');
 });
+
+/**
+ * w5912 (lothsahn: "Does FFU have its own set of slots the same way? Can we show those on the portal?"): LothDesktop's ffu
+ * build slots, as its daemon reports them (machine/ffuSlots.ts slotsReport): one held by the fleet's reviewer, one held
+ * by a worker that is gone with its work pushed (stale, w5885), one released. A set of their own on the machine's page.
+ */
+function ffuSlotsFleet(s: AppState): AppState {
+  const f = fleet(s);
+  const t = (m: number) => new Date(NOW.getTime() + m * 60_000).toISOString();
+  const ffuSlots: NonNullable<MachineStats['ffuSlots']> = {
+    at: t(-1),
+    max: 4,
+    slots: [
+      { id: 'slot1', holder: 'l-review', holderIs: 'live', branch: 'w5655-heat-links', commit: 'abcdef123456', takenAt: t(-180), usedAt: t(-5), free: false, stale: false, targetBytes: 9.3 * 2 ** 30, sizedAt: t(-20) },
+      { id: 'slot2', holder: '23762b98', holderIs: 'gone', branch: 'w5633-shared-fleet', commit: '0123456789ab', takenAt: t(-2900), usedAt: t(-2880), free: true, stale: true, targetBytes: 14.2 * 2 ** 30, sizedAt: t(-50) },
+      { id: 'slot3', branch: 'w5592-belts', commit: 'fedcba987654', usedAt: t(-600), free: true, stale: false },
+    ],
+  };
+  return { ...f, machineStats: { ...f.machineStats, lothdesktop: { ...f.machineStats!.lothdesktop, ffuSlots } } };
+}
+
+test("fleet: a machine's page shows its ffu slots apart from its sandboxes: holder, branch and commit, since when, and a stale hold (w5912)", async ({ page }) => {
+  await fixedFleet(page, '#/machine/lothdesktop', ffuSlotsFleet);
+  const list = page.getByTestId('ffu-slots');
+  await expect(page.locator('.sb-panel')).not.toHaveCount(0);
+  if (!(await list.isVisible())) await page.getByRole('button', { name: 'Details', exact: true }).click();
+  await expect(page.getByText('ffu slots · 2 of 3 held, 1 stale (up to 4)')).toBeVisible();
+  const held = list.getByTestId('ffu-slot-slot1');
+  await expect(held).toHaveClass(/ffu-slot-held/);
+  await expect(held).toContainText('9.3 GB target');
+  await expect(held.getByRole('button', { name: 'Review the nightly report' })).toBeVisible();
+  await expect(held).toContainText('runs · since 3h');
+  await expect(held).toContainText('w5655-heat-links @ abcdef12 · used 5m');
+  const stale = list.getByTestId('ffu-slot-slot2');
+  await expect(stale).toHaveClass(/ffu-slot-stale/);
+  await expect(stale).toContainText('23762b98 · gone');
+  await expect(list.getByTestId('ffu-slot-slot3')).toContainText('released');
+  // No action in the set: it is a view (the next ffu-slot take frees a stale hold itself).
+  await expect(stale.getByRole('button')).toHaveCount(0);
+  await list.scrollIntoViewIfNeeded();
+  await proof(page, 'ffu-slots-machine-page');
+});
