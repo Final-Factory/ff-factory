@@ -343,6 +343,14 @@ export const PAIR_HOLD_MS = 45 * 60_000;
  */
 export const TIMED_HOLD_MS = 20 * 60_000;
 
+/**
+ * How long a computer's free place stays held for an older or higher leg (w1863's WorkItem.legs) that nobody started there
+ * (w5860), from when that computer's room began. A leg fits one place, so it can start the moment the hold begins; the bound
+ * only covers a dispatcher that does not: the WRONG flag tells it after 10 min (flagQueuedWithRoom), and 30 min leaves it two
+ * capacity pings to act. A judgment, not a measurement.
+ */
+export const LEG_HOLD_MS = 30 * 60_000;
+
 /** What a computer with room is, for whether a request can run there (w1944, RoomNow.fit): its platform, and w1861's no-timed-runs reason. */
 export interface RoomFit {
   platform?: string;
