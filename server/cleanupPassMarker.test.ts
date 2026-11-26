@@ -78,7 +78,6 @@ test('runner: a dry run neither marks nor reports a start (w5795)', async () => 
       done: () => undefined,
       marker,
       started: (t) => void started.push(t),
-      quick: async () => assert.fail('no quick plan in a dry run'),
     });
     await r.run('asked', { dryRun: true });
     assert.equal(during, undefined);
@@ -88,48 +87,22 @@ test('runner: a dry run neither marks nor reports a start (w5795)', async () => 
   }
 });
 
-test('runner: a low pass plans the quick scope first and reports what it would free; an hourly pass does not (w5795, report-only)', async () => {
-  let free = 20 * GB;
-  let order: string[] = [];
+test('runner: a low pass goes straight to the pass, and its step timings reach the summary (w5795: no quick plan first)', async () => {
+  const order: string[] = [];
   const r = new CleanupRunner({
     settings: () => ({ everyMinutes: 60, softFreeGB: 30 }),
     diskPaths: () => ['V:/'],
-    statfs: async () => ({ free, total: 320 * GB }),
-    pass: async () => (order.push('pass'), { removed: [], failed: [], bytes: 0, phasesMs: { regular: 1, cap: 2 } }),
+    statfs: async () => ({ free: 20 * GB, total: 320 * GB }),
+    pass: async (low) => (order.push(low ? 'low pass' : 'pass'), { removed: [], failed: [], bytes: 0, phasesMs: { regular: 1, cap: 2 } }),
     consumers: async () => [],
     log: () => undefined,
     done: () => undefined,
-    quick: async () => {
-      order.push('quick');
-      return [
-        { path: 'V:/ffw/ffu-slots/slot3/target', bytes: 24 * GB, rule: 'ffu-slot-target' },
-        { path: 'V:/ffw/tmp/ffa-1/ffu-target', bytes: 2 * GB, rule: 'cargo-target-cap' },
-      ];
-    },
   });
   const low = await r.tick();
-  assert.deepEqual(order, ['quick', 'pass'], 'the quick plan first, then the full pass as before');
-  assert.equal(low?.quick?.items, 2);
-  assert.equal(low?.quick?.bytes, 26 * GB);
-  assert.equal(low?.quick?.top?.[0].rule, 'ffu-slot-target');
+  assert.equal(low?.trigger, 'low-space');
+  assert.deepEqual(order, ['low pass'], 'nothing planned before the pass');
+  assert.ok(!("quick" in (low ?? {})), "no quick report in the summary");
   assert.deepEqual(low?.phasesMs, { regular: 1, cap: 2 }, "the pass's step timings reach the summary");
-
-  free = 200 * GB;
-  order = [];
-  const r2 = new CleanupRunner({
-    settings: () => ({ everyMinutes: 60, softFreeGB: 30 }),
-    diskPaths: () => ['V:/'],
-    statfs: async () => ({ free, total: 320 * GB }),
-    pass: async () => (order.push('pass'), { removed: [], failed: [], bytes: 0 }),
-    consumers: async () => [],
-    log: () => undefined,
-    done: () => undefined,
-    quick: async () => (order.push('quick'), []),
-  });
-  const hourly = await r2.tick();
-  assert.equal(hourly?.trigger, 'hourly');
-  assert.deepEqual(order, ['pass']);
-  assert.equal(hourly?.quick, undefined);
 });
 
 test('describeCutOff rounds the minutes and never goes negative (w5795)', () => {

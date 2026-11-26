@@ -1027,6 +1027,29 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, 'off'), ['-StoreLock off']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, 'on'), ['--store-lock on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn']);
+  // w5833: the editor temp folder's switch: on or off and nothing else, macOS and Linux only (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', editorTmpdir: 'maybe' as never }), /editor_tmpdir: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', editorTmpdir: '' as never }), /editor_tmpdir: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', editorTmpdir: 'on' }), /editor_tmpdir: macOS and Linux only, and beast is a Windows PC/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', editorTmpdir: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const etLin = store.readTranscript(OPS_ID, 220).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(etLin.text.includes(`--worker-fence on --editor-tmpdir on'`), etLin.text);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, 'off'), ['--editor-tmpdir off']);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, 'on'), [], 'Windows: no flag, install.ps1 has none');
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its setting');
+  // w5863: the path fence's switch: off or warn and nothing else, macOS and Linux only.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', pathFence: 'on' as never }), /path_fence: off or warn/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', pathFence: '' as never }), /path_fence: off or warn/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', pathFence: 'off' }), /path_fence: macOS and Linux only, and beast is a Windows PC/);
+  ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', pathFence: 'off' });
+  await new Promise((r) => setTimeout(r, 300));
+  const pfLin = store.readTranscript(OPS_ID, 240).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(pfLin.text.includes(`--worker-fence on --path-fence off'`), pfLin.text);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--path-fence warn']);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, 'off'), [], 'Windows: no flag, install.ps1 has none');
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on', 'off'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on', '--path-fence off']);
   ops.close();
 });
 
@@ -1104,6 +1127,20 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'warn' as never }), /transcript_lock: on or off/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', transcriptLock: 'on' }), /transcript_lock: Linux only/);
   assert.equal(asked.length, beforeTl, 'a refused value asks nothing');
+  // w5833: the editor temp folder alone is a valid update over the link; a value off the list, or a Windows machine, never goes.
+  ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', editorTmpdir: 'on' });
+  assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { editorTmpdir: 'on' } });
+  const beforeEt = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', editorTmpdir: 'warn' as never }), /editor_tmpdir: on or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', editorTmpdir: 'on' }), /editor_tmpdir: macOS and Linux only/);
+  assert.equal(asked.length, beforeEt, 'a refused value asks nothing');
+  // w5863: the path fence alone is a valid update over the link; a value off the list, or a Windows machine, never goes.
+  ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', pathFence: 'off' });
+  assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { pathFence: 'off' } });
+  const beforePf = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', pathFence: 'on' as never }), /path_fence: off or warn/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', pathFence: 'off' }), /path_fence: macOS and Linux only/);
+  assert.equal(asked.length, beforePf, 'a refused value asks nothing');
   await new Promise((r) => setTimeout(r, 50));
   ops.close();
 

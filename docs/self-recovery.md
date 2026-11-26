@@ -422,14 +422,14 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
     `listed` (sizing what is kept for a person), `remove` and `ownRemove`.
   - The marker carries the step in flight and the steps done, so a cut-off pass names the step that held it: `clean-up:
     the previous hourly pass, started ..., was cut off 61 min later, in its stale step (57 min in it), ...; steps done
-    before: stray temp 0 min, regular 4 min`. The steps: `quick`, `stray temp`, `regular`, `stale` (stale output),
+    before: stray temp 0 min, regular 4 min`. The steps: `stray temp`, `regular`, `stale` (stale output),
     `stale (install leftovers)`, `cap`, `own`, `listed`, `remove`, `ownRemove`. The first pass on this code (LothDesktop,
     2026-11-25 19:54Z) was cut off by an update after 61 min and could not say where its hour went.
-  - A low pass first plans the quick scope: the cargo-target cap with the low-space rules
-    (`planInstallLeftovers` scope `cargo-cap`, `low: true`), which covers unheld FFU slot targets and closed workers'
-    cargo. It reports what that would free and how long it took to plan, as `quick` in the summary and the
-    `clean-up (...)` log line. It removes nothing yet. Removing the quick scope first comes in a later change, once the
-    data shows it is safe (docs/worker-fence.md's lockout rule: warn-only first).
+  - A low pass used to plan a report-only quick scope first (the cargo-target cap with the low-space rules). It is gone
+    (w5795): on LothDesktop it took 21 min of each low pass before anything was removed, and no pass that ran it
+    finished to report it. Since each step now removes its own plan at once, the regular rules' items go a few minutes
+    into a pass and the cap's as soon as it is planned (2026-11-26 01:38Z hourly pass: `regular 2.4, remove 0.4, cap
+    18.8, removeStale 0.1` min).
 
 **The rules**: each is an allowlisted folder and an age; an entry goes only when nothing anywhere inside it
 changed for that long (a bounded walk, so a folder something still writes to stays).
