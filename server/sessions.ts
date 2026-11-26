@@ -1427,6 +1427,8 @@ export class AgentSession implements SessionHandle {
         if (wrote.first !== undefined && file && gen?.hasher) {
           const again = check?.ok ? await rehashFrom(file, check.checkpoints, wrote.first) : undefined;
           gen.hasher = again?.hasher;
+          // w5888: sealed as rewritten at once, so a check from here on passes even if no turn ends to seal it
+          if (again) await this.sealNow(gen, false);
           t.push(`re-hash ${lap()} (${again ? mb(again.hashedBytes) : 'failed'})`);
           mark('re-hashed');
         }
