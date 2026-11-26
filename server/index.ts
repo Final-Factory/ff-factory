@@ -90,6 +90,7 @@ import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf
 import { GithubApps } from './githubApps.ts';
 import { startGhCallLog } from './ghBudget.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
+import { ghLoginBanner, ghLoginStatusLines } from '../shared/ghLogin.ts';
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -3142,10 +3143,12 @@ agents.usagePollChanged = () => {
   machines.pushUsageConfig();
 };
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
+/** Each machine's own gh login as the warnings read it (w5932). */
+const ghLoginMachines = () => machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), ...(m.gh ? { gh: m.gh } : {}) }));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   const idle = liveIdleStatusLine(cfg.live?.enabled === true, cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES, machines.list(), liveIdle.keptOpen());
-  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...ghLoginStatusLines(ghLoginMachines()), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -3200,6 +3203,9 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
+  // A machine's own gh login that GitHub refuses with 401 (w5932): for the owners, whose login it is.
+  const ghl = ghLoginBanner(ghLoginMachines());
+  if (ghl) warnings.push({ id: 'gh-login', kind: 'gh-login', owners: true, text: ghl });
   // A GitHub token that lacks a required repository or permission (w904), or GitHub rate limiting its account (w1186): for its person and the owners.
   for (const b of github.banners()) warnings.push({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };
