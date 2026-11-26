@@ -434,6 +434,11 @@ test("w5543: one run installs the plugins into the workers' folder and the Mediu
   const bad = machine({ claudeConfigDir: true, medium: true, mediumShCode: 1 });
   assert.equal(await bad.run(), EXIT.failed);
   assert.ok(bad.lines.some((l) => l.startsWith(`FAILED (Medium agents, ${bad.mediumDir}): registerAgents.sh exited 1`)));
+  // w5946 F6: a workers' folder that fails (a worker can break its own) still lets the Medium agents' one refresh.
+  const workers = machine({ claudeConfigDir: true, medium: true, shCode: 1 });
+  assert.equal(await workers.run(), EXIT.failed);
+  assert.ok(workers.calls.some((c) => c.cmd === 'sh' && c.env?.CLAUDE_CONFIG_DIR === workers.mediumDir), 'the Medium refresh ran');
+  assert.deepEqual(installedVersions(JSON.parse(fs.readFileSync(path.join(workers.mediumDir, 'plugins', 'installed_plugins.json'), 'utf8')))['ff-agents'], '1.29.20');
 });
 
 test('w5597: an old-layout machine migrates: the new checkout is cloned, the old one is never run, fetched or written, and the marker moves', async () => {
