@@ -371,10 +371,16 @@ test("w2231: a worker whose Claude pool is held is Blocked on that pool, gives u
   assert.equal(store.work.get('w1')!.status, 'active');
   assert.match(agents.waker.pending(a.id)?.note ?? '', /^w1 is unblocked: /);
   (agents.waker as unknown as { fire(id: string, tries: number): void }).fire(a.id, 0);
-  await until('the parked message and the resume reach it', () => {
-    const tx = store.readTranscript(a.id);
-    return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: '));
-  });
+  // Its placement on beta is the test machine's real sandbox switch (about 30 git processes, none of it work Agents began
+  // and settled() waits for): 1.7 s on an idle BEAST (w5915, git p50 57 ms), past the kit's 5 s under a full run's load.
+  await until(
+    'the parked message and the resume reach it',
+    () => {
+      const tx = store.readTranscript(a.id);
+      return tx.some((e) => e.kind === 'user' && e.text.includes('Fix the Test Runner failure on #1552.')) && tx.some((e) => e.kind === 'user' && e.text.includes('w1 is unblocked: '));
+    },
+    30_000,
+  );
   assert.equal(sessions.parked(a.id).length, 0);
   assert.equal(store.sessions.get(a.id)!.machineSandbox, 'beta', 'placed again on a free sandbox');
 });
