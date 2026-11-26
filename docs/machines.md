@@ -777,6 +777,24 @@ keep their requests and their shells run on.
   and `machines.personPlay.who` (a name), each with an optional `machine`; sent to the daemon with the bench priorities each
   minute. Tests: `server/personPlay.test.ts`.
 
+## A person's drain (w5878)
+
+A person who asks to hold new work off a computer and let the workers there finish (lothsahn on w5814, "Hold new work on
+LothDesktop and let the running workers finish") gets a **drain**: the dispatcher or their orchestrator calls
+`hold_machine` (`server/machineDrain.ts`, kept as `Machine.drain` and across a re-register) with their words quoted, who
+said them, and optionally `hours` (it lifts by itself) and `except` (requests that may still go there).
+
+- `Agents.placement()` merges it into `placement.hold` beside a coming build's and a person's game's holds, so every path
+  that reads holds skips the computer: `start_agent` (`awayProblem`), the w2046 room move, the agent-cap move and the
+  cross-machine re-placement (`moveDecision` through `holdReason`), priority reclaims, pair legs (`startPairLegs`), the
+  Capacity block's HELD line and Queued reasons.
+- `placement(false)` leaves it out, so `machineHold` never holds the resumes of the workers already there: they finish.
+- Work pinned to the computer (`machinePin`, `pin_words`) still goes there, as for a pause. Timed runs read
+  `placement(false)` and are not held by it.
+- Recovery needs nobody at the computer: `hold_machine lift`, or `hours`. Before it, such a hold lived only in the
+  dispatcher's notes, and the w2046 moves put w5838, w5857, w5863 and w5834 on LothDesktop between 17:54 and 19:12
+  (-07:00) on 2026-11-25, each logging "first with room in placement.prefer" with no hold named.
+
 ## Offline and paused computers take no work
 
 One rule, in `shared/availability.ts` and `server/machineAway.ts`, holds on every path that picks or plans a computer:

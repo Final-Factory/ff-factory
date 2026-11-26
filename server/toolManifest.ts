@@ -98,6 +98,7 @@ export const TOOL_MANIFEST = {
   system_status: { group: 'machines', kinds: [D, P, R, O], always: [D, P, O] },
   add_machine: { group: 'machines', kinds: [D, R] },
   set_machine_label: { group: 'machines', kinds: [D, R] },
+  hold_machine: { group: 'machines', kinds: [D, P, R] },
   machine_daemon: { group: 'machines', kinds: [D, R] },
   convert_machine: { group: 'machines', kinds: [D, R] },
   relocate_machines: { group: 'machines', kinds: [D, R] },

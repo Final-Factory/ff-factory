@@ -540,6 +540,8 @@ export function holdReason(id: string, prefs: PlacementPrefs = {}, requests: rea
   // A machine paused from its tray app (w1532, server/machinePause.ts) is held the same way until it runs again.
   // w4673: the hold names only the routes that release it (machinePause.ts pauseHold), never a blanket "90 minutes without input".
   if (why.startsWith('paused from its tray app')) return `${id} is ${why.includes('; it runs again ') ? why.replace('; it runs again ', ': nothing resumes there until it runs again, ') : `${why}: nothing resumes there until it runs again`}`;
+  // w5878: a person's drain (hold_machine) holds new work and moves only; the workers already there finish.
+  if (why.startsWith('drained: ')) return `${id} is ${why}: no new work, move or pair leg goes there while its own workers finish (hold_machine lift ends it)`;
   return `${id} is on hold (${why}): nothing resumes there until the hold is lifted (placement.hold)`;
 }
 
