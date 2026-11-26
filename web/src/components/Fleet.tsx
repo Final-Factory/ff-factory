@@ -416,6 +416,17 @@ function Places({ c, viewer, now, sel, variant, go, onNewSandbox }: { c: FleetCo
           ))}
         </div>
       )}
+      {/* w5924: light agent folders, apart from the game sandboxes: one per agent-only worker, no editor. */}
+      {(c.lights?.length ?? 0) > 0 && (
+        <div className="fl-lights" data-testid="fl-lights">
+          <div className="fl-free-line dim small" title="Agent-only work (another repo, FFU, a review) runs in a light folder of its own: no game checkout, no editor, counted against the agent cap only (w5924)">
+            Light agent folders
+          </div>
+          {c.lights.map((sb) => (
+            <SandboxItem key={sb.key} sb={sb} me={viewer.me} call={callOf(sb)} now={now} sel={sel} variant={variant} go={go} />
+          ))}
+        </div>
+      )}
       {c.host && !c.daemon && (
         <p className="side-empty">The portal runs the orchestrators and the dispatcher; sandboxes and workers are on the machines.</p>
       )}
