@@ -101,33 +101,109 @@ test('w5895: the read-back flags every excepted request with no live worker ther
   assert.match(r.text, /w5656: no worker of it here/);
 });
 
-test('w5895: a drain lets only its running workers finish by default; another worker\'s check-in resume is logged against it and still goes (warn-only)', async (t) => {
+const machineHoldOf = (env: { agents: unknown }) => (env.agents as unknown as { machineHold(s: { info: SessionInfo }): string | undefined }).machineHold.bind(env.agents);
+
+/** w5937: lothsahn's drain of pc set by the dispatcher on w5814, with stop1 (w5475) due to resume at its check-in 04:39. */
+async function drained(t: Parameters<typeof twoComputers>[0], extra: Record<string, unknown> = {}) {
   const env = await heldScene(t);
   (env.agents as unknown as { waker: { pending(id: string): unknown } }).waker.pending = (id: string) => (id === 'stop1' ? { at: '2026-11-26T04:39:00.000Z', note: 'check CI' } : undefined);
   env.store.putWork({ ...env.store.work.get('w5814')!, humanAsked: true });
-  const set = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', except: ['w5586'], work_id: 'w5814' });
+  const set = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', except: ['w5586'], work_id: 'w5814', ...extra });
   assert.ok(!set.isError, set.text);
-  assert.match(set.text, /the 1 worker\(s\) running there finish, and the others there should not resume/);
-  assert.match(set.text, /worker stop1 \(w5475\) stopped; will resume here at its check-in 04:39Z: the drain lets only its running workers finish, so this resume is AGAINST it/);
+  return { env, set, hold: machineHoldOf(env), s: (id: string) => ({ info: env.store.sessions.get(id)! }) };
+}
+
+test('w5937: a drain lets only its running workers finish by default; another worker\'s check-in resume is held, once logged', async (t) => {
+  const { env, set, hold, s } = await drained(t);
+  assert.match(set.text, /the 1 worker\(s\) running there finish, and the others there do not resume until it is lifted/);
+  assert.match(set.text, /worker stop1 \(w5475\) stopped; will resume here at its check-in 04:39Z: the drain lets only its running workers finish, so this resume is HELD/);
   assert.match(set.text, /w5586: worker stop2 stopped; resumes here at its next message \(the hold lets it through\)/);
   const d = env.store.machines.get('pc')!.drain!;
   assert.deepEqual([d.resumes, d.running], ['running', ['run1']]);
   assert.match(drainWouldHold(d, { id: 'stop1', works: ['w5475'] }) ?? '', /lets only the workers running at/);
-  assert.equal(drainWouldHold(d, { id: 'run1', works: ['w5814'] }), undefined, 'a running one finishes');
-  assert.equal(drainWouldHold(d, { id: 'stop2', works: ['w5586'] }), undefined, 'an excepted request\'s worker resumes');
-  // Warn-only: the resume of stop1 at its check-in is not held (machineHold), and it is logged once.
   const logs: string[] = [];
   const log = console.log;
   console.log = (...a: unknown[]) => void logs.push(a.join(' '));
   try {
-    const hold = (env.agents as unknown as { machineHold(s: { info: SessionInfo }): string | undefined }).machineHold.bind(env.agents);
-    const s = { info: env.store.sessions.get('stop1')! };
-    assert.equal(hold(s), undefined, 'warn-only: the resume goes');
-    assert.equal(hold(s), undefined);
+    for (let n = 0; n < 2; n++) assert.match(hold(s('stop1')) ?? '', /^pc is drained: Lothsahn's drain lets only the workers running at .*hold_machine lift, update_work hold \{action: lift\}, or a hold with resumes 'all'/);
+    assert.equal(hold(s('stop2')), undefined, 'an excepted request\'s worker resumes');
+    assert.equal(hold(s('run1')), undefined, 'a worker mid-turn is never held');
+    // run1 ends its turn: it was running when the drain was set, so its next resume goes on.
+    env.store.putSession({ ...env.store.sessions.get('run1')!, status: 'idle' });
+    assert.equal(hold(s('run1')), undefined, 'a worker running at the drain finishes, over several turns');
   } finally {
     console.log = log;
   }
-  assert.equal(logs.filter((l) => /pc drain: worker stop1 \(w5475\) resumes there.*warn-only: it would be held once enforced/.test(l)).length, 1, logs.join('\n'));
+  assert.equal(logs.filter((l) => /pc drain: worker stop1 \(w5475\) resume held, as .* \(w5937\)/.test(l)).length, 1, logs.join('\n'));
+});
+
+test('w5937: a drain set again keeps the workers the first one lets finish (w6055 F1)', async (t) => {
+  const { env, hold, s } = await drained(t);
+  env.store.putSession({ ...env.store.sessions.get('run1')!, status: 'idle' });
+  const again = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', except: ['w5586'], hours: 4, work_id: 'w5814' });
+  assert.ok(!again.isError, again.text);
+  assert.deepEqual(env.store.machines.get('pc')!.drain!.running, ['run1']);
+  assert.equal(hold(s('run1')), undefined, 'run1 was running at the first drain: it still finishes');
+  assert.ok(hold(s('stop1')), 'stop1 is still held');
+});
+
+test('w5937: a drain-held message for a worker whose request closed is dropped and said, not held forever (w6058)', async (t) => {
+  const { env, hold } = await drained(t);
+  // A real session on pc, stopped, on w5475 (the store-only stop1 has no handle the send queue can hold).
+  const h = env.sessions.create({ kind: 'worker', title: 'held', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }) });
+  Object.assign(h.info, { machineId: 'pc', status: 'stopped' });
+  env.store.putSession(h.info);
+  const id = h.info.id;
+  env.store.putWork({ ...env.store.work.get('w5475')!, sessionIds: ['stop1', id] });
+  const mine = () => env.sessions.queued().filter((q) => q.id === id).length;
+  env.sessions.send(id, 'A reply to the held worker');
+  env.sessions.drain();
+  assert.equal(mine(), 1, 'held while w5475 is open');
+  assert.ok(hold(h));
+  env.store.putWork({ ...env.store.work.get('w5475')!, status: 'done' });
+  env.sessions.drain();
+  assert.equal(mine(), 0, 'dropped once its request closed');
+  assert.ok(env.store.readTranscript(id).some((e) => e.kind === 'system' && /A resume was not delivered: pc is drained .* no open request left/.test(e.text)));
+  // With an open request again, its held message waits for the lift as before.
+  env.store.putWork({ ...env.store.work.get('w5475')!, status: 'active' });
+  env.sessions.send(id, 'Another reply');
+  env.sessions.drain();
+  assert.equal(mine(), 1);
+});
+
+test('w5937: a drain with resumes all holds no worker already there (w5878\'s behavior)', async (t) => {
+  const { hold, s } = await drained(t, { resumes: 'all' });
+  assert.equal(hold(s('stop1')), undefined);
+});
+
+test('w5937: recovery needs nobody at the machine: hold_machine lift releases the held resume', async (t) => {
+  const { env, hold, s } = await drained(t);
+  assert.ok(hold(s('stop1')));
+  const r = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
+  assert.ok(!r.isError, r.text);
+  assert.equal(hold(s('stop1')), undefined);
+});
+
+test('w5937: recovery needs nobody at the machine: update_work hold {action: lift} in the person\'s turn releases it', async (t) => {
+  const { env, hold, s } = await drained(t);
+  assert.ok(hold(s('stop1')));
+  const loth = env.chat(LOTH);
+  asTurn(loth, 'human');
+  const r = await env.call(loth.info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop' });
+  assert.ok(!r.isError, r.text);
+  assert.equal(env.store.machines.get('pc')!.drain, undefined);
+  assert.equal(hold(s('stop1')), undefined);
+});
+
+test('w5937: recovery needs nobody at the machine: the hold set again with resumes all releases it, and the drain stays', async (t) => {
+  const { env, hold, s } = await drained(t);
+  assert.ok(hold(s('stop1')));
+  const loth = env.chat(LOTH);
+  asTurn(loth, 'human');
+  const r = await env.call(loth.info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'hold', resumes: 'all' }, words: 'Keep LothDesktop held but let its workers resume' });
+  assert.ok(!r.isError, r.text);
+  assert.equal(env.store.machines.get('pc')!.drain?.resumes, 'all');
+  assert.equal(hold(s('stop1')), undefined);
 });
 
 test('w5895: holdReadback says NOT held plainly, and an old drain (no resumes) lets every worker resume as before', () => {
