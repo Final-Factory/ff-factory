@@ -169,9 +169,11 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
     if (i.toolsChildren) {
       // w5959: a child that holds a virtual disk, with toolsDiskLock on, stays Medium like MEDIUM_TOOLS (toolsDiskPlan).
       const kept = new Set((i.toolsKeepMedium?.children ?? []).map((c) => c.toLowerCase()));
-      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !MEDIUM_TOOLS.includes(c.name.toLowerCase()) && !kept.has(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
+      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !keptMediumTool(c.name) && !kept.has(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
       medium.push(tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)));
-      for (const c of i.toolsChildren) if (c.dir && kept.has(c.name.toLowerCase()) && !MEDIUM_TOOLS.includes(c.name.toLowerCase())) medium.push(path.join(tools, c.name));
+      // w6101: the old shims folder, while it is still there (agents started before the move run it), stays Medium.
+      for (const c of i.toolsChildren) if (c.dir && c.name.toLowerCase() === OLD_TOOLS_SHIMS) medium.push(path.join(tools, c.name));
+      for (const c of i.toolsChildren) if (c.dir && kept.has(c.name.toLowerCase()) && !keptMediumTool(c.name)) medium.push(path.join(tools, c.name));
       // Its disks after it: one that inherited Low turned Medium with the folder; one Low on its own is raised itself.
       medium.push(...(i.toolsKeepMedium?.disks ?? []).filter((d) => medium.some((m) => same(path.dirname(d), m))));
     } else medium.push(path.join(tools, 'node'));
@@ -187,12 +189,22 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
 }
 
 /** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
-export const MEDIUM_TOOLS = ['node', 'low', 'unity-low', 'shims'];
+export const MEDIUM_TOOLS = ['node', 'low', 'unity-low'];
+
+/**
+ * w6101: `<root>/tools/shims`, the Windows shims folder from w5838 until the move to `<root>/tools-medium/shims`. Out of
+ * MEDIUM_TOOLS, but never labelled Low while it is there: agents started before the move still run it first on their
+ * PATH. The daemon removes it once none does (dropOldToolsShims); `tools` is Medium, so no Low worker makes it again.
+ */
+export const OLD_TOOLS_SHIMS = 'shims';
+/** A tools child the fence keeps Medium: MEDIUM_TOOLS, and the old shims folder while it is there (w6101). */
+const keptMediumTool = (name: string) => MEDIUM_TOOLS.includes(name.toLowerCase()) || name.toLowerCase() === OLD_TOOLS_SHIMS;
 
 /**
  * Where the daemon wrote the workers' shims on Windows from w5838 (a Medium folder, not the Low slots mailbox) until w6101
  * moved them to `<root>/tools-medium/shims` (pathFence.ts enforcedShimDir), the one name on every OS. Still written, and
- * Medium (MEDIUM_TOOLS), while an agent host started before the move has it on its PATH (agentHost.ts hostsWithPathDir).
+ * Medium (OLD_TOOLS_SHIMS), only while an agent host started before the move has it on its PATH (agentHost.ts
+ * hostsWithPathDir); then removed (dropOldToolsShims).
  */
 export const toolsShimsDir = (root: string) => path.join(root, 'tools', 'shims');
 
@@ -205,7 +217,7 @@ export const WINDOWS_SHIM_FILES = ['ff-leftovers', 'ff-leftovers.cmd', 'ff-pr', 
 /**
  * w6101: what sits in a Windows shims folder that the daemon does not write (WINDOWS_SHIM_FILES), by name. Every agent's
  * PATH starts there, so a `git.cmd` planted while `tools-medium` was still Low (a rollout before w5539) would run for
- * Medium agents too. Warn only: the daemon logs each one; nothing is removed. A folder that cannot be read answers its error.
+ * Medium agents too. The daemon moves each one out (quarantineStrayShims). A folder that cannot be read answers its error.
  */
 export function strayShimFiles(dir: string, list: (d: string) => string[] = (d) => fs.readdirSync(d)): { strays: string[]; error?: string } {
   try {
@@ -221,40 +233,104 @@ export function strayShimFiles(dir: string, list: (d: string) => string[] = (d) 
 export const windowsShimsDir = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, 'shims');
 
 /**
- * w6101: the Windows daemon's shims at start. They are written to `<root>/tools-medium/shims` (windowsShimsDir), which is
- * put first on new agents' PATH. `<root>/tools/shims` (toolsShimsDir, Medium) is written too, so an agent host started
- * before the move, with that folder first on its PATH, runs this daemon's shims; `waits` names those hosts
- * (hostsWithPathDir), and the log says how many there are. Nothing is refused or removed here (warn first, lothsahn's
- * lockout rule). A failed write in the new folder falls back to the old one, which is Medium, so recovery needs nobody
- * at the machine; it is a WARNING. A file there that the daemon does not write is a WARNING (strayShimFiles). Answers
- * the folder to put first on PATH, or undefined if neither could be written.
+ * w6101: the Windows daemon's shims at start. They are written to `<root>/tools-medium/shims` (windowsShimsDir), first on
+ * new agents' PATH. `<root>/tools/shims` (toolsShimsDir, Medium) is written too only while an agent host started before
+ * the move has it on its PATH (`waits`, hostsWithPathDir); dropOldToolsShims removes it once none does. A failed write in
+ * the new folder falls back to the old one, which is Medium, so recovery needs nobody at the machine; it is a WARNING.
+ * Answers the folder to put first on PATH (undefined if neither could be written) and whether the old one is still needed.
  */
-export function windowsShims(root: string, o: { write: (dir: string) => void; waits: () => string[]; log: (l: string) => void; list?: (d: string) => string[] }): string | undefined {
+export function windowsShims(root: string, o: { write: (dir: string) => void; waits: () => string[]; log: (l: string) => void }): { bin: string | undefined; oldNeeded: boolean } {
   const dir = windowsShimsDir(root);
   const old = toolsShimsDir(root);
-  let bin: string | undefined;
   try {
     o.write(dir);
-    bin = dir;
   } catch (e) {
     o.log(`unity slots: WARNING: could not write the shims in ${dir} (${(e as Error).message}); new agents get ${old} first on their PATH instead, which Low workers cannot write either, and the next daemon start tries again (w6101)`);
+    try {
+      o.write(old);
+      return { bin: old, oldNeeded: true };
+    } catch (e2) {
+      o.log(`unity slots: WARNING: could not write the shims in ${old} either: ${(e2 as Error).message} (w6101)`);
+      return { bin: undefined, oldNeeded: false };
+    }
   }
-  let oldOk = false;
+  const w = o.waits();
+  if (!w.length) {
+    o.log(`unity slots: the shims are in ${dir}, first on agents' PATH (w6101); no agent host has ${old} on its PATH, so it is not written and goes`);
+    return { bin: dir, oldNeeded: false };
+  }
   try {
     o.write(old);
-    oldOk = true;
   } catch (e) {
-    o.log(`unity slots: WARNING: could not write the shims in ${old}: ${(e as Error).message}${bin ? `; agents started before the move to ${dir} run what is left there` : ''} (w6101)`);
+    o.log(`unity slots: WARNING: could not write the shims in ${old}: ${(e as Error).message}; agents started before the move to ${dir} run what is left there (w6101)`);
   }
-  if (!bin && oldOk) bin = old;
-  if (bin === dir) {
-    const w = o.waits();
-    o.log(`unity slots: the shims are in ${dir}, first on new agents' PATH (w6101); ${old} is written too, for ${w.length ? `the ${w.length} agent host(s) started before the move that have it on their PATH (${w.join(', ')})` : 'agent hosts started before the move (none has it on its PATH now)'}`);
-    const s = strayShimFiles(dir, o.list);
-    if (s.error) o.log(`unity slots: WARNING: could not read ${dir} to look for files the daemon does not write there: ${s.error} (w6101)`);
-    for (const n of s.strays) o.log(`unity slots: WARNING: ${path.join(dir, n)} is not a shim the daemon writes, and every agent's PATH starts in this folder; left in place (warn only, w6101)`);
+  o.log(`unity slots: the shims are in ${dir}, first on new agents' PATH (w6101); ${old} is written too for the ${w.length} agent host(s) started before the move that have it on their PATH (${w.join(', ')}), and goes once they have ended`);
+  return { bin: dir, oldNeeded: true };
+}
+
+/**
+ * w6101: removes `<root>/tools/shims` once no agent host has it on its PATH (`waits`), looked at now and then every
+ * `everyMs`. `tools` is Medium, so no Low worker can make it again or swap it for a link. Answers the timer while it
+ * still waits (cleared by itself once the folder is gone), or undefined.
+ */
+export function dropOldToolsShims(root: string, o: { waits: () => string[]; log: (l: string) => void; everyMs?: number; remove?: (p: string) => void; exists?: (p: string) => boolean }): ReturnType<typeof setInterval> | undefined {
+  const old = toolsShimsDir(root);
+  const remove = o.remove ?? removeEntry;
+  const tryDrop = (): boolean => {
+    let w: string[];
+    try {
+      w = o.waits();
+    } catch {
+      return false;
+    }
+    if (w.length) return false;
+    try {
+      if (!(o.exists ?? fs.existsSync)(old)) return true;
+      remove(old);
+      o.log(`unity slots: removed the old shims folder ${old}: no agent host has it on its PATH (w6101)`);
+    } catch (e) {
+      o.log(`unity slots: WARNING: could not remove the old shims folder ${old}: ${(e as Error).message}; tried again in a minute (w6101)`);
+      return false;
+    }
+    return true;
+  };
+  if (tryDrop()) return undefined;
+  const t = setInterval(() => {
+    if (tryDrop()) clearInterval(t);
+  }, o.everyMs ?? 60_000);
+  t.unref?.();
+  return t;
+}
+
+/**
+ * w6101: moves each file in the Windows shims folder that the daemon does not write (strayShimFiles) into
+ * `<root>/tools-medium/quarantine/shims-<time>-<pid>`, a folder no agent has on its PATH and no worker writes, where a
+ * person can look at it; nothing is deleted. Each move is a WARNING; one that fails says so and leaves the file. At start
+ * and again once the fence has labelled (`tools-medium` may have read Low until then).
+ */
+export function quarantineStrayShims(root: string, o: { log: (l: string) => void; list?: (d: string) => string[]; rename?: (from: string, to: string) => void; mkdir?: (d: string) => void; now?: () => number }): string[] {
+  const dir = windowsShimsDir(root);
+  const s = strayShimFiles(dir, o.list);
+  if (s.error) o.log(`unity slots: WARNING: could not read ${dir} to look for files the daemon does not write there: ${s.error} (w6101)`);
+  if (!s.strays.length) return [];
+  const to = path.join(root, TOOLS_MEDIUM_CHILD, 'quarantine', `shims-${(o.now ?? Date.now)()}-${process.pid}`);
+  const moved: string[] = [];
+  try {
+    (o.mkdir ?? ((d) => fs.mkdirSync(d, { recursive: true })))(to);
+  } catch (e) {
+    o.log(`unity slots: WARNING: could not make ${to} to move ${s.strays.join(', ')} out of ${dir}: ${(e as Error).message}; left in place (w6101)`);
+    return [];
   }
-  return bin;
+  for (const n of s.strays) {
+    try {
+      (o.rename ?? fs.renameSync)(path.join(dir, n), path.join(to, n));
+      moved.push(n);
+      o.log(`unity slots: WARNING: ${path.join(dir, n)} is not a shim the daemon writes, and every agent's PATH starts in this folder; moved to ${to} (w6101)`);
+    } catch (e) {
+      o.log(`unity slots: WARNING: ${path.join(dir, n)} is not a shim the daemon writes, and could not be moved out: ${(e as Error).message}; left in place (w6101)`);
+    }
+  }
+  return moved;
 }
 
 type Ran = { code: number | null; stdout: string; stderr: string };
@@ -378,7 +454,7 @@ const DISK_IMAGE = /\.vhdx?$/i;
 export function lowDiskImages(root: string, toolsChildren: { name: string; dir: boolean }[] | undefined, list: (dir: string) => string[] = (d) => { try { return fs.readdirSync(d); } catch { return []; } }): string[] {
   const found: string[] = [];
   for (const c of toolsChildren ?? []) {
-    if (!c.dir || MEDIUM_TOOLS.includes(c.name.toLowerCase())) continue;
+    if (!c.dir || keptMediumTool(c.name)) continue;
     const dir = path.join(root, 'tools', c.name);
     for (const f of list(dir)) if (DISK_IMAGE.test(f)) found.push(path.join(dir, f));
   }

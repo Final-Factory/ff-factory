@@ -67,7 +67,7 @@ test('w5717: given its children, tools turns Medium, each child folder but node 
   // w5838: the folders of programs the daemon runs (the Low copies, the Unity junctions, the shims) stay Medium too.
   for (const c of ['low', 'unity-low']) assert.ok(!t.dirs.includes(path.join(tools, c)), `${c} is not labelled Low`);
   assert.deepEqual(t.medium, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c))]);
-  assert.deepEqual(MEDIUM_TOOLS, ['node', 'low', 'unity-low', 'shims']);
+  assert.deepEqual(MEDIUM_TOOLS, ['node', 'low', 'unity-low'], 'w6101: shims left MEDIUM_TOOLS; the old folder is kept Medium only while it is there');
   // Without the list (a daemon from before w5717 never passes one): the old layout.
   const old = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools'), exists: () => true });
   assert.ok(old.dirs.includes(tools));
@@ -867,7 +867,7 @@ test("w5959: toolsDiskLock on keeps ffu-sniper's tools child Medium, its disk af
   const tools = path.join(R, 'tools');
   assert.deepEqual(t.dirs.filter((d) => d.startsWith(tools)).sort(), [path.join(tools, 'cargo'), path.join(tools, 'git')]);
   const m = t.medium.filter((d) => d.startsWith(tools));
-  assert.deepEqual(m, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)), path.join(tools, 'wsl-ffu-sniper'), sniperDisk], 'tools first, the child after it, the disk last');
+  assert.deepEqual(m, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)), path.join(tools, 'shims'), path.join(tools, 'wsl-ffu-sniper'), sniperDisk], 'tools first, the child after it, the disk last');
   // A disk lowDiskImages did not place in a kept child (a stale plan) is never labelled.
   assert.ok(!beastTargets({ children: [], disks: [sniperDisk] }).medium.includes(sniperDisk));
   // Two disks in one child are one line, one kept child.

@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -111,6 +111,7 @@ import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runn
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { WIN_CI_FIRST, WinCiFirst, machineBusyMs, readLowered, writeLowered } from './ciFirstWin.ts';
+import { RunnerPriority, parseProcRows, parseTaskRows, processPriorityScript, runnerPriorityMode, runnerTaskScript } from './runnerPriority.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -300,6 +301,12 @@ export interface DaemonConfig {
    * stops it. Set remotely by `ops_worker machine_update win_ci_first`, read at the daemon's start; "warn" is the recovery.
    */
   winCiFirst?: 'off' | 'warn' | 'enforce';
+  /**
+   * w6163: a Windows machine's CI runners' scheduled tasks and listeners go to Normal priority (machine/runnerPriority.ts).
+   * Unset: "enforce" on the machines RUNNER_PRIORITY_ENFORCE lists (none in the first, warn-only step), "warn" (only logs)
+   * everywhere else, BEAST included; "off" stops it. Read at the daemon's start.
+   */
+  runnerPriority?: 'off' | 'warn' | 'enforce';
   /**
    * w5863, w5899: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "on" (the default
    * when unset) puts the unity-slot shims on every agent's PATH in <root>/tools-medium/shims, which fenced workers cannot
@@ -667,6 +674,7 @@ export class Daemon {
   readonly ciFirst: CiFirst;
   /** w6110: the same on a Windows CI-first machine (WIN_CI_FIRST: lothdesktop), by priority class; warn only so far: it logs. */
   readonly winCiFirst: WinCiFirst;
+  readonly runnerPriority: RunnerPriority;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -1181,6 +1189,19 @@ export class Daemon {
       now: () => Date.now(),
       log: (line) => log(line),
     });
+    // w6163: the CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): the machines in
+    // RUNNER_PRIORITY_ENFORCE set them (none in the first, warn-only step), every other Windows machine only logs them (BEAST
+    // stays so: Ben's hold on its system settings)
+    this.runnerPriority = new RunnerPriority({
+      mode: runnerPriorityMode(cfg.id, process.platform, real, cfg.runnerPriority),
+      procs: () => pd.procs(),
+      census: (procs) => runnerCensus(procs),
+      priorityOf: (pid) => priorityOf(pid),
+      raise: async (pids, fix) => parseProcRows(await runnerPowerShell(processPriorityScript(pids, fix))),
+      tasks: async (roots, fix) => parseTaskRows(await runnerPowerShell(runnerTaskScript(roots, fix))),
+      now: () => Date.now(),
+      log: (line) => log(line),
+    });
     this.light = new LightFolders({ root: () => this.sandboxRoot(), onChange: () => this.reportSandboxes() });
     this.pool = new SandboxPool(
       {
@@ -1428,8 +1449,12 @@ export class Daemon {
       busyNow: this.cleanupBusyNow(),
     });
     // The w6142 review: what the step alone frees shows in the clean-up history, not only in its log line.
-    if (run && run.removed.length > 0)
-      appendCleanupLog(appDirOfConfig(this.cfg), { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) });
+    if (run && run.removed.length > 0) {
+      const e = { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) };
+      appendCleanupLog(appDirOfConfig(this.cfg), e);
+      // w6166: the portal keeps it too, as it keeps every pass (portal_logs cleanup).
+      this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
+    }
   }
 
   /**
@@ -1932,14 +1957,24 @@ export class Daemon {
     try {
       // w5838, w6101: on Windows the shims sit in <root>/tools-medium/shims, labelled Medium (lowIntegrity.ts lowTargets),
       // not in the mailbox's bin, which Low workers write: every agent's PATH starts there, Medium ones included. The old
-      // <root>/tools/shims is written too while agents started before the move have it on their PATH (windowsShims).
+      // <root>/tools/shims is written too only while agents started before the move have it on their PATH (windowsShims).
       // w6074 E: a worker's chmod there (Landlock does not refuse one) must not make the daemon fall back to warn.
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) readyShimDir(enforcedShimDir(this.cfg.root));
       // w6080: off and warn write into the mailbox's bin; the link an earlier on start left there goes first.
       else if (process.platform !== 'win32') unlinkShimBinLink(oldBin);
       if (process.platform === 'win32' && this.cfg.root) {
         const root = this.cfg.root;
-        this.slotBin = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []), log });
+        const waits = () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []);
+        const w = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits, log });
+        this.slotBin = w.bin;
+        // w6101: once no agent started before the move runs it, <root>/tools/shims goes; files in the new folder the
+        // daemon does not write are moved out, now and again once the fence has labelled tools-medium Medium.
+        if (w.bin === windowsShimsDir(root)) {
+          const t = dropOldToolsShims(root, { waits, log });
+          if (t) this.timers.push(t);
+          quarantineStrayShims(root, { log });
+          void this.fenceReady?.then(() => quarantineStrayShims(root, { log })).catch(() => undefined);
+        }
       } else this.slotBin = shims(writeShims(shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
@@ -1987,6 +2022,16 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
+    if (this.runnerPriority.mode !== 'off') {
+      let tickFailing = false; // said once, not every minute
+      const tick = () =>
+        void this.runnerPriority.tick().then(
+          () => { if (tickFailing) log('runner priority: the tick runs again'); tickFailing = false; },
+          (e) => { if (!tickFailing) log(`runner priority: the tick failed: ${(e as Error).message}`); tickFailing = true; },
+        );
+      this.timers.push(setInterval(loopLabel('timer runnerPriority.tick', tick), 60_000));
+      setTimeout(tick, 15_000).unref();
+    }
     if (this.winCiFirst.enabled) {
       const tick = () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`));
       this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
@@ -5357,4 +5402,11 @@ export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math
 async function winSuspend(pid: number, resume: boolean): Promise<string | undefined> {
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winSuspendScript(pid, resume)], { timeoutMs: 60_000 });
   return r.code !== 0 ? `powershell exited ${r.code}: ${r.stderr.trim().slice(0, 200)}` : r.stdout.trim() || undefined;
+}
+
+/** w6163: one of machine/runnerPriority.ts's PowerShell scripts; its standard output, or an error with what it said. */
+async function runnerPowerShell(script: string): Promise<string> {
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
+  if (r.code !== 0) throw new Error(`powershell exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
+  return r.stdout;
 }

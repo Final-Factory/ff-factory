@@ -993,11 +993,42 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard, busy
   return out;
 }
 
+/** The removals in flight in this process, by normalized path (w6166). */
+const removing = new Map<string, Promise<boolean>>();
+const removalKey = (p: string) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+const atOrInside = (p: string, dir: string) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+
 /**
  * Measure `it.path`, rename it to `<name>.ffclean-<n>` (renameAway: one suffix at most) and delete that, adding the outcome to `out`. The rename
  * fails on Windows while a file inside is open, so an entry in use is skipped whole. Returns whether it went.
+ *
+ * One removal of a path at a time in this process (w6166): on Windows, two fs.promises.rename calls of one directory at the same
+ * moment both return ok (measured on BEAST, w6161: 10 of 10 trials), so the w6044 alone step and a pass's later step removing one
+ * released ffu target at once both counted it removed, with its full bytes. A removal of a path that is, or is inside, one in
+ * flight waits for that one and counts nothing (neither removed nor failed); a removal of a folder that holds one in flight waits
+ * for it first. The check and the claim are one synchronous step, so a third removal at the same moment sees the first.
  */
 export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<boolean> {
+  const key = removalKey(it.path);
+  for (const [k, p] of removing) {
+    if (!atOrInside(key, k)) continue;
+    await p.catch(() => false);
+    return true;
+  }
+  const below = [...removing].filter(([k]) => atOrInside(k, key)).map(([, p]) => p);
+  const run = (async () => {
+    await Promise.allSettled(below);
+    return removeRenamedNow(it, out);
+  })();
+  removing.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (removing.get(key) === run) removing.delete(key);
+  }
+}
+
+async function removeRenamedNow(it: CleanupItem, out: CleanupRun): Promise<boolean> {
   if (it.members) return removeMembers(it, out);
   // A dead FUSE mount inside comes off first (EBUSY otherwise); a live one refuses the entry whole (w5276).
   const mounts = await clearDeadMounts(it.path);
