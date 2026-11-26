@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -1932,14 +1932,24 @@ export class Daemon {
     try {
       // w5838, w6101: on Windows the shims sit in <root>/tools-medium/shims, labelled Medium (lowIntegrity.ts lowTargets),
       // not in the mailbox's bin, which Low workers write: every agent's PATH starts there, Medium ones included. The old
-      // <root>/tools/shims is written too while agents started before the move have it on their PATH (windowsShims).
+      // <root>/tools/shims is written too only while agents started before the move have it on their PATH (windowsShims).
       // w6074 E: a worker's chmod there (Landlock does not refuse one) must not make the daemon fall back to warn.
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) readyShimDir(enforcedShimDir(this.cfg.root));
       // w6080: off and warn write into the mailbox's bin; the link an earlier on start left there goes first.
       else if (process.platform !== 'win32') unlinkShimBinLink(oldBin);
       if (process.platform === 'win32' && this.cfg.root) {
         const root = this.cfg.root;
-        this.slotBin = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []), log });
+        const waits = () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []);
+        const w = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits, log });
+        this.slotBin = w.bin;
+        // w6101: once no agent started before the move runs it, <root>/tools/shims goes; files in the new folder the
+        // daemon does not write are moved out, now and again once the fence has labelled tools-medium Medium.
+        if (w.bin === windowsShimsDir(root)) {
+          const t = dropOldToolsShims(root, { waits, log });
+          if (t) this.timers.push(t);
+          quarantineStrayShims(root, { log });
+          void this.fenceReady?.then(() => quarantineStrayShims(root, { log })).catch(() => undefined);
+        }
       } else this.slotBin = shims(writeShims(shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
