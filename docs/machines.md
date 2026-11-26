@@ -2732,7 +2732,24 @@ LothDesktop and Beast, not just when BEAST is full").
     - Warn only (lothsahn's lockout rule): a worker whose work moved off it (`movedAway`) and that its daemon's hello still
       reports live, or that a resume after a drop would wake, is journalled and reported "[machines] … (w5942, warn only)"
       (`Machines.warnMovedAway`). On 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50 while w5869
-      and w5891 ran on biscuit too: two live workers on one request. Stopping them is a separate, reviewed change.
+      and w5891 ran on biscuit too: two live workers on one request.
+    - **Enforcing it** (w5950, a separate, independently reviewed change per lothsahn's lockout rule): the owner's setting
+      `movedAwayWorkers` (set_app_config, read live, no restart; `server/movedAwayEnforce.ts`) is `"warn"` (unset, the
+      default: the warn lines above, nothing stopped), `"on"` or `"off"` (no check at all). With `"on"`,
+      `Machines.movedAwayCheck` hands such workers to `Agents.enforceMovedAway`: one still live at its daemon's hello is
+      stopped, one a resume would wake (`resumeCutOff`) is not resumed. In both cases its check-in is cancelled, its
+      sandbox's uncommitted work is saved as a WIP commit pushed only to a side branch (`saveWork` with `holdPush`, so the
+      branch its new worker carries is never pushed from there), and each new worker gets "[forwarded, w5942] … [w5950] Your
+      request's old worker … " naming where that work went. Only when `movedAwayVerdict` holds the w5949 review's conditions:
+      (a) its open requests no longer list it (else `awayMoveUndone`, w3425, clears the mark); (b) every request moved off it
+      has another worker (a failed start hands the request back with none: kept); (c) that worker is in another sandbox and
+      started (live, mid-turn, or ran a turn), not errored or stopped on purpose, a live one preferred; (d) the save is
+      skipped when another agent works in its sandbox, its process did not end within 10 s or its branch is unknown, and
+      said so in the message; (e) the "too long ago to resume" report names a moved-away worker's new worker to message,
+      not the old one. A worker that fails a condition keeps its work and is reported "[machines] … kept, since enforcing
+      could stop the only copy of the work: … (w5950)". The side branch is local-first: the sandbox's branch is one WIP
+      commit ahead until that sandbox is switched or cleaned. Recovery needs nobody at any machine: an owner's request to
+      the dispatcher, set_app_config `movedAwayWorkers` `"off"` (or `null` for `"warn"`).
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
