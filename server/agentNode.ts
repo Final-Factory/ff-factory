@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { holdersScript, parseHolders, type Holder } from './agentNodeHolders.ts';
 
 /**
  * The agents' node on a Windows worker root (w1742; lothsahn, 2026-10-22: "we're making random folders under the temp
@@ -48,6 +49,12 @@ export interface AgentNodeDeps {
   now?: () => number;
   /** Tests: the digests to expect instead of the pinned ones. */
   pin?: { exeSha256: string; treeSha256: string };
+  /** The processes below Medium that hold anything under these folders (agentNodeHolders.ts by default); throws when it cannot tell. */
+  holders?: (dirs: string[]) => Promise<Holder[]>;
+  /** Ends a process (process.kill by default). */
+  kill?: (pid: number) => void;
+  /** Tests: how long to wait between tries of a rename refused while the holders end (2 s). */
+  retryMs?: number;
 }
 
 export type AgentNodeResult = 'current' | 'installed' | 'busy' | 'skipped' | 'failed';
@@ -246,6 +253,45 @@ async function labelCheck(dir: string, d: AgentNodeDeps): Promise<string | undef
   return p && `its labels let a Low worker write it: ${p}`;
 }
 
+async function readHolders(dirs: string[], d: AgentNodeDeps): Promise<Holder[]> {
+  if (d.holders) return d.holders(dirs);
+  const script = Buffer.from(holdersScript(dirs, [process.pid]), 'utf16le').toString('base64');
+  const r = await d.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', script], { timeoutMs: 5 * 60_000 });
+  const got = r.code === 0 ? parseHolders(r.stdout) : undefined;
+  if (!got) throw new Error(`the read of the processes holding them failed (${r.code}: ${(r.stderr || r.stdout).replace(/\s+/g, ' ').trim().slice(-200)})`);
+  return got;
+}
+
+/**
+ * Ends every process below Medium that holds the node's folder or its record's folder open (w5882's review): a write
+ * handle a Low worker took while an old daemon had `tools` Low outlives the relabel, so it could write node.exe after the
+ * check; and a file or folder held open stops the swap. The WARNING that names them is said before they are ended, and
+ * the processes are never Medium ones (no agent's node, no editor). Answers why the node cannot be trusted this run, or
+ * nothing when no Low process held either folder.
+ */
+async function endLowHolders(dirs: string[], d: AgentNodeDeps): Promise<string | undefined> {
+  const there = dirs.filter((x) => fs.existsSync(x));
+  if (!there.length) return undefined;
+  let held: Holder[];
+  try {
+    held = await readHolders(there, d);
+  } catch (e) {
+    return `could not tell which processes hold it open: ${(e as Error).message}`;
+  }
+  if (!held.length) return undefined;
+  const list = held.map((h) => `${h.name} (${h.pid}) ${h.path}`).join('; ');
+  d.say(`WARNING: Agent node: processes below Medium integrity hold the node's folders open, so they could write it or keep it in place: ${list}; ending them.`);
+  const left: string[] = [];
+  for (const h of held) {
+    try {
+      (d.kill ?? ((pid: number) => process.kill(pid)))(h.pid);
+    } catch (e) {
+      left.push(`${h.pid} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
+    }
+  }
+  return `Low processes held it open: ${held.map((h) => `${h.name} (${h.pid})`).join(', ')}${left.length ? `; could not end ${left.join(', ')}` : ''}`;
+}
+
 /** How long a stage folder is taken to be another rollout's, still running (an unpack takes seconds: 1.8 s measured). */
 const STAGE_TTL_MS = 60 * 60_000;
 
@@ -329,15 +375,20 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     }
     remove(aside);
   }
-  // The labels first: once nothing Low can write the files, what is hashed next stays what runs.
-  const lab = !homeBad && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
+  // Then the processes below Medium that hold either folder open (w5882's review): a handle outlives a relabel, so a
+  // folder some Low process holds is never trusted, whatever its labels and hashes say. They are ended, and the node swapped.
+  const held = notAFolder(dir) ? undefined : await endLowHolders([dir, medium], d);
+  // The labels next: once nothing Low can write the files, what is hashed next stays what runs.
+  const lab = !homeBad && !held && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
   const st = homeBad
     ? { ok: false as const, why: `its record's folder ${homeBad}` }
-    : lab
-      ? { ok: false as const, why: lab }
-      : stampCheck(stampFile, dir, pin);
+    : held
+      ? { ok: false as const, why: held }
+      : lab
+        ? { ok: false as const, why: lab }
+        : stampCheck(stampFile, dir, pin);
   if (st.ok) {
-    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, and no Low label or access entry of their own lets a Low worker write them).`);
+    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, no Low label or access entry of their own lets a Low worker write them, and no process below Medium holds them open).`);
     return 'current';
   }
   const why = st.why;
@@ -371,10 +422,25 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     let old: string | undefined;
     if (fs.existsSync(dir) || notAFolder(dir)) {
       old = path.join(tools, `node.old-${(d.now ?? Date.now)()}`);
-      try {
-        fs.renameSync(dir, old);
-      } catch (e) {
-        d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is in use (${(e as NodeJS.ErrnoException).code}); the node there stays until the next rollout.`);
+      // A file or folder in it held open refuses the rename (w5882's review: a Low process holding one kept a planted node
+      // in place on every rollout). The Low holders are ended and the rename tried again; one a Medium process holds
+      // (an agent's node reading its own files) is waited for a moment, never ended.
+      let busy: string | undefined;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          fs.renameSync(dir, old);
+          busy = undefined;
+          break;
+        } catch (e) {
+          busy = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+          if (attempt === 2) break;
+          const ended = await endLowHolders([dir], d);
+          if (ended?.startsWith('could not tell')) busy += `; ${ended}`;
+          await new Promise((res) => setTimeout(res, d.retryMs ?? 2000));
+        }
+      }
+      if (busy) {
+        d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is still in use (${busy}) after any process below Medium that held it was ended (a Medium one is never ended); the node there stays until the next rollout.`);
         remove(stage);
         return 'busy';
       }

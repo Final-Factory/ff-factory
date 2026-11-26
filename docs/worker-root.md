@@ -811,7 +811,17 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     a failure or output it cannot read, all mean a fresh copy. The read takes about 5 s on BEAST (measured; the
     parse 12 ms). Labels are read in English, as in `machine/lowIntegrity.ts`. A file that differs, is missing or was added, or no record at
     all, means a fresh pinned download swapped in at the same path, even when the files there match: a folder this run
-    unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. Each run stages in
+    unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. A handle outlives a relabel, so
+    labels, hashes and identity can all be right while a Low process that survived two rollbacks still holds a write
+    handle on the real folder (w5882's review). So before the labels, each run reads which processes below Medium hold
+    anything under `tools
+ode` or `daemongent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
+    list, `NtQueryInformationProcess` class 51, its file and section handles and its mapped views; the system-wide handle
+    table is refused to a Low session, 0xC0000022, measured). It says a WARNING naming them, ends them, and swaps the
+    node; one it cannot read counts as a holder, and a failed read means a fresh copy. The read covers 110 to 122 Low
+    processes and about 30k handles in 3 to 6 s on BEAST (measured). A rename refused because a file in the folder is
+    held open is tried three times, the Low holders ended between tries; a folder only a Medium process holds is never
+    forced, and the node there stays with a WARNING. A node.exe that runs does not block the rename (measured). Each run stages in
     `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
     may be another rollout's, still unpacking). The rollout log says
     `Agent node: node verified: ...`, `Agent node: node reinstalled (<why>): ...`, or
