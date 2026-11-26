@@ -1304,6 +1304,13 @@ export class Daemon {
               closed: this.closedSessionDirs(),
               ffuSized: this.ffuSized,
             }),
+          // w6044: the released ffu slots' targets planned first, before the slow steps a restart cuts off; report-only for now.
+          first: {
+            plan: async () =>
+              planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+            report: (items, ms) =>
+              log(`clean-up: ffu slots first (report-only, w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`),
+          },
           busyNow: runnerBusyNow(() => this.procs()),
           endStrays: async (strays) => {
             for (const st of strays) {
