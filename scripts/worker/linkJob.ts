@@ -233,6 +233,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.toolsDiskLock === 'warn' || f.toolsDiskLock === 'on' ? { toolsDiskLock: f.toolsDiskLock } : {}),
     ...(f.winCiFirst === 'off' || f.winCiFirst === 'warn' || f.winCiFirst === 'enforce' ? { winCiFirst: f.winCiFirst } : {}),
     ...(f.sharedLock === 'off' || f.sharedLock === 'warn' || f.sharedLock === 'on' ? { sharedLock: f.sharedLock } : {}),
+    ...(f.runnerPriority === 'off' || f.runnerPriority === 'warn' || f.runnerPriority === 'enforce' ? { runnerPriority: f.runnerPriority } : {}),
   };
 }
 

@@ -1099,6 +1099,18 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   }
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), ['-WinCiFirst enforce']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), [], 'not Windows: no flag');
+  // w6163: the CI runners' priority: off, warn or enforce and nothing else, Windows only.
+  for (const bad of ['on', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', runnerPriority: bad as never }), /runner_priority: off, warn or enforce/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', runnerPriority: 'enforce' }), /runner_priority: Windows only, and biscuit is not a Windows PC/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', runnerPriority: 'enforce' }), /runner_priority enforce: not on BEAST/);
+  for (const m of ['off', 'warn'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', runnerPriority: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const rpWin = store.readTranscript(OPS_ID, 340).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(rpWin.text.includes(`-RunnerPriority ${m}"'`), rpWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), ['-RunnerPriority enforce']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), [], 'not Windows: no flag');
   ops.close();
 });
 

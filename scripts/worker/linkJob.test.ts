@@ -115,6 +115,9 @@ test('w5554: the worker caps mode goes through to the installer update as named;
   // w6110: win ci first, off, warn or enforce from the wire; anything else is dropped.
   for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { winCiFirst: m }), { source: '/src', winCiFirst: m });
   assert.deepEqual(updateFlagsOf('/src', { winCiFirst: 'on' as never }), { source: '/src' });
+  // w6163: runner priority, off, warn or enforce from the wire; anything else is dropped.
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { runnerPriority: m }), { source: '/src', runnerPriority: m });
+  assert.deepEqual(updateFlagsOf('/src', { runnerPriority: 'on' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'on' as never }), { source: '/src' });
 });
 

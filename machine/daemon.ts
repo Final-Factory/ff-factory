@@ -307,8 +307,8 @@ export interface DaemonConfig {
   winCiFirst?: 'off' | 'warn' | 'enforce';
   /**
    * w6163: a Windows machine's CI runners' scheduled tasks and listeners go to Normal priority (machine/runnerPriority.ts).
-   * Unset: "enforce" on the machines RUNNER_PRIORITY_ENFORCE lists (none in the first, warn-only step), "warn" (only logs)
-   * everywhere else, BEAST included; "off" stops it. Read at the daemon's start.
+   * Unset: "enforce" on the machines RUNNER_PRIORITY_ENFORCE lists (LothDesktop, since step 2), "warn" (only logs)
+   * everywhere else, BEAST always; "off" stops it. Read at the daemon's start.
    */
   runnerPriority?: 'off' | 'warn' | 'enforce';
   /**
@@ -1203,7 +1203,7 @@ export class Daemon {
       log: (line) => log(line),
     });
     // w6163: the CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): the machines in
-    // RUNNER_PRIORITY_ENFORCE set them (none in the first, warn-only step), every other Windows machine only logs them (BEAST
+    // RUNNER_PRIORITY_ENFORCE set them (LothDesktop, since step 2), every other Windows machine only logs them (BEAST
     // stays so: Ben's hold on its system settings)
     this.runnerPriority = new RunnerPriority({
       mode: runnerPriorityMode(cfg.id, process.platform, real, cfg.runnerPriority),

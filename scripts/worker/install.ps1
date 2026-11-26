@@ -69,6 +69,11 @@
   Windows CI-first machine in daemon.json (winCiFirst), as ops_worker machine_update win_ci_first does: enforce lowers the
   processes agents' tools start to BelowNormal while a job runs, warn (the default) only logs what they take (the
   recovery), off stops it. Left out: the install keeps what it has.
+.PARAMETER RunnerPriority
+  With -Update (w6163, machine/runnerPriority.ts): set what the daemon does about the ffu CI runners' scheduled tasks and
+  listeners (Windows) in daemon.json (runnerPriority), as ops_worker machine_update runner_priority does: enforce sets
+  the tasks to priority 4 and raises the listeners to Normal, warn only logs what it reads (the recovery), off stops it.
+  Left out: the install keeps what it has.
 .PARAMETER MediumAgentFolders
   With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
   temp root and cargo home in daemon.json (mediumAgentFolders), as ops_worker machine_update medium_agent_folders does:
@@ -135,6 +140,7 @@ param(
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
     [ValidateSet('off', 'warn', 'enforce')][string]$WinCiFirst,
+    [ValidateSet('off', 'warn', 'enforce')][string]$RunnerPriority,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -307,6 +313,7 @@ if ($Update) {
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }
     if ($WinCiFirst) { $argv += @('--win-ci-first', $WinCiFirst) }
+    if ($RunnerPriority) { $argv += @('--runner-priority', $RunnerPriority) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
