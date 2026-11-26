@@ -239,6 +239,32 @@ paused listener is in SIGSTOP, so it does not poll at all. After SIGCONT it open
 `status=Busy` only if it was already stuck before the pause. What the pause can do is hide a stuck listener for as long
 as a bench turn lasts. Rule (b) picks it up 10 minutes after the turn ends.
 
+### Windows CI runners at Normal priority (w6163)
+
+A Windows runner started through its scheduled task (`Start-ScheduledTask`, which the daemon uses to start one again) runs
+at the task's priority. The default is 7: BelowNormal class, I/O Low and memory priority 2, and its jobs inherit all
+three. At logon it starts from the Startup folder's `.cmd` at Normal. Of the task priorities, only 4 starts a process at
+Normal in all three; 5 and 6 lower the memory priority.
+
+`machine/runnerPriority.ts` runs once a minute from `machine/daemon.ts` and looks only at ffu- runners.
+- **The task.** It reads each running listener's scheduled task at the first tick, for a runner folder not seen before,
+  and every hour.
+- **The processes.** It reads the class, I/O and memory priority of the listener and of the cmd.exe and conhost.exe it
+  runs under, when the listener is new or its class reads below Normal. run.cmd starts a relaunched listener under the
+  same cmd.
+
+Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
+- It sets a task above 4 to 4 with `Set-ScheduledTask`. That is the user's own task, so no elevation is needed; the
+  Schedule service rewrites its own copy of the task.
+- It raises each of those processes below Normal to Normal in all three priorities (SetPriorityClass, ProcessIoPriority,
+  ProcessMemoryPriority) and reads them back, so the jobs started after that run at Normal.
+- Nothing is restarted, a job already running keeps its priority, and a process above Normal is left alone.
+
+The first step lists no machine, so everywhere it only logs `runner priority:` lines (lothsahn's lockout rule). BEAST stays
+log-only, under Ben's standing hold on its system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`)
+overrides the default at the daemon's start. A failure is logged once and changes nothing else. ffu's
+`install-ffu-runner.ps1` registers new tasks at 4 with no 72-hour limit (ffu #1204).
+
 ### Runner temp folders on macOS and Windows (w5999)
 
 On Linux each runner unit's `ff-runner-tmpdir.conf` drop-in (w5834) puts its temp files inside the worker root. The
