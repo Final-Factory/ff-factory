@@ -40,32 +40,6 @@ env:
 # GITHUB_TOKEN and no secrets, these jobs use none, and a first-time contributor's run waits for an owner's approval
 # (Settings, Actions, General).
 jobs:
-  w6117-repro:
-    name: w6117 repro (temporary)
-    runs-on: ubuntu-latest
-    steps:
-      - name: dpkg -i twice over libasound2-data and libasound2t64 1.2
-        run: |
-          #!/usr/bin/env bash
-          # Temporary (w6117): the cached set's dpkg -i, then the second pass, on a real runner.
-          set +e -u
-          u=http://azure.archive.ubuntu.com/ubuntu/pool/main/a/alsa-lib
-          d=$(mktemp -d); old=$d/old; new=$d/new; mkdir -p $old $new
-          for v in 1.1 1.2; do
-            t=$([ $v = 1.1 ] && echo $old || echo $new)
-            curl -sfL -o $t/libasound2-data_1.2.15.3-1ubuntu$v\_all.deb $u/libasound2-data_1.2.15.3-1ubuntu${v}_all.deb
-            curl -sfL -o $t/libasound2t64_1.2.15.3-1ubuntu$v\_amd64.deb $u/libasound2t64_1.2.15.3-1ubuntu${v}_amd64.deb
-          done
-          ls -la $old $new
-          echo "== the image's state: both at ubuntu1.1"
-          sudo dpkg -i $old/*.deb >/dev/null 2>&1 || sudo dpkg -i $old/*.deb
-          dpkg-query -W libasound2-data libasound2t64
-          debs=("$new"/*.deb); echo "order: ${debs[*]##*/}"
-          echo "== pass 1"; sudo dpkg -i "${debs[@]}"; echo "pass 1 exit $?"
-          echo "== audit after pass 1"; sudo dpkg --audit
-          echo "== pass 2"; sudo dpkg -i "${debs[@]}"; echo "pass 2 exit $?"
-          echo "== audit after pass 2 (empty = clean)"; sudo dpkg --audit; echo "audit exit $?"
-          dpkg-query -W libasound2-data libasound2t64
   checks:
     # Not on a push to main (w925): see concurrency above.
     if: github.event_name != 'push'
