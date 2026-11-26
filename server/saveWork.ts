@@ -190,12 +190,11 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   const noise = restored.length ? [`restored ${restored.length} file(s) the Unity editor only rewrote by itself (re-serialized materials, w2782; a dynamic font atlas that grew, w5067) to HEAD instead of saving them: ${restored.join(', ')}`] : [];
   const left = foreign.size ? (await untrackedFiles(dir)).filter((f) => foreign.has(f)) : [];
   if (left.length) noise.push(`left ${left.length} untracked file(s) uncommitted that were already in the sandbox when it was switched to ${branch}, so not this worker's (w2988): ${someFiles(left)}`);
-  // w6099: before anything is committed, so a refused save leaves the sandbox as it was.
+  // w6099: read before the commit (the commit cannot change origin); a refused push still leaves the work committed here.
   const no = await guardRemote(async (a) => {
     const g = await git(dir, a);
     return g.code === 0 ? g.stdout : undefined;
   }, `the save's push in ${dir}`);
-  if (no) throw new Error(no);
   const specs = ['.', ...(await skipSpecs(dir)), ...left.map((f) => `:(exclude,literal)${f}`)];
   // From a file: another worker's leftovers can be hundreds of paths, past Windows' command line.
   const specFile = path.join(path.dirname(await foreignPath(dir)), 'ff-save-pathspec');
@@ -206,6 +205,10 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   await must(dir, ['commit', '-q', '--no-verify', '-m', opts.message], 'git commit');
   const sha = (await must(dir, ['rev-parse', '--short', 'HEAD'], 'reading the commit')).trim();
   const notes = [...noise, `committed ${files} file(s) on ${branch} as ${sha}`];
+  if (no) {
+    notes.push(`not pushed (${no}): the commit is in this machine's repository`);
+    return { sha, files, pushed: false, notes };
+  }
   if (opts.holdPush) {
     const side = savedBranch(branch, sha);
     const held = await git(dir, ['push', 'origin', `HEAD:refs/heads/${side}`], 5 * 60_000, opts.env);

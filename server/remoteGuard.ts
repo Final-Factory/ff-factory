@@ -9,34 +9,51 @@
  * process with none of safeGit's fence; a fetch starts its git-upload-pack the same way. Every sandbox's origin is a GitHub
  * repository, so each URL must be one, over https or ssh.
  *
- * Warn-only for now (REMOTE_GUARD): the daemon logs what it would refuse and goes on; enforcing it is a separate PR, once
- * the logs show no real checkout trips it. A refused checkout recovers by itself: its worker sets origin back with the
- * `git remote set-url` the message names; reverting the enforce PR (a portal deploy) turns it back to warn-only.
+ * Enforced (REMOTE_GUARD): #1371 shipped it warn-only, and no daemon log on BEAST showed a checkout it would refuse. A refused
+ * save still commits and only skips the push; a refused switch or rescue push changes nothing. A refused checkout recovers
+ * by itself: its worker sets origin back with the `git remote set-url` the message names; setting REMOTE_GUARD back to
+ * 'warn' (a portal deploy) turns it back to logging only.
  */
 import { githubKey } from './memoryGit.ts';
 
 /** 'warn': log what would be refused and go on; 'enforce': refuse it. */
-export const REMOTE_GUARD: 'warn' | 'enforce' = 'warn';
+export const REMOTE_GUARD: 'warn' | 'enforce' = 'enforce';
 
-/** A URL with any user name or password taken out, so a message never carries a token. */
+/**
+ * A URL with anything that may carry a token taken out, so a message never does: the user name and password up to the
+ * last `@` before the path (`https://a@b@host/`, scp's `tok@host:path`), and any query or fragment. The user info goes
+ * first: git ends it at the first `/`, not at `?` or `#` (w6148: `https://u:FAKE?PW@host/` kept `u:FAKE`).
+ */
 export function redact(url: string): string {
-  return url.replace(/^([a-z][\w+.-]*:\/\/)[^@/]*@/i, '$1');
+  const m = /^([a-z][\w+.-]*:\/\/)?([^/\\]*)(.*)$/is.exec(url.trim())!;
+  return `${m[1] ?? ''}${m[2].slice(m[2].lastIndexOf('@') + 1)}${m[3]}`.replace(/[?#].*$/s, '');
 }
 
+/**
+ * Set only by server/testLocalRemotes.ts, which test files import: their checkouts push to bare repositories in a temp
+ * folder, which the guard would refuse. No daemon or portal module imports it, and nothing a worker writes reaches the
+ * daemon's globals (w6148's review: setting it takes code in the daemon's process, which owns the daemon anyway).
+ */
+const testLocalRemotes = () => (globalThis as { ffTestLocalRemotes?: boolean }).ffTestLocalRemotes === true;
+
 /** Whether the daemon may push to or fetch from `url`: a GitHub repository over https or ssh. */
-export const allowedRemote = (url: string) => !!githubKey(url) && !/^http:/i.test(url.trim());
+export const allowedRemote = (url: string) => (!!githubKey(url) && !/^http:/i.test(url.trim())) || (testLocalRemotes() && !/^[a-z][\w+.-]*::/i.test(url.trim()));
 
 /**
  * Why `remote`'s URLs (fetch and push, `git remote get-url --all` and `--push --all`, insteadOf applied) are not ones the
  * daemon uses, or undefined. `fetchOut`/`pushOut` are those calls' stdout, or undefined when the call failed.
  */
-export function remoteProblem(remote: string, fetchOut: string | undefined, pushOut: string | undefined, allowed = allowedRemote): string | undefined {
-  if (fetchOut === undefined || pushOut === undefined) return `could not read ${remote}'s URL`;
+export function remoteProblem(remote: string, fetchOut: string | undefined, pushOut: string | undefined, allowed = allowedRemote, remotes?: string): string | undefined {
+  const fix = `set it with \`git remote set-url ${remote} <its GitHub URL>\``;
+  // With no remote of that name, git takes `origin` for a path: a folder of that name in the checkout.
+  if (remotes !== undefined && !remotes.split('\n').some((r) => r.trim() === remote))
+    return `the checkout has no remote named ${remote}, so git would take "${remote}" for a folder in it (w6099); add it with \`git remote add ${remote} <its GitHub URL>\` (or, if git says it exists, from a .git/remotes file, ${fix})`;
+  if (fetchOut === undefined || pushOut === undefined) return `could not read ${remote}'s URL (w6099); look at it with \`git remote -v\` and ${fix}`;
   const urls = [...new Set([...fetchOut.split('\n'), ...pushOut.split('\n')].map((u) => u.trim()).filter(Boolean))];
   if (!urls.length) return `${remote} has no URL`;
   const bad = urls.filter((u) => !allowed(u));
   if (!bad.length) return undefined;
-  return `${remote} points at ${bad.map(redact).join(', ')}, not a GitHub repository over https or ssh (w6099): a push or fetch there would run that repository's own programs; set it back with \`git remote set-url ${remote} <its GitHub URL>\` (and \`git config --unset-all remote.${remote}.pushurl\`)`;
+  return `${remote} points at ${bad.map(redact).join(', ')}, not a GitHub repository over https or ssh (w6099): a push or fetch there would run that repository's own programs; ${fix} (and \`git config --unset-all remote.${remote}.pushurl\`)`;
 }
 
 /** What a check found: undefined to go on, else the refusal; in warn-only mode the problem is logged and the call goes on. */
@@ -56,10 +73,12 @@ const getUrl = (remote: string, push: boolean) => ['remote', 'get-url', ...(push
  * undefined when it failed; `what` names the call and the checkout for the log.
  */
 export async function guardRemote(read: (args: string[]) => Promise<string | undefined>, what: string, remote = 'origin', allowed = allowedRemote): Promise<string | undefined> {
-  return verdict(remoteProblem(remote, await read(getUrl(remote, false)), await read(getUrl(remote, true)), allowed), what);
+  const remotes = await read(['remote']);
+  return verdict(remoteProblem(remote, await read(getUrl(remote, false)), await read(getUrl(remote, true)), allowed, remotes), what);
 }
 
 /** guardRemote for a synchronous git. */
 export function guardRemoteSync(read: (args: string[]) => string | undefined, what: string, remote = 'origin', allowed = allowedRemote): string | undefined {
-  return verdict(remoteProblem(remote, read(getUrl(remote, false)), read(getUrl(remote, true)), allowed), what);
+  const remotes = read(['remote']);
+  return verdict(remoteProblem(remote, read(getUrl(remote, false)), read(getUrl(remote, true)), allowed, remotes), what);
 }

@@ -1,3 +1,4 @@
+import './testLocalRemotes.ts'; // w6099: these checkouts' origins are bare repositories in a temp folder
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -80,7 +81,10 @@ test('w5912: the report gives each slot its holder, whether the holder runs, its
   assert.match(s3.why!, /kept 30 min for a short wait/);
   assert.deepEqual([s4.holder, s4.holderIs, s4.free, s4.stale, s4.why], [undefined, undefined, true, false, 'released']);
   // Past the grace the stopped holder's slot is stale too, its edit to be saved on a rescue branch first.
-  const later = slotsReport(deps(root, '', { ...f, at: NOW + FFU_SLOT_WAIT_GRACE_MS + 120_000 }, NOW + FFU_SLOT_WAIT_GRACE_MS + 120_000)).slots[2];
+  // From the slot's own last use, which includes the checkout's real file times: NOW was taken when the file loaded, and a
+  // slow machine's takes ran minutes after it (w6148's review of #1389: 210 s on BEAST kept the slot inside its grace).
+  const past = Date.parse(s3.usedAt!) + FFU_SLOT_WAIT_GRACE_MS + 120_000;
+  const later = slotsReport(deps(root, '', { ...f, at: past }, past)).slots[2];
   assert.deepEqual([later.free, later.stale], [true, true], later.why ?? '');
   assert.match(later.why!, /saved on a rescue branch first/);
   // Facts older than 15 min: no holder is known to have stopped, so nothing is stale.
