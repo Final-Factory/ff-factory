@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { AppState, Machine, MachineSandbox } from '../../../shared/types';
 import { api } from '../api';
-import { attempt, sessionsByIds, toast, useStore } from '../store';
+import { attempt, sessionsByIds, toast, useStore, wantSession } from '../store';
 import { displayName, fmtRelative, machineSandboxGlance, navigate, unityLabel, unityTone, useNow } from '../util';
 import { LiveButton } from './LiveButton';
 import { NewAgentModal } from './Modals';
@@ -19,6 +19,11 @@ import { Chip, CopyButton, Icon, ModelChip, StateText } from './ui';
 export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, onClose }: { app: AppState; machine: Machine; sandbox: MachineSandbox; sessionId?: string; onClose?: () => void }) {
   const now = useNow();
   const sessions = sessionsByIds(app.sessions, sb.sessionIds);
+  // w5907: the older agents the page's state left out; a link to one of them fetches it.
+  const notLoaded = sessions.length === sb.sessionIds.length ? undefined : sb.sessionIds.filter((id) => !sessions.some((s) => s.id === id));
+  useEffect(() => {
+    if (sessionId && sb.sessionIds.includes(sessionId)) wantSession(sessionId);
+  }, [sessionId, sb.sessionIds, app.sessions]);
   const selected = sessions.find((s) => s.id === sessionId) ?? sessions[sessions.length - 1];
   const [newAgent, setNewAgent] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
@@ -71,7 +76,7 @@ export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, o
             </span>
             {selected && <ModelChip session={selected} who={selected.title} className="hide-phone" />}
             {selected && <LiveButton sessionId={selected.id} />}
-            {ready && <AgentPicker place={displayName(sb)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!reachable} />}
+            {ready && <AgentPicker place={displayName(sb)} sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!reachable} notLoaded={notLoaded} />}
           </>
         }
         detailsOpen={details}
@@ -133,7 +138,7 @@ export function MachineSandboxPanel({ app, machine: m, sandbox: sb, sessionId, o
         {selected && <SessionDetails session={selected} />}
       </DetailsSheet>
 
-      <AgentTabs sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!reachable} />
+      <AgentTabs sessions={sessions} selected={selected} onSelect={pick} onNew={() => setNewAgent(true)} newDisabled={!reachable} notLoaded={notLoaded} />
 
       {selected ? (
         <SessionView key={selected.id} session={selected} embedded />
