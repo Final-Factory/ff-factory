@@ -20,6 +20,7 @@
 //
 // tools/node is not part of it off Windows: no agent runs it there (server/agentNode.ts agentNodePathDir is Windows only;
 // server/lowIntegrity.test.ts pins that).
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
@@ -114,11 +115,14 @@ export function guardOldShimBin(bin: string, o: { target: string; quarantine: st
   let n = 0;
   /** Take whatever is at `bin` out of the mailbox: rename it into the quarantine, then remove it there. */
   const evict = (): boolean => {
-    const st = lstat(bin);
-    if (!st) return false;
     // w6080 F: a worker's chmod of <root>/tools-medium or of the quarantine (Landlock refuses none) stopped every
     // rename into it, and of the mailbox (bin's parent, which a rename out of needs write on) the same: each put back.
+    // w6144 (w6103 note 3): before bin is looked at: in a mailbox (or root) at 000 the look itself fails, and bin was
+    // never mended. Owner bits only are added; every agent runs as the daemon's user.
+    ownFolderBits(path.dirname(path.dirname(o.quarantine)), 0o700);
     ownFolderBits(path.dirname(bin), 0o700);
+    const st = lstat(bin);
+    if (!st) return false;
     ownFolderMode(path.dirname(o.quarantine), 0o755);
     fs.mkdirSync(o.quarantine, { recursive: true, mode: 0o700 });
     ownFolderMode(o.quarantine, 0o700);
@@ -232,7 +236,17 @@ function openOwnFolder(p: string): number | undefined {
   const st = lstat(p);
   if (!st?.isDirectory()) return undefined;
   try {
-    fs.chmodSync(p, (st.mode & 0o7777) | 0o700);
+    // w6144 (w6103 note 2): a link swapped in at p after the lstat above must not have its target chmodded. On macOS,
+    // where Seatbelt refuses a worker's own chmod (a won race would be a gain), `chmod -h` (fchmodat with
+    // AT_SYMLINK_NOFOLLOW) sets a link's own mode, never its target's. Node has no route: its lchmodSync opens the path
+    // for writing (EISDIR on a folder), and no open of a folder at 000 succeeds, O_EVTONLY and O_SYMLINK included
+    // (measured on m5). Only this rare case spawns. Linux has no lchmod for a folder, and there Landlock lets the worker
+    // chmod the target itself anyway, so a path chmod gives it nothing it lacks.
+    const m = ((st.mode & 0o7777) | 0o700).toString(8);
+    if (process.platform === 'darwin') {
+      const r = spawnSync('/bin/chmod', ['-h', m, '--', p], { stdio: 'ignore', timeout: 10_000 });
+      if (r.status !== 0) return undefined;
+    } else fs.chmodSync(p, parseInt(m, 8));
     const fd = fs.openSync(p, flags);
     const now = fs.fstatSync(fd);
     if (now.ino === st.ino && now.dev === st.dev) return fd;
@@ -298,19 +312,24 @@ export function readyShimDir(dir: string): void {
  * w6074 E: then, while the daemon runs, the modes it wrote there are put back on every change seen in the folder (a
  * chmod is one) and every `everyMs`, the folder's included; logged once per name an hour. Returns a stop.
  */
-export function guardShimModes(dir: string, o: { log: (l: string) => void; everyMs?: number; now?: () => number }): () => void {
+export function guardShimModes(dir: string, o: { log: (l: string) => void; everyMs?: number; now?: () => number }): ShimModeGuard {
   const now = o.now ?? Date.now;
   const want = new Map<string, number>();
-  let names: string[] = [];
-  try {
-    names = fs.readdirSync(dir);
-  } catch {
-    // Not there (the daemon could not write it, w6080): the folders' modes are still guarded.
-  }
-  for (const n of names) {
-    const st = lstat(path.join(dir, n));
-    if (st?.isFile()) want.set(n, st.mode & 0o7777);
-  }
+  /** The modes the daemon gave: read from the folder just after it wrote the shims there. */
+  const learnModes = () => {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      // Not there (the daemon could not write it, w6080): the folders' modes are still guarded.
+    }
+    want.clear();
+    for (const n of names) {
+      const st = lstat(path.join(dir, n));
+      if (st?.isFile()) want.set(n, st.mode & 0o7777);
+    }
+  };
+  learnModes();
   const said = new Map<string, number>();
   const mend = () => {
     const fixed: string[] = [];
@@ -335,23 +354,61 @@ export function guardShimModes(dir: string, o: { log: (l: string) => void; every
     for (const f of fresh) said.set(f, t);
     if (fresh.length) o.log(`path fence: put back the mode the daemon gave in the shims folder: ${fresh.join(', ')}`);
   };
-  const ws: fs.FSWatcher[] = [];
-  for (const f of [dir, path.dirname(dir)]) {
-    try {
-      const w = fs.watch(f, { persistent: false }, () => mend());
-      w.on('error', () => undefined);
-      ws.push(w);
-    } catch {
-      // The timer still mends.
+  const ws = new Map<string, fs.FSWatcher>();
+  const watch = () => {
+    for (const f of [dir, path.dirname(dir)]) {
+      if (ws.has(f)) continue;
+      try {
+        const w = fs.watch(f, { persistent: false }, () => mend());
+        w.on('error', () => undefined);
+        ws.set(f, w);
+      } catch {
+        // Not there yet, or not readable: the timer still mends, and learn() watches it again.
+      }
     }
-  }
+  };
+  watch();
   const timer = setInterval(mend, o.everyMs ?? 60_000);
   timer.unref?.();
-  return () => {
+  const stop = () => {
     clearInterval(timer);
-    for (const w of ws) w.close();
+    for (const w of ws.values()) w.close();
+    ws.clear();
   };
+  // w6144 (w6103 note 1): after a failed start write, the 60 s retry writes the shims later; the guard learns their
+  // modes then (it had none to guard) and watches the folder if it could not before.
+  return Object.assign(stop, {
+    learn: () => {
+      learnModes();
+      watch();
+    },
+  });
 }
+
+/**
+ * w6080 G, w6144: the daemon's shim write in <root>/tools-medium/shims failed at start (no fallback into the mailbox):
+ * tried again every `everyMs` (a minute) until one succeeds; then `wrote()` (the mode guard learns the new shims).
+ * Returns the timer.
+ */
+export function retryShimWrite(dir: string, o: { write: (dir: string) => void; wrote: () => void; log: (l: string) => void; everyMs?: number }): NodeJS.Timeout {
+  const retry = setInterval(() => {
+    try {
+      readyShimDir(dir);
+      o.write(dir);
+    } catch {
+      // Logged once at start; the next try comes.
+      return;
+    }
+    clearInterval(retry);
+    o.wrote();
+    o.log(`path fence: wrote the shims in ${dir}`);
+  }, o.everyMs ?? 60_000);
+  retry.unref?.();
+  return retry;
+}
+
+/** guardShimModes' answer: call it to stop; `learn()` after the daemon writes the shims again. */
+export type ShimModeGuard = (() => void) & { learn: () => void };
 
 /**
  * w6080 (off and warn): the shims go in the mailbox's `bin`; where `bin` is still the link guardOldShimBin made (to
