@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { ghConfigFolder, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
+import path from 'node:path';
+import { ghConfigFolder, ghLoginStorage, machineGhStatusEnv, OWNER_LABEL_ON_SYSTEM_DRIVE, ownerLabelTargets, sayOwnerLabels, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, type TokenRun } from '../machine/ownerSecrets.ts';
+import { NO_READ_UP } from '../machine/lowIntegrity.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
 
@@ -268,4 +270,67 @@ test('the Keychain write leg is held after it hung or got through, until the cod
   assert.match(held.skipped[0], /^security \(held: .*let through/);
   const linux = ownerToolLegs({ platform: 'linux', gh: 'gh', token: 'machine-token-value-xxxxx', ghConfigDir: '/r/gh-worker', credentialEnv: {}, keychainHeld: 'let through' });
   assert.deepEqual(linux.skipped, [], 'the hold means nothing off a Mac');
+});
+
+// w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"; for LothDesktop).
+const w = path.win32;
+test('ownerLabelTargets (w5749): only LothDesktop labels, gh and ~/.ssh only; browsers left with their reason', () => {
+  const home = w.join('C:', 'Users', 'L');
+  const env = { APPDATA: w.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: w.join(home, 'AppData', 'Local') };
+  const gh = w.join(env.APPDATA, 'GitHub CLI');
+  const ssh = w.join(home, '.ssh');
+  const chrome = w.join(env.LOCALAPPDATA, 'Google', 'Chrome', 'User Data');
+  const there = new Set([gh, ssh, chrome]);
+  const plan = ownerLabelTargets({ platform: 'win32', home, env, machineId: 'LothDesktop', exists: (p) => there.has(p) });
+  assert.deepEqual(plan.label, [
+    { path: gh, sddl: NO_READ_UP.dir },
+    { path: ssh, sddl: NO_READ_UP.dir },
+  ]);
+  assert.deepEqual(
+    plan.left.map((l) => l.path),
+    [chrome],
+  );
+  assert.match(plan.left[0].why, /AppContainer/);
+});
+
+test('ownerLabelTargets (w5749): every other machine and OS looks at nothing on its system drive', () => {
+  let calls = 0;
+  const exists = () => (calls++, true);
+  for (const o of [
+    { platform: 'win32' as const, machineId: 'beast' },
+    { platform: 'win32' as const, machineId: undefined },
+    { platform: 'darwin' as const, machineId: 'lothdesktop' },
+    { platform: 'linux' as const, machineId: 'lothdesktop' },
+  ])
+    assert.deepEqual(ownerLabelTargets({ ...o, home: w.join('C:', 'Users', 'L'), env: {}, exists }), { label: [], left: [] });
+  assert.equal(calls, 0);
+  assert.ok(OWNER_LABEL_ON_SYSTEM_DRIVE.has('lothdesktop') && OWNER_LABEL_ON_SYSTEM_DRIVE.size === 1);
+});
+
+test('ghLoginStorage (w5749): keyring, file or none, from gh auth status', () => {
+  assert.equal(ghLoginStorage(['github.com', '  ✓ Logged in to github.com account Lothsahn (keyring)', '  - Token: gho_***'].join('\n')), 'keyring');
+  assert.equal(ghLoginStorage(['github.com', `  ✓ Logged in to github.com account Lothsahn (${w.join('C:', 'U', 'GitHub CLI', 'hosts.yml')})`].join('\n')), 'file');
+  assert.equal(ghLoginStorage('You are not logged into any GitHub hosts.'), undefined);
+  // A login gh could not check (w5849: an invalid token; a network outage likely the same) is still stored where it says.
+  assert.equal(ghLoginStorage(['github.com', `  X Failed to log in to github.com account Lothsahn (${w.join('C:', 'U', 'GitHub CLI', 'hosts.yml')})`].join('\n')), 'file');
+  assert.equal(ghLoginStorage('  X Failed to log in to github.com account Lothsahn (keyring)'), 'keyring');
+});
+
+test('machineGhStatusEnv (w5749): no token reaches the status check', () => {
+  const e = machineGhStatusEnv({ GH_TOKEN: 'x', GITHUB_TOKEN: 'y', PATH: 'p' });
+  assert.equal(e.GH_TOKEN, undefined);
+  assert.equal(e.GITHUB_TOKEN, undefined);
+  assert.equal(e.PATH, 'p');
+  assert.equal(e.GH_PROMPT_DISABLED, '1');
+});
+
+test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and what stays open', () => {
+  const ssh = w.join('C:', 'U', '.ssh');
+  const plan = { label: [{ path: ssh, sddl: NO_READ_UP.dir }], left: [{ path: 'Chrome', why: 'AppContainer' }] };
+  const line = sayOwnerLabels('warn', plan, 'keyring');
+  assert.ok(line.includes(`would label (warn only: no label set) No-Read-Up on ${ssh};`), line);
+  assert.match(line, /Credential Manager \(keyring\).*on moves it/);
+  assert.match(line, /left open: Chrome \(AppContainer\)$/);
+  assert.match(sayOwnerLabels('on', plan, 'file'), /rules label No-Read-Up on .*hosts\.yml/);
+  assert.match(sayOwnerLabels('warn', { label: [], left: [] }, undefined), /none on this Windows machine .*only on lothdesktop/);
 });
