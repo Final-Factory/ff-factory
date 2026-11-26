@@ -3,7 +3,7 @@
 // runs the real ones on a real Windows PC and a real Mac.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PUT_BACK, runJob, updateFlagsOf, type JobDeps } from './linkJob.ts';
+import { PUT_BACK, runJob, toolsTimedOut, updateFlagsOf, type JobDeps } from './linkJob.ts';
 import { jobName, jobPlist, launchJob } from '../../machine/osJob.ts';
 import { jobRemoveScript, jobScript, jobTaskXml, rollbackScript } from '../../server/machineDeployWin.ts';
 import type { UpdateJob } from '../../machine/selfUpdate.ts';
@@ -126,6 +126,13 @@ test('w5614: the store lock goes through to the installer update as named; an un
   assert.deepEqual(updateFlagsOf('/src', { storeLock: 'enforce' as never }), { source: '/src' });
 });
 
+test('w5862: the Medium agents folder mode goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
+  for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { mediumAgentFolders: m }), { source: '/src', mediumAgentFolders: m });
+  assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', mediumAgentFolders: 'on' }), { source: '/src', workerFence: 'on', mediumAgentFolders: 'on' });
+  assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
+  assert.deepEqual(updateFlagsOf('/src', { mediumAgentFolders: 'off' as never }), { source: '/src' });
+});
+
 test('w5833: the editor temp folder goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
   for (const m of ['on', 'off'] as const) assert.deepEqual(updateFlagsOf('/src', { editorTmpdir: m }), { source: '/src', editorTmpdir: m });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', editorTmpdir: 'on' }), { source: '/src', workerFence: 'on', editorTmpdir: 'on' });
@@ -188,4 +195,24 @@ test("w1596: the job runs as the OS's own, outside the daemon: a scheduled task,
   calls.length = 0;
   assert.match(await launchJob({ ...spec, service: 'com.fffactory.daemon' }, 'linux', run), /transient systemd unit com\.fffactory\.daemon\.job/);
   assert.deepEqual(calls[0].slice(0, 4), ['systemd-run', '--user', '--quiet', '--collect']);
+});
+
+test('w5967: a tools run that hangs is failed with the reason at its limit, so the job ends and frees the update lock', async () => {
+  const m = machine();
+  const said: string[] = [];
+  const tools: UpdateJob = { id: 't1', form: 'tools', commit: NEW, root: 'C:\ffw', appDir: 'C:\ffw\daemon', service: 'FFFactoryDaemon', createdAt: '', phase: 'running' };
+  // Never answers: beast's job 442c5638 on 2026-11-26.
+  const hung = { ...m.deps, say: (l: string) => void said.push(l), tools: () => new Promise<number>(() => undefined), toolsMs: 30 };
+  const t0 = Date.now();
+  const out = await runJob(tools, hung);
+  assert.ok(Date.now() - t0 < 5_000, 'it ends at its limit, not when the run does');
+  assert.equal(out.ok, false);
+  assert.equal(out.exit, 1);
+  assert.equal(out.note, toolsTimedOut(30));
+  assert.match(out.note!, /did not end within 0 min, so the job stopped it and ended: this machine takes updates again/);
+  assert.ok(said.some((l) => l.startsWith('FAILED: the agent tools run did not end')), 'its log says why');
+  // One that ends in time is not touched, and one that throws is a failure with its exit, never a hang.
+  assert.deepEqual(await runJob(tools, { ...m.deps, tools: async () => 0, toolsMs: 1_000 }), { ok: true, exit: 0 });
+  const threw = await runJob(tools, { ...m.deps, tools: async () => { throw new Error('git pull failed'); }, toolsMs: 1_000 });
+  assert.deepEqual(threw, { ok: false, exit: 1, note: 'the agent tools run exited 1' });
 });

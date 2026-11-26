@@ -216,14 +216,14 @@ export interface CardInputs {
  * person, the PR and a Blocked or Queued state come from the ledger, as the machine view and the Dispatcher read it.
  */
 export function workerCards(fleet: readonly FleetComputer[], x: CardInputs): WorkerCard[] {
-  const sessions = fleet.flatMap((c) => c.sandboxes.flatMap((sb) => [...sb.agents.shown, ...sb.agents.older]));
+  const sessions = fleet.flatMap((c) => [...c.sandboxes, ...(c.lights ?? [])].flatMap((sb) => [...sb.agents.shown, ...sb.agents.older]));
   const byId = new Map(sessions.map((s) => [s.id, s]));
   const ledger = chatLedger(x.work, byId, x.now);
   const live = workLiveAll(x.work ?? [], { session: (id) => byId.get(id), now: x.now });
   const workOf = new Map((x.work ?? []).map((w) => [w.id, w]));
   const cards: WorkerCard[] = [];
   for (const c of fleet) {
-    for (const sb of c.sandboxes) {
+    for (const sb of [...c.sandboxes, ...(c.lights ?? [])]) {
       // A worker whose Live view is up is listed too: the machine view's slot calls its person with "Live view: go" (w1430).
       const streams = (s: SessionInfo) => !!x.views?.some((v) => v.sessionId === s.id && v.state !== 'stopped');
       for (const s of [...sb.agents.shown, ...sb.agents.older.filter(streams)]) {

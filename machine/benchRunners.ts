@@ -168,6 +168,8 @@ export interface BenchRunnersDeps {
   diag(root: string): string | undefined;
   /** Whether a runner root is an operations runner (isOpsRunner, w3424): never paused. */
   opsRunner?(root: string): boolean;
+  /** Listener pids the load gate or a person's hold suspended (machine/loadRunners.ts, w5916): left to it, never continued here. */
+  othersPaused?(): Set<number>;
   read(): RunnersState | undefined;
   write(s: RunnersState): void;
   log(text: string): void;
@@ -259,7 +261,7 @@ export class BenchRunners {
     const now = new Date(this.d.now()).toISOString();
     const stopped: (RunnerCensus['listeners'][number] & { log: ListenerLog })[] = [];
     for (const l of c.listeners) {
-      if (pausedPids.has(l.pid) || l.busy) continue;
+      if (pausedPids.has(l.pid) || l.busy || this.d.othersPaused?.().has(l.pid)) continue;
       if (this.d.opsRunner?.(l.root)) {
         const why = `an operations runner (${OPS_RUNNER_MARK}, w3424): its jobs time nothing, so it takes them during the turn`;
         if (this.heldSaid.get(l.pid) !== why) this.d.log(`bench runners: runner ${l.root} (listener pid ${l.pid}) not paused: ${why}`);

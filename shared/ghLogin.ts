@@ -86,7 +86,8 @@ export function parseGhStatusJson(text: string, now: Date): GhLogin | undefined 
   const login = typeof a.login === 'string' && ACCOUNT.test(a.login) ? a.login : undefined;
   const source = typeof a.tokenSource === 'string' && SOURCE.test(a.tokenSource) ? a.tokenSource : undefined;
   if (a.state !== 'success' || !login) {
-    const why = a.state === 'timeout' ? 'GitHub did not answer gh in time' : 'GitHub refused the login (gh auth status: not valid)';
+    // gh 2.102.0 on an invalid token (measured by w5932): exit 0, state "error", login "", and an error naming "401 Unauthorized".
+    const why = a.state === 'timeout' ? 'GitHub did not answer gh in time' : typeof a.error === 'string' && /\b401\b/.test(a.error) ? REFUSED_401 : 'GitHub refused the login (gh auth status: not valid)';
     return { checkedAt, ok: false, ...(login ? { account: login } : {}), ...(source ? { source } : {}), error: why };
   }
   return { checkedAt, ok: true, account: login, scopes: scopeList(typeof a.scopes === 'string' ? a.scopes : ''), ...(source ? { source } : {}) };
@@ -103,12 +104,50 @@ export function parseGhStatusText(text: string, now: Date): GhLogin {
   const block = blocks.find((b) => /Active account:\s*true/i.test(b)) ?? blocks.find((b) => /Logged in to github\.com/i.test(b)) ?? text;
   const m = /Logged in to github\.com (?:account|as) ([A-Za-z0-9-]+)(?: \(([^)\s]+)\))?/i.exec(block);
   if (!m || !ACCOUNT.test(m[1])) {
-    const why = /not logged in|gh auth login/i.test(text) ? 'gh is not logged in to github.com' : /Failed to log in|invalid|expired/i.test(text) ? 'GitHub refused the login (gh auth status: not valid)' : 'gh auth status named no github.com account';
-    return { checkedAt, ok: false, error: why };
+    // "X Failed to log in to github.com account bryding (keyring)" / "The token in keyring is invalid." (gh 2.102.0, w5932): a 401.
+    const failed = /Failed to log in|invalid|expired/i.test(text);
+    const why = failed && /is invalid|401/i.test(text) ? REFUSED_401 : /not logged in|gh auth login/i.test(text) && !failed ? 'gh is not logged in to github.com' : failed ? 'GitHub refused the login (gh auth status: not valid)' : 'gh auth status named no github.com account';
+    const who = /Failed to log in to github\.com account ([A-Za-z0-9-]+)/i.exec(text)?.[1];
+    return { checkedAt, ok: false, ...(who && ACCOUNT.test(who) ? { account: who } : {}), error: why };
   }
   const scopes = /Token scopes:\s*([^\r\n]*)/i.exec(block)?.[1] ?? '';
   const source = m[2] && SOURCE.test(m[2]) ? m[2] : undefined;
   return { checkedAt, ok: true, account: m[1], scopes: /^none$/i.test(scopes.trim()) ? [] : scopeList(scopes), ...(source ? { source } : {}) };
+}
+
+/** The error of a login GitHub answered with 401 (w5932): the token is invalid, expired or revoked. */
+export const REFUSED_401 = 'GitHub refused the token (HTTP 401: invalid, expired or revoked)';
+
+/**
+ * Whether a reading says GitHub refused the login (w5932): its token is no good, not gh missing, not logged in or a blip.
+ * Runs there with no vault GitHub token get that token as GH_TOKEN (w5548), so their pushes, pull requests and CI reads fail.
+ */
+export function ghLoginRefused(gh: GhLogin | undefined): boolean {
+  return !!gh && !gh.ok && /^GitHub refused/.test(gh.error ?? '');
+}
+
+/** A machine as the gh login warnings see it: its id, whether its daemon is connected, and its last gh reading. */
+export interface GhLoginMachine {
+  id: string;
+  online: boolean;
+  gh?: GhLogin;
+}
+
+const refusedOnes = (ms: readonly GhLoginMachine[]) => ms.filter((m) => m.online && ghLoginRefused(m.gh));
+
+/** What a person does about it: sign gh in again at that computer's own desktop (an ssh session reads no Windows or Mac login). */
+const reLogin = (id: string) => `a person signs gh in again at ${id}'s own desktop: gh auth login -h github.com -s repo,workflow,read:org,gist (over ssh gh cannot read a Windows Credential Manager or Mac Keychain login and answers 401 even when it is good)`;
+
+/** system_status's WARNING lines (w5932): one per connected machine whose own gh login GitHub refuses. */
+export function ghLoginStatusLines(ms: readonly GhLoginMachine[]): string[] {
+  return refusedOnes(ms).map((m) => `WARNING: gh login (w5932): ${m.id}'s own gh login${m.gh!.account ? ` (${m.gh!.account})` : ''}: ${m.gh!.error}, read ${m.gh!.checkedAt.slice(11, 16)}Z. Its runs with no vault GitHub token cannot push, open pull requests or read CI. Fix: ${reLogin(m.id)}`);
+}
+
+/** The dashboard banner's text (w5932), or undefined when no connected machine's gh login is refused. */
+export function ghLoginBanner(ms: readonly GhLoginMachine[]): string | undefined {
+  const bad = refusedOnes(ms);
+  if (!bad.length) return undefined;
+  return `GitHub refuses the gh login of ${bad.map((m) => `${m.id}${m.gh!.account ? ` (${m.gh!.account})` : ''}`).join(', ')} (HTTP 401): work there with no vault GitHub token cannot push or read CI. Fix: ${bad.length === 1 ? reLogin(bad[0].id) : 'a person signs gh in again at the desktop of each: gh auth login -h github.com -s repo,workflow,read:org,gist'}.`;
 }
 
 /** Whether the login may push a change to .github/workflows: true, false, or undefined when unknown (no report, an error, no scopes reported). */

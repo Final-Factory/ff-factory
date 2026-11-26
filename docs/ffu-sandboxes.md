@@ -49,6 +49,15 @@ shared by every slot and every worker's cargo:
   home's `bin`, still on `PATH`.
 - Tests: `server/cargoHome.test.ts`.
 
+## Where an FFU worker works: a light agent folder (w5924)
+
+An FFU request needs only an agent slot (`needs: agent`), so its worker starts in a **light agent folder** of its own
+(`<sandbox_root>/agent-work/agentN`), not in a game sandbox: it takes no game sandbox from game work, and a computer whose
+game sandboxes are all full still takes it while an agent slot is free. Its builds still go through an ffu slot below
+(`ffu-slot take`), whose warm target is the point of this page. An FFU worker placed in a game sandbox before w5924 moves
+to a light folder when it next resumes; its temp folder stays as it was. Details: [machines.md](machines.md), "Light agent
+folders (w5924)".
+
 ## Use (a worker)
 
 ```sh
@@ -58,9 +67,22 @@ ffu-slot release                             # once the work is pushed (a stoppe
 ffu-slot list                                # every slot, its branch, and why it is or is not free
 ffu-slot take --wait 9 --branch my-branch    # no slot free: wait up to 9 min for one (w5885)
 ffu-slot sweep                               # free every slot a worker may take now, saving its holder's work first
+eval "$(ffu-slot take --branch other-branch)" # a second checkout: its own slot and target beside the first (w5885)
+eval "$(ffu-slot where --branch my-branch)"  # back to the slot on my-branch; plain `where` gives the one used last
+ffu-slot release --branch other-branch       # give one back; plain `release` gives back every slot of yours with no work
 ```
 
-`take` keeps the slot you already hold. Otherwise it picks a free slot: first one last used on your branch, then the
+**One slot per branch** (w5885, lothsahn's note of 2026-11-26: "A worker with two checkouts may lease a second ffu slot,
+one slot per checkout and per branch, when one is free. The worker's own hold never counts as 'another worker's'"). w5475's
+worker held slot4 for its map branch; its Report a Bug branch could not build in slot4's target (two checkouts in one target
+overwrite each other's crates) nor in its temp folder (w4258's guard), so it waited on its own slot while three slots sat
+free. Now `take --branch <b>` on a branch none of your slots is on leases another free slot, up to `FFU_SLOTS_PER_WORKER`
+(2, a guess: the case it came from, and low so one worker never takes a machine's four). With none free, or at that cap, a
+slot of yours with no work switches to the branch, as before; when all of yours have work, take exits 4 naming your slots
+as yours and the others by their real holders. The guards (`server/ffuTargetGuard.ts`, `server/strayWrite.ts`) open every
+slot you hold. Test: `server/ffuSlots.test.ts`, "one worker, two branches".
+
+`take` keeps the slot you already hold on that branch (with no `--branch`, the one you used last). Otherwise it picks a free slot: first one last used on your branch, then the
 one used most recently (the warmest target), a slot with no work to save before one whose holder's work must be rescued.
 It makes a new slot (a cold target) only when no slot is free. Exit 4 means no slot can be had now: all
 `FF_FFU_SLOTS_MAX` slots are held, or the drive has under 40 GB free. Exit 3 is any other failure.
@@ -124,6 +146,27 @@ than `cd` into a slot path it remembers: `take` keeps the slot it holds, or give
 The `ffu-slot` shim (`machine/ffuSlots.ts`) is written by the machine daemon into the same folder as `ff-leftovers` and
 `ff-pr`, which is first on every worker's PATH. Its default is 4 slots per machine (`FFU_SLOTS_DEFAULT_MAX`, a guess),
 so 4 × the 16 GB cap is 64 GB at most.
+
+**A cargo build outside a slot is noted** (w5885, warn-only, `server/ffuSlotBuildHook.ts`): when a worker that holds no slot
+runs `cargo build`, `test`, `check`, `clippy`, `run`, `bench` or `nextest` outside `ffu-sandboxes`, its next step carries a
+note to take a slot or wait for one, at most once per 30 min. A machine with no `ffu-sandboxes` folder is left alone. A
+refusal would come in a later, separate change, by lothsahn's lockout rule (warn first).
+
+## On the portal (w5912)
+
+Each machine's ffu slots show on its page, in a set of their own under its sandboxes (`web/src/components/FfuSlots.tsx`),
+and in `list_sandboxes` and `list_machines` (`server/ffuSlotsView.ts`): for each slot, the holder (its title and request
+when the portal knows the session), whether it runs, stopped or is gone, its branch and commit, since when it is held and
+when it was last used, its target's size, and whether the hold is **stale**. Stale is `ffu-slot list`'s own judgement: a
+held slot `slotFree` calls free (its holder is gone with its work pushed, or stopped or waiting past `FFU_SLOT_WAIT_GRACE_MS`, or idle
+past `FFU_SLOT_IDLE_MS`, w5885); the next `take` frees it by itself, so the page has no action.
+
+- The daemon runs `ffu-slot list --json` (`slotsReport`) in a child process every 2 minutes (`FFU_REPORT_MS`,
+  `readFfuSlotsReport`), so the `git rev-parse` and `git status` in each checkout never block it, and sends the result in its
+  15-second stats (`MachineStats.ffuSlots`). A machine with no `slots.json` sends none.
+- A target's size is the one the clean-up pass last measured (the `ffuSized` hook of `planInstallLeftovers`, hourly or on
+  a stale pass), never a `du` of its own; a slot not measured yet shows none.
+- The page state gets each slot without its `why` sentence (`pageStats`), which the tools keep.
 
 ## Clean-up (`server/installLeftovers.ts`, rule `ffu-slot-target`)
 

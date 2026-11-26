@@ -147,6 +147,11 @@ export interface PendingPermission {
   input: unknown;
   /** Why it is being asked (blocked path, etc.), when the SDK says. */
   reason?: string;
+  /**
+   * w5914: a shell command the worker asked again after FF Factory's nudge toward another route (server/bashNudge.ts):
+   * its "no other route" reason when it gave one, and the route key its route request is filed and de-duplicated by.
+   */
+  noRoute?: { reason?: string; key: string };
   createdAt: string;
 }
 
@@ -411,7 +416,7 @@ export interface SessionInfo {
   savedWork?: { sha: string; files: number; pushed: boolean; branch: string; at: string; sideRef?: string };
   /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
   /** `shared` (w1135): work that is not the game's, resumed on an agent seat beside another agent; its game tree is that agent's. */
-  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true };
+  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true; light?: true };
   /**
    * Its Live view ended because its sandbox was released while it waited (w1582, server/placeAgain.ts liveLostNote): its
    * next message asks it to stage the view again with these settings, then this goes.
@@ -698,6 +703,44 @@ export interface MachineStats extends HostStats {
   personPlay?: PersonPlayReport;
   /** The ready players its shared player cache holds (w4601, machine/playerCache.ts); absent: an older daemon, or no cache. */
   playerCache?: PlayerCacheReport;
+  /** Its ffu build slots (w5912, machine/ffuSlots.ts slotsReport); absent: an older daemon, or no slot made there yet. */
+  ffuSlots?: FfuSlotsReport;
+}
+
+/**
+ * One ffu build slot (docs/ffu-sandboxes.md) as its daemon judged it (w5912): `free` and `why` are `ffu-slot list`'s own
+ * judgement (machine/ffuSlots.ts slotFree), `stale` a held slot another worker may take now (w5885: its holder finished,
+ * no longer runs with its work pushed, stopped or waits past FFU_SLOT_WAIT_GRACE_MS, or idle past FFU_SLOT_IDLE_MS).
+ */
+export interface FfuSlotView {
+  id: string;
+  /** The session that holds it; absent: released. */
+  holder?: string;
+  /** live: its process runs here; stopped: a request still waits for it; gone: neither; unknown: no fresh facts. */
+  holderIs?: 'live' | 'stopped' | 'gone' | 'unknown';
+  /** The branch it was last given; absent: detached at origin/main. */
+  branch?: string;
+  /** Its checkout's commit (12 hex), when it could be read. */
+  commit?: string;
+  /** When it was taken (ISO). */
+  takenAt?: string;
+  /** When it was last used (ISO, slotLastUsed: its take, its checkout's git files, its target's builds). */
+  usedAt?: string;
+  free: boolean;
+  stale: boolean;
+  /** Why it is or is not free, as `ffu-slot list` says it. Left out of the page state (server/ffuSlotsView.ts pageStats). */
+  why?: string;
+  /** Its target's size as the daemon's last clean-up pass measured it (bytes), and when (ISO); absent: not measured yet. */
+  targetBytes?: number;
+  sizedAt?: string;
+}
+
+export interface FfuSlotsReport {
+  /** When the daemon judged them (ISO). */
+  at: string;
+  /** The slots a machine may make (FF_FFU_SLOTS_MAX). */
+  max: number;
+  slots: FfuSlotView[];
 }
 
 /**
@@ -1137,6 +1180,8 @@ export interface WorkerFenceReport {
   since?: string;
 }
 
+import type { RunnerHoldReport } from './runnerHold.ts';
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -1190,6 +1235,11 @@ export interface Machine {
    * with the probe's error. A failed fence holds its sandbox workers, and placement counts the machine busy.
    */
   fence?: WorkerFenceReport;
+  /**
+   * w5916: what a person's hold (placement.hold, a drain) does to its CI runners, as its daemon last said: which are
+   * stopped, which still run a job. Absent with no hold. Shown beside the hold (runnerHoldText).
+   */
+  runnerHold?: RunnerHoldReport;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.
@@ -1298,6 +1348,12 @@ export interface Machine {
 export interface MachineSandbox {
   /** The folder name, also the Unity project and MCP instance name ("<id>@<hash>"). Addressed as "<machine>/<id>". */
   id: string;
+  /**
+   * "light" (w5924, machine/lightFolders.ts): a light agent folder, `<sandbox_root>/agent-work/<id>` (ids agent1, agent2,
+   * ...), for work that needs only an agent slot: a plain folder, no branch, no Library, no editor. It counts against the
+   * machine's agent cap only, never among its game sandboxes (shared/sandboxKind.ts). Unset: a game sandbox.
+   */
+  kind?: 'light';
   branch: string;
   base: string;
   path: string;
@@ -1895,9 +1951,10 @@ export interface TokenWarning {
    * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
    * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889); github-token:
    * a GitHub token lacks a required repository or permission, or nears its expiry (w904); github-rate-limit: GitHub is rate
-   * limiting a token's account, which says nothing about the token's permissions (w1186).
+   * limiting a token's account, which says nothing about the token's permissions (w1186); gh-login: GitHub refuses a
+   * machine's own gh login with 401 (w5932).
    */
-  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit';
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit' | 'gh-login';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
   /** The owners see it too, besides `person` (w904: a GitHub token that lacks a requirement). */
@@ -2415,6 +2472,14 @@ export interface WorkPair {
    * hold it fetches it into its own player cache with fetch_attachment instead of building (shared/capacity.ts fetchPlayerNote).
    */
   player?: PairPlayer;
+  /**
+   * w5965: why its player predates w5297 (request_pair legacy_data, or read from its words: pre-1.0, the 0.50 line): such a
+   * player never reads FF_GAME_DATA_DIR and writes the per-OS data folder in the owner's profile (LocalLow on Windows), which
+   * a fenced worker cannot write (w5944: lothdesktop's Low-integrity worker, 'no host-ready within 420s'). Its legs then go
+   * only on computers whose worker fence is off (shared/capacity.ts unfitWhy), and never on Linux (pre-1.0 has no Linux
+   * multiplayer build).
+   */
+  legacyData?: string;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
   /**
@@ -2473,6 +2538,11 @@ export interface WorkItem {
   requesters: Requester[];
   /** Filed in a turn the person started (their own message), which the destructive tools require. */
   humanAsked: boolean;
+  /**
+   * w5896: humanAsked rests only on an earlier message of the person's quoted verbatim, not on a turn of theirs: the
+   * dispatcher's destructive tools (DESTRUCTIVE_TOOLS, server/belts.ts) still need their words in a turn of their own.
+   */
+  askedFromRecord?: boolean;
   status: WorkStatus;
   createdAt: string;
   updatedAt: string;
@@ -2527,6 +2597,13 @@ export interface WorkItem {
   findings?: WorkFinding[];
   /** w3706: its final outcome, written by every close (Store.putWork): the close note and the last worker report. */
   finalOutcome?: { at: string; status: WorkStatus; text: string };
+  /**
+   * w5914: a route request FF Factory filed itself (server/routeRequests.ts, docs/bash-nudge.md) because a worker answered
+   * the shell nudge with "no other route". `key` dedups the need; `waiters` are the workers whose card waits on it;
+   * `doneSha` is the portal's commit when it was first seen done, and `landed` when a later portal commit runs (the route
+   * deployed), with `line` the route the waiting workers are told to use; `told` the sessions already told once.
+   */
+  route?: WorkRoute;
   /** Questions the dispatcher asked about it (at most 3). */
   asks: number;
   /**
@@ -3184,8 +3261,30 @@ export interface WorkFfboxDev {
  * itself (nightly-run, w864; docs/intake.md, "The nightly run"), or a red master batch the game repo's CI found after
  * merges (master-batch, w1180; docs/intake.md, "Master batch reds").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch' | 'harness-route';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch', 'harness-route'];
+
+/** w5914: one worker whose shell approval card waits on a route request (WorkItem.route). */
+export interface RouteWaiter {
+  session: string;
+  requestId: string;
+  command: string;
+  reason?: string;
+  /** The worker's open requests when it asked. */
+  works: string[];
+  at: string;
+}
+
+/** w5914: the route request's own record (WorkItem.route). */
+export interface WorkRoute {
+  key: string;
+  triage: 'go' | 'approval';
+  waiters: RouteWaiter[];
+  doneSha?: string;
+  landed?: string;
+  line?: string;
+  told?: string[];
+}
 
 export interface WorkSource {
   kind: WorkSourceKind;
@@ -3527,6 +3626,18 @@ export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
   sessions: SessionInfo[];
+  /**
+   * w5907: the sessions as of this state, `<boot>.<rev>` (server/pageState.ts SessionRevs). A page that reconnects sends
+   * it back (`have` on /ws) and gets only the sessions changed since. Absent from older servers.
+   */
+  sessionsRev?: string;
+  /**
+   * Set when `sessions` holds only those changed since the page's `have` rev: `ids` are all the sessions the page keeps
+   * (it drops the others and asks for any it lacks). Absent: `sessions` is the whole list.
+   */
+  sessionsDelta?: { since: number; ids: string[] };
+  /** How many finished sessions older than the page's window the server left out (a view asks for one by id). */
+  olderSessions?: number;
   standingAgents: StandingAgent[];
   delegations: DelegationRequest[];
   machines: Machine[];

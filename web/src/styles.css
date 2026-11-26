@@ -6696,6 +6696,42 @@ body {
   gap: var(--s-1);
 }
 
+/* A machine's ffu build slots (w5912): a list of their own, with a left rule, so they never read as game sandboxes. */
+.ffu-slots {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.ffu-slot {
+  border-left: 3px solid var(--blue);
+  padding: 2px var(--s-2);
+  min-width: 0;
+}
+
+.ffu-slot-free {
+  border-left-color: var(--green);
+}
+
+.ffu-slot-stale {
+  border-left-color: var(--amber);
+}
+
+.ffu-slot-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s-1);
+}
+
+.ffu-slot-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 @media (hover: none) {
   .fl-agent {
     min-height: 40px;

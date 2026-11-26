@@ -17,7 +17,13 @@
 // (c) every runner unit gets a drop-in (DROPIN_NAME): RestartSec=30s and StartLimitIntervalSec=0, so a short ENOSPC never
 //     ends it for good, and OOMPolicy=continue (w5264): at 11:41:27Z the same day a global OOM killed one test binary of
 //     ffu-biscuit-4's job, and systemd's default OOMPolicy=stop ended the whole unit, cancelling ffu PR #998's check job.
-// The units' names, labels and count are untouched: only the drop-in is written, and only systemctl --user is run.
+// (d) w5834 (lothsahn: "under no circumstances should workers write outside of ffw", "And not just Windows, Mac and Linux
+//     too."): every runner unit also gets TMPDIR_DROPIN_NAME, a temp folder inside the worker root (runnerTempDir) and
+//     DOTNET_EnableDiagnostics=0. Without them each Runner.Listener and Runner.Worker start left clr-debug-pipe-<pid>-*-in/out
+//     and dotnet-diagnostic-<pid>-*-socket in /tmp (biscuit, 2026-11-25: 44 pairs), which .NET puts in TMPDIR or /tmp.
+//     A listener started before it (its /proc environ lacks that TMPDIR) is restarted once it is idle: no worker, not busy,
+//     not paused, not cooling down.
+// The units' names, labels and count are untouched: only the drop-ins are written, and only systemctl --user is run.
 import fs from 'node:fs';
 import path from 'node:path';
 import type { RunnerCensus } from './benchRunners.ts';
@@ -33,6 +39,38 @@ export const DROPIN = [
   'OOMPolicy=continue',
   '',
 ].join('\n');
+
+const flat = (p: string) => p.replace(/\/+$/, '');
+
+/** The second drop-in (d): the runner's temp folder inside the worker root, and no .NET diagnostic pipes. */
+export const TMPDIR_DROPIN_NAME = 'ff-runner-tmpdir.conf';
+
+/** systemd's double-quoted form of one word (a path with a space stays one word). */
+const sdQuote = (s: string) => `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+export function tmpdirDropin(tmp: string): string {
+  return [
+    '# Written by FF Factory (w5834): the runner\'s temp folder is inside the worker root, and .NET opens no diagnostic pipes',
+    '# (clr-debug-pipe-*, dotnet-diagnostic-*), which it would put in TMPDIR or /tmp.',
+    '[Service]',
+    `Environment=${sdQuote(`TMPDIR=${tmp}`)}`,
+    'Environment=DOTNET_EnableDiagnostics=0',
+    `ExecStartPre=-/bin/mkdir -p ${sdQuote(tmp)}`,
+    '',
+  ].join('\n');
+}
+
+/**
+ * The temp folder of a runner (d): <runner folder>/_tmp for one inside the worker root, else <root>/runner-tmp/<unit name>
+ * (biscuit's ~/ffu-runner, w2784, sits outside ffw: only its environment changes). Undefined with no worker root.
+ */
+export function runnerTempDir(u: RunnerUnit, workerRoot: string | undefined): string | undefined {
+  if (!workerRoot) return undefined;
+  const r = flat(workerRoot);
+  const root = flat(u.root);
+  if (root.startsWith(`${r}/`)) return path.posix.join(root, '_tmp');
+  return path.posix.join(r, 'runner-tmp', u.unit.replace(/\.service$/, ''));
+}
 
 /** A listener busy with no worker for this long is stuck (b): past GitHub's 10-minute job lock, the job is no longer its. */
 export const STUCK_MS = 10 * 60_000;
@@ -115,9 +153,13 @@ export function parseShow(out: string): UnitShow {
 
 export interface RunnerUnitsDeps {
   units(): RunnerUnit[];
-  /** The drop-in's text now, undefined when there is none. */
-  readDropin(unit: string): string | undefined;
-  writeDropin(unit: string, text: string): void;
+  /** The drop-in's text now (`name`, default DROPIN_NAME), undefined when there is none. */
+  readDropin(unit: string, name?: string): string | undefined;
+  writeDropin(unit: string, text: string, name?: string): void;
+  /** The runner's temp folder (runnerTempDir), undefined to leave its environment alone (d). */
+  tempDir?(u: RunnerUnit): string | undefined;
+  /** A process's TMPDIR as it started (/proc/<pid>/environ); undefined when unreadable (d). */
+  startedTmpdir?(pid: number): string | null | undefined;
   /** Runs `systemctl --user <args>`; answers its stdout, or throws. */
   systemctl(args: string[]): Promise<string>;
   /** Free bytes on the volume holding `p`, undefined when it cannot be read. */
@@ -133,7 +175,16 @@ export interface RunnerUnitsDeps {
   now(): number;
 }
 
-const flat = (p: string) => p.replace(/\/+$/, '');
+
+/** Whether `systemctl show -p Environment` output ends with TMPDIR=want as a whole value (systemd quotes one with spaces). */
+export function loadedHasTmpdir(show: string | undefined, want: string): boolean {
+  const line = (show ?? '').split(/\r?\n/).find((x) => x.startsWith('Environment='));
+  if (!line) return false;
+  const v = line.slice('Environment='.length);
+  // every assignment is listed in order and the last one wins, so an override.conf after ours counts against it
+  const last = v.split(/\s+(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((e) => e.replace(/^"|"$/g, '')).filter((e) => e.startsWith('TMPDIR=')).at(-1);
+  return last === `TMPDIR=${want}`;
+}
 
 export class RunnerUnits {
   private readonly d: RunnerUnitsDeps;
@@ -143,6 +194,12 @@ export class RunnerUnits {
   private workerless = new Map<number, number>();
   /** Units whose drop-in could not be written, said once. */
   private said = new Set<string>();
+  /** A daemon-reload this daemon owes systemd: a drop-in written by a pass whose reload failed (w5834 F1), retried each pass. */
+  private reloadOwed = false;
+  /** Units whose unloaded TMPDIR owed one reload already (w5890 F2): an override that wins asks no reload each pass after. */
+  private tmpReloadAsked = new Set<string>();
+  /** Units restarted once for their temp folder (w5834): never again while this daemon runs; a listener still without it is said once. */
+  private tmpRestarted = new Set<string>();
 
   constructor(d: RunnerUnitsDeps) {
     this.d = d;
@@ -165,12 +222,70 @@ export class RunnerUnits {
     return t !== undefined && this.d.now() - t < COOLDOWN_MS;
   }
 
+  /**
+   * Whether an idle listener without its temp folder may be restarted for it (w5834 F1, the w5884 review): once per unit, only
+   * when systemd has loaded TMPDIR=want for it (else a restart comes back without it, every cooldown), and only when a fresh
+   * census still shows it idle with no job worker (N1: the pass's census can be several restarts old). Anything else is said
+   * once and the unit is left running as it is.
+   */
+  private sayOnce(key: string, text: string) {
+    if (!this.said.has(key)) this.d.log(`runner units: ${text} (w5834)`);
+    this.said.add(key);
+  }
+
+  private async tmpRestartable(unit: string, root: string, want: string, pid: number): Promise<boolean> {
+    const sayOnce = (key: string, text: string) => this.sayOnce(`${unit}/${key}`, `${unit} (${root}): ${text}`);
+    if (this.tmpRestarted.has(unit)) {
+      sayOnce('tmp-again', `listener pid ${pid} still started without TMPDIR=${want} after its one restart: left running; check \`systemctl --user show -p Environment ${unit}\` for an override`);
+      return false;
+    }
+    let loaded: string | undefined;
+    try {
+      loaded = await this.d.systemctl(['show', '-p', 'Environment', unit]);
+    } catch (e) {
+      // w5890 F1: a failing show only skips this restart; the rest of the pass goes on
+      sayOnce('tmp-show', `could not read its loaded environment (${(e as Error).message}): not restarted for TMPDIR`);
+      return false;
+    }
+    if (!loadedHasTmpdir(loaded, want)) {
+      // one reload owed per unit: a pending reload loads it; an override that wins would otherwise ask one every pass (w5890 F2)
+      if (!this.tmpReloadAsked.has(unit)) this.reloadOwed = true;
+      this.tmpReloadAsked.add(unit);
+      sayOnce('tmp-unloaded', `systemd has not loaded TMPDIR=${want} (a daemon-reload pending, or another drop-in overrides it): not restarted for it`);
+      return false;
+    }
+    const fresh = await this.d.census();
+    const r = flat(root);
+    const l = fresh.listeners.find((x) => x.pid === pid);
+    // w5890 F3: a bench turn may have paused it since the pass's first look
+    return !!l && !l.busy && !fresh.workers.some((w) => flat(w.root) === r) && !this.d.paused().has(pid);
+  }
+
   private async step() {
     const units = this.d.units();
     if (!units.length) return;
     // (c) the drop-in, then one daemon-reload for all of them
     let wrote = 0;
+    const tmp = new Map<string, string>();
     for (const u of units) {
+      // (d) the temp folder drop-in; a failure here is said once and changes nothing else
+      let t: string | undefined;
+      if (this.d.tempDir) {
+        try {
+          t = this.d.tempDir(u);
+          if (!t) throw new Error('no worker root');
+          const text = tmpdirDropin(t);
+          if (this.d.readDropin(u.unit, TMPDIR_DROPIN_NAME) !== text) {
+            this.d.writeDropin(u.unit, text, TMPDIR_DROPIN_NAME);
+            wrote++;
+            this.d.log(`runner units: ${u.unit} (${u.root}): wrote ${TMPDIR_DROPIN_NAME} (TMPDIR=${t}, DOTNET_EnableDiagnostics=0)`);
+          }
+          tmp.set(u.unit, t);
+        } catch (e) {
+          if (!this.said.has(`${u.unit}/tmp`)) this.d.log(`runner units: ${u.unit}: could not write ${TMPDIR_DROPIN_NAME}: ${(e as Error).message}`);
+          this.said.add(`${u.unit}/tmp`);
+        }
+      }
       if (this.d.readDropin(u.unit) === DROPIN) continue;
       try {
         this.d.writeDropin(u.unit, DROPIN);
@@ -181,7 +296,18 @@ export class RunnerUnits {
         this.said.add(u.unit);
       }
     }
-    if (wrote) await this.d.systemctl(['daemon-reload']);
+    if (wrote || this.reloadOwed) {
+      // owed until it succeeds: a failed reload leaves the drop-ins on disk but not loaded, and the next pass writes nothing
+      // and a failing one is said once and lets the rest of the pass run: failed units and stuck listeners still recover (w5890 F1)
+      this.reloadOwed = true;
+      try {
+        await this.d.systemctl(['daemon-reload']);
+        this.reloadOwed = false;
+        this.said.delete('daemon-reload');
+      } catch (e) {
+        this.sayOnce('daemon-reload', `daemon-reload failed (${(e as Error).message}): retried each pass, the rest of this pass goes on`);
+      }
+    }
     let census: RunnerCensus | undefined;
     for (const u of units) {
       if (this.cooling(u.unit)) continue;
@@ -205,7 +331,20 @@ export class RunnerUnits {
       const l = census.listeners.find((x) => flat(x.root) === root);
       if (!l) continue;
       const since = busySince(this.d.diag(u.root));
-      if (l.busy || census.workers.some((w) => flat(w.root) === root) || this.d.paused().has(l.pid) || since === undefined) {
+      const idle = !l.busy && !census.workers.some((w) => flat(w.root) === root) && !this.d.paused().has(l.pid);
+      // (d) an idle listener started before its temp folder drop-in: restarted once, so it and its jobs leave /tmp alone
+      const want = tmp.get(u.unit);
+      if (want && idle && since === undefined) {
+        const had = this.d.startedTmpdir?.(l.pid);
+        if (had !== undefined && had !== want && (await this.tmpRestartable(u.unit, u.root, want, l.pid))) {
+          this.tmpRestarted.add(u.unit);
+          await this.d.systemctl(['restart', u.unit]);
+          this.last.set(u.unit, this.d.now());
+          this.d.log(`runner units: ${u.unit} (${u.root}): idle listener pid ${l.pid} started with TMPDIR=${had ?? '(unset)'}: restarted for TMPDIR=${want} (w5834)`);
+          continue;
+        }
+      }
+      if (!idle || since === undefined) {
         this.workerless.delete(l.pid);
         continue;
       }

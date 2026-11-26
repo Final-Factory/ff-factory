@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
-import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, type FfuSlotDeps } from '../machine/ffuSlots.ts';
+import { spawn, spawnSync } from 'node:child_process';
+import { FFU_SERVER_GROUP, FFU_SLOTS_DEFAULT_MAX, ffuServerExes, ffuSlotMain, readSlotState, slotCargoHome, realFfuSlotDeps, slotBin, slotCheckout, slotTarget, takeSlot, releaseSlot, sweepSlots, FFU_SLOT_WAIT_GRACE_MS, FFU_SLOT_IDLE_MS, FFU_SLOTS_PER_WORKER, type FfuSlotDeps } from '../machine/ffuSlots.ts';
 import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
@@ -82,7 +82,7 @@ test('w3764: a worker takes a slot on its branch, keeps it, and the next worker 
   const b = deps(root, 'bbbb2222', { live: ['aaaa1111', 'bbbb2222'] });
   assert.equal(takeSlot(b, { branch: 'feat', remote }), 'slot2', 'a running holder keeps slot1: the next worker gets a new slot');
 
-  assert.equal(releaseSlot(a), 'slot1');
+  assert.deepEqual(releaseSlot(a), ['slot1']);
   const c = deps(root, 'cccc3333', { live: ['bbbb2222', 'cccc3333'] });
   assert.equal(takeSlot(c, { remote }), 'slot1', 'the released slot, used last, before a new one');
   assert.ok(fs.existsSync(path.join(slotTarget(root, 'slot1'), 'debug', 'warm.rlib')), 'its cargo target stays warm');
@@ -122,6 +122,16 @@ test('w3764: no new slot below the free-disk floor, and take prints the lines ev
   // w5501: the machine's cargo home inside the root, where a fenced worker can fetch a new crate.
   assert.match(lines, /^export CARGO_HOME='.*\/cache\/cargo'$/m);
   assert.match(lines, /^cd '.*ffu-sandboxes\/slot1\/ffu'$/m);
+  // w5947: an agent outside the fences (the daemon set MEDIUM_AGENT_VAR) keeps its own CARGO_HOME, never the workers' one.
+  for (const medium of ['warn', 'on'] as const) {
+    for (const cmd of ['take', 'where']) {
+      const m = Object.assign(deps(root, 'aaaa1111'), { medium });
+      ffuSlotMain([cmd], m);
+      assert.doesNotMatch(m.out.join(''), /CARGO_HOME/, `${medium} ${cmd}`);
+    }
+  }
+  assert.equal(slotCargoHome({ cargoHome: '/w/cache/cargo', medium: 'warn' }), undefined);
+  assert.equal(slotCargoHome({ cargoHome: '/w/cache/cargo' }), '/w/cache/cargo');
 });
 
 // ---- the clean-up rule
@@ -530,4 +540,64 @@ test('w5885: take --wait waits for a slot to free instead of building elsewhere,
   c.sleep = (ms) => void (clock += ms);
   assert.equal(ffuSlotMain(['take', '--wait', '2'], c), 4, 'still held at the limit: exit 4, nothing built anywhere');
   assert.match(c.said.join(''), /wake_me/);
+});
+
+test("w5885: one worker, two branches: each checkout gets its own slot and target and both build at once; its own slot never counts as another worker's", async (t) => {
+  const { root, remote } = world(t);
+  const a = deps(root, 'aaaa1111', { max: 4 });
+  assert.equal(takeSlot(a, { branch: 'feat', remote }), 'slot1');
+  fs.writeFileSync(path.join(slotCheckout(root, 'slot1'), 'map.rs'), '// the map branch, not committed\n');
+  // lothsahn's note (w5475): a second checkout on another branch leases a second slot instead of waiting on the worker's own.
+  assert.equal(takeSlot(a, { branch: 'bug-report', remote }), 'slot2', 'a second branch gets a second slot');
+  assert.match(a.said.join(''), /took slot2.*beside your slot1|made slot2/s);
+  assert.ok(fs.existsSync(path.join(slotCheckout(root, 'slot1'), 'map.rs')), 'the first checkout is untouched');
+  assert.equal(git(['rev-parse', '--abbrev-ref', 'HEAD'], slotCheckout(root, 'slot2')), 'bug-report');
+  assert.equal(takeSlot(a, { branch: 'feat', remote }), 'slot1', 'each branch keeps its own slot');
+  assert.equal(takeSlot(a, { branch: 'bug-report', remote }), 'slot2');
+  const cfg = (id: string) => fs.readFileSync(path.join(root, 'ffu-sandboxes', id, '.cargo', 'config.toml'), 'utf8');
+  assert.ok(cfg('slot1').includes(JSON.stringify(slotTarget(root, 'slot1').split(path.sep).join('/'))));
+  assert.ok(cfg('slot2').includes(JSON.stringify(slotTarget(root, 'slot2').split(path.sep).join('/'))), 'two targets, never one shared');
+
+  // Both build at once: two processes, one per checkout, each writing its target as cargo would, alive together.
+  const build = (id: string) =>
+    new Promise<number>((res) => {
+      const p = spawn(process.execPath, ['-e', `const fs=require('fs');fs.mkdirSync(process.argv[1],{recursive:true});fs.writeFileSync(process.argv[1]+'/started','');const t=Date.now();while(!fs.existsSync(process.argv[2]+'/started')&&Date.now()-t<10000);fs.writeFileSync(process.argv[1]+'/built',process.argv[3]);process.exit(fs.existsSync(process.argv[2]+'/started')?0:1)`, path.join(slotTarget(root, id), 'debug'), path.join(slotTarget(root, id === 'slot1' ? 'slot2' : 'slot1'), 'debug'), id], { cwd: slotCheckout(root, id), stdio: 'ignore' });
+      p.on('exit', (c) => res(c ?? 1));
+    });
+  assert.deepEqual(await Promise.all([build('slot1'), build('slot2')]), [0, 0], 'each saw the other running: in parallel');
+  assert.equal(fs.readFileSync(path.join(slotTarget(root, 'slot1'), 'debug', 'built'), 'utf8'), 'slot1');
+  assert.equal(fs.readFileSync(path.join(slotTarget(root, 'slot2'), 'debug', 'built'), 'utf8'), 'slot2');
+
+  // where --branch gives each one's lines; plain where the last used.
+  const w = deps(root, 'aaaa1111', { max: 4 });
+  assert.equal(ffuSlotMain(['where', '--branch', 'feat'], w), 0);
+  assert.match(w.out.join(''), /^export FFU_SLOT='slot1'$/m);
+  assert.equal(ffuSlotMain(['where', '--branch', 'nope'], w), 1);
+  assert.match(w.said.join(''), /none of your slots \(slot2 on bug-report, slot1 on feat\) is on nope/);
+
+  // At the per-worker cap with work in both: a third branch waits (exit 4) and names the worker's own slots as its own.
+  fs.writeFileSync(path.join(slotCheckout(root, 'slot2'), 'bug.rs'), '// not committed\n');
+  const c = deps(root, 'aaaa1111', { max: 4 });
+  assert.equal(FFU_SLOTS_PER_WORKER, 2);
+  assert.equal(ffuSlotMain(['take', '--branch', 'third'], c), 4);
+  assert.match(c.said.join(''), /you hold 2 ffu slots, the most one worker may \(slot2 on bug-report: .*uncommitted.*slot1 on feat: .*uncommitted/s);
+  assert.doesNotMatch(c.said.join(''), /held by aaaa1111/, "its own hold is never listed as another worker's");
+
+  // Another worker holds the rest: the wait names the real holder.
+  const b = deps(root, 'bbbb2222', { max: 3, live: ['aaaa1111', 'bbbb2222'] });
+  assert.equal(takeSlot(b, { branch: 'feat', remote }), 'slot3');
+  fs.rmSync(path.join(slotCheckout(root, 'slot2'), 'bug.rs'));
+  fs.rmSync(path.join(slotCheckout(root, 'slot1'), 'map.rs'));
+  // Under the cap with no other slot free, a clean slot of its own switches branch, as before.
+  const e = deps(root, 'aaaa1111', { max: 3, live: ['aaaa1111', 'bbbb2222'] });
+  assert.equal(releaseSlot(e, { slot: 'slot2' })[0], 'slot2');
+  fs.writeFileSync(path.join(slotCheckout(root, 'slot1'), 'map.rs'), '// work again\n');
+  const f = deps(root, 'bbbb2222', { max: 3, live: ['aaaa1111', 'bbbb2222'] });
+  assert.equal(takeSlot(f, { branch: 'bug-report', remote }), 'slot2', 'b leases the slot a released');
+  assert.equal(ffuSlotMain(['take', '--branch', 'third'], e), 4);
+  assert.match(e.said.join(''), /no other ffu slot is free for third \(slot2: held by bbbb2222.*slot3: held by bbbb2222.*\), and yours have work \(slot1 on feat/s);
+
+  // release with no argument gives back every slot without work, and keeps (and names) the one with work.
+  assert.throws(() => releaseSlot(e), /slot1: .*uncommitted.*a slot with work stays yours/);
+  assert.deepEqual(releaseSlot(f).sort(), ['slot2', 'slot3']);
 });

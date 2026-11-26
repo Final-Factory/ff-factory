@@ -9,7 +9,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, FINAL_FACTORY_PRODUCT_NAME, brandName, configPath, loadConfig, productName, projectOf, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
-import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
+import { SessionManager, compactCommand, isMidTurn, resumesAnswered, resumesUnanswered, seedSdkCost, snapshotOf } from './sessions.ts';
 import { BenchHolderWatch } from './benchHolders.ts';
 import { BenchStopError } from './benchStop.ts';
 import { TIMER_LIMITS } from './timers.ts';
@@ -33,6 +33,8 @@ import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
+import { RouteRequests } from './routeRequests.ts';
+import { intakeSettings } from './intakeRules.ts';
 import { FfuPostMergeWatch } from './ffuPostMerge.ts';
 import { TestHistory, localRunKey, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
@@ -76,8 +78,8 @@ import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf
 import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
-import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
-import { accountSetupLines, addSecretEnv, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
+import { TokenSwitch, dispatcherMove, dispatcherWait, orchestratorOut, type DispatcherAccount, type RateLimitInfo } from './tokenSwitch.ts';
+import { accountSetupLines, addSecretEnv, addSecretValues, dispatcherPoolPerson, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
 import { scrubAtStart } from './scrubSecrets.ts';
 import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
@@ -88,6 +90,7 @@ import { GithubTokens, PORTAL_MACHINE, ghRunner, githubFromVault, githubPersonOf
 import { GithubApps } from './githubApps.ts';
 import { startGhCallLog } from './ghBudget.ts';
 import { CiReadWatch, ciReadBanner, ciReadLine, repoSlug } from './ciReadHealth.ts';
+import { ghLoginBanner, ghLoginStatusLines } from '../shared/ghLogin.ts';
 import { GITHUB_REQUIRED_REPOS } from '../shared/githubRequirements.ts';
 import { collectNetwork, loadOutsideWatchState, outsideWatchConfig, saveOutsideWatchState, watchedPortalUrl, watcherOf } from './outsideWatch.ts';
 import { endMaybeGzip } from './compress.ts';
@@ -108,9 +111,10 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { originOf, tailnetDeviceAddress, tailnetOnly } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress, tailnetOnly, tailnetAddress as tailnetIp } from './remoteChat.ts';
 import { OWNER_DEVICE_APPROVAL_DEFAULT } from './devices.ts';
-import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { clientAddress, configureClientAddress, directAddress } from './clientAddress.ts';
+import { MID_TRANSFER_CHECK_MS, TailscalePathProbe, slowBundleReason, slowRunningReason } from './tailscalePath.ts';
 import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -124,8 +128,10 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
-import { pageSessions, stateSizes } from './pageState.ts';
+import { pageAllStats } from './ffuSlotsView.ts';
+import { pageNamedSessions, pageSession, pageSessions, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
+import { drainOf, drainHold } from './machineDrain.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
 // process starts anything that could inherit it.
@@ -273,6 +279,13 @@ setGithubTokens(github);
 github.start();
 // w3758: the portal's gh calls by caller, with the token's budget beside them, every 15 minutes (server/ghBudget.ts).
 startGhCallLog(ghRunner(undefined, 'the rate limit read'));
+// w5888: what a start can put off waits until the coordinators resumed after a restart have answered (their first turns waited
+// 2-5 min while these chores held the VM's two vCPUs, measured 2026-11-26), from 30 s after the start (the resumes are asked
+// for at 2 s) and never more than 5 min.
+const startedAt = Date.now();
+const afterResumes: Promise<void> = new Promise<void>((r) => setTimeout(r, 30_000).unref())
+  .then(() => resumesAnswered(5 * 60_000))
+  .then((all) => console.log(`start: ${all ? 'the resumed agents answered' : `${resumesUnanswered()} resumed agent(s) not answered yet`} ${((Date.now() - startedAt) / 1000).toFixed(0)} s after the start; the put-off chores run now (w5888)`));
 // Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
 // per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
 setTimeout(async () => {
@@ -281,8 +294,8 @@ setTimeout(async () => {
   if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
   void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
   // The orchestrators' own Claude Code transcripts on this host (w1688), masked in place as they are written; the first pass
-  // looks through every one of them for the values known now.
-  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start();
+  // looks through every one of them for the values known now, once the resumes have answered (w5888).
+  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start({ backScanAfter: afterResumes });
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 sessions.keepTranscript = (id) => {
@@ -380,6 +393,8 @@ function joinHttpScript(kind: keyof typeof JOIN_FILES): string | undefined {
     return undefined;
   }
 }
+/** w5897: the Tailscale path of a slow or cut update bundle, one journal line per probe. */
+const tailscalePath = new TailscalePathProbe(runProc);
 const joinWhois = async (addr: string) => tailscaleWhois((await import('./proc.ts')).run, addr);
 const joinHttp = machineJoinHttp({
   codes: machines.joins,
@@ -427,6 +442,11 @@ machines.linkRefusedAlert = (_machineId, title, text) => {
   notifier.host(title, text);
   machines.report?.(text);
 };
+// w5916: a person's hold on a machine (a drain, or config placement.hold) drains its CI runners (machine/loadRunners.ts)
+machines.runnerHoldFor = (id) => {
+  const d = drainOf(store.machines.get(id));
+  return d ? drainHold(d) : cfg.placement?.hold?.[id] || undefined;
+};
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
 machines.activityFor = (id) => machineActivityPause(cfg, id);
@@ -469,12 +489,18 @@ const watcher = () =>
         cfg.outsideWatch?.machine,
         machines.list().map((m) => m.id),
         machines.list().filter((m) => m.local).map((m) => m.id),
+        providers.enabled ? [providers.id] : [],
       );
 // Without publicUrl, the address the other machines were deployed with (add_machine's portal_url) is the same portal; the
 // local machine's loopback address is not (w424).
 const portalUrl = () => watchedPortalUrl(cfg.publicUrl, machines.list());
 const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: portalUrl(), name: os.hostname() }, outside);
 machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
+// FFBox watches through its connector (w5892): it gets the topic while it is the watcher, null otherwise. Every minute,
+// so a config change reaches it without a hook; the manager sends a value once per link.
+const pushProviderWatch = () => providers.setOutsideWatch(watcher() === providers.id ? (watchConfig()?.ntfyTopic ?? null) : null);
+pushProviderWatch();
+setInterval(pushProviderWatch, 60_000).unref();
 const learnNetwork = () =>
   void collectNetwork()
     .then((n) => {
@@ -793,8 +819,8 @@ const guardData = async () => {
 setTimeout(() => void guardData(), 3 * 60_000).unref();
 setInterval(() => void guardData(), dataGuardSettings(cfg).everyMinutes * 60_000).unref();
 // The transcript search index (w5111, server/searchIndex.ts) is built in its own thread a little after the start, so the first
-// search_transcripts does not wait for it.
-setTimeout(() => void warmSearchIndex(store.transcriptsDir).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`)), 30_000).unref();
+// search_transcripts does not wait for it; after the resumes (w5888: its thread took one of the two vCPUs for 65 s).
+void afterResumes.then(() => warmSearchIndex(store.transcriptsDir)).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`));
 // Sessions that ran before the spend record existed are read from their transcripts once, then the record's repairs run once per
 // session (w859, w1209, w1160, w2007; docs/spend.md "Backfill", "Corrections to history"). server/spendJobs.ts: read off the main
 // thread and parsed in slices with a pause after each session, so a start never holds the loop (w2026).
@@ -1121,8 +1147,9 @@ providers.dev = new DevRequests(
     identity,
     orchestrators: agents.orchestrators,
     attachments,
-    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy }),
-    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy }),
+    // w5896: what FFBox hands over besides an operator's own words is a third party's text relayed: it demotes a person's turn.
+    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy, relay: true }),
+    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy, relay: true }),
     // An operator's own authenticated words: a turn of theirs, as if typed in FF Factory (w831).
     sendAsPerson: (person, text) => void agents.operatorTurn(person, text),
   },
@@ -1159,6 +1186,9 @@ runWaitsMigration({
 blockerWatch.start();
 // A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
 const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
+// w5914: a worker's "no other route" for a shell command files a request to build that route, and the waiting cards are
+// denied with the route once it deploys (server/routeRequests.ts, docs/bash-nudge.md).
+const routeRequests = new RouteRequests({ store, sessions, orchestrators: agents.orchestrators, systemPayer: () => identity.systemPayer(), lookbackDays: () => intakeSettings(cfg).lookbackDays, portalSha: () => appVersion().sha }).start();
 // ffu's post-merge revert verdicts to the reverted PR's request (w4930).
 const ffuPostMerge = new FfuPostMergeWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 const testHistoryCi = new TestHistoryCi({ cfg, history: testHistory, identity, log: (line) => console.log(line) }).start();
@@ -1172,20 +1202,33 @@ function poolPeople(): PoolPerson[] {
   return identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName, hasPool: owners.includes(u.userId.toLowerCase()) }));
 }
 
-/** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
-function appState(user: string | undefined): AppState {
+/** When each session last changed, for a reconnecting page's state (w5907, server/pageState.ts). */
+const sessionRevs = new SessionRevs();
+bus.on('event', (e: ServerEvent) => sessionRevs.note(e));
+
+/**
+ * The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). `have`: the
+ * sessionsRev of the state a reconnecting page holds (w5907): its sessions part then holds only what changed since.
+ */
+function appState(user: string | undefined, have?: string | null): AppState {
   // w5533: only a signed-in login gets a state; a page whose login is gone is closed before it gets here (openPages).
   const me = auth.userInfo(user);
   if (!me) throw new HttpError(401, 'login required');
   const mine = agents.orchestrators.personalFor(me);
   const work = agents.orchestrators.forPage();
+  const standingAgents = agents.standing.list();
+  const machineList = machines.list().map(machineView);
+  const live = liveHub.viewsFor(me.userId);
+  // w5861: without the fields the page never reads; w5907: only the sessions the page shows on open (server/pageState.ts).
+  const named = pageNamedSessions({ work, ids: [mine.info.id, agents.dispatcherId], standing: standingAgents, machines: machineList, live });
+  const kept = pageSessions(store.sessions.values(), named, Date.now());
   return {
     app: appNow(),
-    // w5861: without the fields the page never reads (server/pageState.ts): the whole list had reached 18 MB.
-    sessions: pageSessions(store.sessions.values(), work, Date.now()),
-    standingAgents: agents.standing.list(),
+    ...sessionsPart(kept.sessions, sessionRevs, sessionRevs.since(have)),
+    olderSessions: kept.older,
+    standingAgents,
     delegations: [...store.delegations.values()],
-    machines: machines.list().map(machineView),
+    machines: machineList,
     providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
     ffbox: providers.summary(),
     max: max.summary(),
@@ -1193,7 +1236,7 @@ function appState(user: string | undefined): AppState {
     host: hostForUser({ ...host, drain: drainer.status }, me.userId),
     usage: usage.usage,
     accounts: accountsNow(),
-    machineStats: machines.allStats(),
+    machineStats: pageAllStats(machines.allStats()),
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
@@ -1206,7 +1249,7 @@ function appState(user: string | undefined): AppState {
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true }, project: projectView(cfg) },
     settings: store.settings,
     poolPeople: poolPeople(),
-    live: liveHub.viewsFor(me.userId),
+    live,
     // w4238: an owner's page offers the buttons of another owner's waiting question; a member's page never needs the list.
     ...(me.role === 'owner' ? { owners: identity.list().filter((x) => x.role === 'owner').map((x) => ({ userId: x.userId, displayName: x.displayName })) } : {}),
   };
@@ -1256,6 +1299,18 @@ const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, pattern: string, h: Handler) => routes.push([method, new RegExp(`^${pattern}$`), h]);
 
 route('GET', '/api/state', async (req) => appState(auth.user(req)));
+// w5907: sessions the page's state left out (finished, older than its window), as the page gets them, for a view that
+// shows one (a session's page, a sandbox's older agent). At most 200 ids; an unknown id is left out of the answer.
+route('GET', '/api/sessions', async (req, _p, url) => {
+  if (!auth.userInfo(auth.user(req))) throw new HttpError(401, 'login required');
+  const ids = (url.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+  if (!ids.length || ids.length > 200) throw new HttpError(400, '"ids" takes 1 to 200 session ids');
+  const named = new Set(ids);
+  return ids.flatMap((id) => {
+    const s = store.sessions.get(id);
+    return s ? [pageSession(s, named, Date.now())] : [];
+  });
+});
 
 // ---- the live view (w1398, docs/live-view.md): a session's knobs, for its requester and the owners
 const liveFor = (req: http.IncomingMessage, sessionId: string) => {
@@ -2480,7 +2535,21 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       const start = parseRange(req.headers.range, updateBundle.size);
       const sent = sendStream(req, res, new StreamReply('application/octet-stream', updateBundle.file, updateBundle.size, 'attachment; filename="ff-factory.bundle"'));
-      res.on('close', () => console.log(bundleServedLine(updateBundle.machineId, { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished })));
+      // w5897: a cut or slow bundle also logs the Tailscale path to that machine (server/tailscalePath.ts), read-only.
+      const peerAddr = directAddress(req);
+      const tailnetPeer = tailnetIp(peerAddr) ? peerAddr : undefined;
+      const midCheck = setTimeout(() => {
+        const why = slowRunningReason(sent(), Date.now() - t0, updateBundle.size);
+        if (why) void tailscalePath.probe(updateBundle.machineId, why, tailnetPeer);
+      }, MID_TRANSFER_CHECK_MS);
+      midCheck.unref();
+      res.on('close', () => {
+        clearTimeout(midCheck);
+        const served = { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished };
+        console.log(bundleServedLine(updateBundle.machineId, served));
+        const why = slowBundleReason(served);
+        if (why) void tailscalePath.probe(updateBundle.machineId, why, tailnetPeer);
+      });
       return;
     }
     // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its
@@ -2710,14 +2779,14 @@ server.on('upgrade', (req, socket, head) => {
       clients.delete(ws);
     });
     const t0 = performance.now();
-    const state = appState(user);
+    const state = appState(user, new URL(req.url ?? '/', 'http://x').searchParams.get('have'));
     const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
     const built = performance.now() - t0;
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));
@@ -2959,6 +3028,7 @@ setVaultContext({
   reservedFor,
   payer: () => identity.systemPayer().userId,
   poolOf: (person) => agents.poolOf(person),
+  dispatcherOn: () => dispatcherAccount(),
   githubUsable: github.usable,
   onGithubUse: (e, what) => github.noteUse(e, what),
   onGithubMissing: (person, machineId, what) => {
@@ -3091,10 +3161,12 @@ agents.usagePollChanged = () => {
   machines.pushUsageConfig();
 };
 agents.machineStatusLines = () => machines.list().map((m) => machineLoadLine(m, machines.statsOf(m.id), machines.isOnline(m.id), machines.protocolOf(m.id)));
+/** Each machine's own gh login as the warnings read it (w5932). */
+const ghLoginMachines = () => machines.list().map((m) => ({ id: m.id, online: machines.isOnline(m.id), ...(m.gh ? { gh: m.gh } : {}) }));
 agents.extraStatusLines = () => {
   const ffbox = providers.statusLine();
   const idle = liveIdleStatusLine(cfg.live?.enabled === true, cfg.live?.idleCloseMinutes ?? LIVE_IDLE_DEFAULT_MINUTES, machines.list(), liveIdle.keptOpen());
-  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
+  return [...(ffbox ? [ffbox] : []), ...(idle ? [idle] : []), max.statusLine(), ...outsideWatchLines(), ...pathHealth.statusLines(), ...unitWatchdog.statusLines(), ...backupStatusLines(), ...vaultLines(), ciReadLine(ciRead.health), ...ghLoginStatusLines(ghLoginMachines()), ...tokenReport().lines, ...(tokenStop.statusLine() ? [tokenStop.statusLine()!] : []), ...tokenSwitchLines(), ...(retiredKeys ? [retiredKeys] : [])];
 };
 /** The vault's summary for system_status, and its fallbacks in the last 24 hours (docs/vault.md). Never a value. */
 const vaultLines = () => {
@@ -3149,6 +3221,9 @@ function tokenReport(now = Date.now()): { lines: string[]; warnings: TokenWarnin
   // CI the portal cannot read (w889): for everyone, as a CI wait is anybody's.
   const ci = ciReadBanner(ciRead.health);
   if (ci) warnings.push({ id: 'ci-read', kind: 'ci-read', text: ci });
+  // A machine's own gh login that GitHub refuses with 401 (w5932): for the owners, whose login it is.
+  const ghl = ghLoginBanner(ghLoginMachines());
+  if (ghl) warnings.push({ id: 'gh-login', kind: 'gh-login', owners: true, text: ghl });
   // A GitHub token that lacks a required repository or permission (w904), or GitHub rate limiting its account (w1186): for its person and the owners.
   for (const b of github.banners()) warnings.push({ id: b.id, kind: b.kind, ...(b.person ? { person: b.person } : {}), owners: true, text: b.text });
   return { lines, warnings };
@@ -3171,8 +3246,28 @@ function refreshTokenWarnings() {
 }
 setInterval(refreshTokenWarnings, 20_000).unref();
 setTimeout(refreshTokenWarnings, 8_000).unref();
-/** The dispatcher's pinned vault token, for its stop line (w1109): its meters' key, its name and whose pool it is in. */
+/** The credential key the dispatcher's process runs on (or last ran on), for its reserve on a pool (w5891). */
+function dispatcherAccount(): string | undefined {
+  const id = agents.orchestrators.dispatcherId;
+  return id ? store.sessions.get(id)?.account : undefined;
+}
+/** The enabled tokens of `person`'s own Claude pool as the gate reads them now (case-insensitive). */
+function poolTokensOf(person: string) {
+  return [...gatePoolsRaw()].find(([who]) => who.toLowerCase() === person.toLowerCase())?.[1] ?? [];
+}
+/**
+ * The dispatcher's vault token for its stop line (w1109): its meters' key, its name and whose pool it is in. Pinned: that
+ * token. On a pool (w5891): the token it runs on, only once no other token of that pool has room below the stop line,
+ * because before then it moves to one (w5921) and its workers need not stop: the stop fires only when the whole pool is out.
+ */
 function dispatcherToken(): { key: string; name: string; owner?: string } | undefined {
+  const pool = dispatcherPoolPerson(cfg);
+  if (pool !== undefined) {
+    const on = dispatcherAccount();
+    const mine = poolTokensOf(pool).find((t) => `token:${t.entry.fingerprint}` === on);
+    if (!on || !mine) return undefined;
+    return dispatcherRoomIn(pool, on) ? undefined : { key: on, name: `${mine.entry.name} …${mine.entry.last4}`, owner: pool };
+  }
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? vault.claudeByName(pinned) : undefined;
   return got ? { key: `token:${got.entry.fingerprint}`, name: `${got.entry.name} …${got.entry.last4}`, ...(got.entry.owner ? { owner: got.entry.owner } : {}) } : undefined;
@@ -3218,6 +3313,48 @@ const tokenLabel = (account: string) => {
 };
 const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why, ...(t.view.capped ? { capped: true } : {}) }))] as const);
 agents.orchestratorTokenOut = (account, pool) => orchestratorOut(poolViews(), account, pool);
+/**
+ * w5921: a token of `pool` other than `except` the dispatcher may move to now: not used up, retired, capped or held, not marked
+ * out, and below the dispatcher's stop line. The one rule for a move off a token that is out and for the stop line (review of
+ * #1312: a capped or held token counted as room there and moved nothing, so the stop never fired and nothing moved).
+ */
+function dispatcherRoomIn(pool: string, except?: string) {
+  return poolTokensOf(pool).find((t) => {
+    const k = `token:${t.entry.fingerprint}`;
+    return k !== except && !usage.outOf(k) && !['exhausted', 'retired', 'held'].includes(t.view.state) && !t.view.capped && !stopMeters(usage.usageOf(k), poolLimits(cfg)).length;
+  });
+}
+/** w5921: whether the dispatcher would start on a token now, as its config names it (a pin that is not out, or room in its pool). */
+function dispatcherHasRoom(): boolean {
+  const c = dispatcherAccountCfg();
+  if (c.pinned) return !!c.pinned.key && !usage.outOf(c.pinned.key) && !agents.tokenUnusable?.(c.pinned.key);
+  return !!dispatcherRoomIn(c.pool);
+}
+/** w5921: why the dispatcher's process on `account` restarts on another token, else undefined (dispatcherMove). */
+function dispatcherMoveWhy(account: string): { why: string; out: boolean } | undefined {
+  const c = dispatcherAccountCfg();
+  const room = !c.pinned && !!dispatcherRoomIn(c.pool, account);
+  return dispatcherMove(c, poolViews(), account, { label: tokenLabel(account), owner: agents.tokenOwner?.(account), room, atStop: room && stopMeters(usage.usageOf(account), poolLimits(cfg)).length > 0 });
+}
+agents.dispatcherAccountMove = dispatcherMoveWhy;
+agents.dispatcherHeldWhy = () => (dispatcherHasRoom() ? undefined : dispatcherWaitWhy());
+agents.operatorAlert = (line) => agents.orchestrators.toPeople(identity.list().filter((u) => u.role === 'owner' || vault.hasClaudeFor(u.userId)), line, true);
+/** What claudeAccounts.dispatcher names now, as dispatcherMove reads it. */
+function dispatcherAccountCfg(): DispatcherAccount {
+  const pinned = pinnedDispatcherEntry(cfg);
+  if (pinned !== undefined) {
+    const got = vault.claudeByName(pinned);
+    return { pinned: { name: pinned, key: got ? `token:${got.entry.fingerprint}` : undefined, label: got ? `${got.entry.name} …${got.entry.last4}` : undefined }, pool: '', named: false };
+  }
+  const named = dispatcherPoolPerson(cfg);
+  return { pool: named ?? agents.poolOf(identity.systemPayer().userId), named: named !== undefined };
+}
+/** w5921: why the dispatcher waits when no token it may run on has room, with the first reset. */
+function dispatcherWaitWhy(): string {
+  const c = dispatcherAccountCfg();
+  const tokens = c.pinned ? [] : poolTokensOf(c.pool).map((t) => ({ label: `${t.entry.name} …${t.entry.last4}`, until: usage.outOf(`token:${t.entry.fingerprint}`)?.until ?? (t.view.until ? Date.parse(t.view.until) : undefined) }));
+  return dispatcherWait(c, tokens, Date.now());
+}
 const tokenSwitch = new TokenSwitch({
   file: path.join(cfg.dataDir, 'token-switches.json'),
   label: tokenLabel,
@@ -3228,6 +3365,9 @@ const tokenSwitch = new TokenSwitch({
     // A standing agent's new run picks its token at its start, and waits for its pool when no token has room (w1126).
     if (s.kind === 'standing') return true;
     if (s.kind !== 'orchestrator') return limitsClearFor(s);
+    // w5921: the dispatcher's pool (its config's) has a token it would be better on.
+    // A config move into a pool with no room is no resume (it waits; the config change alerted, review of #1312).
+    if (agents.orchestrators.isDispatcher(s)) return !!s.account && !!dispatcherMoveWhy(s.account) && dispatcherHasRoom();
     const person = agents.orchestrators.ownerOf(s)?.userId;
     return !!person && !!s.account && !!orchestratorOut(poolViews(), s.account, agents.poolOf(person));
   },
@@ -3242,8 +3382,24 @@ const tokenSwitch = new TokenSwitch({
   hold: (s, ref, what) => agents.orchestrators.tokenStopBlocked(s.id, { ref, what }, { stamp: "stopped on its Claude token's usage limit (w1745)", told: "stopped on its Claude token's usage limit" }),
   note: (s, line) => agents.orchestrators.noteOnHeld(s.id, line),
   log: (line) => console.log(line),
+  // w5921: an orchestrator (the dispatcher) stuck on a used-up token tells the operators: the owners and everyone with a Claude
+  // pool (lothsahn's and Ben's orchestrators), never the stuck orchestrator itself.
+  alert: (s, line) => {
+    const own = agents.orchestrators.ownerOf(s)?.userId;
+    const to = identity.list().filter((u) => (u.role === 'owner' || vault.hasClaudeFor(u.userId)) && !(own && u.userId.toLowerCase() === own.toLowerCase()));
+    // Only orchestrators that exist: an alert starts none (a new one would spend a turn, maybe on the same used-up pool).
+    agents.orchestrators.toPeople(to, line, true);
+  },
+  dispatcherId: () => agents.orchestrators.dispatcherId,
+  outUntil: (account) => usage.outOf(account)?.until,
+  dispatcherWait: dispatcherWaitWhy,
 });
 agents.accountMoving = (info, why) => tokenSwitch.moving(info, why);
+// w5921: the ledger says why a request sits undecided when the dispatcher is rate-limited, and does not offer it again then.
+agents.orchestrators.dispatcherLimited = () => tokenSwitch.dispatcherLimited();
+// w5921: a config change, a vault change or a token that ran out moves an idle dispatcher (and a person's orchestrator whose
+// pool setting changed) at once; one mid-turn moves at the first check after its turn ends. Not in a dry run.
+if (!isDryRun) setInterval(() => agents.applyAccountConfig('the 30-second check'), 30_000).unref();
 if (!isDryRun) {
   sessions.events.on('rateLimit', (s: { info: SessionInfo }, info: RateLimitInfo) => tokenSwitch.rateLimit(s.info, info));
   // A machine's session reports its last result beside the turn's end: read it a moment later, from the store.
@@ -3267,9 +3423,22 @@ const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();
   if (!w || !c) return [`Outside watchdog: off (${isDryRun ? 'a dry run' : cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
+  if (w === providers.id) return [providerWatchLine(c.ntfyTopic)];
   return [
     `Outside watchdog: ${w} checks ${c.healthUrl} and pings ${c.host} every 60 s${machines.isOnline(w) ? '' : ` (${w} is offline now)`}; alerts go to ntfy topic "${c.ntfyTopic}" (subscribe in the ntfy app); Wake-on-LAN ${c.mac ? `to ${c.mac}${c.broadcast ? ` via ${c.broadcast}` : ''}` : 'not possible yet (MAC unknown)'}`,
   ];
+};
+/** The outside watchdog's line while FFBox watches (w5892): what FFBox last reported, never more than the topic shown. */
+const providerWatchLine = (topic: string) => {
+  const o = providers.outsideWatch;
+  const at = (iso?: string) => (iso ? `${iso.slice(11, 16)}Z` : '?');
+  const link = !providers.online ? ' (its connector is offline now)' : !providers.takesOutsideWatch ? " (its connector does not take outside_watch yet: update FFBox)" : '';
+  const seen = !o
+    ? 'no report from it yet'
+    : o.state === 'idle'
+      ? `idle (no topic or no URL), reported ${at(o.at)}`
+      : `last check ${o.state} at ${at(o.checkedAt)}${o.state === 'down' && o.failingSince ? ` (failing since ${at(o.failingSince)})` : ''}, ${o.checks} checks and ${o.alerts} alerts since FFBox's ffwatch started${o.announcedAt ? `, test alert sent ${o.announcedAt.slice(0, 16).replace('T', ' ')}Z` : ''}${o.lastAlert && !o.lastAlert.ok ? `; its last alert ("${o.lastAlert.title}") failed to reach ntfy` : ''}`;
+  return `Outside watchdog: FFBox checks ${o?.healthUrl ?? 'the portal'} every ${o?.intervalSecs ?? 60} s, alerting after ${o?.failures ?? 3} misses${link}; ${seen}; alerts go to ntfy topic "${topic}" (subscribe in the ntfy app); no ping or Wake-on-LAN (FFBox is not on the tailnet); the machines' copies are off (m5's retired, w5892)`;
 };
 usage.start();
 

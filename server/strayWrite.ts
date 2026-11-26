@@ -35,7 +35,7 @@ export interface StrayWriteContext {
   /** The ff-agents checkout's path, from the marker publish-skills reads. Default: read `<home>/.claude/final-factory-agents-checkout`. */
   skillsCheckout?: () => string | undefined;
   /** The folder of the ffu slot this session holds (w4537), or undefined when it holds none. */
-  heldFfuSlot?: () => string | undefined;
+  heldFfuSlot?: () => string | string[] | undefined;
 }
 
 /** A path as one comparable string: forward slashes, `.` and `..` resolved, no trailing slash, lower case. */
@@ -68,8 +68,9 @@ export function checkStrayWrite(target: string, ctx: StrayWriteContext): string 
   const open = [resolvedPath(ctx.sandbox, cwd), temp, `${home}/.claude`, `${home}/.codex`];
   const skills = (ctx.skillsCheckout ?? markerCheckout(ctx.home))();
   if (skills) open.push(resolvedPath(skills, cwd));
-  const slot = ctx.heldFfuSlot?.();
-  if (slot) open.push(resolvedPath(slot, cwd));
+  // w5885: a worker may hold one slot per branch.
+  const slots = ctx.heldFfuSlot?.();
+  for (const slot of Array.isArray(slots) ? slots : slots ? [slots] : []) open.push(resolvedPath(slot, cwd));
   if (open.some((d) => inside(n, d)) || /\/never games(?:\/|$)/.test(n)) return undefined;
   const shownTemp = ctx.temp.replace(/\\/g, '/').replace(/\/+$/, '');
   const resolved = n !== target.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() ? ` (that is ${n})` : '';

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { COOLDOWN_MS, DROPIN, RunnerUnits, STUCK_MS, busySince, findRunnerUnits, parseShow, runnerRootOf, type RunnerUnitsDeps } from '../machine/runnerUnits.ts';
+import { COOLDOWN_MS, DROPIN, DROPIN_NAME, RunnerUnits, STUCK_MS, TMPDIR_DROPIN_NAME, busySince, findRunnerUnits, loadedHasTmpdir, parseShow, runnerRootOf, runnerTempDir, tmpdirDropin, type RunnerUnitsDeps } from '../machine/runnerUnits.ts';
 import type { RunnerCensus } from '../machine/benchRunners.ts';
 
 /**
@@ -85,7 +85,7 @@ interface World {
   now: number;
 }
 
-function world(over: Partial<World> = {}): { w: World; units: RunnerUnits } {
+function world(over: Partial<World> = {}): { w: World; d: RunnerUnitsDeps; units: RunnerUnits } {
   const w: World = {
     show: { 'ffu-runner.service': 'ActiveState=active\nResult=success\n', 'ffu-biscuit-2.service': 'ActiveState=active\nResult=success\n' },
     free: 48 * 1024 ** 3,
@@ -114,7 +114,7 @@ function world(over: Partial<World> = {}): { w: World; units: RunnerUnits } {
     log: (t) => void w.logs.push(t),
     now: () => w.now,
   };
-  return { w, units: new RunnerUnits(d) };
+  return { w, d, units: new RunnerUnits(d) };
 }
 
 const acts = (w: World) => w.calls.filter((c) => !c.startsWith('show'));
@@ -175,5 +175,185 @@ test('(c) each runner unit gets the drop-in once, with one daemon-reload', async
   assert.match(DROPIN, /^\[Unit\]\nStartLimitIntervalSec=0\n\[Service\]\nRestartSec=30s\nOOMPolicy=continue\n/m);
   w.calls = [];
   await units.tick();
+  assert.deepEqual(acts(w), []);
+});
+
+/**
+ * w5834: on biscuit on 2026-11-25 every Runner.Listener and Runner.Worker start left clr-debug-pipe-<pid>-*-in/out and
+ * dotnet-diagnostic-<pid>-*-socket in /tmp (44 pairs): .NET puts them in TMPDIR, or /tmp when it is unset.
+ */
+test('(d) each runner unit gets a temp folder inside the worker root and no .NET diagnostic pipes', () => {
+  assert.equal(runnerTempDir({ unit: 'ffu-biscuit-2.service', root: R2 }, '/home/ben-ryding/ffw'), `${R2}/_tmp`);
+  assert.equal(runnerTempDir({ unit: 'ffu-runner.service', root: R1 }, '/home/ben-ryding/ffw/'), '/home/ben-ryding/ffw/runner-tmp/ffu-runner', 'a runner outside the root keeps its folder; its temp moves inside');
+  assert.equal(runnerTempDir({ unit: 'ffu-runner.service', root: '/home/ben-ryding/ffwx/r' }, '/home/ben-ryding/ffw'), '/home/ben-ryding/ffw/runner-tmp/ffu-runner');
+  assert.equal(runnerTempDir({ unit: 'ffu-runner.service', root: R1 }, undefined), undefined);
+  const text = tmpdirDropin('/home/ben ryding/ffw/runner-tmp/ffu-runner');
+  assert.match(text, /^\[Service\]\nEnvironment="TMPDIR=\/home\/ben ryding\/ffw\/runner-tmp\/ffu-runner"\nEnvironment=DOTNET_EnableDiagnostics=0\nExecStartPre=-\/bin\/mkdir -p "\/home\/ben ryding\/ffw\/runner-tmp\/ffu-runner"\n/m);
+});
+
+function tmpWorld(over: Partial<World> = {}, env: Record<number, string | null | undefined> = {}, deps: Partial<RunnerUnitsDeps> = {}) {
+  const { w, d } = world({ tail: { [R2]: ENDED_TAIL }, ...over });
+  for (const u of ['ffu-runner.service', 'ffu-biscuit-2.service']) w.dropins.set(`${u}/${DROPIN_NAME}`, DROPIN);
+  // what systemd has loaded: a daemon-reload loads each unit's TMPDIR drop-in, unless it is told to fail
+  const sd = { loaded: new Map<string, string>(), reloadFails: 0, override: '', showFails: false };
+  const units = new RunnerUnits({
+    ...d,
+    systemctl: async (args) => {
+      if (args[0] === 'daemon-reload' && sd.reloadFails > 0) {
+        sd.reloadFails--;
+        w.calls.push('daemon-reload (failed)');
+        throw new Error('Failed to connect to bus');
+      }
+      const out = await d.systemctl(args);
+      if (args[0] === 'daemon-reload') {
+        for (const [k, t] of w.dropins) {
+          const m = k.endsWith(`/${TMPDIR_DROPIN_NAME}`) && /Environment="(TMPDIR=[^"]*)"/.exec(t);
+          if (m) sd.loaded.set(k.slice(0, -TMPDIR_DROPIN_NAME.length - 1), m[1]);
+        }
+      }
+      if (args[0] === 'show' && args.includes('Environment') && sd.showFails) throw new Error('Failed to connect to bus');
+      if (args[0] === 'show' && args.includes('Environment')) return `Environment=${[sd.loaded.get(args.at(-1)!), sd.override].filter(Boolean).join(' ')}\n`;
+      return out;
+    },
+    readDropin: (u, name = DROPIN_NAME) => w.dropins.get(`${u}/${name}`),
+    writeDropin: (u, t, name = DROPIN_NAME) => void w.dropins.set(`${u}/${name}`, t),
+    tempDir: (u) => runnerTempDir(u, '/home/ben-ryding/ffw'),
+    startedTmpdir: (pid) => env[pid],
+    ...deps,
+  });
+  return { w, units, sd };
+}
+
+test('(d) the drop-in is written once, and an idle listener started without it is restarted once', async () => {
+  const env: Record<number, string | null | undefined> = { 710511: null };
+  const { w, units } = tmpWorld({}, env);
+  await units.tick();
+  assert.equal(w.dropins.get(`ffu-biscuit-2.service/${TMPDIR_DROPIN_NAME}`), tmpdirDropin(`${R2}/_tmp`));
+  assert.equal(w.dropins.get(`ffu-runner.service/${TMPDIR_DROPIN_NAME}`), tmpdirDropin('/home/ben-ryding/ffw/runner-tmp/ffu-runner'));
+  assert.deepEqual(acts(w), ['daemon-reload', 'restart ffu-biscuit-2.service']);
+  assert.match(w.logs.join('\n'), /idle listener pid 710511 started with TMPDIR=\(unset\): restarted for TMPDIR=.*ffu-biscuit-2\/_tmp/);
+  w.calls = [];
+  env[710511] = `${R2}/_tmp`;
+  w.now += COOLDOWN_MS;
+  await units.tick();
+  assert.deepEqual(acts(w), [], 'written once; a listener that has it is left alone');
+});
+
+/**
+ * w5884's review of #1285 (F1): a daemon-reload that failed once left the drop-in on disk but unloaded, later passes wrote
+ * nothing and never reloaded, and each restarted listener came back without TMPDIR: 8 restarts in 2 hours, unbounded.
+ */
+test('(d) a failed daemon-reload is retried, no restart waits on an unloaded drop-in, and a unit is restarted for TMPDIR once at most', async () => {
+  const env: Record<number, string | null | undefined> = { 710511: null };
+  const { w, units, sd } = tmpWorld({}, env);
+  sd.reloadFails = 1;
+  for (let i = 0; i < 120; i++) {
+    await units.tick();
+    w.now += 60_000;
+  }
+  const restarts = w.calls.filter((c) => c === 'restart ffu-biscuit-2.service');
+  assert.equal(w.calls.filter((c) => c === 'daemon-reload (failed)').length, 1);
+  assert.equal(w.calls.filter((c) => c === 'daemon-reload').length, 1, 'the owed reload is made on the next pass, and only then');
+  assert.equal(restarts.length, 1, 'restarted once, after the reload loaded TMPDIR, though the listener still lacks it');
+  assert.equal(w.logs.filter((l) => l.includes('after its one restart')).length, 1, 'still without it after its restart: said once');
+});
+
+test('(d) an override that sets TMPDIR after ours is never restarted for, and said once', async () => {
+  const { w, units, sd } = tmpWorld({}, { 710511: null });
+  sd.override = '"TMPDIR=/tmp/elsewhere"';
+  for (let i = 0; i < 8; i++) {
+    await units.tick();
+    w.now += COOLDOWN_MS;
+  }
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+  assert.equal(w.logs.filter((l) => l.includes('has not loaded TMPDIR')).length, 1);
+});
+
+test('(d) a listener that took a job since the pass began is not restarted (a fresh census)', async () => {
+  const { w, units } = tmpWorld({}, { 710511: null });
+  const listeners = [{ pid: 710511, root: R2, busy: false }];
+  let looks = 0;
+  w.census = { listeners, workers: [], leftovers: [] };
+  const census = w.census;
+  Object.defineProperty(w, 'census', { get: () => (++looks > 1 ? { ...census, listeners: [{ ...listeners[0], busy: true }] } : census) });
+  await units.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+});
+
+/** w5890, the second review of #1285: its probes, kept as tests. */
+test('(d) a daemon-reload that keeps failing is said once and the pass goes on: a failed unit is still started', async () => {
+  const { w, units, sd } = tmpWorld({ show: { 'ffu-runner.service': 'ActiveState=failed\nResult=start-limit-hit\n', 'ffu-biscuit-2.service': 'ActiveState=active\nResult=success\n' } }, { 710511: null });
+  sd.reloadFails = 1000;
+  for (let i = 0; i < 60; i++) {
+    await units.tick();
+    w.now += 60_000;
+  }
+  assert.equal(w.calls.filter((c) => c === 'daemon-reload (failed)').length, 60, 'retried each pass');
+  assert.ok(w.calls.includes('start ffu-runner.service'), 'failed-unit recovery still runs');
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), [], 'nothing loaded, so no restart for TMPDIR');
+  assert.equal(w.logs.filter((l) => l.includes('daemon-reload failed')).length, 1);
+});
+
+test('(d) a failing show -p Environment skips only that restart, said once', async () => {
+  const { w, units, sd } = tmpWorld({ show: { 'ffu-runner.service': 'ActiveState=failed\nResult=start-limit-hit\n', 'ffu-biscuit-2.service': 'ActiveState=active\nResult=success\n' } }, { 710511: null });
+  sd.showFails = true;
+  await units.tick();
+  await units.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+  assert.ok(w.calls.includes('start ffu-runner.service'));
+  assert.equal(w.logs.filter((l) => l.includes('could not read its loaded environment')).length, 1);
+});
+
+test('(d) an override that wins owes one reload, not one each pass', async () => {
+  const { w, units, sd } = tmpWorld({}, { 710511: null });
+  sd.override = '"TMPDIR=/tmp/elsewhere"';
+  for (let i = 0; i < 120; i++) {
+    await units.tick();
+    w.now += 60_000;
+  }
+  assert.ok(w.calls.filter((c) => c === 'daemon-reload').length <= 2, `reloads: ${w.calls.filter((c) => c === 'daemon-reload').length}`);
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+});
+
+test('(d) a listener a bench turn pauses after the first look is not restarted', async () => {
+  const { w, units } = tmpWorld({}, { 710511: null });
+  let looks = 0;
+  const paused = new Set<number>([710511]);
+  Object.defineProperty(w, 'paused', { get: () => (++looks > 1 ? paused : new Set<number>()) });
+  await units.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+});
+
+test('loadedHasTmpdir reads the last TMPDIR of systemctl show, quoted or not', () => {
+  assert.equal(loadedHasTmpdir('Environment=TMPDIR=/a/_tmp DOTNET_EnableDiagnostics=0\n', '/a/_tmp'), true);
+  assert.equal(loadedHasTmpdir('Environment="TMPDIR=/home/ben ryding/_tmp" DOTNET_EnableDiagnostics=0\n', '/home/ben ryding/_tmp'), true);
+  assert.equal(loadedHasTmpdir('Environment=TMPDIR=/a/_tmp2\n', '/a/_tmp'), false);
+  assert.equal(loadedHasTmpdir('Environment=TMPDIR=/a/_tmp TMPDIR=/tmp\n', '/a/_tmp'), false);
+  assert.equal(loadedHasTmpdir('Environment=\n', '/a/_tmp'), false);
+  assert.equal(loadedHasTmpdir(undefined, '/a/_tmp'), false);
+});
+
+test('(d) never restarted while a job runs, while paused or busy, or when its environment cannot be read', async () => {
+  const cases = [
+    tmpWorld({ census: { listeners: [{ pid: 710511, root: R2, busy: true }], workers: [{ pid: 1310962, root: R2 }], leftovers: [] } }, { 710511: null }),
+    tmpWorld({ paused: new Set([710511]) }, { 710511: null }),
+    tmpWorld({ tail: { [R2]: ENDING_TAIL } }, { 710511: null }),
+    tmpWorld({}, {}),
+  ];
+  for (const { w, units } of cases) {
+    await units.tick();
+    assert.deepEqual(acts(w).filter((c) => c !== 'daemon-reload'), []);
+  }
+});
+
+test('(d) a drop-in that cannot be written is said once and leaves the rest of the look alone', async () => {
+  const { w, units } = tmpWorld({ tail: { [R2]: STUCK_TAIL } }, { 710511: null }, {
+    tempDir: () => {
+      throw new Error('EACCES');
+    },
+  });
+  await units.tick();
+  await units.tick();
+  assert.equal(w.logs.filter((l) => l.includes(`could not write ${TMPDIR_DROPIN_NAME}`)).length, 2, 'once per unit');
   assert.deepEqual(acts(w), []);
 });
