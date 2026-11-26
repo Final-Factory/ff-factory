@@ -113,8 +113,8 @@ test('the agent node goes to <root>/tools/node with its record, is verified on t
     const rec = JSON.parse(fs.readFileSync(agentNodeStamp(root), 'utf8')) as { version: string; files: Record<string, string> };
     assert.equal(rec.version, AGENT_NODE.version);
     assert.deepEqual(Object.keys(rec.files).sort(), ['node.exe', 'node_modules/npm/index.js', 'npm.cmd']);
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
-    assert.match(f.said.at(-1)!, /^Agent node: node verified: .*3 files match the record/);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled [(]verified: .*3 files match the record.*swapped anyway/);
     // An older node there, its record of the older one: replaced in place, the same folder.
     fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
     fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ version: 'v22.0.0', files: { ...rec.files, 'node.exe': shaOf('v22.0.0') } }));
@@ -122,6 +122,30 @@ test('the agent node goes to <root>/tools/node with its record, is verified on t
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
     assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record is not of the pinned v/);
+  });
+});
+
+test("w5839: every run swaps in a fresh copy, from the zip kept in the record's folder; a kept zip that is not the pinned one is downloaded again (w5964's review)", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    let downloads = 0;
+    f.d.download = async () => (downloads++, zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // A handle a Low process could have hidden from the holder read stays on the old file once it is swapped: node.exe is
+    // a new file after the run (another file id), even though it passed every check.
+    assert.equal(f.tarInto.length, 1);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled [(]verified: .*swapped anyway/);
+    assert.equal(f.tarInto.length, 2, 'a fresh copy was unpacked and put there');
+    assert.equal(downloads, 1, 'the kept zip was used');
+    const kept = path.join(agentNodeHome(root), AGENT_NODE.zip);
+    fs.writeFileSync(kept, 'a planted zip');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.equal(downloads, 2, 'a kept zip that is not the pinned one is not unpacked');
+    assert.deepEqual(fs.readFileSync(kept), zip);
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
   });
 });
 
@@ -142,7 +166,7 @@ test('w5839: a node.exe replaced, a file added beside it or a file removed is re
     fs.rmSync(path.join(agentNodeDir(root), 'npm.cmd'));
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.match(f.said.at(-1)!, /1 missing \(npm\.cmd\)/);
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.ok(!f.ran.includes(agentNodeExe(root)), `ran the installed node: ${f.ran.join(', ')}`);
   });
 });
@@ -179,7 +203,7 @@ test('w5839: a node from before the record is always swapped, even one whose fil
     assert.match(f.said.at(-1)!, /its record is not of the pinned/);
     assert.ok(!fs.existsSync(path.join(agentNodeDir(root), 'version.dll')));
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.ok(!f.ran.includes(agentNodeExe(root)));
   });
 });
@@ -200,7 +224,7 @@ test("w5839: a junction at tools\\node is refused and a real folder put there; t
     const st = fs.lstatSync(agentNodeDir(root));
     assert.ok(st.isDirectory() && !st.isSymbolicLink());
     assert.ok(fs.existsSync(path.join(elsewhere, 'node.exe')), 'nothing was deleted through the junction');
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
   });
 });
 
@@ -217,7 +241,7 @@ test('w5839: a staging folder a run left behind is swept, and never stops the ne
     fs.mkdirSync(path.join(root, 'tools', theirs));
     assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now }), 'installed');
     assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', theirs].sort());
-    assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now + 2 * 60 * 60_000 }), 'current');
+    assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now + 2 * 60 * 60_000 }), 'installed');
     assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
   });
 });
@@ -264,7 +288,7 @@ test('w5839: an old node folder a swap could not delete (a node still ran from i
     const f = fake(zip);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     fs.mkdirSync(path.join(root, 'tools', 'node.old-1795650065661'));
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
   });
 });
@@ -297,8 +321,8 @@ test("w5839: a pinned copy whose files carry a Low label or an access entry of t
       assert.equal(await ensureAgentNode(root, f.d), 'installed', JSON.stringify(own));
       assert.ok(f.said.at(-1)!.startsWith('Agent node: node reinstalled (its labels let a Low worker write it: '), f.said.at(-1)!);
       assert.ok(f.said.at(-1)!.includes(Object.values(own)[0]!), f.said.at(-1)!);
-      assert.equal(await ensureAgentNode(root, f.d), 'current');
-      assert.match(f.said.at(-1)!, /^Agent node: node verified: .*no Low label/);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
+      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled [(]verified: .*no Low label/);
     }
   });
 });
@@ -351,11 +375,11 @@ test("w5839: another folder with the pinned bytes, inherited Medium labels and a
     fs.renameSync(copy, agentNodeDir(root));
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record is of another folder /);
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
     // Ours, moved aside and back, is still ours.
     fs.renameSync(agentNodeDir(root), path.join(root, 'tools', 'away'));
     fs.renameSync(path.join(root, 'tools', 'away'), agentNodeDir(root));
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
   });
 });
 
@@ -395,7 +419,7 @@ test("w5839: a record in a folder a Low worker could write is not read: the fold
       assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record's folder has labels that let a Low worker write it: /, what);
       assert.ok(!fs.existsSync(mark), `${what}: the folder was put aside, not reused`);
       assert.deepEqual(fs.readdirSync(path.join(root, 'daemon')), ['agent-node'], what);
-      assert.equal(await ensureAgentNode(root, f.d), 'current', what);
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', what);
     }
   });
 });
@@ -429,7 +453,7 @@ test("w5839: a Low process with write access to the recorded node, with labels a
       const root = tmp();
       const f = fake(zip);
       assert.equal(await ensureAgentNode(root, f.d), 'installed');
-      assert.equal(await ensureAgentNode(root, f.d), 'current');
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
       assert.deepEqual(f.reads.at(-1), [agentNodeDir(root), agentNodeHome(root)], 'both folders are read');
       assert.equal(f.modes.at(-1), true, 'only write access counts before the node is trusted');
       // Two rollbacks gave it a write handle on the real folder; the relabel since left labels, hashes and identity right.
@@ -438,7 +462,7 @@ test("w5839: a Low process with write access to the recorded node, with labels a
       assert.equal(await ensureAgentNode(root, f.d), 'installed', where);
       assert.match(f.said.at(-2)!, new RegExp(`^WARNING: Agent node: processes below Medium integrity hold write access to the node's folders.*powershell \\(4242\\) ${at.replaceAll('\\', '\\\\')}; the node is not trusted, and they are not ended\\.$`));
       assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(Low processes held write access to it: powershell \(4242\)\)/);
-      assert.equal(await ensureAgentNode(root, f.d), 'current');
+      assert.equal(await ensureAgentNode(root, f.d), 'installed');
     }
   });
 });
@@ -452,7 +476,7 @@ test('w5839: when the processes holding the node cannot be read, the node is not
     f.o.held = [new Error('the read of the processes holding them failed (1: Add-Type refused)')];
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(could not tell which processes hold it open: .*Add-Type refused/);
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
   });
 });
 
@@ -495,7 +519,7 @@ test("w5839: a planted node held open by no process below Medium stays, nothing 
     }
     assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled \(no record of its install.*is still in use \((EBUSY|EPERM)[^;]*\); nothing is ended, and the node there stays/);
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'planted');
-    assert.deepEqual(fs.readdirSync(agentNodeHome(root)), [], 'no stage left');
+    assert.deepEqual(fs.readdirSync(agentNodeHome(root)), [AGENT_NODE.zip], 'no stage left, only the kept zip');
   });
 });
 
@@ -595,14 +619,14 @@ test("w5839: a file of the node with another hard link is never trusted: a handl
     const root = tmp();
     const f = fake(zip);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
     const other = path.join(root, 'elsewhere');
     fs.mkdirSync(other);
     fs.linkSync(agentNodeExe(root), path.join(other, 'n.exe'));
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(1 of its files has another hard link \(node\.exe\)\)/);
     assert.equal(fs.statSync(agentNodeExe(root)).nlink, 1, 'the fresh copy has one name');
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
   });
 });
 

@@ -28,6 +28,11 @@
  * here, GetMappedFileName on it) and each mapped view in its memory (VirtualQueryEx, MEM_MAPPED). A process below
  * Medium whose handles or memory cannot be read is counted (`unread=`) and never ended: Windows' own sandboxed services
  * are such (DefenderAiPlatformHost on the CI runner, w5839), and one that hides this way is outside what this defends.
+ *
+ * What this read cannot see (w5964's review): the handle list is taken first and each handle copied after, so a Low
+ * process that moves its write handle to a new value in a loop (or passes it to another Low process) is missed (named in
+ * 0 of 12 reads, measured), and one that puts an empty access list on itself is never listed as Low. So it never decides
+ * whether the node is swapped (server/agentNode.ts swaps on every rollout); it names the writers it does see, in the log.
  */
 
 import { gzipSync } from 'node:zlib';
@@ -153,7 +158,10 @@ public static class FfHolders {
       break;
     }
     try {
-      long n = Marshal.ReadInt64(b); var l = new List<long[]>((int)n); IntPtr e = b + 16;
+      // A count the buffer cannot hold is a list not read (it threw "Non-negative number required" on a real run, w5839):
+      // the caller counts that process as unread, never as holding nothing.
+      long n = Marshal.ReadInt64(b); if (n < 0 || n > (len - 16) / 40) return null;
+      var l = new List<long[]>((int)n); IntPtr e = b + 16;
       for (long i = 0; i < n; i++, e += 40) l.Add(new long[] { Marshal.ReadInt64(e, 0), Marshal.ReadInt32(e, 28), (uint)Marshal.ReadInt32(e, 24) });
       return l;
     } finally { Marshal.FreeHGlobal(b); }

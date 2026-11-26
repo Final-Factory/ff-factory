@@ -874,8 +874,18 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     there (w5951's review, N2: the warn-only stage never leaves a machine without node) (measured on BEAST: a Low
     writer on npm's `index.js` gave `busy` and kept running, and the run after it exited swapped the node). A node.exe that runs does not block the rename (measured). Each run stages in
     `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
-    may be another rollout's, still unpacking). The rollout log says
-    `Agent node: node verified: ...`, `Agent node: node reinstalled (<why>): ...`, or
+    may be another rollout's, still unpacking). **Every rollout swaps the node, even one that passes every check**
+    (w5964's review, B1): a Low process can hide a write handle from the holder read by moving it to a new handle value
+    in a loop while the read copies them one at a time (measured from a Low sandbox: about 10 million moves in 150 s, the
+    writer named in 0 of 12 reads, then `PLANTED` written into the file), and can pass it between two Low processes. The
+    fresh copy is Medium from birth and a handle to the old one stays on the old files (`tools\node.old-<ms>`), so the
+    checks no longer decide whether to swap, only what the line says and which writers it names. The swap unpacks the zip
+    kept in `daemon\agent-node\<zip>` when its SHA-256 is the pinned one (hashed in memory and those same bytes unpacked),
+    else downloads it and keeps it (`pinnedZip`), so a rollout needs no network once a machine has it. A Low process that
+    puts an empty access list on itself is never listed as Low by the read (w5964's review, N1): the swap does not rest on
+    the read. The rollout log says
+    `Agent node: node reinstalled (verified: ...; swapped anyway, ...): ...` for a node that passed every check,
+    `Agent node: node reinstalled (<why>): ...` for one that did not, or
     `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or
     swap failed: the machine is never left without node (if even moving the old folder back fails, the line says
     `tools\node is MISSING` and where it is, and the next rollout puts one there). Windows lets `tools\node` be renamed

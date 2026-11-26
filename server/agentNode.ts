@@ -346,10 +346,41 @@ function sweepAside(daemonDir: string): void {
 }
 
 /**
- * Put the pinned node at `<root>\tools\node`, unless the record says it is there already. Everything it writes stays in
- * `<root>\tools` and `<root>\daemon\agent-node`. Each run says one line the rollout log keeps: "node verified", or "node reinstalled (why)", or a WARNING
- * "node not reinstalled (why)" when it could not, and then the node there stays (lothsahn's lockout rule: never leave the
- * machine without node). A folder that cannot be moved aside keeps its node: 'busy', and the next rollout tries again.
+ * The pinned zip's bytes: the copy kept in the record's folder when its SHA-256 is the pinned one, else a download, kept
+ * there for the next rollout (every rollout swaps the node, w5964's review, so it needs no network once one has it). The
+ * bytes are hashed in memory and those same bytes unpacked, so nothing that changes the kept file after the read counts.
+ */
+async function pinnedZip(medium: string, d: AgentNodeDeps): Promise<Buffer> {
+  const kept = path.join(medium, AGENT_NODE.zip);
+  const sha = (b: Buffer) => crypto.createHash('sha256').update(b).digest('hex');
+  try {
+    const b = fs.readFileSync(kept);
+    if (sha(b) === AGENT_NODE.sha256) return b;
+  } catch {
+    // none kept yet
+  }
+  const bytes = await (d.download ?? fetchBytes)(`https://nodejs.org/dist/${AGENT_NODE.version}/${AGENT_NODE.zip}`);
+  const sum = sha(bytes);
+  if (sum !== AGENT_NODE.sha256) throw new Error(`${AGENT_NODE.zip} has SHA-256 ${sum}, not the pinned ${AGENT_NODE.sha256}`);
+  try {
+    // Older versions' zips go: one is kept.
+    for (const n of fs.readdirSync(medium)) if (/^node-v[\d.]+-win-.*\.zip(\.part)?$/.test(n) && n !== AGENT_NODE.zip) remove(path.join(medium, n));
+    fs.writeFileSync(`${kept}.part`, bytes);
+    fs.renameSync(`${kept}.part`, kept);
+  } catch {
+    // Not kept: the next rollout downloads it again.
+  }
+  return bytes;
+}
+
+/**
+ * Put a fresh copy of the pinned node at `<root>\tools\node` on every run, from the zip kept in the record's folder
+ * (`pinnedZip`). Everything it writes stays in `<root>\tools` and `<root>\daemon\agent-node`. Each run says one line the
+ * rollout log keeps: "node reinstalled (why)", where why starts "verified: ..." when the node there passed every check,
+ * or a WARNING "node not reinstalled (why)" when it could not, and then the node there stays (lothsahn's lockout rule:
+ * never leave the machine without node). A folder that cannot be moved aside keeps its node: 'busy', and the next rollout
+ * tries again. The checks no longer decide whether to swap (w5964's review: a Low process can hide a write handle from
+ * the holder read), only what the line says; 'current' is never returned now.
  *
  * A node with no record is always swapped for the fresh one, even when its files match: a folder this run unpacked and
  * labelled Medium is known to be nobody else's, while one a Low worker could once write may hold a Low label of its own
@@ -400,11 +431,13 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
       : held
         ? { ok: false as const, why: held }
         : stampCheck(stampFile, dir, pin);
-  if (st.ok) {
-    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, no Low label or access entry of their own lets a Low worker write them, and no process below Medium holds write access to them).`);
-    return 'current';
-  }
-  const why = st.why;
+  // A node that passes every check is swapped all the same (w5964's review, B1): a Low process can hide a write handle
+  // from the holder read by moving it to a new handle value while the read copies them one at a time (measured: named in
+  // 0 of 12 reads), so the read cannot vouch for it. A fresh copy is Medium from birth and no handle to the old one
+  // reaches it; the checks above still name what they find, in the line.
+  const why = st.ok
+    ? `verified: node.exe and its ${st.files} files match the record of the pinned download, no Low label or access entry of their own lets a Low worker write them, and the holder read named no process below Medium with write access; swapped anyway, since a Low process can hide a write handle from that read`
+    : st.why;
   // Unpacked in the record's folder, which no daemon labels Low (`agentNodeHome`): its files are Medium from birth, so no
   // Low worker ever holds a handle to one, even while `tools` is Low (w5868's review). A rename keeps them so on the way to
   // `tools\node`, on the same volume.
@@ -413,10 +446,7 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     fs.mkdirSync(tools, { recursive: true });
     fs.mkdirSync(medium, { recursive: true });
     fs.mkdirSync(stage);
-    const url = `https://nodejs.org/dist/${AGENT_NODE.version}/${AGENT_NODE.zip}`;
-    const bytes = await (d.download ?? fetchBytes)(url);
-    const sum = crypto.createHash('sha256').update(bytes).digest('hex');
-    if (sum !== AGENT_NODE.sha256) throw new Error(`${AGENT_NODE.zip} has SHA-256 ${sum}, not the pinned ${AGENT_NODE.sha256}`);
+    const bytes = await pinnedZip(medium, d);
     const zip = path.join(stage, AGENT_NODE.zip);
     fs.writeFileSync(zip, bytes);
     const tar = d.tar ?? path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe');
