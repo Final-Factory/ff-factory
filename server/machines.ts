@@ -1685,6 +1685,8 @@ export class MachineManager {
   /**
    * What a machine may know about itself, asked with its own token (GET /machine/whoami, w513): the worker installer
    * checks its credential with it, and the uninstaller which agents still run there before it removes anything.
+   * `sandboxes` are the game sandboxes only (w5924: the update's --max-sandboxes check counted lothdesktop's 7 light agent
+   * folders and refused); the light agent folders are `lights`.
    */
   selfStatus(id: string) {
     const m = this.require(id);
@@ -1693,7 +1695,7 @@ export class MachineManager {
       .map((s) => ({ id: s.info.id, title: s.info.title, sandbox: s.info.machineSandbox, midTurn: isMidTurn(s.info) }));
     // The daemon's code and whether it is outdated (w613): worker.ts update checks the new one is what the portal sees.
     const outdated = this.outdated(id);
-    return { id: m.id, online: this.isOnline(id), ...(this.hellos.get(id)?.daemon ? { daemon: this.hellos.get(id)!.daemon } : {}), ...(outdated ? { outdated } : {}), root: m.root, agents, sandboxes: (m.sandboxes ?? []).map((sb) => sb.id) };
+    return { id: m.id, online: this.isOnline(id), ...(this.hellos.get(id)?.daemon ? { daemon: this.hellos.get(id)!.daemon } : {}), ...(outdated ? { outdated } : {}), root: m.root, agents, sandboxes: gameSandboxes(m.sandboxes).map((sb) => sb.id), lights: lightFolders(m.sandboxes).map((sb) => sb.id) };
   }
 
   /**

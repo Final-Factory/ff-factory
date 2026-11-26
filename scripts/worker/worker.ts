@@ -32,6 +32,7 @@ import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, type SandboxPoolSetting
 import { slotsPointer } from '../../machine/unitySlots.ts';
 import { FFU_SERVER_GROUP, ffuServerExes } from '../../machine/ffuSlots.ts';
 import { rootBackupOf } from '../../machine/selfUpdate.ts';
+import { LIGHT_DIR, isLightId, reposIn } from '../../machine/lightFolders.ts';
 import { cancelledGrow, carryDevDrive, claudeSlug, decideDevDrive, defaultMaxGB, devDriveDirs, devDriveGuard, gbOf, hostDirOf, linkRootFolders, moveSandboxes, parseDevDriveOutput, realMoveDeps, unlinkRootFolder, type DevDriveRecord, type DevDriveState } from './devdrive.ts';
 import { REINSTALL_KEEPS, driveRootOf, isHostFile, moveMap, readMoved, rebaseJson, rebasePath, rebaseText, writeMoved } from './driveRoot.ts';
 import { readJsonDurable as readJsonFile } from '../../server/durable.ts';
@@ -419,7 +420,10 @@ export interface WhoAmI {
   outdated?: string;
   root?: string;
   agents: { id: string; title: string; sandbox?: string; midTurn: boolean }[];
+  /** The game sandboxes (w5924: a portal from #1323 until this fix listed the light agent folders here too). */
   sandboxes: string[];
+  /** The light agent folders (w5924, `<sandbox root>/agent-work/agentN`): they count against no --max-sandboxes. */
+  lights?: string[];
 }
 
 /**
@@ -511,7 +515,10 @@ export function preflightProblems(f: Facts, o: Pick<InstallOptions, 'root' | 'po
   else if (f.credentialId && f.portal.me.id !== f.credentialId) p.push(`the portal says this credential is machine ${f.portal.me.id}, not ${f.credentialId}`);
   if (!f.credentialId) p.push('the credential is not a machine credential (it starts ffm_<machine id>_)');
   // The count sets the player-folder pairs (w576): lowering it below the sandboxes there would leave one without its pair.
-  const there = f.portal.ok ? f.portal.me.sandboxes : [];
+  // w5924: light agent folders are no game sandboxes and have no player folders, so they never count here.
+  // A portal from before this fix has no `lights` and lists them as sandboxes: their ids (agentN) tell them apart then.
+  const lights = new Set(f.portal.ok ? (f.portal.me.lights ?? f.portal.me.sandboxes.filter(isLightId)) : []);
+  const there = f.portal.ok ? f.portal.me.sandboxes.filter((id) => !lights.has(id)) : [];
   if (there.length > o.maxSandboxes) {
     p.push(`--max-sandboxes ${o.maxSandboxes} is below the ${there.length} sandboxes there (${there.join(', ')}): delete ${there.length - o.maxSandboxes} first (delete_sandbox)`);
   }
@@ -2548,8 +2555,12 @@ export interface SandboxRisk {
 export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]> {
   const out: SandboxRisk[] = [];
   if (!fs.existsSync(sandboxesDir)) return out;
-  for (const name of fs.readdirSync(sandboxesDir)) {
-    const dir = path.join(sandboxesDir, name);
+  // w5924: the clones a worker made in a light agent folder (agent-work/agentN): the folder itself or up to 3 levels down,
+  // found by the same scan the daemon runs before it deletes one (reposIn).
+  const lightDir = path.join(sandboxesDir, LIGHT_DIR);
+  const repos: [string, string][] = fs.readdirSync(sandboxesDir).filter((n) => n !== LIGHT_DIR).map((n) => [n, path.join(sandboxesDir, n)]);
+  for (const repo of reposIn(lightDir, 4)) repos.push([path.relative(sandboxesDir, repo).split(path.sep).join('/'), repo]);
+  for (const [name, dir] of repos) {
     if (!fs.existsSync(path.join(dir, '.git'))) continue;
     // A slot repo (w5614, its .git a folder) holds its other branches and its stash itself, not in the kept clone.
     const slot = fs.statSync(path.join(dir, '.git')).isDirectory();
