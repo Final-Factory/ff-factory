@@ -353,6 +353,9 @@ export async function cleanupPass(o: {
   const none: OwnLeftoverPlan = { items: [], listed: [] };
   // What a step's removal has tried so far: own's removal keeps clear of it (withoutOverlap).
   const attempted: CleanupItem[] = [];
+  // The first step's items: removed before own was planned, so an own item inside one is dropped outright (withoutOverlap
+  // would keep own's and drop the first item, which is gone already).
+  const firstTaken: CleanupItem[] = [];
   // w6044: the released ffu slots' targets first, removed at once with the mode on, before any slower step can cut the pass off.
   const first = o.first;
   if (first && o.mode !== 'off' && !o.opts.dryRun) {
@@ -363,6 +366,7 @@ export async function cleanupPass(o: {
     let run: CleanupRun | undefined;
     if (o.mode === 'on' && items.length) {
       attempted.push(...items);
+      firstTaken.push(...items);
       run = await timed('ffu firstRemove', () => runCleanup(items, o.guard, o.busyNow).catch((e) => ({ removed: [], failed: items.map((i) => ({ path: i.path, why: (e as Error).message })), bytes: 0 }) as CleanupRun));
       add(run);
     }
@@ -407,7 +411,7 @@ export async function cleanupPass(o: {
   const held = (plan.held ?? []).filter((h) => onDrive(h.path)).sort((a, b) => b.bytes - a.bytes);
   const kept = { ...(held.length ? { held } : {}), phasesMs };
   if (dry) return { removed: [], failed: [], bytes: 0, planned: await timed('size', () => sizePlan([...regular, ...plan.items, ...own.items])), listed, ...kept };
-  own.items = withoutOverlap(attempted, own).own;
+  own.items = withoutOverlap(attempted, own).own.filter((i) => !firstTaken.some((t) => within(i.path, t.path)));
   if (ownPlan && own.items.length) add(await timed('ownRemove', () => ownPlan.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun)));
   return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed, ...kept };
 }

@@ -259,25 +259,43 @@ export function anyBusyNow(...checks: ((it: CleanupItem) => Promise<string | und
   };
 }
 
-/** An ffu slot's holder and take time, as slots.json says them: what ffuSlotBusyNow compares (w6044). */
-export const ffuSlotMark = (s: { holder?: string; takenAt?: string } | undefined) => `${s?.holder ?? ''}@${s?.takenAt ?? ''}`;
+/**
+ * An ffu slot's holder, take time and last use, as slots.json says them: what ffuSlotBusyNow compares (w6044). usedAt moves on
+ * every take, a same session's re-take included (machine/ffuSlots.ts takeSlot keeps takenAt then; review of #1358).
+ */
+export const ffuSlotMark = (s: { holder?: string; takenAt?: string; usedAt?: string } | undefined) => `${s?.holder ?? ''}@${s?.takenAt ?? ''}@${s?.usedAt ?? ''}`;
+
+/** Whether an ffu slot's holder runs or can resume, by the guard's in-use and resumable session folders (ffa-<holder>). */
+export const ffuHolderUp = (holder: string | undefined, guard: CleanupGuard) =>
+  !!holder && [...guard.inUse, ...(guard.resumable ?? [])].some((k) => !!k && path.basename(k).toLowerCase() === `ffa-${holder}`.toLowerCase());
 
 /**
  * The re-check for runCleanup (w6044): for an ffu slot target planned in a pass's first step, right before the rename, slots.json
  * again (a worker that took the slot since the plan keeps it: its holder or take time moved) and a fresh process list (a cargo
  * build or a program in it keeps it). Any other item passes. An unreadable slot state or process list keeps the item.
  */
-export function ffuSlotBusyNow(root: string | undefined, procs: () => Promise<ProcLite[] | undefined>, now: () => number = Date.now): (it: CleanupItem) => Promise<string | undefined> {
+export function ffuSlotBusyNow(root: string | undefined, procs: () => Promise<ProcLite[] | undefined>, guard?: () => CleanupGuard, now: () => number = Date.now): (it: CleanupItem) => Promise<string | undefined> {
   return async (it) => {
     if (!it.ffuSlot) return undefined;
     if (!root) return 'no install root to read the slot state again';
-    let mark: string;
+    let slot: { holder?: string; takenAt?: string; usedAt?: string } | undefined;
     try {
-      mark = ffuSlotMark(readSlotState(root).slots.find((x) => x.id === it.ffuSlot!.id));
+      slot = readSlotState(root).slots.find((x) => x.id === it.ffuSlot!.id);
     } catch (e) {
       return `the slot state could not be read again (${(e as Error).message})`;
     }
-    if (mark !== it.ffuSlot.mark) return `ffu ${it.ffuSlot.id} was taken since the plan (holder@takenAt ${it.ffuSlot.mark} → ${mark})`;
+    const mark = ffuSlotMark(slot);
+    if (mark !== it.ffuSlot.mark) return `ffu ${it.ffuSlot.id} was taken since the plan (holder@takenAt@usedAt ${it.ffuSlot.mark} → ${mark})`;
+    // A holder that was down at the plan and runs or can resume now (a fresh guard, not the pass's).
+    if (slot?.holder && guard) {
+      let g: CleanupGuard;
+      try {
+        g = guard();
+      } catch (e) {
+        return `the sessions could not be read again (${(e as Error).message})`;
+      }
+      if (ffuHolderUp(slot.holder, g)) return `ffu ${it.ffuSlot.id}'s holder ${slot.holder} runs or can resume again`;
+    }
     const list = await procs();
     if (!list) return 'the process list could not be read again';
     const runners = cargoTargetRunners(it.path, list);
@@ -1256,8 +1274,7 @@ export async function planInstallLeftovers(o: {
     // - a low pass: debug/incremental of a held target, the whole target of one no running or resumable worker holds.
     const ffuBase = path.join(root, FFU_SLOTS_DIR);
     const ffuState = fs.existsSync(ffuBase) ? readSlotState(root) : { slots: [] };
-    const holderUp = (holder: string | undefined) =>
-      !!holder && [...o.guard.inUse, ...(o.guard.resumable ?? [])].some((k) => !!k && path.basename(k).toLowerCase() === `ffa-${holder}`.toLowerCase());
+    const holderUp = (holder: string | undefined) => ffuHolderUp(holder, o.guard);
     // w5796: a cargo target inside a slot's checkout (ffu/target) is a build that missed the slot's own target: a build run with
     // its working folder outside the slot (cargo reads .cargo/config.toml from the working folder up, not from the manifest's),
     // or a script that named $repo/target/<dir> itself (ffu's check_snapshot_compat.sh, rolling_deploy.sh and sim_switch.sh
@@ -1285,7 +1302,8 @@ export async function planInstallLeftovers(o: {
     for (const e of await children(ffuBase)) {
       if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
       const slot = path.join(ffuBase, e.name);
-      await strayInTreeTarget(slot, e.name);
+      // The first step takes the slots' own targets only: a stray ffu/target may be in a held slot (review of #1358).
+      if (!firstOnly) await strayInTreeTarget(slot, e.name);
       const target = path.join(slot, 'target');
       if (items.has(target) || !isCargoTarget(target)) continue;
       const gbs = (b: number) => `${(b / GB).toFixed(1)} GB`;

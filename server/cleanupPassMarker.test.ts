@@ -265,6 +265,33 @@ test('cleanupPass removes the released ffu targets first, before the regular ste
     assert.ok(!fs.existsSync(t1) && fs.existsSync(t2), 'the re-check keeps the slot taken since the plan');
     assert.deepEqual(r.removed.map((x) => x.path), [t1]);
     assert.ok(r.bytes >= 100);
+    // Own's leftovers keep clear of what the first step took (withoutOverlap); the later cap step finds it gone; a removal the
+    // guard refuses, or whose re-check throws, keeps the target and the pass goes on.
+    const t4 = mk('slot4');
+    const t5 = mk('slot5');
+    const t6 = mk('slot6');
+    let ownGot: string[] | undefined;
+    let capSaw: boolean[] | undefined;
+    const g = await cleanupPass({
+      opts: { stale: false, dryRun: false },
+      guard: { keep: [t5], inUse: [], home: path.join(root, 'nobody') },
+      mode: 'on',
+      regular: async () => [],
+      stale: async () => ({ items: [], listed: [] }),
+      cap: async () => ((capSaw = [fs.existsSync(t4), fs.existsSync(t5)]), { items: [], listed: [] }),
+      first: { plan: async () => ({ items: [t4, t5, t6].map((p) => ({ path: p, rule: 'ffu-slot-target', why: 'test' })), listed: [] }) },
+      busyNow: async (it) => {
+        if (it.path === t6) throw new Error('boom');
+        return undefined;
+      },
+      own: { plan: async () => ({ items: [{ path: path.join(t4, 'debug'), why: 'own' } as never, { path: path.join(root, 'tmp', 'ffa-x'), why: 'own' } as never], listed: [] }), run: async (p) => ((ownGot = p.items.map((i: { path: string }) => i.path)), { removed: [], failed: [], bytes: 0 }) },
+      root,
+    });
+    assert.deepEqual(capSaw, [false, true], 'the cap step runs after the removal and finds the taken target gone');
+    assert.deepEqual(ownGot, [path.join(root, 'tmp', 'ffa-x')], "own's item inside a taken target is dropped");
+    assert.deepEqual(g.removed.map((x) => x.path), [t4]);
+    assert.deepEqual(g.failed.map((x) => [x.path, /refused|re-check failed/.test(x.why)]), [[t5, true], [t6, true]]);
+    assert.ok(fs.existsSync(t5) && fs.existsSync(t6));
     // A plan that fails costs the pass nothing; dry-run mode says the plan and removes nothing.
     const t3 = mk('slot3');
     const said: (number | undefined)[] = [];
