@@ -7,6 +7,7 @@ import { checkGitBashPathInPowerShell } from './gitBashPath.ts';
 import { daemonShell, daemonToolProblem, type DaemonReads } from './daemonReads.ts';
 import { readTargets } from './secretGuard.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
+import { checkSystemTempWrite } from './tmpWriteFence.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
@@ -119,6 +120,12 @@ export function sandboxGuard(opts: {
   publicIdentity?: PublicIdentity;
   /** The machine's worker install folder (root.json's root): deleting outside it is refused (checkOutsideRootDelete). Absent: not checked. */
   workerRoot?: string;
+  /**
+   * w6050: refuse a shell write into /tmp, /var/tmp, /private/tmp, /var/folders or a Windows system temp folder outside the
+   * worker's own folders (server/tmpWriteFence.ts checkSystemTempWrite). False or absent: not refused here (the PostToolUse
+   * hook in server/sessions.ts still warns). Set from the tmpWriteFence config key, whose "warn" is the recovery switch.
+   */
+  tmpWriteEnforce?: boolean;
   /**
    * w3670: the machine daemon's folder (a protected path) and its install root: the worker READS the daemon's diagnostic files
    * there (server/daemonReads.ts DAEMON_READ_ALLOW), every other read there and of the install's secrets folder is refused, and
@@ -263,6 +270,17 @@ export function sandboxGuard(opts: {
         (tool === 'PowerShell' && opts.workerRoot ? checkGitBashPathInPowerShell(cmd, opts.workerRoot) : undefined) ??
         (opts.workerRoot ? checkOffDriveScan(cmd, { root: opts.workerRoot, cwd: input.cwd || opts.sandboxPath, allow: [opts.sandboxPath, ...(daemon ? [daemon.dir] : [])] }) : undefined);
       if (reason) return deny(reason);
+      if (opts.tmpWriteEnforce) {
+        // w6050 (w6008, lothsahn: "under no circumstances should workers write outside of ffw"). A parse that throws lets the
+        // command run: a bug in the fence must not lock a worker out of its shell.
+        let tmp: string | undefined;
+        try {
+          tmp = checkSystemTempWrite(cmd, { root: opts.workerRoot, temp: opts.env?.TMPDIR, sandbox: opts.sandboxPath, cwd: input.cwd || opts.sandboxPath, home: opts.home, env: opts.env });
+        } catch {
+          tmp = undefined;
+        }
+        if (tmp) return deny(tmp);
+      }
       let flat = flatten(cmd);
       if (cloneGrant && cloneNames) {
         // The granted clone: each command naming it must be an allowed form. What is left, with the clone's own name taken
