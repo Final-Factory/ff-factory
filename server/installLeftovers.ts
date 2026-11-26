@@ -214,6 +214,18 @@ export function timingHeld(root: string, inFlight?: string, alive: (pid: number)
 }
 
 /**
+ * How an idle FFU runner's job folder goes when a worker cannot delete it (w5929): on Windows the runners' Medium integrity
+ * label refuses a fenced worker (w5499), and the daemon's own hourly pass takes it only after runnerWorkDays, so on a disk that
+ * is not low a clean-up worker was told "the daemon removes it" with no way to make that happen (w5911, LothDesktop's 15.1 GB
+ * _work\ffu). machine_cleanup (the dispatcher's tool, and a disk clean-up worker's on its own machine: Agents.workerCleanup)
+ * runs an 'asked' pass, which counts as low (server/cleanup.ts run), so ffu-runner-work takes the folder after the settle
+ * time, with its job check and its rename-aside unchanged.
+ */
+export function runnerWorkRoute(s: Pick<InstallLeftoverSettings, 'runnerWorkDays' | 'lowCacheSettleMinutes'> = INSTALL_LEFTOVER_DEFAULTS): string {
+  return `the daemon's rule ffu-runner-work takes it while no job runs: by itself only after ${s.runnerWorkDays} days untouched, or ${s.lowCacheSettleMinutes} min when the disk is low, and at once on a machine_cleanup pass (an asked pass counts as a low one and takes a job folder untouched ${s.lowCacheSettleMinutes} min). On a disk clean-up request of this machine run mcp__machine__machine_cleanup yourself; on any other request it stays until then: name it in your report for the dispatcher's machine_cleanup on this machine`;
+}
+
+/**
  * Why an Actions runner's `_work` must stay now, or undefined when the runner holds no job (w3502): unknown processes, a
  * Runner.Worker of this runner, any process run from its _work folder, or a listener whose _diag log says it was just handed a
  * job (machine/benchRunners.ts holdsJob, the check that pauses LothDesktop's FFU runners safely). A runner whose listener is
@@ -245,6 +257,63 @@ export function runnerBusyNow(procs: () => Promise<ProcLite[] | undefined>, now:
     if (it.rule !== 'ffu-runner-work' || !it.runner) return undefined;
     const why = runnerJobWhy(it.runner, await procs(), now(), readLog);
     return why ? `a job may have started on the FFU runner since the plan: ${why}` : undefined;
+  };
+}
+
+/** The first reason any of the re-checks gives to keep an item now (runCleanup's busyNow). */
+export function anyBusyNow(...checks: ((it: CleanupItem) => Promise<string | undefined>)[]): (it: CleanupItem) => Promise<string | undefined> {
+  return async (it) => {
+    for (const c of checks) {
+      const why = await c(it);
+      if (why) return why;
+    }
+    return undefined;
+  };
+}
+
+/**
+ * An ffu slot's holder, take time and last use, as slots.json says them: what ffuSlotBusyNow compares (w6044). usedAt moves on
+ * every take, a same session's re-take included (machine/ffuSlots.ts takeSlot keeps takenAt then; review of #1358).
+ */
+export const ffuSlotMark = (s: { holder?: string; takenAt?: string; usedAt?: string } | undefined) => `${s?.holder ?? ''}@${s?.takenAt ?? ''}@${s?.usedAt ?? ''}`;
+
+/** Whether an ffu slot's holder runs or can resume, by the guard's in-use and resumable session folders (ffa-<holder>). */
+export const ffuHolderUp = (holder: string | undefined, guard: CleanupGuard) =>
+  !!holder && [...guard.inUse, ...(guard.resumable ?? [])].some((k) => !!k && path.basename(k).toLowerCase() === `ffa-${holder}`.toLowerCase());
+
+/**
+ * The re-check for runCleanup (w6044): for an ffu slot target planned in a pass's first step, right before the rename, slots.json
+ * again (a worker that took the slot since the plan keeps it: its holder or take time moved) and a fresh process list (a cargo
+ * build or a program in it keeps it). Any other item passes. An unreadable slot state or process list keeps the item.
+ */
+export function ffuSlotBusyNow(root: string | undefined, procs: () => Promise<ProcLite[] | undefined>, guard?: () => CleanupGuard, now: () => number = Date.now): (it: CleanupItem) => Promise<string | undefined> {
+  return async (it) => {
+    if (!it.ffuSlot) return undefined;
+    if (!root) return 'no install root to read the slot state again';
+    let slot: { holder?: string; takenAt?: string; usedAt?: string } | undefined;
+    try {
+      slot = readSlotState(root).slots.find((x) => x.id === it.ffuSlot!.id);
+    } catch (e) {
+      return `the slot state could not be read again (${(e as Error).message})`;
+    }
+    const mark = ffuSlotMark(slot);
+    if (mark !== it.ffuSlot.mark) return `ffu ${it.ffuSlot.id} was taken since the plan (holder@takenAt@usedAt ${it.ffuSlot.mark} → ${mark})`;
+    // A holder that was down at the plan and runs or can resume now (a fresh guard, not the pass's).
+    if (slot?.holder && guard) {
+      let g: CleanupGuard;
+      try {
+        g = guard();
+      } catch (e) {
+        return `the sessions could not be read again (${(e as Error).message})`;
+      }
+      if (ffuHolderUp(slot.holder, g)) return `ffu ${it.ffuSlot.id}'s holder ${slot.holder} runs or can resume again`;
+    }
+    const list = await procs();
+    if (!list) return 'the process list could not be read again';
+    const runners = cargoTargetRunners(it.path, list);
+    if (runners.length) return `a program runs from it since the plan (pid ${runners[0].pid})`;
+    const busy = await cargoTargetBusy(it.path, path.join(path.dirname(it.path), 'ffu'), list, Infinity, now(), runners);
+    return busy ? `a build started in it since the plan: ${busy}` : undefined;
   };
 }
 
@@ -1196,10 +1265,10 @@ export async function planInstallLeftovers(o: {
   // w5503: the ffu slots' targets are capped on the hourly pass too (the 'cargo-cap' scope), not only on the daily stale
   // pass or a low one: after #1148 deployed, LothDesktop's 05:34 UTC hourly pass on 2026-11-25 never looked at slot2-4
   // (25-35 GB each, 11-21 GB of it an idle incremental cache) because the rule ran only in the full plan.
-  // w6044: the 'ffu-slots' scope, the first step of a pass, takes released slots only (no running or resumable holder,
-  // nothing running from the target); a held slot's sweep and trims stay with the later step. On a low pass a released,
-  // settled target goes whole at once, without the cargo-graph sweep (up to five plans of the whole target) or a size walk
-  // that the whole removal made moot: the rule below takes it whole on a low pass anyway.
+  // w6044: the 'ffu-slots' scope, the first step of a pass, takes released slots' targets whole only (no running or resumable
+  // holder, nothing running from the target): on a low pass once settled, without the cargo-graph sweep (up to five plans of
+  // the whole target) or a size walk that the whole removal made moot; on any other pass once idle ffuSlotIdleDays. Every
+  // sweep and trim, a held slot's included, stays with the later step.
   const firstOnly = o.scope === 'ffu-slots';
   const ffuSlotTargets = async () => {
     // ---- ffu slots' cargo targets (w3764, machine/ffuSlots.ts): <install>/ffu-sandboxes/slot<N>/target, kept warm between
@@ -1217,8 +1286,7 @@ export async function planInstallLeftovers(o: {
     // - a low pass: debug/incremental of a held target, the whole target of one no running or resumable worker holds.
     const ffuBase = path.join(root, FFU_SLOTS_DIR);
     const ffuState = fs.existsSync(ffuBase) ? readSlotState(root) : { slots: [] };
-    const holderUp = (holder: string | undefined) =>
-      !!holder && [...o.guard.inUse, ...(o.guard.resumable ?? [])].some((k) => !!k && path.basename(k).toLowerCase() === `ffa-${holder}`.toLowerCase());
+    const holderUp = (holder: string | undefined) => ffuHolderUp(holder, o.guard);
     // w5796: a cargo target inside a slot's checkout (ffu/target) is a build that missed the slot's own target: a build run with
     // its working folder outside the slot (cargo reads .cargo/config.toml from the working folder up, not from the manifest's),
     // or a script that named $repo/target/<dir> itself (ffu's check_snapshot_compat.sh, rolling_deploy.sh and sim_switch.sh
@@ -1246,7 +1314,8 @@ export async function planInstallLeftovers(o: {
     for (const e of await children(ffuBase)) {
       if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
       const slot = path.join(ffuBase, e.name);
-      await strayInTreeTarget(slot, e.name);
+      // The first step takes the slots' own targets only: a stray ffu/target may be in a held slot (review of #1358).
+      if (!firstOnly) await strayInTreeTarget(slot, e.name);
       const target = path.join(slot, 'target');
       if (items.has(target) || !isCargoTarget(target)) continue;
       const gbs = (b: number) => `${(b / GB).toFixed(1)} GB`;
@@ -1276,8 +1345,15 @@ export async function planInstallLeftovers(o: {
       const newest = await newestTopWrite(target);
       const recent = newest > now - settleMs ? `written ${agoText(now - newest)} ago, within the settle time` : undefined;
       const kept = holding ?? running ?? recent;
-      if (firstOnly && o.low) {
-        if (!kept) items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target, the disk is low, ${holder ? `its holder ${holder} neither runs nor can resume` : 'no worker holds the slot'}, nothing runs from it and nothing in it was written for ${settleMs / 60_000} min; taken first in the pass (w6044); the next build in the slot rebuilds it`, base: slot });
+      // w6044: the first step takes a released target whole only, on a low pass once settled, on any other pass once idle
+      // ffuSlotIdleDays (the rule below's first verdict). Its sweeps and over-cap verdicts stay with the later cap or stale step,
+      // which would plan them again in the same pass (review of #1353). The slot's mark rides the item for ffuSlotBusyNow.
+      if (firstOnly) {
+        const ffuSlot = { id: e.name, mark: ffuSlotMark(ffuState.slots.find((x) => x.id === e.name)) };
+        const whose = holder ? `its holder ${holder} neither runs nor can resume` : 'no worker holds the slot';
+        if (kept) continue;
+        if (o.low) items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target, the disk is low, ${whose}, nothing runs from it and nothing in it was written for ${settleMs / 60_000} min; taken first in the pass (w6044); the next build in the slot rebuilds it`, base: slot, ffuSlot });
+        else if (now - newest > s.ffuSlotIdleDays * DAY) items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target, ${whose}, nothing runs from it and nothing in it was written for ${s.ffuSlotIdleDays} days; taken first in the pass (w6044); the next build in the slot rebuilds it`, base: slot, ffuSlot });
         continue;
       }
       const bytes = await sizeOf(target);
