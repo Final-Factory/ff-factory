@@ -195,6 +195,17 @@ unreadable file is `off`). The portal sets it live, with nobody at the machine a
 `read-fence-off`, `read-fence-warn` or `read-fence-on` (or `POST /api/machines/<id>/daemon` `{"action":"read-fence-warn"}`).
 Runs already going keep the fence they started with; the write fence never changes.
 
+**One label pass at a time; the last switch wins** (w5980, measured on LothDesktop 2026-11-26). A first `on` on a machine
+can take many minutes: a closed folder that refuses the label gets the owner's Full grant first, and both the grant and
+the label walk everything inside it (LothDesktop: 15:45:49 to 16:00:10 UTC). A `warn` sent at 15:52 ran beside it,
+opened what `on` had closed so far, and `on` finished last, leaving every closed path labelled under `warn`. Now each pass
+(`applyReadLabelsInTurn`, machine/daemon.ts) waits for the one before, sets the mode the `read-fence` file says when it
+starts, and an `on` pass stops between its steps once the file says otherwise; the next pass then sets the new mode. A
+switch sent during a long pass answers only when the passes before it are done, so the portal's wait may run out: read
+`daemon.log` for `the read fence is <mode>` rather than sending it again. And the given-back paths get their labels
+before the closed folders that hold them (`labelNoReadUp`): labelled after, `app\machine` sat closed under the
+daemon folder's walk, and the gh shim's `ghApp.ts` read as missing to Low workers for minutes (15:54-15:55 UTC).
+
 | Mode | Runs started from now on | Windows labels | Probe |
 |---|---|---|---|
 | `off` (default) | no read rules | any No-Read-Up label a closed path still carries (an earlier `on`, a reverted build) is replaced by plain No-Write-Up at each start and at the switch (`openNoReadUp`); a path without one is not touched | none |
