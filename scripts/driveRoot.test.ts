@@ -245,6 +245,18 @@ test('the reinstall’s check of the sandboxes: a commit no remote has, or an un
   git(lightClone, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'light work');
   const lightRisk = (await sandboxRisks(sandboxes)).find((r) => r.sandbox === 'agent-work/agent1/ff-factory');
   assert.equal(lightRisk?.unpushed.length, 1, 'the commit in the light folder clone');
+  // w6018's review: a clone at the light folder itself ("git clone <url> .") and one nested deeper are found too.
+  for (const [rel, file] of [['agent-work/agent2', 'e.txt'], ['agent-work/agent3/sub/repo', 'f.txt']] as const) {
+    const at = path.join(sandboxes, ...rel.split('/'));
+    git(base, 'clone', '-q', origin, at);
+    fs.writeFileSync(path.join(at, file), file);
+    git(at, 'add', file);
+    git(at, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'light work');
+  }
+  const lightRisks = await sandboxRisks(sandboxes);
+  for (const rel of ['agent-work/agent2', 'agent-work/agent3/sub/repo']) {
+    assert.equal(lightRisks.find((r) => r.sandbox === rel)?.unpushed.length, 1, `the commit in ${rel}`);
+  }
   fs.rmSync(base, { recursive: true, force: true });
 });
 

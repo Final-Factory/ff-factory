@@ -83,6 +83,8 @@ test('worker install: every missing prerequisite is named before anything change
   assert.deepEqual(preflightProblems({ ...GOOD, portal: five }, { ...OPTS, maxSandboxes: 5 }), [], 'light agent folders never count (w5924)');
   const mixed = { ok: true as const, me: { ...five.me, sandboxes: [...five.me.sandboxes, ...lights] } };
   assert.deepEqual(preflightProblems({ ...GOOD, portal: mixed }, { ...OPTS, maxSandboxes: 5 }), [], 'nor when a portal also lists them as sandboxes');
+  const old = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: mixed.me.sandboxes } };
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: old }, { ...OPTS, maxSandboxes: 5 }), [], 'nor against a portal with no lights field');
   assert.match(bad({ portal: five }, { maxSandboxes: 4 }), /--max-sandboxes 4 is below the 5 sandboxes there \(slot1, slot2, slot3, slot4, slot5\): delete 1 first/);
   assert.equal(preflightProblems({ ...GOOD, elevated: true, git: [2, 1], gitLfs: false }, OPTS).length, 3, 'all of them at once');
 });
