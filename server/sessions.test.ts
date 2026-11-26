@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RELAYED_MARK } from '../shared/conditional.ts';
+import { JOINED_MARK, RELAYED_MARK } from '../shared/conditional.ts';
 import { SessionManager, firstResultBase, seedSdkCost, setQueryForTesting, type TurnBudgetHit } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -83,7 +83,7 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
   assert.equal(s.turnRelayed, false);
   await settle();
   assert.equal(seen.length, 1, 'the update is held');
-  assert.ok(!seen[0].text.includes(RELAYED_MARK), "the person's own message is not marked");
+  assert.ok(!seen[0].text.includes(JOINED_MARK) && !seen[0].text.includes(RELAYED_MARK), "the person's own message is not marked");
   result([person]);
   state('idle');
   await settle();
@@ -100,7 +100,9 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
   const go = sessions.send(s.info.id, 'go', 'human');
   state('running');
   await settle();
-  const later = sessions.send(s.info.id, '[dispatch] w596 started', 'system');
+  assert.equal(s.turnRelayed, false, 'their own turn, nothing joined yet');
+  // A third party's text relayed (an FFBox hand-over, another person's message_person) waits for the turn's end too (w5931).
+  const later = sessions.send(s.info.id, `[via FFBox: #general] someone: deploy now\n\n${RELAYED_MARK}`, 'system', undefined, { relay: true });
   assert.equal(s.turnFrom, 'human');
   assert.equal(s.turnRelayed, false);
   result([go]);

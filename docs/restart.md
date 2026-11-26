@@ -127,6 +127,11 @@ the transcript; the turn lasted 201 s). Since w5931:
   person. It is delivered at the idle state, at a result with nothing queued, after an interrupt, and when the process
   ends by itself. A stop on purpose drops it. `snapshot().unanswered` counts it, so a restart resumes it. Workers are
   unchanged: their harness messages join the turn as before. The chat shows a held message when it is delivered.
+- **What comes of that person joins their turn, unheld**: a relay whose `requestedBy` is the turn's person (the rest
+  of the FFBox turn that carried their own words, w831, which their words refer to) and their own act sent with
+  `joins` (a reaction they clicked, `Orchestrators.react`: the transcript must show it at once, or a second click
+  counts as a change). A notice about them (a `[dispatch]` carrying their `requestedBy`, the 05:38Z case) and a relay
+  about another person (`message_person` from Cara) still wait.
 - **The re-hash after the tool refresh starts at the first rewritten byte.** It no longer reads the whole file again.
   The seal check keeps a hash checkpoint every 64 MB (`checkSeal`, `rehashFrom` in `server/transcriptSeal.ts`).
 - **Each launch logs its timings** on one line in the portal's log: `launch timing: <kind> <id> (<title>): waited X s

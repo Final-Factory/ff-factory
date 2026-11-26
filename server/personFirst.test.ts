@@ -90,6 +90,29 @@ test("w5931: harness messages sent during a person's turn reach the orchestrator
   s.stop();
 });
 
+test("w5931: what comes of the turn's person joins their turn: a relay about them (w831) and their own reaction; a notice about them or a relay about another waits", async (t) => {
+  const { launches, session, store, idle, words } = scene(t);
+  const s = session('sess-theirs');
+  const loth = { userId: 'lothsahn', displayName: 'Lothsahn' };
+  const cara = { userId: 'cara', displayName: 'Cara' };
+  const all = ['FFBox turn', 'own words', 'reacted', 'w5888', 'from Cara']; // the relayed mark names "own words"
+  s.send('[via FFBox] his own words', 'human', undefined, [], loth);
+  s.send('[from FFBox via Discord] the whole FFBox turn', 'system', undefined, [], loth, [], true);
+  s.send('Lothsahn reacted 🎉', 'system', undefined, [], loth, [], false, true);
+  // 2026-11-26 05:38Z: a [dispatch] about him joined his turn, and the turn's only text answered it, not him.
+  s.send('[dispatch] w5888 started', 'system', undefined, [], loth);
+  s.send('[from Cara, via message_person] close his requests', 'system', undefined, [], cara, [], true);
+  await launchesSettled();
+  await tick();
+  assert.deepEqual(words(launches[0].got, all), ['own words', 'FFBox turn', 'reacted']);
+  assert.equal(s.turnRelayed, true, 'the relay about him marks his turn relayed (w5507)');
+  assert.ok(store.readTranscript('sess-theirs').some((e) => e.kind === 'user' && e.text.includes('reacted')), 'the reaction is in the chat at once, so a second click changes nothing');
+  launches[0].out(idle);
+  await tick();
+  assert.deepEqual(words(launches[0].got, all), ['own words', 'FFBox turn', 'reacted', 'w5888', 'from Cara']);
+  s.stop();
+});
+
 test("w5931: a person's message to an orchestrator still launching goes ahead of the harness messages waiting in its input", async (t) => {
   const { launches, session, store, idle, words } = scene(t);
   const s = session('sess-ahead');

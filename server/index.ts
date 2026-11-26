@@ -476,12 +476,18 @@ const watcher = () =>
         cfg.outsideWatch?.machine,
         machines.list().map((m) => m.id),
         machines.list().filter((m) => m.local).map((m) => m.id),
+        providers.enabled ? [providers.id] : [],
       );
 // Without publicUrl, the address the other machines were deployed with (add_machine's portal_url) is the same portal; the
 // local machine's loopback address is not (w424).
 const portalUrl = () => watchedPortalUrl(cfg.publicUrl, machines.list());
 const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: portalUrl(), name: os.hostname() }, outside);
 machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
+// FFBox watches through its connector (w5892): it gets the topic while it is the watcher, null otherwise. Every minute,
+// so a config change reaches it without a hook; the manager sends a value once per link.
+const pushProviderWatch = () => providers.setOutsideWatch(watcher() === providers.id ? (watchConfig()?.ntfyTopic ?? null) : null);
+pushProviderWatch();
+setInterval(pushProviderWatch, 60_000).unref();
 const learnNetwork = () =>
   void collectNetwork()
     .then((n) => {
@@ -1128,8 +1134,9 @@ providers.dev = new DevRequests(
     identity,
     orchestrators: agents.orchestrators,
     attachments,
-    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy }),
-    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy }),
+    // w5896: what FFBox hands over besides an operator's own words is a third party's text relayed: it demotes a person's turn.
+    sendFiles: (id, text, files, requestedBy) => agents.sendWithAttachments(id, text, 'system', { attachments: files, requestedBy, relay: true }),
+    sendText: (id, text, requestedBy) => void sessions.send(id, text, 'system', undefined, { requestedBy, relay: true }),
     // An operator's own authenticated words: a turn of theirs, as if typed in FF Factory (w831).
     sendAsPerson: (person, text) => void agents.operatorTurn(person, text),
   },
@@ -3317,9 +3324,22 @@ const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();
   if (!w || !c) return [`Outside watchdog: off (${isDryRun ? 'a dry run' : cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
+  if (w === providers.id) return [providerWatchLine(c.ntfyTopic)];
   return [
     `Outside watchdog: ${w} checks ${c.healthUrl} and pings ${c.host} every 60 s${machines.isOnline(w) ? '' : ` (${w} is offline now)`}; alerts go to ntfy topic "${c.ntfyTopic}" (subscribe in the ntfy app); Wake-on-LAN ${c.mac ? `to ${c.mac}${c.broadcast ? ` via ${c.broadcast}` : ''}` : 'not possible yet (MAC unknown)'}`,
   ];
+};
+/** The outside watchdog's line while FFBox watches (w5892): what FFBox last reported, never more than the topic shown. */
+const providerWatchLine = (topic: string) => {
+  const o = providers.outsideWatch;
+  const at = (iso?: string) => (iso ? `${iso.slice(11, 16)}Z` : '?');
+  const link = !providers.online ? ' (its connector is offline now)' : !providers.takesOutsideWatch ? " (its connector does not take outside_watch yet: update FFBox)" : '';
+  const seen = !o
+    ? 'no report from it yet'
+    : o.state === 'idle'
+      ? `idle (no topic or no URL), reported ${at(o.at)}`
+      : `last check ${o.state} at ${at(o.checkedAt)}${o.state === 'down' && o.failingSince ? ` (failing since ${at(o.failingSince)})` : ''}, ${o.checks} checks and ${o.alerts} alerts since FFBox's ffwatch started${o.announcedAt ? `, test alert sent ${o.announcedAt.slice(0, 16).replace('T', ' ')}Z` : ''}${o.lastAlert && !o.lastAlert.ok ? `; its last alert ("${o.lastAlert.title}") failed to reach ntfy` : ''}`;
+  return `Outside watchdog: FFBox checks ${o?.healthUrl ?? 'the portal'} every ${o?.intervalSecs ?? 60} s, alerting after ${o?.failures ?? 3} misses${link}; ${seen}; alerts go to ntfy topic "${topic}" (subscribe in the ntfy app); no ping or Wake-on-LAN (FFBox is not on the tailnet); the machines' copies are off (m5's retired, w5892)`;
 };
 usage.start();
 
