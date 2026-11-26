@@ -592,6 +592,45 @@ test('w5938: a stall check that comes late (the daemon blocked its own loop) is 
   assert.match(lines[0], /the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 200000 bytes: not a stall/);
 });
 
+test('w5987: on a loop that keeps blocking, totalMs still ends the download, and late checks in a row with nothing read are a stall', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 7) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // Half the bundle, then nothing (the w1641 stall), served while this thread's loop blocks 300 ms at a time outside a
+  // timer, so every 100 ms stall check comes about 200 ms late.
+  const held = await bundleServer(t, body, () => 'stall');
+  const blocking = (ms: number) => {
+    let on = true;
+    const block = () => on && setImmediate(() => (Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), on && setTimeout(block, 5)));
+    block();
+    return () => (on = false);
+  };
+  const run = async (sub: string, o: { totalMs: number; lateRow?: number }) => {
+    const lines: string[] = [];
+    const stop = blocking(300);
+    const at = Date.now();
+    try {
+      await downloadBundle(held.url, 'tok', b, path.join(dir, sub), fetch, { stallMs: 100, lateMs: 50, attempts: 1, ...o, log: (l) => lines.push(l) });
+      assert.fail('the download should not finish');
+    } catch (e) {
+      return { error: (e as Error).message, ms: Date.now() - at, lines };
+    } finally {
+      stop();
+    }
+  };
+  // Every check late and no cap: totalMs ends it, and the last check says it came late, past the limit, not "stalled".
+  const total = await run('total', { totalMs: 2_000, lateRow: 1e9 });
+  assert.match(total.error, /the bundle's download did not finish in 2 s \(its stall check came \d+ s late, past the 2 s limit\) at 100000 of 200000 bytes, after 1 attempt\(s\)/);
+  assert.ok(total.ms >= 2_000 && total.ms < 3_500, `ended at ${total.ms} ms`);
+  assert.ok(total.lines.length >= 3 && total.lines.every((l) => /stall check came \d+ s late .*not a stall/.test(l)), total.lines.join('\n'));
+  // With the cap (here 3), the stall shows after 3 late checks in a row, long before totalMs.
+  const capped = await run('capped', { totalMs: 60_000, lateRow: 3 });
+  assert.match(capped.error, /the bundle's download stalled \(its stall check came late 3 times in a row with nothing read between\) at 100000 of 200000 bytes, after 1 attempt\(s\)/);
+  assert.equal(capped.lines.length, 2, capped.lines.join('\n'));
+  assert.ok(capped.ms < 5_000, `ended at ${capped.ms} ms`);
+});
+
 test('w5938: an update job past its limit is named in the refusal and warned of once; nothing ends it yet', async () => {
   const at = Date.parse('2026-11-26T06:11:26Z');
   const job = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir: 'a', service: 's', createdAt: new Date(at).toISOString(), phase: 'running', pid: process.pid } as UpdateJob;

@@ -331,7 +331,9 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    published branch, its own repository (daemon.json `updateOrigin`). A download that stalls (30 s without a byte) or breaks resumes from
    the bytes it has with a Range request, up to 6 tries within 8 minutes, each logged in the daemon's log with its cause
    (`machine/selfUpdate.ts` `DOWNLOAD`; w1641: beast's stalled at 7 of 18.5 MB and Node's fetch sat 300 s before it said
-   "terminated"). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
+   "terminated"). A stall check that comes over 10 s late (the daemon's own event loop was blocked) is not a stall and gives
+   the stream another 30 s (w5938), but 5 late checks in a row with nothing read between are one, and a late check past the
+   8 minutes says it came late, past the limit (w5987). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
    An answer the link could not carry (it was down, or it was sent less than a minute before a drop, since a dead link
    looks open for up to 45 s) is kept 30 minutes and sent again after the next hello (`ANSWERS`; w1641: at the 450f7d53c
    rollout the portal VM's Tailscale restarted 4.5 minutes into beast's update). The portal ignores a repeat, takes a

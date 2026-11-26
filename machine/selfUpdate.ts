@@ -127,9 +127,13 @@ export function selfUpdateProblem(m: { commit?: unknown; bundle?: { sha256?: unk
  * The bundle download's limits (w1641). beast's tools download at the 8c66ee8 deploy stalled at 6,962,988 of 18,549,629
  * bytes and sat there until undici's own body timeout (300 s without a byte) ended it as "terminated", after the portal had
  * stopped waiting (5 minutes): a stall is now noticed after `stallMs` and the download resumes where it stopped (the portal
- * answers a Range request, server/index.ts sendStream), at most `attempts` times, all of it within `totalMs`.
+ * answers a Range request, server/index.ts sendStream), at most `attempts` times, all of it within `totalMs`. A stall check
+ * `lateMs` late is not a stall (w5938), but `lateRow` of them in a row with nothing read between is (w5987).
  */
-export const DOWNLOAD = { stallMs: 30_000, attempts: 6, totalMs: 8 * 60_000, lateMs: 10_000 };
+export const DOWNLOAD = { stallMs: 30_000, attempts: 6, totalMs: 8 * 60_000, lateMs: 10_000, lateRow: 5 };
+
+/** A limit in words: "8 min", "1.5 s". */
+const span = (ms: number) => (ms >= 60_000 && ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 100) / 10} s`);
 
 /** What a failed fetch says, its cause included (undici's "terminated" hides why: UND_ERR_BODY_TIMEOUT, UND_ERR_SOCKET). */
 export function fetchError(e: unknown): string {
@@ -152,12 +156,14 @@ export async function downloadBundle(
   b: { sha256: string; size: number },
   dir: string,
   doFetch: typeof fetch = fetch,
-  o: { stallMs?: number; attempts?: number; totalMs?: number; lateMs?: number; log?: (line: string) => void } = {},
+  o: { stallMs?: number; attempts?: number; totalMs?: number; lateMs?: number; lateRow?: number; log?: (line: string) => void } = {},
 ): Promise<string> {
   const stallMs = o.stallMs ?? DOWNLOAD.stallMs;
   const lateMs = o.lateMs ?? DOWNLOAD.lateMs;
+  const lateRow = o.lateRow ?? DOWNLOAD.lateRow;
   const attempts = o.attempts ?? DOWNLOAD.attempts;
-  const deadline = Date.now() + (o.totalMs ?? DOWNLOAD.totalMs);
+  const totalMs = o.totalMs ?? DOWNLOAD.totalMs;
+  const deadline = Date.now() + totalMs;
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${b.sha256.slice(0, 16)}.bundle`);
   const part = `${file}.part`;
@@ -174,24 +180,34 @@ export async function downloadBundle(
     for (let attempt = 1; ; attempt++) {
       const ctl = new AbortController();
       let timedOut: 'stall' | 'total' | undefined;
+      let lateNote = '';
+      let lates = 0;
       let timer: NodeJS.Timeout | undefined;
       // w5938: a check that comes late is not a stall. beast's daemon blocked its own event loop 40-72 s at a time (LoopWatch,
       // 2026-11-26 05:38-06:33 UTC); Node runs a due timer before it reads the socket, so the 30 s check fired before the
       // bytes (or the TLS handshake) that came meanwhile were read, and six "stalled at 0 of 25693 bytes" refused the update
       // twice while the portal logged no bundle sent. A late check gives the stream a fresh `stallMs`; `totalMs` still ends it.
-      const arm = () => {
+      // w5987: on a loop that keeps blocking, a real stall would show only at `totalMs`, so `lateRow` late checks in a row with
+      // no answer or byte read between are a stall; and a late check past the deadline says so, not "stalled".
+      const arm = (read = false) => {
+        if (read) lates = 0;
         clearTimeout(timer);
         const left = deadline - Date.now();
         const wait = Math.max(1, Math.min(stallMs, left));
         const due = Date.now() + wait;
         timer = setTimeout(() => {
           const late = Date.now() - due;
-          if (left > stallMs && late > lateMs && Date.now() < deadline) {
+          if (late > lateMs && Date.now() >= deadline) {
+            timedOut = 'total';
+            lateNote = ` (its stall check came ${Math.round(late / 1000)} s late, past the ${span(totalMs)} limit)`;
+          } else if (left > stallMs && late > lateMs && ++lates >= lateRow) {
+            timedOut = 'stall';
+            lateNote = ` (its stall check came late ${lates} times in a row with nothing read between)`;
+          } else if (left > stallMs && late > lateMs) {
             o.log?.(`update over the link: the bundle's stall check came ${Math.round(late / 1000)} s late (this daemon's event loop was blocked), at ${size} of ${b.size} bytes: not a stall, the stream gets another ${Math.round(stallMs / 1000)} s`);
             arm();
             return;
-          }
-          timedOut = left <= stallMs ? 'total' : 'stall';
+          } else timedOut = left <= stallMs ? 'total' : 'stall';
           ctl.abort();
         }, wait);
       };
@@ -199,6 +215,7 @@ export async function downloadBundle(
       try {
         const from = size;
         const res = await doFetch(url, { headers: { authorization: `Bearer ${token}`, ...(from ? { range: `bytes=${from}-` } : {}) }, signal: ctl.signal });
+        arm(true);
         notePortalRedirect(url, res);
         if (res.status >= 400 && res.status < 500) {
           await res.body?.cancel();
@@ -211,7 +228,7 @@ export async function downloadBundle(
         // A resume the portal answered with the whole file, or a range that does not start where this one stopped: from 0.
         if (from && (res.status === 200 || !new RegExp(`^bytes ${from}-`).test(res.headers.get('content-range') ?? ''))) await restart();
         for await (const chunk of Readable.fromWeb(res.body as import('node:stream/web').ReadableStream<Uint8Array>)) {
-          arm();
+          arm(true);
           if (size + chunk.length > b.size) throw new Final(`the bundle is larger than the ${b.size} bytes the portal said`);
           await out.write(chunk, 0, chunk.length, size).catch((e) => {
             throw new Final(`could not write ${part}: ${(e as Error).message}`);
@@ -223,7 +240,7 @@ export async function downloadBundle(
         break;
       } catch (e) {
         if (e instanceof Final) throw e;
-        const why = timedOut === 'stall' ? `stalled (no byte in ${Math.round(stallMs / 1000)} s)` : timedOut === 'total' ? `did not finish in ${Math.round((o.totalMs ?? DOWNLOAD.totalMs) / 1000)} s` : `broke: ${fetchError(e)}`;
+        const why = timedOut === 'stall' ? `stalled${lateNote || ` (no byte in ${Math.round(stallMs / 1000)} s)`}` : timedOut === 'total' ? `did not finish in ${Math.round(totalMs / 1000)} s${lateNote}` : `broke: ${fetchError(e)}`;
         if (timedOut === 'total' || attempt >= attempts || Date.now() >= deadline) throw new Error(`the bundle's download ${why} at ${size} of ${b.size} bytes, after ${attempt} attempt(s)`);
         o.log?.(`update over the link: the bundle's download ${why} at ${size} of ${b.size} bytes; attempt ${attempt + 1} of ${attempts} resumes from there`);
         await new Promise((r) => setTimeout(r, Math.min(1000 * attempt, 5000, Math.max(0, deadline - Date.now()))));
