@@ -110,6 +110,7 @@ import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
+import { WIN_CI_FIRST, WinCiFirst, machineBusyMs } from './ciFirstWin.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -656,6 +657,8 @@ export class Daemon {
   /** w5999: the macOS and Windows runners' temp folders inside the worker root (machine/runnerEnv.ts). */
   readonly runnerEnv?: RunnerEnv;
   readonly ciFirst: CiFirst;
+  /** w6110: the same on a Windows CI-first machine (WIN_CI_FIRST: lothdesktop), by priority class; warn only so far: it logs. */
+  readonly winCiFirst: WinCiFirst;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -1149,6 +1152,19 @@ export class Daemon {
       setWeights: async (unit, cpu, io) => void (await userctl(['set-property', '--runtime', unit, `CPUWeight=${cpu}`, `IOWeight=${io}`])),
       ...linuxReads,
       census: async () => runnerCensus(await pd.procs()),
+      log: (line) => log(line),
+    });
+    // w6110: on Windows the agents' processes go below the CI runners' jobs by priority class (machine/ciFirstWin.ts)
+    this.winCiFirst = new WinCiFirst({
+      settings: real && process.platform === 'win32' ? WIN_CI_FIRST[cfg.id.toLowerCase()] : undefined,
+      procs: () => pd.procs(),
+      census: (procs) => runnerCensus(procs),
+      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid! })),
+      priorityOf: (pid) => priorityOf(pid),
+      facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
+      machineBusyMs: () => machineBusyMs(),
+      self: process.pid,
+      now: () => Date.now(),
       log: (line) => log(line),
     });
     this.light = new LightFolders({ root: () => this.sandboxRoot(), onChange: () => this.reportSandboxes() });
@@ -1925,6 +1941,7 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
+    if (this.winCiFirst.enabled) this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`))), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
