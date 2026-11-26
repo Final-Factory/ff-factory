@@ -20,7 +20,7 @@ import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
 import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
-import { compilerServers } from './compilerServer.ts';
+import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
@@ -3629,9 +3629,13 @@ export class Daemon {
         void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
-      this.timers.push(setInterval(() => {
+      // w5938: off the event loop (compilerServersAsync), and one look at a time.
+      let looking = false;
+      this.timers.push(setInterval(async () => {
+        if (looking) return;
+        looking = true;
         try {
-          for (const pid of strayLowServers(compilerServers(), root)) {
+          for (const pid of strayLowServers(await compilerServersAsync(), root)) {
             log(`worker integrity: ending Low compiler server ${pid}, which runs from the install's own path (w5347)`);
             try {
               process.kill(pid);
@@ -3641,6 +3645,8 @@ export class Daemon {
           }
         } catch {
           /* the next look */
+        } finally {
+          looking = false;
         }
       }, 15_000));
     } catch (e) {

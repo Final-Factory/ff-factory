@@ -11,7 +11,7 @@
  * A failed `unity-slot run` names that cause instead of a bare compile failure.
  */
 import fs from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 
 /** A Unity log's CS2012 under Library/Bee: the path it could not write, or undefined. */
 export function beeAccessDenied(log: string): string | undefined {
@@ -82,6 +82,20 @@ export function compilerServers(platform: NodeJS.Platform = process.platform): C
     windowsHide: true,
   });
   return r.status === 0 ? parseCompilerServers(r.stdout) : [];
+}
+
+/**
+ * The same, without blocking the caller's event loop: the daemon's 15 s look (w5347) ran compilerServers() on its main
+ * thread, and from beast's Low switch-on (2026-11-24 11:30 UTC) its LoopWatch logged a blocked loop 90-230 times an hour
+ * (about 5 before), up to 72 s, until its link heartbeat and the update download's stall check fired late (w5938).
+ */
+export function compilerServersAsync(platform: NodeJS.Platform = process.platform): Promise<CompilerServer[]> {
+  if (platform !== 'win32') return Promise.resolve([]);
+  return new Promise((resolve) =>
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(LIST_SERVERS, 'utf16le').toString('base64')], { encoding: 'utf8', timeout: 30_000, windowsHide: true }, (err, stdout) =>
+      resolve(err ? [] : parseCompilerServers(stdout)),
+    ),
+  );
 }
 
 const LOW = (s: CompilerServer) => s.rid > 0 && s.rid < 0x2000;
