@@ -185,7 +185,7 @@ and points `core.hooksPath` there; no rustc, or a failed build, keeps the shell 
 worker's to write, as the shared clone's config already is: the guard stops slips, not a worker set on getting past it.
 The daemon does not build it: its rustc would be one a Low worker can write. macOS and Linux keep the shell hooks (about
 2 ms a call). Change `slot-guard.sh` and the `.rs` together: `server/ffuSlotGuard.test.ts` runs every refusal on both.
-Cost on LothDesktop: see the w6062 pull request's numbers.
+Cost on LothDesktop (measured 2026-11-26, 40 empty commits per hook set, interleaved, under an exclusive bench ticket; the median a commit adds over no hooks, in the two calmest of three runs): the shell hooks added 237 and 296 ms, the native hook 90 and 102 ms. Most of what is left is Windows starting the hook 7 times.
 
 ## On the portal (w5912)
 
