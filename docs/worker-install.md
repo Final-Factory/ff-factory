@@ -354,6 +354,16 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
 6. **The report**: `<daemon>/update/result.json`, sent by the daemon that runs afterwards (`self_update_report`, the new one
    or the old one put back); then the job's task or LaunchAgent is removed. The report carries the installer's lines
    (`Before:`, `After:`, any `~ key: before -> after`), never a credential (any `ffm_` token is cut to its machine id).
+7. **A job that never ends is ended by the daemon** (w5938, `machine/selfUpdate.ts` `JOB_LIMIT`, `jobToEnd`, `endOverdue`):
+   while a job is in flight every update and tools run is refused, so on beast, 2026-11-26, job 977d56f7 (15.5 min, the
+   longest of its last 179) refused the agent tools update. At each 10 s tick, and before a new update or an unload is
+   weighed, a job **staged over 10 min** (its process never took it) or **running over 45 min** whose process is gone, whose
+   pid is now another program's (its command line does not name `linkJob.ts`), or which is hung (alive, its
+   `update-job.log` unwritten for 15 min; the hung process is stopped, TERM then KILL) gets a failed result with the reason,
+   in `update-job.log` and the daemon log (`update over the link: FAILED the daemon ended the job: ...`). The tick reports it
+   and removes the job's task like any other; the daemon runs on its current code and takes the next update. A live job
+   process still writing its log is never ended, however old: it is warned of once and the refusal says why. A pid whose
+   command line cannot be read is never stopped.
 
 **Who uses it.** The rollout after a verified deploy, for the daemon step and the agent tools ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887));
 `ops_worker machine_update`, which the portal then runs itself (no ssh, no worker job) and reports to the caller's

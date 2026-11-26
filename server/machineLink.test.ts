@@ -3,7 +3,7 @@
 // OS's own is a stand-in that writes what scripts/worker/linkJob.ts writes (scripts/worker/linkJob.test.ts tests that job).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
@@ -15,9 +15,9 @@ import { Store } from './store.ts';
 import { SessionManager } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { PendingCalls, type UpdateBundle, UpdateBundles, bundleServedLine, unwaitedAnswer, updateBundleFor } from './machineLink.ts';
-import type { LinkUpdateReport } from './machineProtocol.ts';
+import type { FromDaemon, LinkUpdateReport } from './machineProtocol.ts';
 import { Daemon, RECONNECT_MS, REOFFER_MS, type DaemonConfig, type Probes } from '../machine/daemon.ts';
-import { ANSWERS, SelfUpdater, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobOverdue, keepRootJson, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
+import { ANSWERS, SelfUpdater, alive, checkPublished, checkoutFromBundle, downloadBundle, fetchError, inFlightRefusal, JOB_LIMIT, jobToEnd, keepRootJson, processCommand, readJson, rootBackupOf, selfUpdateProblem, updateFiles, writeJson, type UpdateJob } from '../machine/selfUpdate.ts';
 import type { JobSpec } from '../machine/osJob.ts';
 import type { Config } from './config.ts';
 
@@ -592,33 +592,141 @@ test('w5938: a stall check that comes late (the daemon blocked its own loop) is 
   assert.match(lines[0], /the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 200000 bytes: not a stall/);
 });
 
-test('w5938: an update job past its limit is named in the refusal and warned of once; nothing ends it yet', async () => {
+test('w5938: jobToEnd ends a job only past its limit: staged and never taken, its process gone or another program, or hung; never a live one writing its log', () => {
   const at = Date.parse('2026-11-26T06:11:26Z');
   const job = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir: 'a', service: 's', createdAt: new Date(at).toISOString(), phase: 'running', pid: process.pid } as UpdateJob;
-  assert.equal(jobOverdue(job, at + 15 * 60_000), undefined, "beast's 15.5 min job is within its limit");
-  assert.equal(inFlightRefusal(job, at + 3 * 60_000), 'an update job of this machine is still running (job 977d56f7, update, 3 min since it was made)');
-  assert.equal(jobOverdue(job, at + JOB_LIMIT.inFlightMs + 60_000), `job 977d56f7 (update) has been running (pid ${process.pid}) for 46 min, past its 45 min limit`);
-  assert.match(inFlightRefusal(job, at + JOB_LIMIT.inFlightMs + 60_000), /^an update job of this machine is still running: job 977d56f7 .* past its 45 min limit; nothing ends it yet \(warn only, w5938\)$/);
+  const mine = { command: 'node /x/src/scripts/worker/linkJob.ts --job /x/update/job.json' };
   const staged = { ...job, phase: 'staged', pid: undefined } as UpdateJob;
-  assert.match(jobOverdue(staged, at + JOB_LIMIT.stagedMs + 60_000) ?? '', /staged and never taken by its process for 11 min, past its 10 min limit/);
-  assert.equal(jobOverdue({ ...job, phase: 'done' }, at + 10 * JOB_LIMIT.inFlightMs), undefined, 'a job that ended is not overdue');
-  assert.equal(jobOverdue({ ...job, pid: 2 ** 30 }, at + 10 * JOB_LIMIT.inFlightMs), undefined, 'nor one whose process is gone');
+  const gone = { ...job, pid: 2 ** 30 };
+  const lim = JOB_LIMIT.inFlightMs;
+  // Inside its limit: never touched, whatever its process does.
+  assert.equal(jobToEnd(job, at + 15.5 * 60_000, { ...mine, logAt: at }), undefined, "beast's 15.5 min job (977d56f7) is within its limit");
+  assert.equal(jobToEnd(staged, at + JOB_LIMIT.stagedMs - 60_000), undefined, 'a job staged 9 min ago is left for its process');
+  assert.equal(jobToEnd(gone, at + lim - 60_000), undefined, 'a job whose process went 44 min in is left (a restart at logon takes it over)');
+  assert.equal(jobToEnd({ ...job, phase: 'done' }, at + 10 * lim), undefined, 'a job that ended is not ended again');
+  // Past it, alive and progressing, or not known to be the job's: never ended.
+  assert.equal(jobToEnd(job, at + 3 * 60 * 60_000, { ...mine, logAt: at + 3 * 60 * 60_000 - 60_000 }), undefined, 'a live job process that wrote its log a minute ago is left, 3 h in');
+  assert.equal(jobToEnd(job, at + 10 * lim, { logAt: at }), undefined, 'a live pid whose command line cannot be read is never ended');
+  // Past it and stuck: ended, with why.
+  assert.deepEqual(jobToEnd(staged, at + JOB_LIMIT.stagedMs + 60_000), { reason: 'job 977d56f7 (update) was staged 11 min ago and its process never took it (limit 10 min)', kill: false });
+  assert.deepEqual(jobToEnd(gone, at + lim + 60_000), { reason: `job 977d56f7 (update) has run 46 min (limit 45 min) and its process (pid ${2 ** 30}) is gone without a result`, kill: false });
+  assert.deepEqual(jobToEnd(job, at + lim + 60_000, { command: 'firefox', logAt: at + lim }), { reason: `job 977d56f7 (update) has run 46 min (limit 45 min) and its pid ${process.pid} is now another program's, so its process is gone without a result`, kill: false });
+  assert.deepEqual(jobToEnd(job, at + lim + 60_000, { ...mine, logAt: at + lim + 60_000 - JOB_LIMIT.quietMs - 60_000 }), { reason: `job 977d56f7 (update) has run 46 min (limit 45 min) and its process (pid ${process.pid}) is hung: its log unwritten for 16 min (limit 15 min)`, kill: true });
+  assert.equal(jobToEnd(job, at + lim + 60_000, { ...mine, logAt: at + lim + 60_000 - JOB_LIMIT.quietMs + 60_000 }), undefined, 'quiet 14 min: not yet hung');
+  assert.match(inFlightRefusal(job, at + lim + 60_000), /^an update job of this machine is still running: job 977d56f7 .* past its 45 min limit, but its process is alive and still writing its log, so it is not ended \(w5938\)$/);
+  assert.equal(inFlightRefusal(job, at + 3 * 60_000), 'an update job of this machine is still running (job 977d56f7, update, 3 min since it was made)');
+});
 
-  // The daemon: warned once by the tick, refused with the reason, and the job left as it is.
+/** A daemon's updater over a job fixture (w5938): its logs, what it sent, and the files. */
+function overdueFixture(t: { after: (fn: () => unknown) => void }, job: Partial<UpdateJob>, o: { now?: number; command?: (pid: number) => Promise<string | undefined> } = {}) {
   const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjob-'));
-  try {
-    const f = updateFiles(appDir);
-    writeJson(f.job, { ...job, appDir });
-    const logs: string[] = [];
-    const sent: unknown[] = [];
-    const u = new SelfUpdater({ appDir, portalUrl: () => 'http://x', token: 't', send: (m) => (sent.push(m), true), exit: () => undefined, log: (...a) => logs.push(a.join(' ')), now: () => at + JOB_LIMIT.inFlightMs + 60_000 });
-    await u.tick();
-    await u.tick();
-    assert.equal(logs.filter((l) => /WARNING job 977d56f7/.test(l)).length, 1, logs.join('\n'));
-    assert.equal(readJson<UpdateJob>(f.job)?.phase, 'running', 'warn only: the job is left in flight');
-  } finally {
-    fs.rmSync(appDir, { recursive: true, force: true });
-  }
+  t.after(() => fs.rmSync(appDir, { recursive: true, force: true }));
+  const f = updateFiles(appDir);
+  const full = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir, service: 's', createdAt: new Date().toISOString(), phase: 'running', commit: 'c'.repeat(40), before: 'b'.repeat(40), ...job } as UpdateJob;
+  writeJson(f.job, full);
+  const logs: string[] = [];
+  const sent: FromDaemon[] = [];
+  const killed: string[] = [];
+  const u = new SelfUpdater({
+    appDir,
+    portalUrl: () => 'http://x',
+    token: 't',
+    send: (m) => (sent.push(m), true),
+    exit: () => undefined,
+    log: (...a) => logs.push(a.join(' ')),
+    remove: async () => undefined,
+    ...(o.now !== undefined ? { now: () => o.now! } : {}),
+    command: o.command ?? (async () => undefined),
+    kill: (pid, sig) => (killed.push(`${pid} ${sig}`), process.kill(pid, sig)),
+  });
+  return { u, f, logs, sent, killed, job: full };
+}
+
+const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+const setLogAge = (file: string, ms: number) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.appendFileSync(file, `${new Date().toISOString()} FF Factory update job 977d56f7-1030-442b-bcad-bd6ac62ab798: update to ff-factory cccccccccccc (w1596).\nRunning the installer...\n`);
+  const t = new Date(Date.now() - ms);
+  fs.utimesSync(file, t, t);
+};
+/** A stand-in job process: its command line names linkJob.ts, and it runs until it is stopped. */
+const standIn = (t: { after: (fn: () => unknown) => void }) => {
+  const p = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', 'linkJob.ts'], { stdio: 'ignore' });
+  t.after(() => void p.kill('SIGKILL'));
+  return p;
+};
+const linuxCommand = (pid: number) => processCommand(pid);
+
+test('w5938: a staged job past 10 min is ended by the tick: failed with the reason in update-job.log and the daemon log, reported, and taken off the machine', async (t) => {
+  const x = overdueFixture(t, { phase: 'staged', createdAt: ago(JOB_LIMIT.stagedMs + 60_000) });
+  await x.u.tick();
+  const job = readJson<UpdateJob>(x.f.job)!;
+  assert.equal(job.phase, 'done');
+  const r = readJson<LinkUpdateReport>(x.f.result)!;
+  assert.deepEqual([r.id, r.ok, r.exit, r.form, r.before], [x.job.id, false, 1, 'update', 'b'.repeat(40)]);
+  assert.match(r.note!, /^the daemon ended the job: job 977d56f7 \(update\) was staged 11 min ago and its process never took it \(limit 10 min\); this machine takes updates again, its daemon runs on \(w5938\)$/);
+  const log = fs.readFileSync(x.f.log, 'utf8');
+  assert.match(log, /FF Factory update job 977d56f7-1030-442b-bcad-bd6ac62ab798: update to ff-factory cccccccccccc \(never started by its process\)\.\n.* job 977d56f7-1030-442b-bcad-bd6ac62ab798: FAILED \(the daemon ended the job: .*\)\.\n$/);
+  assert.match(r.log, /FAILED \(the daemon ended the job/, "the report carries the job's own log section");
+  assert.ok(x.logs.some((l) => l.startsWith('update over the link: FAILED the daemon ended the job: job 977d56f7')), x.logs.join('\n'));
+  assert.ok(x.sent.some((m) => m.type === 'self_update_report' && m.report.id === x.job.id && !m.report.ok), 'the failed result went to the portal');
+  await x.u.tick();
+  assert.equal(readJson<UpdateJob>(x.f.job)?.removed, true, "its task or LaunchAgent is removed, as after any job");
+  assert.equal(x.logs.filter((l) => /FAILED the daemon ended/.test(l)).length, 1, 'ended once');
+});
+
+test('w5938: a running job past 45 min whose process is gone is ended; one whose process went 44 min in is left', async (t) => {
+  const young = overdueFixture(t, { pid: 2 ** 30, createdAt: ago(JOB_LIMIT.inFlightMs - 60_000) });
+  await young.u.tick();
+  assert.equal(readJson<UpdateJob>(young.f.job)?.phase, 'running');
+  assert.equal(fs.existsSync(young.f.result), false, 'inside its limit: never touched');
+  const old = overdueFixture(t, { pid: 2 ** 30, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) });
+  await old.u.tick();
+  assert.equal(readJson<UpdateJob>(old.f.job)?.phase, 'done');
+  assert.match(readJson<LinkUpdateReport>(old.f.result)!.note!, /has run 46 min \(limit 45 min\) and its process \(pid \d+\) is gone without a result/);
+  assert.deepEqual(old.killed, [], 'nothing to stop');
+});
+
+test('w5938: a live job process past 45 min is stopped and ended only when its log has been quiet 15 min; one still writing is never touched', async (t) => {
+  const busy = standIn(t);
+  await until('the stand-in up', () => alive(busy.pid));
+  const live = overdueFixture(t, { pid: busy.pid, createdAt: ago(3 * 60 * 60_000) }, { command: linuxCommand });
+  setLogAge(live.f.log, 60_000);
+  await live.u.tick();
+  await live.u.tick();
+  assert.equal(readJson<UpdateJob>(live.f.job)?.phase, 'running', 'a live job writing its log is left, 3 h in');
+  assert.ok(alive(busy.pid), 'and its process runs on');
+  assert.deepEqual(live.killed, []);
+  assert.equal(live.logs.filter((l) => /WARNING job 977d56f7 .* past its 45 min limit; its process is alive and still writing its log/.test(l)).length, 1, live.logs.join('\n'));
+
+  const stuck = standIn(t);
+  await until('the stand-in up', () => alive(stuck.pid));
+  const hung = overdueFixture(t, { pid: stuck.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: linuxCommand });
+  setLogAge(hung.f.log, JOB_LIMIT.quietMs + 60_000);
+  await hung.u.tick();
+  assert.deepEqual(hung.killed, [`${stuck.pid} SIGTERM`]);
+  assert.equal(alive(stuck.pid), false, 'the hung process was stopped');
+  assert.equal(readJson<UpdateJob>(hung.f.job)?.phase, 'done');
+  assert.match(readJson<LinkUpdateReport>(hung.f.result)!.note!, /is hung: its log unwritten for 16 min \(limit 15 min\)/);
+
+  // A live pid that is not a job process (its pid taken by another program) is never stopped: the job alone is ended.
+  const other = overdueFixture(t, { pid: process.pid, createdAt: ago(JOB_LIMIT.inFlightMs + 60_000) }, { command: async () => 'node --test server/machineLink.test.ts' });
+  await other.u.tick();
+  assert.deepEqual(other.killed, []);
+  assert.match(readJson<LinkUpdateReport>(other.f.result)!.note!, /is now another program's/);
+});
+
+test('w5938: an update sent while an overdue job holds the lock is taken: the stale job is ended first and the new one starts', async (t) => {
+  const s = await setup(t);
+  await until('online, its hello read', () => s.mm.canLink('mx'));
+  s.d.selfUpdate.deps.launch = finishing(s, {});
+  s.d.selfUpdate.deps.remove = async () => undefined;
+  const f = updateFiles(s.appDir);
+  writeJson(f.job, { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'tools', root: s.root, appDir: s.appDir, service: 'com.fffactory.linktest', createdAt: ago(JOB_LIMIT.stagedMs + 60_000), phase: 'staged' } satisfies UpdateJob);
+  const r = await s.mm.linkUpdate('mx');
+  assert.equal(r.ok, true, 'not refused for the stale job');
+  assert.notEqual(readJson<UpdateJob>(f.job)?.id, '977d56f7-1030-442b-bcad-bd6ac62ab798');
+  assert.match(fs.readFileSync(f.log, 'utf8'), /job 977d56f7-1030-442b-bcad-bd6ac62ab798: FAILED \(the daemon ended the job: job 977d56f7 \(tools\) was staged 11 min ago/);
 });
 
 test('w1641: an answer the link could not carry goes again when it is back; one sent just before a drop too; the portal ignores a repeat', async () => {

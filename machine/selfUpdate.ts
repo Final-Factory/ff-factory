@@ -14,6 +14,7 @@
 //   4. the daemon that runs afterwards (the new one, or the old one put back) sends that result as self_update_report.
 //
 // No module here may need an npm package: linkJob.ts imports these from a checkout that has none.
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { gitExecFile } from '../server/safeGit.ts';
 import fs from 'node:fs';
@@ -22,6 +23,7 @@ import { Readable } from 'node:stream';
 import type { FromDaemon, LinkUpdateFlags, LinkUpdateReport, ToDaemon } from '../server/machineProtocol.ts';
 import { notePortalRedirect } from './portalPin.ts';
 import { launchJob, removeJob } from './osJob.ts';
+import { jobSection } from '../server/updateLog.ts';
 
 /** The largest bundle a daemon takes (ff-factory's whole history was 19 MB in October 2026). */
 export const MAX_BUNDLE_BYTES = 512 * 1024 * 1024;
@@ -87,10 +89,16 @@ export function jobInFlight(job: UpdateJob | undefined): boolean {
 /**
  * How long an update job may be in flight (w5938). On beast, 2026-11-26, job 977d56f7 ran 15.5 min (06:11:26-06:26:55 UTC,
  * its daemon too blocked to be seen online), and the agent tools update the rollout sent at 06:14:31 was refused for it;
- * the longest of the 179 jobs in the last 6000 lines of its update-job.log. Nothing ends an older one yet: past these the daemon
- * warns once and its refusal says so (warn first, lothsahn's lockout rule); ending it is a later change.
+ * the longest of the 179 jobs in the last 6000 lines of its update-job.log. Past these the daemon ends the job (endOverdue):
+ * a staged job past `stagedMs` (its process never took it), or a running one past `inFlightMs` whose process is gone, is
+ * not the job's any more (its pid now another program's), or is hung: alive but its update-job.log unwritten for `quietMs`.
+ * A live job process whose log still grows is never ended, however old. `quietMs` is a guess with room: the job's longest
+ * silent steps are the 3 min wait for the portal (linkJob.ts PUT_BACK) and an installer step; a tools run ends itself at
+ * 30 min (linkJob.ts TOOLS_JOB_MS).
  */
-export const JOB_LIMIT = { stagedMs: 10 * 60_000, inFlightMs: 45 * 60_000 };
+export const JOB_LIMIT = { stagedMs: 10 * 60_000, inFlightMs: 45 * 60_000, quietMs: 15 * 60_000 };
+
+const minutes = (ms: number) => Math.round(ms / 60_000);
 
 /** Why a job in flight is past its limit (JOB_LIMIT), or undefined. A staged job is one whose process never took it. */
 export function jobOverdue(job: UpdateJob | undefined, now = Date.now()): string | undefined {
@@ -98,9 +106,38 @@ export function jobOverdue(job: UpdateJob | undefined, now = Date.now()): string
   const age = now - Date.parse(job.createdAt);
   const limit = job.phase === 'staged' ? JOB_LIMIT.stagedMs : JOB_LIMIT.inFlightMs;
   if (!(age > limit)) return undefined;
-  const min = (ms: number) => Math.round(ms / 60_000);
   const what = job.phase === 'staged' ? 'staged and never taken by its process' : `running (pid ${job.pid})`;
-  return `job ${job.id.slice(0, 8)} (${job.form}) has been ${what} for ${min(age)} min, past its ${min(limit)} min limit`;
+  return `job ${job.id.slice(0, 8)} (${job.form}) has been ${what} for ${minutes(age)} min, past its ${minutes(limit)} min limit`;
+}
+
+/** What the daemon sees of a job's process and log when it decides (endOverdue); tests pass their own. */
+export interface JobLook {
+  /** The process's command line; undefined when it cannot be read (then it is never ended as another program's). */
+  command?: string;
+  /** When its update-job.log last grew (its mtime, or a growth this daemon saw). */
+  logAt?: number;
+}
+
+/**
+ * Whether a job is to be ended (w5938), and why: undefined for one within its limits, ended, or progressing. `kill` says its
+ * process is alive and hung, and is ended first. The pid is the job's only when its command line names linkJob.ts.
+ */
+export function jobToEnd(job: UpdateJob | undefined, now: number, look: JobLook = {}): { reason: string; kill: boolean } | undefined {
+  if (!job || job.phase === 'done') return undefined;
+  const age = now - Date.parse(job.createdAt);
+  const id = `job ${job.id.slice(0, 8)} (${job.form})`;
+  if (job.phase === 'staged') {
+    if (!(age > JOB_LIMIT.stagedMs)) return undefined;
+    return { reason: `${id} was staged ${minutes(age)} min ago and its process never took it (limit ${minutes(JOB_LIMIT.stagedMs)} min)`, kill: false };
+  }
+  if (!(age > JOB_LIMIT.inFlightMs)) return undefined;
+  const over = `${id} has run ${minutes(age)} min (limit ${minutes(JOB_LIMIT.inFlightMs)} min)`;
+  if (!alive(job.pid)) return { reason: `${over} and its process (pid ${job.pid ?? 'none'}) is gone without a result`, kill: false };
+  if (look.command !== undefined && !/linkJob\.ts/.test(look.command)) return { reason: `${over} and its pid ${job.pid} is now another program's, so its process is gone without a result`, kill: false };
+  if (look.command === undefined) return undefined; // alive, and not known to be the job's: never ended
+  const quiet = look.logAt === undefined ? Infinity : now - look.logAt;
+  if (!(quiet > JOB_LIMIT.quietMs)) return undefined; // alive and writing its log: progressing
+  return { reason: `${over} and its process (pid ${job.pid}) is hung: its log unwritten for ${Number.isFinite(quiet) ? `${minutes(quiet)} min` : 'its whole run'} (limit ${minutes(JOB_LIMIT.quietMs)} min)`, kill: true };
 }
 
 /** The refusal while a job is in flight: which job, how long, and whether it is past its limit (w5938). */
@@ -108,8 +145,21 @@ export function inFlightRefusal(job: UpdateJob | undefined, now = Date.now()): s
   const base = 'an update job of this machine is still running';
   if (!job || !jobInFlight(job)) return base;
   const over = jobOverdue(job, now);
-  if (over) return `${base}: ${over}; nothing ends it yet (warn only, w5938)`;
-  return `${base} (job ${job.id.slice(0, 8)}, ${job.form}, ${Math.round((now - Date.parse(job.createdAt)) / 60_000)} min since it was made)`;
+  if (over) return `${base}: ${over}, but its process is alive and still writing its log, so it is not ended (w5938)`;
+  return `${base} (job ${job.id.slice(0, 8)}, ${job.form}, ${minutes(now - Date.parse(job.createdAt))} min since it was made)`;
+}
+
+/** A job process's command line, or undefined when it cannot be read (w5938). */
+export async function processCommand(pid: number, platform: NodeJS.Platform = process.platform): Promise<string | undefined> {
+  try {
+    if (platform === 'linux') return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+    const run = (cmd: string, args: string[]) =>
+      new Promise<string | undefined>((resolve) => execFile(cmd, args, { timeout: 15_000, windowsHide: true }, (e, out) => resolve(e ? undefined : String(out).trim())));
+    if (platform === 'win32') return await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CommandLine`]) || undefined;
+    return await run('ps', ['-o', 'command=', '-p', String(Math.trunc(pid))]) || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** The machine's credential never leaves in a report: any ffm_ token in the text is cut down to its id. */
@@ -372,6 +422,9 @@ export interface SelfUpdaterDeps {
   nodeArgs?: string[];
   platform?: NodeJS.Platform;
   launch?: typeof launchJob;
+  /** w5938: a job process's command line (processCommand) and the signal that ends a hung one; tests replace them. */
+  command?: (pid: number) => Promise<string | undefined>;
+  kill?: (pid: number, signal: NodeJS.Signals) => void;
   /** w5546: sets the worker read fence's mode (daemon_control read-fence-off / read-fence-warn / read-fence-on). */
   readFence?: (mode: 'off' | 'warn' | 'on') => Promise<void>;
   remove?: typeof removeJob;
@@ -402,6 +455,10 @@ export class SelfUpdater {
   private removing: Promise<void> | undefined;
   /** Jobs past their limit already warned of (JOB_LIMIT), so the tick says it once. */
   private readonly overdueWarned = new Set<string>();
+  /** The job's update-job.log as this daemon last saw it: its size, and when it grew (JobLook.logAt). */
+  private logSeen: { size: number; at: number } | undefined;
+  /** An overdue job being ended: the tick and a new update wait for the one look (endOverdue). */
+  private ending: Promise<void> | undefined;
   /** Answers to the portal's calls, kept until the link surely had them (ANSWERS). */
   private readonly answers = new Map<string, { msg: LinkAnswer; at: number; sentAt?: number }>();
   /** Its hands (the job launcher, the fetch); tests replace them. */
@@ -487,6 +544,7 @@ export class SelfUpdater {
     const why = selfUpdateProblem(msg);
     if (why) return refuse(why);
     const f = updateFiles(this.deps.appDir);
+    await this.endOverdue();
     await this.removing;
     if (this.busy) return refuse('an update job of this machine is still running (this daemon is fetching or starting one)');
     const prior = readJson<UpdateJob>(f.job);
@@ -532,6 +590,7 @@ export class SelfUpdater {
     const inst = this.install();
     if (!inst) return answer(false, this.noInstall());
     if (!fs.existsSync(path.join(updateFiles(this.deps.appDir).src, 'scripts', 'worker', 'linkJob.ts'))) return answer(false, "the install's checkout has no update job (scripts/worker/linkJob.ts): update it first");
+    await this.endOverdue();
     await this.removing;
     const prior = readJson<UpdateJob>(updateFiles(this.deps.appDir).job);
     if (this.busy || jobInFlight(prior)) return answer(false, this.busy ? 'an update job of this machine is still running' : inFlightRefusal(prior, this.now()));
@@ -544,10 +603,79 @@ export class SelfUpdater {
     }
   }
 
+  /**
+   * w5938: end a job past its limit (jobToEnd) with nobody at the machine: a hung process is stopped first, then the job gets a
+   * failed result (sent by the tick like any other) and its done phase, so updates are taken again. The daemon runs on.
+   */
+  endOverdue(): Promise<void> {
+    this.ending ??= this.endOverdueOnce().finally(() => (this.ending = undefined));
+    return this.ending;
+  }
+  private async endOverdueOnce(): Promise<void> {
+    const f = updateFiles(this.deps.appDir);
+    const job = readJson<UpdateJob>(f.job);
+    if (!job || job.phase === 'done') return;
+    const now = this.now();
+    const look: JobLook = {};
+    try {
+      const st = fs.statSync(f.log);
+      // First sight: its mtime says when it last grew; a size change seen later is growth then (an mtime that lags, Windows).
+      if (!this.logSeen) this.logSeen = { size: st.size, at: st.mtimeMs };
+      else if (this.logSeen.size !== st.size) this.logSeen = { size: st.size, at: now };
+      look.logAt = Math.max(st.mtimeMs, this.logSeen.at);
+    } catch {
+      // no log yet: never written
+    }
+    // Its command line only once it is past its limit: on Windows each look starts PowerShell, and the tick runs every 10 s.
+    if (job.phase === 'running' && job.pid && alive(job.pid) && now - Date.parse(job.createdAt) > JOB_LIMIT.inFlightMs) look.command = await (this.deps.command ?? processCommand)(job.pid);
+    const end = jobToEnd(job, now, look);
+    if (!end) return;
+    if (end.kill && job.pid) {
+      const kill = this.deps.kill ?? ((pid: number, sig: NodeJS.Signals) => process.kill(pid, sig));
+      try {
+        kill(job.pid, 'SIGTERM');
+        for (let i = 0; i < 20 && alive(job.pid); i++) await new Promise((r) => setTimeout(r, 250));
+        if (alive(job.pid)) kill(job.pid, 'SIGKILL');
+        for (let i = 0; i < 20 && alive(job.pid); i++) await new Promise((r) => setTimeout(r, 250));
+      } catch (e) {
+        this.deps.log(`update over the link: ending hung job ${job.id.slice(0, 8)} (pid ${job.pid}) failed: ${(e as Error).message}`);
+      }
+      if (alive(job.pid)) {
+        this.deps.log(`update over the link: WARNING ${end.reason}; its process did not end when stopped, so the job is left in flight (w5938)`);
+        return;
+      }
+    }
+    // Its process may have taken it, or ended it, meanwhile: only the job as it was seen is ended.
+    const now2 = readJson<UpdateJob>(f.job);
+    if (!now2 || now2.id !== job.id || now2.phase !== job.phase || now2.pid !== job.pid || readJson<LinkUpdateReport>(f.result)?.id === job.id) return;
+    const note = `the daemon ended the job: ${end.reason}; this machine takes updates again, its daemon runs on (w5938)`;
+    const at = new Date(now).toISOString();
+    try {
+      fs.mkdirSync(path.dirname(f.log), { recursive: true });
+      const head = job.phase === 'staged' ? `\n${at} FF Factory update job ${job.id}: ${job.form}${job.commit ? ` to ff-factory ${job.commit.slice(0, 12)}` : ''} (never started by its process).\n` : '';
+      fs.appendFileSync(f.log, `${head}${at} job ${job.id}: FAILED (${note}).\n`);
+    } catch {
+      // the result still says why
+    }
+    let log = '';
+    try {
+      log = scrub(jobSection(fs.readFileSync(f.log, 'utf8').slice(-512 * 1024), job.id)).slice(-12_000);
+    } catch {
+      // no log
+    }
+    const report: LinkUpdateReport = { id: job.id, form: job.form === 'tools' ? 'tools' : 'update', commit: job.commit ?? '', ok: false, exit: 1, ...(job.before ? { before: job.before } : {}), note, log, at };
+    writeJson(f.result, report);
+    writeJson(f.job, { ...job, phase: 'done', pid: undefined });
+    this.deps.log(`update over the link: FAILED ${note}`);
+  }
+
   /** Send a result the portal has not had; once sent and the job's process is gone, remove the job's task or LaunchAgent. */
   async tick(): Promise<void> {
     // The spare copy of root.json kept fresh, and root.json put back once a reset drive is there again (w1918).
     this.install();
+    // An overdue job is ended first (w5938), so its failed result goes in this tick. Only one not done is looked at, so a
+    // finished job's removal below still starts in this same turn of the loop (the command that arrives then waits for it).
+    if (readJson<UpdateJob>(updateFiles(this.deps.appDir).job)?.phase !== 'done') await this.endOverdue();
     const r = pendingReport(this.deps.appDir);
     if (r && this.deps.send({ type: 'self_update_report', report: r })) {
       markReported(this.deps.appDir, r.id);
@@ -557,7 +685,7 @@ export class SelfUpdater {
     const over = jobOverdue(job, this.now());
     if (over && job && !this.overdueWarned.has(job.id)) {
       this.overdueWarned.add(job.id);
-      this.deps.log(`update over the link: WARNING ${over}; updates are refused while it is in flight, and nothing ends it yet (warn only, w5938)`);
+      this.deps.log(`update over the link: WARNING ${over}; its process is alive and still writing its log, so it is left to run and updates are refused meanwhile (w5938)`);
     }
     if (job?.reported && !job.removed && job.phase === 'done' && !alive(job.pid) && !this.busy) {
       // Busy meanwhile, so no new job starts while the old one's task or LaunchAgent is removed (it would be removed too).
