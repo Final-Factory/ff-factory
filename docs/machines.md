@@ -1261,7 +1261,11 @@ older daemon ignores it and keeps making worktrees.
   With `all`, a worktree becomes a slot repo when a worker is placed in it (the switch to its branch), under the same
   checks except the live agent (the placed one waits on the switch). A failure leaves the worktree whole and the switch
   goes on. The look logs why it passes a worktree by ("not becoming a slot repo yet: an agent is live there"), once
-  each time the reason changes.
+  each time the reason changes. Limits at a placement (w6086's review): up to 90 s waiting for the main clone's lock
+  (past it nothing is done and nothing is held against the sandbox), then up to 90 s of conversion once it holds the
+  lock, plus up to 10 s for a cut git call to end. A conversion that fails or times out after taking the lock is skipped
+  at that sandbox's placements for 6 h (`CONVERT_BACKOFF_MS`); the idle look still tries. A cut that lands after the
+  swap leaves a whole slot repo and logs "became a slot repo".
 - **One branch, one sandbox**: git no longer refuses a branch another sandbox holds, since they share no refs, so the
   pool does (`slotBranchHolder`): `switch_branch` and `create_sandbox` to a branch a slot-repo sandbox holds are
   refused with "branch X is checked out in sandbox Y". Between two worktrees git still refuses in its own words.
