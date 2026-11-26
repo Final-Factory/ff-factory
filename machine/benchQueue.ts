@@ -116,14 +116,17 @@ export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv =
  * (unity-slot run reads any `why` as a refusal).
  */
 export function benchStatusDir(root: string | undefined, mkdir: (p: string) => void = (p) => void fs.mkdirSync(p, { recursive: true })): { dir: string; why?: string } {
-  if (!root) return { dir: os.tmpdir(), why: 'no worker root: the bench status file goes to the OS temp folder' };
-  const dir = path.join(root, 'tmp', 'bench-status');
-  try {
-    mkdir(dir);
-    return { dir };
-  } catch (e) {
-    return { dir: os.tmpdir(), why: `could not make ${dir} (${(e as Error).message}): the bench status file goes to the OS temp folder` };
+  let why = 'no worker root: the bench status file goes to the OS temp folder';
+  if (root) {
+    const dir = path.join(root, 'tmp', 'bench-status');
+    try {
+      mkdir(dir);
+      return { dir };
+    } catch (e) {
+      why = `could not make ${dir} (${(e as Error).message}): the bench status file goes to the OS temp folder`;
+    }
   }
+  return { dir: os.tmpdir(), why };
 }
 
 /** A ticket's status folder: the caller's, else benchStatusDir's (its fallback warned). */
@@ -207,7 +210,7 @@ export class BenchTicket {
 
   constructor(o: BenchTicketOptions) {
     this.o = o;
-    this.status = path.join(o.tempDir ?? os.tmpdir(), `ff-bench-${process.pid}-${randomBytes(4).toString('hex')}`);
+    this.status = path.join(statusDirFor(o.tempDir, undefined), `ff-bench-${process.pid}-${randomBytes(4).toString('hex')}`);
   }
 
   /** The earlier place this ticket was taken at (w4624), when the helper was asked to keep one. */
