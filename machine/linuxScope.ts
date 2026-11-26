@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { run as runAsync } from '../server/proc.ts';
 
 /**
  * w2474: on a Linux PC the daemon starts every Unity editor and every agent host in a transient systemd scope of its own
@@ -39,8 +40,8 @@ const PROBE_MARK = 'ffw-scope-ok';
  * with no user bus systemd 255 says "Failed to connect to bus", runs nothing and still exits 0 (measured, Ubuntu 24.04).
  * Exported for tests.
  */
-export function probeScopes(run: () => { status: number | null; stdout: string } = () => spawnSync('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--', 'echo', PROBE_MARK], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
-  const r = run();
+export function probeScopes(run: (() => { status: number | null; stdout: string }) | { status: number | null; stdout: string } = () => spawnSync('systemd-run', ['--user', '--scope', '--quiet', '--collect', '--', 'echo', PROBE_MARK], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
+  const r = typeof run === 'function' ? run() : run;
   return r.status === 0 && (r.stdout ?? '').includes(PROBE_MARK);
 }
 
@@ -66,19 +67,52 @@ export function oomPolicyUsable(probe: () => boolean = probeOomPolicy, now = Dat
  * and pids controllers (systemd's user@.service does, `Delegate=pids memory cpu`, since systemd 252: a guess for older ones), or
  * systemd takes the properties and nothing holds them. So the probe reads its own scope's memory.max back. Exported for tests.
  */
-export function probeLimits(run: () => { status: number | null; stdout: string } = () => spawnSync('systemd-run', ['--user', '--scope', '--quiet', '--collect', '-p', `MemoryMax=${PROBE_MEMORY}`, '-p', 'TasksMax=4096', '--', 'sh', '-c', 'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max" "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/pids.max"'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
-  const r = run();
+export function probeLimits(run: () => { status: number | null; stdout: string } = () => spawnSync('systemd-run', ['--user', '--scope', '--quiet', '--collect', ...LIMITS_PROBE], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
+  return limitsAnswer(run());
+}
+
+function limitsAnswer(r: { status: number | null; stdout: string }): boolean {
   const lines = (r.stdout ?? '').split(/\s+/);
   return r.status === 0 && lines.includes(String(PROBE_MEMORY)) && lines.includes('4096');
 }
 
 const PROBE_MEMORY = 1073741824;
+const LIMITS_PROBE = ['-p', `MemoryMax=${PROBE_MEMORY}`, '-p', 'TasksMax=4096', '--', 'sh', '-c', 'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max" "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/pids.max"'];
 
 /** Whether scopes enforce limits now: probed once, the answer kept PROBE_TTL_MS. Exported for tests. */
 export function limitsUsable(probe: () => boolean = probeLimits, now = Date.now()): boolean {
   if (!probedLimits || now - probedLimits.at > PROBE_TTL_MS) probedLimits = { ok: probe(), at: now };
   return probedLimits.ok;
 }
+
+type ProbeRunAsync = (args: string[]) => Promise<{ status: number | null; stdout: string }>;
+const realProbeRunAsync: ProbeRunAsync = async (args) => {
+  const r = await runAsync('systemd-run', args, { timeoutMs: 10_000 });
+  return { status: r.code, stdout: r.stdout };
+};
+let warming: Promise<void> | undefined;
+
+/**
+ * w5973: the three probes, run as child processes the daemon's loop does not wait on, before their answers go stale
+ * (at half PROBE_TTL_MS), so scoped() at an editor's or an agent host's launch finds them kept and never runs
+ * systemd-run on the loop (up to 3 x 10 s before). The daemon calls it at start and on a timer; Linux only. One at a time.
+ */
+export function warmScopeProbes(o: { platform?: NodeJS.Platform; run?: ProbeRunAsync; now?: () => number } = {}): Promise<void> {
+  if ((o.platform ?? process.platform) !== 'linux') return Promise.resolve();
+  if (warming) return warming;
+  const now = o.now ?? Date.now;
+  const due = (p: { at: number } | undefined) => !p || now() - p.at > PROBE_TTL_MS / 2;
+  const run = o.run ?? realProbeRunAsync;
+  const base = ['--user', '--scope', '--quiet', '--collect'];
+  warming = (async () => {
+    if (due(probed)) probed = { ok: probeScopes(await run([...base, '--', 'echo', PROBE_MARK]).catch(() => FAILED)), at: now() };
+    if (!probed?.ok) return;
+    if (due(probedOom)) probedOom = { ok: probeScopes(await run([...base, ...OOM_CONTINUE, '--', 'echo', PROBE_MARK]).catch(() => FAILED)), at: now() };
+    if (due(probedLimits)) probedLimits = { ok: limitsAnswer(await run([...base, ...LIMITS_PROBE]).catch(() => FAILED)), at: now() };
+  })().finally(() => (warming = undefined));
+  return warming;
+}
+const FAILED = { status: null, stdout: '' };
 
 /** Forget the probes' answers (tests). */
 export function resetScopeProbe() {
@@ -136,12 +170,16 @@ export function scoped(
 
 /**
  * Why a scope's process tree ended, from the user journal of that scope (w2884): systemd's own line when the OOM killer
- * (or systemd-oomd) ended a process of it, else undefined. Best effort: no journal, no answer, within 3 s.
+ * (or systemd-oomd) ended a process of it, else undefined. Best effort: no journal, no answer, within 3 s. w5973: a child
+ * process the daemon's loop does not wait on (it ran from the agent host's 100 ms poll).
  */
-export function scopeEndCause(unit: string, run: () => { status: number | null; stdout: string } = () => spawnSync('journalctl', ['--user', '-u', unit, '-o', 'cat', '-n', '40', '--no-pager'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 })): string | undefined {
+export async function scopeEndCause(unit: string, run: () => Promise<{ status: number | null; stdout: string }> = async () => {
+  const r = await runAsync('journalctl', ['--user', '-u', unit, '-o', 'cat', '-n', '40', '--no-pager'], { timeoutMs: 3000 });
+  return { status: r.code, stdout: r.stdout };
+}): Promise<string | undefined> {
   let out = '';
   try {
-    out = run().stdout ?? '';
+    out = (await run()).stdout ?? '';
   } catch {
     return undefined;
   }
