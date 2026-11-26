@@ -1190,6 +1190,18 @@ the process does. The legacy `unity-mcp-port.json` stays the sandbox editor's. T
 `<sandbox>_clone_<n>@<hash>`, and the guard lets a worker pin its own sandbox's clones (`server/guard.ts`) and no
 other. No fence changed.
 
+**A clone editor's home on a fenced Mac** (w5961, found in w5806): a second editor a worker opens itself under
+`unity-slot run` inherits the worker's Seatbelt profile but not the fenced editor's environment, so with the real home
+Unity is refused its window layout in `~/Library/Preferences/Unity/Editor-5.x` and stops on a hidden "Moving file failed"
+modal with no MCP bridge (measured on m5: the log ends at `[LAYOUT] About to save layout` and `Curl error 23`, 10+
+minutes; HOME alone did not help, Foundation's home follows `CFFIXED_USER_HOME`). Now `slotEnv` gives a sandbox agent on
+a Mac with the worker fence on `FF_UNITY_EDITOR_HOME` (`<root>/home`, the home `macEditorFenceFor` gives the daemon's own
+fenced editors), and `unity-slot run` sets `HOME` and `CFFIXED_USER_HOME` to it when its command is the Unity editor
+binary without `-batchmode` (`editorHomeEnv`, `machine/unitySlots.ts`). A script keeps the person's home (git, gh); a
+script that opens an editor itself can pass `FF_UNITY_EDITOR_HOME` on. A batch run keeps it too: under a moved home with
+no licensing client running, Unity starts its own there and quits unlicensed. No fence changed; `<root>/home` is already
+writable to every worker.
+
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the

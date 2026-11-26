@@ -86,6 +86,29 @@ export function editorStatusEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return { ...env, UNITY_MCP_STATUS_DIR: dir };
 }
 
+/**
+ * w5961: on a Mac whose Seatbelt worker fence is on, the daemon gives sandbox agents FF_UNITY_EDITOR_HOME, `<root>/home`
+ * (daemon.ts slotEnv), the home its own fenced editors get (machine/unity.ts macEditorFenceFor). A second editor a worker
+ * opens under `unity-slot run` (a peer run's ParrelSync clone) inherits the worker's profile, and with the real home Unity
+ * is refused its window layout in ~/Library/Preferences/Unity/Editor-5.x and stops on a hidden "Moving file failed" modal
+ * with no MCP bridge (measured on m5 in w5806: log ends at `[LAYOUT] About to save layout` + `Curl error 23`, 10+ minutes;
+ * HOME alone did not help, Foundation's home follows CFFIXED_USER_HOME). So an interactive Unity editor run gets HOME and
+ * CFFIXED_USER_HOME at that folder (it loaded in 10.6 s and its bridge came up so). Only the editor binary itself, and never
+ * a `-batchmode` run: a script keeps the person's home for git and the rest, and a batch run under a moved home with no
+ * licensing client already running starts its own there and quits unlicensed (machine/unity.ts licensingClientRunning).
+ */
+export function editorHomeEnv(rest: string[], env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+  const home = env.FF_UNITY_EDITOR_HOME;
+  const [cmd = '', ...args] = rest;
+  if (!home || platform !== 'darwin' || !isUnityBinary({ cmd, name: '' }, 'darwin') || args.some((a) => /^-batchmode$/i.test(a))) return env;
+  try {
+    fs.mkdirSync(home, { recursive: true });
+  } catch {
+    // the daemon's fenced editor start makes it too
+  }
+  return { ...env, HOME: home, CFFIXED_USER_HOME: home };
+}
+
 /** w5324: the pid Unity wrote to a project's Library/EditorInstance.json at boot ({"process_id": n, ...}), or undefined. */
 export function editorInstancePid(projectPath: string): number | undefined {
   const pid = readJson<{ process_id?: unknown }>(path.join(projectPath, 'Library', 'EditorInstance.json'))?.process_id;
@@ -1645,7 +1668,7 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
     const logFile = batchUnityLogFile(o.rest, env, o.label ?? 'batch');
     if (logFile) d.say(`no -logFile given: Unity logs to ${logFile} (w5297: never the person's own Editor.log)`);
     const run = commandToSpawn(logFile ? [...o.rest, '-logFile', logFile] : o.rest, process.platform, env);
-    const { FF_UNITY_SLOT_JOB: _job, ...childEnv } = editorStatusEnv(env);
+    const { FF_UNITY_SLOT_JOB: _job, ...childEnv } = editorHomeEnv(run.shell ? [] : [run.cmd, ...run.args], editorStatusEnv(env));
     const child = spawn(run.cmd, run.args, {
       stdio: 'inherit',
       shell: run.shell,
