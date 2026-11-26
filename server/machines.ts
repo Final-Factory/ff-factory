@@ -41,6 +41,7 @@ import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 import { beatWasLate } from './loopWatch.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
 import { runnerHoldReportOf } from '../shared/runnerHold.ts';
+import { movedAwayMode } from './movedAwayEnforce.ts';
 
 const PING_MS = 20_000;
 /** w5916: how often the portal looks whether a machine's hold changed, and how often it repeats a hold that did not. */
@@ -790,6 +791,7 @@ export class MachineManager {
    * and reported; nothing is stopped or skipped yet (lothsahn's lockout rule: warn first, enforce in its own reviewed change).
    */
   private warnMovedAway(machineId: string, sids: string[], what: string) {
+    if (!sids.length) return;
     const line = sids.map((sid) => {
       const m = this.handle(sid)!.info.movedAway!;
       return `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
@@ -798,19 +800,44 @@ export class MachineManager {
     this.report?.(`[machines] ${machineId}: ${sids.length} worker(s) whose work moved elsewhere: ${what}: ${line.join(', ')}. A newer worker carries that work, so two may act on one request (w5942, warn only).`);
   }
 
+  /**
+   * w5950: what enforcing (config movedAwayWorkers "on") does with moved-away workers (Agents.enforceMovedAway, wired at
+   * boot): answers the ones it took off this machine (stopped, or not to be resumed) with each one's new workers; the rest
+   * it kept, and journalled why. Unset (a test without Agents): nothing is enforced.
+   */
+  enforceMovedAway?: (machineId: string, sids: string[], how: 'live' | 'resume') => Map<string, string[]>;
+
+  /** w5950: the moved-away workers of `sids` this hello or resume handles: warned ("warn"), enforced ("on") or neither ("off"). */
+  private movedAwayCheck(machineId: string, sids: string[], how: 'live' | 'resume', what: string): Map<string, string[]> {
+    const mode = movedAwayMode(this.cfg.movedAwayWorkers);
+    const moved = sids.filter((sid) => this.handle(sid)?.info.movedAway);
+    if (mode === 'off' || !moved.length) return new Map();
+    if (mode === 'warn' || !this.enforceMovedAway) {
+      this.warnMovedAway(machineId, moved, what);
+      return new Map();
+    }
+    return this.enforceMovedAway(machineId, moved, how);
+  }
+
   private resumeCutOff(machineId: string, live: Set<string>, now = Date.now()) {
     const c = this.cutOff.get(machineId);
     if (!c || this.outdated(machineId)) return;
     this.cutOff.delete(machineId);
-    const gone = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid) && !this.handle(sid)!.info.stoppedOnPurpose);
-    if (!gone.length) return;
-    // w5942 (warn only, lothsahn's lockout rule): a worker whose work moved off it while its computer was away resumes here
-    // as before, and is named, so the journal shows how often that happens before a later change stops it.
-    const moved = gone.filter((sid) => this.handle(sid)!.info.movedAway);
-    if (moved.length) this.warnMovedAway(machineId, moved, 'would not resume (it resumes for now)');
+    const all = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid) && !this.handle(sid)!.info.stoppedOnPurpose);
+    if (!all.length) return;
+    const tooOld = now - c.at > RESUME_WITHIN_MS;
+    // w5942 warns (the default); w5950's "on" takes a worker whose work moved off it while its computer was away out of the
+    // resume, when a started new worker holds each of its requests (movedAwayEnforce.ts), and tells that worker instead.
+    const taken = this.movedAwayCheck(machineId, all, 'resume', tooOld ? 'cut off too long ago to resume by itself' : 'would not resume (it resumes for now)');
+    const gone = all.filter((sid) => !taken.has(sid));
     const when = new Date(c.at).toLocaleTimeString();
-    if (now - c.at > RESUME_WITHIN_MS) {
-      this.report?.(`[machines] ${machineId} is back; ${gone.length} agent(s) were mid-turn when its daemon ${c.why} at ${when}, too long ago to resume by themselves: ${gone.join(', ')}. Message them to continue.`);
+    if (tooOld) {
+      // w5950 (e): a moved-away worker is not one to message: its new worker carries the work.
+      const movedOn = (sid: string) => this.handle(sid)?.info.movedAway;
+      const toMessage = gone.filter((sid) => !movedOn(sid));
+      const away = gone.filter((sid) => movedOn(sid));
+      const awayText = away.length ? ` ${away.map((sid) => `${sid} (its work moved to ${movedOn(sid)!.to} at ${movedOn(sid)!.at.slice(11, 19)}Z: message the worker its request is with now, not this one)`).join(', ')}.` : '';
+      if (gone.length) this.report?.(`[machines] ${machineId} is back; ${gone.length} agent(s) were mid-turn when its daemon ${c.why} at ${when}, too long ago to resume by themselves: ${gone.join(', ')}.${toMessage.length ? ` Message ${toMessage.length === gone.length ? 'them' : toMessage.join(', ')} to continue.` : ''}${awayText}`);
       return;
     }
     const resumed: string[] = [];
@@ -2618,8 +2645,8 @@ export class MachineManager {
           if (lived.length) this.workersLived?.(id, lived);
           // w5942 (warn only): on 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50, whose w5869
           // and w5891 had moved to biscuit at 06:09:46Z (w2544): two live workers on each request.
-          const moved = lived.filter((sid) => this.handle(sid)?.info.movedAway);
-          if (moved.length) this.warnMovedAway(id, moved, 'still runs');
+          // w5950: "on" stops such a worker, when a started new worker holds each of its requests (movedAwayEnforce.ts).
+          this.movedAwayCheck(id, lived, 'live', 'still runs');
         }
         if (why || behind) this.checkOutdated();
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
