@@ -33,9 +33,13 @@ test('ids in the orchestrator chat link to the worker, sandbox, machine and requ
 
   const stills = process.env.IDLINK_STILLS;
   const shot = async (name: string) => {
-    if (stills) await page.screenshot({ path: `${stills}/${test.info().project.name}-${name}.png` });
+    if (!stills) return;
+    // Messages rise and fade in (styles.css, rise/fade): shoot once every one that ends (not a spinner's or a live dot's loop) has finished.
+    await page.waitForFunction(() => document.getAnimations().every((a) => a.playState !== 'running' || a.effect?.getTiming().iterations === Infinity));
+    await page.screenshot({ path: `${stills}/${test.info().project.name}-${name}.png` });
   };
-  await msg.scrollIntoViewIfNeeded();
+  // The message is drawn again as its turn settles (a new node): retry the scroll until it holds.
+  await expect(async () => msg.scrollIntoViewIfNeeded({ timeout: 2000 })).toPass();
   await shot('1-chat-links');
 
   const mobile = isMobile(page);
@@ -44,6 +48,8 @@ test('ids in the orchestrator chat link to the worker, sandbox, machine and requ
   await expect(page).toHaveURL(new RegExp(`#/machine/${machine}/sandbox/${sandbox}/${worker.id}$`));
   await expect(page.getByTestId('machine-sandbox-panel')).toBeVisible();
   if (!mobile) await expect(page.locator('.orch.orch-compact')).toBeVisible();
+  // The worker's own conversation is drawn in the panel.
+  await expect(page.getByTestId('machine-sandbox-panel').getByText(`Fix the portal ${tag}`).first()).toBeVisible();
   await shot('2-worker-panel');
 
   // The request, from the chat beside the panel on a desktop (back to the chat first on a phone): the Requests tab with
@@ -59,5 +65,7 @@ test('ids in the orchestrator chat link to the worker, sandbox, machine and requ
   await again.nth(3).click();
   await expect(page).toHaveURL(new RegExp(`#/machine/${machine}/sandbox/${sandbox}$`));
   await expect(page.getByTestId('machine-sandbox-panel')).toBeVisible();
+  // The sandbox's newest worker is drawn in the panel (another test's worker in the same sandbox may be newer than ours).
+  await expect(page.getByTestId('machine-sandbox-panel').locator('.msg-assistant').first()).toBeVisible();
   await shot('4-sandbox-panel');
 });
