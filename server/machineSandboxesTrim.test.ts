@@ -698,6 +698,32 @@ test('w5614: slot repos "all": a free, idle worktree sandbox becomes a slot repo
   r.git(r.main, 'switch', '-q', 'master');
 });
 
+test('w5614: slot repos "all" on a busy machine: a worktree that is never free converts when a worker is placed in it, and the look says why it waited', async (t) => {
+  // BEAST, 2026-11-26: slot3 was free only between a release and the next placement, so convertIdle never saw it free,
+  // and the log never said why. The worker placed there was the one waiting for the conversion.
+  const r = repos();
+  t.after(r.cleanup);
+  const logs: string[] = [];
+  const { p } = pool(r, { liveAgents: () => 1, log: (l) => logs.push(l) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  fs.writeFileSync(path.join(dir, 'loose.txt'), 'u');
+  p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
+  await p.tick();
+  (p as unknown as { lastConvertLookAt: number }).lastConvertLookAt = 0;
+  await p.tick();
+  assert.ok(isWorktree(dir), 'an agent is live there: the look leaves it');
+  const said = logs.filter((l) => /sb1: not becoming a slot repo yet: an agent is live there/.test(l));
+  assert.equal(said.length, 1, `the reason, once: ${JSON.stringify(logs)}`);
+  const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
+  assert.ok(isSlotRepo(dir), `converted at the placement: ${JSON.stringify(logs)}`);
+  assert.equal(res.to, 'sandbox/placed');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed');
+  assert.equal(p.list()[0].status, 'ready');
+  assert.ok(fs.existsSync(path.join(dir, 'loose.txt')), 'files untouched');
+});
+
 test('w5614: a conversion cut between its two renames is finished; a slot .git.new beside a whole .git is dropped', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slotfin-'));
   try {
