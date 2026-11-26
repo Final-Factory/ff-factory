@@ -1322,16 +1322,22 @@ export class AgentSession implements SessionHandle {
     clock.done = true;
     if (this.resumeClock === clock) this.resumeClock = undefined;
     resumeAnswered(clock);
-    const now = Date.now();
-    let at = clock.asked;
-    const steps = clock.marks.map(([what, t]) => {
-      const s = `${what} +${((t - at) / 1000).toFixed(1)} s`;
-      at = t;
-      return s;
-    });
-    steps.push(`${how} +${((now - at) / 1000).toFixed(1)} s`);
-    const size = clock.bytes === undefined ? '' : `; transcript ${(clock.bytes / 1048576).toFixed(1)} MB`;
-    console.log(`resume ${this.info.id} (${clip(this.info.title, 60)}): ${how} ${((now - clock.asked) / 1000).toFixed(1)} s after it was asked (${steps.join(', ')}${size}) (w5888)`);
+    // only a log line: it never throws into consume(), and stays one line (clip() would add a line for a long title)
+    try {
+      const now = Date.now();
+      let at = clock.asked;
+      const steps = clock.marks.map(([what, t]) => {
+        const s = `${what} +${((t - at) / 1000).toFixed(1)} s`;
+        at = t;
+        return s;
+      });
+      steps.push(`${how} +${((now - at) / 1000).toFixed(1)} s`);
+      const size = clock.bytes === undefined ? '' : `; transcript ${(clock.bytes / 1048576).toFixed(1)} MB`;
+      const title = String(this.info.title ?? '').replace(/\s+/g, ' ').slice(0, 60);
+      console.log(`resume ${this.info.id} (${title}): ${how} ${((now - clock.asked) / 1000).toFixed(1)} s after it was asked (${steps.join(', ')}${size}) (w5888)`);
+    } catch {
+      // the timing is lost, nothing else
+    }
   }
 
   /** The launch is over (or given up): the messages sent meanwhile go into the tally, in their order. */
