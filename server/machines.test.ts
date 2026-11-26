@@ -1729,7 +1729,7 @@ test('w3597: a resume its daemon refuses at the agent cap is Queued for a slot, 
   assert.notEqual(worker.info.status, 'error', 'a cap refusal is no failure');
   const q = sessions.queued().find((x) => x.id === worker.info.id)!;
   assert.equal(q.on, 'capacity');
-  assert.match(q.why, /^1 agents mid-turn on mx by its daemon's count \(it refused the start: already 1 agents mid-turn on this machine, in its sandboxes and standing agents together \(its agent cap 1\)\)$/);
+  assert.match(q.why, /^1 agents mid-turn on mx by its daemon's count \(it refused the start: already 1 agents mid-turn on this machine, in its sandboxes and standing agents together \(its agent cap 1\); counted: [0-9a-f]{8} \(standing, running\)\)$/, 'it names the agents it counted (w5972)');
   assert.match(q.why, ROOM_WAIT, 'a resume held so may move to a computer with room (w2046)');
   assert.equal(mm.runningIn('mx', '*'), 1, 'the refused turn takes no slot');
   const item: WorkItem = { id: 'w3564', title: 'FFU flake', brief: 'Fix it.', priority: 'normal', keys: [], requestedBy: { userId: 'u', displayName: 'lothsahn' }, requesters: [{ userId: 'u', displayName: 'lothsahn' }], humanAsked: true, status: 'active', createdAt: new Date(Date.now() - 3_600_000).toISOString(), updatedAt: new Date().toISOString(), sessionIds: [worker.info.id], overlaps: [], asks: 0, log: [] };
