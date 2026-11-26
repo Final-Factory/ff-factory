@@ -9,7 +9,7 @@
 // The ticket: a play-only machine has no game checkout and no python, so the daemon writes its ticket in the queue's own
 // format (<root>/daemon/bench.queue/tNNNNNNNN, bench.lock/owner; machine/benchQueue.ts reads it), the holder being the daemon
 // itself. Only it takes tickets there; it still waits while a live ticket of anyone else's is in the queue, or a person plays.
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -25,6 +25,7 @@ import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
 import { sendChunks } from './review.ts';
 import { PLAYER_EXE } from './timedRunPack.ts';
 import { exeReadsGameDataDir, playerHomeEnv, preparePlayerHome, savesDirsFor } from './gameData.ts';
+import { run as runAsync } from '../server/proc.ts';
 import { fencedPlayer, playerFenceFor, playerWritable, type PlayerFence } from './playerFence.ts';
 
 
@@ -243,10 +244,10 @@ export function linkInto(src: string, slot: string, files: { path: string }[], k
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** End a leg's player and what it started (taskkill /T on Windows). */
-function killTree(child: ChildProcess | undefined) {
+/** End a leg's player and what it started (taskkill /T on Windows; w5973: a child the daemon's loop does not wait on). */
+async function killTree(child: ChildProcess | undefined): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  if (child.pid && process.platform === 'win32') spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true });
+  if (child.pid && process.platform === 'win32') await runAsync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { timeoutMs: 30_000 });
   else child.kill('SIGKILL');
 }
 
@@ -540,7 +541,7 @@ export class TimedRunner {
     if (this.stop?.id === id) return true;
     this.stop = { id, why };
     this.d.log(`timed run ${id}: cancelled: ${why}; ending its leg and giving its ticket back`);
-    killTree(this.child);
+    void killTree(this.child);
     for (const w of [...this.wakers]) w();
     return true;
   }
@@ -973,8 +974,8 @@ export class TimedRunner {
     const bound = legTimeoutS(o.settings) * 1000;
     const code = await new Promise<number | string>((resolve) => {
       const timer = setTimeout(() => {
-        killTree(child);
-        resolve('timeout');
+        // As before, the leg ends once the tree is ended (taskkill answered), not while it still runs.
+        void killTree(child).then(() => resolve('timeout'));
       }, bound);
       child.on('error', (e) => (clearTimeout(timer), resolve(`error: ${e.message}`)));
       child.on('exit', (c) => (clearTimeout(timer), resolve(c ?? -1)));

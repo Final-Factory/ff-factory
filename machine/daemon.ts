@@ -27,6 +27,7 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
+import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
@@ -1851,6 +1852,9 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer heartbeat', () => this.heartbeat()), LINK_BEAT_MS));
     // w5973: the machine gh login's token is read off the loop; read it now, so the first runs after a start get it.
     if (this.cfg.root) void this.readMachineGh();
+    // w5973: the Linux scope probes answer from what this keeps, so an editor's or agent's launch runs no systemd-run on the loop.
+    void warmScopeProbes();
+    this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(loopLabel('timer selfUpdate.tick', () => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`))), 10_000));
