@@ -1067,6 +1067,7 @@ export class Agents {
     machines.workersLived = (id, sids) => void this.orchestrators.workersLived(id, sids);
     // w5942: a daemon's refusal at its agent cap keeps room moves off that computer a while (resumeMove.ts MoveGuard).
     machines.capRefused = (id, why) => this.moveGuard.noteRefusal(id, why, Date.now());
+    machines.capStarted = (id) => this.moveGuard.startedOn(id);
     // w2884: a worker whose agent host died mid-turn, resumed by Machines: said on its requests' logs.
     machines.workerNote = (sid, text) => void this.orchestrators.noteOnHeld(sid, text);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
@@ -3962,7 +3963,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // undoes the first (w5869 went biscuit → beast → biscuit → lothdesktop on 2026-11-25).
     // A worker that ran a turn keeps its conversation: it waits a while for a seat on its own computer first. Both come after
     // the w2079 hand-over, so an old worker whose requests went elsewhere never holds a message for them.
-    const lately = !urgent ? this.moveGuard.movedLately(reqs.map((w) => w.id), now) ?? warmWait(info.turns, hold, Date.parse(q.at) || now, now) : undefined;
+    const lately = !urgent ? this.moveGuard.movedLately(reqs.map((w) => w.id), now) ?? warmWait(info.turns, hold, this.moveGuard.waitingSince(info.id, info.turns ?? 0, Date.parse(q.at) || now), now) : undefined;
     if (lately) {
       if (this.roomKept.get(info.id) !== lately) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) waits: ${lately}`);
       this.roomKept.set(info.id, lately);
@@ -4238,11 +4239,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   /**
    * w5942: a message that waited for a worker whose requests all went to other workers goes to those workers, once each,
    * instead of being dropped (w2079 dropped it: at 06:38:50Z on 2026-11-25 the message for w5869's moved worker 81122653 was
-   * "taken off worker 81122653: not moved" and reached nobody). A gate resume (resumeOf) is the old worker's own wait and
-   * stays dropped: the worker now on the request set its own. Answers the workers it went to.
+   * "taken off worker 81122653: not moved" and reached nobody). A gate resume (resumeOf) or a check-in ("[wake_me] …") is the
+   * old worker's own wait and stays dropped: the worker now on the request sets its own (the w5949 review). Answers the workers
+   * it went to.
    */
   private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend): string[] {
-    if (q.resumeOf) return [];
+    if (q.resumeOf || /^\[wake_me\]/.test(q.text)) return [];
     const at = `${info.machineId}/${info.machineSandbox}`;
     const heirs = new Map<string, { s: SessionInfo; ids: string[] }>();
     for (const w of ws) {
@@ -4328,7 +4330,6 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend) {
     const from = `${info.machineId}/${info.machineSandbox}`;
-    this.moveGuard.noteMove(reqs.map((w) => w.id), to, Date.now());
     const reason = entry.reason ?? `${hold}, and ${to} has room (w2046)`;
     const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
     const h = this.sessions.sessions.get(info.id);
@@ -4367,6 +4368,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       try {
         const started = await this.startMoved(info, primary, to, why, hold, branch, entry.lead, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
         console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
+        // w5942: only a move whose fresh session started holds the request where it went; a failed start goes back to the
+        // dispatcher unheld (the w5949 review, M2: "starting w5449 on beast failed" at 06:56:37Z on 2026-11-25).
+        this.moveGuard.noteMove([primary.id], to, Date.now());
         // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
         if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);

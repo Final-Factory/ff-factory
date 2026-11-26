@@ -2607,18 +2607,22 @@ LothDesktop and Beast, not just when BEAST is full").
     `ROOM_WAIT` reads as room to move for). w5869 went biscuit → beast (81122653, refused) → biscuit (aa98e369 placed again)
     → lothdesktop (19889673) within 20 min, w5892 went c89b46d1 → c1e9dd0c → c89b46d1, and w5932's fresh workers 60a433cb
     and d4f2c3ca never ran a turn (measured, the portal journal). The fixes (`server/resumeMove.ts`, `Agents.roomMove`):
-    - A request moved within `HOME_WAIT_MS` (15 min) waits where it went (`MoveGuard.movedLately`, noted in `moveForRoom` for
-      room and away moves), Queued "… moves at most once per wait (w5942)". Urgent work and away moves (w2544) are not held.
+    - A request moved within `HOME_WAIT_MS` (15 min) waits where it went (`MoveGuard.movedLately`, noted in `moveForRoom` once
+      the fresh session started, for room and away moves; a failed start goes back unheld), Queued "… moves at most once per wait (w5942)". Urgent work and away moves (w2544) are not held.
     - A worker that ran a turn (`SessionInfo.turns > 0`) and waits only for an agent seat on its own computer (`SEAT_WAIT`:
-      "no agent seat is free on", "N agents mid-turn") waits there up to `HOME_WAIT_MS` from its message (`warmWait`), as the
+      "no agent seat is free on", "N agents mid-turn", by the portal's count) waits there up to `HOME_WAIT_MS` from when it
+      first waited at its turn count (`warmWait`, `MoveGuard.waitingSince`: a message queued again does not start it afresh), as the
       w4738 wait does for a released one. Placing it again in its own sandbox clears `placeReleased`, and so the w4738 wait.
       One that never ran a turn moves after `MOVE_AFTER_MS` as before. Both checks run after the w2079 hand-over, so an old
-      worker whose requests went elsewhere never holds a message for them.
+      worker whose requests went elsewhere never holds a message for them. A refusal by its daemon's count is no seat wait:
+      `requeueRefused` queues it again with a fresh time on every refusal (the w5949 review, B1).
     - A computer whose daemon refused a start at its agent cap (`machines.ts` `capRefused`, `AGENT_CAP_REFUSAL`) is no move
-      target for `REFUSED_FOR_MS` (5 min, a judgment), whatever the portal's count says (`MoveFacts.held`).
+      target, whatever the portal's count says (`MoveFacts.held`), until a start there goes through (`capStarted`, its first
+      mid-turn report) or `REFUSED_FOR_MS` (30 min, a judgment past beast's measured 10 to 18 min miscount; a reconnect is no
+      news, since beast reconnected between refusals with its count still wrong).
     - A message for a worker whose requests all went to other workers is forwarded to the worker each request is with now
       (`Agents.forwardToHeirs`: "[forwarded, w5942] This message was queued for worker …", keeping its sender), not dropped.
-      A gate resume (`resumeOf`) stays dropped: the new worker sets its own wait.
+      A gate resume (`resumeOf`) or a check-in (`[wake_me] …`) stays dropped: the new worker sets its own wait.
     - Warn only (lothsahn's lockout rule): a worker whose work moved off it (`movedAway`) and that its daemon's hello still
       reports live, or that a resume after a drop would wake, is journalled and reported "[machines] … (w5942, warn only)"
       (`Machines.warnMovedAway`). On 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50 while w5869

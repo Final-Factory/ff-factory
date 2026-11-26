@@ -114,7 +114,8 @@ test('w5942: warmWait keeps a worker with its conversation on its own computer f
   assert.ok(line?.startsWith(WARM_MARK), line ?? 'no line');
   assert.match(line!, /\(w5942\)/, 'the ledger reads the mark: not WRONG');
   assert.match(line!, /at 06:52Z/);
-  assert.match(warmWait(7, BEAST_REFUSED, at, at + 30_000) ?? '', /\(w5942\)/, "the daemon's count is a seat wait too");
+  // The w5949 review, B1: a daemon's refusal is queued again with a fresh time on every refusal, so it is no wait to sit out.
+  assert.equal(warmWait(7, BEAST_REFUSED, at, at + 30_000), undefined, "a refusal by its daemon's count is not a seat wait");
   assert.equal(warmWait(7, BISCUIT_FULL, at, at + HOME_WAIT_MS), undefined, 'past the wait it moves');
   assert.equal(warmWait(0, BISCUIT_FULL, at, at + 30_000), undefined, 'a worker that never ran a turn has nothing to keep');
   assert.equal(warmWait(undefined, BISCUIT_FULL, at, at + 30_000), undefined);
@@ -130,7 +131,25 @@ test('w5942: MoveGuard remembers a move for HOME_WAIT_MS and a cap refusal for R
   assert.equal(g.movedLately(['w5869'], t0 + HOME_WAIT_MS), undefined, 'a wait past HOME_WAIT_MS may move again');
   g.noteRefusal('beast', 'already 6 agents running', t0);
   assert.match(g.refusals(t0 + 60_000).beast ?? '', /refused a start at its agent cap 60 s ago \(w5942\)/);
-  assert.deepEqual(g.refusals(t0 + REFUSED_FOR_MS), {}, 'it is a target again after REFUSED_FOR_MS');
+  assert.deepEqual(g.refusals(t0 + REFUSED_FOR_MS), {}, 'it is a target again after REFUSED_FOR_MS, the recovery that needs nobody');
+  // beast's miscount lasted 10 to 18 min (the w5949 review): still skipped at 18 min.
+  g.noteRefusal('beast', 'already 6 agents running', t0);
+  assert.ok(g.refusals(t0 + 18 * 60_000).beast, 'skipped through the measured miscount');
+  g.startedOn('beast');
+  assert.deepEqual(g.refusals(t0 + 60_000), {}, 'a start there that went through makes it a target again at once');
+});
+
+test('w5942 (the w5949 review, B1): a warm worker whose message is queued again and again still moves HOME_WAIT_MS after it first waited', () => {
+  const g = new MoveGuard();
+  const t0 = Date.parse('2026-11-25T06:46:39Z');
+  // Its message sent again every 25 s (a fresh q.at each time), its turn count unchanged.
+  let now = t0;
+  let line: string | undefined = 'waits';
+  for (; now < t0 + 2 * HOME_WAIT_MS && line; now += 25_000) line = warmWait(7, BISCUIT_FULL, g.waitingSince('aa98e369', 7, now - 1000), now);
+  assert.equal(line, undefined, 'the wait ended');
+  assert.ok(now - t0 <= HOME_WAIT_MS + 25_000, `it ended at the wait's bound, ${Math.round((now - t0) / 1000)} s after it first waited`);
+  // A turn it ran starts the count again.
+  assert.equal(g.waitingSince('aa98e369', 8, now), now);
 });
 
 test("w5942: tonight's w5869 sequence replayed moves the request once: a warm worker waits for its seat, the moved copy waits where it went, and a message for the old worker reaches the new one", async (t) => {
@@ -182,6 +201,19 @@ test("w5942: tonight's w5869 sequence replayed moves the request once: a warm wo
   void agents;
 });
 
+test('w5942 (the w5949 review, M2): a move whose fresh session fails to start does not hold the request where it did not go', async (t) => {
+  const { agents, worker, request, queued, roomMove, settled } = await setup(t);
+  const x = agents as unknown as Internals;
+  x.startMoved = async () => {
+    throw new Error('no agent seat on beast now');
+  };
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: { at: OLD, sandbox: 'slot1', branch: 'w5449-fix', why: 'idle' } });
+  request(['5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  assert.equal(agents.moveGuard.movedLately(['w5869'], Date.now()), undefined, 'handed back unheld');
+});
+
 test("w5942: a computer whose daemon refused a start at its cap is no move target for a while, whatever the portal's count", async (t) => {
   const { starts, worker, request, queued, roomMove, settled, machines } = await setup(t);
   // w5932's 60a433cb: a fresh worker on biscuit; beast's daemon has just refused d4f2c3ca.
@@ -212,6 +244,9 @@ test('w5942: a message for a worker whose request another live worker carries go
   const r = { ...queued('81122653', 'CI cleared', Date.now() - 60_000, 'system'), resumeOf: { work: 'w5869', note: 'CI cleared' } };
   roomMove(old, r, BEAST_REFUSED, Date.now());
   assert.equal(sent.length, 1, 'a gate resume is not forwarded');
+  // Nor its own check-in (the w5949 review): the worker now on the request sets its own.
+  roomMove(old, queued('81122653', '[wake_me] Your check-in is due. Your note: look at CI', Date.now() - 60_000, 'system'), BEAST_REFUSED, Date.now());
+  assert.equal(sent.length, 1, 'a check-in is not forwarded');
 });
 
 test('w5942 (warn only): a worker whose work moved elsewhere and that its daemon still runs, or that a resume would wake, is reported, not stopped', async (t) => {

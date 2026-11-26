@@ -740,6 +740,8 @@ export class MachineManager {
   workersLived?: (machineId: string, sessionIds: string[]) => void;
   /** w5942: its daemon refused a start at its agent cap (AGENT_CAP_REFUSAL), with the daemon's words. */
   capRefused?: (machineId: string, why: string) => void;
+  /** w5942: a start its daemon took went through (its first mid-turn report): its count had room. */
+  capStarted?: (machineId: string) => void;
   /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
   private readonly dropWhy = new Map<string, string | false>();
 
@@ -2601,7 +2603,10 @@ export class MachineManager {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
         // Its daemon has its turn now (w3597): counted by its own mark from here.
-        if (isMidTurn(msg.info)) this.starting.delete(msg.info.id);
+        if (isMidTurn(msg.info)) {
+          if (this.starting.has(msg.info.id)) this.capStarted?.(id);
+          this.starting.delete(msg.info.id);
+        }
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
         // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
