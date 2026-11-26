@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -1011,6 +1011,24 @@ test('w5959: worker update --tools-disk-lock writes toolsDiskLock to daemon.json
   assert.equal(toolsDiskLockFlag(undefined), undefined);
   assert.equal(toolsDiskLockFlag('warn'), 'warn');
   for (const bad of ['off', 'ON', '']) assert.throws(() => toolsDiskLockFlag(bad), /--tools-disk-lock is warn or on/);
+});
+
+test('w6110: worker update --win-ci-first writes winCiFirst to daemon.json on Windows only; unset carries it; anything but off, warn or enforce is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-wcf-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { winCiFirst?: 'off' | 'warn' | 'enforce' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('winCiFirst' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.equal(written(BEAST_CONFIG, { winCiFirst: m }).winCiFirst, m, m);
+  const had = { ...BEAST_CONFIG, winCiFirst: 'enforce' };
+  assert.equal(written(had, {}).winCiFirst, 'enforce', 'unset carries it');
+  assert.equal(written(had, { winCiFirst: 'warn' }).winCiFirst, 'warn', 'the way back replaces it');
+  for (const p of ['linux', 'darwin'] as const) assert.throws(() => written(BEAST_CONFIG, { winCiFirst: 'enforce' }, p), /--win-ci-first: Windows only/);
+  const cfg = { a: 1 };
+  assert.equal(applyWinCiFirst(cfg, undefined, 'linux'), cfg, 'unset: the very config, any OS');
+  assert.deepEqual(applyWinCiFirst(cfg, 'enforce', 'win32'), { a: 1, winCiFirst: 'enforce' });
+  assert.equal(winCiFirstFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'enforce']) assert.equal(winCiFirstFlag(m), m);
+  for (const bad of ['on', 'ENFORCE', '']) assert.throws(() => winCiFirstFlag(bad), /--win-ci-first is off, warn or enforce/);
 });
 
 test('w6000: worker update --daemon-tmpdir writes daemonTmpdir to daemon.json on every OS; unset carries it; anything but on or off is refused', () => {

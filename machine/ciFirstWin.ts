@@ -15,10 +15,22 @@
 // Editors the daemon starts are not under a host (Start-Process) and count as the rest (the pool's belowNormal setting,
 // machine/sandboxes.ts, runs them BelowNormal where it is on); batch builds go to Idle (lowerBuild).
 //
-// This step is warn only (the lockout rule, w6110): nothing is set. The tick logs, while a CI job runs, how many cores
-// the machine, the jobs and each agent's processes used over the last tick, and how many of the agents' processes run
-// above `priority`, the evidence the enforcing step (a separate PR, with a daemon.json switch and an undo) rests on.
+// daemon.json `winCiFirst` picks what it does (read at the daemon's start; `ops_worker machine_update win_ci_first`):
+// - "warn" (unset): nothing is set. While a CI job runs the tick logs how many cores the machine, the jobs and each
+//   agent's processes used over the last tick, and how many of the agents' tools' processes run above `priority`.
+// - "enforce": while a CI job runs, those processes go to `priority` (Idle), and what they start inherits it. Only
+//   an agent's tools are lowered (what its claude starts: shells, cargo, python): the host and its direct children
+//   (claude) keep their priority, so the agent's loop, its heartbeat and the hang watch's CPU reading are not starved
+//   (and Windows' balance-set manager still boosts a starved thread now and then). No Unity editor, or what one started,
+//   is lowered. Nothing is lowered while a bench or a person's turn holds the machine, and what was lowered is raised
+//   back then, so a timed run measures what it always did; it is raised back too once no CI job runs. Each lowered
+//   process is kept with its old priority in <root>/tmp/ci-first-lowered.json, so a daemon started with "warn" or "off"
+//   raises what is still running (and what it started since, still at the lowered priority) back: that is the recovery,
+//   and it needs nobody at the machine.
+// - "off": nothing is read or logged, beyond raising back what that record holds.
+import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import type { RunnerCensus } from './benchRunners.ts';
 import type { Proc } from './unity.ts';
 
@@ -31,8 +43,11 @@ export interface WinCiFirstSettings {
   warnEveryMs: number;
 }
 
+// Idle, not BelowNormal: LothDesktop's runners run their jobs at BelowNormal themselves (the daemon restarts a runner
+// with Start-ScheduledTask, whose default task priority 7 is BelowNormal, and a job's processes inherit it; measured
+// 2026-11-26 17:46Z, both workers at BelowNormal). BelowNormal would only put the agents' tools level with the jobs.
 export const LOTHDESKTOP_CI_FIRST: WinCiFirstSettings = {
-  priority: os.constants.priority.PRIORITY_BELOW_NORMAL,
+  priority: os.constants.priority.PRIORITY_LOW,
   warnCores: 4,
   warnEveryMs: 5 * 60_000,
 };
@@ -41,6 +56,14 @@ export const LOTHDESKTOP_CI_FIRST: WinCiFirstSettings = {
 export const WIN_CI_FIRST: Record<string, WinCiFirstSettings> = { lothdesktop: LOTHDESKTOP_CI_FIRST };
 
 export type WinProc = Proc;
+
+export type WinCiFirstMode = 'off' | 'warn' | 'enforce';
+
+/**
+ * What enforcing lowered, by `pid@start`: the priority it had, when it was lowered, its host's pid, and when it was raised
+ * back (kept one more raise, for what it started in the seconds before that, which the listing could not show yet).
+ */
+export type Lowered = Record<string, { prev: number; at: number; host?: number; raisedAt?: number }>;
 
 export interface ProcFact {
   pid: number;
@@ -53,8 +76,10 @@ export interface WinCiFirstDeps {
   procs: () => Promise<WinProc[]>;
   /** The runners and their jobs in that listing. */
   census: (procs: WinProc[]) => RunnerCensus;
-  /** The agent hosts running now: their session and the host process's pid. */
-  hosts: () => { session: string; pid: number }[];
+  /** The agent hosts running now: their session, the host process's pid and when the host said it started. */
+  hosts: () => { session: string; pid: number; startedAt?: number }[];
+  /** How old a process listing can be when it is answered (LIST_MAX_AGE_MS). */
+  listMaxAgeMs?: number;
   priorityOf: (pid: number) => number | undefined;
   /** Start time and CPU so far of these processes (machine/unityReaper.ts inspectProcs); a process gone is left out. */
   facts: (pids: number[]) => Promise<ProcFact[]>;
@@ -62,14 +87,25 @@ export interface WinCiFirstDeps {
   machineBusyMs: () => number;
   /** The daemon's own pid. */
   self: number;
+  /** daemon.json `winCiFirst`; unset is "warn". */
+  mode?: WinCiFirstMode;
+  /** A bench or a person's turn holds this machine now (machine/benchTurn.ts's holder). */
+  held?: () => boolean;
+  /** os.setPriority; false when it could not. Without it, or without `record`, nothing is lowered. */
+  setPriority?: (pid: number, priority: number) => boolean;
+  /** The record of what was lowered (<root>/tmp/ci-first-lowered.json). */
+  record?: { read: () => Lowered; write: (l: Lowered) => void };
   now: () => number;
   log: (line: string) => void;
 }
 
 export interface WinCiFirstResult {
   jobs: number;
-  /** Agents' processes above the setting's priority. */
+  /** Agents' tools' processes above the setting's priority (before this tick lowered any). */
   above: number;
+  /** Processes this tick lowered, and raised back. */
+  lowered?: number;
+  raised?: number;
   /** Cores over the last tick, while the same jobs ran and both ticks were read. */
   machineCores?: number;
   jobCores?: number;
@@ -140,6 +176,45 @@ export function agentTrees(roots: number[], procs: Pick<Proc, 'pid' | 'ppid'>[],
   return out;
 }
 
+export const loweredFile = (root: string) => path.join(root, 'tmp', 'ci-first-lowered.json');
+
+/** The record of what enforcing lowered under this worker root ({} when there is none or it does not parse). */
+export function readLowered(root: string): Lowered {
+  try {
+    const v = JSON.parse(fs.readFileSync(loweredFile(root), 'utf8')) as unknown;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) return {};
+    const out: Lowered = {};
+    for (const [k, l] of Object.entries(v as Record<string, unknown>)) {
+      const r = l as { prev?: unknown; at?: unknown };
+      const { host: h, raisedAt: ra } = l as { host?: unknown; raisedAt?: unknown };
+      if (/^\d+@\d+$/.test(k) && typeof r?.prev === 'number' && typeof r?.at === 'number')
+        out[k] = { prev: r.prev, at: r.at, ...(typeof h === 'number' ? { host: h } : {}), ...(typeof ra === 'number' ? { raisedAt: ra } : {}) };
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+export function writeLowered(root: string, l: Lowered) {
+  const file = loweredFile(root);
+  if (!Object.keys(l).length) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(l));
+  fs.renameSync(tmp, file);
+}
+
+const isUnity = (p: WinProc) => /^unity(\.exe)?$/i.test(p.name ?? '') || /(^|[\\/"])unity\.exe"?(\s|$)/i.test(p.cmd);
+const imageOf = (p: WinProc | undefined) => p?.name || (p?.cmd ?? '?').trim().replace(/^"/, '').split(/["\s]/)[0].split(/[\\/]/).pop() || '?';
+/** A process listing can be this old when it is answered (machine/sandboxes.ts realPoolDeps caches it for 5 s). */
+export const LIST_MAX_AGE_MS = 5_000;
+/** A raise that fails is tried again this many ticks, then dropped from the record with a line in the log. */
+const RAISE_TRIES = 3;
+
 export class WinCiFirst {
   private readonly d: WinCiFirstDeps;
   private jobKey = '';
@@ -147,28 +222,175 @@ export class WinCiFirst {
   private warnedAt = 0;
   private listFailing = false;
   private factsFailing = false;
+  private recordFailing = false;
   private ticking = false;
+  /** A tick was asked for while one ran (a turn began or ended meanwhile): run once more when it ends. */
+  private again = false;
+  private heldSaid = false;
+  private lowered: Lowered = {};
+  private raiseFails = new Map<string, number>();
+  /** Hosts with a tool at the lowered priority at the last enforcing tick beside a job. */
+  private lowHosts = new Set<number>();
 
   constructor(d: WinCiFirstDeps) {
     this.d = d;
+    try {
+      this.lowered = d.record?.read() ?? {};
+    } catch {
+      this.lowered = {};
+    }
   }
 
   get enabled(): boolean {
     return !!this.d.settings;
   }
 
+  get mode(): WinCiFirstMode {
+    return this.d.mode ?? 'warn';
+  }
+
+  /** What enforcing lowered and has not raised back yet. */
+  loweredNow(): Lowered {
+    return { ...this.lowered };
+  }
+
+  /**
+   * Enforcing lowered some of this host's tools: their CPU then says little about whether its agent is hung (the hang
+   * watch, machine/agentHost.ts watchProgress, keeps it and looks again).
+   */
+  toolsLowered(hostPid: number): boolean {
+    return this.lowHosts.has(hostPid);
+  }
+
   async tick(): Promise<WinCiFirstResult | undefined> {
     const s = this.d.settings;
-    if (!s || this.ticking) return undefined;
+    if (!s) return undefined;
+    if (this.ticking) {
+      this.again = true;
+      return undefined;
+    }
     this.ticking = true;
     try {
-      return await this.step(s);
+      let res = await this.step(s);
+      while (this.again) {
+        this.again = false;
+        res = await this.step(s);
+      }
+      return res;
     } finally {
       this.ticking = false;
     }
   }
 
+  private save(): boolean {
+    try {
+      this.d.record!.write(this.lowered);
+      if (this.recordFailing) this.d.log('ci first: the record of lowered processes is written again');
+      this.recordFailing = false;
+      return true;
+    } catch (e) {
+      if (!this.recordFailing) this.d.log(`ci first: could not write the record of lowered processes: ${(e as Error).message.slice(0, 200)}`);
+      this.recordFailing = true;
+      return false;
+    }
+  }
+
+  /**
+   * Raise back each recorded process still running (the same pid and start time) to the priority it had, and what it
+   * started since it was lowered that still runs at the lowered priority (it inherited it) to that same priority, whether
+   * the recorded process still runs or not (Windows never gives an orphan a new parent). `cutoff`: a process started later
+   * may not be the one the listing showed under that pid, and is left alone: so a raised entry is kept (raisedAt, the time
+   * its raise was done) until a raise whose cutoff is past it has looked again, for what it started before raisedAt only
+   * (after that the parent was back at its priority, and what it started then is not ours to raise).
+   * What could not be raised stays recorded and is tried again, RAISE_TRIES ticks.
+   */
+  private async raise(procs: WinProc[], why: string, s: WinCiFirstSettings, cutoff: number): Promise<number> {
+    const rec = Object.entries(this.lowered).map(([k, l]) => ({ k, pid: Number(k.split('@')[0]), start: Number(k.split('@')[1]), ...l }));
+    if (!rec.length || !this.d.setPriority) return 0;
+    const pids = [...new Set(rec.map((r) => r.pid))];
+    const stop = new Set<number>([this.d.self, ...this.d.hosts().map((h) => h.pid)]);
+    // by parent pid alone, from recorded pids that ended too (what they started runs on with their pid as its parent)
+    const loose = agentTrees(pids, procs, stop, new Map([...procs.map((p) => p.pid), ...pids].map((p) => [p, 0])));
+    const facts = await this.d.facts([...new Set([...pids, ...[...loose.values()].flat()])]);
+    const byPid = new Map(facts.map((f) => [f.pid, f]));
+    const started = new Map(facts.filter((f) => f.startedAt !== undefined).map((f) => [f.pid, f.startedAt!]));
+    const kids = new Map<number, number[]>();
+    for (const p of procs) if (p.pid !== p.ppid) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
+    const recorded = new Set(rec.map((r) => r.k));
+    const procOf = new Map(procs.map((p) => [p.pid, p]));
+    const underUnity = (pid: number, top: number): boolean => {
+      for (let p = procOf.get(pid), i = 0; p && p.pid !== top && i < 64; p = procOf.get(p.ppid), i++) if (isUnity(p)) return true;
+      return false;
+    };
+    const done = new Set<number>();
+    let n = 0;
+    let failed = 0;
+    let alive = 0;
+    const keep: Lowered = {};
+    // true: raised or nothing to raise; false: setPriority failed
+    const up = (pid: number, to: number): boolean => {
+      done.add(pid);
+      if (this.d.priorityOf(pid) !== s.priority) return true;
+      if (this.d.setPriority!(pid, to)) {
+        n++;
+        return true;
+      }
+      failed++;
+      return false;
+    };
+    const entry = (r: (typeof rec)[number], raisedAt?: number) => ({ prev: r.prev, at: r.at, ...(r.host !== undefined ? { host: r.host } : {}), ...(raisedAt !== undefined ? { raisedAt } : {}) });
+    const stamp: string[] = []; // raised here: raisedAt is the time the raise is done, set below
+    for (const r of rec) {
+      const now = byPid.get(r.pid)?.startedAt;
+      const same = now === r.start;
+      let failedHere = false;
+      if (same) {
+        alive++;
+        if (r.raisedAt === undefined && !done.has(r.pid) && !up(r.pid, r.prev)) {
+          failedHere = true;
+          const tries = (this.raiseFails.get(r.k) ?? 0) + 1;
+          this.raiseFails.set(r.k, tries);
+          if (tries < RAISE_TRIES) keep[r.k] = entry(r);
+          else this.d.log(`ci first: gave up raising process ${r.pid} back after ${tries} tries; it stays at ${priorityName(s.priority)} until it ends`);
+        }
+      }
+      // raised now (or ended): looked at once more by a raise whose cutoff is past this one
+      if (!failedHere && r.raisedAt === undefined) stamp.push(r.k);
+      else if (!failedHere && cutoff <= r.raisedAt!) keep[r.k] = entry(r, r.raisedAt);
+      const until = Math.min(cutoff, r.raisedAt ?? Infinity);
+      // What it started since it was lowered: started after r.at and before its pid's new holder (when another has it).
+      const firsts = (kids.get(r.pid) ?? []).filter((c) => {
+        const cs = started.get(c);
+        if (cs === undefined || done.has(c) || stop.has(c) || cs > until || cs + 1_000 < Math.max(r.at, r.start)) return false;
+        return same || now === undefined || cs < now;
+      });
+      const below = agentTrees(firsts, procs, stop, started);
+      for (const c of [...firsts, ...firsts.flatMap((x) => below.get(x) ?? [])]) {
+        const f = byPid.get(c);
+        if (done.has(c) || !f || recorded.has(keyOf(f)) || (f.startedAt ?? Infinity) > cutoff) continue;
+        // A Unity editor or batch run, and what it started, is never ours (never lowered): the bench turn's lowerBuild puts
+        // batch runs at Idle during a person's turn, and raising them here would undo that.
+        if (underUnity(c, r.pid)) continue;
+        up(c, r.prev);
+      }
+    }
+    const raisedAt = this.d.now();
+    for (const r of rec) if (stamp.includes(r.k)) keep[r.k] = entry(r, raisedAt);
+    for (const k of [...this.raiseFails.keys()]) if (!keep[k] || keep[k].raisedAt !== undefined) this.raiseFails.delete(k);
+    this.lowered = keep;
+    this.save();
+    const fresh = rec.filter((r) => r.raisedAt === undefined).length;
+    if (n || failed || fresh)
+      this.d.log(
+        `ci first: raised ${n} process(es) back to the priority they had (${why}; ${fresh} were recorded as lowered, ${alive} of the recorded still run${failed ? `, ${failed} could not be raised` : ''})`,
+      );
+    return n;
+  }
+
   private async step(s: WinCiFirstSettings): Promise<WinCiFirstResult | undefined> {
+    const asked = this.d.now();
+    // A process started after this cannot be the one the listing showed under its pid (Windows reuses pids).
+    const cutoff = asked - (this.d.listMaxAgeMs ?? LIST_MAX_AGE_MS) - 1_000;
     let procs: WinProc[];
     try {
       procs = await this.d.procs();
@@ -181,7 +403,36 @@ export class WinCiFirst {
       this.last = undefined;
       return undefined;
     }
+    // Enforce only with a record to undo it from.
+    const enforcing = this.mode === 'enforce' && !!this.d.setPriority && !!this.d.record;
+    const isHeld = () => enforcing && (this.d.held?.() ?? false);
+    const held = isHeld();
+    if (enforcing && held !== this.heldSaid) {
+      this.d.log(
+        held
+          ? "ci first: a bench or a person's turn holds this machine: what was lowered is raised back, and nothing is lowered until the turn ends"
+          : "ci first: the turn holding this machine ended: the agents' tools go below CI jobs again",
+      );
+      this.heldSaid = held;
+    }
     const census = this.d.census(procs);
+    const raiseIf = async (why: string) => {
+      if (!Object.keys(this.lowered).length) return 0;
+      try {
+        return await this.raise(procs, why, s, cutoff);
+      } catch (e) {
+        this.d.log(`ci first: could not raise the lowered processes back yet (${why}): ${(e as Error).message.slice(0, 200)}`);
+        return 0;
+      }
+    };
+    let raised = 0;
+    if (!enforcing) raised = await raiseIf(`winCiFirst is ${this.mode}`);
+    else if (held) raised = await raiseIf("a bench or a person's turn holds this machine");
+    else if (!census.workers.length) raised = await raiseIf('no CI job runs now');
+    // nothing lowered now beside a job (kept as it was while a read is slow or fails: the hang watch reads it meanwhile)
+    if (!enforcing || held || !census.workers.length) this.lowHosts = new Set();
+    if (this.mode === 'off') return { jobs: 0, above: 0, raised };
+
     const key = census.workers
       .map((w) => w.pid)
       .sort((a, b) => a - b)
@@ -191,28 +442,22 @@ export class WinCiFirst {
       if (changed) this.d.log('ci first: no CI job running now');
       this.jobKey = key;
       this.last = undefined;
-      return { jobs: 0, above: 0 };
+      return { jobs: 0, above: 0, raised };
     }
-    // A CI job runs. Its processes: each worker's tree by parent pid, never into an agent host or the daemon (an adopted
-    // host's parent is the old daemon's pid, which a job's process can get again).
+    // A CI job runs. Read the start time and CPU of everything that could be the jobs' or an agent's (by parent pid alone),
+    // then walk both again by start time: a child only when its parent started no later than it.
     const hosts = this.d.hosts();
-    const roots = hosts.map((h) => h.pid);
-    const notJob = new Set<number>([...roots, this.d.self]);
-    const kids = new Map<number, number[]>();
-    for (const p of procs) if (p.pid !== p.ppid) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
-    const jobPids = new Set<number>();
-    const queue = census.workers.map((w) => w.pid);
-    while (queue.length) {
-      const p = queue.shift()!;
-      if (jobPids.has(p) || notJob.has(p)) continue;
-      jobPids.add(p);
-      queue.push(...(kids.get(p) ?? []));
-    }
-    const stop = new Set<number>([...roots, this.d.self, ...jobPids, ...census.listeners.map((l) => l.pid)]);
-    // Everything that could be an agent's (by parent pid alone), read once for start times and CPU, then walked again by
-    // start time.
-    const loose = agentTrees(roots, procs, stop, new Map(procs.map((p) => [p.pid, 0])));
-    const want = [...new Set([...roots, ...[...loose.values()].flat(), ...jobPids])];
+    const listeners = census.listeners.map((l) => l.pid);
+    const workers = census.workers.map((w) => w.pid);
+    const looseJob = agentTrees(workers, procs, new Set([this.d.self]), new Map(procs.map((p) => [p.pid, 0])));
+    const looseAgents = agentTrees(
+      hosts.map((h) => h.pid),
+      procs,
+      new Set([this.d.self, ...listeners, ...workers]),
+      new Map(procs.map((p) => [p.pid, 0])),
+    );
+    const recordedPids = Object.keys(this.lowered).map((k) => Number(k.split('@')[0]));
+    const want = [...new Set([...hosts.map((h) => h.pid), ...workers, ...[...looseJob.values(), ...looseAgents.values()].flat(), ...recordedPids])];
     let facts: ProcFact[];
     const readAt = this.d.now();
     try {
@@ -223,20 +468,106 @@ export class WinCiFirst {
       if (!this.factsFailing) this.d.log(`ci first: could not read the processes' start times and CPU: ${(e as Error).message.slice(0, 200)}`);
       this.factsFailing = true;
       this.last = undefined;
-      return { jobs: census.workers.length, above: 0 };
+      return { jobs: census.workers.length, above: 0, raised };
     }
     const now = this.d.now();
     const busy = this.d.machineBusyMs();
-    const started = new Map(facts.filter((f) => f.startedAt !== undefined).map((f) => [f.pid, f.startedAt!]));
-    const trees = agentTrees(roots, procs, stop, started);
     const byPid = new Map(facts.map((f) => [f.pid, f]));
-    let above = 0;
-    for (const pids of trees.values())
+    const started = new Map(facts.filter((f) => f.startedAt !== undefined).map((f) => [f.pid, f.startedAt!]));
+    // The jobs: each worker and what it started (an adopted host, whose old parent pid a job's process got again, started
+    // before that process and is not walked into).
+    // A host's pid that Windows gave to another process (one that started after the host said it did, or a runner's) is
+    // no host: the job walk goes into it, and nothing below it is lowered as an agent's.
+    const hostOk = (h: { pid: number; startedAt?: number }) => {
+      const st = started.get(h.pid);
+      return h.startedAt === undefined || st === undefined || st <= h.startedAt + 5_000;
+    };
+    const likely = hosts.filter(hostOk).map((h) => h.pid);
+    const jobPids = new Set<number>([...workers, ...[...agentTrees(workers, procs, new Set([this.d.self, ...likely]), started).values()].flat()]);
+    const real = hosts.filter((h) => hostOk(h) && !jobPids.has(h.pid) && !listeners.includes(h.pid));
+    const roots = real.map((h) => h.pid);
+    const stop = new Set<number>([...hosts.map((h) => h.pid), this.d.self, ...jobPids, ...listeners]);
+    const trees = agentTrees(roots, procs, stop, started);
+    const procOf = new Map(procs.map((p) => [p.pid, p]));
+    // What enforcing lowers: an agent's tools (what its claude starts), not the host or its own direct children (claude
+    // keeps its priority, so its loop and heartbeat are not starved), and no Unity editor or what one started (editors keep
+    // the pool's own priority; batch builds go to Idle by lowerBuild already). An editor a lowered tool starts later
+    // inherits the lowered priority, as it inherits the pool's belowNormal setting.
+    const tools = new Map<number, number>(); // pid -> its host
+    for (const [root, pids] of trees) {
+      const unity = new Set<number>();
       for (const pid of pids) {
-        const p = this.d.priorityOf(pid);
-        if (p !== undefined && p < s.priority) above++;
+        const p = procOf.get(pid);
+        if (unity.has(p?.ppid ?? -1) || (p && isUnity(p))) unity.add(pid);
+        else if (p && p.ppid !== root) tools.set(pid, root);
       }
-    const res: WinCiFirstResult = { jobs: census.workers.length, above };
+    }
+    let above = 0;
+    const loweredNow: { k: string; pid: number; prev: number }[] = [];
+    let lowerFailed = 0;
+    const low = new Set<number>(); // hosts with a tool at the lowered priority now
+    const lowering = enforcing && !held && !isHeld(); // a turn that began during the read is honoured now
+    const cands: { k: string; pid: number; prev: number; host: number }[] = [];
+    for (const [pid, host] of tools) {
+      const p = this.d.priorityOf(pid);
+      if (p === s.priority && lowering) low.add(host);
+      if (p === undefined || p >= s.priority) continue;
+      above++;
+      const f = byPid.get(pid);
+      if (!lowering || f?.startedAt === undefined || f.startedAt > cutoff) continue;
+      cands.push({ k: keyOf(f), pid, prev: p, host });
+    }
+    // No record, no undo after a restart: what is to be lowered is written first, and nothing is lowered if it cannot be.
+    let unwritten = false;
+    const wasFailing = this.recordFailing;
+    if (cands.length) {
+      const before = this.lowered;
+      this.lowered = { ...before };
+      for (const c of cands) {
+        const was = before[c.k];
+        this.lowered[c.k] = { prev: was?.prev ?? c.prev, at: was?.at ?? now, host: c.host };
+      }
+      if (!this.save()) {
+        this.lowered = before;
+        unwritten = true;
+      } else {
+        for (const c of cands) {
+          if (this.d.setPriority!(c.pid, s.priority)) {
+            loweredNow.push(c);
+            low.add(c.host);
+          } else {
+            lowerFailed++;
+            if (!before[c.k]) delete this.lowered[c.k];
+            else this.lowered[c.k] = before[c.k];
+          }
+        }
+        if (lowerFailed) this.save();
+      }
+    }
+    if (enforcing) this.lowHosts = low;
+    if (unwritten) {
+      if (!wasFailing) this.d.log(`ci first: lowered none of ${cands.length} process(es), since the record of what would be lowered could not be written`);
+    } else if (loweredNow.length || lowerFailed) {
+      const names = loweredNow.map((l) => `${l.pid} ${imageOf(procOf.get(l.pid))}`);
+      this.d.log(
+        `ci first: lowered ${loweredNow.length} of the agents' tools' process(es) to ${priorityName(s.priority)} beside the CI job(s), so the jobs go first (w6110)${lowerFailed ? `; ${lowerFailed} could not be lowered` : ''}${names.length ? `: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}` : ''}`,
+      );
+    }
+    // An entry whose process had ended by the listing (not in it, nor running now) and left nothing it started (no listed
+    // process has its pid as parent) is done: what it started after the listing, it started before the listing.
+    if (enforcing) {
+      const parents = new Set(procs.map((p) => p.ppid));
+      let pruned = false;
+      for (const k of Object.keys(this.lowered)) {
+        const [pid, st] = k.split('@').map(Number);
+        if (byPid.get(pid)?.startedAt !== st && !procOf.has(pid) && !parents.has(pid)) {
+          delete this.lowered[k];
+          pruned = true;
+        }
+      }
+      if (pruned) this.save();
+    }
+    const res: WinCiFirstResult = { jobs: census.workers.length, above, lowered: loweredNow.length, raised };
     const jobFacts = [...jobPids].flatMap((p) => byPid.get(p) ?? []);
     const agentFacts = (root: number) => (trees.get(root) ?? []).flatMap((p) => byPid.get(p) ?? []);
     if (this.last && !changed && now > this.last.at) {
@@ -245,7 +576,7 @@ export class WinCiFirst {
       res.machineCores = Math.max(0, busy - this.last.busy) / ms;
       res.jobCores = cpuBetween(this.last.cpu, jobFacts, this.last.since) / ms;
       res.agentCores = {};
-      for (const h of hosts) res.agentCores[h.session] = cpuBetween(this.last.cpu, agentFacts(h.pid), this.last.since) / ms;
+      for (const h of real) res.agentCores[h.session] = cpuBetween(this.last.cpu, agentFacts(h.pid), this.last.since) / ms;
     }
     const cpu = new Map<string, number>();
     for (const f of [...jobFacts, ...roots.flatMap(agentFacts)]) if (f.cpuMs !== undefined) cpu.set(keyOf(f), f.cpuMs);
@@ -253,9 +584,14 @@ export class WinCiFirst {
     this.last = { at: now, since: readAt, busy, cpu };
 
     const sides = census.workers.map((w) => `${w.root.split('/').pop()} (worker ${w.pid} at ${priorityName(this.d.priorityOf(w.pid))})`).join(', ');
-    const would = `${above} of their process(es) run above ${priorityName(s.priority)}, which enforcing would lower (warn only, w6110)`;
+    const would =
+      this.mode === 'enforce'
+        ? held
+          ? `none of their tools lowered while a bench or a person's turn holds this machine`
+          : `${Object.keys(this.lowered).length} of their tools' process(es) lowered to ${priorityName(s.priority)} so far`
+        : `${above} of their tools' process(es) run above ${priorityName(s.priority)}, which enforcing would lower (warn only, w6110)`;
     if (changed) {
-      this.d.log(`ci first: CI job(s) running: ${sides}; ${hosts.length} agent(s) beside them; ${would}`);
+      this.d.log(`ci first: CI job(s) running: ${sides}; ${real.length} agent(s) beside them; ${would}`);
       this.warnedAt = 0;
     }
     this.jobKey = key;

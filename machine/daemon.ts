@@ -110,7 +110,7 @@ import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
-import { WIN_CI_FIRST, WinCiFirst, machineBusyMs } from './ciFirstWin.ts';
+import { WIN_CI_FIRST, WinCiFirst, machineBusyMs, readLowered, writeLowered } from './ciFirstWin.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -293,6 +293,13 @@ export interface DaemonConfig {
    * write there. Set remotely by `ops_worker machine_update tools_disk_lock`, read at the daemon's start; "warn" is the recovery.
    */
   toolsDiskLock?: ToolsDiskLockMode;
+  /**
+   * w6110: CI jobs go first on a Windows CI-first machine (machine/ciFirstWin.ts, WIN_CI_FIRST: lothdesktop): "warn" (the default
+   * when unset) only logs what the agents' processes take beside a CI job; "enforce" lowers the processes agents' tools start to
+   * Idle while a job runs, recorded in <root>/tmp/ci-first-lowered.json and raised back when it is off or warn again; "off"
+   * stops it. Set remotely by `ops_worker machine_update win_ci_first`, read at the daemon's start; "warn" is the recovery.
+   */
+  winCiFirst?: 'off' | 'warn' | 'enforce';
   /**
    * w5863, w5899: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "on" (the default
    * when unset) puts the unity-slot shims on every agent's PATH in <root>/tools-medium/shims, which fenced workers cannot
@@ -1160,11 +1167,17 @@ export class Daemon {
       settings: real && process.platform === 'win32' ? WIN_CI_FIRST[cfg.id.toLowerCase()] : undefined,
       procs: () => pd.procs(),
       census: (procs) => runnerCensus(procs),
-      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid! })),
+      // the host writes its own start to its record (agentHost.ts), so a pid Windows gave to another process started later
+      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid!, startedAt: hostStartedAt(h.dir) })),
       priorityOf: (pid) => priorityOf(pid),
       facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
       machineBusyMs: () => machineBusyMs(),
       self: process.pid,
+      mode: cfg.winCiFirst,
+      held: () => !!(this.timedHolderHere() ?? this.personHolder()),
+      setPriority: (pid, priority) => setPriorityOf(pid, priority),
+      // no worker root, no record: enforce then lowers nothing (nothing a restart could undo)
+      record: cfg.root ? { read: () => readLowered(cfg.root!), write: (l) => writeLowered(cfg.root!, l) } : undefined,
       now: () => Date.now(),
       log: (line) => log(line),
     });
@@ -1965,7 +1978,28 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
-    if (this.winCiFirst.enabled) this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`))), 60_000));
+    if (this.winCiFirst.enabled) {
+      const tick = () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`));
+      this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
+      // what an earlier daemon lowered is raised back (or kept, in enforce) soon after the start, not a minute later
+      if (Object.keys(this.winCiFirst.loweredNow()).length) setTimeout(tick, 10_000).unref();
+      // a bench or a person's turn that begins (or ends) is acted on within 5 s, not at the next minute's tick
+      if (this.winCiFirst.mode === 'enforce') {
+        let wasHeld = false;
+        this.timers.push(
+          setInterval(
+            loopLabel('timer winCiFirst.held', () => {
+              const held = !!(this.timedHolderHere() ?? this.personHolder());
+              if (held !== wasHeld) {
+                wasHeld = held;
+                tick();
+              }
+            }),
+            5_000,
+          ),
+        );
+      }
+    }
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
@@ -4542,6 +4576,7 @@ export class Daemon {
       log: (line) => log(line),
       capsMode: () => capsModeOf(this.cfg.workerCaps),
       toolsCpu: (pid) => this.toolsCpu(pid),
+      toolsLowered: (pid) => this.winCiFirst.toolsLowered(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {
         const sandbox = holder.e?.spec?.sandbox ?? hostPlace(h.dir)?.sandbox;
