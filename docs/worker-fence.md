@@ -311,8 +311,23 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
     `lothdesktop` only; on every other Windows machine nothing on the system drive is looked at. `ownerLabelTargets`
     plans No-Read-Up on the gh folder and `~\.ssh`. Warn stage first (this change): the probe's line `read fence (warn):
     owner-secret rules would label ... No-Read-Up on ...` names them, says where the gh login is (`gh auth status`: in
-    Credential Manager, `(keyring)`, or in `hosts.yml`) and what stays open. The enforce stage (a separate PR, own review)
-    labels them and moves the login in `on`, and takes both back in `off` and `warn`.
+    Credential Manager, `(keyring)`, or in `hosts.yml`) and what stays open.
+  - **Enforce stage** (daemon.ts `applyOwnerLabels`, at the start of `applyReadLabels`, each daemon start and fence-mode
+    change). In `on`: `ghLoginToFile` reads the token (`gh auth token`), runs `gh auth login --with-token
+    --insecure-storage` with it, and checks that `gh auth status` now says `hosts.yml` with the same token before
+    `deleteGenericCreds` deletes `gh:github.com:` and `gh:github.com:<user>` from Credential Manager (`CredDeleteW`; a Low
+    process can read and delete those entries, measured, so they must go). Any failed step leaves the login where it was,
+    and with several accounts nothing moves. It writes `read-fence-gh-moved.json` in the daemon's app folder. Then
+    `labelNoReadUp` labels the gh folder and `~\.ssh` `S:(ML;OICI;NWNR;;;ME)` with `grant: false`: the owner's folders get
+    their label and no ACL change. In `off` and `warn`, the way back: `unlabelNoReadUp` sets the empty label SACL `S:` on
+    each folder that carries the explicit NR label, so it inherits its parent's again, as before (measured on V:: the
+    folder and the file inside lose the label). If the note is there, `ghLoginToKeyring` runs `gh auth login
+    --with-token`, checks that the login is back in Credential Manager with the same token, and deletes the note. The way
+    back needs nobody at the machine: set the read fence to `warn` (or `off`). To revert this code, set `warn` first and
+    let the daemon start once: a build without `applyOwnerLabels` leaves the labels and the login where they are (gh
+    still works from `hosts.yml`; only Low workers lose the folders).
+  - Runs with no vault token get the machine login's token as `GH_TOKEN` (`machineGh`, read by the Medium daemon from
+    `hosts.yml` once moved), never the labelled folder. `lowGhSelfTest` now tests that same route at Low.
   - **Browser profiles stay open, even on LothDesktop**: Chrome and Edge grant their network service's AppContainer
     Modify on each profile's `Network` folder (measured on LothDesktop 2026-11-25: icacls shows an `S-1-15-3-1024-...`
     capability with `(M)` on `User Data\Default\Network`). An AppContainer runs at Low, so a No-Read-Up label on the
