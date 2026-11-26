@@ -2242,6 +2242,18 @@ It is for your part of the work, not an answer to another worker's question.`;
    * hand-off and its Queued state undone. A request the move had not touched yet is left as it is. Without it the request sat
    * Queued with no worker while `s` kept its movedAway mark (the w5950 review: handBack before startMoved succeeds).
    */
+  /**
+   * w6047 (the w6056 review, 2): a message a failed move held for worker `sid`, whose hand-back of `w` (made meanwhile) stands,
+   * goes into that hand-off's message, so the request's next worker gets it.
+   */
+  carryInHandBack(w: WorkItem, sid: string, text: string) {
+    const hb = w.handedBack;
+    if (!hb || hb.session !== sid || !text) return;
+    w.handedBack = { ...hb, message: hb.message ? `${hb.message}\n\n---\n\n${text}` : text };
+    this.stamp(w, `the message its move held for worker ${sid} goes with its hand-back (w6047)`);
+    this.store.putWork(w);
+  }
+
   moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string, move?: { how: string; to: string }): boolean {
     if (!isOpen(w)) return false;
     const off = !w.sessionIds.includes(s.id);

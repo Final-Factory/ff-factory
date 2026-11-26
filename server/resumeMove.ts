@@ -301,6 +301,9 @@ export class MoveGuard {
 
   /** `what` says what was refused (w5976: a move's fresh session that did not start there); a daemon's cap refusal by default. */
   noteRefusal(machine: string, why: string, now: number, what?: string) {
+    // w6047 (the w6056 review): a cap refusal never turns a standing "did not start there" into one a start clears early.
+    const had = this.refused.get(machine);
+    if (!what && had?.what && now - had.at < REFUSED_FOR_MS) return;
     this.refused.set(machine, { at: now, why, ...(what ? { what } : {}) });
   }
 

@@ -229,6 +229,12 @@ test('w6047 (finding 3): a start that goes through on a computer clears its cap 
   g.noteRefusal('lothdesktop', 'already 6 agents running', t0);
   g.startedOn('lothdesktop');
   assert.equal(g.refusals(t0 + 1000).lothdesktop, undefined, 'a cap refusal is over once a start goes through');
+  // The w6056 review (minor): a cap refusal there later never turns the standing one into one a start clears.
+  g.noteRefusal('beast', 'already 6 agents running', t0 + 2000);
+  g.startedOn('beast');
+  assert.match(g.refusals(t0 + 3000).beast ?? '', /a moved session did not start there/, 'still no move target after a cap refusal');
+  // It still ends by itself (REFUSED_FOR_MS, 30 min): nobody at the machine is needed.
+  assert.equal(g.refusals(t0 + 31 * 60_000).beast, undefined);
 });
 
 test('w6047 (finding 4, "on"): a hand-back made while the start was under way stands; the failed move does not undo it', async (t) => {
@@ -248,7 +254,9 @@ test('w6047 (finding 4, "on"): a hand-back made while the start was under way st
   assert.deepEqual(w.sessionIds, [], 'not linked back to the old worker');
   assert.match(w.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
   assert.match(w.log.map((l) => (typeof l === 'string' ? l : JSON.stringify(l))).join('\n'), /not given back to worker 5449aaaa .*handed back meanwhile/);
-  void sessions;
+  // The w6056 review, 2: the message the move held goes with that hand-off, never to the old worker, which holds nothing now.
+  assert.match(w.handedBack?.message ?? '', /go on/, "the message rides the pause's hand-off");
+  assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0, 'not put back for the old worker');
 });
 
 type PreemptInternals = Internals & {
