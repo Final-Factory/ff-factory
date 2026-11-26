@@ -133,19 +133,34 @@ export class CliScrubber {
     this.o = o;
   }
 
-  start(): this {
+  /**
+   * Watch and sweep from now on. The first full pass reads every file with the values known now, so what was written before
+   * this process is found too; with `backScanAfter` (w5888, the portal's start) that pass waits for it, and meanwhile what
+   * is written from now on is scanned as it comes, from each file's size at start.
+   */
+  start(o: { backScanAfter?: Promise<unknown> } = {}): this {
     // Claude Code makes it at its first session; made here so the watch holds from the start
     try {
       fs.mkdirSync(this.o.root, { recursive: true });
     } catch {
       // no right to: the sweep looks for it
     }
+    const backScan = () => {
+      this.version = -1;
+      void this.sweep();
+    };
+    if (o.backScanAfter) {
+      // w5888: after a portal restart the full pass (every Claude Code transcript, 52 s of the main thread measured on
+      // 2026-11-26) ran beside the resumed coordinators' first turns; the bytes already there were scanned by the process
+      // before, so they wait for the resumes, the new bytes do not
+      this.version = secretValuesVersion();
+      for (const [f, size] of this.files()) this.read.set(f, size);
+      void o.backScanAfter.then(backScan, backScan);
+    }
     this.watch();
     this.sweeper = setInterval(() => void this.sweep(), this.o.sweepMs ?? 120_000);
     this.sweeper.unref();
-    // the first pass reads every file with the values known now, so what was written before this process is found too
-    this.version = -1;
-    void this.sweep();
+    if (!o.backScanAfter) backScan();
     return this;
   }
 
