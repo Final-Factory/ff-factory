@@ -1449,8 +1449,12 @@ export class Daemon {
       busyNow: this.cleanupBusyNow(),
     });
     // The w6142 review: what the step alone frees shows in the clean-up history, not only in its log line.
-    if (run && run.removed.length > 0)
-      appendCleanupLog(appDirOfConfig(this.cfg), { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) });
+    if (run && run.removed.length > 0) {
+      const e = { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) };
+      appendCleanupLog(appDirOfConfig(this.cfg), e);
+      // w6166: the portal keeps it too, as it keeps every pass (portal_logs cleanup).
+      this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
+    }
   }
 
   /**
