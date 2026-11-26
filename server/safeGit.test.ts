@@ -448,6 +448,43 @@ test('w5573: a repository-set url.insteadOf refuses the daemon’s push and fetc
   }
 });
 
+test('w6082: a planted core.alternateRefsCommand runs on a plain fetch through an alternate, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main } = worktree(f);
+    // The repository a worker points its alternates at, and the one it plants the command in.
+    const alt = path.join(f.root, 'alt.git');
+    git(f.root, 'clone', '-q', '--bare', slash(main), alt);
+    const me = path.join(f.root, 'me');
+    git(f.root, 'init', '-q', '-b', 'master', me);
+    fs.writeFileSync(path.join(me, '.git', 'objects', 'info', 'alternates'), `${slash(path.join(alt, 'objects'))}\n`);
+    // A command that logs and prints no refs (the fixture's evil.sh reads stdin, which git never closes here).
+    const cmd = slash(path.join(f.root, 'alt.sh'));
+    fs.writeFileSync(cmd, `#!/bin/sh\necho "alternateRefsCommand $*" >> '${f.marker}'\nexit 0\n`, { mode: 0o755 });
+    git(me, 'config', 'core.alternateRefsCommand', cmd);
+    fs.writeFileSync(path.join(main, 'b.txt'), 'b\n');
+    git(main, 'add', 'b.txt');
+    git(main, 'commit', '-qm', 'b');
+
+    // Control: plain git runs the planted command on a fetch (the plant is live).
+    spawnSync('git', ['-C', me, 'fetch', '-q', slash(main), 'master'], { encoding: 'utf8', timeout: 30_000 });
+    assert.match(f.ran(), /alternateRefsCommand /, 'plain git fetch ran the planted command');
+    fs.rmSync(f.marker, { force: true });
+
+    // The fence: run() (server/proc.ts) and the sync wrapper fetch, and the fetch still works.
+    const a = await run('git', ['-C', me, 'fetch', '-q', slash(main), 'master:refs/heads/a']);
+    assert.equal(a.code, 0, a.stderr);
+    gitExecFileSync(['-C', me, 'fetch', '-q', slash(main), 'master:refs/heads/b'], { encoding: 'utf8' });
+    assert.equal(gitExecFileSync(['-C', me, 'rev-parse', 'refs/heads/b'], { encoding: 'utf8' }).trim(), git(main, 'rev-parse', 'master').trim());
+    // The calls that skip the scan (needsScan) carry the fixed keys too.
+    for (const args of [['rev-parse', '--verify', '--quiet', 'refs/heads/a'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'core.alternateRefsCommand'], ['worktree', 'list', '--porcelain']])
+      await run('git', ['-C', me, ...args]);
+    assert.equal(f.ran(), '', 'no planted program ran');
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
 test('w5541: git lfs install and update keep the repository’s hooks folder (they write hooks); every other call gets FF Factory’s', async () => {
   const { fixedFor } = await import('./safeGit.ts');
   const hooks = (a: string[]) => fixedFor(a).find(([k]) => k === 'core.hooksPath')?.[1];

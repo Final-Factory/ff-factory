@@ -1814,6 +1814,11 @@ export class SessionManager {
    */
   machineHold?: (s: SessionHandle) => string | undefined;
   /**
+   * w5937 (w6058's review): why a message held by a 'running' drain is dropped instead of held: its worker has no open
+   * request left, so nothing but the lift would ever let it go. Set by Agents (Agents.drainOrphan).
+   */
+  drainOrphan?: (s: SessionHandle) => string | undefined;
+  /**
    * A message the hold of a PAUSED machine keeps from a worker there (w1532, server/machinePause.ts heldResume): true when
    * its requests were handed back to another computer instead, the message going with them, so it is not queued. Set by Agents.
    */
@@ -2269,6 +2274,14 @@ export class SessionManager {
       }
       // w1376: a held computer resumes nobody; checked before a restart (moveFor) or a slot, so nothing stops or starts there.
       const onHold = this.machineHold?.(s);
+      // w5937: a drain-held message (a reply, message_agent, CI) for a worker whose requests all closed is dropped and said,
+      // like a stale resume, not held until the lift (w6058).
+      const orphan = onHold ? this.drainOrphan?.(s) : undefined;
+      if (orphan) {
+        drop();
+        free(() => this.notDelivered(q.id, orphan));
+        continue;
+      }
       const restart = onHold ? undefined : this.moveFor(s);
       // Its process may have been stopped for the restart: placement is read again.
       if (restart) this.placementChanged?.();

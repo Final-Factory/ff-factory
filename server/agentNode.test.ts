@@ -59,6 +59,7 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
     tar: 'tar',
     pin: pinOf(o.pinVersion ?? AGENT_NODE.version),
     retryMs: 0,
+    account: 'TEST\\worker',
     // The Low holders: the next of `held` per read, none once it is used up.
     holders: async (dirs, m) => {
       reads.push(dirs);
@@ -76,7 +77,7 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
         o[key] = undefined;
         return { code: 0, stdout: key === 'own' && o.readOut !== undefined ? o.readOut : icaclsTree(args[0], own), stderr: '' };
       }
-      if (cmd === 'icacls') return o.icaclsFails ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
+      if (cmd === 'icacls') return o.icaclsFails && args[1] === '/setintegritylevel' ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
       if (cmd === 'tar') {
         tarInto.push(args[args.indexOf('-C') + 1]);
         if (o.tarFails) return { code: 1, stdout: '', stderr: 'bad zip' };
@@ -255,6 +256,58 @@ test('w5839: a fresh folder that cannot be labelled Medium is not put in place, 
     const f = fake(zip, { icaclsFails: true });
     assert.equal(await ensureAgentNode(root, f.d), 'failed');
     assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled .*could not label .* Medium.*the node there stays\.$/);
+  });
+  assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'v22.0.0');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
+});
+
+test("w6068: where the account writes only through a group's Modify (BEAST's F:), it gets Full on the stage before the unpack, so the Medium label is set and every entry of the node holds it inherited", async () => {
+  const root = tmp();
+  fs.mkdirSync(agentNodeDir(root), { recursive: true });
+  fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    const exec = f.d.exec;
+    // BEAST's ACL: icacls /setintegritylevel answers "Access is denied" (WRITE_OWNER) unless the account was given Full on
+    // a folder above the path before the path was made, so the path holds it inherited (measured on BEAST, w6068).
+    const granted: string[] = [];
+    const own: string[] = [];
+    f.d.account = 'BEAST\\rydin';
+    f.d.exec = async (cmd, args, o) => {
+      if (cmd === 'icacls' && args[1] === '/grant') {
+        assert.equal(args[2], 'BEAST\\rydin:(OI)(CI)F');
+        (fs.existsSync(path.join(args[0], unpackedName)) ? own : granted).push(args[0]);
+        return { code: 0, stdout: 'processed file: ' + args[0], stderr: '' };
+      }
+      if (cmd === 'icacls' && args[1] === '/setintegritylevel') {
+        const ok = granted.some((g) => args[0].toLowerCase().startsWith(g.toLowerCase() + path.sep));
+        return ok ? { code: 0, stdout: '', stderr: '' } : { code: 5, stdout: '', stderr: args[0] + ': Access is denied.' };
+      }
+      return exec(cmd, args, o);
+    };
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
+    assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
+    assert.equal(granted.length, 1);
+    assert.match(path.basename(granted[0]), /^node-v[\d.]+-\d+\.part$/, 'the grant is on the stage, not on the node itself');
+    assert.deepEqual(own, [], 'no grant after the unpack, which would leave the node an access entry of its own');
+  });
+});
+
+test("w6068: a stage the account cannot be given Full on is not unpacked, and the node there stays", async () => {
+  const root = tmp();
+  fs.mkdirSync(agentNodeDir(root), { recursive: true });
+  fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    const exec = f.d.exec;
+    f.d.account = 'BEAST\\rydin';
+    f.d.exec = async (cmd, args, o) => (cmd === 'icacls' && args[1] === '/grant' ? { code: 5, stdout: '', stderr: 'Access is denied.' } : exec(cmd, args, o));
+    assert.equal(await ensureAgentNode(root, f.d), 'failed');
+    assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled .*could not give BEAST\\rydin Full on .*\.part, which labelling it Medium needs: Access is denied\.; the node there stays\.$/);
+    assert.deepEqual(f.tarInto, []);
   });
   assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'v22.0.0');
   assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
