@@ -217,5 +217,17 @@ test("w5499: remove of a runner job folder a fenced worker gets EPERM on says th
   const code = await removeFolders([job], facts, NOW, (s) => void out.push(s), async () => c, new Map(), { log: path.join(root, 'removed.jsonl'), cwd: root });
   rm.mock.restore();
   assert.equal(code, 1);
-  assert.match(out.join(''), /KEEP .*\n.*a fenced worker cannot delete an FFU runner's folders \(EPERM.*the daemon's clean-up rule ffu-runner-work removes this one on its own pass/);
+  assert.match(out.join(''), /KEEP .*\n.*a fenced worker cannot delete an FFU runner's folders \(EPERM.*the daemon's rule ffu-runner-work takes it while no job runs: by itself only after 14 days untouched, or 15 min when the disk is low, and at once on a machine_cleanup pass/);
+  assert.match(out.join(''), /On a disk clean-up request of this machine run mcp__machine__machine_cleanup yourself; on any other request it stays until then/, 'w5929: says up front how it goes, or that it stays and why');
+});
+
+test('w5929: on Windows the DELETE row of a runner job folder says up front that the worker cannot remove it and how it goes', async (t) => {
+  const { root, facts } = world(t);
+  runners(root);
+  const job = path.join(root, 'ffu-runners', 'ffu-biscuit-2', '_work', 'ffu');
+  const win = await judgeWithGit(job, facts, NOW, { ...ctx({ procs: [listener(root, 'ffu-biscuit-2', 100)] }), platform: 'win32' });
+  assert.equal(win.verdict, 'delete');
+  assert.match(win.why, /A fenced worker cannot delete it on Windows .*after 14 days untouched.*run mcp__machine__machine_cleanup yourself/);
+  const linux = await judgeWithGit(job, facts, NOW, { ...ctx({ procs: [listener(root, 'ffu-biscuit-2', 100)] }), platform: 'linux' });
+  assert.doesNotMatch(linux.why, /machine_cleanup/, 'off Windows a worker removes it itself');
 });
