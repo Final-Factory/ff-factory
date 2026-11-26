@@ -77,7 +77,7 @@ import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } fr
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
 import { runnerHoldText } from '../shared/runnerHold.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
-import { movedAwayVerdict, type HeirFacts, type MovedAwayFacts } from './movedAwayEnforce.ts';
+import { movedAwayMode, movedAwayVerdict, type HeirFacts, type MovedAwayFacts } from './movedAwayEnforce.ts';
 import { MOVE_AFTER_MS, MoveGuard, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, warmWait, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
@@ -96,7 +96,7 @@ import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.t
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, dispatcherPoolPerson, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, moveBeforeOf, type MoveBefore, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
 import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
@@ -4563,7 +4563,14 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const primary = reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
     const back = (w: WorkItem, note: string, msg?: string) => this.orchestrators?.handBack(w, info, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(msg ? { message: msg } : {}), to });
-    for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+    // w5976, config movedAwayWorkers "on": the other requests are handed back only once the fresh session started, and a start
+    // that fails gives every request back to this worker (giveBack below). Otherwise they go at once, as before.
+    const undo = movedAwayMode(this.cfg.movedAwayWorkers) === 'on';
+    const before = new Map(reqs.map((w) => [w.id, moveBeforeOf(w, info.id)]));
+    const others = () => {
+      for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+    };
+    if (!undo) others();
     if (primary) {
       const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
       try {
@@ -4575,13 +4582,40 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
         if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
+        if (undo) others();
       } catch (e) {
         const err = (e as Error).message;
+        if (undo) return this.giveBack(info, reqs, before, to, err, q, entry.texts);
         console.warn(`room move: starting ${primary.id} on ${to} failed (${err}); handed back to the dispatcher, Queued for ${to}`);
         back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, message);
       }
-    }
+    } else if (undo) others();
     this.orchestrators?.retireWhenFree(info.id);
+  }
+
+  /**
+   * w5976, config movedAwayWorkers "on": a room move whose fresh session did not start on `to` gives its requests back to the
+   * worker it was to leave (Orchestrators.moveUndone), instead of leaving the request Queued with no worker while that worker
+   * kept its movedAway mark. Its sandbox stays released (its work was saved), so it resumes when a sandbox frees on its own
+   * computer, with the message the move took (SessionManager.putBack); `to` is no move target for REFUSED_FOR_MS, so the next
+   * drain does not try the same start again, and the worker is not retired.
+   */
+  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[]) {
+    const why = `its new session on ${to} did not start (${err})`;
+    console.warn(`room move: starting ${reqs.map((w) => w.id).join(', ')} on ${to} failed (${err}); given back to worker ${info.id} on ${info.machineId}/${info.machineSandbox} (w5976)`);
+    this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
+    for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why);
+    delete info.movedAway;
+    this.store.putSession(info);
+    this.store.append(info.id, { kind: 'system', text: `Its work stays with it: ${why}. Its sandbox stays released; it resumes when one frees on ${info.machineId} (w5976).` });
+    if (q) {
+      const text = texts.length > 1 || texts[0] !== q.text ? texts.join('\n\n---\n\n') : q.text;
+      // A joined text carries each message's attachment ids (movedText), so the joined one carries none of its own.
+      const back: QueuedSend = { ...q, text };
+      if (text !== q.text) delete back.attachments;
+      this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
+    }
+    this.machines.report?.(`[machines] ${reqs.map((w) => w.id).join(', ')} stayed with worker ${info.id} on ${info.machineId}/${info.machineSandbox}: ${why} (w5976).`);
   }
 
   /** The fresh session of a moved request (w2046), in a free sandbox on `to`; answers where it started. Throws when it cannot. */
