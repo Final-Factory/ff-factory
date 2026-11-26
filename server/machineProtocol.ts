@@ -232,7 +232,7 @@ export type ToDaemon =
    * comes in `sandboxes` snapshots), delete (returns when it is gone), log (the tail of its editor log).
    */
   | { type: 'sandbox'; id: string; op: 'create'; sandbox: string; branch: string; base: string; seedLibrary: boolean; startUnity: boolean }
-  | { type: 'sandbox'; id: string; op: 'delete'; sandbox: string; deleteBranch?: boolean }
+  | { type: 'sandbox'; id: string; op: 'delete'; sandbox: string; deleteBranch?: boolean; force?: boolean }
   | { type: 'sandbox'; id: string; op: 'log'; sandbox: string; lines: number }
   /**
    * Protocol 6: take a worktree that already exists into the pool as it is (the host migration): nothing on disk is
@@ -419,6 +419,8 @@ export type FromDaemon =
       steamInstall?: boolean;
       /** It holds the nightly lab's fixtures (w3939, `<root>/nightly-history/fixtures`, never on C:) and serves `lab_fixture` and `lab_fixture_upload`. An older portal ignores it. */
       labFixtures?: boolean;
+      /** It makes, reports and deletes light agent folders (w5924, machine/lightFolders.ts; ids agent1, agent2, ...). An older portal ignores it, and the portal places agent-only work in a light folder only where it is set. */
+      lightFolders?: boolean;
       /** Its owner's pause (w1532, machine/pause.ts): from its tray, its schedule or a person's input. An older portal ignores it. */
       pause?: MachinePause;
       /** It updates, restarts and unloads itself on the portal's word over this link (w1596, `self_update`, `daemon_control`): the version. An older portal ignores it. */

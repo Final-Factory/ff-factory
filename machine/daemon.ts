@@ -46,6 +46,7 @@ import { MachineGuard, realGuardEffects, type MachineGuardEffects, type MachineG
 import type { TrimPolicy } from '../server/cacheTrim.ts';
 import { DEFAULT_BUILD } from '../server/placement.ts';
 import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
+import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
@@ -597,6 +598,8 @@ export class Daemon {
   private maxTail?: FileTail;
   /** The machine's sandboxes (machine/sandboxes.ts): worktrees of the clone with their own editors. */
   readonly pool: SandboxPool;
+  /** Light agent folders (w5924, machine/lightFolders.ts): agent-only workers' plain folders under the sandbox root, reported with the sandboxes. */
+  readonly light: LightFolders;
   /** Each sandbox's local test runs, sent to the portal's per-test history (w4922, machine/testHistorySpool.ts). */
   private readonly testHistory: TestHistorySpool;
   /** Every Unity editor on the machine against max_unity, and the queue for launches (machine/unitySlots.ts, w469). */
@@ -1053,6 +1056,7 @@ export class Daemon {
       census: async () => runnerCensus(await pd.procs()),
       log: (line) => log(line),
     });
+    this.light = new LightFolders({ root: () => this.sandboxRoot(), onChange: () => this.reportSandboxes() });
     this.pool = new SandboxPool(
       {
         repoPath: cfg.repoPath,
@@ -2260,6 +2264,8 @@ export class Daemon {
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
       ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
+      lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
       // Its owner's pause (w1532): a paused machine is held and its workers hand their requests back.
       pause: this.pause.current(),
@@ -2491,7 +2497,12 @@ export class Daemon {
       const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
       return here.length ? { ...sb, lingering: here } : sb;
     });
-    this.send({ type: 'sandboxes', list, disk: this.pool.diskState() });
+    // w5924: the light agent folders ride along, `kind: "light"`; a portal that predates them never asks for one, so finds none.
+    const light = this.light.list().map((sb) => {
+      const here = lingering.filter((l) => l.sandbox === sb.id).map(({ sessionId, pid, since }) => ({ sessionId, pid, since }));
+      return here.length ? { ...sb, lingering: here } : sb;
+    });
+    this.send({ type: 'sandboxes', list: [...list, ...light], disk: this.pool.diskState() });
   }
 
   /**
@@ -4212,7 +4223,7 @@ export class Daemon {
       const all = this.runningIn('*') + this.runningIn(undefined);
       return all >= this.maxSessions ? `already ${all} agents mid-turn on this machine, in its sandboxes and standing agents together (its agent cap ${this.maxSessions})` : undefined;
     }
-    const sb = this.pool.list().find((s) => s.id === spec.sandbox);
+    const sb = this.pool.list().find((s) => s.id === spec.sandbox) ?? (isLightId(spec.sandbox) ? this.light.list().find((s) => s.id === spec.sandbox) : undefined);
     if (!sb) return `no sandbox "${spec.sandbox}" on this machine`;
     if (sb.status !== 'ready') return `sandbox ${sb.id} is ${sb.status}${sb.statusDetail ? ` (${sb.statusDetail})` : ''}`;
     if (path.resolve(sb.path).toLowerCase() !== path.resolve(spec.cwd).toLowerCase()) return `sandbox ${sb.id} is at ${sb.path}, not ${spec.cwd}`;
@@ -4536,6 +4547,16 @@ export class Daemon {
             (text) => this.send({ type: 'sandbox_result', id: msg.id, ok: true, text }),
             (err) => this.send({ type: 'sandbox_result', id: msg.id, ok: false, text: (err as Error).message }),
           );
+        // w5924: a light agent folder (an id agent1, agent2, ...): a plain folder, no worktree, no Library, no editor.
+        if (isLightId(msg.sandbox) && (msg.op === 'create' || msg.op === 'delete' || msg.op === 'release' || msg.op === 'log')) {
+          const live = msg.op === 'create' || msg.op === 'log' ? 0 : this.liveIn(msg.sandbox);
+          if (live) reply(Promise.reject(new Error(`${live} agent(s) still run in light folder ${msg.sandbox}; stop them first`)));
+          else if (msg.op === 'create') reply(Promise.resolve().then(() => this.light.create(msg.sandbox)));
+          else if (msg.op === 'delete') reply(this.light.remove(msg.sandbox, msg.force === true));
+          else if (msg.op === 'log') reply(Promise.resolve(`light folder ${msg.sandbox} has no editor, so no editor log`));
+          else reply(Promise.resolve(`light folder ${msg.sandbox} released (it stays on disk until it is deleted)`));
+          return;
+        }
         if (msg.op === 'create') {
           reply(this.pool.create({ id: msg.sandbox, branch: msg.branch, base: msg.base, seedLibrary: msg.seedLibrary, startUnity: msg.startUnity }).then((s) => `Creating sandbox ${s.id} on branch ${s.branch} from ${s.base} at ${s.path}.`));
         } else if (msg.op === 'delete') {

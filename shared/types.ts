@@ -1298,6 +1298,12 @@ export interface Machine {
 export interface MachineSandbox {
   /** The folder name, also the Unity project and MCP instance name ("<id>@<hash>"). Addressed as "<machine>/<id>". */
   id: string;
+  /**
+   * "light" (w5924, machine/lightFolders.ts): a light agent folder, `<sandbox_root>/agent-work/<id>` (ids agent1, agent2,
+   * ...), for work that needs only an agent slot: a plain folder, no branch, no Library, no editor. It counts against the
+   * machine's agent cap only, never among its game sandboxes (shared/sandboxKind.ts). Unset: a game sandbox.
+   */
+  kind?: 'light';
   branch: string;
   base: string;
   path: string;
