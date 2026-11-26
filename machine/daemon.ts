@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -77,7 +77,7 @@ import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
-import { RELEASE_SETTINGS, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
+import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
@@ -1319,10 +1319,12 @@ export class Daemon {
           first: {
             plan: async () =>
               planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
-            report: (items, ms) =>
-              log(`clean-up: ffu slots first (report-only, w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`),
+            report: (items, ms, run) =>
+              log(
+                `clean-up: ffu slots first (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
+              ),
           },
-          busyNow: runnerBusyNow(() => this.procs()),
+          busyNow: anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard())),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
@@ -3775,6 +3777,8 @@ export class Daemon {
       // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
       if (ownerGameData) log(await ownerGameDataLock(ownerGameData, exec));
       for (const exe of await lowRunners(root, exec)) log(`worker integrity: CI runner job exe ${exe} is still labelled Low, so its jobs start at Low and Git Bash dies (0xC0000022); label its folder Medium`);
+      // w5948: a virtual disk (a WSL distro's ext4.vhdx) in a Low tools child: said, not moved (warn-only).
+      for (const disk of lowDiskImages(root, toolsChildren)) log(lowDiskImageWarning(disk, root));
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
