@@ -176,6 +176,16 @@ export interface RunnerUnitsDeps {
 }
 
 
+/** Whether `systemctl show -p Environment` output ends with TMPDIR=want as a whole value (systemd quotes one with spaces). */
+export function loadedHasTmpdir(show: string | undefined, want: string): boolean {
+  const line = (show ?? '').split(/\r?\n/).find((x) => x.startsWith('Environment='));
+  if (!line) return false;
+  const v = line.slice('Environment='.length);
+  // every assignment is listed in order and the last one wins, so an override.conf after ours counts against it
+  const last = v.split(/\s+(?=(?:[^"]*"[^"]*")*[^"]*$)/).map((e) => e.replace(/^"|"$/g, '')).filter((e) => e.startsWith('TMPDIR=')).at(-1);
+  return last === `TMPDIR=${want}`;
+}
+
 export class RunnerUnits {
   private readonly d: RunnerUnitsDeps;
   private ticking = false;
@@ -184,6 +194,10 @@ export class RunnerUnits {
   private workerless = new Map<number, number>();
   /** Units whose drop-in could not be written, said once. */
   private said = new Set<string>();
+  /** A daemon-reload this daemon owes systemd: a drop-in written by a pass whose reload failed (w5834 F1), retried each pass. */
+  private reloadOwed = false;
+  /** Units restarted once for their temp folder (w5834): never again while this daemon runs; a listener still without it is said once. */
+  private tmpRestarted = new Set<string>();
 
   constructor(d: RunnerUnitsDeps) {
     this.d = d;
@@ -204,6 +218,32 @@ export class RunnerUnits {
   private cooling(unit: string): boolean {
     const t = this.last.get(unit);
     return t !== undefined && this.d.now() - t < COOLDOWN_MS;
+  }
+
+  /**
+   * Whether an idle listener without its temp folder may be restarted for it (w5834 F1, the w5884 review): once per unit, only
+   * when systemd has loaded TMPDIR=want for it (else a restart comes back without it, every cooldown), and only when a fresh
+   * census still shows it idle with no job worker (N1: the pass's census can be several restarts old). Anything else is said
+   * once and the unit is left running as it is.
+   */
+  private async tmpRestartable(unit: string, root: string, want: string, pid: number): Promise<boolean> {
+    const sayOnce = (key: string, text: string) => {
+      if (!this.said.has(`${unit}/${key}`)) this.d.log(`runner units: ${unit} (${root}): ${text} (w5834)`);
+      this.said.add(`${unit}/${key}`);
+    };
+    if (this.tmpRestarted.has(unit)) {
+      sayOnce('tmp-again', `listener pid ${pid} still started without TMPDIR=${want} after its one restart: left running; check \`systemctl --user show -p Environment ${unit}\` for an override`);
+      return false;
+    }
+    if (!loadedHasTmpdir(await this.d.systemctl(['show', '-p', 'Environment', unit]), want)) {
+      this.reloadOwed = true;
+      sayOnce('tmp-unloaded', `systemd has not loaded TMPDIR=${want} (a daemon-reload pending, or another drop-in overrides it): not restarted for it`);
+      return false;
+    }
+    const fresh = await this.d.census();
+    const r = flat(root);
+    const l = fresh.listeners.find((x) => x.pid === pid);
+    return !!l && !l.busy && !fresh.workers.some((w) => flat(w.root) === r);
   }
 
   private async step() {
@@ -241,7 +281,12 @@ export class RunnerUnits {
         this.said.add(u.unit);
       }
     }
-    if (wrote) await this.d.systemctl(['daemon-reload']);
+    if (wrote || this.reloadOwed) {
+      // owed until it succeeds: a failed reload leaves the drop-ins on disk but not loaded, and the next pass writes nothing
+      this.reloadOwed = true;
+      await this.d.systemctl(['daemon-reload']);
+      this.reloadOwed = false;
+    }
     let census: RunnerCensus | undefined;
     for (const u of units) {
       if (this.cooling(u.unit)) continue;
@@ -270,7 +315,8 @@ export class RunnerUnits {
       const want = tmp.get(u.unit);
       if (want && idle && since === undefined) {
         const had = this.d.startedTmpdir?.(l.pid);
-        if (had !== undefined && had !== want) {
+        if (had !== undefined && had !== want && (await this.tmpRestartable(u.unit, u.root, want, l.pid))) {
+          this.tmpRestarted.add(u.unit);
           await this.d.systemctl(['restart', u.unit]);
           this.last.set(u.unit, this.d.now());
           this.d.log(`runner units: ${u.unit} (${u.root}): idle listener pid ${l.pid} started with TMPDIR=${had ?? '(unset)'}: restarted for TMPDIR=${want} (w5834)`);
