@@ -116,8 +116,8 @@ export function resourceFault(log: string): string | undefined {
   return lines.find((l) => RESOURCE_FAULT.test(l))?.replace(/^\S+Z\s+/, '').trim().slice(0, 240);
 }
 
-/** w6140: a SIGKILLed process: bash's job report ("<script>: line 51: 344007 Killed"), exit 137, or cargo's signal 9. */
-const KILLED = /\bline \d+:\s+\d+ Killed\b|##\[error\]Process completed with exit code 137\.|signal: 9, SIGKILL/;
+/** w6140: a SIGKILLed process: bash's job report ("<script>: line 51: 344007 Killed"), exit 137, or cargo's signal 9, or Python subprocess's negative return code (ffu's run_tests_parallel.py: "(exit -9)", w6229; only -9). */
+const KILLED = /\bline \d+:\s+\d+ Killed\b|##\[error\]Process completed with exit code 137\.|signal: 9, SIGKILL|\(exit -9\)/;
 const STEP_START = /##\[group\]Run /;
 const STEP_FAILED = /##\[error\]Process completed with exit code \d+\./;
 /** w6140: ffu's tools/ci-runners/runner_health.sh line, and its warning when swap is over 90 % full. */

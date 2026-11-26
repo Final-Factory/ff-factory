@@ -305,3 +305,13 @@ test('w6140: a SIGKILLed step beside a full swap is out of memory, rerun once at
   assert.match(oomKill(lowAvail)!, /runner health: available 900 MB of 27186 MB$/);
   assert.equal(oomKill(healthy.replace('available 5611 MB', 'available 1400 MB')), undefined);
 });
+
+// w6229: ffu run 45902685264's "check" (job 140191984567): tools/run_tests_parallel.py printed Python's negative return code for a
+// SIGKILL, "(exit -9)", and runner health read "swap free 13 MB of 8191 MB". Lines from that report; only -9 counts as a kill.
+test('w6229: Python subprocess "exit -9" is a SIGKILL beside full swap; other negative codes are not', () => {
+  const log = text('rerun-oom-exit-minus9.txt');
+  assert.match(oomKill(log)!, /FAILED: ffu-audio\/test\/headless \(exit -9\).*swap free 13 MB of 8191 MB$/);
+  assert.equal(oomKill(log.replace(/exit -9/g, 'exit -11')), undefined);
+  assert.equal(oomKill(log.replace(/exit -9/g, 'exit 9')), undefined);
+  assert.equal(oomKill(log.replace('swap free 13 MB', 'swap free 7900 MB').replace(/^.*swap is 100.*$/m, '')), undefined);
+});
