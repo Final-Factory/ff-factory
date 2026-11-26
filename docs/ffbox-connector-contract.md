@@ -235,6 +235,7 @@ Never send the description, log lines, file names from inside the zip, or the se
 | `dev_ack`, `dev_filed`, `dev_reply` | the answers to an operator's `dev_request` and `dev_message`, and later replies to that conversation ([Dev requests](#dev-requests-an-operators-ffdev-turn-handed-to-ff-factory)) |
 | `report_fixed` | a player's report a finished request fixed (w502; [Reports fixed](#reports-fixed-w502)), only to a connector whose hello lists it |
 | `report_obsolete` | a player's report a declined request leaves, or no longer (w853; [Reports obsolete](#reports-obsolete-w853)), only to a connector whose hello lists it |
+| `outside_watch` | the outside watchdog's ntfy topic while FFBox watches the portal, `null` when it does not (w5892; [The outside watch](#the-outside-watch-w5892)), only to a connector whose hello lists it |
 
 A type the connector does not know is not fatal: answer `error` `unsupported` with the type as `ref`, or ignore it.
 
@@ -562,6 +563,34 @@ sets the verdict of the report's diagnosis conversation (`intake:<id>`) to `OBSO
 says more, and `report_fixed` always sets FIXED), and shows `obsolete {work}` in the `reports` query. A withdrawal puts
 back the verdict it replaced. It posts NOTHING, on Discord or anywhere. A connector without it skips the type (logged
 once per link).
+
+## The outside watch (w5892)
+
+FFBox watches the portal from outside (docs/self-recovery.md, section 4). FF Factory → connector, only when the hello's
+`accepts` lists `outside_watch`, on every new link and when the value changes (`server/providers.ts`,
+`setOutsideWatch`):
+
+```json
+{ "type": "outside_watch", "topic": "ffsb-…" }
+{ "type": "outside_watch", "topic": null }
+```
+
+`null`: another machine watches, or the watch is off; FFBox stops and forgets the topic. The connector writes it to
+`<status-dir>/dev/outside-watch/config.json`, and ffwatch (`scripts/outside_watch.py`) keeps its own copy, checks
+`<fff.url>/api/health` every 60 s and alerts `https://ntfy.sh/<topic>` after 3 misses in a row and on recovery.
+
+Connector → FF Factory, when it changes and on every new link (`OutsideWatchStatusSchema`, `server/providerProtocol.ts`):
+
+```json
+{ "type": "outside_watch_status", "outside_watch": { "at": "2026-11-25T06:00:00Z", "interval_secs": 60, "failures": 3,
+  "state": "up", "checks": 4, "alerts": 1, "pings": false, "health_url": "https://fff.example.ts.net/api/health",
+  "topic_tag": "0123456789ab", "checked_at": "…", "ok_at": "…", "failing_since": "…", "announced_at": "…",
+  "last_alert": { "at": "…", "title": "Outside watchdog on FFBox", "ok": true } } }
+```
+
+`state` is `up`, `down` or `idle` (no topic or no URL). Never the topic: `topic_tag` is the first 12 hex of its SHA-256.
+`announced_at` is when the one low-priority test alert reached ntfy, sent for each new topic. A portal that answers
+`unsupported` is not sent it again on that link. `system_status`'s "Outside watchdog" line shows it.
 
 ## Escalations from Max (HTTP, not the connector)
 
