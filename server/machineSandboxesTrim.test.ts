@@ -21,6 +21,7 @@ import type { BenchTicket } from '../machine/benchQueue.ts';
 import { EDITOR_TICKET_RETRY_MS, SandboxPool, type PoolOptions, deletable, idleSandboxEditors, lfsDedup, lfsDedupWords, librarySource, treeBytes, type PoolDeps, type SandboxEditor } from '../machine/sandboxes.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../shared/types.ts';
 import { copyTree, removeTree, run } from './proc.ts';
+import { withBaseRepoLock } from './sandboxes.ts';
 import { readGitStatus } from './gitStatus.ts';
 import { borrowsFrom, configText, finishConversion, gitPathForm, isSlotRepo, isWorktree, keptStashPrefix, worktreeRecordOf } from '../machine/slotRepo.ts';
 import { testRepos } from './testMachine.ts';
@@ -760,12 +761,76 @@ for (const how of ['hangs', 'throws'] as const) {
     assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed');
     assert.equal(p.list()[0].status, 'ready');
     assert.ok(events.some((e) => /sb1: could not become a slot repo/.test(e.text)), JSON.stringify(events));
-    // The next placement, with git well again, converts it.
+    assert.ok(events.some((e) => /placements skip the conversion for 6 h/.test(e.text)), JSON.stringify(events));
+    // w6086 finding 1: the next placement does not try again (it would hold that worker up too) ...
     inner.d.git = real;
     await p.switch('sb1', 'sandbox/placed2', 'origin/master');
-    assert.ok(isSlotRepo(dir), 'converted at the next placement');
+    assert.ok(isWorktree(dir), 'backed off: the next placement leaves it');
+    assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed2');
+    // ... and once the back-off is past, a placement converts it.
+    (p as unknown as { convertFailedAt: Map<string, number> }).convertFailedAt.clear();
+    await p.switch('sb1', 'sandbox/placed3', 'origin/master');
+    assert.ok(isSlotRepo(dir), 'converted at a placement after the back-off');
+    assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed3');
   });
 }
+
+test('w5614: a conversion at a placement whose main clone lock stays busy gives up before doing anything, with no back-off (w6086 finding 2)', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const { p, events } = pool(r, { liveAgents: () => 1 });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
+  const dir = path.join(r.sbRoot, 'sb1');
+  p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
+  (p as unknown as { convertAtPlacementMs: number }).convertAtPlacementMs = 300;
+  // Another sandbox's locked work holds the main clone's lock for 2 s.
+  let free: () => void = () => undefined;
+  const holding = withBaseRepoLock(() => new Promise<void>((res) => (free = res)));
+  const freeLater = setTimeout(() => free(), 2_000);
+  t.after(() => clearTimeout(freeLater));
+  const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
+  await holding;
+  assert.equal(res.to, 'sandbox/placed', 'the placement went on');
+  assert.ok(isWorktree(dir), 'still a whole worktree');
+  assert.equal(fs.existsSync(path.join(dir, '.git.new')), false, 'nothing was started');
+  assert.ok(events.some((e) => /sb1: could not become a slot repo: the main clone stayed busy/.test(e.text)), JSON.stringify(events));
+  assert.ok(!events.some((e) => /placements skip/.test(e.text)), 'a busy lock is no failure: no back-off');
+  (p as unknown as { convertAtPlacementMs: number }).convertAtPlacementMs = 120_000;
+  await p.switch('sb1', 'sandbox/placed2', 'origin/master');
+  assert.ok(isSlotRepo(dir), 'the next placement converts it');
+});
+
+test('w5614: a conversion cut after its swap says it became a slot repo, not that it stays a worktree (w6086 finding 3)', async (t) => {
+  const r = repos();
+  t.after(r.cleanup);
+  const logs: string[] = [];
+  const { p, events } = pool(r, { liveAgents: () => 1, log: (l) => logs.push(l) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
+  const dir = path.join(r.sbRoot, 'sb1');
+  p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
+  const inner = p as unknown as { convertAtPlacementMs: number; d: { git: (a: string[], o?: { signal?: AbortSignal; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }> } };
+  inner.convertAtPlacementMs = 15_000;
+  const real = inner.d.git;
+  let reached = false;
+  // The status count after the swap hangs until the pool cuts it.
+  inner.d.git = async (a, o) => {
+    if (!(a.includes('status') && a.includes('--untracked-files=no') && a.includes(dir) && isSlotRepo(dir))) return real(a, o);
+    reached = true;
+    return new Promise((res) => o?.signal?.addEventListener('abort', () => res({ code: 1, stdout: '', stderr: 'killed' })));
+  };
+  const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
+  inner.d.git = real;
+  assert.ok(reached, `the planted step ran: ${JSON.stringify({ logs, events })}`);
+  assert.equal(res.to, 'sandbox/placed');
+  assert.ok(isSlotRepo(dir), 'a whole slot repo');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed');
+  assert.ok(logs.some((l) => /sb1: became a slot repo \(a step after the swap was cut/.test(l)), JSON.stringify(logs));
+  assert.ok(!events.some((e) => /could not become a slot repo/.test(e.text)), JSON.stringify(events));
+});
 
 test('w5614: a conversion cut between its two renames is finished; a slot .git.new beside a whole .git is dropped', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slotfin-'));
