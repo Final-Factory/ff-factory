@@ -12,7 +12,7 @@
  * and `-c` options come after and still win):
  * - FIXED: keys whose name is known, forced every call, with no race against the worker: no fsmonitor, hooks read from
  *   FF Factory's own folder (server/gitHooks: git-lfs's four hooks and nothing else, so a push still uploads LFS objects;
- *   not `/dev/null`, which would be `\dev\null` on a Windows drive a worker can write), the `cat` pager, `:` editors, no signing or signature checks (a gpg program never runs), and remote
+ *   not `/dev/null`, which would be `\dev\null` on a Windows drive a worker can write), the `cat` pager, `:` editors, no `core.alternateRefsCommand` (w6082), no signing or signature checks (a gpg program never runs), and remote
  *   transports limited to https, http, ssh and file (`ext::` and named remote helpers are refused). Same list as w5514's
  *   standing agents (server/launch.ts STANDING_GIT_CONFIG) except `safe.bareRepository=explicit`: the machines' main
  *   clones are bare and the daemon runs `git -C <bare clone>`, which `explicit` refuses.
@@ -59,6 +59,9 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
   ['core.hooksPath', HOOKS],
   ['core.pager', 'cat'],
   ['core.editor', ':'],
+  // Run by a fetch or a receive in a repository whose objects/info/alternates names another (w6082). Empty starts nothing:
+  // git tries to run '', reads no alternate refs, and the fetch still works (measured, git 2.56.1, GIT_TRACE).
+  ['core.alternateRefsCommand', ''],
   ['sequence.editor', ':'],
   ['log.showSignature', 'false'],
   ['commit.gpgSign', 'false'],
