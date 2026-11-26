@@ -1,5 +1,6 @@
 // The WebSocket protocol between the portal (server/machines.ts) and a machine daemon
 // (machine/daemon.ts). JSON messages, one per frame. Types only, plus the version constant.
+import type { RunnerHoldReport } from '../shared/runnerHold.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { PortalPinStatus } from '../machine/portalPin.ts';
 import type { CatalogTool, LaunchSpec } from './launch.ts';
@@ -254,6 +255,11 @@ export type ToDaemon =
   | { type: 'outside_watch'; config: OutsideWatchConfig | null }
   /** The daemon's clean-up settings (server/cleanup.ts), at connect and when they change. Kept on the machine. */
   | { type: 'cleanup_config'; config: { everyMinutes: number; softFreeGB: number; staleOutput?: unknown } }
+  /**
+   * w5916: a person's hold on this machine (config placement.hold, or a drain): its words, or null when there is none. At
+   * connect, when it changes and every few minutes (the daemon lets a hold the portal stopped repeating lapse after 12 h).
+   */
+  | { type: 'runner_hold'; why: string | null }
   /** This machine's activity pause (w1574, config machines.activityPause): at connect and when it changes. */
   | { type: 'activity_config'; config: { enabled: boolean; idleMinutes: number } }
   /** The ledger's facts for the stale-output rules (w459): which requests are open and closed. At connect and every few minutes. */
@@ -444,6 +450,8 @@ export type FromDaemon =
   | { type: 'activity_set'; activity: { enabled: boolean; idleMinutes: number } }
   /** Its host guard's state, when it changes (protocol 8, w466). */
   | { type: 'host_health'; health: Pick<HostHealth, 'checkedAt' | 'sandboxRoot' | 'level' | 'detail' | 'blocked'> }
+  /** w5916: what a person's hold does to its CI runners (draining, stopped), at welcome and when it changes; null: no hold. */
+  | { type: 'runner_hold'; report: RunnerHoldReport | null }
   /** Its worker write fence's state, at welcome and when it changes (w5555): a failed one holds its sandbox workers. */
   | { type: 'worker_fence'; fence: WorkerFenceReport }
   /** The session's current record (the daemon's AgentSession changed it). */

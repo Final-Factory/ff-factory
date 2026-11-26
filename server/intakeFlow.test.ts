@@ -1432,9 +1432,11 @@ test("w830: w811 as it happened: Lothsahn's \"close w811 as a duplicate once 131
   loth.lastFrom = 'system';
   const refused = await call(loth.info, 'update_work', { id: w.id, decline: true, note: 'duplicate of w814' });
   assert.equal(refused.isError, true);
-  assert.match(refused.text, /only Lothsahn, in their own words, approves or declines w\d+, and this turn is not theirs .*recorded with update_work when, in their turn\. Held: FF Factory offers this call back to you on Lothsahn's next message\. If Lothsahn already decided it, do it on their next message; don't ask Lothsahn again\.$/);
+  assert.match(refused.text, /only Lothsahn, in their own words, approves or declines w\d+; this turn is the harness's.*recorded with update_work when, in their turn\. Held: FF Factory offers this call back to you on Lothsahn's next message\. If Lothsahn already decided it, do it on their next message; don't ask Lothsahn again\.$/);
   // Recording it outside his turn is refused and held the same way.
-  assert.match((await call(loth.info, 'update_work', decline)).text, /a decision that waits for a fact is recorded only in a turn Lothsahn started .*Held: /);
+  // (w5896: without his words; quoting his earlier message would record it here, tested in orchestratorsPeople.)
+  const { words: _w, ...bare } = decline;
+  assert.match((await call(loth.info, 'update_work', bare)).text, /a decision that waits for a fact is recorded only on Lothsahn's own words.*Held: /);
   assert.equal(w.conditional, undefined);
   const offer = o.heldOffer(loth.info.id);
   assert.ok(offer.startsWith(`\n\n${HELD_MARK}\n`), offer);

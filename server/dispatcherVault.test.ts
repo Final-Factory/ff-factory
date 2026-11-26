@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PoolHeldError, Vault, fingerprintOf, newKeyText, setVaultContext, type VaultContext } from './vault.ts';
-import { accountSetupLines, hostAccount, liveOnAccount, machineRunEnv, pinnedDispatcherEntry, pinnedDispatcherEnv, reserveLines, reservedCredentials } from './secrets.ts';
+import { accountSetupLines, dispatcherOwnAccount, dispatcherPoolPerson, hostAccount, liveOnAccount, machineRunEnv, pinnedDispatcherEntry, pinnedDispatcherEnv, poolRunEnv, reserveLines, reservedCredentials } from './secrets.ts';
 import { checkAccountConfig } from './config.ts';
 import { normalizeSetting } from './appConfig.ts';
 import { poolLimits } from './tokenPool.ts';
@@ -75,7 +75,7 @@ test('config: the dispatcher alone takes "vault:<entry name>"; the orchestrator,
     assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: bad } } as never), /vault entry's name|"vault:<entry name>"/, bad);
   }
   checkAccountConfig({ claudeAccounts: { dispatcher: 'vault' } } as never);
-  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'keychain' } } as never), /claudeAccounts\.dispatcher is "vault" .* or "vault:<entry name>"/);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'keychain' } } as never), /claudeAccounts\.dispatcher is "vault" .*, "vault:<entry name>" .* or "pool:<login>"/);
   assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: 'tokenfile' } } as never), /every Claude process runs on a vault token \(w1078\)/, 'retired (w1078)');
 });
 
@@ -94,6 +94,52 @@ test('set_app_config: "vault:<entry name>" is accepted for the dispatcher when t
   for (const name of ['nonexistent', 'github-x', 'off']) {
     assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', `vault:${name}`), new RegExp(`no enabled Claude token named "${name}"`), name);
   }
+});
+
+test('w5891: claudeAccounts.dispatcher takes "pool:<login>": config and set_app_config accept a login with a Claude pool; "vault:<name>" and "vault" keep working', (t) => {
+  checkAccountConfig({ claudeAccounts: { dispatcher: 'pool:ben' } } as never);
+  assert.throws(() => checkAccountConfig({ claudeAccounts: { orchestrator: 'pool:ben' } } as never), /only dispatcher/);
+  for (const bad of ['pool:', 'pool:a b', 'pool:-x', `pool:${'x'.repeat(41)}`]) assert.throws(() => checkAccountConfig({ claudeAccounts: { dispatcher: bad } } as never), /pool:<login>/, bad);
+  const users = ['Ben', 'lothsahn'];
+  const { vault } = setup(t);
+  setVaultContext({ vault });
+  t.after(() => setVaultContext(undefined));
+  assert.equal(normalizeSetting('claudeAccounts.dispatcher', ' pool:LOTHSAHN ', undefined, users), 'pool:lothsahn', "stored in the login's own spelling");
+  assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'pool:nobody', undefined, users), /no login "nobody"; the logins are Ben, lothsahn/);
+  assert.throws(() => normalizeSetting('claudeAccounts.dispatcher', 'pool:ben', undefined, users), /Ben has no enabled Claude token in the vault/);
+  assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault:vault-lothsahn-1', undefined, users), 'vault:vault-lothsahn-1');
+  assert.equal(normalizeSetting('claudeAccounts.dispatcher', 'vault', undefined, users), undefined);
+  const cfg = cfgOf({ claudeAccounts: { dispatcher: 'pool:lothsahn' } });
+  assert.equal(hostAccount(cfg, 'dispatcher'), 'pool:lothsahn');
+  assert.equal(hostAccount(cfg, 'orchestrator'), 'vault');
+  assert.equal(dispatcherPoolPerson(cfg), 'lothsahn');
+  assert.equal(pinnedDispatcherEntry(cfg), undefined, 'a pool is not a pin');
+  assert.equal(dispatcherOwnAccount(cfg), true);
+  assert.equal(dispatcherPoolPerson(cfgOf()), undefined);
+});
+
+test("w5891: the dispatcher on a pool runs on that person's own pool (never their pool setting's), its reserve is the token it is on, and a used-up pool waits", (t) => {
+  const { vault } = setup(t);
+  vault.add({ name: 'vault-ben-1', kind: 'claude', value: claudeTok('c'), owner: 'ben', share: 'owner' });
+  const cfg = cfgOf({ claudeAccounts: { dispatcher: 'pool:lothsahn' } });
+  const meters: Record<string, PlanUsage | undefined> = { [fp(L1)]: usage(10, 100, { weeklyDays: 5 }), [fp(L2)]: usage(10, 30, { weeklyDays: 5 }) };
+  const ctx = { ...ctxOf(vault, cfg, meters), poolOf: () => 'ben' };
+  const run = poolRunEnv({ role: 'orchestrator', personId: 'lothsahn', sessionId: 'disp', ownPool: true }, ctx);
+  assert.equal(run.env.CLAUDE_CODE_OAUTH_TOKEN, L2, "lothsahn's token with room, not Ben's though lothsahn's pool setting names Ben's");
+  assert.match(run.account, /^vault token vault-lothsahn-2 …bbbb \(the dispatcher's, from lothsahn's pool: claudeAccounts\.dispatcher "pool:lothsahn"/);
+  // The reserve: the token it runs on now, one of that pool's; another pool's token or none: no reserve.
+  assert.deepEqual(reservedCredentials(cfg, { vault, dispatcherOn: () => tokenKey(L2) }).map((c) => [c.role, c.key]), [['dispatcher', tokenKey(L2)]]);
+  assert.deepEqual(reservedCredentials(cfg, { vault, dispatcherOn: () => tokenKey(claudeTok('c')) }), []);
+  assert.deepEqual(reservedCredentials(cfg, { vault, dispatcherOn: () => undefined }), []);
+  // The whole pool used up: it waits, and never runs on Ben's pool.
+  meters[fp(L2)] = usage(10, 100, { weeklyDays: 5 });
+  assert.throws(
+    () => poolRunEnv({ role: 'orchestrator', personId: 'lothsahn', sessionId: 'disp', ownPool: true }, ctx),
+    (e: unknown) => e instanceof PoolHeldError && /lothsahn's Claude token pool, which claudeAccounts\.dispatcher names, is used up, so the dispatcher waits for its first token to reset \(w5921: never another pool\)/.test(e.message),
+  );
+  setVaultContext(ctx);
+  t.after(() => setVaultContext(undefined));
+  assert.match(accountSetupLines(cfg, 'ben')[0], /any token of lothsahn's own pool with room \(claudeAccounts\.dispatcher "pool:lothsahn", w5891/);
 });
 
 test('the dispatcher on a vault token: hostAccount says so, the orchestrators keep "vault", and unpinned it is the system payer\'s pool', () => {

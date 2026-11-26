@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { benchGlance } from '../../../shared/benchGlance';
 import { playGlance } from '../../../shared/personPlay';
+import { runnerHoldText } from '../../../shared/runnerHold';
 import { machineKind, type AppState, type Machine } from '../../../shared/types';
 import { api, type JoinAnswer } from '../api';
 import { attempt, sessionsByIds, toast, upsertMachine } from '../store';
@@ -176,6 +177,15 @@ export function MachinePanel({ app, machine: m, onClose }: { app: AppState; mach
               <span className="dim small ellipsis" title={`game pid ${play.pids.join(', ') || 'none now'}`}>
                 {playGlance(play)}: no new work goes there; {play.editorsClosed} editor(s) closed, {play.playersAsked} player(s) asked to quit, {play.buildsLowered} build(s) at idle priority
                 {play.until ? '' : `; work resumes ${play.graceMinutes} min after the game closes`}
+              </span>
+            </div>
+          )}
+          {/* A person's hold drains its CI runners (w5916): busy ones finish their job, then none takes another until it lifts. */}
+          {m.runnerHold && runnerHoldText(m.runnerHold) && (
+            <div className="unity-bar" data-testid="machine-runner-hold">
+              <Chip tone="amber">{m.runnerHold.busy.length ? 'CI draining' : 'CI stopped'}</Chip>
+              <span className="dim small ellipsis" title={`held: ${m.runnerHold.why}`}>
+                {runnerHoldText(m.runnerHold)}: they start again when the hold lifts
               </span>
             </div>
           )}

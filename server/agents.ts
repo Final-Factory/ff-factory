@@ -74,8 +74,9 @@ import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts'
 import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
+import { runnerHoldText } from '../shared/runnerHold.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
-import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
+import { MOVE_AFTER_MS, MoveGuard, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, warmWait, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
@@ -91,10 +92,10 @@ import { ReportError, audienceOf, type ReportStore } from './reports.ts';
 import { REPORT_FILTER, TEST_HISTORY_ARGS } from './launch.ts';
 import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.ts';
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
-import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
+import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, dispatcherPoolPerson, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
-import { beltFor, type BeltRole } from './belts.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
 import { DEFAULT_WAIT_SECONDS, MAX_SEND_CHARS, MAX_TOOL_FILE_BYTES, MAX_WAIT_SECONDS, RemoteChat, type Progress, type RemoteCaller } from './remoteChat.ts';
@@ -157,6 +158,7 @@ import type { StandingAgentInput, StandingTrigger } from '../shared/types.ts';
 import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, systemdSupervised, versionLine, waitingOnWakeLine, writeUpdateWanted, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
 import { appVersion, formatVersion } from './version.ts';
 import { ffuSlotLines, type FfuHolder } from './ffuSlotsView.ts';
+import { PREFER_TOOLS } from './bashNudge.ts';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 /** What the MCP SDK passes a tool handler besides its arguments: enough to send a progress notice to a client that asked for them. */
@@ -461,7 +463,7 @@ const DISK_WINDOWS = ` On a Windows computer, disk work (a clean-up, a low-disk 
 const DISK_UNIX = ` On macOS and Linux, outside the folder you only measure and report.`;
 
 export const DISK_HYGIENE = `## Disk space
-Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
+Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. A second checkout of another branch takes a second slot (\`ffu-slot take --branch <that branch>\`), never your first slot's target. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
 
 /**
  * Disk space as a worker on `platform` reads it (w2002, lothsahn: "File the compaction pilot plus the base-context trim and
@@ -489,6 +491,7 @@ A timed A/B gates your DONE only when the request's goal is a performance number
  * else a test step does. Every worker's brief carries it after DISK_HYGIENE.
  */
 export const SHELL_STEPS = `## Shell steps that never wait for a person
+${PREFER_TOOLS}
 You run in bypass mode: a Bash or PowerShell command asks nobody, except when Claude Code's own dangerous-rm check flags a delete in it (an \`rm\` of a \`$VAR\` path with a glob or a brace list, \`$TMPDIR/*.log\` or \`$TMPDIR/{a,b}\`, or of a critical path); then a person must approve it and your work stops. A function, a loop, several lines, \`&&\`, a copy into the game's data folder and a script run never ask (measured). So:
 - Put multi-step test logic (a function, a retry loop, several legs) in a script file in $TMPDIR, written with the Write tool, and run it: \`bash "$TMPDIR/leg.sh" 1920\`. It never asks, and you can run it again.
 - Keep what a command prints small: every later call reads it again, and tool output is nearly half of a worker's history (measured). Find the lines first (\`grep -n\`), then read the range you need, not the whole file; cap a search (\`| head -40\`, \`grep -l\`, \`grep -c\`); print a build's, a test run's or a CI log's summary and its failures (\`| tail -40\`, \`gh run view <id> --log-failed | tail -80\`), not the whole log.
@@ -729,6 +732,19 @@ export class Agents {
    * on) has a token that is not: its label and why, else undefined. Wired by index.ts.
    */
   orchestratorTokenOut?: (account: string, pool: string) => string | undefined;
+  /**
+   * w5921: why the dispatcher's process on `account` must restart on another token before its next turn, else undefined: its
+   * config (claudeAccounts.dispatcher, a pinned token, a pool, or the payer's pool and their pool setting) names another
+   * token or pool than the one it runs on, or its token is out and its own pool has a better one. Never another pool. Wired
+   * by index.ts.
+   */
+  dispatcherAccountMove?: (account: string) => { why: string; out: boolean } | undefined;
+  /** w5921: why the dispatcher would wait if it started now (its pin out, or no token of its pool with room), else undefined. */
+  dispatcherHeldWhy?: () => string | undefined;
+  /** w5921: a line to the operators' orchestrators (those that exist): the owners and everyone with a Claude pool. */
+  operatorAlert?: (line: string) => void;
+  /** w5921 (review of #1312): the token the dispatcher was last moved off because it was out, and when: a restart that lands on it again is not moved again for 30 min (a sticky capped token). */
+  private dispatcherOff?: { account: string; at: number };
   /** An idle agent's process stops to restart on another account (accountMove): where it ran and why, for the switch log (w1745). */
   accountMoving?: (info: SessionInfo, why: string) => void;
   /** Who owns the vault token `account` (a session's credential key, "token:<fingerprint>"), for the pool setting's move (w1717); wired by index.ts. */
@@ -1066,6 +1082,9 @@ export class Agents {
     machines.workersCutOff = (id, sids, players) => this.orchestrators.workersCutOff(id, sids, players);
     // w2474: ...and one whose process ran on through the drop is not Blocked on it once its daemon says so.
     machines.workersLived = (id, sids) => void this.orchestrators.workersLived(id, sids);
+    // w5942: a daemon's refusal at its agent cap keeps room moves off that computer a while (resumeMove.ts MoveGuard).
+    machines.capRefused = (id, why) => this.moveGuard.noteRefusal(id, why, Date.now());
+    machines.capStarted = (id) => this.moveGuard.startedOn(id);
     // w2884: a worker whose agent host died mid-turn, resumed by Machines: said on its requests' logs.
     machines.workerNote = (sid, text) => void this.orchestrators.noteOnHeld(sid, text);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
@@ -1146,6 +1165,7 @@ export class Agents {
       options: this.opsOptions,
       tellOrchestrator: (person, text) => void this.sessions.send(this.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
       personTurn: (id, words) => this.personTurn(id, words),
+      personTurnNeed: (id, words) => this.orchestrators.ownWordsNeed(id, words),
       reactionCovers: (id, need) => this.orchestrators.reactionCovers(id, need),
       file: path.join(cfg.dataDir, 'ops-worker.json'),
       // A job sent for ledger requests (w631): open or stalled ones only; its DONE lines for them close them.
@@ -3243,10 +3263,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * gets them from its machine's daemon, which fetches them into the Inbox there before the message goes on. Without
    * files, a plain send.
    */
-  async sendWithAttachments(id: string, text: string, from: 'human' | 'orchestrator' | 'system', opts: { images?: ImageInput[]; attachments?: AttachmentRef[]; requestedBy?: Requester; bypassGate?: boolean; hold?: boolean } = {}): Promise<string> {
+  async sendWithAttachments(id: string, text: string, from: 'human' | 'orchestrator' | 'system', opts: { images?: ImageInput[]; attachments?: AttachmentRef[]; requestedBy?: Requester; bypassGate?: boolean; hold?: boolean; relay?: boolean } = {}): Promise<string> {
     if (from === 'human') this.orchestrators.refuseHumanChat(this.sessions.get(id).info);
     const files = (opts.attachments ?? []).map(publicRef);
-    const send = (attachments?: DeliveredAttachment[]) => this.sessions.send(id, text, from, opts.images, { requestedBy: opts.requestedBy, bypassGate: opts.bypassGate, attachments, hold: opts.hold });
+    const send = (attachments?: DeliveredAttachment[]) => this.sessions.send(id, text, from, opts.images, { requestedBy: opts.requestedBy, bypassGate: opts.bypassGate, attachments, hold: opts.hold, ...(opts.relay ? { relay: true } : {}) });
     if (!files.length) return send();
     const store = this.attachments;
     if (!store) throw new Error('attachments are not wired into this server');
@@ -3539,8 +3559,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     this.notifyPeople(
       this.orchestrators.audienceOf(s.info),
       `[worker update] ${this.label(s)} is waiting for permission to use ${p.toolName} with ${JSON.stringify(p.input ?? null).slice(0, 600)}` +
-        // Claude Code's reason (w5148): why it asked, which says what would have answered it.
-        `${'reason' in p && p.reason ? ` (Claude Code's reason: ${String(p.reason).slice(0, 300)})` : ''}. ` +
+        // Why it asked (w5148): Claude Code's reason, and for a shell command the worker's own "no other route" (w5914).
+        `${'reason' in p && p.reason ? ` (why: ${String(p.reason).slice(0, 400)})` : ''}. ` +
+        ('noRoute' in p && p.noRoute
+          ? 'FF Factory already asked the worker for a route that needs no approval and this is its answer; a request to build that route is filed or linked on the ledger. A message you send it, or its turn ending, clears the card. '
+          : '') +
         `You cannot approve it; tell the user it needs them (the approval card is in that sandbox's panel).`,
     );
   }
@@ -3790,16 +3813,72 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const i = s.info;
     if (!s.live || isMidTurn(i) || !i.account) return undefined;
     const owner = this.orchestrators.ownerOf(i);
+    // w5921: the dispatcher follows its own config (a pinned token, one person's pool, or the payer's), and moves within its
+    // pool off a token that is out; index.ts reads the vault for it.
+    if (!owner && i.orchestratorRole === 'dispatcher' && this.dispatcherAccountMove) {
+      const move = this.dispatcherAccountMove(i.account);
+      if (!move?.out) return move?.why;
+      // Off a token that is out: once. Its restart may land on the same token (the pool's pick keeps a sticky capped one when
+      // nothing else passes its caps): not moved again for 30 min, so no restart loop (review of #1312).
+      const now = Date.now();
+      const off = this.dispatcherOff;
+      if (!off || off.account !== i.account || now - off.at > 30 * 60_000) {
+        this.dispatcherOff = { account: i.account, at: now };
+        return move.why;
+      }
+      return now - off.at < 2 * 60_000 ? move.why : undefined;
+    }
     const person = owner?.userId ?? (dispatcherOwnAccount(this.cfg) ? undefined : this.identity.systemPayer().userId);
     if (!person) return undefined;
     const pool = this.poolOf(person);
     // w1745: its token is out (used up, refused by Claude, or retired) and the pool its work runs on has a token that is not:
-    // it restarts there before this message. The dispatcher stays on the token it is pinned to, as configured.
+    // it restarts there before this message.
     const out = i.orchestratorRole === 'dispatcher' ? undefined : this.orchestratorTokenOut?.(i.account, pool);
     if (out) return `its process runs on ${out}, so it restarts on a token with room in ${isSamePerson(pool, person) ? 'its person' : pool}'s pool before this message (w1745)`;
     const on = this.tokenOwner?.(i.account);
     if (!on || isSamePerson(on, pool)) return undefined;
     return `its process runs on ${on}'s Claude pool and ${person}'s pool setting names ${isSamePerson(pool, person) ? 'their own' : `${pool}'s`} now, so it restarts there before this message (w1717)`;
+  }
+
+  /**
+   * w5921 (lothsahn, 2026-11-26: "Changing that config should take effect immediately. If it requires a restart the dispatcher
+   * should be restarted."): each live orchestrator whose process runs on another token or pool than its config names now is
+   * stopped between turns, so its next message starts it on the right one (orchestratorEnv), its conversation kept. The
+   * dispatcher: claudeAccounts.dispatcher (a pinned token, one person's pool, or the system payer's pool by their setting); a
+   * person's orchestrator: their pool setting (w1717). Only config moves: a token that ran out is w1745's, at its turn's end
+   * and its next message. No message is sent, so no turn is spent (review of #1312). One mid-turn, or with a background task,
+   * finishes on the token it started on (a turn is never killed); the next call after it moves it: index.ts calls this every
+   * 30 s, and at once after set_app_config claudeAccounts.dispatcher and set_pool. A dispatcher moved into a pool with no room
+   * waits, and the operators are told with its first reset. The ids stopped.
+   */
+  applyAccountConfig(cause: string): string[] {
+    const moved: string[] = [];
+    for (const h of this.sessions.sessions.values()) {
+      const i = h.info;
+      if (i.kind !== 'orchestrator' || !h.live || isMidTurn(i) || i.backgroundTasks || !i.account) continue;
+      const dispatcher = i.orchestratorRole === 'dispatcher' && !this.orchestrators.ownerOf(i);
+      const move = dispatcher ? this.dispatcherAccountMove?.(i.account) : undefined;
+      const why = dispatcher ? (move && !move.out ? move.why : undefined) : this.personPoolMove(h);
+      if (!why) continue;
+      const who = dispatcher ? 'the dispatcher' : `orchestrator ${i.id}`;
+      console.log(`token move (w5921): ${who} restarts between turns: ${why} (${cause})`);
+      this.store.append(i.id, { kind: 'system', text: `Stopped by FF Factory between turns to apply its account config: ${why}. Its history is kept: its next message starts it on the new token (w5921).` });
+      h.stop(false);
+      moved.push(i.id);
+      const held = dispatcher ? this.dispatcherHeldWhy?.() : undefined;
+      if (held) this.operatorAlert?.(`[token alert] The dispatcher was stopped to apply its account config (${cause}): ${why}. It cannot start yet: ${held}. Nothing to do unless that wait is wrong: \`set_app_config claudeAccounts.dispatcher\` with another pin or pool (or null) applies at once (w5921).`);
+    }
+    return moved;
+  }
+
+  /** A person's orchestrator whose process runs on another pool than their pool setting names now (w1717), else undefined. */
+  private personPoolMove(s: SessionHandle): string | undefined {
+    const person = this.orchestrators.ownerOf(s.info)?.userId;
+    if (!person || !s.info.account) return undefined;
+    const pool = this.poolOf(person);
+    const on = this.tokenOwner?.(s.info.account);
+    if (!on || isSamePerson(on, pool)) return undefined;
+    return `its process runs on ${on}'s Claude pool and ${person}'s pool setting names ${isSamePerson(pool, person) ? 'their own' : `${pool}'s`} now (w1717)`;
   }
 
   /** Whose Claude pool `person`'s work runs on (w1717, AppSettings.pool): their own unless their setting names another's. */
@@ -3822,7 +3901,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const pools = withPool(this.store.settings.pool, person, from, people, (u) => this.hasPool?.(u) ?? false);
     this.store.putSettings({ pool: pools });
     const after = this.poolOf(person);
-    if (!isSamePerson(before, after)) console.log(`pool setting (w1717): ${person}'s work now runs on ${isSamePerson(after, person) ? 'their own pool' : `${after}'s pool`} (was ${isSamePerson(before, person) ? 'their own' : `${before}'s`}), set by ${by}`);
+    if (!isSamePerson(before, after)) {
+      console.log(`pool setting (w1717): ${person}'s work now runs on ${isSamePerson(after, person) ? 'their own pool' : `${after}'s pool`} (was ${isSamePerson(before, person) ? 'their own' : `${before}'s`}), set by ${by}`);
+      // w5921: their orchestrator (and the dispatcher, when it runs on the payer's pool) moves now, not at its next message.
+      this.applyAccountConfig(`${person}'s pool setting changed`);
+    }
     return after;
   }
 
@@ -3899,6 +3982,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private readonly roomKept = new Map<string, string>();
   /** w5260: released urgent or frantic workers whose resume found no computer to move to: their resume may pre-empt at a safe point (PlaceAgainDeps.resumePreempt). */
   private readonly roomStuck = new Map<string, string>();
+  /** w5942: each request's last move and the computers whose daemon refused a start at its cap, so a request moves at most once per wait. */
+  readonly moveGuard = new MoveGuard();
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -3949,11 +4034,21 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return `${hold}; ${home}`;
     }
     const { reqs, owned, gone } = this.movableWorkOf(info);
-    if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length));
+    if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length, q));
     if (!reqs.length && (owned.length || gone.length)) {
       // w2411: a timed run's result waiting here goes again, to the worker on its request now
       this.timedRuns?.dropped(q.uuid);
       return true;
+    }
+    // w5942: a request moved within HOME_WAIT_MS waits where it went: a move is a fresh session, and a second one in a wait
+    // undoes the first (w5869 went biscuit → beast → biscuit → lothdesktop on 2026-11-25).
+    // A worker that ran a turn keeps its conversation: it waits a while for a seat on its own computer first. Both come after
+    // the w2079 hand-over, so an old worker whose requests went elsewhere never holds a message for them.
+    const lately = !urgent ? this.moveGuard.movedLately(reqs.map((w) => w.id), now) ?? warmWait(info.turns, hold, this.moveGuard.waitingSince(info.id, info.turns ?? 0, Date.parse(q.at) || now), now) : undefined;
+    if (lately) {
+      if (this.roomKept.get(info.id) !== lately) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) waits: ${lately}`);
+      this.roomKept.set(info.id, lately);
+      return `${hold}; ${lately}`;
     }
     const d = moveDecision(this.moveFacts(info, reqs));
     if ('requeuePair' in d) {
@@ -4199,16 +4294,60 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * A waiting resume's requests that do not move with it (w2079, movableWorkOf): each one another worker carries is taken off
    * this worker, and when nothing is left to move (`all`) its message is not delivered, its check-in goes and it is retired.
    */
-  private leaveToOwners(info: SessionInfo, owned: WorkItem[], gone: WorkItem[], hold: string, all: boolean) {
+  private leaveToOwners(info: SessionInfo, owned: WorkItem[], gone: WorkItem[], hold: string, all: boolean, q?: QueuedSend) {
     const at = `${info.machineId}/${info.machineSandbox}`;
     for (const w of owned) this.orchestrators.moveOff(w, info.id, `not moved (w2079): ${this.otherWorkerOn(w, info, true)}, so no moved copy starts (${hold})`);
     for (const w of gone) this.orchestrators.noteMove(w.id, `a message for its old worker ${info.id} on ${at} did not move it again (w2079): it was moved off ${w.movedOff![info.id]}`);
     const ids = [...owned, ...gone].map((w) => w.id).join(', ');
     console.log(`room move: worker ${info.id} on ${at} (${ids}) not moved (w2079): ${[...owned.map((w) => `${w.id}: ${this.otherWorkerOn(w, info, true)}`), ...gone.map((w) => `${w.id}: moved off it already`)].join('; ')}`);
     if (!all) return;
-    this.store.append(info.id, { kind: 'system', text: `Not moved (w2079): its requests (${ids}) are with other workers now, so the message that waited for it was not delivered and nothing starts for it elsewhere.` });
+    const to = q ? this.forwardToHeirs(info, [...owned, ...gone], q) : [];
+    this.store.append(info.id, { kind: 'system', text: `Not moved (w2079): its requests (${ids}) are with other workers now, so ${to.length ? `the message that waited for it went to ${to.join(', ')} (w5942)` : 'the message that waited for it was not delivered'} and nothing starts for it elsewhere.` });
     this.waker.cancel(info.id);
     this.orchestrators.retireWhenFree(info.id);
+  }
+
+  /**
+   * The worker each of `ws` is with now, other than `info` (w5942): the one at work on it (otherWorkerOn), else the newest
+   * worker it went to after it moved off `info`.
+   */
+  private heirOf(w: WorkItem, info: SessionInfo): SessionInfo | undefined {
+    const at = w.sessionIds.filter((id) => id !== info.id).map((id) => this.store.sessions.get(id)).filter((x): x is SessionInfo => !!x && x.kind === 'worker');
+    const working = at.find((x) => (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === info.machineId && x.machineSandbox === info.machineSandbox) && this.stillWorkingOn(w, x));
+    return working ?? at.at(-1);
+  }
+
+  /**
+   * w5942: a message that waited for a worker whose requests all went to other workers goes to those workers, once each,
+   * instead of being dropped (w2079 dropped it: at 06:38:50Z on 2026-11-25 the message for w5869's moved worker 81122653 was
+   * "taken off worker 81122653: not moved" and reached nobody). A gate resume (resumeOf) or a check-in ("[wake_me] …") is the
+   * old worker's own wait and stays dropped: the worker now on the request sets its own (the w5949 review). Answers the workers
+   * it went to.
+   */
+  private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend): string[] {
+    if (q.resumeOf || /^\[wake_me\]/.test(q.text)) return [];
+    const at = `${info.machineId}/${info.machineSandbox}`;
+    const heirs = new Map<string, { s: SessionInfo; ids: string[] }>();
+    for (const w of ws) {
+      const s = this.heirOf(w, info);
+      if (!s) continue;
+      const e = heirs.get(s.id) ?? { s, ids: [] };
+      e.ids.push(w.id);
+      heirs.set(s.id, e);
+    }
+    const out: string[] = [];
+    for (const { s, ids } of heirs.values()) {
+      const text = `[forwarded, w5942] This message was queued for worker ${info.id} on ${at}, which had ${ids.join(', ')} before it went to you; it reached it no more, so it comes to you.\n\n${movedText(q)}`;
+      try {
+        this.sessions.send(s.id, text, q.from, q.images, { ...(q.requestedBy ? { requestedBy: q.requestedBy } : {}) });
+        for (const id of ids) this.orchestrators.noteMove(id, `a message queued for its old worker ${info.id} on ${at} went to its worker ${s.id} (w5942)`);
+        console.log(`room move: the message queued for worker ${info.id} on ${at} (${ids.join(', ')}) went to worker ${s.id} (w5942)`);
+        out.push(`worker ${s.id}`);
+      } catch (e) {
+        console.warn(`room move: the message queued for worker ${info.id} on ${at} could not go to worker ${s.id}: ${(e as Error).message}`);
+      }
+    }
+    return out;
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */
@@ -4228,6 +4367,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const why = !game.length ? reqs.map((w) => this.legHoldProblem(p.id, w, 'seat')).find(Boolean) : p.freeSandboxes < 1 ? undefined : game.map((w) => this.heldFor(p.id, w)).find(Boolean);
       if (why) held[p.id] = why.split(/\. Start /)[0]!;
     }
+    // w5942: a computer whose daemon just refused a start at its cap is no target, whatever the portal's count says.
+    for (const [id, why] of Object.entries(this.moveGuard.refusals(Date.now()))) if (id !== placeId(info.machineId!)) held[id] ??= why;
     return {
       machine: info.machineId!,
       released: !!r,
@@ -4308,6 +4449,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       try {
         const started = await this.startMoved(info, primary, to, why, hold, branch, entry.lead, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(message ? { message } : {}), to });
         console.log(`room move: ${primary.id} moved from worker ${info.id} on ${from} to ${started} (${why})`);
+        // w5942: only a move whose fresh session started holds the request where it went; a failed start goes back to the
+        // dispatcher unheld (the w5949 review, M2: "starting w5449 on beast failed" at 06:56:37Z on 2026-11-25).
+        this.moveGuard.noteMove([primary.id], to, Date.now());
         // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
         if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
@@ -6192,6 +6336,19 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   /** One sandbox for list_sandboxes. By default (w1159) the status and editor details are cut and git leaves out the last commit's subject and the PR's URL; detail keeps them. */
+  /**
+   * w5916: what a person's hold does to a machine's self-hosted CI runners, while the portal holds it (a drain or
+   * placement.hold): its daemon's last word ("runners draining (1 busy: ...)", "runners stopped by hold (...)"), or that
+   * the daemon has not answered yet. Undefined with no hold.
+   */
+  private runnerHoldLine(m: Machine): string | undefined {
+    if (!this.machines.runnerHoldFor?.(m.id)) return undefined;
+    const said = runnerHoldText(m.runnerHold);
+    if (said) return said;
+    if (!this.machines.isOnline(m.id)) return 'runners: the hold drains them when its daemon is back';
+    return m.runnerHold ? 'runners: none to stop' : 'runners: draining (its daemon has not answered yet)';
+  }
+
   private describeMachineSandbox(m: Machine, sb: MachineSandbox, detail = false) {
     const u = sb.unity;
     const cut = (t: string) => (detail ? t : clip(t, SANDBOX_DETAIL_CHARS));
@@ -6573,9 +6730,10 @@ A report is for a person who asked for one, and people want very few. File one w
       const editors = u ? `Unity ${unitySlotsLine(u)}` : `${pool?.maxUnity} editors at once`;
       const limits = pool ? `${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}, up to ${pool.maxAgentsPerSandbox} agents each, ${editors}, root ${pool.root}` : 'no sandbox_root any more';
       const diskPart = disk && disk.level !== 'ok' ? `; DISK ${disk.level.toUpperCase()} (${((disk.freeBytes ?? 0) / 2 ** 30).toFixed(0)} GB free)` : '';
+      const ciPart = this.runnerHoldLine(m) ? `; CI ${this.runnerHoldLine(m)}` : '';
       const noun = m.local ? `this host's own daemon; bare names like "${sbs[0]?.id ?? 'sb1'}" work too` : platformNoun(m.platform);
       const total = pool ? `, up to ${agentCap(m)} agents in all, standing agents included` : '';
-      parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s, detail)) : ['(none yet)']));
+      parts.push('', `## ${m.id} (${noun}, ${state}; ${limits}${total}${diskPart}${ciPart})`, ...(sbs.length ? sbs.map((s) => this.describeMachineSandbox(m, s, detail)) : ['(none yet)']));
       // Its ffu build slots (w5912), a set of their own beside the game sandboxes: who holds each, and which holds are stale.
       const ffu = ffuSlotLines(m.id, this.machines.statsOf(m.id)?.ffuSlots, this.ffuHolder);
       if (ffu.length) parts.push('', ...ffu);
@@ -7192,7 +7350,7 @@ ${w.repo ?? ''}
             const info = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (!info || (ctx.role !== 'personal' && ctx.role !== 'dispatcher')) throw new Error('delete_memory is for an orchestrator of this portal');
             const who = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})'s orchestrator` : 'the dispatcher';
-            return deleteMemoryFile({ file: file_path, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words) });
+            return deleteMemoryFile({ file: file_path, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words, { thisTurn: true }), need: this.personTurnNeed(info.id, words, { thisTurn: true }) });
           }),
         ),
         tool(
@@ -7208,7 +7366,7 @@ ${w.repo ?? ''}
             const info = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (!info || (ctx.role !== 'personal' && ctx.role !== 'dispatcher')) throw new Error('restore_memory is for an orchestrator of this portal');
             const who = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})'s orchestrator` : 'the dispatcher';
-            return restoreMemoryFile({ name, copy, list, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words) });
+            return restoreMemoryFile({ name, copy, list, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words, { thisTurn: true }), need: this.personTurnNeed(info.id, words, { thisTurn: true }) });
           }),
         ),
         tool(
@@ -7301,7 +7459,7 @@ ${w.repo ?? ''}
           wrap(async ({ pool, person, words }) => {
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              if (caller && !this.personTurn(caller.id, words)) throw new Error(`the pool setting changes only in a turn ${ctx.owner?.displayName ?? 'your person'} started with a message of their own (in a turn a relayed message joined, with their words quoted in words); ask them`);
+              if (caller && !this.personTurn(caller.id, words)) throw new Error(`the pool setting changes only on ${ctx.owner?.displayName ?? 'your person'}'s own words: ${this.personTurnNeed(caller.id, words)}`);
             }
             const by = ctx.owner ?? actor();
             // An owner may set another login's (w13): a member with no Claude token of their own gets no orchestrator until an
@@ -7424,7 +7582,7 @@ ${w.repo ?? ''}
         ),
         tool(
           'set_app_config',
-          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; publicUrl: the portal's base URL that machines and the outside watchdog reach it at (the Tailscale Funnel URL); claudeAccounts.dispatcher (an owner's only): "vault:<vault entry name>" (e.g. "vault:vault-lothsahn-1") runs the dispatcher on that one vault token, and its reserve (docs/vault.md, section 4) is kept there; null runs it on the system payer's pool; if the vault cannot give that token the dispatcher does not start and system_status says why (w1078: every Claude process runs on a vault token, nothing falls back); it applies to the dispatcher's next process start; vault.pool.sessionHoldPercent (80) / onePerWeeklyPercent (95) / retireWeeklyPercent (99) / reservePerDayPercent (5) / reserveSessionPercent (20) / dispatcherStopPercent (95: at this on either meter of the dispatcher's pinned token its workers are asked to save their work and stop, and no new worker starts on it, w1109) / nearResetHours (12: inside these last hours before a token's weekly reset its one-at-a-time and retire caps are lifted; 0 turns it off, at most 168, w1539) / nearResetFloorTokens (1: that only while at least this many other tokens of the pool can take a new process, 0-10) / vault.pool.weeklyCapPercent (a token's own weekly cap, w2785: a map of vault entry name to percent, merged into the ones set, e.g. {"vault-ben-3": 90} or "vault-ben-3=90"; "vault-ben-3=off" or a name set to null drops it; at or above its cap a token is retired for all work, the orchestrators and ops worker included, until its weekly reset) (anyone may set these; one system-wide set, percent 0-100 unless named otherwise, the one-at-a-time limit not above the retire limit): the Claude token pool's limits, read at each process start (docs/vault.md, section 4); vault.unattributed.intake / vault.unattributed.ffbox / vault.unattributed.nightly (an owner's only, w1289): the user id (a login that exists, e.g. "ben") whose Claude pool and GitHub token work nobody asked for by name runs on: intake requests (Discord and FFBox reports, release follow-ups, lab regressions), FFBox-filed work naming no operator, and the nightly run and review jobs with the nightly regression sentry and its delegations (default lothsahn each, docs/vault.md section 10); that person must have an enabled Claude token in the vault that its key opens, or the change is refused and nothing is written; null removes the key (back to the default, lothsahn); it applies at once, to the next run or process start of that kind, with no restart (a request someone has acted on runs for that person, as before); machines.githubFromVault (an owner's only; optionally with machine: a machine id, or "portal" for the portal's own gh reads of PR states and CI checks): true gives that machine's runs the GitHub token of the person their work is for (the vault's vault-<person>-github, as GH_TOKEN, docs/vault.md section 13), false keeps the gh login they had; a person with no usable token keeps it too; systemPayer: the user id automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to (default the owner); providers.ffbox.enabled: true lets FFBox's connector connect (read-only reports: capacity, conversations, intake), false drops it at once (default false); providers.ffbox.token: FFBox's connector token (ffpv1_…), write-only, stored only as its SHA-256, in a file of the secrets folder that config providers.ffbox.tokenSha256File names (w1078; null removes it); providers.ffbox.devRequests (an owner's only, the whole block): { enabled (default true), perHour (0-1000, default 20), maxFiles (0-10, default 10), maxRequestMB (1-500, default 500) }, unknown keys refused; placement.prefer: the computers new game-repo work goes to first, in order (machine ids such as "lothdesktop", "m5", "beast"; a list or one comma-separated string; null clears), placement.avoid: computers kept off unless nothing else has room, each with why ({ "beast": "BEAST unstable, 2026-10-05" }; null clears), and placement.hold: computers that take NO new work at all (game or not) and resume none of their workers, each with who holds it and why ({ "m5": "Ben testing, 2026-10-12" }, or { "lothdesktop": { "why": "...", "except": ["w1785"] } } to let those requests' workers resume, w1863; null clears; a Queued request then says the computer has room but is held, w1089), and placement.minPriority: the lowest priority of work each computer takes ({ "beast": "urgent" }: normal takes all work, low included, high takes high and urgent, urgent only urgent; machine ids that list_machines shows; normal entries are dropped; the whole map is replaced, null clears; work below the level waits Queued rather than go there, w1643) (docs/machines.md, "Placing work"); attachments.maxMB: the largest file a person may attach to a message (1-4096 MB, default 200); attachments.retentionDays: how many days an attached file nobody sent on is kept (1-3650, default 30); attachments.maxPerMessage: the most files in one message or passed by id in one tool call (1-100, default 25; a request's own files go to its worker in full on top; the tools' list limit follows at each agent's next process start) (docs/attachments.md); orchestrator.compactAtTokens: an orchestrator (the dispatcher too) compacts its conversation by itself between turns once its context reaches this many tokens (0 = off, else 50,000-900,000, default 200,000); orchestrator.compactAtTurnUsd: or once a turn cost at least this many USD with the context at 100,000 tokens or more (0 = off, else 0.05-50, default 1); orchestrator.compactIdleSeconds: under orchestrator.compactHardAtTokens a compaction that is due waits until the conversation has had no turn for this many seconds, and any message starts the wait again (0 = at once, else up to 3,600, default 120); orchestrator.compactHardAtTokens: from this context on it compacts at the turn's end without waiting (0, or at or under compactAtTokens: never waits; else 50,000-900,000, default 100,000) (w1538) (docs/orchestrators.md, "Compacting a conversation"); orchestrator.messagesPerPerson: message_person messages a person's orchestrator may send one person until either of the two writes to their own orchestrator (1-100, default 10; Lothsahn's and Ben's orchestrators have no count between them, w627); orchestrator.filingsPerMessage / orchestrator.followUpsPerMessage: filings, and follow-ups to one worker, between two messages of its person (1-100, defaults 20 and 3) (docs/orchestrators.md, "Loops, limits and safety"); orchestrator.timerFilingsPerMessage (an owner's only, w1867): per person, the filings limit in turns their own timers started, counted with the rest since they last wrote ({ "lothsahn": 100 }: logins that exist, each 1-100; the whole map replaced, null removes it; a person not named has orchestrator.filingsPerMessage there too); orchestrator.routineModel: the model of the coordinators' turns no person's own message started (w1158; default claude-sonnet-5-5; "off" runs every coordinator turn on orchestrator.model at once, null back to the default), and orchestrator.routineAfterMinutes: how long after a turn on orchestrator.model those turns stay on it (0-1440, default 60) (docs/orchestrators.md, "Which model answers a turn"); hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries each clean-up pass removes (never a drive root, the home folder, the sandboxes, this app or a protected path); hostGuard.cleanup.everyMinutes: how often this host's clean-up runs (0 = only below the soft threshold, else 15-1440, default 60); hostGuard.cleanup.mediaDays: the pictures and videos (data/uploads, the review folder) of conversations idle this many days go at the hourly clean-up, never ones an open request, a pending question or a waiting card points at; the transcript text stays (0 = never, else 1-3650, default 14, w2268); hostGuard.cleanup.softFreeGB: below this much free space it runs every 15 minutes with the cache-emptying rules, and tells you when it cannot get back above (default: hostGuard.warnFreeGB; above hostGuard.criticalFreeGB); hostGuard.warnFreeGB / hostGuard.criticalFreeGB: the portal's own disk levels in GB free (defaults 20 and 10, w1101): below warn the portal is low and you are told, below critical a clean-up pass runs with every rule; critical stays below warn; the machines' levels are their own; machines.cleanup.everyMinutes / machines.cleanup.softFreeGB (optionally with machine): the same for the machines' daemons (defaults 60 and 80 GB). usagePollMinutes: how often every Claude account's plan usage is polled, here and by the machines' daemons (5-240, default 15; the usage endpoint rate-limits). intake.ffbox (an owner's only: refused unless the person who asked is an owner): the FFBox intake's whole block, replaced, so a key left out takes its default (docs/intake.md): an object with enabled (default false), branches, diagnoses, requests (default true once enabled), boardCheck (answer FFBox's ledger check), escalations (both default false), repo ("owner/name" as board answers name the game repo; default from repo.url), dailyCap (0-200, default 10), match { high (default 0.7), medium (default 0.45) } (board_check's match bands, 0-1), autoApprove { enabled (default false), maxPerDay (0-100, default 3) } and desync { enabled (default true), maxPerDay (0-100, default 10) } (Lothsahn's FFBox desync PR policy: such a PR is approved at once into a review-and-merge request under the policy); unknown keys are refused; it applies at once, and FFBox's connection stays up (a board_check or request while it is off is answered not_enabled). value null removes the key (back to the default). intake.reviewers (an owner's only, like intake.ffbox): who may approve or decline intake requests and answer design questions: a list of user ids (or one comma-separated string), each a login that exists (e.g. ["ben", "lothsahn"]; unknown ids are refused and nothing is written); the whole list is replaced, and null removes it (then only the owner decides); it applies at once (docs/intake.md). intake.nightly.enabled (anyone): true files the nightly e2e lab's regressions as requests (default false; every night is recorded either way). intake.nightly.review (anyone, w905): the nightly merge review's job timer (the Nightly Regression Sentry's duties), the whole block replaced: { enabled (default false), time ("HH:MM", default "06:00"), tz (default "America/New_York"), machine (default "lothdesktop"), person (a login: the review is theirs and they hear when it could not be filed or ended without reviewing) }; intake.nightly.autoApprove (anyone, w2142): { enabled (true or false), maxPerDay (1-100) }, both given: whether the nightly e2e requests go to the dispatcher without a reviewer, at most maxPerDay a day (null: the default, off, 10 a day; docs/intake.md, "Nightly e2e regressions"); it applies at once (docs/intake.md, "The nightly merge review"). intake.nightly.run (anyone): the portal's nightly schedule, the whole block replaced: { enabled (default false), time ("HH:MM", default "03:00"), tz (IANA, default "America/New_York"), machine (default "lothdesktop"), person (a login: the run is theirs and they hear a missing or broken night), reportWithinHours (1-20, default 5) }; it applies at once (docs/intake.md, "The nightly run"). masterBatch.enabled (anyone, w1180): false stops the portal handing a red master batch of the game repo back to the culprit PR's request as an urgent revert request (default true; applies at once). masterBatch.autoApprove (anyone): { enabled (default true), maxPerDay (0-100, default 10) } for those requests (docs/intake.md, "Master batch reds"). autoDeploy.enabled (anyone, w1634): false stops the portal deploying code merged into main by itself (default true: a commit with green CI goes out once main has had no merge for 15 minutes, 60 at most); deploys then wait for a person (ops_worker deploy); applies within a minute (docs/ops-worker.md, "Automatic deploys"). live.enabled (an owner's only, w1398): true turns on the live view, a sandbox's running game streamed beside its agent's chat with the shader's own properties as knobs (docs/live-view.md); false or null turns it off and stops every running view (default off); it applies at once, and machines whose daemon predates it offer no live view until they are updated. live.idleCloseMinutes (an owner's only, w1746): minutes a Live view sits with no turn, job, check-in or viewer before its sandbox's editor is saved and closed (0-1440, 0 never, default 15; it reopens at the worker's next turn); applies at the next minute. worker.effort (anyone, w2000): a worker's reasoning effort when start_agent names none: low, medium, high or max (default high; null back to high); it is the session's --effort flag, which beats the game repo's settings.json, and applies to workers started after it (docs/orchestrators.md, "A worker's effort"). Only when the user asked for the change.`,
+          `Change one cosmetic setting of this app in its config.json (the old file is kept as config.json.prev). It applies at once and survives restarts. Allowed keys only: ${SETTABLE_KEYS.join(', ')}. ownerName: the user's name, which agents' prompts then use (new sessions); voice.vocabulary: extra words the speech-to-text should spell right (a list, or one comma-separated string); voice.ttsVoice: the default Kokoro voice ("af_heart", "bm_george", …); publicGitIdentity.name / .email: the identity agents commit with in public repos such as this app's own (the guard refuses pushes there with other emails; GitHub noreply addresses are always fine); hostGuard.devDriveVhdx: the sandbox Dev Drive's .vhdx path; publicUrl: the portal's base URL that machines and the outside watchdog reach it at (the Tailscale Funnel URL); claudeAccounts.dispatcher (an owner's only): "vault:<vault entry name>" (e.g. "vault:vault-lothsahn-1") runs the dispatcher on that one vault token, and its reserve (docs/vault.md, section 4) is kept there; "pool:<login>" (e.g. "pool:ben", w5891) runs it on any token of that person's own pool with room, moving within that pool when its token runs out; null runs it on the system payer's pool; a change restarts the dispatcher on it between turns (w5921); if the vault cannot give that token the dispatcher does not start and system_status says why (w1078: every Claude process runs on a vault token, nothing falls back); it applies to the dispatcher's next process start; vault.pool.sessionHoldPercent (80) / onePerWeeklyPercent (95) / retireWeeklyPercent (99) / reservePerDayPercent (5) / reserveSessionPercent (20) / dispatcherStopPercent (95: at this on either meter of the dispatcher's pinned token its workers are asked to save their work and stop, and no new worker starts on it, w1109) / nearResetHours (12: inside these last hours before a token's weekly reset its one-at-a-time and retire caps are lifted; 0 turns it off, at most 168, w1539) / nearResetFloorTokens (1: that only while at least this many other tokens of the pool can take a new process, 0-10) / vault.pool.weeklyCapPercent (a token's own weekly cap, w2785: a map of vault entry name to percent, merged into the ones set, e.g. {"vault-ben-3": 90} or "vault-ben-3=90"; "vault-ben-3=off" or a name set to null drops it; at or above its cap a token is retired for all work, the orchestrators and ops worker included, until its weekly reset) (anyone may set these; one system-wide set, percent 0-100 unless named otherwise, the one-at-a-time limit not above the retire limit): the Claude token pool's limits, read at each process start (docs/vault.md, section 4); vault.unattributed.intake / vault.unattributed.ffbox / vault.unattributed.nightly (an owner's only, w1289): the user id (a login that exists, e.g. "ben") whose Claude pool and GitHub token work nobody asked for by name runs on: intake requests (Discord and FFBox reports, release follow-ups, lab regressions), FFBox-filed work naming no operator, and the nightly run and review jobs with the nightly regression sentry and its delegations (default lothsahn each, docs/vault.md section 10); that person must have an enabled Claude token in the vault that its key opens, or the change is refused and nothing is written; null removes the key (back to the default, lothsahn); it applies at once, to the next run or process start of that kind, with no restart (a request someone has acted on runs for that person, as before); machines.githubFromVault (an owner's only; optionally with machine: a machine id, or "portal" for the portal's own gh reads of PR states and CI checks): true gives that machine's runs the GitHub token of the person their work is for (the vault's vault-<person>-github, as GH_TOKEN, docs/vault.md section 13), false keeps the gh login they had; a person with no usable token keeps it too; systemPayer: the user id automatic work (scheduled standing runs, intake-triggered FFBox work) is attributed and billed to (default the owner); providers.ffbox.enabled: true lets FFBox's connector connect (read-only reports: capacity, conversations, intake), false drops it at once (default false); providers.ffbox.token: FFBox's connector token (ffpv1_…), write-only, stored only as its SHA-256, in a file of the secrets folder that config providers.ffbox.tokenSha256File names (w1078; null removes it); providers.ffbox.devRequests (an owner's only, the whole block): { enabled (default true), perHour (0-1000, default 20), maxFiles (0-10, default 10), maxRequestMB (1-500, default 500) }, unknown keys refused; placement.prefer: the computers new game-repo work goes to first, in order (machine ids such as "lothdesktop", "m5", "beast"; a list or one comma-separated string; null clears), placement.avoid: computers kept off unless nothing else has room, each with why ({ "beast": "BEAST unstable, 2026-10-05" }; null clears), and placement.hold: computers that take NO new work at all (game or not) and resume none of their workers, each with who holds it and why ({ "m5": "Ben testing, 2026-10-12" }, or { "lothdesktop": { "why": "...", "except": ["w1785"] } } to let those requests' workers resume, w1863; null clears; a Queued request then says the computer has room but is held, w1089), and placement.minPriority: the lowest priority of work each computer takes ({ "beast": "urgent" }: normal takes all work, low included, high takes high and urgent, urgent only urgent; machine ids that list_machines shows; normal entries are dropped; the whole map is replaced, null clears; work below the level waits Queued rather than go there, w1643) (docs/machines.md, "Placing work"); attachments.maxMB: the largest file a person may attach to a message (1-4096 MB, default 200); attachments.retentionDays: how many days an attached file nobody sent on is kept (1-3650, default 30); attachments.maxPerMessage: the most files in one message or passed by id in one tool call (1-100, default 25; a request's own files go to its worker in full on top; the tools' list limit follows at each agent's next process start) (docs/attachments.md); orchestrator.compactAtTokens: an orchestrator (the dispatcher too) compacts its conversation by itself between turns once its context reaches this many tokens (0 = off, else 50,000-900,000, default 200,000); orchestrator.compactAtTurnUsd: or once a turn cost at least this many USD with the context at 100,000 tokens or more (0 = off, else 0.05-50, default 1); orchestrator.compactIdleSeconds: under orchestrator.compactHardAtTokens a compaction that is due waits until the conversation has had no turn for this many seconds, and any message starts the wait again (0 = at once, else up to 3,600, default 120); orchestrator.compactHardAtTokens: from this context on it compacts at the turn's end without waiting (0, or at or under compactAtTokens: never waits; else 50,000-900,000, default 100,000) (w1538) (docs/orchestrators.md, "Compacting a conversation"); orchestrator.messagesPerPerson: message_person messages a person's orchestrator may send one person until either of the two writes to their own orchestrator (1-100, default 10; Lothsahn's and Ben's orchestrators have no count between them, w627); orchestrator.filingsPerMessage / orchestrator.followUpsPerMessage: filings, and follow-ups to one worker, between two messages of its person (1-100, defaults 20 and 3) (docs/orchestrators.md, "Loops, limits and safety"); orchestrator.timerFilingsPerMessage (an owner's only, w1867): per person, the filings limit in turns their own timers started, counted with the rest since they last wrote ({ "lothsahn": 100 }: logins that exist, each 1-100; the whole map replaced, null removes it; a person not named has orchestrator.filingsPerMessage there too); orchestrator.routineModel: the model of the coordinators' turns no person's own message started (w1158; default claude-sonnet-5-5; "off" runs every coordinator turn on orchestrator.model at once, null back to the default), and orchestrator.routineAfterMinutes: how long after a turn on orchestrator.model those turns stay on it (0-1440, default 60) (docs/orchestrators.md, "Which model answers a turn"); hostGuard.cleanup.ageRules: JSON list of { "path", "olderThanDays" (>= 3) } whose old entries each clean-up pass removes (never a drive root, the home folder, the sandboxes, this app or a protected path); hostGuard.cleanup.everyMinutes: how often this host's clean-up runs (0 = only below the soft threshold, else 15-1440, default 60); hostGuard.cleanup.mediaDays: the pictures and videos (data/uploads, the review folder) of conversations idle this many days go at the hourly clean-up, never ones an open request, a pending question or a waiting card points at; the transcript text stays (0 = never, else 1-3650, default 14, w2268); hostGuard.cleanup.softFreeGB: below this much free space it runs every 15 minutes with the cache-emptying rules, and tells you when it cannot get back above (default: hostGuard.warnFreeGB; above hostGuard.criticalFreeGB); hostGuard.warnFreeGB / hostGuard.criticalFreeGB: the portal's own disk levels in GB free (defaults 20 and 10, w1101): below warn the portal is low and you are told, below critical a clean-up pass runs with every rule; critical stays below warn; the machines' levels are their own; machines.cleanup.everyMinutes / machines.cleanup.softFreeGB (optionally with machine): the same for the machines' daemons (defaults 60 and 80 GB). usagePollMinutes: how often every Claude account's plan usage is polled, here and by the machines' daemons (5-240, default 15; the usage endpoint rate-limits). intake.ffbox (an owner's only: refused unless the person who asked is an owner): the FFBox intake's whole block, replaced, so a key left out takes its default (docs/intake.md): an object with enabled (default false), branches, diagnoses, requests (default true once enabled), boardCheck (answer FFBox's ledger check), escalations (both default false), repo ("owner/name" as board answers name the game repo; default from repo.url), dailyCap (0-200, default 10), match { high (default 0.7), medium (default 0.45) } (board_check's match bands, 0-1), autoApprove { enabled (default false), maxPerDay (0-100, default 3) } and desync { enabled (default true), maxPerDay (0-100, default 10) } (Lothsahn's FFBox desync PR policy: such a PR is approved at once into a review-and-merge request under the policy); unknown keys are refused; it applies at once, and FFBox's connection stays up (a board_check or request while it is off is answered not_enabled). value null removes the key (back to the default). intake.reviewers (an owner's only, like intake.ffbox): who may approve or decline intake requests and answer design questions: a list of user ids (or one comma-separated string), each a login that exists (e.g. ["ben", "lothsahn"]; unknown ids are refused and nothing is written); the whole list is replaced, and null removes it (then only the owner decides); it applies at once (docs/intake.md). intake.nightly.enabled (anyone): true files the nightly e2e lab's regressions as requests (default false; every night is recorded either way). intake.nightly.review (anyone, w905): the nightly merge review's job timer (the Nightly Regression Sentry's duties), the whole block replaced: { enabled (default false), time ("HH:MM", default "06:00"), tz (default "America/New_York"), machine (default "lothdesktop"), person (a login: the review is theirs and they hear when it could not be filed or ended without reviewing) }; intake.nightly.autoApprove (anyone, w2142): { enabled (true or false), maxPerDay (1-100) }, both given: whether the nightly e2e requests go to the dispatcher without a reviewer, at most maxPerDay a day (null: the default, off, 10 a day; docs/intake.md, "Nightly e2e regressions"); it applies at once (docs/intake.md, "The nightly merge review"). intake.nightly.run (anyone): the portal's nightly schedule, the whole block replaced: { enabled (default false), time ("HH:MM", default "03:00"), tz (IANA, default "America/New_York"), machine (default "lothdesktop"), person (a login: the run is theirs and they hear a missing or broken night), reportWithinHours (1-20, default 5) }; it applies at once (docs/intake.md, "The nightly run"). masterBatch.enabled (anyone, w1180): false stops the portal handing a red master batch of the game repo back to the culprit PR's request as an urgent revert request (default true; applies at once). masterBatch.autoApprove (anyone): { enabled (default true), maxPerDay (0-100, default 10) } for those requests (docs/intake.md, "Master batch reds"). autoDeploy.enabled (anyone, w1634): false stops the portal deploying code merged into main by itself (default true: a commit with green CI goes out once main has had no merge for 15 minutes, 60 at most); deploys then wait for a person (ops_worker deploy); applies within a minute (docs/ops-worker.md, "Automatic deploys"). live.enabled (an owner's only, w1398): true turns on the live view, a sandbox's running game streamed beside its agent's chat with the shader's own properties as knobs (docs/live-view.md); false or null turns it off and stops every running view (default off); it applies at once, and machines whose daemon predates it offer no live view until they are updated. live.idleCloseMinutes (an owner's only, w1746): minutes a Live view sits with no turn, job, check-in or viewer before its sandbox's editor is saved and closed (0-1440, 0 never, default 15; it reopens at the worker's next turn); applies at the next minute. worker.effort (anyone, w2000): a worker's reasoning effort when start_agent names none: low, medium, high or max (default high; null back to high); it is the session's --effort flag, which beats the game repo's settings.json, and applies to workers started after it (docs/orchestrators.md, "A worker's effort"). Only when the user asked for the change.`,
           {
             key: z.enum(SETTABLE_KEYS),
             // An object (intake.ffbox) is a loose object, unknown keys kept for normalizeSetting to name: z.record breaks the
@@ -7440,7 +7598,7 @@ ${w.repo ?? ''}
             // never because relayed text or a harness message asks. The dispatcher's runs under its own user_asked guard (belts.ts).
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words));
+              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words), (id) => this.personTurnNeed(id, a.words));
               if (problem) throw new Error(problem);
             }
             if (OWNER_ONLY_KEYS.has(key)) {
@@ -7465,8 +7623,19 @@ ${w.repo ?? ''}
             if (key.startsWith('machines.cleanup.')) this.machines.pushCleanupConfig();
             if (key.startsWith('machines.activityPause.')) this.machines.pushActivityConfig(machine);
             if (key === 'usagePollMinutes') this.usagePollChanged?.();
+            // w5921: the dispatcher restarts on the token or pool it names now, between turns (never mid-turn).
+            if (key === 'claudeAccounts.dispatcher') {
+              const moved = this.applyAccountConfig('config claudeAccounts.dispatcher changed');
+              const id = this.orchestrators.dispatcherId;
+              const busy = id ? this.sessions.sessions.get(id) : undefined;
+              const now = moved.length ? 'the dispatcher was stopped between turns and its next message starts it there' : busy?.live && isMidTurn(busy.info) ? 'the dispatcher is mid-turn: it restarts there within 30 s of that turn ending (never mid-turn)' : 'the dispatcher already runs there, or starts there at its next message';
+              const held = this.dispatcherHeldWhy?.();
+              return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied at once: ${now} (w5921).${held ? ` WARNING: it cannot start on it now: ${held}; the operators were told.` : ''}`;
+            }
             // w4468: a hold lifted or a reservation changed (placement.hold, holdExcept, minPriority) re-places Queued work now.
             if (key.startsWith('placement.')) this.orchestrators?.capacityMayHaveFreed(`config ${key} changed`);
+            // w5916: a hold set or lifted drains or restarts that machine's CI runners now, not at the next minute's look
+            if (key.startsWith('placement.hold')) this.machines.syncRunnerHolds();
             if (key === 'live.enabled') await this.liveHub?.switched(after === true);
             if (key.startsWith('providers.') || key.startsWith('intake.')) this.providers?.configChanged();
             if (key.startsWith('intake.')) {
@@ -7475,7 +7644,6 @@ ${w.repo ?? ''}
             if (key.startsWith('vault.unattributed.')) return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server: work nobody asked for by name of that kind (docs/vault.md section 10) takes ${after ?? 'the default (lothsahn)'}'s Claude pool and GitHub token from its next run or process start, with no restart.`;
             if (key.startsWith('vault.pool.')) return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}${key.endsWith('Percent') ? ' (percent)' : ''}. The token pool's limits are one set for everyone; the next process start on any Claude token reads it, with no restart. system_status shows each pool's state.`;
             if (key === 'providers.ffbox.token') return `${key}: ${after === 'not set' ? 'removed' : 'set'}. Its SHA-256 only is kept, in the secrets folder (config providers.ffbox.tokenSha256File names the file; config.json never holds it); the connector's next connection must use it. The value is never shown.`;
-            if (key === 'claudeAccounts.dispatcher') return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json. The dispatcher switches at its next process start. system_status shows which token each kind of agent runs on.`;
             return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server${key === 'ownerName' ? ' (prompts of sessions started from now on)' : ''}.`;
           }),
         ),
@@ -7496,7 +7664,7 @@ ${w.repo ?? ''}
             const listing = !a.key && !a.revert;
             if (ctx.role === 'personal' && !listing) {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words));
+              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words), (id) => this.personTurnNeed(id, a.words));
               if (problem) throw new Error(problem.replace(/^set_app_config/, 'set_ffbox_config'));
             }
             if (!listing && a.key && a.value === undefined) throw new Error("value: give the new value, of the key's kind (call it with no key for each key's kind)");
@@ -7579,6 +7747,7 @@ ${w.repo ?? ''}
     return [
       `- "${displayName(m)}" (machine ${m.id}${m.name ? ` "${m.name}"` : ''}, ${machineKind(m)}, ${m.local ? "this host itself (the portal's own computer), no ssh" : m.noSsh ? 'no ssh (joined with -NoSsh: updated over its link, w4674)' : `ssh ${m.host}`}): ${this.machines.isOnline(m.id) ? (m.pause?.paused ? PAUSED_STATE : 'online') : `offline${m.lastSeen ? ` since ${m.lastSeen}` : ''}`}${m.daemonStopped ? ' (daemon stopped on purpose; machine_daemon start brings it back)' : ''}${this.machines.isOnline(m.id) && m.pause?.paused ? ` (${pauseHold(m.pause, Date.now())}): nothing is placed, queued or planned here, and what waits here moves, as for an offline computer; only work pinned here waits, Blocked` : `; ${m.status}`}${m.statusDetail ? ` (${m.statusDetail})` : ''}`,
       `  repo ${m.repoPath || '?'}; ${m.info ? `${m.info.os}, node ${m.info.node}, claude ${m.info.claude ?? '?'}` : 'no daemon report yet'}; ${ghMachineLine(m.gh)}${githubFromVault(this.cfg, m.id) ? ' (runs for a person with a vault GitHub token use theirs instead: machines.githubFromVault)' : ''}; Steam: ${steamLabel(m.steam)}; screen: ${desktopLabel(m.desktop)}; ${pool ? 'workers in its sandboxes' : 'no workers (no sandbox_root)'}; up to ${agentCap(m)} agents in all, standing agents included; Claude account of its agents: ${MACHINE_ACCOUNT}`,
+      ...(this.runnerHoldLine(m) ? [`  CI runners (w5916): ${this.runnerHoldLine(m)}`] : []),
       ...(detail ? [`  folders: ${describeDirs(m)}${m.protectedPaths?.length ? `; protected: ${m.protectedPaths.join(', ')}` : ''}`] : []),
       // The portal hosts its daemon follows (w5576): online machines only.
       ...(this.machines.isOnline(m.id) ? [`  ${describePortalPin(this.machines.portalPinOf(m.id))}`] : []),
@@ -7861,6 +8030,7 @@ ${w.repo ?? ''}
             const was = drainOf(m, this.orchestrators.now().getTime());
             if (!m.drain) return `${m.id} is not drained: nothing to lift.`;
             mm.update(m.id, { drain: undefined });
+            mm.syncRunnerHolds(m.id); // w5916: its CI runners take jobs again
             this.orchestrators?.capacityMayHaveFreed(`${m.id}'s drain lifted`);
             console.log(`[machines] ${m.id} drain lifted by ${ctx.owner?.displayName ?? ctx.role}${was ? ` (was: ${was.who}: "${was.words}")` : ''} (w5878)`);
             return `${m.id} takes new work again (its drain${was ? ` for ${was.who}'s "${was.words}"` : ''} is lifted).`;
@@ -7869,6 +8039,7 @@ ${w.repo ?? ''}
           const d = newDrain({ words, who, hours, except }, by, this.orchestrators?.now() ?? new Date());
           if (typeof d === 'string') throw new Error(d);
           mm.update(m.id, { drain: d });
+          mm.syncRunnerHolds(m.id); // w5916: its CI runners drain
           console.log(`[machines] ${m.id} drained by ${by}: ${d.who}: "${d.words}"${d.until ? ` until ${d.until}` : ''}${d.except ? `, except ${d.except.join(', ')}` : ''} (w5878)`);
           const there = [...this.store.sessions.values()].filter((s) => s.machineId === m.id && s.kind === 'worker' && s.status !== 'stopped').length;
           return `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${there} worker(s) there finish.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;
@@ -8017,7 +8188,7 @@ ${w.repo ?? ''}
       // w5507: a turn a relayed message joined takes their words quoted.
       if (c && this.orchestrators.turnOwnWords(c, words).own) return;
       if (c && ctx.sessionId && delegationId && this.orchestrators.reactionCovers(ctx.sessionId, { verb: 'approve_delegation', refs: [delegationId] })) return;
-      throw new Error(`only ${ctx.owner?.displayName ?? 'your person'}, in their own words, approves a delegation: ask them`);
+      throw new Error(`only ${ctx.owner?.displayName ?? 'your person'}, in their own words, approves a delegation: ${c && ctx.sessionId ? this.personTurnNeed(ctx.sessionId, words) : 'ask them'}`);
     };
     return [
       tool(
@@ -8301,7 +8472,10 @@ ${w.repo ?? ''}
     const w = this.store.work.get(workId.trim().toLowerCase());
     if (!w) return `no work request "${workId}"`;
     if (!WORK_OPEN.includes(w.status)) return `${w.id} is ${w.status}`;
-    if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${w.requestedBy.displayName}'s, so ${tool} cannot run for it; ask them (decide_work ask) to confirm it in their own words`;
+    const n = w.requestedBy.displayName;
+    // w5896: what would pass, said exactly.
+    if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${n}'s, so ${tool} cannot run for it. What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started, or with ${n}'s own words that decided it quoted verbatim in update_work's \`words\` (from a message of theirs in the last ${DECISION_WORDS_HOURS} hours, at least ${DECISION_WORDS_MIN} words); else ask them (decide_work ask)`;
+    if (w.askedFromRecord && DESTRUCTIVE_TOOLS.has(tool)) return `${tool} deletes or removes, so it runs only for a request ${n} asked for in a turn of their own, and ${w.id}'s ask rests on an earlier message of theirs quoted later (w5896). What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started with a message of their own; else ask them (decide_work ask)`;
     return undefined;
   }
 
@@ -9167,10 +9341,16 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
    * Whether this orchestrator's current turn is its person's (the dispatcher has none: nobody writes to it), which
    * memory writes need (server/orchestratorMemory.ts): a turn the harness started may be relaying injected text.
    */
-  private personTurn(id: string, words?: string): boolean {
+  private personTurn(id: string, words?: string, o: { thisTurn?: boolean } = {}): boolean {
     const h = this.sessions.sessions.get(id);
-    // w5507: a turn a relayed message joined (SessionHandle.turnRelayed) is theirs only with their words quoted.
-    return !!h && this.orchestrators.turnOwnWords(h, words).own;
+    // w5507: a turn a relayed message joined (SessionHandle.turnRelayed) is theirs only with their words quoted; w5896: or
+    // their earlier words that decided it, quoted (Orchestrators.turnOwnWords).
+    return !!h && this.orchestrators.turnOwnWords(h, words, o).own;
+  }
+
+  /** w5896: what would pass a gate reserved for the person's own words in this chat now (Orchestrators.ownWordsNeed). */
+  private personTurnNeed(id: string, words?: string, o: { thisTurn?: boolean } = {}): string {
+    return this.orchestrators.ownWordsNeed(id, words, o) ?? 'their own words';
   }
 
   /**
@@ -9190,6 +9370,9 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
    */
   orchestratorEnv(owner: Requester | undefined, sessionId?: string): Record<string, string | undefined> {
     if (owner) return poolRunEnv({ role: 'orchestrator', personId: owner.userId, sessionId }).env;
+    // w5891: "pool:<login>": any token of that person's own pool with room, never another pool (their pool setting included).
+    const pool = dispatcherPoolPerson(this.cfg);
+    if (pool !== undefined) return poolRunEnv({ role: 'orchestrator', personId: pool, sessionId, ownPool: true }).env;
     return (pinnedDispatcherEnv(this.cfg) ?? poolRunEnv({ role: 'orchestrator', personId: this.identity.systemPayer().userId, sessionId })).env;
   }
 
@@ -9358,10 +9541,11 @@ You may read the portal's data folder \`${dataDir}\`, never write it: its report
  * Ben's own, and only in a turn their person started with a message of their own, never a harness turn (a check-in, a
  * timer, a relayed report). The dispatcher's set_app_config has its own guard (belts.ts USER_ASKED_TOOLS).
  */
-export function personalSettingProblem(caller: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy'> | undefined, personTurn: (id: string) => boolean): string | undefined {
+export function personalSettingProblem(caller: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy'> | undefined, personTurn: (id: string) => boolean, need?: (id: string) => string): string | undefined {
   const who = opsAllowedOrchestrator(caller);
   if (!caller || !who) return "set_app_config is the dispatcher's, and Lothsahn's and Ben's own orchestrators' (w1078): ask the dispatcher, through a request";
-  if (!personTurn(caller.id)) return `a setting changes only in a turn ${who.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it, and words does not quote ${who.displayName}'s own message in it, w5507); ask them`;
+  // w5896: the refusal says exactly what passes (Orchestrators.ownWordsNeed).
+  if (!personTurn(caller.id)) return `a setting changes only on ${who.displayName}'s own words: ${need?.(caller.id) ?? `a turn ${who.displayName} started, or their words that decided it quoted verbatim in words`}`;
   return undefined;
 }
 

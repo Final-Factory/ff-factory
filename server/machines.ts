@@ -41,8 +41,12 @@ import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
 import { writeKnownHosts, type MachineSsh } from './machineSsh.ts';
 import { beatWasLate } from './loopWatch.ts';
 import type { GhAppToken } from '../shared/githubAppRoute.ts';
+import { runnerHoldReportOf } from '../shared/runnerHold.ts';
 
 const PING_MS = 20_000;
+/** w5916: how often the portal looks whether a machine's hold changed, and how often it repeats a hold that did not. */
+const RUNNER_HOLD_CHECK_MS = 60_000;
+const RUNNER_HOLD_REPEAT_MS = 10 * 60_000;
 const DEAD_MS = 45_000;
 /** How far back a machine's CPU use is averaged for placement (w2054): four of its daemon's 15 s reports. */
 export const CPU_WINDOW_MS = 60_000;
@@ -521,6 +525,8 @@ export class MachineManager {
       store.putMachine(m);
     }
     setInterval(() => this.heartbeat(), PING_MS).unref();
+    // w5916: each linked daemon hears its machine's hold when it changes, and again every few minutes
+    setInterval(() => this.syncRunnerHolds(), RUNNER_HOLD_CHECK_MS).unref();
   }
 
   /** Whose ~/.ssh holds the pinned host keys: the portal account's home (tests point it at a folder of their own). */
@@ -739,6 +745,10 @@ export class MachineManager {
   private readonly playerSeen = new Map<string, PlayerSeen>();
   /** Workers the daemon's hello reports still running after a drop (w2474): the wait their cut-off gave them goes. */
   workersLived?: (machineId: string, sessionIds: string[]) => void;
+  /** w5942: its daemon refused a start at its agent cap (AGENT_CAP_REFUSAL), with the daemon's words. */
+  capRefused?: (machineId: string, why: string) => void;
+  /** w5942: a start its daemon took went through (its first mid-turn report): its count had room. */
+  capStarted?: (machineId: string) => void;
   /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
   private readonly dropWhy = new Map<string, string | false>();
 
@@ -775,12 +785,30 @@ export class MachineManager {
    * message, as after a portal restart. Only an outdated daemon (a protocol this portal no longer drives) cannot start
    * them: that waits for its redeploy. One that merely has an update available resumes them at once (w605).
    */
+  /**
+   * w5942, warn only: workers on `machineId` whose work moved to another computer (SessionInfo.movedAway) but that its daemon
+   * still runs, or that a resume after its drop would wake: each would act on a request a newer worker now carries. Journalled
+   * and reported; nothing is stopped or skipped yet (lothsahn's lockout rule: warn first, enforce in its own reviewed change).
+   */
+  private warnMovedAway(machineId: string, sids: string[], what: string) {
+    const line = sids.map((sid) => {
+      const m = this.handle(sid)!.info.movedAway!;
+      return `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
+    });
+    console.warn(`machines: ${machineId}: ${what}: ${line.join(', ')}: a newer worker carries its work (w5942, warn only)`);
+    this.report?.(`[machines] ${machineId}: ${sids.length} worker(s) whose work moved elsewhere: ${what}: ${line.join(', ')}. A newer worker carries that work, so two may act on one request (w5942, warn only).`);
+  }
+
   private resumeCutOff(machineId: string, live: Set<string>, now = Date.now()) {
     const c = this.cutOff.get(machineId);
     if (!c || this.outdated(machineId)) return;
     this.cutOff.delete(machineId);
     const gone = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid) && !this.handle(sid)!.info.stoppedOnPurpose);
     if (!gone.length) return;
+    // w5942 (warn only, lothsahn's lockout rule): a worker whose work moved off it while its computer was away resumes here
+    // as before, and is named, so the journal shows how often that happens before a later change stops it.
+    const moved = gone.filter((sid) => this.handle(sid)!.info.movedAway);
+    if (moved.length) this.warnMovedAway(machineId, moved, 'would not resume (it resumes for now)');
     const when = new Date(c.at).toLocaleTimeString();
     if (now - c.at > RESUME_WITHIN_MS) {
       this.report?.(`[machines] ${machineId} is back; ${gone.length} agent(s) were mid-turn when its daemon ${c.why} at ${when}, too long ago to resume by themselves: ${gone.join(', ')}. Message them to continue.`);
@@ -913,6 +941,30 @@ export class MachineManager {
       if (only && id !== only) continue;
       const c = this.activityFor?.(id);
       if (c) this.post(id, { type: 'activity_config', config: c }, false);
+    }
+  }
+
+  /**
+   * w5916: a person's hold on a machine (config placement.hold, or a drain), its words, or undefined. Its daemon drains
+   * the machine's CI runners while it is on (machine/loadRunners.ts). Wired by index.ts.
+   */
+  runnerHoldFor?: (machineId: string) => string | undefined;
+  /** What each linked daemon was last told of its hold, and when. */
+  private runnerHoldSent = new Map<string, { why: string | null; at: number }>();
+
+  /**
+   * w5916: tell each linked daemon (or only `only`) its machine's hold when it changed since the last word, and every
+   * RUNNER_HOLD_REPEAT_MS while one is on, so the daemon's lapse (12 h without a word) never fires while the portal runs.
+   */
+  syncRunnerHolds(only?: string, now = Date.now()) {
+    for (const id of this.links.keys()) {
+      if (only && id !== only) continue;
+      const why = this.runnerHoldFor?.(id) ?? null;
+      const last = this.runnerHoldSent.get(id);
+      if (last && last.why === why && (why === null || now - last.at < RUNNER_HOLD_REPEAT_MS)) continue;
+      this.runnerHoldSent.set(id, { why, at: now });
+      if (last?.why !== why) console.log(`machine ${id}: ${why ? `held: its CI runners drain (${why.slice(0, 120)})` : 'no hold: its CI runners take jobs'} (w5916)`);
+      this.post(id, { type: 'runner_hold', why }, false);
     }
   }
 
@@ -2399,6 +2451,12 @@ export class MachineManager {
     if (cleanup) ws.send(JSON.stringify({ type: 'cleanup_config', config: cleanup } satisfies ToDaemon));
     const activity = this.activityFor?.(id);
     if (activity) ws.send(JSON.stringify({ type: 'activity_config', config: activity } satisfies ToDaemon));
+    // w5916: its hold, at every connect (null too: a hold lifted while the link was down lifts now)
+    if (this.runnerHoldFor) {
+      const why = this.runnerHoldFor(id) ?? null;
+      this.runnerHoldSent.set(id, { why, at: Date.now() });
+      ws.send(JSON.stringify({ type: 'runner_hold', why } satisfies ToDaemon));
+    }
     const ctx = m.local ? undefined : this.cleanupContext?.();
     if (ctx) ws.send(JSON.stringify({ type: 'cleanup_context', context: ctx } satisfies ToDaemon));
     const prio = this.benchPrioritiesFor?.(id);
@@ -2559,6 +2617,10 @@ export class MachineManager {
         if (dropped !== undefined) {
           const lived = m.sessionIds.filter((sid) => live.has(sid));
           if (lived.length) this.workersLived?.(id, lived);
+          // w5942 (warn only): on 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50, whose w5869
+          // and w5891 had moved to biscuit at 06:09:46Z (w2544): two live workers on each request.
+          const moved = lived.filter((sid) => this.handle(sid)?.info.movedAway);
+          if (moved.length) this.warnMovedAway(id, moved, 'still runs');
         }
         if (why || behind) this.checkOutdated();
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
@@ -2578,7 +2640,10 @@ export class MachineManager {
         const s = this.handle(msg.info.id);
         if (!s || s.info.machineId !== id) return;
         // Its daemon has its turn now (w3597): counted by its own mark from here.
-        if (isMidTurn(msg.info)) this.starting.delete(msg.info.id);
+        if (isMidTurn(msg.info)) {
+          if (this.starting.has(msg.info.id)) this.capStarted?.(id);
+          this.starting.delete(msg.info.id);
+        }
         // The portal owns identity, naming and where it works (a worker placed again in another sandbox, w640: the
         // daemon's copy keeps the sandbox it first ran in); the daemon owns run state.
         // The account its process started on (ranAs, ranFor) is the portal's too: the daemon keeps the copy of the session's
@@ -2647,6 +2712,7 @@ export class MachineManager {
           // Worded like the portal's own capacity holds ("N agents mid-turn …"), so a resume may move to a computer with
           // room (resumeMove.ts ROOM_WAIT, w2046) and the ledger reads it as a wait for a slot.
           const n = /already (\d+) agents/.exec(msg.error)?.[1] ?? '?';
+          this.capRefused?.(id, msg.error);
           this.sessions.requeueRefused(msg.sessionId, m, `${n} agents mid-turn on ${id} by its daemon's count (it refused the start: ${msg.error})`);
           return;
         }
@@ -2749,6 +2815,13 @@ export class MachineManager {
       case 'pause':
         this.takePause(id, msg.pause);
         return;
+      case 'runner_hold': {
+        const r = runnerHoldReportOf(msg.report);
+        if (r === null) {
+          if (this.store.machines.get(id)?.runnerHold) this.update(id, { runnerHold: undefined });
+        } else if (r) this.update(id, { runnerHold: r });
+        return;
+      }
       case 'host_health':
         if (msg.health && typeof msg.health === 'object') this.update(id, { guard: msg.health });
         return;

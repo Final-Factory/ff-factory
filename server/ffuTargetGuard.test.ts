@@ -50,3 +50,9 @@ test('w4258: a clean-up item with members removes each member, never the folder,
   assert.deepEqual(r.removed, [{ path: target, bytes: 150, rule: 'ffu-slot-target', why: 'stale' }]);
   assert.ok(!fs.existsSync(a) && !fs.existsSync(b) && fs.existsSync(keep) && fs.existsSync(outside) && fs.existsSync(target));
 });
+
+test('w5885: a worker holding two slots builds in either target; the refusal names both and says a second branch takes a second slot', () => {
+  const two = { ...holds, heldSlot: () => ['slot2', 'slot3'] };
+  for (const id of ['slot2', 'slot3']) assert.equal(checkPrivateFfuTarget(`export CARGO_TARGET_DIR=${path.join(root, 'ffu-sandboxes', id, 'target')}`, two), undefined, id);
+  assert.match(checkPrivateFfuTarget('export CARGO_TARGET_DIR="$TMPDIR/ffu-target-bug"', two) ?? '', /you hold ffu slot2 and slot3.*ffu-slot take --branch <that branch>.*never counts as another worker's/s);
+});
