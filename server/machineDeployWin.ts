@@ -351,7 +351,8 @@ if ($git -and $slug) {
  * (the gh shim: "Cannot find module ...\\machine\\ghApp.ts") until the restarted daemon's label pass gave it back, 4-8
  * minutes later (measured on BEAST and LothDesktop, 2026-11-26). Set before tar unpacks, so every file inherits it as it
  * is made. Harmless with the fence off: it is what a Medium folder has anyway. A failure is said, never fatal: the
- * daemon's own pass still gives it back.
+ * daemon's own pass still gives it back. Never on the system drive, by its path or the real one a junction leads to
+ * (as machine/lowIntegrity.ts onSystemDrive): the fence labels nothing there.
  */
 export function readBackScript(folderVar: string): string {
   return `try {
@@ -363,6 +364,14 @@ public static class FfStageLabel {
   [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);
   [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] public static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
   [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr sa, uint disposition, uint flags, IntPtr template);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetFinalPathNameByHandleW(IntPtr h, System.Text.StringBuilder buf, uint size, uint flags);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  public static string RealPath(string path) {
+    IntPtr h = CreateFileW(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+    if (h == new IntPtr(-1)) return null;
+    try { var b = new System.Text.StringBuilder(1024); uint n = GetFinalPathNameByHandleW(h, b, 1024, 0); return n > 0 && n < 1024 ? b.ToString() : null; } finally { CloseHandle(h); }
+  }
   public static uint Set(string path, string sddl) {
     IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();
     try { bool p, d; IntPtr sacl; if (!GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();
@@ -371,8 +380,15 @@ public static class FfStageLabel {
 }
 "@
   }
-  $lr = [FfStageLabel]::Set(${folderVar}, 'S:(ML;OICI;NW;;;ME)')
-  if ($lr -ne 0) { Write-Output "read-back label on $(${folderVar}) not set ($lr): the daemon's start gives it back" }
+  $sysDrive = if ($env:SystemDrive) { $env:SystemDrive.Substring(0, 2) } else { 'C:' }
+  $realPath = [FfStageLabel]::RealPath(${folderVar})
+  if (-not $realPath) { Write-Output "read-back label on $(${folderVar}) skipped: its real path is unknown" }
+  elseif (([IO.Path]::GetFullPath(${folderVar})).Substring(0, 2) -ieq $sysDrive -or $realPath.TrimStart([char[]]'\\?').Substring(0, 2) -ieq $sysDrive) {
+    Write-Output "read-back label on $(${folderVar}) skipped: on the system drive, which the read fence never labels"
+  } else {
+    $lr = [FfStageLabel]::Set(${folderVar}, 'S:(ML;OICI;NW;;;ME)')
+    if ($lr -ne 0) { Write-Output "read-back label on $(${folderVar}) not set ($lr): the daemon's start gives it back" }
+  }
 } catch { Write-Output "read-back label on $(${folderVar}) not set: $($_.Exception.Message)" }`;
 }
 
