@@ -657,16 +657,17 @@ test('w5938: a stall check that comes late (the daemon blocked its own loop) is 
   });
   const seen: (string | null)[] = [];
   const port = await new Promise<number>((r) => portal.on('message', (m: { port?: number; range?: string | null }) => (m.port ? r(m.port) : seen.push(m.range ?? null))));
-  // beast, 2026-11-26: LoopWatch logged the loop blocked 40-72 s; here 2.5 s or more, outside a timer (a sync call in an
-  // immediate callback), from just after the first 1000 bytes are written, so the stall check (1 s) falls due inside
+  // beast, 2026-11-26: LoopWatch logged the loop blocked 40-72 s; here 4 s or more, outside a timer (a sync call in an
+  // immediate callback), from just after the first 1000 bytes are written, so the stall check (3 s) falls due inside
   // the block and the next turn of the loop runs it, late, before it reads the bytes the portal sent meanwhile. The stall
-  // window is 1 s, not 300 ms: at load 55-70 the portal thread could take over 300 ms to answer, a real stall by this rule.
+  // window is 3 s, not 300 ms: at load 55-90 the portal thread took over 300 ms, and once over 1 s, to send its first
+  // bytes (biscuit, w6057), a real stall by this rule; 3 s keeps that out and still falls due inside the block.
   const blockAfterFirstBytes = (part: string) => {
     const block = () => {
       portal.postMessage('send');
       const at = Date.now();
       Atomics.wait(flag, 0, 0, 10_000);
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, 2500 - (Date.now() - at)));
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, 4000 - (Date.now() - at)));
     };
     // The part on disk at 1000 bytes; one more turn so the loop has taken the write's completion (the download's count).
     const look = () => ((fs.statSync(part, { throwIfNoEntry: false })?.size ?? 0) >= 1000 ? setImmediate(block) : setImmediate(look));
@@ -677,19 +678,22 @@ test('w5938: a stall check that comes late (the daemon blocked its own loop) is 
     Atomics.store(flag, 0, 0);
     Atomics.store(flag, 1, 1);
     blockAfterFirstBytes(path.join(dir, sub, `${b.sha256.slice(0, 16)}.bundle.part`));
-    const file = await downloadBundle(`http://127.0.0.1:${port}`, 'tok', b, path.join(dir, sub), fetch, { stallMs: 1000, lateMs, log: (l) => lines.push(l) });
+    const file = await downloadBundle(`http://127.0.0.1:${port}`, 'tok', b, path.join(dir, sub), fetch, { stallMs: 3000, lateMs, log: (l) => lines.push(l) });
     assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), b.sha256);
     assert.equal(Atomics.load(flag, 0), 1, 'the portal sent the rest while this loop was blocked');
     return lines;
   };
   // Before w5938 (no check of lateness): the late check is taken for a stall and the download starts again.
   const before = await run('before', 1e9);
-  assert.match(before.join('\n'), /stalled \(no byte in 1 s\) at 1000 of 20000 bytes; attempt 2 of 6/);
+  assert.match(before.join('\n'), /stalled \(no byte in 3 s\) at 1000 of 20000 bytes; attempt 2 of 6/);
   assert.deepEqual(seen.splice(0), [null, 'bytes=1000-']);
   const lines = await run('after', 200);
   assert.deepEqual(seen, [null], 'one request: no retry');
-  assert.equal(lines.length, 1, lines.join('\n'));
-  assert.match(lines[0], /the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 20000 bytes: not a stall/);
+  // A loaded machine can also make a check before the first bytes late (biscuit at load 85): not a stall either, so
+  // its line is left out here; nothing else may be logged.
+  const notAt0 = lines.filter((l) => !/stall check came \d+ s late .*, at 0 of 20000 bytes: not a stall/.test(l));
+  assert.equal(notAt0.length, 1, lines.join('\n'));
+  assert.match(notAt0[0],/the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 20000 bytes: not a stall/);
 });
 
 test('w5938: jobToEnd ends a job only past its limit: staged and never taken, its process gone or another program, or hung; never a live one writing its log', () => {
