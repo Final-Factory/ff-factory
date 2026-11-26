@@ -129,6 +129,11 @@ export interface CleanupItem {
   members?: string[];
   /** An ffu-runner-work item: its runner's folder, so a job started since the plan is found again right before the rename (w5502). */
   runner?: string;
+  /**
+   * An ffu slot target taken in a pass's first step (w6044): the slot's holder and take time when it was planned, so a worker
+   * that took the slot since, or a cargo build started in it, keeps it right before the rename (ffuSlotBusyNow).
+   */
+  ffuSlot?: { id: string; mark: string };
 }
 
 export interface CleanupRun {
