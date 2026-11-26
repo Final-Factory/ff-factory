@@ -1065,6 +1065,14 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--medium-agent-folders warn']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on', 'off', 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on', '--path-fence off', '--medium-agent-folders on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its setting');
+  // w5959: the tools disk lock: warn or on and nothing else, Windows only (the Low label is Windows').
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', toolsDiskLock: 'off' as never }), /tools_disk_lock: warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', toolsDiskLock: 'on' }), /tools_disk_lock: Windows only, and biscuit is not a Windows PC/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', toolsDiskLock: 'warn' });
+  await new Promise((r) => setTimeout(r, 300));
+  const tdWin = store.readTranscript(OPS_ID, 300).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(tdWin.text.includes(`-ToolsDiskLock warn"'`), tdWin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-ToolsDiskLock on']);
   ops.close();
 });
 
