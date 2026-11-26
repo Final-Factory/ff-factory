@@ -99,7 +99,8 @@ async function setup(t: { after: (fn: () => unknown) => void }, o: { root?: bool
     await until('the daemon gone', () => !mm.isOnline('mx'), 5000).catch(() => undefined);
     store.flush();
     await store.saved();
-    fs.rmSync(tmp, { recursive: true, force: true });
+    // maxRetries: on Windows the tree can still be written to just after the daemon ends (w6017 saw ENOTEMPTY in root/cache/uv).
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   });
   return { tmp, mm, d, repo, token, url, root, appDir, launched, exits };
 }
@@ -696,6 +697,96 @@ test('w5938: a stall check that comes late (the daemon blocked its own loop) is 
   assert.match(notAt0[0],/the bundle's stall check came \d+ s late \(this daemon's event loop was blocked\), at 1000 of 20000 bytes: not a stall/);
 });
 
+test('w5987: on a loop that keeps blocking, totalMs still ends the download, and late checks in a row with nothing read are a stall', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 7) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  // Half the bundle, then nothing (the w1641 stall), served while this thread's loop blocks 300 ms at a time outside a
+  // timer, so every 100 ms stall check comes about 200 ms late.
+  const held = await bundleServer(t, body, () => 'stall');
+  const blocking = (ms: number) => {
+    let on = true;
+    const block = () => on && setImmediate(() => (Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms), on && setTimeout(block, 5)));
+    block();
+    return () => (on = false);
+  };
+  const run = async (sub: string, o: { totalMs: number; lateRow?: number }) => {
+    const lines: string[] = [];
+    const stop = blocking(300);
+    const at = Date.now();
+    try {
+      await downloadBundle(held.url, 'tok', b, path.join(dir, sub), fetch, { stallMs: 100, lateMs: 50, attempts: 1, ...o, log: (l) => lines.push(l) });
+      assert.fail('the download should not finish');
+    } catch (e) {
+      return { error: (e as Error).message, ms: Date.now() - at, lines };
+    } finally {
+      stop();
+    }
+  };
+  // Every check late and no cap: totalMs ends it, and the last check says it came late, past the limit, not "stalled".
+  const total = await run('total', { totalMs: 2_000, lateRow: 1e9 });
+  assert.match(total.error, /the bundle's download did not finish in 2 s \(its stall check came \d+ s late, past the 2 s limit\) at \d+ of 200000 bytes, after 1 attempt\(s\)/);
+  // Loose upper bounds: biscuit at load 58 took 3.7 s here. Without totalMs (lateRow 1e9) it would never end.
+  assert.ok(total.ms >= 2_000 && total.ms < 15_000, `ended at ${total.ms} ms`);
+  // The last line, once bytes were read, is w5898's: they are kept for the next update. Under load (biscuit at 59) fewer
+  // than 100000, or none, are read in 2 s, so only the kinds of line are checked, not how many.
+  const checks = total.lines.filter((l) => !/kept the \d+ of 200000 bytes .*bundle\.part/.test(l));
+  assert.ok(total.lines.length - checks.length <= 1, total.lines.join('\n'));
+  assert.ok(checks.every((l) => /stall check came \d+ s late .*not a stall/.test(l)), total.lines.join('\n'));
+  // With the cap (here 3), the stall shows after 3 late checks in a row, long before totalMs.
+  const capped = await run('capped', { totalMs: 60_000, lateRow: 3 });
+  assert.match(capped.error, /the bundle's download stalled \(its stall check came late 3 times in a row with nothing read between\) at \d+ of 200000 bytes, after 1 attempt\(s\)/);
+  // The 2 late checks before the third are the 2 lines before the kept part. Under load others may come earlier (at 0
+  // bytes, before the answer; or one during the last chunk's write, still at its old size), so their count is not checked.
+  // The bundle server runs on this blocked loop too, so under load it may not have sent all 100000 bytes when the cap ends it.
+  assert.match(capped.lines.at(-1)!, /kept the \d+ of 200000 bytes .*bundle\.part/);
+  assert.ok(capped.lines.length >= 3 && capped.lines.slice(-3, -1).every((l) => /stall check came \d+ s late .*not a stall/.test(l)), capped.lines.join('\n'));
+  assert.ok(capped.ms < 30_000, `ended at ${capped.ms} ms (totalMs is 60 s)`);
+});
+
+test('w5987: a chunk read between late checks starts their count again, so more than lateRow late checks in all are no stall', async (t) => {
+  const body = Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 13) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const part = path.join(dir, `${b.sha256.slice(0, 16)}.bundle.part`);
+  // The order is set by the part on disk, not by timers (w6057): 1000 bytes, then 4 times over the loop blocks 1.2 s
+  // outside a timer, so the 500 ms check comes late with nothing new read, and the next 1000 bytes come only after it (a
+  // timer due after the check's). Each wait for a chunk on disk follows its read, which re-armed the check.
+  let ctl!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({ start: (c) => void (ctl = c) }, { highWaterMark: 0 });
+  // As fetch does, an abort (the stall check's) errors the body; then the drive below stops.
+  let aborted = false;
+  const doFetch = (async (_url: string, init: RequestInit) => {
+    init.signal?.addEventListener('abort', () => ((aborted = true), ctl.error(new Error('aborted'))));
+    return new Response(stream, { status: 200 });
+  }) as unknown as typeof fetch;
+  const onDisk = (n: number) => new Promise<void>((r) => {
+    const look = () => (aborted || (fs.statSync(part, { throwIfNoEntry: false })?.size ?? 0) >= n ? r() : setImmediate(look));
+    look();
+  });
+  const drive = (async () => {
+    ctl.enqueue(body.subarray(0, 1000));
+    for (let i = 1; i < 5; i++) {
+      await onDisk(i * 1000);
+      await new Promise<void>((r) => setImmediate(() => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1200);
+        setTimeout(() => (aborted || ctl.enqueue(body.subarray(i * 1000, (i + 1) * 1000)), r()), 1);
+      }));
+    }
+    await onDisk(5000);
+    if (!aborted) ctl.close();
+  })();
+  const lines: string[] = [];
+  // lateRow 2: without the count starting again on each chunk, the second late check would end it as a stall.
+  const file = await downloadBundle('http://portal.invalid', 'tok', b, dir, doFetch, { stallMs: 500, lateMs: 100, lateRow: 2, attempts: 1, log: (l) => lines.push(l) }).finally(() => drive);
+  assert.equal(createHash('sha256').update(fs.readFileSync(file)).digest('hex'), b.sha256);
+  const late = lines.filter((l) => /stall check came \d+ s late .*not a stall/.test(l));
+  assert.equal(late.length, 4, lines.join('\n'));
+  assert.deepEqual(late.map((l) => Number(/at (\d+) of 5000/.exec(l)?.[1])), [1000, 2000, 3000, 4000]);
+});
+
 test('w5938: jobToEnd ends a job only past its limit: staged and never taken, its process gone or another program, or hung; never a live one writing its log', () => {
   const at = Date.parse('2026-11-26T06:11:26Z');
   const job = { id: '977d56f7-1030-442b-bcad-bd6ac62ab798', form: 'update', root: 'r', appDir: 'a', service: 's', createdAt: new Date(at).toISOString(), phase: 'running', pid: process.pid } as UpdateJob;
@@ -752,7 +843,7 @@ function overdueFixture(
     now: () => clock.now,
     command: o.command ?? (async () => undefined),
     kill: (pid, sig) => void (stopped.push(`${pid} ${sig}`), (o.stop ?? ((p, s) => process.kill(p, s)))(pid, sig)),
-    stopWaitMs: 500,
+    stopWaitMs: 2000, // a stopped stand-in can take over 500 ms to be reaped on a loaded machine (biscuit at load 60-120)
   });
   /** The daemon looks every 10 s for `ms`, awake: its clock moves with each look. */
   const watch = async (ms: number) => {
@@ -860,7 +951,9 @@ test('w5938: a live job process past 45 min is stopped and ended only when its l
   assert.deepEqual(slept.stopped, [], 'a 10 min gap is not watched quiet time');
   // Quiet 16 min while the daemon watched: hung, stopped with TERM, ended.
   await slept.watch(2 * 60_000);
-  assert.deepEqual(slept.stopped, [`${sleeper.pid} SIGTERM`]);
+  // TERM first; under load the stand-in may not be gone within the fixture's 2 s, and then KILL follows (w6032 saw it).
+  assert.equal(slept.stopped[0], `${sleeper.pid} SIGTERM`, slept.stopped.join(', '));
+  assert.deepEqual(slept.stopped.slice(1), slept.stopped.length > 1 ? [`${sleeper.pid} SIGKILL`] : [], slept.stopped.join(', '));
   assert.equal(alive(sleeper.pid), false, 'the hung process was stopped');
   assert.equal(readJson<UpdateJob>(slept.f.job)?.phase, 'done');
   assert.match(readJson<LinkUpdateReport>(slept.f.result)!.note!, /is hung: its log unwritten for 1[56] min while this daemon watched \(limit 15 min\)/);

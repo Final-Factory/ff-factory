@@ -337,7 +337,10 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    still checked before anything installs: a resumed bundle that does not match deletes the part and downloads again from 0
    in the time left; a part that is empty, not a file, or not shorter than the bundle, or a resume the portal answers 416, is
    dropped the same way; a refusal keeps nothing; and only the newest part of another bundle stays beside it. Recovery needs
-   nobody at the machine. The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
+   nobody at the machine.
+   A stall check that comes over 10 s late (the daemon's own event loop was blocked) is not a stall and gives
+   the stream another 30 s (w5938), but 5 late checks in a row with nothing read between are one, and a late check past the
+   8 minutes says it came late, past the limit (w5987). The portal waits 12 minutes for that answer (`LINK_ACK_MS`), and logs one that comes later with its reason.
    An answer the link could not carry (it was down, or it was sent less than a minute before a drop, since a dead link
    looks open for up to 45 s) is kept 30 minutes and sent again after the next hello (`ANSWERS`; w1641: at the 450f7d53c
    rollout the portal VM's Tailscale restarted 4.5 minutes into beast's update). The portal ignores a repeat, takes a
