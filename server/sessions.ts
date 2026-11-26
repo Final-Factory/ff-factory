@@ -1795,6 +1795,8 @@ export class SessionManager {
   private queue: QueuedSend[] = [];
   private readonly queueFile?: string;
   private drainTimer?: NodeJS.Timeout;
+  /** Every session was stopped with no filter: the manager is done and drains nothing more (stopAll). */
+  private done = false;
   /**
    * A machine session's place is full of mid-turn agents (its sandbox, or the machine's agent cap): why, or undefined.
    * Set by MachineManager. The portal runs no workers of its own (w510), so only a machine's limits apply.
@@ -2184,6 +2186,7 @@ export class SessionManager {
 
   /** Deliver the queued messages that may go now, in order. Returns how many went. */
   drain(now = Date.now()): number {
+    if (this.done) return 0;
     // w3843: a drain asked during one (a placement that failed at once drains from its finally) runs after it. Run inside,
     // it walked the whole queue again (once per sandbox tried) and the outer pass went on over a queue it had changed.
     if (this.draining) {
@@ -2491,8 +2494,15 @@ export class SessionManager {
    * The server is stopping: every process goes (all of them, or those `which` picks), but what each was doing is kept
    * for the next server.
    */
-  stopAll(which: (s: SessionHandle) => boolean = () => true) {
-    for (const s of this.sessions.values()) if (which(s)) s.stop(false);
+  /**
+   * Stop the sessions `which` picks. With none named, every session, and the manager is done: its half-minute drain stops
+   * too (w5915: a test's manager drained on after its test ended, into the folder that test had removed, ENOENT).
+   */
+  stopAll(which?: (s: SessionHandle) => boolean) {
+    for (const s of this.sessions.values()) if (!which || which(s)) s.stop(false);
+    if (which) return;
+    this.done = true;
+    clearInterval(this.drainTimer);
   }
 
   /** Save a session's info after a field was set on it from outside (w1749: its owed compaction). */
