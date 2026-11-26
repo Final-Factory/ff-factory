@@ -34,7 +34,7 @@ interface FakeMachine extends RolloutMachine {
   linkProblem?: string;
   /** w4674: its install joined with -NoSsh (server/machines.ts noSshProblem). */
   noSsh?: boolean;
-  linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; notReached?: boolean; after?: { online: boolean; daemon?: string } };
+  linkRun?: (form: 'update' | 'tools', commit: string) => { report?: Partial<LinkUpdateReport>; throws?: string; notReached?: boolean; after?: { online: boolean; daemon?: string }; hang?: boolean };
 }
 
 /** What `worker.ts tools` prints (server/agentTools.ts), shortened to the lines the rollout reads. */
@@ -55,7 +55,7 @@ const mac = (id: string, over: Partial<FakeMachine> = {}): FakeMachine => ({
   ...over,
 });
 
-function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: boolean; tools?: boolean } = {}) {
+function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: boolean; tools?: boolean; limits?: Record<string, number> } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollout-'));
   let clock = Date.parse('2026-10-10T18:00:00Z');
   const calls: { target: string; remote: string }[] = [];
@@ -63,7 +63,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
   const toolCalls: { target: string; remote: string; at: number }[] = [];
   const told: { to: Requester | undefined; text: string }[] = [];
   /** The updates over the daemons' links (w1596). */
-  const linkCalls: { id: string; form: string; commit: string }[] = [];
+  const linkCalls: { id: string; form: string; commit: string; timeoutMs?: number }[] = [];
   let helloAt = 0;
   let adopted: Set<string> | undefined;
   const find = (id: string) => machines.find((m) => m.id === id)!;
@@ -95,9 +95,11 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     link: (id) => find(id).online && !!find(id).linkRun,
     linkProblem: (id) => (find(id).online && !find(id).linkRun ? find(id).linkProblem : undefined),
     noSsh: (id) => !!find(id).noSsh,
-    linkUpdate: async (id, form, commit) => {
-      linkCalls.push({ id, form, commit });
+    linkUpdate: async (id, form, commit, timeoutMs) => {
+      linkCalls.push({ id, form, commit, ...(timeoutMs ? { timeoutMs } : {}) });
       const r = find(id).linkRun!(form, commit);
+      // w5967: a job that never reports (beast's tools job 442c5638).
+      if (r.hang) return new Promise<LinkUpdateReport>(() => undefined);
       if (r.after) Object.assign(find(id), r.after);
       if (r.throws) throw r.notReached ? new UpdateNotReached(r.throws) : new Error(r.throws);
       return { id: 'j', form, commit, ok: true, exit: 0, log: '', at: '', ...r.report };
@@ -108,7 +110,7 @@ function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: bo
     diskRoom: (id) => find(id).disk,
   };
   const make = () =>
-    new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, tools: () => o.tools !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000 } });
+    new MachineRollout({ host, dataDir: dir, enabled: () => o.enabled !== false, tools: () => o.tools !== false, now: () => clock, sleep: async (ms) => void (clock += ms), limits: { settleMs: 10_000, graceMs: 10 * 60_000, ...o.limits } });
   const verify = (sha = NEW, at = clock) => fs.writeFileSync(path.join(dir, VERIFIED_FILE), JSON.stringify({ sha, previous: OLD, at: new Date(at).toISOString() }));
   return { dir, calls, toolCalls, told, linkCalls, make, verify, advance: (ms: number) => void (clock += ms), setHello: (ids: string[]) => ((adopted = new Set(ids)), (helloAt = clock + 1)), find };
 }
@@ -960,4 +962,37 @@ test('w5516: a verified commit that is not a full sha updates nothing: no instal
   await w.make().tick();
   assert.equal(w.calls.length, 0, 'no installer ran');
   assert.match(w.told[0].text, /- m5: FAILED: the verified commit "c5a93e060aaa" is not a full 40-character sha/);
+});
+
+test('w5967: a tools run that hangs on one machine fails with the reason at its deadline; the other machines are updated and published meanwhile', async () => {
+  const done = (id: string) => ({ report: { log: `After: daemon ${NEW.slice(0, 7)} (was ${OLD.slice(0, 7)}).
+The portal sees ${id} online running ${NEW.slice(0, 7)}.`, before: OLD.slice(0, 7), after: NEW.slice(0, 7) }, after: { online: true, daemon: NEW.slice(0, 7) } });
+  // beast first, as on 2026-11-26: its update ends, its tools job never reports.
+  const beast = mac('beast', { platform: 'win32', root: 'F:\ffw', target: 'not an ssh target', linkRun: (form) => (form === 'tools' ? { hang: true } : done('beast')) });
+  const others = ['biscuit', 'lothdesktop', 'm5'].map((id) => mac(id, { linkRun: (form) => (form === 'tools' ? { report: { log: toolsOut() } } : done(id)) }));
+  const w = world([beast, ...others], { requester: LOTH, limits: { toolsDeadlineMs: 200 } });
+  const r = w.make();
+  w.verify();
+  const tick = r.tick();
+  // While beast's tools wait, every other machine already has its update and its tools.
+  for (let i = 0; i < 50 && !others.every((m) => r.state.machines[m.id]?.tools?.status === 'ok'); i++) await new Promise((res) => setTimeout(res, 5));
+  for (const m of others) {
+    assert.equal(r.state.machines[m.id].status, 'ok', `${m.id} was updated while beast's tools hung`);
+    assert.equal(r.state.machines[m.id].tools?.status, 'ok', `${m.id} got its tools while beast's hung`);
+  }
+  assert.equal(r.state.machines.beast.tools?.status, 'publishing');
+  assert.equal(w.told.length, 0, 'the report waits for beast');
+  // The next tick is not held behind it (the old tick kept busy while it waited).
+  w.advance(60_000);
+  await r.tick();
+  assert.equal(w.linkCalls.filter((c) => c.id === 'beast' && c.form === 'tools').length, 1, 'not started twice');
+  await tick;
+  const t = r.state.machines.beast.tools!;
+  assert.equal(t.status, 'failed');
+  assert.match(t.note!, /the agent tools run on beast did not end within 0 min, so the rollout stopped waiting for it \(w5967\); its other machines were not held up/);
+  assert.equal(r.state.machines.beast.status, 'ok', 'its daemon update stays done');
+  assert.equal(w.told.length, 1, 'one report, once beast settled');
+  assert.match(w.told[0].text, /- beast: updated\..* Agent tools FAILED: the agent tools run on beast did not end/);
+  // The wait over the link is longer than the job's own 30-minute limit, so the job's failed report comes first.
+  for (const c of w.linkCalls.filter((x) => x.form === 'tools')) assert.equal(c.timeoutMs, 35 * 60_000);
 });
