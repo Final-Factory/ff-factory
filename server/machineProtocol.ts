@@ -137,6 +137,8 @@ export interface LinkUpdateFlags {
   editorTmpdir?: 'on' | 'off';
   /** The path fence off or warn (w5863), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
   pathFence?: 'off' | 'warn';
+  /** Medium agents' own temp root and cargo home, warn or on (w5862, w5869; docs/worker-root.md), any OS: daemon.json `mediumAgentFolders`; unset: carried. A daemon that predates it ignores it. */
+  mediumAgentFolders?: 'warn' | 'on';
 }
 
 /**

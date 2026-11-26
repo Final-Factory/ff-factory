@@ -3534,6 +3534,18 @@ export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
   sessions: SessionInfo[];
+  /**
+   * w5907: the sessions as of this state, `<boot>.<rev>` (server/pageState.ts SessionRevs). A page that reconnects sends
+   * it back (`have` on /ws) and gets only the sessions changed since. Absent from older servers.
+   */
+  sessionsRev?: string;
+  /**
+   * Set when `sessions` holds only those changed since the page's `have` rev: `ids` are all the sessions the page keeps
+   * (it drops the others and asks for any it lacks). Absent: `sessions` is the whole list.
+   */
+  sessionsDelta?: { since: number; ids: string[] };
+  /** How many finished sessions older than the page's window the server left out (a view asks for one by id). */
+  olderSessions?: number;
   standingAgents: StandingAgent[];
   delegations: DelegationRequest[];
   machines: Machine[];

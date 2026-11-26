@@ -1267,6 +1267,10 @@ older daemon ignores it and keeps making worktrees.
     it ships `warn` first (lothsahn's lockout rule).
   - Tests: `server/storeLock.test.ts`. Its live legs run in CI: Landlock on Linux; on Windows a Low `cmd.exe` writing
     into the Medium clone. Both commit in a slot repo, and both see the clone's config, refs and objects refused.
+- **Medium agents' folders** (w5862, w5869; `machine/mediumFolders.ts`): `ops_worker` `machine_update` `medium_agent_folders`
+  (`warn` or `on`, every OS) writes daemon.json `mediumAgentFolders`; the daemon restarts with it. `on` moves Medium agents
+  to `<root>/tmp-medium` and `<root>/cache-medium/cargo`, `warn` only logs the exposure (docs/worker-root.md, "Medium
+  agents' temp folders and cargo home"). There is no `off`: unset is `warn`.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 
