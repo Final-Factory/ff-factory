@@ -8,13 +8,14 @@ import { REMOTE_GUARD, allowedRemote, guardRemote, guardRemoteSync, redact, remo
 import { saveWork } from './saveWork.ts';
 import { switchBranch } from './switchBranch.ts';
 import { run } from './proc.ts';
+import { realFfuSlotDeps, takeSlot } from '../machine/ffuSlots.ts';
 
 // w6099 (w6091's review of #1367, follow-up A): a worker can point a sandbox's origin at a bare repository it planted on
 // the disk; the daemon's push then runs that repository's receive-pack, its hooks and config, outside safeGit's fence.
 
 const hasGit = spawnSync('git', ['--version']).status === 0;
 const slash = (p: string) => p.replace(/\\/g, '/');
-// The tests' preload lets every other test push to a bare repository in a temp folder (scripts/testEnv.ts); not these.
+// Other test files import server/testLocalRemotes.ts to push to a bare repository in a temp folder; this one never does.
 (globalThis as { ffTestLocalRemotes?: boolean }).ffTestLocalRemotes = false;
 
 test('w6099: only GitHub over https or ssh is a remote the daemon uses', () => {
@@ -38,6 +39,10 @@ test('w6099: a fetch or push URL that is not GitHub is named, with no user name,
   assert.equal(redact('x-access-token:FAKESECRET@evil.example:o/r.git'), 'evil.example:o/r.git');
   assert.equal(redact('https://a@FAKESECRET@evil.example/r.git'), 'https://evil.example/r.git');
   assert.equal(redact('https://evil.example/r.git?access_token=FAKESECRET#FAKESECRET'), 'https://evil.example/r.git');
+  // w6148's review of #1389: the user info ends at the first `/`, so a `?` or `#` in a password is still user info.
+  assert.equal(redact('https://u:FAKE?PW@evil.example/r.git'), 'https://evil.example/r.git');
+  assert.equal(redact('https://u:FAKE#PW@evil.example/r.git'), 'https://evil.example/r.git');
+  assert.equal(redact('F:\\ffw\\planted.git'), 'F:\\ffw\\planted.git');
   assert.equal(redact('F:/ffw/planted.git'), 'F:/ffw/planted.git');
   assert.equal(redact('file:///F:/ffw/planted.git'), 'file:///F:/ffw/planted.git');
   // Finding C: each message names the fix, and a checkout with no origin is told to add one.
@@ -106,5 +111,26 @@ test('w6099: a sandbox whose origin is a planted bare repository with a hook: th
     assert.equal(await check(), undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6099: ffu-slot take refuses to fetch the shared clone from an origin that is not GitHub, and names the clone', { skip: !hasGit }, () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'remoteguard-ffu-'));
+  try {
+    const work = path.join(base, 'src');
+    const git = (cwd: string, ...a: string[]) => assert.equal(spawnSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', ...a], { cwd, encoding: 'utf8' }).status, 0, a.join(' '));
+    fs.mkdirSync(work);
+    git(work, 'init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(work, 'Cargo.toml'), '[workspace]\n');
+    git(work, 'add', '.');
+    git(work, 'commit', '-qm', 'one');
+    const planted = path.join(base, 'planted.git');
+    git(base, 'clone', '-q', '--bare', work, planted);
+    const root = path.join(base, 'install');
+    fs.mkdirSync(root);
+    const d = { ...realFfuSlotDeps({ FF_WORKER_ROOT: root, FF_SESSION_ID: 'take0001' }), max: 2, freeGB: () => 500, write: () => {}, say: () => {} };
+    assert.throws(() => takeSlot(d, { remote: planted }), /the shared clone in .* was not fetched: refused by FF Factory: origin points at /);
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true, maxRetries: 5 });
   }
 });

@@ -21,17 +21,18 @@ export const REMOTE_GUARD: 'warn' | 'enforce' = 'enforce';
 
 /**
  * A URL with anything that may carry a token taken out, so a message never does: the user name and password up to the
- * last `@` before the path (`https://a@b@host/`, scp's `tok@host:path`), and any query or fragment.
+ * last `@` before the path (`https://a@b@host/`, scp's `tok@host:path`), and any query or fragment. The user info goes
+ * first: git ends it at the first `/`, not at `?` or `#` (w6148: `https://u:FAKE?PW@host/` kept `u:FAKE`).
  */
 export function redact(url: string): string {
-  const m = /^([a-z][\w+.-]*:\/\/)?([^/]*)(.*)$/is.exec(url.trim().replace(/[?#].*$/s, ''))!;
-  return `${m[1] ?? ''}${m[2].slice(m[2].lastIndexOf('@') + 1)}${m[3]}`;
+  const m = /^([a-z][\w+.-]*:\/\/)?([^/\\]*)(.*)$/is.exec(url.trim())!;
+  return `${m[1] ?? ''}${m[2].slice(m[2].lastIndexOf('@') + 1)}${m[3]}`.replace(/[?#].*$/s, '');
 }
 
 /**
- * Set by the tests' preload (scripts/testEnv.ts) only: their checkouts push to bare repositories in a temp folder, which
- * the guard would refuse; remoteGuard.test.ts turns it off to test the guard itself. Nothing a worker writes reaches the
- * daemon's globals.
+ * Set only by server/testLocalRemotes.ts, which test files import: their checkouts push to bare repositories in a temp
+ * folder, which the guard would refuse. No daemon or portal module imports it, and nothing a worker writes reaches the
+ * daemon's globals (w6148's review: setting it takes code in the daemon's process, which owns the daemon anyway).
  */
 const testLocalRemotes = () => (globalThis as { ffTestLocalRemotes?: boolean }).ffTestLocalRemotes === true;
 
@@ -46,7 +47,7 @@ export function remoteProblem(remote: string, fetchOut: string | undefined, push
   const fix = `set it with \`git remote set-url ${remote} <its GitHub URL>\``;
   // With no remote of that name, git takes `origin` for a path: a folder of that name in the checkout.
   if (remotes !== undefined && !remotes.split('\n').some((r) => r.trim() === remote))
-    return `the checkout has no remote named ${remote}, so git would take "${remote}" for a folder in it (w6099); add it with \`git remote add ${remote} <its GitHub URL>\``;
+    return `the checkout has no remote named ${remote}, so git would take "${remote}" for a folder in it (w6099); add it with \`git remote add ${remote} <its GitHub URL>\` (or, if git says it exists, from a .git/remotes file, ${fix})`;
   if (fetchOut === undefined || pushOut === undefined) return `could not read ${remote}'s URL (w6099); look at it with \`git remote -v\` and ${fix}`;
   const urls = [...new Set([...fetchOut.split('\n'), ...pushOut.split('\n')].map((u) => u.trim()).filter(Boolean))];
   if (!urls.length) return `${remote} has no URL`;
