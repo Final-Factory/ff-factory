@@ -1404,6 +1404,10 @@ export class CleanupRunner {
   /** The last firstAlone, and whether one is in flight (w6044): at most one per LOW_PASS_MINUTES from a tick. */
   private aloneAt = 0;
   private aloneRunning = false;
+  /** The first step alone in flight, which a new pass waits for before its own first step (w6142 review). */
+  private aloneDone: Promise<void> | undefined;
+  /** The pass in flight has decided whether it is low: before that, nothing runs alone beside it (w6142 review). */
+  private lowDecided = false;
   /** What deferred the last due pass, while it still does (said once). */
   private heldBy?: string;
   last?: CleanupSummary;
@@ -1492,13 +1496,17 @@ export class CleanupRunner {
       return undefined;
     }
     this.running = true;
+    this.lowDecided = false;
     try {
+      // w6142 review: a first step alone still in flight ends before this pass plans its own.
+      if (this.aloneDone) await this.aloneDone;
       const s = this.d.settings();
       const dryRun = !!opts.dryRun;
       const first = await this.volumes();
       const before = first.free;
       const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? first.total : undefined));
       if (!dryRun) this.runningLow = low;
+      this.lowDecided = true;
       const st = s.staleOutput;
       const withStale = !!st && st.mode !== 'off' && (dryRun || low || staleDue(this.now(), this.lastStaleAt, st.everyHours, this.d.localHour?.(this.now())));
       if (!dryRun) {
@@ -1570,12 +1578,13 @@ export class CleanupRunner {
       if (!opts.dryRun) this.d.marker?.clear();
       this.running = false;
       this.runningLow = false;
+      this.lowDecided = false;
     }
   }
 
   /** A tick during a pass (w6044): below the soft threshold, a non-low pass in flight, no hold: the first step alone. */
   private async midPassLow() {
-    if (!this.d.firstAlone || this.runningLow || this.aloneRunning) return;
+    if (!this.d.firstAlone || !this.lowDecided || this.runningLow || this.aloneRunning) return;
     if (this.now() - this.aloneAt < LOW_PASS_MINUTES * 60_000) return;
     const v = await this.volumes();
     const s = this.d.settings();
@@ -1586,16 +1595,21 @@ export class CleanupRunner {
   }
 
   private async alone(trigger: CleanupSummary['trigger']) {
-    if (!this.d.firstAlone || this.runningLow || this.aloneRunning) return;
+    if (!this.d.firstAlone || !this.lowDecided || this.runningLow || this.aloneRunning) return;
     this.aloneRunning = true;
     this.aloneAt = this.now();
-    try {
-      await this.d.firstAlone(trigger);
-    } catch {
-      // its own log line says it; the pass in flight goes on
-    } finally {
-      this.aloneRunning = false;
-    }
+    const done = (async () => {
+      try {
+        await this.d.firstAlone!(trigger);
+      } catch {
+        // its own log line says it; the pass in flight goes on
+      } finally {
+        this.aloneRunning = false;
+        this.aloneDone = undefined;
+      }
+    })();
+    this.aloneDone = done;
+    await done;
   }
 }
 

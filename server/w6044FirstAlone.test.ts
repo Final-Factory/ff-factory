@@ -131,3 +131,110 @@ test('w6044: a hold (a timed run) keeps the low tick off, until free space falls
   g.release();
   await hourly;
 });
+
+// The w6142 review of #1384 found two race windows; both its probes are kept here.
+test('w6044: a tick while a low pass is still reading free space runs nothing alone beside it', async () => {
+  let calls = 0;
+  let openStat!: () => void;
+  const statGate = new Promise<void>((res) => (openStat = res));
+  const alone: string[] = [];
+  const firsts: boolean[] = [];
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 60 }),
+    diskPaths: () => ['F:/'],
+    statfs: async () => {
+      calls++;
+      if (calls === 1) await statGate;
+      return { free: 40 * GB, total: 900 * GB };
+    },
+    pass: async (low) => (firsts.push(low), none),
+    consumers: async () => [],
+    log: () => undefined,
+    done: () => undefined,
+    now: () => Date.parse('2026-11-26T16:31:00Z'),
+    firstAlone: async (t) => void alone.push(t),
+  });
+  const asked = r.run('asked');
+  await new Promise((res) => setImmediate(res));
+  await r.tick();
+  openStat();
+  await asked;
+  assert.deepEqual(firsts, [true]);
+  assert.deepEqual(alone, []);
+});
+
+test('w6044: a pass waits for the first step alone to end before it starts', async () => {
+  let free = 200 * GB;
+  let endHourly!: () => void;
+  const hourlyGate = new Promise<void>((res) => (endHourly = res));
+  let endAlone!: () => void;
+  const aloneGate = new Promise<void>((res) => (endAlone = res));
+  const passes: boolean[] = [];
+  let aloneIn = false;
+  const overlap: boolean[] = [];
+  const r = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 60 }),
+    diskPaths: () => ['F:/'],
+    statfs: async () => ({ free, total: 900 * GB }),
+    pass: async (low) => {
+      passes.push(low);
+      overlap.push(aloneIn);
+      if (passes.length === 1) await hourlyGate;
+      return none;
+    },
+    consumers: async () => [],
+    log: () => undefined,
+    done: () => undefined,
+    now: () => Date.parse('2026-11-26T16:31:00Z'),
+    firstAlone: async () => {
+      aloneIn = true;
+      await aloneGate;
+      aloneIn = false;
+    },
+  });
+  const hourly = r.tick();
+  await new Promise((res) => setImmediate(res));
+  free = 40 * GB;
+  const alone = r.tick();
+  await new Promise((res) => setImmediate(res));
+  endHourly();
+  await hourly;
+  const asked = r.run('asked');
+  await new Promise((res) => setImmediate(res));
+  assert.equal(passes.length, 1, 'the asked pass has not started while the alone step runs');
+  endAlone();
+  await alone;
+  await asked;
+  assert.deepEqual(passes, [false, true]);
+  assert.deepEqual(overlap.filter(Boolean), [], 'no pass ran beside the alone step');
+});
+
+test('w6044: firstAlonePass removes nothing in stage 3a, and mode off plans nothing', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { firstAlonePass } = await import('./staleOutput.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-alone-'));
+  try {
+    const t = path.join(root, 'ffu-sandboxes', 'slot2', 'target');
+    fs.mkdirSync(t, { recursive: true });
+    fs.writeFileSync(path.join(t, 'x.rlib'), Buffer.alloc(100));
+    const guard = { keep: [], inUse: [], home: path.join(root, 'nobody') };
+    let planned = 0;
+    const said: (number | undefined)[] = [];
+    const first = {
+      plan: async () => (planned++, { items: [{ path: t, rule: 'ffu-slot-target', why: 'test' }], listed: [] }),
+      report: (_i: unknown, _ms: number, run?: CleanupRun) => void said.push(run?.removed.length),
+    };
+    assert.equal(await firstAlonePass({ mode: 'off', root: [root], guard, first }), undefined);
+    assert.equal(await firstAlonePass({ mode: 'on', guard, first }), undefined, 'no root: nothing');
+    assert.equal(planned, 0, 'mode off or no root plans nothing');
+    const r = await firstAlonePass({ mode: 'on', root: [root], guard, first });
+    assert.equal(planned, 1);
+    assert.deepEqual(said, [undefined], 'said, not removed');
+    assert.equal(r?.removed.length, 0);
+    assert.ok(fs.existsSync(t), 'the target stays in stage 3a');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

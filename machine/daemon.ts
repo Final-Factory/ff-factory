@@ -81,7 +81,7 @@ import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLe
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
-import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
+import { cleanupPass, firstAlonePass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
 import { hubEditorDirs, hubListedEditors, listWinDialogs, macEditorFenceFor, macEditorStatusDir, realDeps as realUnityDeps, type EditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
@@ -1403,18 +1403,13 @@ export class Daemon {
    * Report-only for now: it plans and says what it would take, and removes nothing (the stale-output mode dry-run).
    */
   private async ffuFirstAlone(trigger: string) {
-    const mode = staleOutputSettings(this.cleanupSettings.staleOutput).mode;
-    if (mode === 'off' || !this.cfg.root) return;
     const guard = this.cleanupGuard();
-    await cleanupPass({
-      opts: { stale: false, dryRun: false },
+    await firstAlonePass({
+      mode: staleOutputSettings(this.cleanupSettings.staleOutput).mode,
+      root: this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined,
       guard,
-      mode: 'dry-run',
-      regular: async () => [],
-      stale: async () => ({ items: [], listed: [] }),
       first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}, report-only)`),
       busyNow: this.cleanupBusyNow(),
-      root: [this.cfg.root, ...(this.cfg.extraRoots ?? [])],
     });
   }
 
