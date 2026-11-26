@@ -40,6 +40,7 @@ import { agentGitDir, ensureAgentGit } from '../../server/agentGit.ts';
 import { gitFence, isGit } from '../../server/safeGit.ts';
 import { NODE_GROUP, agentNodeDir, agentNodeExe, ensureAgentNode, firewallCheckScript, parseFirewallCheck } from '../../server/agentNode.ts';
 import { ADMIN_PROBE_PS, aclArgs, adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, hostnameFallback, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, tailscaleCandidates } from './portalSsh.ts';
+import { isLink, removeLink } from '../../server/fsLink.ts';
 
 export const LAYOUT_VERSION = 1;
 export const DEFAULT_REPO = 'https://github.com/Final-Factory/FinalFactory.git';
@@ -1034,7 +1035,7 @@ async function giveRoot(l: Layout, owner: string) {
   // A root on its Dev Drive keeps the daemon's folder and the credential in the host folder (w1070): those too.
   if (path.dirname(l.daemon) !== l.root) await giveTo(owner, [l.daemon, l.secrets]);
   // Not through the Dev Drive's junctions (w900: that is the sandboxes' and the seed's whole trees), nor the attached VHDX.
-  const skip = (e: string) => e === 'sandboxes' || e === 'devdrive.vhdx' || fs.lstatSync(path.join(l.root, e)).isSymbolicLink();
+  const skip = (e: string) => e === 'sandboxes' || e === 'devdrive.vhdx' || isLink(path.join(l.root, e));
   await giveTo(owner, fs.readdirSync(l.root).filter((e) => !skip(e)).map((e) => path.join(l.root, e)));
 }
 
@@ -1161,7 +1162,7 @@ function newDriveMaxGB(o: Pick<InstallOptions, 'devDriveMaxGB' | 'maxSandboxes' 
 /** Whether a folder is a real one (not a junction) with something in it. */
 const realAndUsed = (dir: string) => {
   try {
-    return !fs.lstatSync(dir).isSymbolicLink() && fs.readdirSync(dir).length > 0;
+    return !isLink(dir) && fs.readdirSync(dir).length > 0;
   } catch {
     return false;
   }
@@ -1406,7 +1407,7 @@ async function reinstallPrepare(o: InstallOptions, l: Layout): Promise<Reinstall
     // Everything of the old install goes, its daemon folder and credential included (the token is in hand): only what it carries stays.
     if (n === '.reinstall') continue;
     const p = path.join(l.root, n);
-    if (fs.lstatSync(p).isSymbolicLink()) fs.rmSync(p, { force: true, recursive: false });
+    if (isLink(p)) removeLink(p);
     else await exec('cmd.exe', ['/d', '/c', fs.lstatSync(p).isDirectory() ? 'rd' : 'del', ...(fs.lstatSync(p).isDirectory() ? ['/s', '/q'] : ['/f', '/q']), p], { timeoutMs: 60 * 60_000 });
     if (fs.existsSync(p)) throw new Error(`could not delete ${p} (a process holds a file in it?); run the reinstall again once it is free`);
     say(`Deleted ${p}.`);
@@ -1757,13 +1758,6 @@ export async function install(o: InstallOptions, from = SRC, phase: 'all' | 'pre
 
   // 1. The root and its manifest.
   // A junction to a Dev Drive that is detached right now dangles (mkdir would refuse it): setupDevDrive attaches the drive and looks after those two.
-  const isLink = (d: string) => {
-    try {
-      return fs.lstatSync(d).isSymbolicLink();
-    } catch {
-      return false;
-    }
-  };
   for (const d of [l.root, l.daemon, l.secrets, l.sandboxes, l.seed, l.players, l.nightly, l.scratch, l.tmp, l.logs]) if (!isLink(d)) fs.mkdirSync(d, { recursive: true });
   const now = new Date().toISOString();
   const prev = readManifest(l.root);
