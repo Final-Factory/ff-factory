@@ -17,19 +17,23 @@ export interface ProbeResult {
   why?: string;
 }
 
-export type ProbeRun = (cmd: string, args: string[], timeoutMs: number) => { status: number | null; signal?: string | null; error?: Error; stderr?: string };
+export type ProbeRun = (cmd: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv) => { status: number | null; signal?: string | null; error?: Error; stderr?: string };
 
-const realRun: ProbeRun = (cmd, args, timeoutMs) => {
-  const r = spawnSync(cmd, args, { timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+const realRun: ProbeRun = (cmd, args, timeoutMs, env) => {
+  const r = spawnSync(cmd, args, { timeout: timeoutMs, encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true, ...(env ? { env } : {}) });
   return { status: r.status, signal: r.signal, error: r.error, stderr: r.stderr };
 };
 
-/** Runs `argv` (the fence's own launcher around a no-op) and says whether the fence applies on this machine. */
-export function probeFence(argv: string[], o: { run?: ProbeRun; timeoutMs?: number } = {}): ProbeResult {
+/**
+ * Runs `argv` (the fence's own launcher around a no-op) and says whether the fence applies on this machine. `env`, when
+ * given, is all the run gets (w5838: a program in a folder workers write gets machine/maxEventsFence.ts bareEnv, none of
+ * the daemon's tokens); else the daemon's own.
+ */
+export function probeFence(argv: string[], o: { run?: ProbeRun; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): ProbeResult {
   try {
     const [cmd, ...args] = argv;
     if (!cmd) return { ok: false, why: 'no command' };
-    const r = (o.run ?? realRun)(cmd, args, o.timeoutMs ?? 15_000);
+    const r = (o.run ?? realRun)(cmd, args, o.timeoutMs ?? 15_000, o.env);
     if (r.error) return { ok: false, why: `${cmd} could not run: ${r.error.message}` };
     if (r.status === 0) return { ok: true };
     const tail = (r.stderr ?? '').trim().split('\n').slice(-3).join(' | ');

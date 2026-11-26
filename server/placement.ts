@@ -1,7 +1,7 @@
-import { WORK_PRIORITIES, type BenchLock, type BenchQueueReport, type PlayerCacheReport, type WorkItem, type WorkPriority } from '../shared/types.ts';
+import { WORK_PRIORITIES, type AgentIntegrity, type BenchLock, type BenchQueueReport, type PlayerCacheReport, type WorkItem, type WorkPair, type WorkPriority } from '../shared/types.ts';
 import type { SteamClient } from '../shared/steam.ts';
 import { windowLacks, type DesktopSession } from '../shared/desktop.ts';
-import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
+import { admitsPriority, minPriorityText, MIN_PRIORITIES, reservedText, pairRoom, ROOM_STAND_MS, unfitWhy, legacyUnfitWhy, type MinPriority, type ReservedRoom, type RoomFit } from '../shared/capacity.ts';
 
 /**
  * Where new work has room (w416, Lothsahn: "make sure jobs are getting scheduled on LothDesktop", then "Game work should
@@ -25,6 +25,9 @@ export interface Computer {
   fenceFailed?: string;
   /** w5965: its worker fence's state (Machine.fence.state): a pair run of a pre-w5297 player goes only where it is off. */
   fence?: 'off' | 'setting_up' | 'on' | 'failed';
+  /** w6003: the integrity level its Windows sandbox agents were measured at (Machine.fence.agentIntegrity), and why not. */
+  agentIntegrity?: AgentIntegrity;
+  agentIntegrityWhy?: string;
   /** Agent processes up in its sandboxes; an idle one holds its memory too. */
   live: number;
   /** Of those, mid-turn (what its agent limit counts since w384). */
@@ -464,7 +467,7 @@ export function slotsOf(p: Computer, kind: NeedKind): number {
 }
 
 /** What decides which work can run on `p` (RoomNow.fit, shared/capacity.ts unfitWhy). */
-const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}), ...(p.fence ? { fence: p.fence } : {}) });
+export const fitOf = (p: Computer): RoomFit => ({ ...(p.platform ? { platform: p.platform } : {}), ...(p.noTimedRuns ? { noTimedRuns: p.noTimedRuns } : {}), ...(p.noPlayers ? { noPlayers: p.noPlayers } : {}), ...(p.steam ? { steam: p.steam } : {}), ...(p.desktop ? { desktop: p.desktop } : {}), ...(p.cargoShort ? { cargoShort: p.cargoShort } : {}), ...(p.playerCache?.entries.length ? { playerCache: p.playerCache } : {}), ...(p.fence ? { fence: p.fence } : {}), ...(p.agentIntegrity ? { agentIntegrity: p.agentIntegrity } : {}), ...(p.agentIntegrityWhy ? { agentIntegrityWhy: p.agentIntegrityWhy } : {}) });
 
 /**
  * Whether pair run `w` could ever get all its legs at once (w3530): pairRoom over every computer that is online and not held
@@ -480,6 +483,29 @@ export function pairCanFinish(places: readonly Computer[], prefs: PlacementPrefs
   const fit = Object.fromEntries(up.map((p) => [p.id, fitOf(p)]));
   const one = { ...w, pair: { ...w.pair!, legs: 1 } };
   return !pairRoom(w, up.map((p) => p.id).filter((id) => !unfitWhy(one, id, fit, needs)), fit).short;
+}
+
+/**
+ * w6003: which computers can take a leg of a pre-w5297 pair run (WorkPair.legacyData), by the measured integrity level
+ * of their sandbox agents (shared/capacity.ts legacyUnfitWhy), and a line that names each other computer and why. When
+ * fewer fit than its legs, the line says "no computer fits", and plainly so when no Windows sandbox measures Medium.
+ * Read at request_pair (a refusal, nothing filed), at start_agent (a leg's refusal) and in the Stalled line.
+ */
+export function legacyFit(places: readonly Computer[], w: { pair: Pick<WorkPair, 'legacyData' | 'legs'> }): { fits: string[]; short: boolean; line: string } {
+  const fits: string[] = [];
+  const why: string[] = [];
+  for (const p of places) {
+    const r = !p.online ? `${p.id} is offline` : legacyUnfitWhy(w.pair, p.id, fitOf(p));
+    if (r) why.push(r);
+    else fits.push(p.id);
+  }
+  const legs = w.pair.legs ?? 1;
+  const short = fits.length < legs;
+  const noMedium = !places.some((p) => p.platform === 'win32' && fits.includes(p.id));
+  const head = short
+    ? `no computer fits ${legs > 1 ? `all ${legs} legs of ` : ''}a pair run of a pre-w5297 player (${w.pair.legacyData}): ${fits.length ? `only ${fits.join(', ')} ${fits.length > 1 ? 'fit' : 'fits'}` : 'none fits'}${noMedium ? ', and no Windows sandbox agent has been measured at Medium integrity, so none can run it on Windows now' : ''}`
+    : `computers that fit a pre-w5297 pair run: ${fits.join(', ')}`;
+  return { fits, short, line: why.length ? `${head}; ${why.join('; ')}` : head };
 }
 
 /**
