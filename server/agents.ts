@@ -75,7 +75,7 @@ import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLin
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
-import { MOVE_AFTER_MS, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, type MoveFacts } from './resumeMove.ts';
+import { MOVE_AFTER_MS, MoveGuard, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, warmWait, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
 import { resumeWhereLine, stopWhereLine, type BeforeSend } from './resumeWhere.ts';
@@ -1065,6 +1065,8 @@ export class Agents {
     machines.workersCutOff = (id, sids, players) => this.orchestrators.workersCutOff(id, sids, players);
     // w2474: ...and one whose process ran on through the drop is not Blocked on it once its daemon says so.
     machines.workersLived = (id, sids) => void this.orchestrators.workersLived(id, sids);
+    // w5942: a daemon's refusal at its agent cap keeps room moves off that computer a while (resumeMove.ts MoveGuard).
+    machines.capRefused = (id, why) => this.moveGuard.noteRefusal(id, why, Date.now());
     // w2884: a worker whose agent host died mid-turn, resumed by Machines: said on its requests' logs.
     machines.workerNote = (sid, text) => void this.orchestrators.noteOnHeld(sid, text);
     this.placeAgainTick = setInterval(() => this.placeAgain.tick(), 60_000);
@@ -3898,6 +3900,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   private readonly roomKept = new Map<string, string>();
   /** w5260: released urgent or frantic workers whose resume found no computer to move to: their resume may pre-empt at a safe point (PlaceAgainDeps.resumePreempt). */
   private readonly roomStuck = new Map<string, string>();
+  /** w5942: each request's last move and the computers whose daemon refused a start at its cap, so a request moves at most once per wait. */
+  readonly moveGuard = new MoveGuard();
 
   /**
    * SessionManager.roomMove (w2046, server/resumeMove.ts): a message that waits only for room on its worker's own computer.
@@ -3948,11 +3952,21 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return `${hold}; ${home}`;
     }
     const { reqs, owned, gone } = this.movableWorkOf(info);
-    if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length));
+    if (owned.length || gone.length) this.unmemoized(() => this.leaveToOwners(info, owned, gone, hold, !reqs.length, q));
     if (!reqs.length && (owned.length || gone.length)) {
       // w2411: a timed run's result waiting here goes again, to the worker on its request now
       this.timedRuns?.dropped(q.uuid);
       return true;
+    }
+    // w5942: a request moved within HOME_WAIT_MS waits where it went: a move is a fresh session, and a second one in a wait
+    // undoes the first (w5869 went biscuit → beast → biscuit → lothdesktop on 2026-11-25).
+    // A worker that ran a turn keeps its conversation: it waits a while for a seat on its own computer first. Both come after
+    // the w2079 hand-over, so an old worker whose requests went elsewhere never holds a message for them.
+    const lately = !urgent ? this.moveGuard.movedLately(reqs.map((w) => w.id), now) ?? warmWait(info.turns, hold, Date.parse(q.at) || now, now) : undefined;
+    if (lately) {
+      if (this.roomKept.get(info.id) !== lately) console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) waits: ${lately}`);
+      this.roomKept.set(info.id, lately);
+      return `${hold}; ${lately}`;
     }
     const d = moveDecision(this.moveFacts(info, reqs));
     if ('requeuePair' in d) {
@@ -4198,16 +4212,59 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * A waiting resume's requests that do not move with it (w2079, movableWorkOf): each one another worker carries is taken off
    * this worker, and when nothing is left to move (`all`) its message is not delivered, its check-in goes and it is retired.
    */
-  private leaveToOwners(info: SessionInfo, owned: WorkItem[], gone: WorkItem[], hold: string, all: boolean) {
+  private leaveToOwners(info: SessionInfo, owned: WorkItem[], gone: WorkItem[], hold: string, all: boolean, q?: QueuedSend) {
     const at = `${info.machineId}/${info.machineSandbox}`;
     for (const w of owned) this.orchestrators.moveOff(w, info.id, `not moved (w2079): ${this.otherWorkerOn(w, info, true)}, so no moved copy starts (${hold})`);
     for (const w of gone) this.orchestrators.noteMove(w.id, `a message for its old worker ${info.id} on ${at} did not move it again (w2079): it was moved off ${w.movedOff![info.id]}`);
     const ids = [...owned, ...gone].map((w) => w.id).join(', ');
     console.log(`room move: worker ${info.id} on ${at} (${ids}) not moved (w2079): ${[...owned.map((w) => `${w.id}: ${this.otherWorkerOn(w, info, true)}`), ...gone.map((w) => `${w.id}: moved off it already`)].join('; ')}`);
     if (!all) return;
-    this.store.append(info.id, { kind: 'system', text: `Not moved (w2079): its requests (${ids}) are with other workers now, so the message that waited for it was not delivered and nothing starts for it elsewhere.` });
+    const to = q ? this.forwardToHeirs(info, [...owned, ...gone], q) : [];
+    this.store.append(info.id, { kind: 'system', text: `Not moved (w2079): its requests (${ids}) are with other workers now, so ${to.length ? `the message that waited for it went to ${to.join(', ')} (w5942)` : 'the message that waited for it was not delivered'} and nothing starts for it elsewhere.` });
     this.waker.cancel(info.id);
     this.orchestrators.retireWhenFree(info.id);
+  }
+
+  /**
+   * The worker each of `ws` is with now, other than `info` (w5942): the one at work on it (otherWorkerOn), else the newest
+   * worker it went to after it moved off `info`.
+   */
+  private heirOf(w: WorkItem, info: SessionInfo): SessionInfo | undefined {
+    const at = w.sessionIds.filter((id) => id !== info.id).map((id) => this.store.sessions.get(id)).filter((x): x is SessionInfo => !!x && x.kind === 'worker');
+    const working = at.find((x) => (isMidTurn(x) || !!this.sessions.sessions.get(x.id)?.live) && !(x.machineId === info.machineId && x.machineSandbox === info.machineSandbox) && this.stillWorkingOn(w, x));
+    return working ?? at.at(-1);
+  }
+
+  /**
+   * w5942: a message that waited for a worker whose requests all went to other workers goes to those workers, once each,
+   * instead of being dropped (w2079 dropped it: at 06:38:50Z on 2026-11-25 the message for w5869's moved worker 81122653 was
+   * "taken off worker 81122653: not moved" and reached nobody). A gate resume (resumeOf) is the old worker's own wait and
+   * stays dropped: the worker now on the request set its own. Answers the workers it went to.
+   */
+  private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend): string[] {
+    if (q.resumeOf) return [];
+    const at = `${info.machineId}/${info.machineSandbox}`;
+    const heirs = new Map<string, { s: SessionInfo; ids: string[] }>();
+    for (const w of ws) {
+      const s = this.heirOf(w, info);
+      if (!s) continue;
+      const e = heirs.get(s.id) ?? { s, ids: [] };
+      e.ids.push(w.id);
+      heirs.set(s.id, e);
+    }
+    const out: string[] = [];
+    for (const { s, ids } of heirs.values()) {
+      const text = `[forwarded, w5942] This message was queued for worker ${info.id} on ${at}, which had ${ids.join(', ')} before it went to you; it reached it no more, so it comes to you.\n\n${movedText(q)}`;
+      try {
+        this.sessions.send(s.id, text, q.from, q.images, { ...(q.requestedBy ? { requestedBy: q.requestedBy } : {}) });
+        for (const id of ids) this.orchestrators.noteMove(id, `a message queued for its old worker ${info.id} on ${at} went to its worker ${s.id} (w5942)`);
+        console.log(`room move: the message queued for worker ${info.id} on ${at} (${ids.join(', ')}) went to worker ${s.id} (w5942)`);
+        out.push(`worker ${s.id}`);
+      } catch (e) {
+        console.warn(`room move: the message queued for worker ${info.id} on ${at} could not go to worker ${s.id}: ${(e as Error).message}`);
+      }
+    }
+    return out;
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */
@@ -4227,6 +4284,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const why = !game.length ? reqs.map((w) => this.legHoldProblem(p.id, w, 'seat')).find(Boolean) : p.freeSandboxes < 1 ? undefined : game.map((w) => this.heldFor(p.id, w)).find(Boolean);
       if (why) held[p.id] = why.split(/\. Start /)[0]!;
     }
+    // w5942: a computer whose daemon just refused a start at its cap is no target, whatever the portal's count says.
+    for (const [id, why] of Object.entries(this.moveGuard.refusals(Date.now()))) if (id !== placeId(info.machineId!)) held[id] ??= why;
     return {
       machine: info.machineId!,
       released: !!r,
@@ -4269,6 +4328,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend) {
     const from = `${info.machineId}/${info.machineSandbox}`;
+    this.moveGuard.noteMove(reqs.map((w) => w.id), to, Date.now());
     const reason = entry.reason ?? `${hold}, and ${to} has room (w2046)`;
     const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
     const h = this.sessions.sessions.get(info.id);

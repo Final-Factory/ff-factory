@@ -738,6 +738,8 @@ export class MachineManager {
   private readonly playerSeen = new Map<string, PlayerSeen>();
   /** Workers the daemon's hello reports still running after a drop (w2474): the wait their cut-off gave them goes. */
   workersLived?: (machineId: string, sessionIds: string[]) => void;
+  /** w5942: its daemon refused a start at its agent cap (AGENT_CAP_REFUSAL), with the daemon's words. */
+  capRefused?: (machineId: string, why: string) => void;
   /** Why the next drop of a machine's link is expected (a forced redeploy, a daemon restart); false: do not resume. */
   private readonly dropWhy = new Map<string, string | false>();
 
@@ -774,12 +776,30 @@ export class MachineManager {
    * message, as after a portal restart. Only an outdated daemon (a protocol this portal no longer drives) cannot start
    * them: that waits for its redeploy. One that merely has an update available resumes them at once (w605).
    */
+  /**
+   * w5942, warn only: workers on `machineId` whose work moved to another computer (SessionInfo.movedAway) but that its daemon
+   * still runs, or that a resume after its drop would wake: each would act on a request a newer worker now carries. Journalled
+   * and reported; nothing is stopped or skipped yet (lothsahn's lockout rule: warn first, enforce in its own reviewed change).
+   */
+  private warnMovedAway(machineId: string, sids: string[], what: string) {
+    const line = sids.map((sid) => {
+      const m = this.handle(sid)!.info.movedAway!;
+      return `${sid} (its work moved to ${m.to} at ${m.at.slice(11, 19)}Z)`;
+    });
+    console.warn(`machines: ${machineId}: ${what}: ${line.join(', ')}: a newer worker carries its work (w5942, warn only)`);
+    this.report?.(`[machines] ${machineId}: ${sids.length} worker(s) whose work moved elsewhere: ${what}: ${line.join(', ')}. A newer worker carries that work, so two may act on one request (w5942, warn only).`);
+  }
+
   private resumeCutOff(machineId: string, live: Set<string>, now = Date.now()) {
     const c = this.cutOff.get(machineId);
     if (!c || this.outdated(machineId)) return;
     this.cutOff.delete(machineId);
     const gone = c.sessions.filter((sid) => !live.has(sid) && this.handle(sid) && !this.handle(sid)!.info.stoppedOnPurpose);
     if (!gone.length) return;
+    // w5942 (warn only, lothsahn's lockout rule): a worker whose work moved off it while its computer was away resumes here
+    // as before, and is named, so the journal shows how often that happens before a later change stops it.
+    const moved = gone.filter((sid) => this.handle(sid)!.info.movedAway);
+    if (moved.length) this.warnMovedAway(machineId, moved, 'would not resume (it resumes for now)');
     const when = new Date(c.at).toLocaleTimeString();
     if (now - c.at > RESUME_WITHIN_MS) {
       this.report?.(`[machines] ${machineId} is back; ${gone.length} agent(s) were mid-turn when its daemon ${c.why} at ${when}, too long ago to resume by themselves: ${gone.join(', ')}. Message them to continue.`);
@@ -2558,6 +2578,10 @@ export class MachineManager {
         if (dropped !== undefined) {
           const lived = m.sessionIds.filter((sid) => live.has(sid));
           if (lived.length) this.workersLived?.(id, lived);
+          // w5942 (warn only): on 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50, whose w5869
+          // and w5891 had moved to biscuit at 06:09:46Z (w2544): two live workers on each request.
+          const moved = lived.filter((sid) => this.handle(sid)?.info.movedAway);
+          if (moved.length) this.warnMovedAway(id, moved, 'still runs');
         }
         if (why || behind) this.checkOutdated();
         // After the daemon's own session reports (sent right after its hello), so a resume starts from its state.
@@ -2646,6 +2670,7 @@ export class MachineManager {
           // Worded like the portal's own capacity holds ("N agents mid-turn …"), so a resume may move to a computer with
           // room (resumeMove.ts ROOM_WAIT, w2046) and the ledger reads it as a wait for a slot.
           const n = /already (\d+) agents/.exec(msg.error)?.[1] ?? '?';
+          this.capRefused?.(id, msg.error);
           this.sessions.requeueRefused(msg.sessionId, m, `${n} agents mid-turn on ${id} by its daemon's count (it refused the start: ${msg.error})`);
           return;
         }
