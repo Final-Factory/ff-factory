@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -287,6 +287,12 @@ export interface DaemonConfig {
    * machine_update daemon_tmpdir`, read at the daemon's start; "off" is the recovery.
    */
   daemonTmpdir?: 'on' | 'off';
+  /**
+   * w5959: a virtual disk (a WSL distro's ext4.vhdx) in a Low `<root>/tools` child, Windows only (machine/lowIntegrity.ts
+   * toolsDiskPlan). Absent or "warn" (the default): w5948's WARNING only. "on": that child is kept Medium, so workers cannot
+   * write there. Set remotely by `ops_worker machine_update tools_disk_lock`, read at the daemon's start; "warn" is the recovery.
+   */
+  toolsDiskLock?: ToolsDiskLockMode;
   /**
    * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
    * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
@@ -3755,11 +3761,14 @@ export class Daemon {
       } catch {
         toolsChildren = undefined;
       }
+      // w5948, w5959: a virtual disk in a Low tools child: said (warn), or its child kept Medium (toolsDiskLock on).
+      const disks = toolsDiskPlan(root, lowDiskImages(root, toolsChildren), this.cfg.toolsDiskLock);
       const targets = lowTargets({
         root,
         appDir: appDirOfConfig(this.cfg),
         children,
         toolsChildren,
+        toolsKeepMedium: disks.keep,
         extra: [...(this.cfg.extraRoots ?? []), this.cfg.tempDir, this.sandboxRoot(), ...allow.filter((a) => !isFile(a))],
         files: allow.filter(isFile),
         allowInAppDir: allow,
@@ -3796,8 +3805,7 @@ export class Daemon {
       // w5440: CI runners stay Medium (lowIntegrity.ts CI_CHILDREN); one whose job exe is still Low fails every Windows job.
       if (ownerGameData) log(await ownerGameDataLock(ownerGameData, exec));
       for (const exe of await lowRunners(root, exec)) log(`worker integrity: CI runner job exe ${exe} is still labelled Low, so its jobs start at Low and Git Bash dies (0xC0000022); label its folder Medium`);
-      // w5948: a virtual disk (a WSL distro's ext4.vhdx) in a Low tools child: said, not moved (warn-only).
-      for (const disk of lowDiskImages(root, toolsChildren)) log(lowDiskImageWarning(disk, root));
+      for (const line of disks.lines) log(line);
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');

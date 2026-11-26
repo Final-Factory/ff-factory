@@ -35,6 +35,7 @@ import type { CleanupFacts } from '../server/cleanupFolders.ts';
 import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
 import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
+import { guardRemoteSync } from '../server/remoteGuard.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
 export const FFU_SLOTS_DIR = 'ffu-sandboxes';
@@ -407,7 +408,12 @@ export function rescueWork(d: FfuSlotDeps, s: FfuSlot): FfuRescue {
     const onOrigin = d.git(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${from}`], repo).code === 0;
     must(d.git(onOrigin ? ['branch', '-f', from, `refs/remotes/origin/${from}`] : ['branch', '-D', from], repo), 'git branch');
   }
-  const push = d.git(['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], repo);
+  // w6099: workers write the shared clone's config, origin's URL included.
+  const no = guardRemoteSync((a) => {
+    const g = d.git(a, repo);
+    return g.code === 0 ? g.out : undefined;
+  }, `the rescue push in ${fwd(repo)}`);
+  const push = no ? { code: 1, out: '', err: no } : d.git(['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], repo);
   const r: FfuRescue = { holder, slot: s.id, branch, sha, ...(from ? { from } : {}), pushed: push.code === 0, at: new Date(d.now()).toISOString() };
   d.say(`ffu-slot: saved ${holder}'s work in ${s.id} (${sha.slice(0, 8)}) on branch ${branch}${r.pushed ? ', pushed to origin' : ` in ${fwd(repo)} (push failed: ${(push.err || push.out).trim().slice(0, 160)})`}\n`);
   return r;
