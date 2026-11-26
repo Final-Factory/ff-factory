@@ -103,6 +103,7 @@ import { editorBenchSession, editorSessions, passedShared, raisedSessions, type 
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
+import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
@@ -629,6 +630,8 @@ export class Daemon {
   readonly benchRunners: BenchRunners;
   readonly loadGate: LoadGate;
   readonly runnerUnits: RunnerUnits;
+  /** w5999: the macOS and Windows runners' temp folders inside the worker root (machine/runnerEnv.ts). */
+  readonly runnerEnv?: RunnerEnv;
   readonly ciFirst: CiFirst;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
@@ -1078,6 +1081,35 @@ export class Daemon {
       log: (line) => log(line),
       now: () => Date.now(),
     });
+    // w5999: the macOS and Windows runners' temp folders inside the worker root, as runnerUnits does for Linux
+    // (machine/runnerEnv.ts): TMPDIR (and Windows' TEMP and TMP) and DOTNET_EnableDiagnostics=0 in each runner's launchd
+    // plist or .env, and an idle listener started without them restarted once
+    if (real && (process.platform === 'darwin' || process.platform === 'win32')) {
+      const envPlatform = process.platform;
+      this.runnerEnv = new RunnerEnv({
+        platform: envPlatform,
+        ...runnerEnvOps({
+          platform: envPlatform,
+          workerRoot: cfg.root,
+          home: os.homedir(),
+          uid: process.getuid?.() ?? 0,
+          exec: (cmd, args) =>
+            new Promise((resolve, reject) =>
+              execFile(cmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${cmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
+            ),
+        }),
+        held: (r) => {
+          const st = this.loadGate.state();
+          return !!st.hold || (st.startOnLift ?? []).some((x) => sameRoot(x, r.root, envPlatform));
+        },
+        opsRunner: (root) => isOpsRunner(root),
+        census: async () => runnerCensus(await pd.procs()),
+        diag: (root) => readListenerLog(root),
+        paused: () => new Set([...this.benchRunners.paused(), ...this.loadGate.state().suspended].map((p) => p.pid)),
+        log: (line) => log(line),
+        now: () => Date.now(),
+      });
+    }
     // w5322: on a CI-first machine (CI_FIRST: biscuit) FF Factory's own scopes run below its CI runners (machine/ciFirst.ts)
     const userctl = (args: string[]) =>
       new Promise<string>((resolve, reject) =>
@@ -1782,6 +1814,7 @@ export class Daemon {
     this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
     this.timers.push(setInterval(() => void this.loadGate.tick().then(() => this.sendRunnerHold()), 5_000));
     this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
+    if (this.runnerEnv) this.timers.push(setInterval(() => void this.runnerEnv?.tick(), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(() => void this.ciFirst.tick(), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
