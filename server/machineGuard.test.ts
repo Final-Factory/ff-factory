@@ -494,3 +494,150 @@ test("w3328: below the critical line a disk clean-up request's worker starts on 
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+/** w5906: a pending grow on a Dev Drive machine with nothing else in the way; `stopped` lists the hosts the guard stopped. */
+function idleGrowWorld(sessions: Partial<SessionInfo>[], o: { holds?: Record<string, string>; ends?: boolean } = {}) {
+  const { w, fx, ports: base } = world();
+  w.sandboxes = [];
+  w.sessions = sessions as SessionInfo[];
+  const said: string[] = [];
+  const logged: string[] = [];
+  const stopped: string[] = [];
+  const ports: MachineGuardPorts = {
+    ...base,
+    report: (title, text) => (w.reports.push(title), void said.push(text)),
+    log: (line) => void logged.push(line),
+    idleHold: (id) => o.holds?.[id],
+    stopIdle: async (id) => {
+      stopped.push(id);
+      if (o.ends === false) return false;
+      const s = w.sessions.find((x) => x.id === id);
+      if (s) s.status = 'stopped';
+      return true;
+    },
+  };
+  let state: Record<string, unknown> = { letter: 'V', maxGB: 320, wantGB: 360 };
+  const fx2: MachineGuardEffects = {
+    ...fx,
+    exists: () => true,
+    readJson: () => state,
+    runHelper: async (a) => {
+      w.log.push(`helper ${a}`);
+      state = { letter: 'V', maxGB: 360 };
+      return { action: a, ok: true, at: new Date(w.now).toISOString(), detail: 'grew V: from 320 to 360 GB' };
+    },
+  };
+  const g = new MachineGuard({ ...SETTINGS, hostDiskPaths: ['D:/'], devDriveVhdx: 'D:/ffw/devdrive.vhdx', devDriveMaxGB: 320 }, String.raw`F:\ffw\sandboxes`, fx2, ports);
+  const grows = () => w.log.filter((l) => l === 'helper grow').length;
+  return { w, g, said, logged, stopped, grows };
+}
+
+test('w5906: an idle agent between turns with no check-in does not hold a pending grow: its host is stopped and the grow runs in that one look', async () => {
+  // lothdesktop, 2026-11-26 04:58:37Z: 2c75765f (w5475) ended its turn in slot2 with no check-in; its host (pid 4744) idled
+  // and the grow waited until the ops worker stopped it by hand at 05:00:14Z. Before that, w5814's own worker 74e5a46e.
+  const { w, g, stopped, grows, logged } = idleGrowWorld([{ id: '2c75765f-aaaa', kind: 'worker', status: 'idle', sandboxId: 'slot2' }]);
+  await g.tick();
+  assert.deepEqual(stopped, ['2c75765f-aaaa'], 'stopped through the daemon\'s stop op');
+  assert.equal(grows(), 1, 'and grown within the same guard tick');
+  assert.ok(logged.some((l) => /stopping 1 idle agent\(s\) \(2c75765f in slot2\) for the Dev Drive grow/.test(l)), logged.join('\n'));
+  assert.ok(w.reports.includes('Dev Drive: grown'));
+});
+
+test('w5906: an agent mid-turn, waiting on a permission, mid-tool or with a pending check-in holds the grow, and no idle agent is stopped meanwhile', async () => {
+  for (const [s, why] of [
+    [{ id: 'a1', kind: 'worker', status: 'running', sandboxId: 'slot1' }, /slot1: running/],
+    [{ id: 'a1', kind: 'worker', status: 'waiting_permission', sandboxId: 'slot1' }, /slot1: waiting_permission/],
+    [{ id: 'a1', kind: 'worker', status: 'idle', sandboxId: 'slot1', activeTool: { id: 't', name: 'Bash', since: '2026-10-05T21:59:00Z' } }, /slot1: mid-tool, Bash/],
+    [{ id: 'a1', kind: 'worker', status: 'idle', sandboxId: 'slot1' }, /slot1: a check-in at 2026-10-05T22:20:00/],
+  ] as [Partial<SessionInfo>, RegExp][]) {
+    const { g, said, stopped, grows } = idleGrowWorld([s, { id: 'a2', kind: 'worker', status: 'idle', sandboxId: 'slot2' }], { holds: { a1: 'a check-in at 2026-10-05T22:20:00.000Z' } });
+    await g.tick();
+    await g.tick();
+    assert.equal(grows(), 0, `${s.status} holds it`);
+    assert.deepEqual(stopped, [], 'the idle one in slot2 is left alone while something else holds the grow');
+    assert.match(said.join('\n'), why);
+    assert.doesNotMatch(said.join('\n'), /slot2/, 'and is not named as a blocker');
+  }
+});
+
+test('w5906: an idle agent stopped for the grow whose host has not ended yet holds it until the next look', async () => {
+  const k = idleGrowWorld([{ id: 'a2', kind: 'worker', status: 'idle', sandboxId: 'slot4' }], { ends: false });
+  await k.g.tick();
+  assert.equal(k.grows(), 0);
+  assert.match(k.said.join('\n'), /once the idle agent\(s\) it stopped have ended; 1 \(slot4\) still up/);
+  k.w.sessions[0].status = 'stopped';
+  await k.g.tick();
+  assert.equal(k.grows(), 1);
+});
+
+test('w5906: the "grow pending" reason is said again when its blockers change (logged at most every 2 min, reported every 15), never left naming agents gone long ago', async () => {
+  const { w, g, said, logged, grows } = idleGrowWorld([
+    { id: 'a1', kind: 'worker', status: 'running', sandboxId: 'slot2' },
+    { id: 'a5', kind: 'worker', status: 'running', sandboxId: 'slot5' },
+  ]);
+  const pending = () => logged.filter((l) => /grows from 320 to 360 GB once/.test(l));
+  await g.tick();
+  assert.equal(pending().length, 1);
+  assert.match(pending()[0], /2 agent\(s\) \(slot2: running, slot5: running\)/);
+  // The same blockers: said once.
+  w.now += 5 * MIN;
+  await g.tick();
+  assert.equal(pending().length, 1);
+  // slot2 ends its turn and leaves; slot5 still runs: within 2 min of the last line, nothing; after, the new reason.
+  w.sessions = w.sessions.filter((s) => s.id !== 'a1');
+  await g.tick();
+  assert.equal(pending().length, 2, 'more than 2 min since the last line: said at once');
+  assert.match(pending()[1], /1 agent\(s\) \(slot5: running\)/);
+  w.sessions[0].status = 'waiting_permission';
+  w.now += 30_000;
+  await g.tick();
+  assert.equal(pending().length, 2, 'rate-limited');
+  w.now += 2 * MIN;
+  await g.tick();
+  assert.equal(pending().length, 3);
+  assert.match(pending()[2], /slot5: waiting_permission/);
+  // The portal's report follows at most every 15 min, with the latest reason.
+  assert.equal(said.length, 1);
+  w.now += 15 * MIN;
+  await g.tick();
+  assert.equal(said.length, 2);
+  assert.match(said[1], /slot5: waiting_permission/);
+  // It ends its turn with no check-in: stopped and grown.
+  w.sessions[0].status = 'idle';
+  await g.tick();
+  assert.equal(grows(), 1);
+});
+
+test("w5906: the daemon's own ports: an idle agent with a pending check-in or a timed run holds its sandbox; any other is stopped through its stop op", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-mguard-idle-'));
+  const drive = path.join(tmp, 'V');
+  fs.mkdirSync(drive);
+  const { fx } = world();
+  const sandboxes = { root: drive, maxSandboxes: 5, maxAgentsPerSandbox: 6, maxUnity: 2, diskWarnGB: 80, diskCriticalGB: 40 };
+  const d = new Daemon({ portalUrl: 'http://127.0.0.1:9', id: 'lothdesktop', token: 'x', repoPath: tmp, appDir: tmp, claude: 'no-such-claude', maxSessions: 3, maxEventsFile: null, sandboxes, hostGuard: SETTINGS }, () => ({}) as unknown as SessionHandle, PROBES, undefined, { ...fx, exists: (p) => fs.existsSync(p) });
+  t.after(() => {
+    d.shutdown();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+  const inner = d as unknown as { startGuard(): void; entries: Map<string, unknown>; wakes: Map<string, number>; timed?: { active(): string[] } };
+  const host = (id: string) => {
+    const s = { info: { id, kind: 'worker', status: 'idle' }, live: true, stops: 0, stop: () => (s.stops++, setTimeout(() => (s.live = false), 50)) };
+    inner.entries.set(id, { s, spec: { sandbox: id } });
+    return s;
+  };
+  const free = host('slot2');
+  const checkIn = host('slot4');
+  host('slot5');
+  inner.wakes = new Map([['slot4', Date.parse('2026-11-26T05:30:00Z')]]);
+  inner.timed = { active: () => ['slot5'] };
+  inner.startGuard();
+  const ports = (d.guard as unknown as { ports: MachineGuardPorts }).ports;
+  assert.equal(ports.idleHold!('slot2'), undefined);
+  assert.equal(ports.idleHold!('slot4'), 'a check-in at 2026-11-26T05:30:00.000Z');
+  assert.equal(ports.idleHold!('slot5'), 'a timed run');
+  assert.equal(await ports.stopIdle!('slot2'), true, 'its host ended');
+  assert.equal(free.stops, 1);
+  assert.equal(checkIn.stops, 0);
+  assert.equal(await ports.stopIdle!('slot2'), true, 'one already gone is not stopped again');
+  assert.equal(free.stops, 1);
+});
