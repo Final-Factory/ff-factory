@@ -461,3 +461,29 @@ for (const mode of ['on', 'warn'] as const) {
     });
   }
 }
+
+for (const mode of ['on', 'warn'] as const) {
+  test(`w6047 (the w6136 review, "${mode}"): the request a message resumes, handed back during the move's waits, carries it; not a sibling's hand-off, not the old worker`, async (t) => {
+    const { store, sessions, agents, worker, request, queued, roomMove, settled, starts } = await setup(t, mode);
+    (agents as unknown as { liveHub: unknown }).liveHub = {
+      endFor: async () => {
+        agents.orchestrators.handBack(store.work.get('w5870')!, store.sessions.get('5449aaaa')!, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+        return undefined;
+      },
+      running: () => false,
+    };
+    const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+    request(['5449aaaa'], 'w5869');
+    request(['5449aaaa'], 'w5870');
+    const q: QueuedSend = { ...queued('5449aaaa', 'go on', Date.now() - 60_000), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+    assert.equal(roomMove(s, q, BISCUIT_FULL, Date.now()), true);
+    await settled('5449aaaa');
+    const a = store.work.get('w5869')!, b = store.work.get('w5870')!;
+    assert.deepEqual(starts, [], 'no fresh session was started');
+    assert.match(b.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
+    assert.match(b.handedBack?.message ?? '', /^go on$/, 'the request it resumes carries the message, once');
+    assert.equal(a.handedBack?.message, undefined, "not in the sibling's hand-off");
+    assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa' && m.resumeOf?.work === 'w5870').length, 0, 'no resume of w5870 waits for the old worker');
+    if (mode === 'on') assert.ok(a.sessionIds.includes('5449aaaa') && !a.handedBack, 'the sibling stays with the old worker');
+  });
+}

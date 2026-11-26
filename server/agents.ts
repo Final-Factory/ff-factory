@@ -4846,7 +4846,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         return 'given back';
       }
       others();
-      this.deliverHeld(info, reqs, q ?? entry.first, entry.texts);
+      this.deliverHeld(info, reqs, q ?? entry.first, entry.texts, primary.id);
       this.store.append(info.id, { kind: 'system', text: `Its move to ${to} did not start: ${err}, and that stands (w6047).` });
       this.orchestrators?.retireWhenFree(info.id);
       return 'handed back';
@@ -4897,7 +4897,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w6047: the message a move held, when every request it had was handed back meanwhile and that stands (giveBack's
    * hand-backs made during the move): to a next worker placed meanwhile, else into a standing hand-off, never to this worker.
    */
-  private deliverHeld(info: SessionInfo, reqs: WorkItem[], q: QueuedSend | undefined, texts: string[]) {
+  private deliverHeld(info: SessionInfo, reqs: WorkItem[], q: QueuedSend | undefined, texts: string[], first?: string) {
     // w6047 (the w6056 review, 2): every request was handed back meanwhile (a pause, a stop_agent move_to), and that stands:
     // the message the move held goes in that hand-off, for the request's next worker, never to this worker, which holds none.
     const text = texts.length ? texts.join('\n\n---\n\n') : q ? movedText(q) : '';
@@ -4925,7 +4925,11 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       const lq: QueuedSend = { uuid: `w6047-back-${info.id}-${Date.now()}`, id: info.id, text, from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), ...(q?.resumeOf ? { resumeOf: q.resumeOf } : {}), at: new Date().toISOString(), why: 'held by its move, whose requests were handed back meanwhile (w6047)' };
       told = this.forwardToHeirs(info, placed, lq, nextOf);
     }
-    const w = text ? (back.find((x) => !placed.includes(x)) ?? (told.length ? undefined : back[0])) : undefined;
+    // w6047 (the w6136 review, 1): the hand-off that carries it is the one of the request it resumes, else the move's own
+    // request, before any other handed back with it.
+    const want = [q?.resumeOf?.work, first].filter((id): id is string => !!id);
+    const open = back.filter((x) => !placed.includes(x));
+    const w = text ? (want.map((id) => open.find((x) => x.id === id)).find((x) => !!x) ?? open[0] ?? (told.length ? undefined : back[0])) : undefined;
     if (w) this.orchestrators.carryInHandBack(w, info.id, text);
     else if (text && !told.length) console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off (w6047)`);
   }
@@ -4955,7 +4959,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       return;
     }
     this.store.append(info.id, { kind: 'system', text: `Its work stays with it: ${why}. Its sandbox stays released; it resumes when one frees on ${info.machineId} (w5976).` });
-    if (q) {
+    // w6047 (the w6136 review, 2): a message that resumes a request this worker no longer holds (handed back meanwhile, and
+    // that stands) goes with that request's hand-back, never back to this worker, which would resume work it gave up.
+    const gone = q?.resumeOf?.work ? reqs.find((w) => w.id === q.resumeOf!.work && !given.includes(w) && w.handedBack?.session === info.id) : undefined;
+    if (gone) {
+      this.deliverHeld(info, [gone], q, texts);
+    } else if (q) {
       // One message goes back as it was, with its attachments (w5995). Several joined ones carry each one's attachment ids as
       // text (movedText), so the joined message carries none of its own.
       // w6047: a pre-empt passes no message of its own (q is the first absorbed one, its text in texts already), so the
