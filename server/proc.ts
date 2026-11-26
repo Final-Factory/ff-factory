@@ -1,8 +1,9 @@
-import { execFile, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitFence, isGit } from './safeGit.ts';
+import { execFileOffThread } from './spawnThread.ts';
 
 export const isWindows = process.platform === 'win32';
 
@@ -29,7 +30,8 @@ export async function run(cmd: string, args: string[], opts: RunOptions = {}): P
   // w5541: git runs no program the checkout's own config names (server/safeGit.ts).
   const f = isGit(cmd) ? await gitFence(args, { cwd: opts.cwd, env: opts.env }) : { args, env: opts.env ?? process.env };
   return new Promise((resolve) => {
-    execFile(
+    // w6077: the daemon starts programs from its spawn thread (server/spawnThread.ts); elsewhere this is execFile itself.
+    execFileOffThread(
       cmd,
       f.args,
       { cwd: opts.cwd, timeout: opts.timeoutMs ?? 0, maxBuffer: 64 * 1024 * 1024, env: f.env, windowsHide: true, signal: opts.signal },

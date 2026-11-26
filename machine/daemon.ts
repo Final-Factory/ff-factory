@@ -28,6 +28,8 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
+import { StallProfiler } from '../server/stallProfile.ts';
+import { useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
@@ -605,6 +607,7 @@ export class Daemon {
   private lastBeat = 0;
   /** The daemon's own event-loop watch (w4926): a block is a line in daemon.log, beside what ran around it. */
   private loopWatch?: LoopWatch;
+  private stallProfiler?: StallProfiler;
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
@@ -1960,6 +1963,12 @@ export class Daemon {
     if (this.cfg.root) void refreshTrustedBenchAsync({ appDir: appDirOfConfig(this.cfg), background: true }, this.cfg.root);
     this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
+    // w6077: a block LoopWatch can name only by "last ran" (code after an await, under no label) gets the functions that held
+    // the loop from V8's sampling profiler, as the portal's do (server/stallProfile.ts); profiles in <app>/profiles, the newest few.
+    if (this.cfg.root && process.env.FF_STALL_PROFILE !== 'off') {
+      const lw = this.loopWatch;
+      this.stallProfiler = new StallProfiler({ dataDir: appDirOfConfig(this.cfg), worstLagSince: (t) => lw.worstLagSince(t), blocksSince: (t) => lw.blocksSince(t), log: (l) => log(l), stallMs: DAEMON_STALL_LOG_MS, whose: "the daemon's" }).start();
+    }
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(loopLabel('timer selfUpdate.tick', () => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`))), 10_000));
     this.timers.push(setInterval(loopLabel('timer reportStats', () => void this.reportStats()), STATS_MS));
@@ -2080,6 +2089,7 @@ export class Daemon {
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
     this.loopWatch?.stop();
+    this.stallProfiler?.stop();
     this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
@@ -5084,6 +5094,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   const cfg: DaemonConfig = withRootDefaults({ ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file });
   cfg.token = readToken(cfg);
   for (const [k, v] of Object.entries(cfg.env ?? {})) if (typeof v === 'string') process.env[k] = v;
+  // w6077: programs start from a thread of their own, not the loop (server/spawnThread.ts): starting one PowerShell held BEAST's
+  // loop up to 35.5 s. FF_SPAWN_THREAD=off (daemon.json "env") starts them on the loop again; a thread that keeps dying does too.
+  useSpawnThread(process.env.FF_SPAWN_THREAD !== 'off', (line) => log(line));
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   // w5501: a CARGO_HOME outside the root (the person's ~/.cargo on C:, where a Low worker's `cargo fetch` was refused) moves
   // to <root>/cache/cargo, seeded in the background from the old one, which is only read; one inside the root stays.

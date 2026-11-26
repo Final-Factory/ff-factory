@@ -31,7 +31,8 @@ const where = (f: CallFrame) => {
   const name = f.functionName.startsWith('RegExp: ') ? 'RegExp' : f.functionName;
   return `${name || '(anonymous)'}${file ? ` (${file}:${f.lineNumber + 1})` : ''}`;
 };
-const ours = (f: CallFrame) => /\/(server|shared)\/[^/]+\.ts$/.test(f.url) && !f.url.includes('/node_modules/');
+// w6077: the daemon's own code (machine/) counts too, since the daemon runs one as well.
+const ours = (f: CallFrame) => /\/(server|shared|machine)\/[^/]+\.ts$/.test(f.url) && !f.url.includes('/node_modules/');
 
 /**
  * The functions that took the time in a profile: `self` by their own time (where the CPU was), `under` the portal's own functions
@@ -91,12 +92,18 @@ export class StallProfiler {
   private readonly worstLagSince: (since: number) => number;
   private readonly blocksSince: (since: number) => [number, number][];
   private readonly log: (line: string) => void;
+  /** A window whose worst lag is at least this keeps its profile (PROFILE_STALL_MS; the daemon's is its stall line's, w6077). */
+  private readonly stallMs: number;
+  /** Whose functions the lines name: "the portal's" (default) or "the daemon's" (w6077). */
+  private readonly whose: string;
 
-  constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void }) {
+  constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void; stallMs?: number; whose?: string }) {
     this.dir = path.join(o.dataDir, 'profiles');
     this.worstLagSince = o.worstLagSince;
     this.blocksSince = o.blocksSince ?? (() => []);
     this.log = o.log ?? ((l) => console.warn(l));
+    this.stallMs = o.stallMs ?? PROFILE_STALL_MS;
+    this.whose = o.whose ?? "the portal's";
   }
 
   start() {
@@ -138,11 +145,11 @@ export class StallProfiler {
     this.busy = true;
     const from = this.windowStart;
     const lag = this.worstLagSince(from);
-    const blocks = this.blocksSince(from).filter(([, l]) => l >= PROFILE_STALL_MS);
+    const blocks = this.blocksSince(from).filter(([, l]) => l >= this.stallMs);
     s.post('Profiler.stop', (err, res) => {
       this.begin();
       this.busy = false;
-      if (err || !res?.profile || lag < PROFILE_STALL_MS) return;
+      if (err || !res?.profile || lag < this.stallMs) return;
       void this.keep(res.profile as unknown as CpuProfile, lag, from, blocks);
     });
   }
@@ -151,13 +158,13 @@ export class StallProfiler {
     try {
       const sum = summarizeProfile(p);
       const fmt = (l: { fn: string; ms: number }[]) => l.map((x) => `${x.fn} ${(x.ms / 1000).toFixed(1)} s`).join('; ') || 'none';
-      this.log(`stall profile: the loop stalled ${(lag / 1000).toFixed(1)} s in the minute from ${new Date(from).toISOString()}; CPU ${(sum.totalMs / 1000).toFixed(1)} s. Own time: ${fmt(sum.self)}. In the portal's functions: ${fmt(sum.under)}`);
+      this.log(`stall profile: the loop stalled ${(lag / 1000).toFixed(1)} s in the minute from ${new Date(from).toISOString()}; CPU ${(sum.totalMs / 1000).toFixed(1)} s. Own time: ${fmt(sum.self)}. In ${this.whose} functions: ${fmt(sum.under)}`);
       // The minute's totals mix the block with everything else that ran (w2044: a state save once a second summed to 5 s a
       // minute, though no one save came near a second): each of the longest blocks gets its own line, from its samples only.
       // A beat `lag` ms late ran at `at`, so the loop was held from at most `at - lag` to `at`.
       for (const [at, l] of blocks.sort((a, b) => b[1] - a[1]).slice(0, BLOCK_LINES)) {
         const b = summarizeProfile(p, 4, [[at - l - from, at - from]]);
-        this.log(`stall profile: block of ${(l / 1000).toFixed(1)} s ending ${new Date(at).toISOString()}. Own time: ${fmt(b.self)}. In the portal's functions: ${fmt(b.under)}`);
+        this.log(`stall profile: block of ${(l / 1000).toFixed(1)} s ending ${new Date(at).toISOString()}. Own time: ${fmt(b.self)}. In ${this.whose} functions: ${fmt(b.under)}`);
       }
       await fs.promises.mkdir(this.dir, { recursive: true });
       await fs.promises.writeFile(path.join(this.dir, `stall-${new Date(from).toISOString().replace(/[:.]/g, '-')}.cpuprofile`), JSON.stringify(p));
