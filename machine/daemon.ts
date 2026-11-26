@@ -874,7 +874,7 @@ export class Daemon {
         worker: {
           sandboxIds: () => (this.pool ? this.pool.list().map((sb) => sb.id) : []),
           ticket: (o) =>
-            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
+            benchTicketFor({ mode: 'exclusive', reason: 'timing', what: o.what, maxMin: o.maxMin, ownerPid: o.ownerPid, ...(o.place !== undefined ? { place: o.place } : {}), checkouts: this.pool ? this.pool.list().map((sb) => sb.path) : [], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg), background: true }, env: { ...timedRunEnv(process.env, o.session, o.run), FF_SANDBOX_ID: '' } }),
         },
       });
     }
@@ -888,7 +888,7 @@ export class Daemon {
     if (cfg.root) {
       this.benchProxy = new BenchProxy({
         dir: path.join(appDirOfConfig(cfg), 'bench-holds'),
-        trusted: { appDir: appDirOfConfig(cfg) },
+        trusted: { appDir: appDirOfConfig(cfg), background: true },
         lock: () => benchLockDir(cfg.root!),
         root: cfg.root,
         sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
@@ -1126,7 +1126,7 @@ export class Daemon {
         // own sandbox's timed leg (rides_along: "running editor <sandbox>", with the sandbox in the ticket)
         // w1962: under a session of its own (editor:<sandbox>, at its sandbox's worker's priority in priorities.json), which
         // FF_BENCH_SESSION gives it: FF_SESSION_ID would make it a worker's, whose leftovers FF Factory ends
-        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg) }, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
+        bootTicket: (sb) => benchTicketFor({ mode: 'shared', what: `running editor ${sb.id}`, checkouts: [sb.path], root: cfg.root, trusted: { appDir: appDirOfConfig(cfg), background: true }, env: { ...process.env, FF_SANDBOX_ID: sb.id, FF_SESSION_ID: '', FF_BENCH_SESSION: editorBenchSession(sb.id) } }),
       },
       pd,
     );
@@ -1849,6 +1849,8 @@ export class Daemon {
     if (watch) this.outsideWatch = new OutsideWatch(watch);
     this.timers.push(setInterval(loopLabel('timer outsideWatch.tick', () => void this.outsideWatch?.tick()), 60_000));
     this.timers.push(setInterval(loopLabel('timer heartbeat', () => this.heartbeat()), LINK_BEAT_MS));
+    // w5973: the machine gh login's token is read off the loop; read it now, so the first runs after a start get it.
+    if (this.cfg.root) void this.readMachineGh();
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(loopLabel('timer selfUpdate.tick', () => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`))), 10_000));
@@ -3332,14 +3334,30 @@ export class Daemon {
    * `gh auth token` outside every fence and kept 30 minutes. Its value is never logged; only whether there was one.
    */
   private machineGh(): Record<string, string> {
-    const now = Date.now();
-    if (!this.ghMemo || now - this.ghMemo.at > 30 * 60_000) {
-      const had = this.ghMemo ? Boolean(this.ghMemo.token) : undefined;
-      const token = machineGhToken();
-      this.ghMemo = { at: now, token };
-      if (had !== Boolean(token)) log(token ? 'owner secrets: runs with no vault GitHub token get the machine gh login as GH_TOKEN (w5548)' : "owner secrets: gh auth token gave no machine login token; runs with no vault GitHub token fall back to the login's folder (w5548)");
-    }
-    return machineGhEnv({}, this.ghMemo.token);
+    // w5973: read off the event loop (gh auth token took up to 30 s on it). A stale token is used while the next read
+    // runs; before the first read lands (the daemon starts one at once), a run gets none and takes the folder fallback.
+    if (!this.ghMemo || Date.now() - this.ghMemo.at > 30 * 60_000) void this.readMachineGh();
+    return machineGhEnv({}, this.ghMemo?.token);
+  }
+
+  private ghReading?: Promise<void>;
+  /** w5973: machineGh's read, one at a time; awaited by the async callers that need a fresh token. */
+  private readMachineGh(): Promise<void> {
+    if (this.ghReading) return this.ghReading;
+    const had = this.ghMemo ? Boolean(this.ghMemo.token) : undefined;
+    this.ghReading = machineGhToken()
+      .then((token) => {
+        this.ghMemo = { at: Date.now(), token };
+        if (had !== Boolean(token)) log(token ? 'owner secrets: runs with no vault GitHub token get the machine gh login as GH_TOKEN (w5548)' : "owner secrets: gh auth token gave no machine login token; runs with no vault GitHub token fall back to the login's folder (w5548)");
+      })
+      .finally(() => (this.ghReading = undefined));
+    return this.ghReading;
+  }
+
+  /** machineGh once a read has landed (the probes, which run off the launch path and may wait for it). */
+  private async machineGhRead(): Promise<Record<string, string>> {
+    if (!this.ghMemo || Date.now() - this.ghMemo.at > 30 * 60_000) await this.readMachineGh();
+    return machineGhEnv({}, this.ghMemo?.token);
   }
 
   /**
@@ -3715,7 +3733,7 @@ export class Daemon {
       if (!copy) return loud('no Low copy of gh to test with');
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
       // the daemon read one, which is the only route left once the owner's gh folder carries No-Read-Up; else the folder.
-      const token = this.machineGh().GH_TOKEN;
+      const token = (await this.machineGhRead()).GH_TOKEN;
       const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
       const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token:/i.test(l));
@@ -3863,7 +3881,7 @@ export class Daemon {
     const appDir = appDirOfConfig(this.cfg);
     const holdFile = keychainHoldFile(appDir);
     const version = readVersion();
-    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: this.machineGh().GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env), keychainHeld: keychainHeld(holdFile, version) });
+    const { legs, skipped } = ownerToolLegs({ platform: process.platform, gh: trustedGh(root, appDir), token: (await this.machineGhRead()).GH_TOKEN, ghConfigDir: workerGhConfigDir(root), credentialEnv: githubCredentialEnv(process.env), keychainHeld: keychainHeld(holdFile, version) });
     const said: ToolLegVerdict[] = [];
     for (const leg of legs) {
       const argv = fenced(leg.cmd, leg.args);

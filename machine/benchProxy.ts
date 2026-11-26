@@ -12,7 +12,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { benchQueueDir, newestBenchQueueScript, pythonExe, queueTickets, supportsPlace, trustedBenchRun, type BenchMode, type TrustedBench } from './benchQueue.ts';
+import { benchQueueDir, newestBenchQueueScript, pythonExe, queueTickets, refreshTrustedBenchAsync, supportsPlace, trustedBenchRun, type BenchMode, type TrustedBench } from './benchQueue.ts';
 import { RpcRefused, type Caller } from './daemonRpc.ts';
 
 const HANDLE = /^h[0-9a-f]{16}$/;
@@ -94,6 +94,8 @@ export class BenchProxy {
     // The ticket says who asked from the token alone. The daemon's own token and secrets stay out of the helper.
     const { FF_DAEMON_TOKEN: _t, FF_DAEMON_RPC: _r, FF_BENCH_TICKET: _h, ...base } = process.env;
     const askEnv: NodeJS.ProcessEnv = { ...base, FF_SESSION_ID: c.session, FF_SANDBOX_ID: c.sandbox ?? '', FF_BENCH_SESSION: '', ...(cwd ? { FF_SANDBOX_PATH: cwd } : {}) };
+    // w5973: an old copy is fetched first without holding the daemon's loop; then trustedBenchRun finds it fresh.
+    if (this.d.trusted) await refreshTrustedBenchAsync(this.d.trusted, this.d.root);
     const tr = this.d.trusted ? trustedBenchRun(this.d.trusted, this.d.root, askEnv) : undefined;
     if (tr && 'why' in tr) throw new RpcRefused(tr.why);
     const script = tr ? tr.script : newestBenchQueueScript([cwd], this.d.root);
