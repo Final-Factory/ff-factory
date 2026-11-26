@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, shimQuarantineDir, watchShimBin } from './pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, watchShimBin } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -1863,6 +1863,8 @@ export class Daemon {
     try {
       // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
       // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
+      // w6074 E: a worker's chmod there (Landlock does not refuse one) must not make the daemon fall back to warn.
+      if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) readyShimDir(enforcedShimDir(this.cfg.root));
       this.slotBin = shims(writeShims(process.platform === 'win32' && this.cfg.root ? toolsShimsDir(this.cfg.root) : shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
@@ -1890,6 +1892,8 @@ export class Daemon {
       log(pathFenceLine(pf, this.slotBin, this.cfg.root));
       // w5899, w5872's review: agents started before the move keep the old bin first on their PATH; it holds only the
       // daemon's shims until they have ended, then goes.
+      // w6074 E: the modes it wrote in <root>/tools-medium/shims are put back while it runs.
+      if (pf === 'on' && this.cfg.root && this.slotBin === enforcedShimDir(this.cfg.root)) guardShimModes(this.slotBin, { log });
       if (pf === 'on' && this.cfg.root && this.slotBin && this.slotBin !== oldBin) guardOldShimBin(oldBin, { target: this.slotBin, quarantine: shimQuarantineDir(this.cfg.root), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, oldBin) : []), log });
       if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
     }

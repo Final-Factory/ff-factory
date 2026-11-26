@@ -603,6 +603,20 @@ Two more holes, from w5872's review:
   swapped for a link to another folder moves as the link, and the folder it named is left alone. When none runs, the
   link goes the same way (`path fence: removed the old shims folder ...`). A worker that swaps the link for its own
   folder wins until it is undone: a narrow race, for those older agents only.
+- **chmod is not a write to Landlock** (w6074's review, measured on biscuit). A fenced worker can change modes where
+  it cannot write. Two holes followed, both closed in `machine/pathFence.ts`:
+  - **A folder at `bin` set to 555.** Moving a folder to another parent needs write on the folder itself (its `..`), so
+    the rename into the quarantine failed for good, and older agents ran the planted `ff-pr`. The guard now opens the
+    folder without following a link and `fchmod`s it to 0700 before each rename (`ownFolderMode`), retrying a few
+    times, and makes folders in the quarantine writable before removing them. A failure is logged once an hour by its
+    error code, not its message, which names a new quarantine path each try.
+  - **The real shims.** `chmod 000 ff-pr` in `tools-medium/shims` took ff-pr from every agent, and `chmod 500` on the
+    folder made the daemon's next `writeShims` fail, and so fall back to warn. Before writing them the daemon gives the
+    folder 0755 and each file in it owner read and write again (`readyShimDir`). While it runs, `guardShimModes` puts
+    back the modes it wrote, on every change it sees there and every minute, logged as `path fence: put back the mode
+    ...`. A worker still wins the moment before that.
+  - Other locked folders (`secrets`, the daemon's) can be made unreadable the same way: a denial of service, not a way
+    to run code, and not covered here.
 - **Grants add up.** A `writeLockExtra` (or `extraRoots`) folder that holds a locked one, or sits in one (the root,
   `tools-medium`, the shims), would open it again on Linux; `writeLockArgs` leaves it out and the daemon logs `write
   lock: left out the extra writable folder ...`. On macOS Seatbelt's later deny already wins.

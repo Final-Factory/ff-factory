@@ -4,7 +4,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, shimQuarantineDir, watchShimBin } from '../machine/pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, watchShimBin } from '../machine/pathFence.ts';
+import { writeShims } from '../machine/unitySlots.ts';
 import { hostsWithPathDir } from '../machine/agentHost.ts';
 import { FF_LANDLOCK, LOCKED_CHILDREN, readLockArgs, writeLockArgs } from '../machine/writeLock.ts';
 import { openChildren } from '../machine/lowIntegrity.ts';
@@ -344,6 +345,102 @@ test('w6063 probe C: the old shims folder swapped for a link while the guard men
     assert.equal(fs.readFileSync(path.join(victim, 'precious', 'work.txt'), 'utf8'), 'keep', 'nothing behind the link is deleted');
   } finally {
     stop();
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+// w6074 (the re-review): chmod, which Landlock does not refuse. Root ignores modes, so these say nothing run as root.
+const asRoot = process.getuid?.() === 0;
+const notWinNorRoot = { skip: (process.platform === 'win32' && 'the path fence is off on Windows') || (asRoot && 'root ignores file modes') };
+
+test('w6074 probe P9 (D): a folder a worker put at the old bin and chmod 555 is still taken out, and the link made again', notWinNorRoot, async () => {
+  const g = guardRoot();
+  fs.writeFileSync(path.join(g.bin, 'ff-pr'), '#!/bin/sh\necho planted\n', { mode: 0o755 });
+  fs.mkdirSync(path.join(g.bin, 'deep'));
+  fs.writeFileSync(path.join(g.bin, 'deep', 'f'), 'x');
+  fs.chmodSync(path.join(g.bin, 'deep'), 0o555);
+  fs.chmodSync(g.bin, 0o555);
+  const stop = guardOldShimBin(g.bin, g.opts(() => ['s1']));
+  try {
+    assert.ok(g.only(), 'those agents run the daemon\'s ff-pr, not the planted one');
+    assert.deepEqual(fs.readdirSync(shimQuarantineDir(g.root)), [], 'and the 555 folders inside are removed too');
+    fs.rmSync(g.bin);
+    fs.mkdirSync(g.bin);
+    fs.writeFileSync(path.join(g.bin, 'ff-pr'), '#!/bin/sh\necho planted\n', { mode: 0o755 });
+    fs.chmodSync(g.bin, 0o555);
+    assert.ok(await waitFor(g.only), 'while the guard runs as well');
+  } finally {
+    stop();
+    for (const p of [g.bin, path.join(g.bin, 'deep')]) if (lstatOrUndefined(p)?.isDirectory()) fs.chmodSync(p, 0o755);
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6074 probe P11 (D): a mend that keeps failing logs once an hour, not once per try', notWin, async () => {
+  const g = guardRoot();
+  const real = fs.renameSync;
+  // Every rename of bin refused with a message that names a new path each time, as the kernel's does.
+  let tries = 0;
+  (fs as { renameSync: unknown }).renameSync = (a: fs.PathLike, b: fs.PathLike) => {
+    if (String(a) !== g.bin) return real(a, b);
+    tries++;
+    throw Object.assign(new Error(`EACCES: permission denied, rename '${String(a)}' -> '${String(b)}'`), { code: 'EACCES' });
+  };
+  const stop = guardOldShimBin(g.bin, g.opts(() => ['s1'], 20));
+  try {
+    for (let i = 0; i < 30; i++) {
+      fs.writeFileSync(path.join(g.root, 'unity-slots', `req-${i}`), '');
+      fs.rmSync(path.join(g.root, 'unity-slots', `req-${i}`));
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    await waitFor(() => tries > 20);
+    const notMended = g.lines.filter((l) => /not mended/.test(l));
+    assert.ok(tries > 20, `the guard kept trying (${tries})`);
+    assert.equal(notMended.length, 1, `one line, not one per try: ${notMended.length}`);
+    assert.match(notMended[0], /not mended: EACCES/);
+  } finally {
+    stop();
+    (fs as { renameSync: unknown }).renameSync = real;
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6074 probe P10 (E): a worker\'s chmod in <root>/tools-medium/shims does not stop the daemon writing its shims at start', notWinNorRoot, () => {
+  const g = guardRoot();
+  try {
+    fs.writeFileSync(path.join(g.target, 'unity-slot.cmd'), 'x');
+    fs.chmodSync(path.join(g.target, 'ff-pr'), 0o000);
+    fs.chmodSync(path.join(g.target, 'unity-slot.cmd'), 0o000);
+    fs.chmodSync(g.target, 0o500);
+    readyShimDir(g.target);
+    assert.equal(fs.statSync(g.target).mode & 0o777, 0o755, 'the folder');
+    writeShims(g.target);
+    fs.writeFileSync(path.join(g.target, 'ff-pr'), SHIM);
+    assert.equal(fs.statSync(path.join(g.target, 'unity-slot')).mode & 0o777, 0o755, 'writeShims wrote unity-slot');
+  } finally {
+    if (lstatOrUndefined(g.target)) fs.chmodSync(g.target, 0o755);
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6074 probe P10 (E): while the daemon runs, a worker\'s chmod of a shim or of the shims folder is put back', notWinNorRoot, async () => {
+  const g = guardRoot();
+  const ffPr = path.join(g.target, 'ff-pr');
+  const stop = guardShimModes(g.target, { log: (l) => g.lines.push(l), everyMs: 100 });
+  try {
+    fs.chmodSync(ffPr, 0o000);
+    assert.ok(await waitFor(() => (fs.statSync(ffPr).mode & 0o777) === 0o755), 'ff-pr runs again');
+    fs.chmodSync(g.target, 0o500);
+    assert.ok(await waitFor(() => (fs.statSync(g.target).mode & 0o777) === 0o755), 'the folder is the daemon\'s to write again');
+    assert.match(g.lines.join('\n'), /put back the mode the daemon gave in the shims folder/);
+    for (let i = 0; i < 20; i++) {
+      fs.chmodSync(ffPr, 0o000);
+      await waitFor(() => (fs.statSync(ffPr).mode & 0o777) === 0o755);
+    }
+    assert.ok(g.lines.filter((l) => l.includes(ffPr)).length === 1, 'once an hour per name');
+  } finally {
+    stop();
+    fs.chmodSync(g.target, 0o755);
     fs.rmSync(g.root, { recursive: true, force: true });
   }
 });

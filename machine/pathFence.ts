@@ -118,20 +118,34 @@ export function guardOldShimBin(bin: string, o: { target: string; quarantine: st
     if (!st) return false;
     fs.mkdirSync(o.quarantine, { recursive: true, mode: 0o700 });
     const away = path.join(o.quarantine, `bin-${process.pid}-${now()}-${n++}`);
-    try {
-      // rename moves the entry itself (a link stays a link), never what it points to.
-      fs.renameSync(bin, away);
-    } catch (e) {
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT') return false;
-      // Another file system: a link can still be unlinked (unlink never follows; a folder swapped in meanwhile fails it).
-      if (code === 'EXDEV' && st.isSymbolicLink()) {
-        fs.unlinkSync(bin);
-        return true;
+    for (let i = 0; ; i++) {
+      // w6074 D: moving a folder to another parent needs write on the folder itself (its `..`), so a worker's chmod 555
+      // of its folder at bin would stop the rename for good. The daemon owns it too: open it without following a link
+      // and fchmod it first. A worker that chmods it back in between only buys a retry.
+      if (lstat(bin)?.isDirectory()) ownFolderMode(bin, 0o700);
+      try {
+        // rename moves the entry itself (a link stays a link), never what it points to.
+        fs.renameSync(bin, away);
+        break;
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return false;
+        // Another file system: a link can still be unlinked (unlink never follows; a folder swapped in meanwhile fails it).
+        if (code === 'EXDEV' && st.isSymbolicLink()) {
+          fs.unlinkSync(bin);
+          return true;
+        }
+        if ((code === 'EACCES' || code === 'EPERM') && i < 4) continue;
+        throw e;
       }
-      throw e;
     }
-    fs.rmSync(away, { recursive: true, force: true });
+    // In the quarantine, which no worker can write: folders inside made writable first (a 555 one stops rmSync), then
+    // removed. A failure leaves it there, harmless, and does not stop the link being made again.
+    try {
+      removeTree(away);
+    } catch (e) {
+      o.log(`path fence: could not remove ${away} from the quarantine: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+    }
     return true;
   };
   const drop = (why: string) => {
@@ -159,7 +173,8 @@ export function guardOldShimBin(bin: string, o: { target: string; quarantine: st
       // The first mend replaces the daemon's own old folder (the line above says so); a change after that is a worker's.
       if (had && started) fixed = bin;
     } catch (e) {
-      fixed = `${bin} (not mended: ${(e as Error).message})`;
+      // Keyed on the error's code, not its message: the message names a new quarantine path each time (w6074 P11).
+      fixed = `${bin} (not mended: ${(e as NodeJS.ErrnoException).code ?? (e as Error).name})`;
     } finally {
       started = true;
     }
@@ -194,6 +209,99 @@ export function guardOldShimBin(bin: string, o: { target: string; quarantine: st
   }, o.everyMs ?? 60_000);
   timer.unref?.();
   return stop;
+}
+
+/** Set a folder's mode through a handle that never follows a link (no chmod through a path a worker can swap). */
+export function ownFolderMode(p: string, mode: number): boolean {
+  const c = fs.constants;
+  let fd: number;
+  try {
+    fd = fs.openSync(p, c.O_RDONLY | (c.O_DIRECTORY ?? 0) | (c.O_NOFOLLOW ?? 0));
+  } catch {
+    return false;
+  }
+  try {
+    const st = fs.fstatSync(fd);
+    if (!st.isDirectory()) return false;
+    if ((st.mode & 0o7777) !== mode) fs.fchmodSync(fd, mode);
+    return true;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Remove a tree only the daemon can write (the quarantine): every real folder in it made 0700 first, links never followed. */
+function removeTree(p: string) {
+  const walk = (q: string) => {
+    if (!lstat(q)?.isDirectory()) return;
+    fs.chmodSync(q, 0o700);
+    for (const n of fs.readdirSync(q)) walk(path.join(q, n));
+  };
+  walk(p);
+  fs.rmSync(p, { recursive: true, force: true });
+}
+
+/**
+ * w6074 E: Landlock has no right for a file's mode, so a fenced worker can chmod what is in `<root>/tools-medium/shims`
+ * though it cannot write there: `chmod 000 ff-pr` takes ff-pr from every agent, `chmod 500` on the folder makes the
+ * daemon's next writeShims fail (and it would fall back to warn). Before the daemon writes the shims: the folder 0755,
+ * each file in it readable and writable by its owner again. No worker can make a link there, so a plain chmod is safe.
+ */
+export function readyShimDir(dir: string): void {
+  if (!lstat(dir)) return;
+  ownFolderMode(dir, 0o755);
+  for (const n of fs.readdirSync(dir)) {
+    const p = path.join(dir, n);
+    const st = lstat(p);
+    if (st?.isFile() && (st.mode & 0o600) !== 0o600) fs.chmodSync(p, (st.mode & 0o7777) | 0o600);
+  }
+}
+
+/**
+ * w6074 E: then, while the daemon runs, the modes it wrote there are put back on every change seen in the folder (a
+ * chmod is one) and every `everyMs`, the folder's included; logged once per name an hour. Returns a stop.
+ */
+export function guardShimModes(dir: string, o: { log: (l: string) => void; everyMs?: number; now?: () => number }): () => void {
+  const now = o.now ?? Date.now;
+  const want = new Map<string, number>();
+  for (const n of fs.readdirSync(dir)) {
+    const st = lstat(path.join(dir, n));
+    if (st?.isFile()) want.set(n, st.mode & 0o7777);
+  }
+  const said = new Map<string, number>();
+  const mend = () => {
+    const fixed: string[] = [];
+    try {
+      const d = lstat(dir);
+      if (d?.isDirectory() && (d.mode & 0o7777) !== 0o755 && ownFolderMode(dir, 0o755)) fixed.push(dir);
+      for (const [n, m] of want) {
+        const p = path.join(dir, n);
+        const st = lstat(p);
+        if (!st?.isFile() || (st.mode & 0o7777) === m) continue;
+        fs.chmodSync(p, m);
+        fixed.push(p);
+      }
+    } catch (e) {
+      fixed.push(`${dir} (not mended: ${(e as NodeJS.ErrnoException).code ?? (e as Error).name})`);
+    }
+    const t = now();
+    const fresh = fixed.filter((f) => (said.get(f) ?? -Infinity) <= t - 3600_000);
+    for (const f of fresh) said.set(f, t);
+    if (fresh.length) o.log(`path fence: put back the mode the daemon gave in the shims folder: ${fresh.join(', ')}`);
+  };
+  let w: fs.FSWatcher | undefined;
+  try {
+    w = fs.watch(dir, { persistent: false }, () => mend());
+    w.on('error', () => undefined);
+  } catch {
+    w = undefined;
+  }
+  const timer = setInterval(mend, o.everyMs ?? 60_000);
+  timer.unref?.();
+  return () => {
+    clearInterval(timer);
+    w?.close();
+  };
 }
 
 const lstat = (p: string) => {
