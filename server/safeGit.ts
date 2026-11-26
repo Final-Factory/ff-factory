@@ -22,7 +22,8 @@
  *   value back, else a neutral one (git-lfs's standard filter for `filter.lfs.*`, so LFS files still check out). A
  *   repository's credential helpers are dropped and the user's and system's added again in their order. This one has a
  *   race: a worker who writes the key between the scan and the call wins it, so it narrows the gap without closing it.
- *   Subcommands that start none of those programs (rev-parse, merge-base, config, worktree list, ...: NO_SCAN) skip it (w5991).
+ *   Calls that start none of those programs and read no object (config, symbolic-ref, worktree list, a plain rev-parse:
+ *   needsScan) skip it (w5991).
  * - `diff`, `log`, `show` and `whatchanged` also get `--no-ext-diff --no-textconv`: `diff.external` cannot be overridden
  *   by value (an empty one makes every `git diff` fail, measured by w5514 on git 2.50.1), and the flags need no scan.
  *
@@ -204,24 +205,37 @@ export function fenceArgs(args: string[]): string[] {
 }
 
 /**
- * Subcommands that start no program a scanned key names, so they need no scan (w5991): they read or move refs and read config,
- * and check out, diff, filter, merge or reach a remote never. The fixed keys still go on every call (an editor, a hook such as
- * reference-transaction, fsmonitor). `worktree` only as `list` and `prune`: `add` checks files out (filters) and `remove` runs
- * `git status` in the checkout. Every scan is one more process start, about half of all of ffu-slot's (w5991: 266 of 861 in
- * server/ffuSlots.test.ts); this keeps the protection and drops the scans that protect nothing. A per-repository cache of the
- * scan was not taken: the shared ffu clone's config is written by every worker holding a slot, and a cache would let a key
- * planted after the first call of a run win every later call (take --wait runs for minutes), where the scan's own race is the
- * gap between two process starts.
+ * Calls that start no program a scanned key names, so they need no scan (w5991): they resolve or move refs, read config or
+ * list worktrees, and never check out, diff, filter, merge, reach a remote or read an object. The fixed keys still go on every
+ * call (an editor, a hook such as reference-transaction, fsmonitor). Reading an object is the trap (w5996's review): a
+ * repository that plants extensions.partialClone and a promisor remote makes git lazy-fetch a missing object in a child
+ * process, which runs the planted core.sshCommand; merge-base, show-ref, for-each-ref and `rev-parse X^{commit}` all did
+ * (measured, git 2.56.1). So `rev-parse` skips only with plain names (no `^`, `~`, `:`, `@{`) and options from REV_PARSE_OPTS,
+ * `worktree` only as `list` and `prune` (`add` checks files out, `remove` runs status), and those calls also carry
+ * GIT_NO_LAZY_FETCH=1 (git 2.45.1 on; an older git ignores it, and the list alone holds). Every scan is one more process
+ * start, about a third of ffu-slot's (w5991: 266 of 861 in server/ffuSlots.test.ts). A per-repository cache of the scan was
+ * not taken: the shared ffu clone's config is written by every worker holding a slot, and a cache would let a key planted
+ * after the first call of a run win every later call (take --wait runs for minutes), where the scan's own race is the gap
+ * between two process starts.
  */
-const NO_SCAN = new Set(['rev-parse', 'merge-base', 'symbolic-ref', 'show-ref', 'for-each-ref', 'config']);
+const NO_SCAN = new Set(['symbolic-ref', 'config']);
+const REV_PARSE_OPTS = new Set(['--verify', '--quiet', '-q', '--abbrev-ref', '--symbolic-full-name', '--show-toplevel', '--git-dir', '--git-common-dir', '--absolute-git-dir', '--is-inside-work-tree', '--is-bare-repository', '--show-prefix', '--show-cdup', '--']);
 
-/** Whether a call needs the scan: false only for subcommands that start no program a repository names (NO_SCAN). */
+/** Whether a call needs the scan: false only for calls that start no program a repository names (see NO_SCAN). */
 export function needsScan(args: string[]): boolean {
   const { sub } = splitGlobal(args);
   const name = args[sub] ?? '';
+  const rest = args.slice(sub + 1);
   if (NO_SCAN.has(name)) return false;
-  if (name === 'worktree' && /^(list|prune)$/.test(args[sub + 1] ?? '')) return false;
+  if (name === 'worktree' && /^(list|prune)$/.test(rest[0] ?? '')) return false;
+  if (name === 'rev-parse') return !rest.every((a) => (a.startsWith('-') ? REV_PARSE_OPTS.has(a) : !/[\^~:@{}\s\*?[]/.test(a)));
   return true;
+}
+
+/** A call that skips the scan: fixed keys, and no lazy fetch of a missing object (git 2.45.1 on). */
+function unscanned(args: string[], env: Env): { args: string[]; env: Env } {
+  const f = fenced(args, env, '');
+  return { args: f.args, env: { ...f.env, GIT_NO_LAZY_FETCH: '1' } };
 }
 
 const scanArgs = (location: string[]) => [...location, 'config', '--show-scope', '--includes', '-z', '--get-regexp', SCANNED_KEYS];
@@ -259,7 +273,7 @@ const scanEnv = (env: Env) => withConfigFirst({ ...env, GIT_TERMINAL_PROMPT: '0'
 /** The arguments and environment for a git call in a checkout a worker may have written (sync). */
 export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } = {}): { args: string[]; env: Env } {
   const env = opts.env ?? process.env;
-  if (!needsScan(args)) return fenced(args, env, '');
+  if (!needsScan(args)) return unscanned(args, env);
   let out = '';
   try {
     out = execFileSync('git', scanArgs(splitGlobal(args).location), {
@@ -281,7 +295,7 @@ export function gitFenceSync(args: string[], opts: { cwd?: string; env?: Env } =
 /** The arguments and environment for a git call in a checkout a worker may have written. */
 export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {}): Promise<{ args: string[]; env: Env }> {
   const env = opts.env ?? process.env;
-  if (!needsScan(args)) return Promise.resolve(fenced(args, env, ''));
+  if (!needsScan(args)) return Promise.resolve(unscanned(args, env));
   return new Promise((resolve) => {
     execFile(
       'git',

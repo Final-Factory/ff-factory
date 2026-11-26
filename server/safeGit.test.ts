@@ -200,9 +200,12 @@ test('w5541: the subcommand is found past the global options; diff, log and show
   assert.ok(isGit('git') && isGit('/usr/bin/git') && isGit('C:\\Program Files\\Git\\cmd\\git.exe') && !isGit('gh') && !isGit('git-lfs'));
 });
 
-test('w5991: only subcommands that start no program a repository names skip the scan', () => {
-  for (const a of [['rev-parse', 'HEAD'], ['-C', 'd', 'merge-base', '--is-ancestor', 'a', 'b'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'x.y'], ['-C', 'd', 'worktree', 'list', '--porcelain'], ['worktree', 'prune'], ['for-each-ref'], ['show-ref']])
+test('w5991: only calls that start no program a repository names and read no object skip the scan', () => {
+  for (const a of [['rev-parse', 'HEAD'], ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/feat'], ['-C', 'd', 'rev-parse', '--abbrev-ref', 'HEAD'], ['rev-parse', '--show-toplevel'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'x.y'], ['-C', 'd', 'worktree', 'list', '--porcelain'], ['worktree', 'prune']])
     assert.equal(needsScan(a), false, a.join(' '));
+  // w5996: these read objects, and a planted partial clone lazy-fetches a missing one through core.sshCommand.
+  for (const a of [['merge-base', '--is-ancestor', 'a', 'b'], ['show-ref'], ['for-each-ref'], ['rev-parse', 'HEAD^{commit}'], ['rev-parse', 'HEAD~1'], ['rev-parse', 'HEAD:a.txt'], ['rev-parse', '@{u}'], ['rev-parse', '--short', 'HEAD'], ['rev-parse', '--parseopt']])
+    assert.equal(needsScan(a), true, a.join(' '));
   for (const a of [['status'], ['worktree', 'add', 'x'], ['worktree', 'remove', 'x'], ['worktree'], ['log', '-1'], ['diff'], ['checkout', 'x'], ['fetch'], ['push'], ['cat-file', '--textconv', 'x'], ['branch', '-f', 'x'], ['-c', 'rev-parse', 'status'], []])
     assert.equal(needsScan(a), true, a.join(' '));
 });
@@ -299,6 +302,35 @@ test('w5541: a worktree whose config plants fsmonitor, a filter, a textconv, dif
     assert.match(gitExecFileSync(['-C', wt, 'config', '--get', 'filter.x.clean'], { encoding: 'utf8' }), /evil\.sh/);
     assert.match((await run('git', ['-C', main, 'worktree', 'list', '--porcelain'])).stdout, /branch refs\/heads\/sandbox\/x/);
     assert.equal((await run('git', ['-C', main, 'worktree', 'prune'])).code, 0);
+    assert.equal(f.ran(), '', 'no planted program ran');
+  } finally {
+    fs.rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test('w5996: a planted partial clone lazy-fetches through core.sshCommand under plain git, never through the fence', { skip }, async () => {
+  const f = fixture();
+  try {
+    const { main, wt } = worktree(f);
+    // An ssh command that logs and fails at once (the fixture's evil.sh reads stdin, which a transport never closes).
+    const ssh = slash(path.join(f.root, 'ssh.sh'));
+    fs.writeFileSync(ssh, `#!/bin/sh\necho "ssh $*" >> '${f.marker}'\nexit 1\n`, { mode: 0o755 });
+    const set = (k: string, v: string) => git(main, 'config', k, v);
+    set('core.repositoryformatversion', '1');
+    set('extensions.partialClone', 'origin');
+    set('remote.origin.url', 'ssh://127.0.0.1:1/r');
+    set('remote.origin.promisor', 'true');
+    set('core.sshCommand', ssh);
+    fs.writeFileSync(path.join(main, '.git', 'refs', 'heads', 'missing'), `${'1'.repeat(40)}\n`);
+    const quiet = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+
+    // Control: plain git lazy-fetches the missing object and runs the planted ssh command (the plant is live).
+    spawnSync('git', ['for-each-ref'], { cwd: wt, encoding: 'utf8', env: quiet, timeout: 30_000 });
+    assert.match(f.ran(), /ssh /, 'plain git ran the planted ssh command');
+    fs.rmSync(f.marker, { force: true });
+
+    for (const a of [['for-each-ref'], ['show-ref'], ['merge-base', 'master', 'refs/heads/missing'], ['rev-parse', 'refs/heads/missing^{commit}'], ['rev-parse', '--verify', '--quiet', 'refs/heads/missing'], ['rev-parse', '--abbrev-ref', 'HEAD'], ['symbolic-ref', '--short', 'HEAD'], ['worktree', 'list', '--porcelain'], ['config', '--get', 'remote.origin.url']])
+      await run('git', ['-C', wt, ...a], { env: quiet });
     assert.equal(f.ran(), '', 'no planted program ran');
   } finally {
     fs.rmSync(f.root, { recursive: true, force: true });
