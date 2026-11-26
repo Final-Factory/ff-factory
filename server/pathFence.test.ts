@@ -74,6 +74,26 @@ test('w5863: the warn watch logs a write to the shims folder, once per name per 
   }
 });
 
+test('w5872 review: a shims folder removed and made again is watched again, and its removal is logged as the folder', async () => {
+  const mailbox = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-pathfence-'));
+  const bin = path.join(mailbox, 'bin');
+  fs.mkdirSync(bin);
+  const lines: string[] = [];
+  const stop = watchShimBin(bin, (l) => lines.push(l));
+  try {
+    fs.rmSync(bin, { recursive: true });
+    assert.ok(await waitFor(() => lines.some((l) => l.includes(`${bin} changed`))), lines.join('\n'));
+    assert.ok(!lines.some((l) => l.includes(path.join(bin, 'bin'))), `no <bin>/bin: ${lines.join('\n')}`);
+    fs.mkdirSync(bin);
+    await new Promise((r) => setTimeout(r, 100));
+    fs.writeFileSync(path.join(bin, 'ff-leftovers'), 'planted\n');
+    assert.ok(await waitFor(() => lines.some((l) => l.includes(path.join(bin, 'ff-leftovers')))), `a write in the new bin is logged: ${lines.join('\n')}`);
+  } finally {
+    stop();
+    fs.rmSync(mailbox, { recursive: true, force: true });
+  }
+});
+
 const landlock = process.platform === 'linux' && spawnSync('python3', [FF_LANDLOCK, '--', 'true']).status === 0;
 
 /** A worker root as the daemon has it, with its Unity slots mailbox inside (biscuit: ~/ffw/unity-slots). */

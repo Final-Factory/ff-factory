@@ -54,20 +54,33 @@ export function watchShimBin(bin: string, log: (l: string) => void, o: { now?: (
     said.set(p, t);
     log(`path fence (warn): ${p} changed and the daemon did not write it. Every agent, unfenced ones too, runs the shims there first on its PATH; a fenced worker's write there is refused once the path fence is on (the shims move to <root>/tools-medium/shims)`);
   };
-  const watch = (dir: string, only?: string) => {
+  const watch = (dir: string, only?: string): fs.FSWatcher | undefined => {
     try {
       const w = fs.watch(dir, { persistent: false }, (_ev, name) => {
         const n = typeof name === 'string' ? name : '';
         if (only !== undefined && n !== only) return;
-        say(only !== undefined ? path.join(dir, only) : n ? path.join(dir, n) : dir);
+        // The folder itself gone: inotify names it by its own name, which is not a child.
+        const gone = only === undefined && (!n || (n === path.basename(dir) && !fs.existsSync(path.join(dir, n))));
+        say(only !== undefined ? path.join(dir, only) : gone ? dir : path.join(dir, n));
+        if (only !== undefined) rewatch();
       });
       w.on('error', (e) => log(`path fence (warn): the watch on ${dir} stopped (${(e as Error).message})`));
       ws.push(w);
+      return w;
     } catch (e) {
       log(`path fence (warn): cannot watch ${dir} (${(e as Error).message}); writes there are not logged`);
+      return undefined;
     }
   };
-  watch(bin);
+  // A bin removed and made again is a new folder: watch the new one (w5872's review). Its inode number can be the old
+  // one's (ext4 reuses them), so every mailbox event for bin while it exists starts a fresh watch; they are rare.
+  let binW: fs.FSWatcher | undefined;
+  const rewatch = () => {
+    if (!fs.existsSync(bin)) return;
+    binW?.close();
+    binW = watch(bin);
+  };
+  binW = watch(bin);
   watch(path.dirname(bin), path.basename(bin));
   return () => {
     for (const w of ws) w.close();
