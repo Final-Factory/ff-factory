@@ -99,6 +99,8 @@ test('w5912: `ffu-slot list --json` prints the report, and the plain list says t
   assert.equal(ffuSlotMain(['list'], plain), 0);
   const lines = plain.out.join('').trim().split('\n');
   for (const [i, s] of r.slots.entries()) assert.ok(lines[i].endsWith(`\t${s.why}`), `${lines[i]} / ${s.why}`);
+  // ...and the same last use as the report, not only the take's stamp (w5912: on biscuit slot1's differed by three days).
+  for (const [i, s] of r.slots.entries()) assert.equal(lines[i].split('\t')[2], s.usedAt ?? '-', lines[i]);
 });
 
 test('w5912: the daemon reads the report in a child process and adds each target size the clean-up pass measured', async (t) => {
