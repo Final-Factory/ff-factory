@@ -13,7 +13,7 @@ import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, 
 import { checkTiming } from './timingGuard.ts';
 import { checkGameRepoClone } from './cloneGuard.ts';
 import { checkPrivateFfuTarget } from './ffuTargetGuard.ts';
-import { readSlotState, slotDir } from '../machine/ffuSlots.ts';
+import { heldSlots, readSlotState, slotDir } from '../machine/ffuSlots.ts';
 import { checkTimedAsk, type TimedAskState } from './timedAsk.ts';
 import { checkDetachedBench } from './benchDetachGuard.ts';
 import { checkChecksRead, checkTimedSleep } from './waitGuard.ts';
@@ -299,8 +299,7 @@ export function sandboxGuard(opts: {
           const root = opts.workerRoot;
           const heldFfuSlot = () => {
             if (!opts.session) return undefined;
-            const id = readSlotState(root).slots.find((s) => s.holder === opts.session)?.id;
-            return id ? slotDir(root, id) : undefined;
+            return heldSlots(readSlotState(root), opts.session).map((s) => slotDir(root, s.id));
           };
           const stray = checkStrayWrite(target, { sandbox: opts.sandboxPath, temp: opts.env.TMPDIR, home: opts.home ?? os.homedir(), heldFfuSlot });
           if (stray) return deny(stray);
