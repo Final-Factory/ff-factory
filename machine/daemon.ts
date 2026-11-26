@@ -1173,7 +1173,7 @@ export class Daemon {
         // w5281: old runs in the shared determinism audit folder (<root>/cache/determinism-audit) age out.
         // w5306: playtest sessions in the worker's game data root (<root>/gamedata/PlaytestSessions) age out as in the old folder.
         // w5557: and in each sandbox's own (<root>/gamedata/sandboxes/<id>/PlaytestSessions).
-        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
+        const rules = rulesOnInstallDrive(cleanupRules({ ...env, mediumTemp: this.mediumFolders().tempRoot, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
         // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
         if (!opts.dryRun) void this.mediumUvPruner?.maybe(low);
@@ -1328,7 +1328,7 @@ export class Daemon {
   mediumFolders(): MediumFolders {
     if (!this.mediumMemo) {
       const c = this.cfg;
-      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()] });
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])] });
       for (const line of this.mediumMemo.lines) log(line);
     }
     return this.mediumMemo;
@@ -1345,8 +1345,9 @@ export class Daemon {
     const m = this.mediumFolders().tempRoot;
     if (m) {
       const d = sessionTempDir(m, id);
-      const spec = this.entries.get(id)?.spec;
-      if (spec ? !spec.sandbox : fs.existsSync(d)) return d;
+      // w5869 (w5871's F1): only a folder that exists. A Medium agent started before the switch went on, or one whose own
+      // folder could not be made (agentTempEnv's fallback), runs in the shared root; a sandbox session always does.
+      if (!this.entries.get(id)?.spec?.sandbox && fs.existsSync(d)) return d;
     }
     return sessionTempDir(agentTempRoot(this.cfg.tempDir), id);
   }
@@ -1468,7 +1469,7 @@ export class Daemon {
     return {
       at: new Date().toISOString(),
       connected: this.ws?.readyState === WebSocket.OPEN && this.welcomed,
-      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir) } : {}),
+      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir), ...(this.mediumFolders().tempRoot ? { mediumTempRoot: this.mediumFolders().tempRoot } : {}) } : {}),
       sandboxes: this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
       live: sessionIds,
       resumable: [...this.resumable],

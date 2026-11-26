@@ -1,6 +1,7 @@
 import { carryTranscript } from './claudeHome.ts';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { query, type Options, type PermissionResult, type Query, type SDKMessage, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -250,6 +251,47 @@ const secs = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 const mb = (bytes: number) => `${(bytes / 1048576).toFixed(1)} MB`;
 
 /**
+ * w5888: the resumed processes that have not answered yet (their first streamed token or message other than `system`, or their
+ * end). After a portal restart the coordinators' first turns waited 2-5 min (2026-11-26, measured: the dispatcher's transcript
+ * seal checked 51 s after its launch was asked, its tool refresh 74 s later, its first step about 70 s after that), while the
+ * boot's own chores (the Claude Code transcripts' full scrub, the search index) held the VM's two vCPUs. What can wait waits for
+ * resumesAnswered().
+ */
+const unanswered = new Set<object>();
+let answeredWaiters: (() => void)[] = [];
+function resumeAnswered(k: object) {
+  if (!unanswered.delete(k) || unanswered.size > 0) return;
+  const w = answeredWaiters;
+  answeredWaiters = [];
+  for (const f of w) f();
+}
+
+/** How many resumed processes have not answered yet (w5888). */
+export function resumesUnanswered(): number {
+  return unanswered.size;
+}
+
+/**
+ * Resolves once no resumed process is still waiting for its first answer (true), or after `maxMs` (false): what a start
+ * may put off (w5888) runs after the people's coordinators are back, never more than `maxMs` late.
+ */
+export function resumesAnswered(maxMs: number): Promise<boolean> {
+  if (unanswered.size === 0) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      answeredWaiters = answeredWaiters.filter((f) => f !== done);
+      resolve(false);
+    }, maxMs);
+    t.unref?.();
+    const done = () => {
+      clearTimeout(t);
+      resolve(true);
+    };
+    answeredWaiters.push(done);
+  });
+}
+
+/**
  * The Query of a process launched a moment later (w3855): iterating it and its control calls (interrupt, setModel,
  * setPermissionMode, getContextUsage) wait for the launch and go to the real one. A launch given up (`undefined`: the session was
  * stopped first) ends at once and its calls do nothing; a launch that failed throws from the first read, as a failed start does.
@@ -301,6 +343,23 @@ export type SessionSink = Pick<Store, 'putSession' | 'append' | 'amend' | 'saveI
  * w5563: one process's conversation and the running hash of its transcript (server/transcriptSeal.ts): sealed at each turn's
  * end and once the process has exited. `fresh`: the process starts the conversation, so its whole transcript is its own.
  */
+/** w5888: one resumed launch's times (AgentSession.resumeDone). */
+interface ResumeClock {
+  asked: number;
+  marks: [string, number][];
+  bytes?: number;
+  q?: Query;
+  done?: boolean;
+}
+
+async function fileBytes(file: string): Promise<number | undefined> {
+  try {
+    return (await fs.promises.stat(file)).size;
+  } catch {
+    return undefined;
+  }
+}
+
 interface SealGen {
   sid: string;
   fresh: boolean;
@@ -593,6 +652,8 @@ export class AgentSession implements SessionHandle {
   private held: Held[] = [];
   /** w5931: the launch's steps' times, for the journal lines that follow it to its first reply and its first turn's end. */
   private launchClock?: { spawnedAt: number; askedAt: number; init?: boolean; text?: boolean };
+  /** w5888: a resumed process's launch, timed from the ask to its first answer; logged once then. */
+  private resumeClock?: ResumeClock;
   private input?: InputQueue;
   private abort?: AbortController;
   private readonly pending = new Map<string, { resolve: (r: PermissionResult) => void; seq: number; input: Record<string, unknown> }>();
@@ -921,6 +982,7 @@ export class AgentSession implements SessionHandle {
       for await (const m of q) {
         // After stop() this query is no longer the session's: a buffered state event must not mark a stopped session idle.
         if (this.q !== q) break;
+        if (m.type !== 'system' && this.resumeClock) this.resumeDone('answered');
         this.handle(m);
       }
       if (this.q === q) this.update({ status: 'stopped', statusDetail: undefined });
@@ -932,6 +994,7 @@ export class AgentSession implements SessionHandle {
       if (this.q === q) this.update({ status: aborted ? 'stopped' : 'error', statusDetail: aborted ? undefined : clip(msg, 300) });
       if (!aborted) crashed = msg;
     } finally {
+      if (this.resumeClock?.q === q) this.resumeDone('ended');
       if (this.q === q) {
         // w5563: the transcript is sealed once the process has exited (final), or as it is when it has not after 30 s.
         void this.sealAtExit(this.sealGen);
@@ -1281,7 +1344,12 @@ export class AgentSession implements SessionHandle {
     this.launching = launching;
     let me: Query | undefined;
     const gone = () => abort.signal.aborted || this.q !== me;
-    const askedAt = Date.now();
+    const clock: ResumeClock = { asked: Date.now(), marks: [] };
+    if (this.resumeClock) this.resumeDone('replaced');
+    this.resumeClock = clock;
+    unanswered.add(clock);
+    const mark = (what: string) => clock.marks.push([what, Date.now()]);
+    const askedAt = clock.asked;
     const launched = launchTurn(async (w) => {
       const t: string[] = [`waited ${secs(w.waitedMs)} to launch behind ${w.ahead}`];
       let step = Date.now();
@@ -1292,6 +1360,7 @@ export class AgentSession implements SessionHandle {
         return secs(ms);
       };
       try {
+        mark('its turn to launch');
         if (gone()) return undefined;
         // w5305: a conversation that began in the legacy ~/.claude resumes in the worker root's folder from a copy of its transcript.
         try {
@@ -1305,8 +1374,10 @@ export class AgentSession implements SessionHandle {
         const gen = this.sealGen;
         const seals = this.store.seals;
         const seal = seals?.load(sid);
+        clock.bytes = file ? await fileBytes(file) : undefined;
         const check = !seals || !gen ? undefined : file ? await checkSeal(file, seal) : seal ? { ok: false as const, why: 'its transcript is gone' } : undefined;
         t.push(`seal ${lap()}${check?.ok ? ` (${mb(check.hasher.size)})` : ''}`);
+        mark('seal checked');
         if (gone()) return undefined;
         if (check && !check.ok && gen) return this.startOver(gen, file, check.why, input, options, launching);
         if (check?.ok && gen) {
@@ -1317,6 +1388,7 @@ export class AgentSession implements SessionHandle {
         const wrote: { first?: number } = {};
         const fresh = await refreshKeptToolsAsync(file, sdkToolsNow(options.mcpServers), gone, wrote);
         t.push(`tools ${lap()} (${fresh.length} changed${wrote.first !== undefined ? `, first rewrite at ${mb(wrote.first)}` : ''})`);
+        mark('tools refreshed');
         if (gone()) return undefined;
         if (fresh.length > 0) this.store.append(this.info.id, { kind: 'system', text: `Tool schemas changed since this conversation loaded them; it sees them as they are now: ${fresh.join(', ')} (w2626).` });
         // our own same-length rewrite: the hash goes on from the file as it is now, hashed again from the checkpoint before it (w5931)
@@ -1324,22 +1396,32 @@ export class AgentSession implements SessionHandle {
           const again = check?.ok ? await rehashFrom(file, check.checkpoints, wrote.first) : undefined;
           gen.hasher = again?.hasher;
           t.push(`re-hash ${lap()} (${again ? mb(again.hashedBytes) : 'failed'})`);
+          mark('re-hashed');
         }
         if (file) cli.tail = new CliTranscriptTail(file, false);
         const state = await this.resumeState(sid, file);
         t.push(`meter ${lap()}`);
+        mark('tally read');
         if (gone()) return undefined;
         this.meter.resume(state);
         this.launched(launching);
         const spawnedAt = Date.now();
         this.launchClock = { spawnedAt, askedAt };
         console.log(`launch timing: ${this.info.kind} ${this.info.id} (${clip(this.info.title, 60)}): ${t.join(', ')}; spawned ${secs(spawnedAt - askedAt)} after it was asked for (w5931)`);
-        return runQuery({ prompt: input, options: { ...options, model: this.liveModel ?? options.model } });
+        const q = runQuery({ prompt: input, options: { ...options, model: this.liveModel ?? options.model } });
+        mark('Claude Code started');
+        return q;
       } finally {
         this.launched(launching);
       }
     }, () => this.info.kind === 'orchestrator' && [...this.outstanding.values()].some((u) => u.from === 'human'));
+    // a launch given up or failed answers nothing: what waits for the resumes does not wait for it
+    void launched.then(
+      (q) => (q ? undefined : this.resumeDone('given up', clock)),
+      () => this.resumeDone('failed', clock),
+    );
     me = lazyQuery(launched);
+    clock.q = me;
     return me;
   }
 
@@ -1390,6 +1472,33 @@ export class AgentSession implements SessionHandle {
     if (!gen || !this.store.seals) return;
     const exited = gen.pid !== undefined && (await pidGone(gen.pid));
     await this.sealNow(gen, exited);
+  }
+
+  /**
+   * w5888: a resumed process answered (or ended, or was given up): one line with where its launch's time went, from the ask
+   * (start()) through each step to now. Nothing else reads it; it is how a deploy's resumes are measured.
+   */
+  private resumeDone(how: string, clock = this.resumeClock) {
+    if (!clock || clock.done) return;
+    clock.done = true;
+    if (this.resumeClock === clock) this.resumeClock = undefined;
+    resumeAnswered(clock);
+    // only a log line: it never throws into consume(), and stays one line (clip() would add a line for a long title)
+    try {
+      const now = Date.now();
+      let at = clock.asked;
+      const steps = clock.marks.map(([what, t]) => {
+        const s = `${what} +${((t - at) / 1000).toFixed(1)} s`;
+        at = t;
+        return s;
+      });
+      steps.push(`${how} +${((now - at) / 1000).toFixed(1)} s`);
+      const size = clock.bytes === undefined ? '' : `; transcript ${(clock.bytes / 1048576).toFixed(1)} MB`;
+      const title = String(this.info.title ?? '').replace(/\s+/g, ' ').slice(0, 60);
+      console.log(`resume ${this.info.id} (${title}): ${how} ${((now - clock.asked) / 1000).toFixed(1)} s after it was asked (${steps.join(', ')}${size}) (w5888)`);
+    } catch {
+      // the timing is lost, nothing else
+    }
   }
 
   /** The launch is over (or given up): the messages sent meanwhile go into the tally, in their order. */
