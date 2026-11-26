@@ -744,6 +744,8 @@ export class Agents {
    * by index.ts.
    */
   dispatcherAccountMove?: (account: string) => { why: string; out: boolean } | undefined;
+  /** w6093: a token's vault name and last 4 ("vault-ben-3 …CAAA") for an account key, else undefined. Wired by index.ts. */
+  tokenLabel?: (account: string) => string | undefined;
   /** w5921: why the dispatcher would wait if it started now (its pin out, or no token of its pool with room), else undefined. */
   dispatcherHeldWhy?: () => string | undefined;
   /** w5921: a line to the operators' orchestrators (those that exist): the owners and everyone with a Claude pool. */
@@ -3886,6 +3888,28 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       if (held) this.operatorAlert?.(`[token alert] The dispatcher was stopped to apply its account config (${cause}): ${why}. It cannot start yet: ${held}. Nothing to do unless that wait is wrong: \`set_app_config claudeAccounts.dispatcher\` with another pin or pool (or null) applies at once (w5921).`);
     }
     return moved;
+  }
+
+  /**
+   * w6093: what set_app_config claudeAccounts.dispatcher says happens to the dispatcher, given what applyAccountConfig moved.
+   * A mid-turn dispatcher is told it restarts only when a move is due for its current token (dispatcherAccountMove); when its
+   * token already satisfies the setting, nothing restarts, and the answer says so instead of promising a restart.
+   */
+  dispatcherConfigAnswer(moved: string[]): string {
+    if (moved.length) return 'the dispatcher was stopped between turns and its next message starts it there';
+    const id = this.orchestrators.dispatcherId;
+    const h = id ? this.sessions.sessions.get(id) : undefined;
+    const account = h?.live ? h.info.account : undefined;
+    if (!h?.live || !account) return 'the dispatcher already runs there, or starts there at its next message';
+    const move = this.dispatcherAccountMove?.(account);
+    const on = this.tokenLabel?.(account) ?? 'its current token';
+    if (!move) {
+      const pool = this.tokenOwner?.(account);
+      const out = pool ? this.orchestratorTokenOut?.(account, pool) : undefined;
+      return `the dispatcher already runs on ${on}${pool ? ` of ${pool}'s pool` : ''}${out ? `, which is out (${out}), and no other token of that pool has room: it waits for a reset there` : ', which has room'}: nothing to restart`;
+    }
+    if (isMidTurn(h.info) || h.info.backgroundTasks) return `the dispatcher is mid-turn: it restarts within 30 s of that turn ending (never mid-turn), because ${move.why}`;
+    return `the dispatcher restarts before its next turn, because ${move.why}`;
   }
 
   /** A person's orchestrator whose process runs on another pool than their pool setting names now (w1717), else undefined. */
@@ -7756,9 +7780,10 @@ ${w.repo ?? ''}
             editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
             path_fence: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w5863/w5899: the path fence on macOS and Linux: on (the default) moves the unity-slot shims folder on every agent's PATH to <root>/tools-medium/shims, which fenced workers cannot write; warn leaves it in the Unity slots mailbox and logs each write the daemon did not make; off leaves it there unwatched, the recovery. Takes effect at the daemon's next start. Unset leaves it as it is."),
             daemon_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w6000: the daemon's own temp folder, every OS: on (the default) points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps the system temp folder (the recovery). Takes effect at the daemon's next start."),
+            tools_disk_lock: z.enum(['warn', 'on']).optional().describe("action machine_update: w5959, Windows only: a virtual disk (a WSL distro's ext4.vhdx) in a Low <root>/tools child (docs/worker-root.md): on keeps that child Medium, so workers can no longer write there; warn (the default) only logs it (the recovery). Written as daemon.json toolsDiskLock; takes effect at the daemon's next start. Unset leaves it as it is."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, tools_disk_lock, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7766,7 +7791,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir, toolsDiskLock: tools_disk_lock });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
@@ -8082,9 +8107,7 @@ ${w.repo ?? ''}
             // w5921: the dispatcher restarts on the token or pool it names now, between turns (never mid-turn).
             if (key === 'claudeAccounts.dispatcher') {
               const moved = this.applyAccountConfig('config claudeAccounts.dispatcher changed');
-              const id = this.orchestrators.dispatcherId;
-              const busy = id ? this.sessions.sessions.get(id) : undefined;
-              const now = moved.length ? 'the dispatcher was stopped between turns and its next message starts it there' : busy?.live && isMidTurn(busy.info) ? 'the dispatcher is mid-turn: it restarts there within 30 s of that turn ending (never mid-turn)' : 'the dispatcher already runs there, or starts there at its next message';
+              const now = this.dispatcherConfigAnswer(moved);
               const held = this.dispatcherHeldWhy?.();
               return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied at once: ${now} (w5921).${held ? ` WARNING: it cannot start on it now: ${held}; the operators were told.` : ''}`;
             }

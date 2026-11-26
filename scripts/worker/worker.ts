@@ -1964,6 +1964,8 @@ export interface UpdateFlags {
   mediumAgentFolders?: 'warn' | 'on';
   /** The daemon's own temp folder (w6000, machine/daemonTemp.ts), every OS: written as daemon.json's `daemonTmpdir`; unset carries daemon.json's (absent: on). */
   daemonTmpdir?: 'on' | 'off';
+  /** A virtual disk in a Low tools child (w5959, machine/lowIntegrity.ts toolsDiskPlan), Windows only: written as daemon.json's `toolsDiskLock`; unset carries daemon.json's (absent: warn). */
+  toolsDiskLock?: 'warn' | 'on';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2085,6 +2087,20 @@ export function daemonTmpdirFlag(v: string | undefined): 'on' | 'off' | undefine
   return v;
 }
 
+/** `--tools-disk-lock warn|on` (w5959): anything else is refused, never guessed at. Exported for tests. */
+export function toolsDiskLockFlag(v: string | undefined): 'warn' | 'on' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'warn' && v !== 'on') throw new Error(`--tools-disk-lock is warn or on, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with toolsDiskLock set (w5959), Windows only: the Low label it acts on is Windows'. Exported for tests. */
+export function applyToolsDiskLock(config: Record<string, unknown>, setting: 'warn' | 'on' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (!setting) return config;
+  if (platform !== 'win32') throw new Error(`--tools-disk-lock: Windows only, not ${platform}`);
+  return { ...config, toolsDiskLock: setting };
+}
+
 /** daemon.json with the daemon's own temp folder set, "off" written as "off" (w6000); every platform. Exported for tests. */
 export function applyDaemonTmpdirSetting(config: Record<string, unknown>, setting: 'on' | 'off' | undefined): Record<string, unknown> {
   return setting ? { ...config, daemonTmpdir: setting } : config;
@@ -2131,7 +2147,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2372,6 +2388,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.pathFence) say(`path fence: ${f.pathFence}`);
   if (f.mediumAgentFolders) say(`medium agent folders: ${f.mediumAgentFolders}`);
   if (f.daemonTmpdir) say(`daemon tmpdir: ${f.daemonTmpdir}`);
+  if (f.toolsDiskLock) say(`tools disk lock: ${f.toolsDiskLock}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2974,6 +2991,9 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              docs/worker-root.md)
             [--daemon-tmpdir on|off] (w6000, every OS: on points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps
              the system temp folder, the recovery; daemon.json daemonTmpdir; default: as daemon.json has it, on if it has none)
+            [--tools-disk-lock warn|on] (w5959, Windows: on keeps a <root>/tools child that holds a virtual disk (.vhd, .vhdx) Medium,
+             so workers cannot write there; warn only logs it, the recovery; daemon.json toolsDiskLock; default: as daemon.json has it,
+             warn if it has none; docs/worker-root.md)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -3077,6 +3097,7 @@ export async function main(argv = process.argv.slice(2)) {
     const pathFence = flags.has('path-fence') ? pathFenceFlag('') : pathFenceFlag(opts['path-fence']);
     const mediumAgentFolders = flags.has('medium-agent-folders') ? mediumAgentFoldersFlag('') : mediumAgentFoldersFlag(opts['medium-agent-folders']);
     const daemonTmpdir = flags.has('daemon-tmpdir') ? daemonTmpdirFlag('') : daemonTmpdirFlag(opts['daemon-tmpdir']);
+    const toolsDiskLock = flags.has('tools-disk-lock') ? toolsDiskLockFlag('') : toolsDiskLockFlag(opts['tools-disk-lock']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3095,6 +3116,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(pathFence ? { pathFence } : {}),
       ...(mediumAgentFolders ? { mediumAgentFolders } : {}),
       ...(daemonTmpdir ? { daemonTmpdir } : {}),
+      ...(toolsDiskLock ? { toolsDiskLock } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

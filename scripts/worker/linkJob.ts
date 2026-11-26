@@ -230,6 +230,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.pathFence === 'off' || f.pathFence === 'warn' || f.pathFence === 'on' ? { pathFence: f.pathFence } : {}),
     ...(f.mediumAgentFolders === 'warn' || f.mediumAgentFolders === 'on' ? { mediumAgentFolders: f.mediumAgentFolders } : {}),
     ...(f.daemonTmpdir === 'on' || f.daemonTmpdir === 'off' ? { daemonTmpdir: f.daemonTmpdir } : {}),
+    ...(f.toolsDiskLock === 'warn' || f.toolsDiskLock === 'on' ? { toolsDiskLock: f.toolsDiskLock } : {}),
   };
 }
 

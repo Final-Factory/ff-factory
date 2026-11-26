@@ -17,7 +17,7 @@ import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { AnsweredCalls } from './answeredCalls.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
-import { LINK_ACK_MS, PendingCalls, THIN_REFUSED, type UpdateBundle, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
+import { LINK_ACK_MS, linkControlWaitMs, PendingCalls, THIN_REFUSED, type UpdateBundle, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { PortalPinStatus } from '../machine/portalPin.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
@@ -1415,7 +1415,7 @@ export class MachineManager {
     // w5546: an older daemon reads any action but restart as uninstall, so the switch goes only to one that offers it.
     if (action.startsWith('read-fence') && !this.hellos.get(id)?.readFenceSwitch) throw new Error(`${id}'s daemon has no read fence switch (it runs code from before w5546): nothing was sent`);
     const callId = randomUUID();
-    const done = this.linkControls.wait(callId, id, 60_000, `the ${action}`);
+    const done = this.linkControls.wait(callId, id, linkControlWaitMs(action), `the ${action}`);
     this.post(id, { type: 'daemon_control', id: callId, action });
     await done;
   }

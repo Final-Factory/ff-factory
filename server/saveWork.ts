@@ -3,6 +3,7 @@ import path from 'node:path';
 import { run } from './proc.ts';
 import { parseStatus } from './gitStatus.ts';
 import { fontAtlasNoise, mayBeDynamicFont, noiseFiles } from './editorNoise.ts';
+import { guardRemote } from './remoteGuard.ts';
 
 /**
  * Save a released worker's uncommitted work before its sandbox goes to other work (w656, run by its machine's daemon):
@@ -189,6 +190,12 @@ export async function saveWork(opts: { dir: string; branch: string; message: str
   const noise = restored.length ? [`restored ${restored.length} file(s) the Unity editor only rewrote by itself (re-serialized materials, w2782; a dynamic font atlas that grew, w5067) to HEAD instead of saving them: ${restored.join(', ')}`] : [];
   const left = foreign.size ? (await untrackedFiles(dir)).filter((f) => foreign.has(f)) : [];
   if (left.length) noise.push(`left ${left.length} untracked file(s) uncommitted that were already in the sandbox when it was switched to ${branch}, so not this worker's (w2988): ${someFiles(left)}`);
+  // w6099: before anything is committed, so a refused save leaves the sandbox as it was.
+  const no = await guardRemote(async (a) => {
+    const g = await git(dir, a);
+    return g.code === 0 ? g.stdout : undefined;
+  }, `the save's push in ${dir}`);
+  if (no) throw new Error(no);
   const specs = ['.', ...(await skipSpecs(dir)), ...left.map((f) => `:(exclude,literal)${f}`)];
   // From a file: another worker's leftovers can be hundreds of paths, past Windows' command line.
   const specFile = path.join(path.dirname(await foreignPath(dir)), 'ff-save-pathspec');

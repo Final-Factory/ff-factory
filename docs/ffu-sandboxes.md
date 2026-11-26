@@ -174,6 +174,19 @@ before their ref update (git has no hook before them), so the ref stays but the 
 files merged (`git merge --abort` puts them back). Recovery if the check ever misfires: `ffu-slot take` rewrites the holder
 file, and a shell with `FF_SESSION_ID` unset skips the check.
 
+**On Windows the slots run a native `reference-transaction`** (w6062). Git runs that hook at every phase of every ref
+transaction: 7 times for one `git commit` (preparing, prepared, committed; preparing, aborted, prepared, committed), and each
+start of Git Bash's `sh` cost about 30 ms on LothDesktop, so the shell hooks added about 210 ms per commit (measured; the
+hook already exited at once outside `prepared`, and an `exit 0` shell hook cost the same). `machine/ffuSlotHooks/native/
+reference_transaction.rs` is the same check in Rust (std only). `take` on Windows builds it once per version of the hooks
+with `rustc` (on PATH, else `CARGO_HOME`, `<root>/tools/cargo` with its `rustup` beside it, `<root>/cache/cargo`,
+`~/.cargo`; about 4 s) into `ffu-sandboxes/hooks/<hash>/` beside copies of `pre-push`, `pre-rebase` and `slot-guard.sh`,
+and points `core.hooksPath` there; no rustc, or a failed build, keeps the shell hooks (`take` says so). That folder is a
+worker's to write, as the shared clone's config already is: the guard stops slips, not a worker set on getting past it.
+The daemon does not build it: its rustc would be one a Low worker can write. macOS and Linux keep the shell hooks (about
+2 ms a call). Change `slot-guard.sh` and the `.rs` together: `server/ffuSlotGuard.test.ts` runs every refusal on both.
+Cost on LothDesktop (measured 2026-11-26, 40 empty commits per hook set, interleaved, under an exclusive bench ticket; the median a commit adds over no hooks, in the two calmest of three runs): the shell hooks added 237 and 296 ms, the native hook 90 and 102 ms. Most of what is left is Windows starting the hook 7 times.
+
 ## On the portal (w5912)
 
 Each machine's ffu slots show on its page, in a set of their own under its sandboxes (`web/src/components/FfuSlots.tsx`),

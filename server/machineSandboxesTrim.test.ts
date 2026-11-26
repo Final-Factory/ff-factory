@@ -698,6 +698,75 @@ test('w5614: slot repos "all": a free, idle worktree sandbox becomes a slot repo
   r.git(r.main, 'switch', '-q', 'master');
 });
 
+test('w5614: slot repos "all" on a busy machine: a worktree that is never free converts when a worker is placed in it, and the look says why it waited', async (t) => {
+  // BEAST, 2026-11-26: slot3 was free only between a release and the next placement, so convertIdle never saw it free,
+  // and the log never said why. The worker placed there was the one waiting for the conversion.
+  const r = repos();
+  t.after(r.cleanup);
+  const logs: string[] = [];
+  const { p } = pool(r, { liveAgents: () => 1, log: (l) => logs.push(l) });
+  await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+  await ready(p, 'sb1');
+  const dir = path.join(r.sbRoot, 'sb1');
+  fs.writeFileSync(path.join(dir, 'loose.txt'), 'u');
+  p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
+  await p.tick();
+  (p as unknown as { lastConvertLookAt: number }).lastConvertLookAt = 0;
+  await p.tick();
+  assert.ok(isWorktree(dir), 'an agent is live there: the look leaves it');
+  const said = logs.filter((l) => /sb1: not becoming a slot repo yet: an agent is live there/.test(l));
+  assert.equal(said.length, 1, `the reason, once: ${JSON.stringify(logs)}`);
+  await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
+  const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
+  assert.ok(isSlotRepo(dir), `converted at the placement: ${JSON.stringify(logs)}`);
+  assert.equal(res.to, 'sandbox/placed');
+  assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed');
+  assert.equal(p.list()[0].status, 'ready');
+  assert.ok(fs.existsSync(path.join(dir, 'loose.txt')), 'files untouched');
+});
+
+for (const how of ['hangs', 'throws'] as const) {
+  test(`w5614: a conversion at a placement that ${how} never stops the placement: the switch goes on with a whole worktree`, async (t) => {
+    const r = repos();
+    t.after(r.cleanup);
+    const { p, events } = pool(r, { liveAgents: () => 1 });
+    await p.create({ id: 'sb1', branch: 'sandbox/sb1', base: 'origin/master', seedLibrary: false, startUnity: false });
+    await ready(p, 'sb1');
+    const dir = path.join(r.sbRoot, 'sb1');
+    // create's provision ends ready before its busy mark is cleared: a switch in that gap rightly skips the conversion.
+    await until('sb1 not busy', () => !(p as unknown as { busy: Set<string> }).busy.has('sb1'));
+    p.configure(SETTINGS(r.sbRoot, { slotRepos: 'all' }));
+    const inner = p as unknown as { convertAtPlacementMs: number; d: { git: (a: string[], o?: { signal?: AbortSignal; timeoutMs?: number }) => Promise<{ code: number; stdout: string; stderr: string }> } };
+    // A throw needs no timeout; a hang needs one long enough to reach the planted fetch (Windows CI's git took over 300 ms
+    // before it, run 45833036898: "timed out after 0 s" with the step never reached).
+    inner.convertAtPlacementMs = how === 'hangs' ? 15_000 : 3 * 60_000;
+    const real = inner.d.git;
+    let reached = false;
+    // The refs fetch into .git.new, after .git.new is written and before the swap: the worst place to be cut.
+    inner.d.git = async (a, o) => {
+      if (!a.includes('fetch') || !a.some((x) => x.endsWith('.git.new'))) return real(a, o);
+      reached = true;
+      if (how === 'throws') throw new Error('planted failure');
+      // A hang: it ends only when the pool aborts it, as a killed git process would.
+      return new Promise((res) => o?.signal?.addEventListener('abort', () => res({ code: 1, stdout: '', stderr: 'killed' })));
+    };
+    await p.tick();
+    const before = { worktree: isWorktree(dir), blocker: (p as unknown as { convertBlocker: (r: unknown) => string | undefined; recs: Map<string, unknown> }).convertBlocker((p as unknown as { recs: Map<string, unknown> }).recs.get('sb1')) };
+    const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
+    assert.ok(reached, `the planted step ran: ${JSON.stringify({ before, now: { worktree: isWorktree(dir), slot: isSlotRepo(dir) }, events })}`);
+    assert.equal(res.to, 'sandbox/placed', 'the placement went on');
+    assert.ok(isWorktree(dir), 'still a whole worktree');
+    assert.equal(fs.existsSync(path.join(dir, '.git.new')), false, 'no half-made git folder left');
+    assert.equal(r.git(dir, 'branch', '--show-current'), 'sandbox/placed');
+    assert.equal(p.list()[0].status, 'ready');
+    assert.ok(events.some((e) => /sb1: could not become a slot repo/.test(e.text)), JSON.stringify(events));
+    // The next placement, with git well again, converts it.
+    inner.d.git = real;
+    await p.switch('sb1', 'sandbox/placed2', 'origin/master');
+    assert.ok(isSlotRepo(dir), 'converted at the next placement');
+  });
+}
+
 test('w5614: a conversion cut between its two renames is finished; a slot .git.new beside a whole .git is dropped', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slotfin-'));
   try {
