@@ -33,6 +33,8 @@ parentPort.on('message', (m) => {
     return done(e, '', '');
   }
   kids.set(m.id, c);
+  // The program's pid, so the main side can end it if this thread dies first: its timeout timer would die with the thread.
+  if (c.pid) parentPort.postMessage({ started: m.id, pid: c.pid });
 });
 `;
 
@@ -60,6 +62,8 @@ let enabled = false;
 let worker: Worker | undefined;
 let nextId = 1;
 const pending = new Map<number, ExecCallback>();
+/** The pids of pending programs, by call id: a thread that dies leaves them running, with no timeout left to end them. */
+const pids = new Map<number, number>();
 let deaths: number[] = [];
 let say: (line: string) => void = (l) => console.warn(l);
 
@@ -79,15 +83,33 @@ function stopThread() {
   const w = worker;
   worker = undefined;
   if (w) void w.terminate();
+  settle('the spawn thread was turned off');
+}
+
+/**
+ * Answer the pending programs -1 and end the ones still running. Ending them is what execFile's own timeout or abort would
+ * have done (child.kill(): SIGTERM, on Windows TerminateProcess), so a git left running cannot hold index.lock forever.
+ */
+function settle(why: string) {
+  for (const pid of pids.values()) {
+    try {
+      process.kill(pid);
+    } catch {
+      // Already gone.
+    }
+  }
+  pids.clear();
+  const err = Object.assign(new Error(`spawn thread ended (${why}); the program's result is unknown`), { code: -1 });
+  const cbs = [...pending.values()];
+  pending.clear();
+  for (const cb of cbs) cb(err, '', '');
 }
 
 function lost(why: string) {
   worker = undefined;
   const now = Date.now();
   deaths = [...deaths.filter((t) => now - t < DEATH_WINDOW_MS), now];
-  const err = Object.assign(new Error(`spawn thread ended (${why}); the program's result is unknown`), { code: -1 });
-  for (const cb of pending.values()) cb(err, '', '');
-  pending.clear();
+  settle(why);
   if (deaths.length >= MAX_DEATHS) {
     enabled = false;
     say(`spawn thread: ended ${deaths.length} times in ${DEATH_WINDOW_MS / 1000} s (last: ${why}); programs start on the main thread again (w6077)`);
@@ -99,8 +121,13 @@ function thread(): Worker | undefined {
   try {
     const w = new Worker(THREAD, { eval: true });
     w.unref();
-    w.on('message', (m: { id: number; err: { message: string; code?: number | string; signal?: string | null; killed?: boolean } | null; stdout: string; stderr: string }) => {
+    w.on('message', (m: { started?: number; pid?: number; id: number; err: { message: string; code?: number | string; signal?: string | null; killed?: boolean } | null; stdout: string; stderr: string }) => {
+      if (m.started !== undefined) {
+        if (m.pid && pending.has(m.started)) pids.set(m.started, m.pid);
+        return;
+      }
       const cb = pending.get(m.id);
+      pids.delete(m.id);
       if (!cb) return;
       pending.delete(m.id);
       if (!pending.size) w.unref();
@@ -120,7 +147,9 @@ function thread(): Worker | undefined {
 /**
  * execFile, with the program started on the spawn thread when it is on (useSpawnThread). The callback gets what execFile's
  * would: stdout and stderr as strings, and an error whose code is the exit status (or a string such as ENOENT), with signal
- * and killed. Aborting `signal` kills the program, as execFile does.
+ * and killed. Aborting `signal` kills the program, as execFile does. One difference: where execFile throws at once (an argument
+ * with a null byte, ERR_INVALID_ARG_VALUE), the thread answers that error through the callback instead (run() then answers
+ * code -1, as its "never throws" promises). A thread that dies ends its running programs and answers them code -1.
  */
 export function execFileOffThread(cmd: string, args: string[], opts: ThreadExecOptions, cb: ExecCallback): void {
   const w = enabled ? thread() : undefined;

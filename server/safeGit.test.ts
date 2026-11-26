@@ -40,8 +40,8 @@ function sources(): string[] {
  */
 const NOT_GIT: Record<string, string> = {
   'machine/daemon.ts|runnerEnvCmd': 'plutil, launchctl and powershell.exe for the macOS and Windows CI runners (machine/runnerEnv.ts, w5999)',
-  'server/spawnThread.ts|m.cmd': 'whatever its callers start (run() fences git before, server/proc.ts; w6077)',
-  'server/spawnThread.ts|cmd': 'whatever its callers start, on the main thread when the spawn thread is off (run() fences git before; w6077)',
+  'server/spawnThread.ts|m.cmd': 'whatever execFileOffThread is given: its callers fence git (proc.run), and the lint checks each caller as a spawner (w6077)',
+  'server/spawnThread.ts|cmd': 'the same, on the main thread when the spawn thread is off: its callers fence git (proc.run; w6077)',
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
   'machine/lowIntegrity.ts|cmd': 'icacls (LowCopies execSync, w5838)',
@@ -110,6 +110,13 @@ export function gitSpawnProblems(files: { rel: string; text: string }[]): string
       if (/['"]-c['"],\s*['"`]git\s/.test(l) && !/\bgitFence(Sync)?\(/.test(l)) problems.push(`${rel}:${i + 1}: a shell runs git without server/safeGit.ts (give it gitFence's env)`);
     });
     const { names, spaces } = childProcessNames(text);
+    // execFileOffThread starts what it is given (server/spawnThread.ts, w6077): each caller is checked as if it were execFile.
+    for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"][^'"]*spawnThread(?:\.ts)?['"]/g)) {
+      for (const part of m[1].split(',')) {
+        const [name, alias] = part.trim().split(/\s+as\s+/);
+        if (name === 'execFileOffThread') names.add((alias ?? name).trim());
+      }
+    }
     if (!names.size && !spaces.length) continue;
     const callee = [...names].map((n) => `(?<![\\w.])${n}`).concat(spaces.map((s) => `\\b${s}\\.\\w+`));
     if (!callee.length) continue;
@@ -140,13 +147,16 @@ test('w5541: the lint catches a raw git spawn, an aliased one and a new generic 
     { rel: 'machine/d.ts', text: "import { spawn } from 'node:child_process';\nexport const go = (bin: string) => spawn(bin, []);\n" },
     { rel: 'machine/e.ts', text: "import { spawn } from 'node:child_process';\nimport { run } from './proc.ts';\nspawn('node', []);\nrun('git', []);\nd.spawn('git', []);\n" },
     { rel: 'scripts/f.ts', text: "await must('copy', 'bash', ['-c', `git -C \"$1\" archive HEAD | tar -x`, 'x', src]);\nawait must('copy', 'bash', ['-c', `git archive HEAD`], { env: (await gitFence([])).env });\n" },
+    { rel: 'machine/g.ts', text: "import { execFileOffThread as eft } from '../server/spawnThread.ts';\neft('git', [], {}, cb);\neft(bin, [], {}, cb);\neft('powershell.exe', [], {}, cb);\n" },
   ]);
-  assert.equal(p.length, 5, p.join('\n'));
+  assert.equal(p.length, 7, p.join('\n'));
   assert.match(p[0], /^machine\/a\.ts:2: execFile\('git'/);
   assert.match(p[1], /^machine\/b\.ts:2: ss\('git'/);
   assert.match(p[2], /^machine\/c\.ts:2: cp\.spawn\('git\.exe'/);
   assert.match(p[3], /^machine\/d\.ts:2: spawn\(bin, \.\.\.\) runs a program a variable names/);
   assert.match(p[4], /^scripts\/f\.ts:1: a shell runs git without server\/safeGit\.ts/);
+  assert.match(p[5], /^machine\/g\.ts:2: eft\('git'/);
+  assert.match(p[6], /^machine\/g\.ts:3: eft\(bin, \.\.\.\) runs a program a variable names/);
 });
 
 // ---------------------------------------------------------------- the pieces

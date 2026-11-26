@@ -75,6 +75,44 @@ test('w6077: a thread that ends answers its programs -1, and the next program ge
   }
 });
 
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+test('w6077: a thread that ends takes its running programs with it (no orphan left without its timeout)', async () => {
+  useSpawnThread(true, () => {});
+  try {
+    const pidFile = `${process.env.TMPDIR ?? process.env.TEMP ?? '.'}/w6077-orphan-${process.pid}.txt`;
+    const slow = run(node, ['-e', `require('fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 20000)`], { timeoutMs: 30_000 });
+    const fs = await import('node:fs');
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i++) await new Promise((r) => setTimeout(r, 50));
+    const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+    fs.rmSync(pidFile, { force: true });
+    assert.ok(alive(pid), 'the program runs');
+    await endSpawnThreadForTest();
+    assert.equal((await slow).code, -1);
+    for (let i = 0; i < 40 && alive(pid); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(alive(pid), false, 'the program ended with its thread');
+  } finally {
+    useSpawnThread(false);
+  }
+});
+
+test('w6077: turning the thread off answers the programs still pending', async () => {
+  useSpawnThread(true, () => {});
+  const slow = run(node, ['-e', 'setTimeout(() => {}, 3000)']);
+  await new Promise((r) => setTimeout(r, 200));
+  useSpawnThread(false);
+  const r = await slow;
+  assert.equal(r.code, -1);
+  assert.match(r.stderr, /turned off/);
+});
+
 test('w6077: a thread that keeps dying is given up: programs start on the calling thread again', async () => {
   const lines: string[] = [];
   useSpawnThread(true, (l) => lines.push(l));
