@@ -219,9 +219,18 @@ switch the fence off from the portal. A worker cannot run this check itself: it 
 Medium label (error 1299, measured on LothDesktop 2026-11-26), so the test of real labels in machine/readFenceGaps.test.ts
 skips at Low and runs on a Medium or elevated runner.
 
-**Explicit labels inside a closed folder** (w5968's review of #1324, measured on the Windows CI runner): a folder's label
-reaches only what inherits it, and a path's own explicit label wins. A file a High (elevated) process makes gets an explicit
-`S:(ML;;NW;;;HI)`, so under the folder's No-Read-Up a Low child still opened it. So after the labels, `relabelInside`
+**The Windows CI runner cannot prove the fence** (w5957, measured at #1324's 579a7480 and 3aed8cd7): there the mirrored
+`daemon.json` carried the inherited `Medium (I)(NW,NR)` label (icacls) and the test's child ran Low (`whoami /groups`), yet
+the child opened it. The child holds SeBackupPrivilege **enabled** (`whoami /priv`, from the elevated runner's token), and
+node opens every file with `FILE_FLAG_BACKUP_SEMANTICS` (libuv), which with that privilege skips the access check, labels
+included. A Medium daemon's Low workers hold no SeBackupPrivilege (none in a fenced worker on LothDesktop, measured), so the
+probe means what it says there; the real-label leg in `machine/readFenceGaps.test.ts` stops on such a child and says why.
+The proof of the labels is the daemon's own `warn` probe on each machine.
+
+**Explicit labels inside a closed folder** (w5968's review of #1324 suspected them on the CI runner; the backup privilege
+above was the cause there): a folder's label reaches only what inherits it, and a path's own explicit label wins, so a file a
+High (elevated) process makes, with its explicit `S:(ML;;NW;;;HI)`, would stay readable under the folder's No-Read-Up. A
+daemon that once ran elevated could leave such files. So after the labels, `relabelInside`
 (machine/lowIntegrity.ts) walks the closed folders and gives every path with an explicit label at Medium or above No-Read-Up
 too, keeping its level (`S:(ML;;NWNR;;;HI)`); in `off` and `warn`, after an `on`, it takes that NR off again. It never
 touches the label targets themselves, the read-back folders, reparse points (it does not follow them) or the system drive,

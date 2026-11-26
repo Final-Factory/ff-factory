@@ -639,8 +639,9 @@ export function relabelScript(roots: readonly string[], skip: readonly string[],
 /**
  * w5968 (review of #1324): a label set on a folder reaches only what inherits it. A file or folder that carries an
  * EXPLICIT label keeps it, and the first label wins, so a file a High (elevated) process made inside a closed folder,
- * which gets `S:(ML;;NW;;;HI)` of its own, stayed readable by Low under the folder's No-Read-Up (measured on the Windows
- * CI runner, which runs elevated). Medium creators give no explicit label, Low ones an explicit Low label, which this leaves
+ * which gets `S:(ML;;NW;;;HI)` of its own, would stay readable by Low under the folder's No-Read-Up (suspected on the
+ * Windows CI runner; there the cause was the child's enabled SeBackupPrivilege, docs/worker-fence.md, but a daemon that
+ * once ran elevated can leave such files). Medium creators give no explicit label, Low ones an explicit Low label, which this leaves
  * alone (workers write there). So after labelNoReadUp (`close`) every explicitly labelled path at Medium or above inside the
  * closed folders gets NR too, keeping its level; `open` takes that NR off again. Read-back folders, the label targets
  * themselves, reparse points and the system drive are never touched. Returns whether every path that needed it was set;
