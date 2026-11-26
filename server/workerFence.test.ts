@@ -339,7 +339,7 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
   const { readLockArgs } = await import('../machine/writeLock.ts');
   const { NO_READ_UP, noReadUpTargets } = await import('../machine/lowIntegrity.ts');
   const { daemonOnlyDirs } = await import('../machine/readFence.ts');
-  assert.deepEqual([...DAEMON_ONLY_CHILDREN], ['steam']);
+  assert.deepEqual([...DAEMON_ONLY_CHILDREN], ['steam', 'tmp-daemon']);
   // macOS: in the deny block, absent from the allow block; steam-lobby-gate (the lobby gate's folder) is no subpath of it.
   const p = seatbeltProfile(F);
   const deny = p.slice(p.indexOf('(deny file-read-data'), p.indexOf('(allow file-read-data'));
@@ -376,7 +376,7 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
     fs.mkdirSync(path.join(r, 'steam-lobby-gate'));
     fs.writeFileSync(path.join(r, 'steam', 'config.json'), '{}');
     fs.writeFileSync(path.join(r, 'steam-lobby-gate', 'x.json'), '{}');
-    assert.deepEqual(daemonOnlyDirs(r), [path.join(r, 'steam')]);
+    assert.deepEqual(daemonOnlyDirs(r), [path.join(r, 'steam'), path.join(r, 'tmp-daemon')]);
     const t2 = readFenceProbeTargets({ root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'], linux: false });
     assert.deepEqual(t2.closed, [path.join(r, 'steam')]);
     // Linux: Landlock cannot refuse the folder's own open (its parents' READ_DIR is inherited), so the probe opens its files.

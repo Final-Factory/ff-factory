@@ -1498,9 +1498,10 @@ export async function removeSlots(args: string[], facts: CleanupFacts | undefine
  * refused every slot and pointed at remove-slot, while `folders` listed the slots as DELETE rows like any other (w5165).
  * The verdict is taken twice, the second time just before the delete, so a worker that starts or resumes meanwhile keeps
  * it. Each removal is printed and appended with its size to <root>/logs/ff-leftovers-removed.jsonl (FF_LEFTOVERS_REMOVE_LOG
- * overrides it, for tests).
+ * overrides it, for tests). w6000 (w5894 review N2): runner-tmp too, the parent of the CI runners' TMPDIR folders outside a
+ * runner folder (machine/runnerUnits.ts runnerTempDir, w5834): removed whole, every running runner's job loses its temp folder.
  */
-export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon', 'cache']);
+export const REMOVE_TOP = new Set(['repo', 'seed', 'secrets', 'backups', 'tools', 'steam', 'logs', 'sandboxes', 'players', 'tmp', 'scratch', 'timing', 'nightly', 'nightly-history', 'ffu-runners', 'ffu-sandboxes', 'player-cache', 'daemon', 'cache', 'runner-tmp', 'tmp-daemon']);
 
 /** Why `p` (resolved) may never go through `remove`, before any verdict; undefined when it may be judged. */
 export function removeFenceProblem(p: string, root: string, o: { home: string; daemonDir?: string; cwd?: string }): string | undefined {

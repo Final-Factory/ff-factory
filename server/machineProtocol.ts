@@ -140,6 +140,8 @@ export interface LinkUpdateFlags {
   pathFence?: 'off' | 'warn';
   /** Medium agents' own temp root and cargo home, warn or on (w5862, w5869; docs/worker-root.md), any OS: daemon.json `mediumAgentFolders`; unset: carried. A daemon that predates it ignores it. */
   mediumAgentFolders?: 'warn' | 'on';
+  /** The daemon's own temp folder on or off (w6000), any OS: daemon.json `daemonTmpdir`; unset: carried. A daemon that predates it ignores it. */
+  daemonTmpdir?: 'on' | 'off';
 }
 
 /**

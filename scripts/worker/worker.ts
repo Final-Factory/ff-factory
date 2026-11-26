@@ -1962,6 +1962,8 @@ export interface UpdateFlags {
   pathFence?: 'off' | 'warn';
   /** Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md), every OS: written as daemon.json's `mediumAgentFolders`; unset carries daemon.json's. */
   mediumAgentFolders?: 'warn' | 'on';
+  /** The daemon's own temp folder (w6000, machine/daemonTemp.ts), every OS: written as daemon.json's `daemonTmpdir`; unset carries daemon.json's (absent: on). */
+  daemonTmpdir?: 'on' | 'off';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2076,6 +2078,18 @@ export function mediumAgentFoldersFlag(v: string | undefined): 'warn' | 'on' | u
   return v;
 }
 
+/** `--daemon-tmpdir on|off` (w6000): anything else is refused, never guessed at. Exported for tests. */
+export function daemonTmpdirFlag(v: string | undefined): 'on' | 'off' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'on' && v !== 'off') throw new Error(`--daemon-tmpdir is on or off, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with the daemon's own temp folder set, "off" written as "off" (w6000); every platform. Exported for tests. */
+export function applyDaemonTmpdirSetting(config: Record<string, unknown>, setting: 'on' | 'off' | undefined): Record<string, unknown> {
+  return setting ? { ...config, daemonTmpdir: setting } : config;
+}
+
 /** daemon.json with Medium agents' folder mode set (w5862, w5869); every platform. Exported for tests. */
 export function applyMediumAgentFolders(config: Record<string, unknown>, setting: 'warn' | 'on' | undefined): Record<string, unknown> {
   return setting ? { ...config, mediumAgentFolders: setting } : config;
@@ -2117,7 +2131,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2357,6 +2371,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.editorTmpdir) say(`editor tmpdir: ${f.editorTmpdir}`);
   if (f.pathFence) say(`path fence: ${f.pathFence}`);
   if (f.mediumAgentFolders) say(`medium agent folders: ${f.mediumAgentFolders}`);
+  if (f.daemonTmpdir) say(`daemon tmpdir: ${f.daemonTmpdir}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -2958,6 +2973,8 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--medium-agent-folders warn|on] (w5862, w5869, every OS: on moves Medium agents' temp root and cargo home to <root>/tmp-medium
              and <root>/cache-medium/cargo, warn only logs the exposure, daemon.json mediumAgentFolders; default: as daemon.json has it;
              docs/worker-root.md)
+            [--daemon-tmpdir on|off] (w6000, every OS: on points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps
+             the system temp folder, the recovery; daemon.json daemonTmpdir; default: as daemon.json has it, on if it has none)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of
              workers and editors. An update without these keeps the drive it has and makes none.)
@@ -3060,6 +3077,7 @@ export async function main(argv = process.argv.slice(2)) {
     const editorTmpdir = flags.has('editor-tmpdir') ? editorTmpdirFlag('') : editorTmpdirFlag(opts['editor-tmpdir']);
     const pathFence = flags.has('path-fence') ? pathFenceFlag('') : pathFenceFlag(opts['path-fence']);
     const mediumAgentFolders = flags.has('medium-agent-folders') ? mediumAgentFoldersFlag('') : mediumAgentFoldersFlag(opts['medium-agent-folders']);
+    const daemonTmpdir = flags.has('daemon-tmpdir') ? daemonTmpdirFlag('') : daemonTmpdirFlag(opts['daemon-tmpdir']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3077,6 +3095,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(editorTmpdir ? { editorTmpdir } : {}),
       ...(pathFence ? { pathFence } : {}),
       ...(mediumAgentFolders ? { mediumAgentFolders } : {}),
+      ...(daemonTmpdir ? { daemonTmpdir } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

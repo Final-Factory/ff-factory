@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
+// w6000: the browsers' profiles it looks for are in the system temp folder, not the daemon's own (<root>/tmp-daemon).
+import { systemTempDir } from '../machine/daemonTemp.ts';
 import path from 'node:path';
 import { isWindows, run } from './proc.ts';
 
@@ -103,7 +105,7 @@ export const PLAYWRIGHT_DIR = path.join(process.env.LOCALAPPDATA ?? path.join(os
 
 /** Find and reap stale automation browsers. Returns one line per reaped tree. */
 export async function reapBrowsers(maxAgeHours: number, selfPid = process.pid): Promise<string[]> {
-  const targets = pickReaps(await listProcs(), { tmp: os.tmpdir(), playwrightDir: PLAYWRIGHT_DIR, now: Date.now(), maxAgeMs: maxAgeHours * 3_600_000, selfPid });
+  const targets = pickReaps(await listProcs(), { tmp: systemTempDir(), playwrightDir: PLAYWRIGHT_DIR, now: Date.now(), maxAgeMs: maxAgeHours * 3_600_000, selfPid });
   const lines: string[] = [];
   for (const t of targets) {
     const k = await run('taskkill', ['/PID', String(t.pid), '/T', '/F'], { timeoutMs: 30_000 });
