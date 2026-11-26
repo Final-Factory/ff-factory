@@ -176,6 +176,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   cache-medium/uv/               the daemon's and Medium agents' UV_CACHE_DIR (the Unity MCP server's uvx, w5565): read-only to workers
   cache-medium/uv-tools/         the daemon's and Medium agents' UV_TOOL_DIR (w5693): read-only to workers
   cache-medium/cargo/            Medium agents' CARGO_HOME with "mediumAgentFolders": "on" (w5862): read-only to workers
+  cache-medium/<tool>/           Medium agents' pip, npm, upm, asset-store, nuget, dotnet, ms-playwright (and xdg) caches with "mediumAgentCaches": "on" (w5870)
   cache/uv-tools/                sandbox agents' and editors' UV_TOOL_DIR (uvx's temp files, w5693, w5745)
   cache/uv-bin/                  sandbox agents' and editors' UV_TOOL_BIN_DIR (`uv tool install`'s commands, w5745)
   steam/                         steamcmd, its config and cached login, FFBox's release scripts: the daemon's alone (w5551, steam-upload.md)
@@ -522,8 +523,38 @@ config's temp folder is always a fence extra). A fenced worker could plant a scr
   `transcriptLock` is not on; w5869, w5871's F3).
 - A folder that cannot be made, or one a worker could still write, keeps today's with a `WARNING medium agent folders:
   could not make ...` line, so the switch never stops an agent and needs nobody at the machine. No fence, no change.
-Still Low-writable and not covered: an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`.
+Still Low-writable then: the other tool caches, an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`
+(the next paragraph).
 Tests: `server/mediumFolders.test.ts` (every path the Medium env names lies outside `lowTargets` and `openChildren`).
+
+**Medium agents' other tool caches, the user PATH, ffu slots and the tools checkouts** (w5870, w5862's follow-up; the same
+warn-only-first rule, lothsahn). What a Medium agent or the daemon still ran from a folder workers write:
+- The tool caches `workerToolCacheEnv` (`machine/sharedCaches.ts`) gives every agent in `<root>/cache`: a .NET global tool
+  under `DOTNET_CLI_HOME`, a Playwright browser, an npm or pip package, a NuGet package's build targets. `planMediumCaches`
+  (`machine/mediumFolders.ts`) decides once at start under daemon.json `mediumAgentCaches`: absent or `"warn"` logs one
+  `WARNING medium agent caches: ...` line; `"on"` gives Medium agents `<root>/cache-medium/<same name>` (`mediumCacheFor`),
+  sandbox agents keep `cache`. A folder that cannot be made keeps the workers' one with a WARNING. The daemon's own env keeps
+  `cache`: sandbox agents inherit it, and the daemon runs none of those tools.
+- The user PATH: .NET's first run adds `$DOTNET_CLI_HOME/.dotnet/tools` to HKCU's PATH (BEAST's held
+  `F:\ffw\cache\dotnet\.dotnet\tools`, measured), which every Medium process of the account searches. `fixUserPath` (Windows,
+  at start) warns; with `"on"` it writes the PATH back without the entries in worker-writable folders, its registry kind kept.
+  The value goes both ways as base64 of its UTF-8 bytes (a non-ASCII entry survives, and no quote reaches the script); the
+  write happens only if the PATH is still what was read, is read back, and puts the old value back on a mismatch (w5946).
+  "Folders workers write" here and for the caches includes what the fences open whole: workerIntegrityAllow,
+  writeLockExtra and the transcripts folder while transcriptLock is off (the same list as `planMediumFolders`).
+- The ffu slots (`<root>/ffu-sandboxes/slotN`, checkout and target): the daemon tells a Medium agent the switch in
+  `FF_MEDIUM_AGENT_CACHES`; `ffu-slot take` and `where` then warn, or refuse (exit 5, `EXIT_MEDIUM_REFUSED`; 4 is "no slot
+  free") and say to build in a clone in its own `$TMPDIR`. The daemon says `"on"` only when `mediumAgentCaches` is `"on"`
+  and w5862's `mediumAgentFolders` made the agent's own temp folder, so that `$TMPDIR` is one no worker writes (w5946 F5).
+  A Medium agent's `take` and `where` print no CARGO_HOME: it keeps its own, never the workers' `<root>/cache/cargo` (w5947).
+- Always, no switch: a Medium agent's `FF_SKILLS` fallback is only `tools-medium` (`server/pluginPaths.ts` `medium`), never
+  the old `<root>/tools` checkout; and the plugin refresh `worker.ts tools` runs (`registerAgents.sh`, then claude's own git
+  in `<CLAUDE_CONFIG_DIR>/plugins/marketplaces/final-factory-agents`) gets safeGit's fence as command-scope config
+  (`fencedRegisterEnv`, `server/agentTools.ts`): the fixed keys, a planted program key overridden and named in a WARNING, a
+  planted URL rewrite removed from that checkout's config with a WARNING (`git config --local --unset-all`, fenced; only one
+  that cannot be removed stops that folder's refresh). The Medium agents' folder is refreshed even when the workers' one
+  failed (w5946 F6).
+Tests: `server/mediumCaches.test.ts`, `server/mediumFolders.test.ts`.
 
 **uv's tool folder, split the same way** (w5693). `uvx` takes a temp file in uv's tool folder (`UV_TOOL_DIR`, default
 `~/.local/share/uv/tools`; `%APPDATA%\uv\tools` on Windows) on every run. No fence lets a worker write the person's home, so
@@ -883,7 +914,17 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     kept in `daemon\agent-node\<zip>` when its SHA-256 is the pinned one (hashed in memory and those same bytes unpacked),
     else downloads it and keeps it (`pinnedZip`), so a rollout needs no network once a machine has it. A Low process that
     puts an empty access list on itself is never listed as Low by the read (w5964's review, N1): the swap does not rest on
-    the read. The rollout log says
+    the read. What the swap costs (w5986, measured on LothDesktop in test folders): `tools\node` is missing between its
+    two renames for 151 µs at the median and 607 µs at most (127 swaps), and 249 node starts while 4 processes started
+    node in a loop all ran; a start that lands in that gap gets ENOENT by full path, or by `PATH` the next node on it (here
+    `C:\Program Files\nodejs`, which Low cannot write). A node still starting holds node.exe open and refuses the
+    first rename (EPERM, 23 of 150 swaps), which is the retry and the busy line below, never a missing node. A Low
+    process holding a write handle to `tools` from before its label was raised cannot create `node` through it in the
+    gap: Windows checks the folder's label as it is now (measured one level down: a thread impersonating Untrusted
+    opened `tools` while it was labelled Untrusted; after the label was raised to Low, creating `node` relative to that
+    handle was refused with 0xC0000022). The label read (`icacls /T`, 5.6 s on LothDesktop's 2459 entries) stays: it
+    is the only check that sees a label any Low process could use, and the holder read now runs after it even when it
+    fails, so the writers of such a node are named for w5952's stage. The rollout log says
     `Agent node: node reinstalled (verified: ...; swapped anyway, ...): ...` for a node that passed every check,
     `Agent node: node reinstalled (<why>): ...` for one that did not, or
     `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or

@@ -267,3 +267,19 @@ test('w5950 (e): past RESUME_WITHIN_MS the report says to message only the worke
   const r = reports.find((x) => /is back; .*too long ago/.test(x))!;
   assert.match(r, /Message 847ebd50 to continue\. d732483b \(its work moved to biscuit at 06:09:46Z: message the worker its request is with now, not this one\)\./);
 });
+
+test('w5950 (the w5975 review, finding 1): a second hello while the worker is being retired neither stops, saves nor tells again', async (t) => {
+  const { agents, sent, saves, worker, live, request, sandbox, settle } = await setup(t);
+  const oldH = live(worker('d732483b', { status: 'running', machineId: 'beast', machineSandbox: 'slot2', movedAway: MOVED }));
+  live(worker('0b7e41c2', { status: 'running', machineId: 'biscuit', machineSandbox: 'slot3', turns: 2 }));
+  sandbox('beast', 'slot2', ['d732483b']);
+  request(['0b7e41c2'], { d732483b: MOVED.at });
+  const first = agents.enforceMovedAway('beast', ['d732483b'], 'live');
+  const again = agents.enforceMovedAway('beast', ['d732483b'], 'resume');
+  assert.deepEqual([...again], [...first], 'still taken, so the resume skips it too');
+  await settle(() => sent.length > 0);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(oldH.stops, 1);
+  assert.equal(saves.length, 1);
+  assert.equal(sent.length, 1);
+});

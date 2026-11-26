@@ -365,6 +365,8 @@ export interface RoomFit {
   cargoShort?: string;
   /** w4601: the ready players its shared player cache holds (machine/playerCache.ts); a pair leg prefers the computer with its commit's. */
   playerCache?: PlayerCacheReport;
+  /** w5965: its worker fence's state (Machine.fence); absent: not reported. A pair run of a pre-w5297 player goes only where it is off. */
+  fence?: 'off' | 'setting_up' | 'on' | 'failed';
 }
 
 /** The player cache's build target for a platform (scripts/nightly/player_cache.py TARGETS), or undefined. */
@@ -445,6 +447,15 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (!f) return undefined;
   // w4621: every leg of a pair run runs a game player (or an FFU client), which a no-players computer (the m3) never runs.
   if (w.pair && f.noPlayers) return `${id} runs no game players (${f.noPlayers}), and every leg of a pair run runs one`;
+  // w5965: a player from before w5297 (the 0.50 line) writes the owner's own data folder, which a fenced worker cannot
+  // write (Windows: LocalLow, labelled Medium; SHGetKnownFolderPath ignores a child's USERPROFILE, so it cannot be moved).
+  if (w.pair?.legacyData) {
+    if (f.platform === 'linux') return `${id} is on Linux, and this pair run's player predates w5297 (${w.pair.legacyData}): pre-1.0 has no Linux multiplayer build (w5965)`;
+    // w5988: on Windows the fence is the integrity level (workerIntegrity "low"), so one nobody reported is an unknown
+    // level, not Medium: w5966 was placed on beast/slot5 at Low. Elsewhere an unreported fence still fits.
+    if (!f.fence && f.platform === 'win32') return `${id} has not reported its worker fence, so its workers' integrity level is unknown, and this pair run's player predates w5297 (${w.pair.legacyData}): it runs only where workers are at Medium (fence off) (w5988)`;
+    if (f.fence && f.fence !== 'off') return `${id}'s worker fence is ${f.fence === 'setting_up' ? 'setting up' : f.fence}, and this pair run's player predates w5297 (${w.pair.legacyData}): it writes the owner's own data folder, which a fenced worker cannot write (w5944, w5965); it goes on a computer whose fence is off`;
+  }
   // w3396: an FFU worker's cargo target grows to many GB; a drive under the line takes none until the clean-up frees it.
   if (f.cargoShort && isCargoRepo(w.repo)) return `${id}: ${f.cargoShort}`;
   // w2459: a pair run that needs Steam (lobbies, a Steam host or join) goes only where Steam is signed in.
@@ -477,6 +488,29 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (mp) return w.pair ? `${id} is a Mac, and each leg of this pair run starts ${mp}'s host and its client on its own computer: ${MAC_REFUSES_SCENARIO}` : `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
   return undefined;
 }
+
+/**
+ * w5988: what the brief of a pair run whose player predates w5297 says about checking the level. Git Bash's `whoami` is
+ * coreutils (no /groups), and Git Bash rewrites a bare `/groups` into a path (`V:/ffw/tools/git/groups`, measured on
+ * lothdesktop 2026-11-26), so the check names Windows' own whoami.exe and turns that rewrite off.
+ */
+export const LEGACY_INTEGRITY_CHECK =
+  "Its player predates w5297 and writes the owner's own data folder, which a Low-integrity worker cannot write (w5944, w5966): " +
+  "on Windows, first check your level with `MSYS2_ARG_CONV_EXCL='*' \"$SYSTEMROOT/System32/whoami.exe\" /groups | grep \"Mandatory Level\"` " +
+  "(Git Bash's own `whoami` is coreutils and has no /groups, and without MSYS2_ARG_CONV_EXCL Git Bash turns /groups into a path). " +
+  '`Medium Mandatory Level` runs it; at `Low Mandatory Level` (S-1-16-4096) run nothing, and report that this computer was the wrong one (w5988).';
+
+/** w5965: what pairText says of a pair run whose player predates w5297 (WorkPair.legacyData). */
+export const PAIR_LEGACY = 'only on computers whose worker fence is off, never Linux (its player predates w5297 and writes the owner\'s own data folder)';
+
+/**
+ * w5965: whether a pair run's words say its player predates w5297: a pre-1.0 build, the 0.50 line (0.50.x.y), or the words
+ * themselves. A judgment from w5944's brief ("the 0.50 line at ac80d7b0", "pre-1.0"); request_pair legacy_data "none" says no.
+ */
+export const mentionsLegacyPlayer = (...texts: (string | undefined)[]): boolean => texts.some((t) => !!t && /\bpre-1\.0\b|\b0\.50\.\d|\b0\.50 line\b|predates w5297/i.test(t));
+
+/** w5965: the mark a pair run gets when its words say its player predates w5297 (mentionsLegacyPlayer). */
+export const LEGACY_READ = 'read from its words: pre-1.0 or the 0.50 line; request_pair legacy_data "none" says it does not';
 
 /** The most computers one pair run takes at once (w1945; a judgment: the game's own pair scenarios use 2, the honest co-op 3). */
 export const PAIR_MAX_LEGS = 4;
@@ -658,4 +692,4 @@ export const warmText = (warm: NonNullable<WorkPair['warm']>): string =>
 /** The computer of a sandbox ref ("machine/slotN"). */
 const refMachine = (ref: string): string => ref.split('/')[0];
 
-export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} ${p.legs === 1 ? 'leg' : 'legs'}${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;
+export const pairText = (p: WorkPair): string => `a pair run of ${p.legs} ${p.legs === 1 ? 'leg' : 'legs'}${p.crossOs ? `, cross-OS (${p.crossOs})` : `, ${PAIR_ANY_OS}`}${p.steam ? `, ${PAIR_STEAM} (${p.steam})` : ''}${p.menus && !p.steam ? `, only on computers whose screen is unlocked (it clicks the game's menus: ${p.menus})` : ''}${p.timed ? ', timed (exclusive tickets: not on a computer that takes no timed runs)' : ''}${p.split ? `, its peers spread (a Mac may host: ${p.split})` : ''}${p.legacyData ? `, ${PAIR_LEGACY} (${p.legacyData})` : ''}${p.avoid?.length ? `, not on ${p.avoid.join(' or ')}` : ''}`;

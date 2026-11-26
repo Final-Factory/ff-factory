@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { inScope, limitsUsable, probeLimits, probeOomPolicy, probeScopes, resetScopeProbe, scopeEndCause, scopeUnit, scoped, scopesUsable } from '../machine/linuxScope.ts';
+import { inScope, limitsUsable, probeLimits, probeOomPolicy, probeScopes, resetScopeProbe, scopeEndCause, scopeUnit, scoped, scopesUsable, oomPolicyUsable, warmScopeProbes } from '../machine/linuxScope.ts';
 
 // w2474: on Linux each editor and agent host gets a systemd scope of its own, out of the daemon's cgroup, so that
 // systemd-oomd's whole-cgroup kill under memory pressure takes the editor, not the daemon and its link to the portal.
@@ -68,13 +68,13 @@ test('w2884: a scope gets OOMPolicy=continue where systemd takes it, so an OOM-k
   assert.equal(probeOomPolicy(() => ({ status: 0, stdout: 'ffw-scope-ok\n' })), true);
 });
 
-test("w2884: scopeEndCause names systemd's OOM line from a scope's journal, and nothing for a plain exit", () => {
+test("w2884: scopeEndCause names systemd's OOM line from a scope's journal, and nothing for a plain exit", async () => {
   const oom = 'Started ffw-agent-h1.scope.\nffw-agent-h1.scope: A process of this unit has been killed by the OOM killer.\nffw-agent-h1.scope: Failed with result \'oom-kill\'.\n';
-  assert.match(scopeEndCause('u', () => ({ status: 0, stdout: oom })) ?? '', /oom-kill/);
-  assert.match(scopeEndCause('u', () => ({ status: 0, stdout: 'ffw-agent-h1.scope: systemd-oomd killed 12 process(es) in this unit.\n' })) ?? '', /systemd-oomd/);
-  assert.equal(scopeEndCause('u', () => ({ status: 0, stdout: 'Started ffw-agent-h1.scope.\nffw-agent-h1.scope: Consumed 3min CPU time.\n' })), undefined);
-  assert.equal(scopeEndCause('u', () => ({ status: null, stdout: '' })), undefined, 'no journal');
-  assert.equal(scopeEndCause('u', () => { throw new Error('no journalctl'); }), undefined);
+  assert.match(await scopeEndCause('u', async () => ({ status: 0, stdout: oom })) ?? '', /oom-kill/);
+  assert.match(await scopeEndCause('u', async () => ({ status: 0, stdout: 'ffw-agent-h1.scope: systemd-oomd killed 12 process(es) in this unit.\n' })) ?? '', /systemd-oomd/);
+  assert.equal(await scopeEndCause('u', async () => ({ status: 0, stdout: 'Started ffw-agent-h1.scope.\nffw-agent-h1.scope: Consumed 3min CPU time.\n' })), undefined);
+  assert.equal(await scopeEndCause('u', async () => ({ status: null, stdout: '' })), undefined, 'no journal');
+  assert.equal(await scopeEndCause('u', async () => { throw new Error('no journalctl'); }), undefined);
 });
 
 test('w5554: a worker host scope carries MemoryMax and TasksMax where the user manager delegates them', () => {
@@ -112,5 +112,25 @@ test('w5554: the limits probe trusts only the scope reading its own limits back'
   assert.equal(limitsUsable(() => (n++, true), 0), true);
   assert.equal(limitsUsable(() => (n++, false), 1000), true, 'kept');
   assert.equal(n, 1);
+  resetScopeProbe();
+});
+
+test('w5973: warmScopeProbes fills the kept answers off the loop, so scoped() at a launch runs no probe of its own', async () => {
+  resetScopeProbe();
+  const calls: string[][] = [];
+  const run = async (args: string[]) => (calls.push(args), { status: 0, stdout: args.includes('sh') ? '1073741824\n4096\n' : 'ffw-scope-ok\n' });
+  await Promise.all([warmScopeProbes({ platform: 'linux', run, now: () => 0 }), warmScopeProbes({ platform: 'linux', run, now: () => 0 })]);
+  assert.equal(calls.length, 3, 'one warm-up at a time: three probes, not six');
+  const never = () => assert.fail('probed on the caller thread');
+  assert.equal(scopesUsable(never, 1000), true);
+  assert.equal(oomPolicyUsable(never, 1000), true);
+  assert.equal(limitsUsable(never, 1000), true);
+  await warmScopeProbes({ platform: 'linux', run, now: () => 1000 });
+  assert.equal(calls.length, 3, 'fresh answers are not probed again');
+  await warmScopeProbes({ platform: 'win32', run, now: () => 10 * 60_000 });
+  assert.equal(calls.length, 3, 'Linux only');
+  resetScopeProbe();
+  await warmScopeProbes({ platform: 'linux', run: async () => ({ status: 0, stdout: 'Failed to connect to bus' }), now: () => 0 });
+  assert.equal(scopesUsable(never, 1), false, 'no user manager: kept as no, and the other two not tried');
   resetScopeProbe();
 });

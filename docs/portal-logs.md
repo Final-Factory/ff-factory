@@ -247,6 +247,58 @@ about 4 minutes (curl 35 from outside; `invalid-packet-filter ... rejecting all 
 lothsahn's Funnel page could not reconnect for 297 s. Two more Funnel-only drops followed in the next 8 minutes. What sent
 the SIGTERM is not in these logs (no agent transcript, and the host's pathwatch repairs a failing layer, not a healthy one).
 The steady `Drop: TCP{... > ...:59343} no rules matched` line, about one a minute all day, is background noise and not a drop.
+### The Tailscale path of a slow update bundle (w5897)
+
+w5643 (portal-to-BEAST updates at 25-50 KB/s, 2026-11-25 08:12Z to about 10:30Z) could not tell whether the portal's peer
+for BEAST was direct or relayed: on a Windows worker `tailscale status` and `tailscale ping` need an admin, because the
+local API pipe is admin-only (`\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled: Access is denied`, on BEAST
+and LothDesktop alike). The portal VM's own tailscaled answers the portal's account, so the portal looks from its side.
+
+**The rate record.** Every bundle a daemon fetches logs one line when its connection closes (`bundleServedLine`,
+`server/machineLink.ts`, w1641):
+
+    machine beast: the update bundle went out in 7.4 s (2454 KB/s)
+    machine beast: the update bundle was cut from byte 6962988 after 7962988 of 18595141 bytes in 312.0 s (3 KB/s)
+
+These lines are the record of each machine's download rate: `grep: "the update bundle"`. A small incremental bundle goes
+out in under a second, and its KB/s is mostly connection set-up ("went out in 0.4 s (3 KB/s)" is normal), so judge a rate
+only on a bundle that took seconds.
+
+**The path line.** When a bundle is cut, when a bundle of 5 s or more (or 1 MB or more) goes out below 200 KB/s, or when
+one is still going after 60 s below that rate, the portal runs two read-only commands on the VM, `tailscale status --json`
+and `tailscale ping -c 5 <the machine's tailnet IP>`, and writes one line (`server/tailscalePath.ts`; at most one per
+machine in 2 minutes). The peer is the one holding the address the bundle request came from, else the one named like the
+machine. `grep: "tailscale path"`:
+
+    machine beast: tailscale path, as the update bundle went out in 8.0 s (61 KB/s): peer beast [LGjJu] 100.x.y.z, online, active, relayed by DERP ord (CurAddr -, Relay ord), LastHandshake 2026-11-26T10:00:00Z (30 s ago), RxBytes 1234, TxBytes 5678; ping 2 pongs: DERP(ord) 54ms, DERP(ord) 61ms; "direct connection not established"; exit 1
+
+- `direct <ip:port>` when `CurAddr` is set (a UDP path), `peer relay ...` for a Tailscale peer relay, else `relayed by DERP
+  <region>` (`Relay` is the peer's home DERP region, set either way). RxBytes and TxBytes are the peer's running totals, so two lines minutes apart give the bytes between them.
+- The ping stops at the first direct pong (Tailscale's default), so a direct path shows one pong; `via DERP(<region>)`
+  pongs and "direct connection not established" mean the packets were relayed.
+- A command that fails says so in the line (`tailscale status failed (exit N: <its last stderr line>)`). Nothing here
+  changes Tailscale, the network or the update path, and no key is printed: only the 5-character short form below.
+
+**Which key is which machine.** tailscaled's own log (source `tailscaled`) names a peer by the first 5 base64 characters
+of its node key in brackets (`[LGjJu]`), never by name; the path line prints the same short form beside the name. On
+2026-11-25 (as w5643 recorded them) three keys sat behind BEAST's public IP 98.43.75.76:
+
+| Short key | What it was |
+|---|---|
+| `[LGjJu]` | a device behind BEAST's public IP |
+| `[xHbCP]` | a device behind BEAST's public IP |
+| `[3S5J2]` | 100.104.235.48, offline |
+
+w5643 could not tie LGjJu and xHbCP to a device by name; the next path line for BEAST does, since it prints the name, the
+short key and the address together.
+
+**The Windows engine is a second SYSTEM process.** On a Windows machine Tailscale's engine runs as a second SYSTEM process,
+not the Tailscale service's own pid: on BEAST on 2026-11-25 it was pid 7220 (w5643). Its links to the control server and
+to DERP show in `Get-NetTCPConnection -OwningProcess <that pid>`, not under the service's pid, so look up the engine's pid
+before reading its connections. On LothDesktop on 2026-11-26 a worker's own account could not see the Tailscale processes
+at all (`Get-Process` and `Win32_Process` listed none; the service's pid was 5532), so reading them there may need an
+admin, as `tailscale status` does.
+
 ## What it can and cannot reach
 
 - **A fixed list.** `LOG_SOURCES` in `server/portalLogs.ts`. The worker's text picks an entry of it; it never becomes a path

@@ -19,12 +19,20 @@
  * elsewhere. The cargo registry is the machine's, inside the install folder (w5501): every
  * slot shares one CARGO_HOME, `<root>/cache/cargo` unless one already sits inside the root (sharedCaches.ts workerCargoHome).
  * Measured design: docs/ffu-sandboxes.md.
+ *
+ * w5870: the slots are in a folder workers write (Low on Windows), so a build there runs build scripts, target binaries and a
+ * slot's `.cargo/config.toml` that any worker could have written. A sandbox agent is a worker itself; a Medium agent (one not
+ * in a sandbox, outside the fences) is not, so `take` and `where` warn it, and refuse it (exit 5) once the daemon says "on" in
+ * MEDIUM_AGENT_VAR (machine/mediumFolders.ts): daemon.json "mediumAgentCaches" is "on" and w5862's "mediumAgentFolders" gave
+ * the agent its own temp folder, which no worker writes, so it builds there instead (w5946 F5). A Medium agent's `take` keeps its
+ * own CARGO_HOME and never gets the workers' `<root>/cache/cargo` (w5947): crates and build scripts a worker could have planted.
  */
 import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitSpawnSync } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
+import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
 import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 
@@ -105,6 +113,8 @@ export interface FfuSlotDeps {
   /** The machine's CARGO_HOME inside the root (w5501, sharedCaches.ts workerCargoHome); `take` exports it. */
   cargoHome?: string;
   facts?: CleanupFacts;
+  /** w5870: MEDIUM_AGENT_VAR, set only for a Medium agent: "warn" or "on". */
+  medium?: string;
   /** Read cleanup-facts.json again (`take --wait` polls with it); absent: the facts stay as given. */
   readFacts?: () => CleanupFacts | undefined;
   now: () => number;
@@ -589,9 +599,16 @@ export function releaseSlot(d: FfuSlotDeps, which: { branch?: string; slot?: str
   });
 }
 
+/** `take` and `where`'s exit when a Medium agent is refused a slot (w5870; 4 is "no slot free", w5946 F4). */
+export const EXIT_MEDIUM_REFUSED = 5;
+
+/** The CARGO_HOME `take` exports: the machine's one in the root for a worker; none for a Medium agent, which keeps its own (w5947). */
+export const slotCargoHome = (d: Pick<FfuSlotDeps, 'cargoHome' | 'medium'>) => (d.medium ? undefined : d.cargoHome);
+
 export const USAGE = `usage: ffu-slot take [--branch <b>] [--base <b>] [--wait <minutes>] | where [--branch <b>] | release [--branch <b> | --slot <id>] | list [--json] | sweep
   take: eval "$(ffu-slot take --branch <your branch>)" gives you an ffu checkout with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR) and cds into it
     exit 4: no slot is free; --wait <minutes> waits for one. Never build ffu elsewhere: wait, or end your turn with wake_me and take again
+    exit 5: refused to an agent outside the worker fences (w5870): build in a clone in your own temp folder, as the message says
     a second branch gets a second slot of its own (its own checkout and target), up to ${FFU_SLOTS_PER_WORKER} per worker; never two checkouts in one target
   where: the same lines for the slot you hold on --branch, else the one you used last (exit 1 if none)
   release: give your slots back (or the one on --branch, or --slot) once your work is pushed (a stopped worker's pushed slot frees itself)
@@ -609,6 +626,17 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     d.say(`ffu-slot: FF_SESSION_ID is not set: run it from a worker of FF Factory\n`);
     return 2;
   }
+  // w5870: a Medium agent and the slots workers write (see the header).
+  const own = 'build ffu in your own temp folder instead, which no worker writes: git clone https://github.com/Final-Factory/ffu.git "$TMPDIR/ffu" and CARGO_TARGET_DIR="$TMPDIR/ffu-target"';
+  if ((cmd === 'take' || cmd === 'where') && (d.medium === 'on' || d.medium === 'warn')) {
+    if (d.medium === 'on') {
+      d.say(`ffu-slot: refused: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write, so a build there would run their build scripts and cargo config outside the fence; ${own} (w5870)
+`);
+      return EXIT_MEDIUM_REFUSED;
+    }
+    d.say(`ffu-slot: WARNING: you run outside the worker fences (not in a sandbox), and the ffu slots are in a folder workers write: a build there runs build scripts and a cargo config any worker could have written. Once daemon.json "mediumAgentFolders" and "mediumAgentCaches" are both "on" (your own temp folder then no worker writes) this is refused (w5870)
+`);
+  }
   try {
     if (cmd === 'take') {
       const branch = opt('--branch');
@@ -616,7 +644,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
       const wait = opt('--wait');
       if (wait !== undefined && !(Number(wait) >= 0)) throw new Error(`not a number of minutes: ${wait}`);
       const id = wait ? takeSlotWaiting(d, { branch, base: opt('--base') }, Number(wait)) : takeSlot(d, { branch, base: opt('--base') });
-      d.write(envLines(d.root, id, d.cargoHome));
+      d.write(envLines(d.root, id, slotCargoHome(d)));
       d.say(`ffu-slot: ${id}: ${fwd(slotCheckout(d.root, id))} (target ${fwd(slotTarget(d.root, id))})\n`);
       return 0;
     }
@@ -632,7 +660,7 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
         d.say(`ffu-slot: you hold no slot: take one with eval "$(ffu-slot take --branch <your branch>)"\n`);
         return 1;
       }
-      d.write(envLines(d.root, mine.id, d.cargoHome));
+      d.write(envLines(d.root, mine.id, slotCargoHome(d)));
       return 0;
     }
     if (cmd === 'release') {
@@ -647,7 +675,11 @@ export function ffuSlotMain(argv: string[], d: FfuSlotDeps): number {
     if (cmd === 'list') {
       const st = readSlotState(d.root);
       if (!st.slots.length) d.write(`no ffu slots yet in ${fwd(slotsBase(d.root))} (max ${d.max})\n`);
-      for (const s of st.slots) d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${s.usedAt ?? '-'}\t${slotFree(d, s).why}\n`);
+      // w5912: the last use slotFree and the portal's report read (slotLastUsed), not only the stamp a take wrote in slots.json.
+      for (const s of st.slots) {
+        const used = slotLastUsed(d, s);
+        d.write(`${s.id}\t${s.branch ?? '(origin/main)'}\t${used ? new Date(used).toISOString() : '-'}\t${slotFree(d, s).why}\n`);
+      }
       for (const r of st.rescues ?? []) d.write(`rescue\t${r.branch}\t${r.at}\t${r.holder}'s work from ${r.slot}${r.pushed ? ', pushed to origin' : ', in the shared clone only'}\n`);
       return 0;
     }
@@ -682,6 +714,7 @@ export function realFfuSlotDeps(env: NodeJS.ProcessEnv = process.env): FfuSlotDe
     cargoHome: workerCargoHome(root, env, '').home, // the home folder only names a seed's source, which take does not need
     max: Number.isInteger(max) && max >= 0 ? max : FFU_SLOTS_DEFAULT_MAX,
     facts,
+    ...(env[MEDIUM_AGENT_VAR] ? { medium: env[MEDIUM_AGENT_VAR] } : {}),
     readFacts,
     now: () => Date.now(),
     git: (args, cwd) => {
