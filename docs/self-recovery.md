@@ -402,7 +402,15 @@ Now the host guard and every machine daemon clean up by themselves (`server/clea
   the portal VM's `/tmp` is a tmpfs of half its RAM, and as "the disk" it read 1.9 GB free while the disk had 101 GB).
 - The critical level, a sandbox drive waiting for space, `host_recovery cleanup` and `machine_cleanup` run
   a pass at once, with every rule.
-- **A pass removes nothing until its whole plan is made, so a pass that a restart cuts off is lost** (w5795). On
+- **Each step of a pass removes its plan as soon as it is planned** (w5795): `own` is planned first, then `regular` is
+  planned and removed (`remove`), then `stale` or `cap` is planned, its strays ended and its items removed
+  (`removeStale`), then `listed` is sized and `ownRemove` runs. Each step's removals keep clear of what `own` keeps or
+  removes (`withoutOverlap`), as the single removal did. Until then a pass removed nothing until every plan was made: on
+  LothDesktop four low passes in a row (2026-11-25, started 21:28Z to 23:04Z) were cut off by daemon restarts after 26 to
+  58 min and removed nothing. The last one named its steps: `quick 21 min, regular 3 min, stale 28 min, own 0 min,
+  listed 0 min`, then cut off 3 min into `remove`. The marker also carries what the pass had removed so far (`soFar`),
+  and a cut-off pass says it: `... before it finished: it had removed 12 items (40.0 GB) by then; ...`.
+- **Before that, a pass removed nothing until its whole plan was made, so a pass that a restart cut off was lost** (w5795). On
   LothDesktop on 2026-11-25 the daemon started 14 times in 13 hours, and its low passes finished 67 and 78 minutes after
   a start (cleanup-log.jsonl against the supervisor log). No pass finished from 10:35 to 14:49 UTC or after 14:49, while V:
   went from 107 to 14 GB free, almost all of it FFU cargo output. Each pass is now visible, report-only:
