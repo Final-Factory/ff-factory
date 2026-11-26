@@ -142,7 +142,7 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
   // On Linux the daemon's own temp folder is left out (w6024 review, point 3): its files come and go, and one gone by the
   // probe's open (ENOENT) would count as not judged and turn the read rules off until the next check. Elsewhere the folder
   // itself is probed.
-  const daemonTmp = path.join(o.root, DAEMON_TMP_CHILD);
+  const daemonTmp = path.join(path.resolve(o.root), DAEMON_TMP_CHILD); // resolved, as daemonOnlyDirs names it
   const asProbed = linux ? closed.flatMap((p) => (p === daemonTmp ? [] : exists(p) && isDir(p) ? filesIn(p) : [p])) : closed;
   return { closed: uniq(asProbed), open: uniq(open) };
 }

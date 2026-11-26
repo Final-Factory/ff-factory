@@ -221,8 +221,11 @@ test('w6000 (w6024 review, point 3): the Linux read-fence probe leaves the daemo
     fs.mkdirSync(path.join(r, DAEMON_TMP_CHILD));
     fs.writeFileSync(path.join(r, DAEMON_TMP_CHILD, 'short-lived'), '');
     const o = { root: r, appDir: path.join(r, 'daemon'), secrets: [], allowBack: ['logs'] };
-    assert.ok(!readFenceProbeTargets({ ...o, linux: true }).closed.some((x) => x.includes(DAEMON_TMP_CHILD)), 'Linux: a file gone by the open would turn the read rules off');
-    assert.ok(readFenceProbeTargets({ ...o, linux: false }).closed.includes(path.join(r, DAEMON_TMP_CHILD)), 'Windows and macOS: the folder itself');
+    // A relative root too (the '.' fallback where the run has no TMPDIR or TEMP, as on CI's Linux runners).
+    const dt = path.join(path.resolve(r), DAEMON_TMP_CHILD);
+    const linux = readFenceProbeTargets({ ...o, linux: true }).closed;
+    assert.ok(!linux.some((x) => x === dt || x.startsWith(dt + path.sep)), `Linux: a file gone by the open would turn the read rules off (${JSON.stringify(linux)})`);
+    assert.ok(readFenceProbeTargets({ ...o, linux: false }).closed.includes(dt), 'Windows and macOS: the folder itself');
   } finally {
     fs.rmSync(r, { recursive: true, force: true });
   }
