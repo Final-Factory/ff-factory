@@ -226,6 +226,9 @@ export function needsScan(args: string[]): boolean {
   const { sub } = splitGlobal(args);
   const name = args[sub] ?? '';
   const rest = args.slice(sub + 1);
+  // `config --blob=<object>` reads its config from an object, which lazy-fetches like any other read (w6023); git takes
+  // a unique prefix of an option, so anything starting `--bl` scans.
+  if (name === 'config') return rest.some((a) => a.startsWith('--bl'));
   if (NO_SCAN.has(name)) return false;
   if (name === 'worktree' && /^(list|prune)$/.test(rest[0] ?? '')) return false;
   if (name === 'rev-parse') return !rest.every((a) => (a.startsWith('-') ? REV_PARSE_OPTS.has(a) : !/[\^~:@{}\s\\*?[]|\.\./.test(a)));

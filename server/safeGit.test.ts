@@ -204,7 +204,7 @@ test('w5991: only calls that start no program a repository names and read no obj
   for (const a of [['rev-parse', 'HEAD'], ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/feat'], ['-C', 'd', 'rev-parse', '--abbrev-ref', 'HEAD'], ['rev-parse', '--show-toplevel'], ['symbolic-ref', '--short', 'HEAD'], ['config', '--get', 'x.y'], ['-C', 'd', 'worktree', 'list', '--porcelain'], ['worktree', 'prune']])
     assert.equal(needsScan(a), false, a.join(' '));
   // w5996: these read objects, and a planted partial clone lazy-fetches a missing one through core.sshCommand.
-  for (const a of [['merge-base', '--is-ancestor', 'a', 'b'], ['show-ref'], ['for-each-ref'], ['rev-parse', 'HEAD^{commit}'], ['rev-parse', 'HEAD~1'], ['rev-parse', 'HEAD:a.txt'], ['rev-parse', '@{u}'], ['rev-parse', 'bad...HEAD'], ['rev-parse', 'HEAD..bad'], ['rev-parse', '--short', 'HEAD'], ['rev-parse', '--parseopt']])
+  for (const a of [['merge-base', '--is-ancestor', 'a', 'b'], ['show-ref'], ['for-each-ref'], ['rev-parse', 'HEAD^{commit}'], ['rev-parse', 'HEAD~1'], ['rev-parse', 'HEAD:a.txt'], ['rev-parse', '@{u}'], ['config', '--blob=HEAD:.gitmodules', '--list'], ['config', '--blo', 'x', '--get', 'a.b'], ['config', 'get', '--blob', 'x', 'a.b'], ['rev-parse', 'bad...HEAD'], ['rev-parse', 'HEAD..bad'], ['rev-parse', '--short', 'HEAD'], ['rev-parse', '--parseopt']])
     assert.equal(needsScan(a), true, a.join(' '));
   for (const a of [['status'], ['worktree', 'add', 'x'], ['worktree', 'remove', 'x'], ['worktree'], ['log', '-1'], ['diff'], ['checkout', 'x'], ['fetch'], ['push'], ['cat-file', '--textconv', 'x'], ['branch', '-f', 'x'], ['-c', 'rev-parse', 'status'], []])
     assert.equal(needsScan(a), true, a.join(' '));
@@ -328,13 +328,17 @@ test('w5996: a planted partial clone lazy-fetches through core.sshCommand under 
     spawnSync('git', ['for-each-ref'], { cwd: wt, encoding: 'utf8', env: quiet, timeout: 30_000 });
     assert.match(f.ran(), /ssh /, 'plain git ran the planted ssh command');
     fs.rmSync(f.marker, { force: true });
+    // w6023: config --blob reads its config from an object, so it lazy-fetches too.
+    spawnSync('git', ['config', '--blob=refs/heads/missing', '--list'], { cwd: wt, encoding: 'utf8', env: quiet, timeout: 30_000 });
+    assert.match(f.ran(), /ssh /, 'plain git config --blob ran the planted ssh command');
+    fs.rmSync(f.marker, { force: true });
 
-    for (const a of [['for-each-ref'], ['show-ref'], ['merge-base', 'master', 'refs/heads/missing'], ['rev-parse', 'refs/heads/missing^{commit}'], ['rev-parse', 'refs/heads/missing...master'], ['rev-parse', 'master..refs/heads/missing'], ['rev-parse', '--verify', '--quiet', 'refs/heads/missing'], ['rev-parse', '--abbrev-ref', 'HEAD'], ['symbolic-ref', '--short', 'HEAD'], ['worktree', 'list', '--porcelain'], ['config', '--get', 'remote.origin.url']])
+    for (const a of [['for-each-ref'], ['show-ref'], ['merge-base', 'master', 'refs/heads/missing'], ['rev-parse', 'refs/heads/missing^{commit}'], ['rev-parse', 'refs/heads/missing...master'], ['rev-parse', 'master..refs/heads/missing'], ['rev-parse', '--verify', '--quiet', 'refs/heads/missing'], ['rev-parse', '--abbrev-ref', 'HEAD'], ['symbolic-ref', '--short', 'HEAD'], ['worktree', 'list', '--porcelain'], ['config', '--get', 'remote.origin.url'], ['config', '--blob=refs/heads/missing', '--list'], ['config', '--blo', 'refs/heads/missing', '--list']])
       await run('git', ['-C', wt, ...a], { env: quiet });
     assert.equal(f.ran(), '', 'no planted program ran');
 
     // An older git ignores GIT_NO_LAZY_FETCH (w6005): the calls that skip the scan must start nothing without it too.
-    for (const a of [['rev-parse', 'refs/heads/missing...master'], ['rev-parse', 'master..refs/heads/missing'], ['rev-parse', '--verify', '--quiet', 'refs/heads/missing'], ['rev-parse', 'refs/heads/missing'], ['rev-parse', '--abbrev-ref', 'HEAD'], ['symbolic-ref', '--short', 'HEAD'], ['worktree', 'list', '--porcelain'], ['config', '--get', 'remote.origin.url']]) {
+    for (const a of [['rev-parse', 'refs/heads/missing...master'], ['rev-parse', 'master..refs/heads/missing'], ['rev-parse', '--verify', '--quiet', 'refs/heads/missing'], ['rev-parse', 'refs/heads/missing'], ['rev-parse', '--abbrev-ref', 'HEAD'], ['symbolic-ref', '--short', 'HEAD'], ['worktree', 'list', '--porcelain'], ['config', '--get', 'remote.origin.url'], ['config', '--blob=refs/heads/missing', '--list'], ['config', '--blo', 'refs/heads/missing', '--list']]) {
       const g = gitFenceSync(['-C', wt, ...a], { env: quiet });
       const { GIT_NO_LAZY_FETCH: _, ...env } = g.env;
       spawnSync('git', g.args, { env, encoding: 'utf8', timeout: 30_000 });
