@@ -111,8 +111,12 @@ export function taskPriorityName(p: number | undefined): string {
 
 const folderName = (root: string) => root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || root;
 const winPath = (r: string) => r.replace(/\//g, '\\').replace(/\\+$/, '');
-/** A runner folder a PowerShell single-quoted string can carry. */
-export const scriptableRoot = (r: string) => /^[a-z]:\\/i.test(winPath(r)) && !/['\r\n]/.test(r);
+/**
+ * A runner folder a PowerShell single-quoted string can carry: only letters, digits, space, _ . - and \ (a whitelist, as
+ * w5946's mediumFolders: a process picks its own command line, and PowerShell ends a single-quoted string at ' and at
+ * U+2018..U+201B too).
+ */
+export const scriptableRoot = (r: string) => /^[a-z]:\\[A-Za-z0-9 _.\\-]+$/i.test(winPath(r));
 const isFfu = (root: string) => /^ffu-/i.test(folderName(root));
 
 /** The PowerShell that reads (and with fix, sets) the scheduled task of each runner folder; it prints a JSON array of TaskRow. */
@@ -161,6 +165,8 @@ export function parseTaskRows(out: string): TaskRow[] {
 export function processPriorityScript(pids: number[], fix: boolean): string {
   for (const p of pids) if (!Number.isInteger(p) || p <= 4) throw new Error(`pid ${p} is not a process to read`);
   return [
+    // a failed compile (constrained language, AMSI) exits non-zero instead of printing nothing
+    `$ErrorActionPreference = 'Stop'`,
     `Add-Type -TypeDefinition @'`,
     `using System; using System.Runtime.InteropServices;`,
     `public static class FFRunnerPrio {`,
@@ -245,6 +251,8 @@ export class RunnerPriority {
   private readonly badRootSaid = new Set<string>();
   private tasksFailing = false;
   private procsFailing = false;
+  /** A tick still running (a slow PowerShell): the next one is skipped, not run beside it. */
+  private busy = false;
 
   constructor(d: RunnerPriorityDeps) {
     this.d = d;
@@ -252,7 +260,16 @@ export class RunnerPriority {
   }
 
   async tick(): Promise<void> {
-    if (this.mode === 'off') return;
+    if (this.mode === 'off' || this.busy) return;
+    this.busy = true;
+    try {
+      await this.tickOnce();
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async tickOnce(): Promise<void> {
     const enforce = this.mode === 'enforce';
     const procs = await this.d.procs();
     const listeners = this.d.census(procs).listeners.filter((l) => isFfu(l.root));
@@ -286,7 +303,12 @@ export class RunnerPriority {
       }
       const name = folderName(l.root);
       const low = rows.filter((r) => prioLow(r.before));
-      const failed = rows.filter((r) => r.error);
+      // a pid the script printed no full row for was not read: a failure, never "Normal"
+      const full = (r: ProcRow) => r.before.cls !== undefined && r.before.io !== undefined && r.before.mem !== undefined;
+      const failed: { pid: number; error?: string }[] = [
+        ...rows.filter((r) => r.error),
+        ...chain.filter((p) => !rows.some((r) => r.pid === p && (r.error || full(r)))).map((pid) => ({ pid, error: 'not read' })),
+      ];
       const stillLow = rows.filter((r) => prioLow(r.after));
       const lead = rows.find((r) => r.pid === l.pid) ?? rows[0];
       const parents = chain.length - 1;

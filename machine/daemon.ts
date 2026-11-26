@@ -1189,8 +1189,9 @@ export class Daemon {
       now: () => Date.now(),
       log: (line) => log(line),
     });
-    // w6163: the CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): lothdesktop sets them,
-    // every other Windows machine (BEAST: Ben's hold on its system settings) only logs them
+    // w6163: the CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): the machines in
+    // RUNNER_PRIORITY_ENFORCE set them (none in the first, warn-only step), every other Windows machine only logs them (BEAST
+    // stays so: Ben's hold on its system settings)
     this.runnerPriority = new RunnerPriority({
       mode: runnerPriorityMode(cfg.id, process.platform, real, cfg.runnerPriority),
       procs: () => pd.procs(),
@@ -2008,7 +2009,12 @@ export class Daemon {
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
     if (this.runnerPriority.mode !== 'off') {
-      const tick = () => void this.runnerPriority.tick().catch((e) => log(`runner priority: the tick failed: ${(e as Error).message}`));
+      let tickFailing = false; // said once, not every minute
+      const tick = () =>
+        void this.runnerPriority.tick().then(
+          () => { if (tickFailing) log('runner priority: the tick runs again'); tickFailing = false; },
+          (e) => { if (!tickFailing) log(`runner priority: the tick failed: ${(e as Error).message}`); tickFailing = true; },
+        );
       this.timers.push(setInterval(loopLabel('timer runnerPriority.tick', tick), 60_000));
       setTimeout(tick, 15_000).unref();
     }

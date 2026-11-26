@@ -199,6 +199,39 @@ test('w6163: the task script matches the folder as runnerRestartScript does, set
   assert.match(runnerTaskScript([`${R2}/`], true), /\$fix = \$true[\s\S]*'V:\\ffw\\ffu-runners\\ffu-lothdesktop-2'/);
   assert.throws(() => runnerTaskScript(["V:\\it's"], true));
   assert.throws(() => runnerTaskScript(['relative\\path'], true));
+  // a whitelist: PowerShell also ends a single-quoted string at U+2018..U+201B (review of #1398)
+  for (const q of ['\u2018', '\u2019', '\u201A', '\u201B', '`', '$', ';', '(']) assert.throws(() => runnerTaskScript([`V:\\ffu-x${q}y`], false), q);
+});
+
+test('w6163: a listener the process script printed nothing (or half a row) for is a failure, never "Normal"', async () => {
+  const { rp, lines } = rig('warn', { raise: (pids) => pids.slice(1).map((pid) => ({ pid, before: pid === 101 ? { cls: CLASS.NORMAL } : NORMAL, after: NORMAL })) });
+  await rp.tick();
+  assert.ok(lines.some((l) => l.includes("could not read ffu-lothdesktop-1's listener") && l.includes('pid 11: not read') && l.includes('pid 101: not read')), lines.join('\n'));
+  assert.ok(lines.some((l) => l.includes("could not read ffu-lothdesktop-2's listener (pid 12)")), lines.join('\n'));
+  assert.ok(!lines.some((l) => l.includes('run at Normal')), lines.join('\n'));
+});
+
+test('w6163: a tick still running makes the next one a no-op, not a second PowerShell beside it', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let calls = 0;
+  const { rp } = rig('warn', {
+    tasks: (roots) => roots.map((root) => ({ root })),
+    raise: (pids) => pids.map((pid) => ({ pid, before: NORMAL, after: NORMAL })),
+  });
+  const inner = (rp as unknown as { d: { raise: (p: number[], f: boolean) => Promise<ProcRow[]> } }).d;
+  const orig = inner.raise;
+  inner.raise = async (p, f) => {
+    calls++;
+    await gate;
+    return orig(p, f);
+  };
+  const first = rp.tick();
+  await new Promise((r) => setImmediate(r));
+  await rp.tick();
+  assert.equal(calls, 1);
+  release();
+  await first;
 });
 
 test('w6163: the process script refuses a system pid, and its lines parse', () => {
