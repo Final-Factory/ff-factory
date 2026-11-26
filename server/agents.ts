@@ -855,6 +855,7 @@ export class Agents {
     sessions.codeMove = (s) => this.codeMove(s);
     // w1376: a computer on hold (config placement.hold) resumes nobody, not even the workers it already has.
     sessions.machineHold = (s) => this.machineHold(s);
+    sessions.drainOrphan = (s) => this.drainOrphan(s);
     // w1532, w2443: a machine paused from its tray app stops what runs there (server/machinePause.ts): workers mid-turn are
     // told to push and stop, interrupted, then stopped; their requests wait Blocked on the pause and resume on the unpause.
     this.pauses = new MachinePauses({
@@ -3941,6 +3942,19 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // and release. Not a pause: that ends its processes, and with them the ticket (machine/pauseStop.ts).
     if (why && this.benchHeld(i).length && !holdReason(i.machineId, { hold: pauseHolds(this.store.machines.values()) })) return undefined;
     return why;
+  }
+
+  /**
+   * w5937 (w6058): a worker with no open request whose message only the 'running' drain holds: the message is dropped (and
+   * said), since its request closing would never release it. Any other hold keeps it waiting as before.
+   */
+  private drainOrphan(s: SessionHandle): string | undefined {
+    const i = s.info;
+    if (i.kind !== 'worker' || !i.machineId || isMidTurn(i)) return undefined;
+    if ([...this.store.work.values()].some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return undefined;
+    const why = this.machineHold(s);
+    if (!why || why !== this.drainResumeHold(i, [])) return undefined;
+    return `${i.machineId} is drained to let only its running workers finish, and worker ${i.id} has no open request left, so its held message is dropped (w5937)`;
   }
 
   /** w5937: why a 'running' drain holds this worker's resume (drainWouldHold), logged once per worker and drain. */

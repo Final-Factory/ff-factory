@@ -147,6 +147,30 @@ test('w5937: a drain set again keeps the workers the first one lets finish (w605
   assert.ok(hold(s('stop1')), 'stop1 is still held');
 });
 
+test('w5937: a drain-held message for a worker whose request closed is dropped and said, not held forever (w6058)', async (t) => {
+  const { env, hold } = await drained(t);
+  // A real session on pc, stopped, on w5475 (the store-only stop1 has no handle the send queue can hold).
+  const h = env.sessions.create({ kind: 'worker', title: 'held', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }) });
+  Object.assign(h.info, { machineId: 'pc', status: 'stopped' });
+  env.store.putSession(h.info);
+  const id = h.info.id;
+  env.store.putWork({ ...env.store.work.get('w5475')!, sessionIds: ['stop1', id] });
+  const mine = () => env.sessions.queued().filter((q) => q.id === id).length;
+  env.sessions.send(id, 'A reply to the held worker');
+  env.sessions.drain();
+  assert.equal(mine(), 1, 'held while w5475 is open');
+  assert.ok(hold(h));
+  env.store.putWork({ ...env.store.work.get('w5475')!, status: 'done' });
+  env.sessions.drain();
+  assert.equal(mine(), 0, 'dropped once its request closed');
+  assert.ok(env.store.readTranscript(id).some((e) => e.kind === 'system' && /A resume was not delivered: pc is drained .* no open request left/.test(e.text)));
+  // With an open request again, its held message waits for the lift as before.
+  env.store.putWork({ ...env.store.work.get('w5475')!, status: 'active' });
+  env.sessions.send(id, 'Another reply');
+  env.sessions.drain();
+  assert.equal(mine(), 1);
+});
+
 test('w5937: a drain with resumes all holds no worker already there (w5878\'s behavior)', async (t) => {
   const { hold, s } = await drained(t, { resumes: 'all' });
   assert.equal(hold(s('stop1')), undefined);
