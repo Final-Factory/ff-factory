@@ -152,6 +152,28 @@ runs `cargo build`, `test`, `check`, `clippy`, `run`, `bench` or `nextest` outsi
 note to take a slot or wait for one, at most once per 30 min. A machine with no `ffu-sandboxes` folder is left alone. A
 refusal would come in a later, separate change, by lothsahn's lockout rule (warn first).
 
+**A git write in a slot you do not hold is refused** (w6038). In w5681 a worker resumed after a long wait, cd'd into a slot
+path from a saved `$TMPDIR` script, and made a merge commit on another worker's branch; five skill lessons had not stopped
+it. `take` now points the shared clone's `core.hooksPath` at `machine/ffuSlotHooks/` (FF Factory's own code, which no worker
+writes) and writes `slot<N>/holder` (`holder <session>`, `branch <branch>`) beside each checkout whenever it writes
+`slots.json`. The hooks (`reference-transaction`, `pre-push`, `pre-rebase`, sharing `slot-guard.sh`) refuse, naming the
+slot, its holder and the holder's branch:
+
+- any ref write (commit, merge, cherry-pick, rebase, reset, stash, branch, tag; `--no-verify` does not skip
+  `reference-transaction`) and any push, when `FF_SESSION_ID` is not the slot's holder, or the slot is released;
+- the same when the holder's checkout is on a branch other than the one `take` recorded (detached is let through: a rebase,
+  or the "checked out in another slot" case).
+
+Let through: no `FF_SESSION_ID` (a person's shell, the daemon), a slot with no holder file yet, a fetch (remote-tracking refs),
+a checkout's HEAD switch (a symref), and a ref set to the commit it is on (`merge --abort`). FF Factory's own git
+(`gitSpawnSync`: `take`, the rescue, the portal's report) runs with `core.hooksPath` on `server/gitHooks` and never meets
+these hooks; `ff-pr push` and `merge` run the same check in TypeScript (`slotWriteRefusal`) before any git, since their git
+is fenced too. The hooks use shell builtins only (no git call): measured on M5, a commit costs 15 to 20 ms more (14.6 ms
+without, 29 to 35 ms with, 40 empty commits each). Not covered: `git reset --hard` and `git checkout -- <path>` rewrite files
+before their ref update (git has no hook before them), so the ref stays but the files moved; a merge the hook stops leaves its
+files merged (`git merge --abort` puts them back). Recovery if the check ever misfires: `ffu-slot take` rewrites the holder
+file, and a shell with `FF_SESSION_ID` unset skips the check.
+
 ## On the portal (w5912)
 
 Each machine's ffu slots show on its page, in a set of their own under its sandboxes (`web/src/components/FfuSlots.tsx`),
