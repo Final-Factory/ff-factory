@@ -32,9 +32,25 @@ export function lightName(have: Iterable<string>): string {
 /** Folders a repository scan never enters: build output and caches, never a checkout of their own. */
 const SKIP = new Set(['node_modules', 'target', 'Library', '.cargo', '.rustup', 'dist', 'build']);
 
-/** The git repositories in `dir` (its own `.git`, a `.git` file of a worktree, or a bare `*.git`), at most `depth` levels down. */
-export function reposIn(dir: string, depth = 3): string[] {
-  const out: string[] = [];
+/**
+ * What a scan of `dir` for git repositories found: `repos` (a folder with its own `.git`, or a `.git` file of a worktree) and
+ * `unsure`, the folders it could not search to the end, which a delete must count as holding work (w6031).
+ */
+export interface RepoScan {
+  repos: string[];
+  unsure: string[];
+}
+
+/**
+ * Scans `dir` for git repositories, `depth` levels down. A folder it does not walk into is still checked for a `.git` of its
+ * own (w6031, the w6027 review: a clone 4 levels down or one named `build` was missed and a delete would have lost it):
+ * - one level past `depth`: a repository there is found; one that is not and holds folders of its own is `unsure`;
+ * - a build cache (node_modules, target, Library, ...): a repository of that name is found; the cache is never walked.
+ * Links are never followed and a folder it cannot read is skipped, as before.
+ */
+export function scanRepos(dir: string, depth = 3): RepoScan {
+  const repos: string[] = [];
+  const unsure: string[] = [];
   const walk = (d: string, left: number) => {
     let names: fs.Dirent[];
     try {
@@ -43,14 +59,27 @@ export function reposIn(dir: string, depth = 3): string[] {
       return;
     }
     if (names.some((n) => n.name === '.git')) {
-      out.push(d);
+      repos.push(d);
       return;
     }
-    if (left <= 0) return;
-    for (const n of names) if (n.isDirectory() && !n.isSymbolicLink() && !SKIP.has(n.name)) walk(path.join(d, n.name), left - 1);
+    const dirs = names.filter((n) => n.isDirectory() && !n.isSymbolicLink());
+    if (left < 0) {
+      if (dirs.length) unsure.push(d);
+      return;
+    }
+    for (const n of dirs) {
+      const p = path.join(d, n.name);
+      if (!SKIP.has(n.name)) walk(p, left - 1);
+      else if (fs.existsSync(path.join(p, '.git'))) repos.push(p);
+    }
   };
   walk(dir, depth);
-  return out;
+  return { repos, unsure };
+}
+
+/** The git repositories `scanRepos` finds in `dir`. */
+export function reposIn(dir: string, depth = 3): string[] {
+  return scanRepos(dir, depth).repos;
 }
 
 export type GitRun = (cwd: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
@@ -62,7 +91,9 @@ const realGit: GitRun = (cwd, args) => run('git', ['-C', cwd, ...args], { timeou
  */
 export async function unsavedWork(dir: string, git: GitRun = realGit): Promise<string[]> {
   const lines: string[] = [];
-  for (const repo of reposIn(dir)) {
+  const scan = scanRepos(dir);
+  for (const d of scan.unsure) lines.push(`${path.relative(dir, d) || '.'}: holds folders deeper than the scan looks for clones`);
+  for (const repo of scan.repos) {
     const rel = path.relative(dir, repo) || '.';
     const status = await git(repo, ['status', '--porcelain', '--untracked-files=normal']);
     if (status.code !== 0) {
