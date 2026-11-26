@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -11,6 +11,20 @@ import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
  * w5377: the Windows worker fence. What gets the Low label (and what must stay Medium: daemon, secrets, the daemon's
  * folder, the person's working files in repo), the environment a Low agent gets, and the w5347 compiler-server guard.
  */
+
+/**
+ * w6085 (item 4 of the w5838 reviews): every temp folder a test here makes is removed when the file's tests end, whether
+ * the test passed or not; a test that removes its own first changes nothing.
+ */
+const made: string[] = [];
+const tmpDir = (prefix: string) => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  made.push(d);
+  return d;
+};
+after(() => {
+  for (const d of made) fs.rmSync(d, { recursive: true, force: true });
+});
 
 const R = path.resolve('/ffw');
 const kids = (...n: string[]) => n.map((name) => ({ name, dir: true }));
@@ -88,7 +102,7 @@ test('w5717: the Mac and Linux fences are unchanged: tools stays one open child,
 });
 
 test('w5717: labelLow gives a child of a Medium folder its own Low label, raises the folder after, and reads the child again', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const dir = tmpDir('low-');
   const tools = path.join(dir, 'tools');
   const cargo = path.join(tools, 'cargo');
   const git = path.join(tools, 'git');
@@ -179,7 +193,7 @@ test("lowRunners names each runner whose Runner.Worker.exe is labelled Low (BEAS
 });
 
 test('labelLow keeps a medium folder Medium only when it inherited Low, and a failure there leaves the fence on (w5377)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const dir = tmpDir('low-');
   const node = path.join(dir, 'node');
   const gone = path.join(dir, 'gone');
   fs.mkdirSync(node);
@@ -217,7 +231,7 @@ const icacls = (labelled: Set<string>, fail?: string): { exec: Exec; calls: stri
 };
 
 test('labelLow labels only what is not Low yet, makes missing paths, and reports a failure', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const dir = tmpDir('low-');
   const a = path.join(dir, 'a');
   const b = path.join(dir, 'b');
   const f = path.join(dir, 'events.jsonl');
@@ -232,7 +246,7 @@ test('labelLow labels only what is not Low yet, makes missing paths, and reports
 });
 
 test('labelLow grants the account Full and labels again when the label is denied for want of WRITE_OWNER (BEAST, w5402)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-'));
+  const dir = tmpDir('low-');
   const a = path.join(dir, 'a');
   const f = path.join(dir, 'events.jsonl');
   const node = path.join(dir, 'node');
@@ -324,7 +338,7 @@ const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean } = {}): {
 };
 
 test('LowCopies names the copy by size and mtime, labels it Low and read-only, and removes older copies', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'v1');
   const f = icaclsSync();
@@ -344,7 +358,7 @@ test('LowCopies names the copy by size and mtime, labels it Low and read-only, a
 });
 
 test('w5838: a replaced Low copy is not run: check makes it again from its source, with a WARNING', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'the real claude');
   // Locked, and refused (the lock and icacls' grant both fail; hashed in full every time): both catch it.
@@ -368,7 +382,7 @@ test('w5838: a replaced Low copy is not run: check makes it again from its sourc
 });
 
 test('w5838: a replaced copy whose source is gone is not run', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'node.exe');
   fs.writeFileSync(exe, 'node');
   const copies = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin');
@@ -379,7 +393,7 @@ test('w5838: a replaced copy whose source is gone is not run', () => {
 });
 
 test('w5838 review: what was planted in tools/low before it was Medium goes before any copy runs, with a WARNING each', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'the real claude');
   const dir = path.join(root, 'tools', 'low');
@@ -396,7 +410,7 @@ test('w5838 review: what was planted in tools/low before it was Medium goes befo
 });
 
 test('w5838 review: a folder or unreadable file planted at the copy\'s own name is removed and the copy made', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'the real claude');
   const st = fs.statSync(exe);
@@ -410,7 +424,7 @@ test('w5838 review: a folder or unreadable file planted at the copy\'s own name 
 });
 
 test('w5838 review: tools/unity-low keeps only the junctions it checked; a planted folder goes and a link never takes its target with it', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowunity-'));
+  const root = tmpDir('lowunity-');
   const dir = lowUnityDir(root);
   fs.mkdirSync(path.join(dir, '6000.9.9f1'), { recursive: true });
   fs.writeFileSync(path.join(dir, '6000.9.9f1', 'Unity.exe'), 'evil');
@@ -452,7 +466,7 @@ test('w5877: isReadOnlyCopy refuses an access list that still lets anyone but SY
 });
 
 test('w5904: a copy is never labelled Low while it is writable: one lock on the .part, or icacls with a WARNING', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   try {
     const exe = path.join(root, 'claude.exe');
     fs.writeFileSync(exe, 'the real claude');
@@ -477,7 +491,7 @@ test('w5904: a copy is never labelled Low while it is writable: one lock on the 
 });
 
 test('w5877: a copy left by an earlier daemon run is never taken over, even with its source\'s bytes', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'the real claude');
   const first = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin').make(exe)!;
@@ -494,7 +508,7 @@ test('w5877: a copy left by an earlier daemon run is never taken over, even with
 });
 
 test('w5877: a same-size rewrite with its times put back is still caught before the run', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'the real claude');
   const said: string[] = [];
@@ -509,7 +523,7 @@ test('w5877: a same-size rewrite with its times put back is still caught before 
 });
 
 test('w5877: when tools/low is not Medium, a DLL planted after make is swept before the next run, with a WARNING', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const root = tmpDir('lowcopy-');
   const exe = path.join(root, 'node.exe');
   fs.writeFileSync(exe, 'node');
   const dir = path.join(root, 'tools', 'low');
@@ -525,7 +539,7 @@ test('w5877: when tools/low is not Medium, a DLL planted after make is swept bef
 });
 
 test('w5877: a Unity junction with a Low label of its own is made again', async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowunity-'));
+  const root = tmpDir('lowunity-');
   const dir = lowUnityDir(root);
   fs.mkdirSync(dir, { recursive: true });
   const install = path.join(root, 'install', 'Editor');
@@ -694,7 +708,7 @@ test('w5557: the owner game folder lock reads back Medium, and says so when it i
 });
 
 test('w5557: labelLow keeps an inherited-Low owner game folder Medium when it is in the medium list', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ownergd-'));
+  const dir = tmpDir('ownergd-');
   try {
     const calls: string[][] = [];
     const exec: Exec = async (cmd, args) => {
@@ -711,7 +725,7 @@ test('w5557: labelLow keeps an inherited-Low owner game folder Medium when it is
 test('w5731: a <root>/steam made after the start is labelled at the next labelling, and its secret files get NR of their own', async () => {
   // N1 of the #1237 review: the daemon labels only paths that exist. ensureDaemonOnlyDirs makes steam first (start and the
   // read-fence switch), so No-Read-Up is set on it before steamcmd's first install writes inside.
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5731-'));
+  const dir = tmpDir('w5731-');
   try {
     const root = path.join(dir, 'ffw');
     const app = path.join(root, 'daemon');
@@ -828,4 +842,47 @@ test("lowDiskImages names each virtual disk in a Low tools child, never node's, 
   assert.match(w, /Nothing was changed/);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>')), w);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>', 'ext4.vhdx') + ' /setintegritylevel M'), w); // a same-volume move keeps the Low label (w5958)
+});
+
+test('w6085: when every name of a copy is taken by a copy still running, make says so as a WARNING and runs nothing', (t) => {
+  const root = tmpDir('lowcopy-');
+  const exe = path.join(root, 'node.exe');
+  fs.writeFileSync(exe, 'node');
+  // Twenty copies an earlier daemon run made, each still running (Windows refuses to remove a running program).
+  const first = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin').make(exe)!;
+  const dir = path.dirname(first);
+  const stem = path.basename(first, '.exe');
+  for (let n = 1; n < 20; n++) fs.copyFileSync(first, path.join(dir, `${stem}-${n}.exe`));
+  const rm = fs.rmSync;
+  t.mock.method(fs, 'rmSync', (p: fs.PathLike, o?: fs.RmOptions) => {
+    if (path.dirname(String(p)) === dir && /^node-\d+-\d+(-\d+)?\.exe$/.test(path.basename(String(p)))) throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+    return rm(p, o);
+  });
+  const said: string[] = [];
+  assert.equal(new LowCopies(root, (l) => void said.push(l), icaclsSync().exec, 'BEAST\\rydin').make(exe), undefined, 'no copy to run');
+  const loud = said.filter((l) => /WARNING: no free name for the Low copy/.test(l));
+  assert.equal(loud.length, 1, said.join('\n'));
+  assert.match(loud[0], /all 20 names are taken/);
+  assert.ok(loud[0].includes(`${stem}-19.exe`), 'it names the copies that hold the names');
+  assert.ok(said.some((l) => /WARNING: could not make a Low copy/.test(l)), said.join('\n'));
+  // Once one of them exits, the next make takes its name.
+  t.mock.restoreAll();
+  const again = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin').make(exe);
+  assert.ok(again && fs.existsSync(again));
+});
+
+test('w6085: a tools/unity-low that cannot be read is said as a WARNING, and one not there yet is not', async () => {
+  const root = tmpDir('lowunity-');
+  const said: string[] = [];
+  const denied = () => {
+    throw Object.assign(new Error('EACCES: permission denied, scandir'), { code: 'EACCES' });
+  };
+  await lowUnityJunctions(root, [], async () => ({ code: 1, stdout: '', stderr: 'no' }), (l) => void said.push(l), denied);
+  assert.equal(said.filter((l) => /WARNING: could not read .*unity-low to sweep it/.test(l)).length, 1, said.join('\n'));
+  said.length = 0;
+  const missing = () => {
+    throw Object.assign(new Error('ENOENT: no such file or directory, scandir'), { code: 'ENOENT' });
+  };
+  await lowUnityJunctions(root, [], async () => ({ code: 1, stdout: '', stderr: 'no' }), (l) => void said.push(l), missing);
+  assert.deepEqual(said, []);
 });

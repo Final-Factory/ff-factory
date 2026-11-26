@@ -851,12 +851,31 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `claude|node|gh-<size>-<mtime>[-<n>].exe`), so no DLL beside a copy
       is loaded by it; a copy's name that cannot be read (a folder, a locked file) is removed and the copy made; in
       `tools\unity-low` everything but the junctions just checked, since the daemon starts `<that folder>\<version>\Unity.exe`
-      (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`).
+      (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`). A `tools\unity-low` the
+      sweep cannot read (anything but "not there") says `WARNING ... could not read ... to sweep it` instead of passing
+      in silence (w6085).
+    - A copy has 20 names (`COPY_SLOTS`). When all 20 are held by copies still running from earlier daemon runs, `make`
+      says `WARNING: no free name for the Low copy ... all 20 names are taken` with the names, and nothing of it runs: at
+      the daemon's start the fence fails (`lowFail`, sandbox workers held until a later start finds a free name); in
+      `check` only that run is held. A name frees as its program exits; the copy is not renamed aside, since a running
+      claude, node or gh may start its own `process.execPath` again (w6085).
+    - A copy that could not be made read-only is still run, with its `WARNING`, and hashed before every run like every
+      copy (w6085, item 7 of w5838's reviews, dropped): refusing it would hold every sandbox worker on that machine
+      (`lowFail`) until the lock worked, which only a person at the machine could mend, against a window of milliseconds
+      between the hash and the spawn in a folder no Low worker can add to. No daemon log on LothDesktop showed that
+      `WARNING` (measured 2026-11-26).
     - A junction is made again unless it leads to its Unity (`junctionLeadsTo`) and carries no Low label of its own (w5877:
       a worker could have labelled it while the folder was Low, and turn it later).
     - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to `<root>\tools\shims`,
       not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included; the old `bin` is
-      removed.
+      removed at every start. An agent host adopted across that change kept the old `bin` on its `PATH` until it ended;
+      both Windows daemons (BEAST, LothDesktop) have run #1283 since 2026-11-26 and LothDesktop's `unity-slots\bin` is
+      gone (measured), so no host started now has it (w6085).
+    - **The one name for the shims folder is `<root>/tools-medium/shims`** (w6085), as macOS and Linux use already
+      (`enforcedShimDir`, `machine/pathFence.ts`): Landlock cannot keep a child of a writable folder read-only, so
+      `tools/shims` cannot work there. Windows still writes `tools\shims` until it moves, in its own change after #1359
+      (hosts record their `PATH`, `hostsWithPathDir`), since the move changes every agent's `PATH` and the fence's folders;
+      `tools\shims` stays written, and Medium, until no host has it on `PATH`.
 - A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).

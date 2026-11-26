@@ -503,6 +503,7 @@ export class LowCopies {
       const stem = `${base}-${st.size}-${Math.floor(st.mtimeMs)}`;
       const want = this.sourceHash(exe);
       let copy: string | undefined;
+      const held: string[] = [];
       for (let n = 0; n < COPY_SLOTS && !copy; n++) {
         const p = path.join(dir, `${stem}${n ? `-${n}` : ''}${path.extname(exe)}`);
         if (!fs.existsSync(p)) {
@@ -519,9 +520,16 @@ export class LowCopies {
           copy = p;
         } catch {
           /* still running from an earlier daemon run: the next name, and the next start removes it */
+          held.push(path.basename(p));
         }
       }
-      if (!copy) throw new Error(`no free name for it in ${dir} (${COPY_SLOTS} copies of it still running?)`);
+      if (!copy) {
+        // w6085 (item 1 of the w5838 reviews): every name is taken by a copy an earlier daemon run still runs. Said loudly:
+        // at the daemon's start this turns the Low fence off and holds sandbox runs until the next start; before a run
+        // (check) that run is held and the next one tries again. A name frees itself as the program that runs it exits.
+        this.say(`worker integrity: WARNING: no free name for the Low copy of ${exe} in ${dir}: all ${COPY_SLOTS} names are taken by copies still running from earlier daemon runs (${held.join(', ')}); a name frees as its program exits, and nothing of it is run until then (w6085)`);
+        throw new Error(`no free name for it in ${dir} (${COPY_SLOTS} copies of it still running)`);
+      }
       const part = `${copy}.part`;
       fs.rmSync(part, { force: true });
       fs.copyFileSync(exe, part);
@@ -556,7 +564,7 @@ export class LowCopies {
       }
       return copy;
     } catch (e) {
-      this.say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
+      this.say(`worker integrity: WARNING: could not make a Low copy of ${exe}: ${(e as Error).message}`);
       return undefined;
     }
   }
@@ -669,7 +677,7 @@ export const lowUnityDir = (root: string) => path.join(root, 'tools', 'unity-low
  * gets its own Low server and no Medium editor's compile can reach it (measured, w5347; docs/worker-root.md 4.1). The
  * junctions live in the root; nothing on the install's drive is written. Returns the versions it has.
  */
-export async function lowUnityJunctions(root: string, editors: { version: string; bin: string }[], exec: Exec, say: (line: string) => void): Promise<string[]> {
+export async function lowUnityJunctions(root: string, editors: { version: string; bin: string }[], exec: Exec, say: (line: string) => void, list: (dir: string) => string[] = (d) => fs.readdirSync(d)): Promise<string[]> {
   const dir = lowUnityDir(root);
   const have: string[] = [];
   try {
@@ -709,9 +717,10 @@ export async function lowUnityJunctions(root: string, editors: { version: string
   // just checked go.
   let names: string[] = [];
   try {
-    names = fs.readdirSync(dir);
-  } catch {
-    /* nothing to sweep */
+    names = list(dir);
+  } catch (err) {
+    // w6085 (item 5 of the w5838 reviews): a folder that cannot be read is not swept, so what was planted there stays; said.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') say(`worker integrity: WARNING: could not read ${dir} to sweep it, so anything planted there stays: ${(err as Error).message} (w6085)`);
   }
   for (const n of names) {
     if (have.includes(n)) continue;
