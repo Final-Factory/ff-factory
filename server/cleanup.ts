@@ -10,7 +10,7 @@ import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 import { renameAway } from './renameAway.ts';
 import { clearDeadMounts } from './deadMounts.ts';
-import { systemTempDir } from '../machine/daemonTemp.ts';
+import { daemonTempDir, systemTempDir, systemTempEnv } from '../machine/daemonTemp.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
 
@@ -36,7 +36,7 @@ export interface CleanupEnv {
   home: string;
   /** The system temp folder (os.tmpdir() before the daemon moved its own, machine/daemonTemp.ts systemTempDir). */
   tmp: string;
-  /** The daemon's own temp folder, <root>/tmp/daemon (w6000), when the agents' temp root is <root>/tmp: aged as a temp root of its own. */
+  /** The daemon's own temp folder, <root>/tmp-daemon (w6000), whenever there is a root: aged as a temp root of its own. */
   daemonTemp?: string;
   /** Windows: %LOCALAPPDATA%. */
   localAppData?: string;
@@ -52,11 +52,12 @@ export interface CleanupEnv {
   gameDataRoots?: string[];
 }
 
-export function hostCleanupEnv(agentTemp?: string): CleanupEnv {
+export function hostCleanupEnv(agentTemp?: string, root?: string): CleanupEnv {
   const platform: CleanupPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'darwin' ? 'darwin' : 'linux';
   const home = os.homedir();
-  // w6000: the daemon's own temp folder is inside the agents' temp root (<root>/tmp/daemon) once it moved there.
-  const daemonTemp = agentTemp && path.resolve(os.tmpdir()) === path.resolve(agentTemp, 'daemon') ? os.tmpdir() : undefined;
+  // w6000: the daemon's own temp folder (<root>/tmp-daemon) is a temp root of its own whenever there is a root, on or off,
+  // wherever the agents' temp folder is (N3 of the #1345 review): a folder that is not there is skipped.
+  const daemonTemp = root ? daemonTempDir(root) : undefined;
   return { platform, home, tmp: systemTempDir(), localAppData: platform === 'win32' ? process.env.LOCALAPPDATA || path.join(home, 'AppData', 'Local') : undefined, agentTemp, ...(daemonTemp ? { daemonTemp } : {}) };
 }
 
@@ -239,12 +240,6 @@ export function fenceToRoot<T extends { path: string }>(items: T[], root: string
 
 const H = 1;
 const D = 24;
-/**
- * Folders of the agents' temp root (<root>/tmp) the daemon uses as it runs, which temp-old never removes whole (w6000):
- * the daemon's own temp folder (os.tmpdir() of the daemon, machine/daemonTemp.ts; gone, every mkdtemp under it fails until
- * the next start) is aged entry by entry as a temp root of its own (daemonTemp).
- */
-export const TEMP_OLD_KEEP = ['daemon'];
 export { LIBRARY_CACHES };
 
 /**
@@ -261,7 +256,7 @@ export function cleanupRules(env: CleanupEnv, policy: CleanupPolicy): CleanupRul
       { id: 'agent-temp', dir: t, names: ['ffa-*'], olderThanHours: policy.sessionTempHours, what: "a finished agent session's own temp folder" },
       ...(policy.cloneOlderThanDays > 0 ? [{ id: 'temp-clones', dir: t, names: policy.clonePatterns, olderThanHours: policy.cloneOlderThanDays * D, repos: 'pushed' as const, what: 'an agent temp clone with nothing unpushed' }] : []),
       // Anything else in temp nobody touched for a week, clones included when fully pushed.
-      { id: 'temp-old', dir: t, except: ['claude', 'claude-*', ...TEMP_OLD_KEEP], olderThanHours: policy.tempAnyOlderThanDays * D, repos: 'pushed', what: 'temp entry untouched for a long time' },
+      { id: 'temp-old', dir: t, except: ['claude', 'claude-*'], olderThanHours: policy.tempAnyOlderThanDays * D, repos: 'pushed', what: 'temp entry untouched for a long time' },
     );
   }
   // Claude Code's task files (background task and subagent output) per project and session: the transcripts
@@ -1628,7 +1623,9 @@ export function sessionTempEnv(root: string, sessionId: string): Record<string, 
   try {
     fs.mkdirSync(d, { recursive: true });
   } catch {
-    return {}; // the system temp folder then
+    // The system temp folder then, named outright (w6000): inherited, it would be the daemon's own <root>/tmp-daemon,
+    // which a fenced agent can neither write nor read.
+    return systemTempEnv();
   }
   return { TMP: d, TEMP: d, TMPDIR: d };
 }

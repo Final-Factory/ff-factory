@@ -107,7 +107,7 @@ test('rules per platform: Windows (checked with Windows paths anywhere) and macO
   assert.ok(win.filter((r) => r.id === 'npm-cache').every((r) => r.when === 'low'), 'whole caches only when space is low');
   assert.ok(!win.some((r) => r.id === 'xcode-derived'));
   const tempOld = win.find((r) => r.id === 'temp-old')!;
-  assert.deepEqual(tempOld.except, ['claude', 'claude-*', 'daemon'], "Claude Code's temp has its own rule; the daemon's own temp is aged entry by entry (w6000)");
+  assert.deepEqual(tempOld.except, ['claude', 'claude-*'], "Claude Code's temp has its own rule");
   const withAgentTemp = cleanupRules({ platform: 'darwin', home: '/Users/ben', tmp: '/var/folders/xy/T', agentTemp: '/Volumes/scratch/agents' }, DEFAULT_CLEANUP);
   assert.deepEqual(at(withAgentTemp, 'agent-temp'), ['/var/folders/xy/T', '/Volumes/scratch/agents']);
   assert.deepEqual(at(withAgentTemp, 'claude-temp'), ['/var/folders/xy/T/claude*/*', '/Volumes/scratch/agents/claude*/*', '/tmp/claude*/*']);

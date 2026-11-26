@@ -93,7 +93,7 @@ test('w5546: readLockArgs closes the daemon folder, secrets and root.json, and g
   const root = path.resolve('/r');
   const a = readLockArgs({ root, read: [path.join(root, 'daemon/gh-app/sessions/s1')] });
   const of = (flag: string) => a.flatMap((x, i) => (a[i - 1] === flag ? [x] : []));
-  assert.deepEqual(of('--no-read'), [path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), path.join(root, 'steam')], 'steam: w5639');
+  assert.deepEqual(of('--no-read'), [path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), path.join(root, 'steam'), path.join(root, 'tmp-daemon')], 'steam: w5639; tmp-daemon: w6000');
   const back = of('--read');
   for (const x of ['logs', 'src', 'app', 'gh-app/bin', 'unity-mcp', 'sandboxes.json', 'gh-app/sessions/s1']) assert.ok(back.includes(path.join(root, 'daemon', x)), x);
   for (const x of back) assert.ok(!/tokens\.json|daemon\.json|hosts|root(-backup)?\.json|secrets/.test(x), `never given back: ${x}`);

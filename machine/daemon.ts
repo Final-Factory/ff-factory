@@ -271,7 +271,7 @@ export interface DaemonConfig {
    */
   editorTmpdir?: 'on' | 'off';
   /**
-   * w6000: "on" (the default when unset) points the daemon's own TMPDIR, TEMP and TMP at `<root>/tmp/daemon`
+   * w6000: "on" (the default when unset) points the daemon's own TMPDIR, TEMP and TMP at `<root>/tmp-daemon`
    * (machine/daemonTemp.ts), so its os.tmpdir() and what it starts write inside the worker root. Set remotely by `ops_worker
    * machine_update daemon_tmpdir`, read at the daemon's start; "off" is the recovery.
    */
@@ -1176,7 +1176,7 @@ export class Daemon {
     } catch {
       // never sent yet: the defaults
     }
-    const env = hostCleanupEnv(cfg.tempDir);
+    const env = hostCleanupEnv(cfg.tempDir, cfg.root);
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),

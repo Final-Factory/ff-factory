@@ -23,7 +23,7 @@
 # --editor-tmpdir on|off (macOS and Linux, w5833) gives each sandbox's Unity editor its own temp folder under the root;
 # --path-fence off|warn (macOS and Linux, w5863) sets the watch of the unity-slot shims folder on every agent's PATH (off stops it);
 # --medium-agent-folders warn|on (w5862, w5869) moves Medium agents' temp root and cargo home to <root>/tmp-medium and <root>/cache-medium/cargo (on) or only logs the exposure (warn);
-# --daemon-tmpdir on|off (w6000) points the daemon's own TMPDIR at <root>/tmp/daemon (on, the default) or keeps the system temp (off, the recovery);
+# --daemon-tmpdir on|off (w6000) points the daemon's own TMPDIR at <root>/tmp-daemon (on, the default) or keeps the system temp (off, the recovery);
 # --daemon-ref REF (default: the pinned --ref, else the commit the portal runs).
 # --ref <full commit id> (w5516) pins the installer and the daemon code to that exact commit and refuses when it cannot check
 # it out; the portal's rollout fetches this script at its own verified commit and passes it:

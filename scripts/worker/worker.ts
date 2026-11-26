@@ -2964,7 +2964,7 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--medium-agent-folders warn|on] (w5862, w5869, every OS: on moves Medium agents' temp root and cargo home to <root>/tmp-medium
              and <root>/cache-medium/cargo, warn only logs the exposure, daemon.json mediumAgentFolders; default: as daemon.json has it;
              docs/worker-root.md)
-            [--daemon-tmpdir on|off] (w6000, every OS: on points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp/daemon, off keeps
+            [--daemon-tmpdir on|off] (w6000, every OS: on points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps
              the system temp folder, the recovery; daemon.json daemonTmpdir; default: as daemon.json has it, on if it has none)
             [--dev-drive] [--dev-drive-max-gb N] [--dev-drive-skip U,T] [--move-to-dev-drive] (Windows, w900: make the Dev Drive if the
              install has none; --move-to-dev-drive also moves its sandboxes and seed onto it, which needs every sandbox free of

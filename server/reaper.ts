@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
-// w6000: the browsers' profiles it looks for are in the system temp folder, not the daemon's own (<root>/tmp/daemon).
+// w6000: the browsers' profiles it looks for are in the system temp folder, not the daemon's own (<root>/tmp-daemon).
 import { systemTempDir } from '../machine/daemonTemp.ts';
 import path from 'node:path';
 import { isWindows, run } from './proc.ts';

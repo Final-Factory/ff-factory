@@ -24,6 +24,7 @@ import { benchLockDir, pidAlive } from './benchLock.ts';
 import { benchQueueDir, queueTickets, type TicketState } from './benchQueue.ts';
 import { sendChunks } from './review.ts';
 import { PLAYER_EXE } from './timedRunPack.ts';
+import { systemTempEnv } from './daemonTemp.ts';
 import { exeReadsGameDataDir, playerHomeEnv, preparePlayerHome, savesDirsFor } from './gameData.ts';
 import { fencedPlayer, playerFenceFor, playerWritable, type PlayerFence } from './playerFence.ts';
 
@@ -950,7 +951,9 @@ export class TimedRunner {
     // w5344: and a home of its own under FF_PLAYER_HOME, so Unity's own PlayerPrefs stay inside the install (Linux, macOS)
     const home = playerHomeEnv(process.env, exeReadsGameDataDir(exe));
     preparePlayerHome(home);
-    const env = { ...timedRunEnv(process.env, o.session, o.id), ...home };
+    // w6000: the system temp folder it had before, not the daemon's own <root>/tmp-daemon, which its fence closes (a Low
+    // player on Windows, the write fence on Linux and macOS).
+    const env = { ...timedRunEnv(process.env, o.session, o.id), ...systemTempEnv(process.env), ...home };
     this.checkStop(o.id);
     // w5564: on Linux and macOS the player, a file in a folder workers write, runs inside a write fence of its own
     const fence = this.d.playerFence ? this.d.playerFence() : this.d.spawnPlayer ? ({ kind: 'none' } as const) : this.ownFence();

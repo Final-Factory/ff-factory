@@ -314,7 +314,7 @@ export async function treeBytes(dir: string): Promise<number | undefined> {
  * No root: none.
  */
 export function sandboxEditorEnv(env: NodeJS.ProcessEnv, sandbox: string, root: string | undefined, tmpdir = false, platform: NodeJS.Platform = process.platform): Record<string, string> {
-  // w6000: without its own TMPDIR the editor gets the system temp folder back, not the daemon's (<root>/tmp/daemon).
+  // w6000: without its own TMPDIR the editor gets the system temp folder back, not the daemon's (<root>/tmp-daemon).
   const own = editorTmpdirEnv(root, sandbox, tmpdir, platform);
   return { ...sandboxGameDataEnv(env, sandbox), ...sandboxUvEnv(env, root), ...(own.TMPDIR ? own : editorSystemTempEnv(env, platform)) };
 }
@@ -333,7 +333,7 @@ export function editorLaunchEnv(env: Record<string, string>, f: { mkdirSync: typ
   } catch (e) {
     log(`editor TMPDIR ${env.TMPDIR} is not usable (${(e as Error).message}): it starts with the system temp folder`);
     const { TMPDIR: _, ...rest } = env;
-    // w6000: the system temp folder named again, not the daemon's own (<root>/tmp/daemon) inherited from its environment.
+    // w6000: the system temp folder named again, not the daemon's own (<root>/tmp-daemon) inherited from its environment.
     return { ...rest, ...editorSystemTempEnv(process.env) };
   }
 }

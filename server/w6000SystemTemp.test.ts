@@ -6,43 +6,50 @@ import { DAEMON_TMPDIR_MAX, SYSTEM_TMPDIR_VAR, applyDaemonTmpdir, daemonTempDir,
 import { editorLaunchEnv, sandboxEditorEnv } from '../machine/sandboxes.ts';
 import { bareEnv } from '../machine/maxEventsFence.ts';
 import { REMOVE_TOP } from '../machine/leftovers.ts';
-import { TEMP_OLD_KEEP, cleanupRules, type CleanupEnv } from './cleanup.ts';
+import { DEFAULT_CLEANUP, cleanupRules, hostCleanupEnv, type CleanupEnv } from './cleanup.ts';
 import { workerUpdateFlags } from './opsWorker.ts';
-import { DEFAULT_CLEANUP } from './cleanup.ts';
+import { DAEMON_ONLY_CHILDREN, DAEMON_TMP_CHILD } from './claudeHome.ts';
+import { WORKER_CHILDREN, openChildren } from '../machine/lowIntegrity.ts';
+import { LOCKED_CHILDREN } from '../machine/writeLock.ts';
+import { READ_DENIED_IN_ROOT, READ_ONLY_IN_ROOT } from './workerFence.ts';
+import { daemonOnlyDirs } from '../machine/readFence.ts';
 
 // w6000 (lothsahn, w5823: "under no circumstances should workers write outside of ffw"; w5834 follow-up): the daemon's own
 // temp folder moves inside the worker root, and every place left in machine/ and server/ that names the system temp is
 // listed here with why it may stay.
 
 const ROOT = path.resolve('/ffw');
+/** The folder checks the real file system: tests pass their own. */
+const ok = { mkdir: () => undefined, writable: () => undefined };
 
-test('w6000: the daemon points TMPDIR, TEMP and TMP at <root>/tmp/daemon and keeps the system temp folder in FF_SYSTEM_TMPDIR', () => {
+test('w6000: the daemon points TMPDIR, TEMP and TMP at <root>/tmp-daemon and keeps the system temp folder in FF_SYSTEM_TMPDIR', () => {
   for (const platform of ['win32', 'darwin', 'linux'] as const) {
     const env: NodeJS.ProcessEnv = { TMPDIR: '/var/folders/xy/T', TEMP: 'C:\\Users\\p\\AppData\\Local\\Temp' };
     const made: string[] = [];
-    const r = applyDaemonTmpdir(env, ROOT, undefined, { platform, mkdir: (p) => void made.push(p), tmpdir: () => '/sys-tmp' });
+    const r = applyDaemonTmpdir(env, ROOT, undefined, { platform, mkdir: (p) => void made.push(p), writable: () => undefined, tmpdir: () => '/sys-tmp' });
     const dir = daemonTempDir(ROOT);
     assert.equal(r.dir, dir, platform);
     assert.deepEqual(made, [dir], 'made before it is named');
     for (const k of ['TMPDIR', 'TEMP', 'TMP']) assert.equal(env[k], dir, `${platform} ${k}`);
     assert.equal(env[SYSTEM_TMPDIR_VAR], '/sys-tmp');
     assert.equal(systemTempDir(env), '/sys-tmp', 'what reads the system temp still finds it');
-    assert.ok(dir.startsWith(ROOT + path.sep), 'inside the root');
+    assert.equal(dir, path.join(ROOT, 'tmp-daemon'), 'a root child of its own, not in the workers\' <root>/tmp (B1 of the #1345 review)');
   }
 });
 
-test('w6000: a re-exec of a daemon that moved its temp keeps the first system temp folder', () => {
+test('w6000: a daemon whose environment already names the system temp folder keeps that one', () => {
   const env: NodeJS.ProcessEnv = { [SYSTEM_TMPDIR_VAR]: '/tmp' };
-  applyDaemonTmpdir(env, ROOT, 'on', { platform: 'linux', mkdir: () => undefined, tmpdir: () => daemonTempDir(ROOT) });
+  applyDaemonTmpdir(env, ROOT, 'on', { platform: 'linux', ...ok, tmpdir: () => daemonTempDir(ROOT) });
   assert.equal(env[SYSTEM_TMPDIR_VAR], '/tmp');
 });
 
-test('w6000 (lockout rule): off, no root, a folder that cannot be made or a root too long only warn, and change nothing', () => {
+test('w6000 (lockout rule): off, no root, a folder that cannot be made or written, or a root too long only warn, and change nothing', () => {
   const cases: [string, Parameters<typeof applyDaemonTmpdir>][] = [
-    ['off', [{}, ROOT, 'off', { platform: 'linux', mkdir: () => undefined, tmpdir: () => '/tmp' }]],
-    ['no worker root', [{}, undefined, undefined, { platform: 'linux', mkdir: () => undefined, tmpdir: () => '/tmp' }]],
-    ['could not make', [{}, ROOT, 'on', { platform: 'win32', mkdir: () => { throw new Error('EACCES'); }, tmpdir: () => '/tmp' }]],
-    [`longer than ${DAEMON_TMPDIR_MAX}`, [{}, '/' + 'r'.repeat(DAEMON_TMPDIR_MAX), 'on', { platform: 'darwin', mkdir: () => undefined, tmpdir: () => '/tmp' }]],
+    ['off', [{}, ROOT, 'off', { platform: 'linux', ...ok, tmpdir: () => '/tmp' }]],
+    ['no worker root', [{}, undefined, undefined, { platform: 'linux', ...ok, tmpdir: () => '/tmp' }]],
+    ['could not make or write', [{}, ROOT, 'on', { platform: 'win32', ...ok, mkdir: () => { throw new Error('EACCES'); }, tmpdir: () => '/tmp' }]],
+    ['EROFS', [{}, ROOT, 'on', { platform: 'linux', ...ok, writable: () => { throw new Error('EROFS'); }, tmpdir: () => '/tmp' }]],
+    [`longer than ${DAEMON_TMPDIR_MAX}`, [{}, '/' + 'r'.repeat(DAEMON_TMPDIR_MAX), 'on', { platform: 'darwin', ...ok, tmpdir: () => '/tmp' }]],
   ];
   for (const [why, args] of cases) {
     const env = args[0];
@@ -52,7 +59,20 @@ test('w6000 (lockout rule): off, no root, a folder that cannot be made or a root
     assert.deepEqual(env, {}, `${why}: the environment is untouched`);
   }
   // Windows sockets are named pipes: a long root still moves there.
-  assert.ok(applyDaemonTmpdir({}, 'C:\\' + 'r'.repeat(DAEMON_TMPDIR_MAX), 'on', { platform: 'win32', mkdir: () => undefined }).dir);
+  assert.ok(applyDaemonTmpdir({}, 'C:\\' + 'r'.repeat(DAEMON_TMPDIR_MAX), 'on', { platform: 'win32', ...ok }).dir);
+});
+
+test('w6000 (N1 of the #1345 review): on the real file system the folder is made and checked writable', () => {
+  const root = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || '.', 'w6000-'));
+  try {
+    const env: NodeJS.ProcessEnv = {};
+    const r = applyDaemonTmpdir(env, root, undefined, { platform: 'win32', tmpdir: () => '/sys-tmp' });
+    assert.equal(r.dir, path.join(root, DAEMON_TMP_CHILD));
+    assert.ok(fs.statSync(r.dir!).isDirectory());
+    assert.equal(env.TEMP, r.dir);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('w6000: a sandbox editor keeps what editorTmpdir gives it (w5833), the system temp while it is off, not the daemon\'s', () => {
@@ -77,23 +97,41 @@ test('w6000: an editor whose own TMPDIR cannot be made starts with the system te
 });
 
 test('w6000: the bare probe shell keeps the temp folder and still no token', () => {
-  const env = bareEnv({ SystemRoot: 'C:/Windows', TEMP: 'V:/ffw/tmp/daemon', TMP: 'V:/ffw/tmp/daemon', GH_TOKEN: 's' });
-  assert.deepEqual(env, { SystemRoot: 'C:/Windows', TEMP: 'V:/ffw/tmp/daemon', TMP: 'V:/ffw/tmp/daemon' });
+  const env = bareEnv({ SystemRoot: 'C:/Windows', TEMP: 'V:/ffw/tmp-daemon', TMP: 'V:/ffw/tmp-daemon', GH_TOKEN: 's' });
+  assert.deepEqual(env, { SystemRoot: 'C:/Windows', TEMP: 'V:/ffw/tmp-daemon', TMP: 'V:/ffw/tmp-daemon' });
 });
 
-test('w6000: the clean-up ages the daemon\'s temp folder entry by entry and never removes it whole', () => {
-  const tmp = path.join(ROOT, 'tmp');
-  const env: CleanupEnv = { platform: 'linux', home: '/home/p', tmp: '/tmp', agentTemp: tmp, daemonTemp: path.join(tmp, 'daemon') };
-  const rules = cleanupRules(env, DEFAULT_CLEANUP);
-  const old = rules.filter((r) => r.id === 'temp-old');
-  assert.ok(old.some((r) => r.dir === path.join(tmp, 'daemon')), 'its entries age out');
-  const parent = old.find((r) => r.dir === tmp)!;
-  for (const k of TEMP_OLD_KEEP) assert.ok(parent.except?.includes(k), `${k} kept whole`);
-  assert.ok(old.some((r) => r.dir === '/tmp'), 'the system temp folder is still looked at, as before');
+test('w6000: the clean-up ages the daemon\'s temp folder entry by entry whenever there is a root (N3 of the #1345 review)', () => {
+  for (const agentTemp of [path.join(ROOT, 'tmp'), path.resolve('/elsewhere/tmp'), undefined]) {
+    const host = hostCleanupEnv(agentTemp, ROOT);
+    assert.equal(host.daemonTemp, daemonTempDir(ROOT), `agents' temp ${agentTemp}`);
+    const env: CleanupEnv = { platform: 'linux', home: '/home/p', tmp: '/tmp', agentTemp, daemonTemp: host.daemonTemp };
+    const old = cleanupRules(env, DEFAULT_CLEANUP).filter((r) => r.id === 'temp-old');
+    assert.ok(old.some((r) => r.dir === daemonTempDir(ROOT)), 'its entries age out');
+    assert.ok(old.some((r) => r.dir === '/tmp'), 'the system temp folder is still looked at, as before');
+  }
+  assert.equal(hostCleanupEnv(undefined).daemonTemp, undefined, 'no root: no daemon temp folder');
 });
 
-test('w6000 (w5894 review N2): runner-tmp is a top folder `ff-leftovers remove` never removes whole', () => {
+test('w6000 (B1 of the #1345 review): the daemon\'s temp folder is no worker folder on any OS, and closed to workers', () => {
+  const dir = daemonTempDir(ROOT);
+  const child = path.relative(ROOT, dir);
+  assert.equal(child, DAEMON_TMP_CHILD, 'a root child of its own');
+  assert.ok((DAEMON_ONLY_CHILDREN as readonly string[]).includes(child));
+  assert.ok(!WORKER_CHILDREN.includes(child), 'Windows: never labelled Low');
+  for (const c of [...WORKER_CHILDREN, ...openChildren(ROOT, [path.join(ROOT, 'tmp'), path.join(ROOT, 'sandboxes')])]) {
+    const rel = path.relative(path.join(ROOT, c), dir);
+    assert.ok(rel.startsWith('..') || path.isAbsolute(rel), `not inside the worker folder ${c}`);
+  }
+  assert.ok(!openChildren(ROOT, [path.join(ROOT, 'tmp')]).includes(child), 'Linux and macOS: not opened to workers');
+  assert.ok((LOCKED_CHILDREN as readonly string[]).includes(child), 'Linux: read-only under the write lock');
+  assert.ok(READ_ONLY_IN_ROOT.subpaths.includes(child) && READ_DENIED_IN_ROOT.subpaths.includes(child), 'macOS: no writes and no reads');
+  assert.ok(daemonOnlyDirs(ROOT).includes(dir), 'closed to reads, and made before the labels are set');
+});
+
+test('w6000: runner-tmp (w5894 review N2) and tmp-daemon are top folders `ff-leftovers remove` never removes whole', () => {
   assert.ok(REMOVE_TOP.has('runner-tmp'));
+  assert.ok(REMOVE_TOP.has(DAEMON_TMP_CHILD));
 });
 
 test('w6000: ops_worker machine_update daemon_tmpdir reaches the installer on every OS', () => {
@@ -107,18 +145,18 @@ test('w6000: ops_worker machine_update daemon_tmpdir reaches the installer on ev
  * The census (w6000): every non-test file of machine/, server/ and shared/ that names the system temp folder
  * (os.tmpdir(), a mkdtemp, a '/tmp' literal), how many times, and why it may stay. The count is exact: a new use fails
  * until it is moved into the root or justified here, and a removed one fails until its count is lowered. With the daemon's
- * temp moved (machine/daemonTemp.ts), os.tmpdir() in daemon code is <root>/tmp/daemon, so "the daemon" below is inside ffw.
+ * temp moved (machine/daemonTemp.ts), os.tmpdir() in daemon code is <root>/tmp-daemon, so "the daemon" below is inside ffw.
  */
 const CENSUS: Record<string, [number, string]> = {
-  'machine/daemonTemp.ts': [12, 'the move itself: reads os.tmpdir() to keep it in FF_SYSTEM_TMPDIR, and names it in comments and log lines'],
-  'machine/benchQueue.ts': [1, 'a bench status file with no root (w5834): os.tmpdir(), the daemon\'s own <root>/tmp/daemon once moved'],
+  'machine/daemonTemp.ts': [13, 'the move itself: reads os.tmpdir() to keep it in FF_SYSTEM_TMPDIR, and names it in comments and log lines'],
+  'machine/benchQueue.ts': [1, 'a bench status file with no root (w5834): os.tmpdir(), the daemon\'s own <root>/tmp-daemon once moved'],
   'machine/daemon.ts': [2, 'a comment; the Git Bash /tmp kept from clean-up (reads)'],
   'machine/evidenceGate.ts': [2, 'fetchHudData\'s default folder: called from server/blockerWatch.ts on the portal VM (and the daemon\'s os.tmpdir() is in the root)'],
   'machine/sharedCaches.ts': [1, 'a comment: Unity\'s own fixed /tmp sockets (w5833, measured), which no TMPDIR moves'],
   'machine/unitySlots.ts': [1, 'unity-slot run --detach\'s log: the caller\'s TMPDIR or TEMP first (a worker\'s ffa-<session>), os.tmpdir() only as the last fallback'],
   'machine/writeLock.ts': [1, 'Linux write lock: /tmp create-only for Unity\'s fixed sockets (w5561), a fence rule, not a writer'],
   'server/agentTools.ts': [1, 'mkdtemp in <root>/tools-medium (inside the root)'],
-  'server/cleanup.ts': [5, 'reads: the clean-up\'s rules for the system temp (as before) and the daemon\'s own; comments'],
+  'server/cleanup.ts': [2, 'reads: the clean-up\'s rules for the system temp (as before) and the daemon\'s own; comments'],
   'server/gitBashTmp.ts': [1, 'asks cygpath where Git Bash maps /tmp (reads; w603 re-makes only the folder Git Bash itself uses)'],
   'server/guard.ts': [1, 'a comment of the guard\'s path rules'],
   'server/index.ts': [3, 'the portal\'s own local sessions\' temp folders: the portal VM only (deploy/vm), whose agents get TMPDIR=/tmp/ffa-<session> there'],
@@ -146,4 +184,24 @@ test('w6000 census: no place in machine/, server/ or shared/ names the system te
     }
   }
   assert.deepEqual(found, Object.fromEntries(Object.entries(CENSUS).map(([f, [n]]) => [f, n])), 'a system temp use was added or removed: move it into the root, or list it in CENSUS with why it stays');
+});
+
+test('w6000: a fenced process with no temp folder of its own gets the system temp named outright, not the daemon-only one', async () => {
+  const { systemTempEnv } = await import('../machine/daemonTemp.ts');
+  const { sessionTempEnv } = await import('./cleanup.ts');
+  assert.deepEqual(systemTempEnv({ [SYSTEM_TMPDIR_VAR]: '/tmp' }), { TMPDIR: '/tmp', TEMP: '/tmp', TMP: '/tmp' });
+  assert.deepEqual(systemTempEnv({}), {}, 'the daemon did not move its temp: inherited is the system temp already');
+  // An agent whose ffa-<session> folder cannot be made (here: its root is a file).
+  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || '.', 'w6000-'));
+  const was = process.env[SYSTEM_TMPDIR_VAR];
+  process.env[SYSTEM_TMPDIR_VAR] = '/sys-tmp';
+  try {
+    const file = path.join(dir, 'a-file');
+    fs.writeFileSync(file, '');
+    assert.deepEqual(sessionTempEnv(file, 'abcdef12'), { TMPDIR: '/sys-tmp', TEMP: '/sys-tmp', TMP: '/sys-tmp' });
+  } finally {
+    if (was === undefined) delete process.env[SYSTEM_TMPDIR_VAR];
+    else process.env[SYSTEM_TMPDIR_VAR] = was;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
