@@ -48,7 +48,7 @@ test('w5838: a probe given bareEnv runs with none of the daemon environment (no 
   try {
     assert.deepEqual(probeFence(argv, { timeoutMs: 60_000, env: bareEnv() }), { ok: true });
     assert.equal(probeFence(argv, { timeoutMs: 60_000 }).ok, false, "without env the run gets the daemon's own");
-    for (const k of Object.keys(bareEnv({ ...process.env, GH_TOKEN: 'x', ANTHROPIC_API_KEY: 'y' }))) assert.ok(/^(SystemRoot|SYSTEMROOT|windir|WINDIR|SystemDrive|SYSTEMDRIVE)$/.test(k), k);
+    for (const k of Object.keys(bareEnv({ ...process.env, GH_TOKEN: 'x', ANTHROPIC_API_KEY: 'y' }))) assert.ok(/^(SystemRoot|SYSTEMROOT|windir|WINDIR|SystemDrive|SYSTEMDRIVE|TEMP|TMP)$/.test(k), k); // w6000: and the temp folder
   } finally {
     if (had === undefined) delete process.env.W5838_VAULT_SECRET;
     else process.env.W5838_VAULT_SECRET = had;

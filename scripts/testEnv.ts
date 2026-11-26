@@ -39,9 +39,16 @@ export const KEPT_FF_ENV = new Set([
   'FF_LINK_JOB_LOG',
   'FF_LEFTOVERS_CALLERS',
   'FF_GAME_REPO',
+  'FF_TEST_ENV_CLEAN',
 ]);
 const SESSION_ENV = /^(GIT_CONFIG_(COUNT|PARAMETERS|KEY_\d+|VALUE_\d+)|CLAUDECODE|CLAUDE_PID|CLAUDE_EFFORT|CLAUDE_AGENT_SDK_VERSION|CLAUDE_CODE_(?!GIT_BASH_PATH$)[A-Z_]+)$/;
 export function sessionEnvNames(env: Record<string, string | undefined>): string[] {
   return Object.keys(env).filter((k) => (k.startsWith('FF_') && !KEPT_FF_ENV.has(k)) || SESSION_ENV.test(k));
 }
-for (const name of sessionEnvNames(process.env)) delete process.env[name];
+// Once, in the test runner: its test files inherit the clean environment, and so does every program a test starts with
+// process.execArgv (this file again). Such a program gets the FF_ settings its test hands it on purpose (FF_CLEANUP_FACTS
+// to the real ff-leftovers CLI in w5300RemoveMany), so it must not lose them here (w5915: they were scrubbed there too).
+if (!process.env.FF_TEST_ENV_CLEAN) {
+  for (const name of sessionEnvNames(process.env)) delete process.env[name];
+  process.env.FF_TEST_ENV_CLEAN = '1';
+}

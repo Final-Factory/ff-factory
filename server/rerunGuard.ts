@@ -35,6 +35,13 @@ import { simpleCommands } from './waitGuard.ts';
  * the test binary and systemd's OOMPolicy=stop stopped the runner's unit. A failed step passes when its log shows that pair
  * (exit 143, SIGTERM, then the runner's own annotation within a few lines) and no real failure (REAL_FAILURE) anywhere in it.
  * The annotation is read from the log, since a fine-grained token cannot read check-run annotations.
+ *
+ * w6140 (ben): the Linux OOM killer's SIGKILL leaves a fifth shape, an out-of-memory fault like w3836's but with no message.
+ * ffu run 45857906682's "check" (job 140043729184, ffu-biscuit-2, attempt 1) failed in its lavapipe step with
+ * "./tools/run_built_tests.sh: line 51: 344007 Killed", and the same job's runner-health step then printed "swap free 5 MB of
+ * 8191 MB" and "##[warning]swap is 100 % full". A kill (bash's "<pid> Killed", exit code 137, or cargo's "signal: 9, SIGKILL")
+ * inside a step that failed counts as out of memory only beside that evidence in the same job's log (oomKill): swap under 1 %
+ * free, or available memory under 5 % of RAM. A kill without it stays a real failure: a SIGKILL can also be a test's own doing.
  */
 
 export interface RerunStep {
@@ -86,7 +93,8 @@ const ROUTE =
   'lost communication with the server", or a step that ended with exit code 143 and "The runner has received a shutdown signal" ' +
   'and no failed test, or (with no step that failed) a step that never finished, a missing log (404), or its ' +
   'runner\'s machine disconnecting from the portal within a minute of the job\'s end; or, once (attempt 1), a step that failed because the runner ran out of memory, disk, ' +
-  'page file or commit quota (os error 1453, 1455, 112, 28).';
+  'page file or commit quota (os error 1453, 1455, 112, 28), or a process SIGKILLed ("Killed", exit code 137) while the ' +
+  'job\'s runner-health step shows swap full or available memory under 5 % of RAM.';
 const LOST = /self-hosted runner lost communication with the server/i;
 
 /**
@@ -106,6 +114,53 @@ export function resourceFault(log: string): string | undefined {
   const lines = log.replace(ANSI, '').split(/\r?\n/);
   if (lines.some((l) => REAL_FAILURE.test(l))) return undefined;
   return lines.find((l) => RESOURCE_FAULT.test(l))?.replace(/^\S+Z\s+/, '').trim().slice(0, 240);
+}
+
+/** w6140: a SIGKILLed process: bash's job report ("<script>: line 51: 344007 Killed"), exit 137, or cargo's signal 9. */
+const KILLED = /\bline \d+:\s+\d+ Killed\b|##\[error\]Process completed with exit code 137\.|signal: 9, SIGKILL/;
+const STEP_START = /##\[group\]Run /;
+const STEP_FAILED = /##\[error\]Process completed with exit code \d+\./;
+/** w6140: ffu's tools/ci-runners/runner_health.sh line, and its warning when swap is over 90 % full. */
+const HEALTH = /runner health \(([^)]*)\): available (\d+) MB of (\d+) MB, swap free (\d+) MB of (\d+) MB/;
+const SWAP_FULL = /##\[warning\]swap is 100 % full/;
+/**
+ * w6140: available memory under this share of RAM at the health step counts as memory pressure. The step runs after the
+ * kill freed the killed process's memory (biscuit-2 read 5611 of 27186 MB then, 21 %), so a low reading there means the
+ * machine stayed near exhaustion even without it; w5213's thrash on biscuit read 0.7 GB of 26 GB (2.7 %). 5 % is about
+ * 1.3 GB on a 27 GB runner: below a normal job's footprint, so a healthy runner does not read under it.
+ */
+export const AVAILABLE_FLOOR = 0.05;
+
+/**
+ * w6140: the kill line and the memory evidence when a step that failed had a process SIGKILLed and the job's runner-health
+ * step shows memory pressure, with no real failure in the log; undefined otherwise. Exported for tests.
+ */
+export function oomKill(log: string): string | undefined {
+  const lines = log.replace(ANSI, '').split(/\r?\n/);
+  if (lines.some((l) => REAL_FAILURE.test(l))) return undefined;
+  const k = lines.findIndex((l, i) => {
+    if (!KILLED.test(l)) return false;
+    if (STEP_FAILED.test(l)) return true;
+    for (const n of lines.slice(i + 1)) {
+      if (STEP_START.test(n)) return false;
+      if (STEP_FAILED.test(n)) return true;
+    }
+    return false;
+  });
+  if (k < 0) return undefined;
+  let pressure: string | undefined;
+  for (const l of lines) {
+    const h = HEALTH.exec(l);
+    if (h) {
+      const [avail, total, swapFree, swap] = [h[2], h[3], h[4], h[5]].map(Number);
+      if (swap > 0 && swapFree * 100 < swap) pressure = `swap free ${swapFree} MB of ${swap} MB`;
+      else if (total > 0 && avail < total * AVAILABLE_FLOOR) pressure = `available ${avail} MB of ${total} MB`;
+    } else if (SWAP_FULL.test(l)) pressure ??= 'swap is 100 % full';
+    if (pressure) break;
+  }
+  if (!pressure) return undefined;
+  const clean = (l: string) => l.replace(/^\S+Z\s+/, '').replace(/\s+/g, ' ').trim();
+  return `${clean(lines[k]).slice(0, 160)}; runner health: ${pressure}`;
 }
 
 const EXIT_143 = /##\[error\]Process completed with exit code 143\./;
@@ -276,7 +331,8 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
       const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
       // w5271: the runner's service was stopped under the step (exit 143 and its stop annotation): the runner died.
       if (typeof log === 'string' && runnerStopped(log)) continue;
-      const fault = typeof log === 'string' ? resourceFault(log) : undefined;
+      // w6140: a SIGKILL beside the runner's memory pressure is the Linux OOM killer: the same one-time rerun.
+      const fault = typeof log === 'string' ? (resourceFault(log) ?? oomKill(log)) : undefined;
       if (fault && j.run_attempt === 1) continue;
       if (fault)
         return `Refused (w3836): ${of} failed in its step "${step.name}" on a runner out of resources ("${fault}"), but it is attempt ${j.run_attempt ?? 'unknown'}: an out-of-resource fault is rerun once, at attempt 1. A second one is the machine's to fix (its page file, disk or runner count) or the job's. Ben's rule: ${RULE} ${ROUTE}`;
