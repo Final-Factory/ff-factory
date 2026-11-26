@@ -17,6 +17,8 @@ OPS_LIB=${OPS_LIB:-/usr/local/lib/fff/ops}
 FFF_ROOT=${FFF_ROOT:-/srv/fff}
 AGENT_ROOT=${AGENT_ROOT:-/srv/fff-agent}
 me=$(id -un)
+# As pid 1 (PrivatePIDs=) a signal with no handler is ignored: until the trap below, systemd's stop ends this at once.
+trap 'exit 143' TERM INT HUP
 answer_err() {
   printf 'ERR %s\n' "$*"
   echo "fff-agent-launch: refused: $*" >&2
@@ -24,6 +26,25 @@ answer_err() {
 }
 
 IFS= read -r -t 30 header || answer_err "no header from the portal within 30 s"
+# fffctl fence-check's probe (w5841): {"v":1,"fence":true} opens fixed paths from inside this unit, where the views show
+# the portal's files as this account's, and answers refused, OPENED or absent for each; never a content, never a path
+# the header names. Then whether other instances' processes show: with PrivatePIDs= this is pid 1 and sees none.
+if [ "$(printf '%s' "$header" | jq -r 'if .v == 1 and .fence == true then "fence" else "" end' 2>/dev/null)" = fence ]; then
+  probe() { # WHAT PATH
+    local err
+    [ -e "$2" ] || { echo "absent: $1 ($2)"; return; }
+    # shellcheck disable=SC2016 # $1 is the inner shell's: the path, opened and never read
+    err=$(sh -c 'exec 3<"$1"' fence "$2" 2>&1) && { echo "OPENED: $1 ($2)"; return; }
+    echo "refused: $1 ($2): ${err##*: }"
+  }
+  echo "== inside fff-agent@ as $me (w5841)"
+  probe "the vault key" /etc/fff/vault.key
+  probe "a Claude login in the portal's home" "$FFF_ROOT/home/.claude/.credentials.json"
+  probe "the push private key" "$FFF_ROOT/data/vapid.json"
+  probe "the secrets folder" "$FFF_ROOT/secrets"
+  echo "its own pid namespace: $([ "$$" = 1 ] && echo yes || echo no)"
+  exit 0
+fi
 printf '%s' "$header" | jq -e '.v == 1 and (.args | type) == "array" and (.env | type) == "object" and (.cwd | type) == "string" and (.configDir | type) == "string"' >/dev/null 2>&1 ||
   answer_err "the header is not FF Factory's agent header (v 1, args, env, cwd, configDir)"
 claude=$OPS_LIB/claude
@@ -84,4 +105,36 @@ if [ -d "$memory" ]; then
 fi
 echo "fff-agent-launch: starting Claude Code $have as $me in $cwd (${#args[@]} arguments)" >&2
 printf 'OK\n'
-exec /usr/bin/env -i "${envs[@]}" "$claude" "${args[@]}"
+# Claude Code as a child, not exec (w5841): nothing ends an instance whose portal side is gone (the SDK's process ended,
+# or agentAccount.ts dropped a stall and started that agent as fff), and a stalled Claude Code reads no stdin to see it.
+# A watcher polls the socket for its hang-up only (events 0: POLLHUP, never data, so a half-close is no hang-up and
+# nothing is read); then this ends and systemd stops what is left of the unit (TERM, KILL after TimeoutStopSec).
+# Background jobs read /dev/null unless told: both take the socket explicitly. As pid 1 (PrivatePIDs=) a signal with no
+# handler is ignored, so systemd's TERM is passed on.
+/usr/bin/env -i "${envs[@]}" "$claude" "${args[@]}" <&0 &
+agent=$!
+exec 3<&-
+python3 -c '
+import select
+p = select.poll()
+p.register(0, 0)
+while not [e for _, e in p.poll() if e & (select.POLLHUP | select.POLLERR | select.POLLNVAL)]:
+    pass
+' <&0 >/dev/null &
+watch=$!
+# As pid 1 its exit SIGKILLs the whole namespace (systemd.exec(5), PrivatePIDs=): Claude Code gets up to 10 s after TERM.
+end_agent() {
+  kill -TERM "$agent" "$watch" 2>/dev/null
+  for _ in $(seq 20); do kill -0 "$agent" 2>/dev/null || return 0; sleep 0.5; done
+}
+trap 'end_agent; exit 143' TERM INT HUP
+which=""
+wait -n -p which "$agent" "$watch"
+rc=$?
+if [ "$which" != "$agent" ]; then
+  echo "fff-agent-launch: the portal hung up: ending Claude Code" >&2
+  end_agent
+  exit 0
+fi
+kill "$watch" 2>/dev/null
+exit "$rc"

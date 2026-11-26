@@ -1264,7 +1264,34 @@ fence_agent() {
     fi
   done
   echo "processes of $owner: $n environs refused to $agent"
+  fence_agent_unit || rc=1
   return "$rc"
+}
+# fence_agent_unit (w5841): the probes from inside an fff-agent@ instance, where the views show the portal's files as the
+# agents' own: one connection to fff-agent.socket with the launcher's fence header ({"v":1,"fence":true}), whose answer is
+# refused, OPENED or absent per path (fff-agent-launch), never a content. The socket is 0600 fff: as root, or as fff.
+fence_agent_unit() {
+  local sock=${FENCE_AGENT_SOCKET:-/run/fff-agent/claude.sock} out
+  if [ ! -S "$sock" ]; then
+    echo "absent: fff-agent.socket ($sock): no agent starts as the agents' account (fffctl agents status)"
+    return 0
+  fi
+  out=$(timeout 60 python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(50)
+s.connect(sys.argv[1])
+s.sendall(b"{\"v\":1,\"fence\":true}\n")
+s.shutdown(socket.SHUT_WR)
+while True:
+    d = s.recv(65536)
+    if not d:
+        break
+    sys.stdout.buffer.write(d)
+' "$sock" 2>&1) || { echo "unchecked: no answer from fff-agent.socket's fence probe: ${out##*$'\n'}"; return 1; }
+  printf '%s\n' "$out"
+  printf '%s\n' "$out" | grep -q '^== inside fff-agent@' || { echo "unchecked: fff-agent.socket's launcher did not run its fence probe"; return 1; }
+  ! printf '%s\n' "$out" | grep -q '^OPENED'
 }
 
 case "${1:-status}" in
