@@ -21,7 +21,7 @@ export const PROVIDER_PROTOCOL = 2;
  * intake settings: a board_check or request while the intake is off is answered error not_enabled, so a change of
  * settings never needs a new welcome.
  */
-export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater', 'report_chunk', 'report_end'];
+export const PORTAL_ACCEPTS: readonly string[] = ['board_check', 'board_summary', 'request', 'accepted', 'refused', 'result', 'metrics', 'dev_request', 'dev_chunk', 'dev_message', 'dev_received', 'updater', 'report_chunk', 'report_end', 'outside_watch_status'];
 
 /** A connector token: `ffpv1_` and 32 random bytes, base64url. The portal keeps only its SHA-256. */
 export const PROVIDER_TOKEN = /^ffpv1_[A-Za-z0-9_-]{43}$/;
@@ -218,6 +218,11 @@ export type ToConnector =
   | ReportFixedMessage
   /** A player's report a declined request leaves (w853): sent only to a connector whose hello lists "report_obsolete". */
   | ReportObsoleteMessage
+  /**
+   * The outside watchdog's ntfy topic (w5892), sent only to a connector whose hello lists "outside_watch": on every new
+   * link and when it changes. null: the watch is elsewhere (or off), so FFBox stops watching and forgets the topic.
+   */
+  | { type: 'outside_watch'; topic: string | null }
   /** The work messages (docs/ffbox-connector-contract.md), sent only to a connector that lists them in hello.accepts. */
   | ToConnectorWork;
 
@@ -874,6 +879,31 @@ export const UpdaterSchema = z.object({
 });
 export type UpdaterMessage = z.infer<typeof UpdaterSchema>;
 
+/**
+ * connector → portal: FFBox's outside watch on this portal (w5892, scripts/outside_watch.py in ffbox), sent when it
+ * changes and on every new link. Never the topic: topic_tag is the first 12 hex of its SHA-256.
+ */
+export const OutsideWatchStatusSchema = z.object({
+  type: z.literal('outside_watch_status'),
+  outside_watch: z.object({
+    at: iso,
+    interval_secs: z.number().int().min(10).max(3_600),
+    failures: z.number().int().min(1).max(100),
+    state: z.enum(['up', 'down', 'idle']),
+    checks: z.number().int().min(0),
+    alerts: z.number().int().min(0),
+    pings: z.boolean(),
+    health_url: z.string().max(400).regex(/^https?:\/\/[A-Za-z0-9.:[\]-]+(\/[A-Za-z0-9._~/-]*)?$/).optional(),
+    topic_tag: z.string().regex(/^[0-9a-f]{12}$/).optional(),
+    checked_at: iso.optional(),
+    ok_at: iso.optional(),
+    failing_since: iso.optional(),
+    announced_at: iso.optional(),
+    last_alert: z.object({ at: iso, title: z.string().max(200), ok: z.boolean() }).optional(),
+  }),
+});
+export type OutsideWatchStatusMessage = z.infer<typeof OutsideWatchStatusSchema>;
+
 export const FromConnectorSchema = z.discriminatedUnion('type', [
   HelloSchema,
   CapacitySchema,
@@ -887,6 +917,7 @@ export const FromConnectorSchema = z.discriminatedUnion('type', [
   QueryResultSchema,
   MetricsSchema,
   UpdaterSchema,
+  OutsideWatchStatusSchema,
   DevRequestSchema,
   DevChunkSchema,
   DevMessageSchema,

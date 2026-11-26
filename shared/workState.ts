@@ -1225,7 +1225,7 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
     // w2046: a resume waiting for room on its full computer moves to one with room (Agents.roomMove); one that says it stays on
     // purpose, or that no other computer can take it, is right to wait. Any other such wait beside room elsewhere is WRONG.
     // w4738: one released while it waited waits a while for its own computer first (resumeMove.ts HOME_MARK), right too.
-    if (/\((?:w2046|w4738)\)/.test(held.why ?? '') || /^being placed again/.test(held.why ?? '')) return { state: 'queued', why };
+    if (/\((?:w2046|w4738|w5942)\)/.test(held.why ?? '') || /^being placed again/.test(held.why ?? '')) return { state: 'queued', why };
     const { kind, fits } = roomFor(w, f, undefined);
     const age = (id: string) => (f.roomSince ? f.now - (f.roomSince[`${kind}:${id}`] ?? f.now) : Infinity);
     const elsewhere = fits.filter((id) => id.toLowerCase() !== held.s.machineId?.toLowerCase() && age(id) >= ROOM_STAND_MS);

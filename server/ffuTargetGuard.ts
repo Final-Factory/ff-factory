@@ -12,7 +12,7 @@
  */
 import path from 'node:path';
 import { expandVars } from './guard.ts';
-import { readSlotState, slotTarget } from '../machine/ffuSlots.ts';
+import { heldSlots, readSlotState, slotTarget } from '../machine/ffuSlots.ts';
 
 type ShellEnv = Record<string, string | undefined>;
 
@@ -22,8 +22,8 @@ export interface FfuTargetContext {
   root?: string;
   /** The worker's session (FF_SESSION_ID): a slot's holder. */
   session?: string;
-  /** The slot the session holds; default: read slots.json. */
-  heldSlot?: () => string | undefined;
+  /** The slots the session holds (w5885: one per branch), the most recently used first; default: read slots.json. */
+  heldSlot?: () => string | string[] | undefined;
 }
 
 const VALUE = String.raw`("[^"]*"|'[^']*'|(?:\$\([^)]*\)|[^\s;&|)])+)`;
@@ -44,20 +44,24 @@ export function checkPrivateFfuTarget(cmd: string, ctx: FfuTargetContext): strin
   if (!/CARGO_TARGET_DIR|--target-dir/i.test(cmd)) return undefined;
   const dirs = targetDirsIn(cmd);
   if (!dirs.length || !ctx.session || !ctx.root) return undefined;
-  const held = ctx.heldSlot ? ctx.heldSlot() : readSlotState(ctx.root).slots.find((s) => s.holder === ctx.session)?.id;
-  if (!held) return undefined;
+  const got = ctx.heldSlot ? ctx.heldSlot() : heldSlots(readSlotState(ctx.root), ctx.session).map((s) => s.id);
+  const ids = (Array.isArray(got) ? got : got ? [got] : []).filter(Boolean);
+  if (!ids.length) return undefined;
+  const held = ids[0];
   const env = ctx.env ?? {};
   const temps = [env.TMPDIR, env.TEMP, env.TMP].filter((x): x is string => !!x);
   const mine = slotTarget(ctx.root, held);
   for (const d of dirs) {
     const e = expandVars(d, env);
-    const temp = e === undefined ? /\$\{?(TMPDIR|TEMP|TMP)\b|\$env:(TEMP|TMP)\b|%(TEMP|TMP)%/i.test(d) : !inside(e, mine) && temps.some((t) => inside(path.resolve(e), path.resolve(t)));
+    const temp = e === undefined ? /\$\{?(TMPDIR|TEMP|TMP)\b|\$env:(TEMP|TMP)\b|%(TEMP|TMP)%/i.test(d) : !ids.some((id) => inside(e, slotTarget(ctx.root!, id))) && temps.some((t) => inside(path.resolve(e), path.resolve(t)));
     if (!temp) continue;
     return (
-      `w4258: you hold ffu ${held}, so cargo builds in its warm target, not in your temp folder (${d}). ` +
+      `w4258: you hold ffu ${ids.join(' and ')}, so cargo builds in ${ids.length > 1 ? 'their' : 'its'} warm target, not in your temp folder (${d}). ` +
       `Run \`eval "$(ffu-slot where)"\` to set CARGO_TARGET_DIR to ${mine.replace(/\\/g, '/')} and cd into the checkout; ` +
       `a build in the checkout lands there even without it (the slot's .cargo/config.toml). For a baseline of another commit ` +
-      `(a RED run on main), check that commit out in your slot and build it there: both stay warm in the one target.`
+      `(a RED run on main), check that commit out in your slot and build it there: both stay warm in the one target. ` +
+      `A second checkout of another branch gets a second slot of its own (w5885): \`eval "$(ffu-slot take --branch <that branch>)"\` ` +
+      `(it waits, exit 4, only while no other slot is free; your own slot never counts as another worker's).`
     );
   }
   return undefined;
