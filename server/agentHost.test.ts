@@ -214,11 +214,17 @@ test("w2625: a host started before a daemon update that added a worker tool: the
   await until('back online', () => mm.isOnline('mx'), 60_000, logs);
   await until('reported live again', () => s.live, 20_000, logs);
   assert.equal(hostPid(id), pid, 'the host outlived the update (w605)');
+  // Between turns, as the portal's move needs (a mid-turn status is never moved, sessions.ts moveFor): the new daemon's
+  // first report may not have brought the session back to idle yet on a slow runner (w5839: failed once on Windows CI).
+  await until('idle again', () => s.info.status === 'idle', 20_000, logs);
 
   // The portal's w1166 path: its process started on other code, so between turns it stops, and its next process starts
   // with the next message (the portal then records that process as on the new code).
   let moved = false;
+  // Each time the portal asked, what it saw: printed if the move never comes, so a failure names its cause.
+  const asked: string[] = [];
   sessions.codeMove = (h) => {
+    if (h.info.id === id) asked.push(`live=${h.live} status=${h.info.status}`);
     if (h.info.id !== id || moved) return undefined;
     if (!h.live) {
       moved = true;
@@ -228,7 +234,7 @@ test("w2625: a host started before a daemon update that added a worker tool: the
   };
   sessions.send(id, '#tools');
   await until('its next turn', () => turnEnds.length === 2, 60_000, logs);
-  assert.ok(moved, 'its process was started again');
+  assert.ok(moved, `its process was started again (the portal asked: ${asked.join('; ') || 'never'})`);
   assert.equal(turnEnds[1], 'Tools: list_ffbox_files, wake_me', 'the next turn sees the tool the update added');
   assert.notEqual(hostPid(id), pid, 'in a new host, on the code the machine runs now');
 });

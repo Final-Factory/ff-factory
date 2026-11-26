@@ -267,7 +267,7 @@ export const REFUSED_FOR_MS = 30 * 60_000;
  */
 export class MoveGuard {
   private readonly moved = new Map<string, { at: number; to: string }>();
-  private readonly refused = new Map<string, { at: number; why: string }>();
+  private readonly refused = new Map<string, { at: number; why: string; what?: string }>();
   private readonly waiting = new Map<string, { since: number; turns: number }>();
 
   /**
@@ -299,8 +299,9 @@ export class MoveGuard {
     return undefined;
   }
 
-  noteRefusal(machine: string, why: string, now: number) {
-    this.refused.set(machine, { at: now, why });
+  /** `what` says what was refused (w5976: a move's fresh session that did not start there); a daemon's cap refusal by default. */
+  noteRefusal(machine: string, why: string, now: number, what?: string) {
+    this.refused.set(machine, { at: now, why, ...(what ? { what } : {}) });
   }
 
   /** A start on `machine` went through: its daemon's count has room again, so it is a move target again. */
@@ -313,7 +314,7 @@ export class MoveGuard {
     const out: Record<string, string> = {};
     for (const [id, r] of this.refused) {
       if (now - r.at >= REFUSED_FOR_MS) this.refused.delete(id);
-      else out[id] = `its daemon refused a start at its agent cap ${Math.round((now - r.at) / 1000)} s ago (w5942): ${r.why}`;
+      else out[id] = `${r.what ?? 'its daemon refused a start at its agent cap'} ${Math.round((now - r.at) / 1000)} s ago (${r.what ? 'w5976' : 'w5942'}): ${r.why}`;
     }
     return out;
   }
