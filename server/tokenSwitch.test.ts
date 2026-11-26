@@ -366,12 +366,50 @@ test('w5921: the dispatcher ending 2 turns in a row on the usage limit alerts th
   sw.turnEnded(disp);
   assert.equal(alerts.length, 1, 'once per streak');
   assert.ok(sw.statusLines([], () => []).some((l) => /^Dispatcher rate-limited \(w5921\): The dispatcher is rate-limited on vault-ben-1/.test(l)));
-  // A turn that ends normally ends the streak: the next two limit turns alert again.
+  // A turn that ends normally ends the streak; the next two limit turns on the same token's window do not alert again.
   sw.turnEnded({ ...disp, lastResult: 'Started w5907 on lothdesktop.' });
   assert.equal(sw.dispatcherLimited(), undefined);
   sw.turnEnded(disp);
   sw.turnEnded(disp);
-  assert.equal(alerts.length, 2);
+  assert.equal(alerts.length, 1, 'once per token window, a flapping token included');
+});
+
+test('w5921 review: a reset dispatcher (a new session) is not limited by the old one; a backlog read mid-turn still alerts; the reset is the usage mark\'s', (t) => {
+  const w = world(t);
+  w.meter(B1, reading(50, 100, 4));
+  w.meter(B2, reading(0, 3));
+  const alerts: string[] = [];
+  w.deps.alert = (_s, line) => alerts.push(line);
+  let current = 'disp';
+  w.deps.dispatcherId = () => current;
+  const marks = new Map<string, number>();
+  const at = Date.now();
+  w.deps.outUntil = (account) => marks.get(account);
+  const sw = new TokenSwitch(w.deps);
+  const disp = { ...worker('disp', key(B1), { lastResult: LIMIT_LINE }), kind: 'orchestrator', orchestratorRole: 'dispatcher', machineId: undefined } as SessionInfo;
+  marks.set(key(B1), at + 3 * 3_600_000);
+  // A queued backlog: both turns read mid-turn, and the second alerts anyway.
+  sw.turnEnded({ ...disp, status: 'running' });
+  sw.turnEnded({ ...disp, status: 'running' });
+  assert.equal(alerts.length, 1, 'alerted although every reading was mid-turn');
+  assert.match(sw.dispatcherLimited()!, new RegExp(`until ${new Date(at + 3 * 3_600_000).toISOString().slice(0, 16).replace('T', ' ')}Z$`), "the usage tracker's mark, the time system_status shows");
+  // The mark ends (or is cleared): not limited, whatever the streak's own guess said.
+  marks.delete(key(B1));
+  assert.equal(sw.dispatcherLimited(), undefined);
+  marks.set(key(B1), at + 3 * 3_600_000);
+  // The dispatcher is reset: a new session id; the old one's streak is not the new dispatcher's.
+  current = 'disp-2';
+  assert.equal(sw.dispatcherLimited(), undefined, 'a reset dispatcher is not rate-limited by its predecessor');
+  sw.turnEnded({ ...disp, id: 'disp-2', account: key(B2), lastResult: 'Started w5907.' });
+  current = 'disp';
+  assert.equal(sw.dispatcherLimited(), undefined, "a dispatcher's normal turn clears every earlier dispatcher's streak");
+  // A token that flaps alerts once per window, not every other turn.
+  sw.turnEnded(disp);
+  sw.turnEnded(disp);
+  sw.turnEnded({ ...disp, lastResult: 'ok' });
+  sw.turnEnded(disp);
+  sw.turnEnded(disp);
+  assert.equal(alerts.length, 1, 'one alert per agent and token window');
 });
 
 test("w5921: a person's orchestrator stuck on the limit twice alerts too, saying what was done; a worker never does", (t) => {

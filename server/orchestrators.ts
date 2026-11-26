@@ -1865,14 +1865,16 @@ It is for your part of the work, not an answer to another worker's question.`;
     return told;
   }
 
-  /** Send each of these people's own orchestrators a harness message (made if missing). */
-  toPeople(people: readonly Requester[], text: string) {
+  /** Send each of these people's own orchestrators a harness message (made if missing; `existing`: only to one they have, w5921). */
+  toPeople(people: readonly Requester[], text: string, existing = false) {
     const seen = new Set<string>();
     for (const r of people) {
       if (seen.has(r.userId.toLowerCase())) continue;
       seen.add(r.userId.toLowerCase());
       try {
-        this.sessions.send(this.personalFor(r).info.id, text, 'system', undefined, { requestedBy: asRequester(r) });
+        const to = existing ? this.personalOf(r.userId) : this.personalFor(r);
+        if (!to) continue;
+        this.sessions.send(to.info.id, text, 'system', undefined, { requestedBy: asRequester(r) });
       } catch {
         // that orchestrator could not be started (a limit); the ledger and the UI still have it
       }

@@ -3246,9 +3246,12 @@ const tokenSwitch = new TokenSwitch({
   // pool (lothsahn's and Ben's orchestrators), never the stuck orchestrator itself.
   alert: (s, line) => {
     const own = agents.orchestrators.ownerOf(s)?.userId;
-    const to = identity.list().filter((u) => (u.role === 'owner' || vault.hasClaudeFor(u.userId)) && !(own && u.userId.toLowerCase() === own.toLowerCase() && !agents.orchestrators.isDispatcher(s)));
-    agents.orchestrators.toPeople(to, line);
+    const to = identity.list().filter((u) => (u.role === 'owner' || vault.hasClaudeFor(u.userId)) && !(own && u.userId.toLowerCase() === own.toLowerCase()));
+    // Only orchestrators that exist: an alert starts none (a new one would spend a turn, maybe on the same used-up pool).
+    agents.orchestrators.toPeople(to, line, true);
   },
+  dispatcherId: () => agents.orchestrators.dispatcherId,
+  outUntil: (account) => usage.outOf(account)?.until,
   dispatcherConfigured: () => {
     const pinned = pinnedDispatcherEntry(cfg);
     if (pinned === undefined) return `the system payer's pool (${identity.systemPayer().userId}'s; claudeAccounts.dispatcher unset)`;
