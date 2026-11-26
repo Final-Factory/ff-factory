@@ -134,6 +134,8 @@ export interface LinkUpdateFlags {
   storeLock?: 'off' | 'warn' | 'on';
   /** The editor temp folder on or off (w5833), macOS and Linux only: daemon.json `editorTmpdir`; unset: carried. A daemon that predates it ignores it. */
   editorTmpdir?: 'on' | 'off';
+  /** The path fence off or warn (w5863), macOS and Linux only: daemon.json `pathFence`; unset: carried. A daemon that predates it ignores it. */
+  pathFence?: 'off' | 'warn';
 }
 
 /**

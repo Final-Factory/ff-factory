@@ -464,3 +464,28 @@ determined forger. The broker runs only on macOS: elsewhere there is no worker f
 
 zsh writes heredocs under `TMPPREFIX` (default `/tmp/zsh`), refused by the fence ("can't create temp file for here
 document"); the fence's environment sets `TMPPREFIX=<root>/tmp/zsh`.
+
+## The agents' PATH folders (w5863, macOS and Linux)
+
+Every agent the daemon starts, fenced or not, finds the daemon's shims first on its PATH (`machine/daemon.ts` slotEnv):
+unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. Off Windows they live in the Unity slots mailbox's `bin`
+(`machine/unitySlots.ts` installShims), and both fences let a worker write the whole mailbox (Landlock `--rw <mailbox>`
+in `machine/writeLock.ts`, Seatbelt's extraWritable in `server/workerFence.ts`): a fenced worker could replace `ff-pr`
+and have it run outside the fence in the next unfenced agent. Windows moved its shims to `<root>/tools/shims` (w5838).
+
+The fix moves them to `<root>/tools-medium/shims` (`enforcedShimDir` in `machine/pathFence.ts`), a folder both fences
+already keep read-only (`LOCKED_CHILDREN`, `READ_ONLY_IN_ROOT`), so no fence rule changes. A deny of `bin` alone is not
+possible on Linux: Landlock only grants, and workers make `req-*` files directly in the mailbox, so it cannot be granted
+child by child. `<root>/tools/node` is not part of it off Windows: no agent runs it there (`server/agentNode.ts`
+agentNodePathDir is Windows only).
+
+It comes in two stages (lothsahn's lockout rule). Now, **warn**: the shims stay in the mailbox, and the daemon logs each
+change in their folder it did not make, `path fence (warn): <path> changed and the daemon did not write it ...`, once per
+name per hour; nothing is refused. Later, a separate pull request moves the shims (enforce). The switch is the daemon
+setting `pathFence` (`off` or `warn`; unset is `warn`), set from anywhere with `ops_worker machine_update path_fence off`,
+so recovery needs nobody at the machine.
+
+Proof (`server/pathFence.test.ts`, live on Linux with Landlock): under the lock a sandbox worker runs with today, a write
+to `<root>/unity-slots/bin/ff-pr` succeeds and is logged; in `<root>/tools-medium/shims` the shim runs from PATH while an
+overwrite, append, truncate, new file, remove, rename in or out, or a move of the folder is refused. On macOS the
+Seatbelt deny of `tools-medium` is checked in the profile text; a live run on a Mac is still to do.

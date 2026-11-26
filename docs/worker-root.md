@@ -854,6 +854,24 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     with every Low worker; Medium editors wrote there before. The port registry (`unity-mcp-port-<hash>.json`) goes to
     the profile's `.unity-mcp` (`GetFolderPath(UserProfile)` ignores the variable), which a Low editor cannot write: it
     reuses the port of the file left there and the daemon finds it by the status file, so nothing breaks.
+- **The fenced editor's environment: warn-only for now** (w5864, from w5838). `launchFenced` still starts a Low Windows
+  editor with the daemon's whole `process.env` (daemon.json `env` included) under the temp, fence and sandbox variables,
+  and a Low worker can read a Low editor's environment. The minimal one is `fencedEditorEnv` (`machine/editorEnv.ts`):
+  Windows' own variables, the root's folders (`rootEnv`: Unity reads `UPM_CACHE_ROOT` and `ASSETSTORE_CACHE_PATH`),
+  `UNITY_MCP_*`, the switches the game's editor scripts read (`FF_TEST_HISTORY`, `UNITY_JOBS_NATIVE_LEAK_DETECTION_MODE`),
+  then the launch's own variables; any name or value shaped like a credential (`secretEnvNames`) is dropped even where
+  allowed. Licensing needs no variable (`-licensingIpc`). Each fenced start logs `editor env (warn-only, w5864): ... would
+  leave out N variable(s): <names>` with the credential-like ones named apart (names only, never a value).
+  - **Measured** (BEAST slot4, 2026-11-26 00:46Z): the editor started through the Low node launcher with only the minimal
+    env (53 names, 79 left out, from a worker's environment): `whoami /groups` inside it said Low Mandatory Level;
+    licensing as the daemon's own full-env start of slot4 at 2026-11-25 23:40Z (the -low channel absent, the
+    `-6000.3.19` client launched, "Successfully resolved entitlement details" 11 times, "Unity Personal"); the scripts
+    compiled; the bridge's status file in `UNITY_MCP_STATUS_DIR` said ready and `execute_code` ran; no name in its
+    environment matched TOKEN, SECRET, PASSWORD, API_KEY, CREDENTIAL or AUTH.
+  - **Enforcing is a separate pull request** after the warn period (lothsahn's lockout rule), not a setting here: the warn
+    lines show what each machine's daemon (BEAST, LothDesktop) holds that would go, which a setting flipped blind would
+    not, and the enforce change carries its own recovery that needs nobody: an editor that does not come up with the
+    minimal env is started again with the whole one and a `WARNING` naming what was missing.
 - Every 15 s the daemon ends any Low Roslyn compiler server that runs from an install's own path (`strayLowServers`), so
   a worker that starts Unity by its install path cannot break the machine's Medium compiles (w5347).
 - **macOS: sandbox editors start under the workers' Seatbelt profile** (w5630, stage 2 of w5540). When the workers'
