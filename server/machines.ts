@@ -20,6 +20,8 @@ import { LINK_ACK_MS, PendingCalls, THIN_REFUSED, type UpdateBundle, UpdateBundl
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { PortalPinStatus } from '../machine/portalPin.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
+import { gameSandboxes, lightFolders } from '../shared/sandboxKind.ts';
+import { lightName } from '../machine/lightFolders.ts';
 import { winDir } from './machineDeployWin.ts';
 import type { DaemonExtras, DeployOptions, DeployResult, MachineDirs } from './machineDeploy.ts';
 import { openPr } from './gitStatus.ts';
@@ -34,6 +36,7 @@ import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './
 import type { AttachmentStore } from './attachments.ts';
 import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary, WorkerFenceReport } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
+import { pageStats } from './ffuSlotsView.ts';
 import type { StaleContext } from './staleOutput.ts';
 import { checkStringMap, readJsonDurable, writeJsonDurable } from './durable.ts';
 import { DRY_RUN_WHY, dryRun, refuseInDryRun } from './dryRun.ts';
@@ -1156,7 +1159,7 @@ export class MachineManager {
   // ---------------------------------------------------------------- daemon versions
 
   /** What each connected daemon said in its hello. */
-  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean }>();
+  private readonly hellos = new Map<string, { protocol: number; oldestPortal?: number; daemon?: string; catalog?: string[]; guard?: boolean; agentHosts?: boolean; saveWork?: boolean; liveView?: boolean; liveIdleClose?: boolean; liveRestage?: boolean; liveKeep?: boolean; compact?: boolean; ghApp?: boolean; selfUpdate?: number; timedRuns?: boolean; labFixtures?: boolean; steamUpload?: boolean; steamInstall?: boolean; portalPin?: PortalPinStatus; readFenceSwitch?: boolean; lightFolders?: boolean }>();
 
   /** Each connected daemon's GPU Whisper (w615), from its hello and its `voice` messages. */
   private readonly voices = new Map<string, RemoteVoiceStatus>();
@@ -1561,7 +1564,8 @@ export class MachineManager {
   placeFull(s: SessionHandle): string | undefined {
     const m = this.store.machines.get(s.info.machineId ?? '');
     if (!m) return undefined;
-    if (s.info.placeReleased && !s.live) {
+    // w5924: a stopped agent-only worker in a game sandbox is asked too: it moves to a light agent folder before it resumes.
+    if ((s.info.placeReleased || s.info.machineSandbox) && !s.live) {
       const why = this.placeAgain?.(s.info);
       if (why) return why;
     }
@@ -2559,7 +2563,7 @@ export class MachineManager {
     if (!m) return;
     switch (msg.type) {
       case 'hello': {
-        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}) });
+        this.hellos.set(id, { protocol: msg.protocol, ...(msg.oldestPortal !== undefined ? { oldestPortal: msg.oldestPortal } : {}), daemon: msg.info?.daemon, catalog: msg.catalog, ...(msg.guard ? { guard: true } : {}), ...(msg.agentHosts ? { agentHosts: true } : {}), ...(msg.saveWork ? { saveWork: true } : {}), ...(msg.liveView ? { liveView: true } : {}), ...(msg.liveIdleClose ? { liveIdleClose: true } : {}), ...(msg.liveRestage ? { liveRestage: true } : {}), ...(msg.liveKeep ? { liveKeep: true } : {}), ...(msg.compact ? { compact: true } : {}), ...(msg.timedRuns ? { timedRuns: true } : {}), ...(msg.labFixtures ? { labFixtures: true } : {}), ...(msg.steamUpload ? { steamUpload: true } : {}), ...(msg.steamInstall ? { steamInstall: true } : {}), ...(msg.ghApp ? { ghApp: true } : {}), ...(typeof msg.selfUpdate === 'number' ? { selfUpdate: msg.selfUpdate } : {}), ...(msg.portalPin && typeof msg.portalPin === 'object' ? { portalPin: msg.portalPin } : {}), ...(msg.readFenceSwitch ? { readFenceSwitch: true } : {}), ...(msg.lightFolders ? { lightFolders: true } : {}) });
         // GitHub App tokens (w1519): a daemon that keeps them gets the current set at once.
         if (msg.ghApp) this.pushGhAppTokens(id);
         // w1946: a play-only machine's timed runs: what it holds now, so the portal sends again what a restart lost.
@@ -2915,7 +2919,7 @@ export class MachineManager {
         return;
       }
       case 'stats': {
-        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), ...(msg.playerCache ? { playerCache: msg.playerCache } : {}), at: new Date().toISOString() };
+        const stats: MachineStats = { ...msg.stats, ...(msg.unity ? { unity: msg.unity } : {}), ...(msg.benchLock ? { benchLock: msg.benchLock } : {}), ...(msg.benchQueue ? { benchQueue: msg.benchQueue } : {}), ...(msg.bench ? { bench: msg.bench } : {}), ...(msg.personPlay ? { personPlay: msg.personPlay } : {}), ...(msg.playerCache ? { playerCache: msg.playerCache } : {}), ...(msg.ffuSlots ? { ffuSlots: msg.ffuSlots } : {}), at: new Date().toISOString() };
         // w1894: a person's game starting or ending there is logged once (portal_logs shows it)
         const was = this.stats.get(id)?.personPlay;
         if (!!was !== !!msg.personPlay) console.log(`machine ${id}: ${msg.personPlay ? `${msg.personPlay.who} is playing Final Factory there (pid ${(msg.personPlay.pids ?? []).join(', ')}): held, its agents yield (w1894)` : `the person's game there ended and its grace passed: it takes work again (w1894)`}`);
@@ -2923,7 +2927,7 @@ export class MachineManager {
         if (was && !msg.personPlay) this.onPlayEnded?.(id);
         if (msg.bench) noteBench(this.playerSeen.get(id) ?? this.playerSeen.set(id, new Map()).get(id)!, msg.bench, Date.now());
         this.noteCpu(id, msg.stats.loadPct);
-        emit({ type: 'machine_stats', id, stats });
+        emit({ type: 'machine_stats', id, stats: pageStats(stats) });
         if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);
         return;
       }
@@ -3129,10 +3133,12 @@ export class MachineManager {
     if (!pool) throw new Error(`${m.id} has no sandboxes: redeploy it with add_machine sandbox_root (e.g. "D:\\work\\ffsb")`);
     const asked = slugify(req.name);
     if (!SANDBOX_ID.test(asked)) throw new Error(`"${req.name}" does not make a usable sandbox name`);
-    if ((m.sandboxes ?? []).length >= pool.maxSandboxes) throw new Error(`already ${m.sandboxes!.length} sandboxes on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
+    // w5924: light agent folders are no game sandboxes: they count against the agent cap only, never max_sandboxes.
+    const games = gameSandboxes(m.sandboxes);
+    if (games.length >= pool.maxSandboxes) throw new Error(`already ${games.length} sandboxes on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
     // A worker root install (w513, lothsahn 2026-10-06) names its sandboxes slot1..slotN, N its sandbox limit: the first
     // free one. The name asked for still names the branch, so a slot used again never inherits an old sandbox's branch.
-    const id = m.root ? slotName((m.sandboxes ?? []).map((s) => s.id), pool.maxSandboxes) : asked;
+    const id = m.root ? slotName(games.map((s) => s.id), pool.maxSandboxes) : asked;
     if (!id) throw new Error(`no free slot on ${m.id} (max_sandboxes ${pool.maxSandboxes}); delete one first`);
     if ((m.sandboxes ?? []).some((s) => s.id === id)) throw new Error(`sandbox "${id}" already exists on ${m.id}`);
     const branch = req.branch?.trim() || `sandbox/${asked}`;
@@ -3140,6 +3146,52 @@ export class MachineManager {
     if (problem) throw new Error(problem);
     const base = req.base?.trim() || this.cfg.defaultBase;
     return await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch, base, seedLibrary: req.seedLibrary ?? true, startUnity: req.startUnity ?? false }, 2 * 60_000);
+  }
+
+  /**
+   * Whether `machineId`'s daemon makes light agent folders (w5924, its hello's lightFolders): work that needs only an agent
+   * slot starts in one of its own there, not in a game sandbox. An older daemon would make a game worktree for the op.
+   */
+  offersLight(machineId: string): boolean {
+    const m = this.store.machines.get(machineId);
+    return !!m && !!poolSettingsOf(m) && this.isOnline(m.id) && this.hellos.get(m.id)?.lightFolders === true;
+  }
+
+  /**
+   * Make a new light agent folder on a machine (w5924): `<sandbox_root>/agent-work/agentN`, the first free N. Returns its
+   * record once the daemon reported it (its sandboxes message comes before the op's answer on the one link).
+   */
+  async createLightFolder(machineId: string, why: string): Promise<MachineSandbox> {
+    const m = this.requireSandboxDaemon(machineId);
+    if (!this.offersLight(m.id)) throw new Error(`${m.id}'s daemon makes no light agent folders yet (w5924): it is updated once no agent runs there`);
+    const id = lightName([...lightFolders(m.sandboxes).map((s) => s.id), ...this.lightMaking]);
+    this.lightMaking.add(id);
+    try {
+      const text = await this.sandboxCall(m.id, { op: 'create', sandbox: id, branch: '', base: '' }, 60_000);
+      const sb = this.store.machines.get(m.id)?.sandboxes?.find((x) => x.id === id);
+      if (!sb) throw new Error(`${m.id} answered "${text}" but has not reported light folder ${id}`);
+      console.log(`light folder: ${m.id}/${id} made for ${why}`);
+      return sb;
+    } finally {
+      this.lightMaking.delete(id);
+    }
+  }
+
+  /** Light folder ids being made now (w5924): two starts at once never get one id. */
+  private readonly lightMaking = new Set<string>();
+
+  /**
+   * Delete a light agent folder (w5924). Its daemon refuses while an agent runs in it, and while a git repository in it holds
+   * work its remotes lack (uncommitted or untracked files, unpushed commits, a stash), unless `force` (a person's word).
+   */
+  async deleteLightFolder(machineId: string, id: string, force = false): Promise<string> {
+    const m = this.requireSandboxDaemon(machineId);
+    const sb = this.requireSandbox(m.id, id);
+    if (sb.kind !== 'light') throw new Error(`${m.id}/${id} is a game sandbox, not a light folder: delete_sandbox deletes game sandboxes`);
+    const text = await this.sandboxCall(m.id, { op: 'delete', sandbox: sb.id, force }, 10 * 60_000);
+    m.sandboxes = (m.sandboxes ?? []).filter((s) => s.id !== sb.id);
+    this.store.putMachine(m);
+    return text;
   }
 
   /** Delete a machine sandbox (its editor, Library, worktree; the branch stays unless deleteBranch). Returns when it is gone. */
@@ -3204,7 +3256,9 @@ export class MachineManager {
       return Promise.reject(new Error(`${m.id}'s daemon speaks protocol ${proto} and cannot clear stuck batch builds (needs ${BATCH_CLEAR_PROTOCOL}): it is redeployed once no agent runs there. Ask your orchestrator to have a person end the build through the ops worker meanwhile.`));
     }
     // Never a sandbox field to a daemon that would ignore it and act on the main clone.
-    const sb = (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox).id);
+    const rec = (this.requireSandboxDaemon(m.id), this.requireSandbox(m.id, sandbox));
+    if (rec.kind === 'light') return Promise.reject(new Error(LIGHT_NO_UNITY(`${m.id}/${rec.id}`)));
+    const sb = rec.id;
     return new Promise<string>((resolve, reject) => {
       const id = randomUUID();
       const timer = setTimeout(() => {
@@ -3308,6 +3362,7 @@ export class MachineManager {
   switchBranch(machineId: string, branch: string, createFrom?: string, sandbox?: string, callerSessionId?: string, githubToken?: string, seatSessionIds?: string[]) {
     if (!sandbox) return Promise.reject(new Error(MAIN_CLONE_NO_AGENTS));
     const rec = (this.requireSandboxDaemon(machineId), this.requireSandbox(machineId, sandbox));
+    if (rec.kind === 'light') return Promise.reject(new Error(`${machineId}/${rec.id} is a light agent folder (w5924): it has no game checkout, so no branch to switch. Your repository is your own clone (in this folder or in $TMPDIR): switch branches there with git.`));
     const sb = rec.id;
     // w5068: the branch it leaves is not pushed while a worker on it waits on its pull request's CI (server/savePushHold.ts).
     const from = rec.git?.branch;
@@ -3610,6 +3665,10 @@ export function leaveRoot(m: Machine): boolean {
 }
 
 /** The first free sandbox slot name, slot1..slot<max>, or undefined when all are taken (w513). Exported for tests. */
+/** w5924: the unity tool's refusal in a light agent folder. */
+export const LIGHT_NO_UNITY = (where: string) =>
+  `${where} is a light agent folder (w5924): agent-only work has no game checkout and no Unity editor here. Work that needs an editor is game work (decide_work needs game) and goes in a game sandbox.`;
+
 export function slotName(taken: string[], max: number): string | undefined {
   const used = new Set(taken.map((t) => t.toLowerCase()));
   for (let k = 1; k <= max; k++) if (!used.has(`slot${k}`)) return `slot${k}`;
