@@ -102,7 +102,8 @@ export const TOOL_MANIFEST = {
   machine_daemon: { group: 'machines', kinds: [D, R] },
   convert_machine: { group: 'machines', kinds: [D, R] },
   relocate_machines: { group: 'machines', kinds: [D, R] },
-  machine_cleanup: { group: 'machines', kinds: [D, R] },
+  // w5929: a worker on a disk clean-up request runs it on its own machine only (Agents.workerCleanup).
+  machine_cleanup: { group: 'machines', kinds: [D, R, W] },
   cleanup_log: { group: 'machines', kinds: [D, R] },
   remove_machine: { group: 'machines', kinds: [D, R] },
   host_recovery: { group: 'machines', kinds: [D, R] },
