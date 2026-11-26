@@ -15,7 +15,8 @@
 //   a runner running a job has its task set once it is between jobs;
 // - the listener and the cmd.exe and conhost.exe it runs under (run.cmd starts a new listener under the same cmd when one
 //   exits 2 to 4, which runnerEnv's relaunch does) are read for class, I/O and memory priority when the listener is new to
-//   this daemon or its class reads below Normal; in "enforce" each below Normal is raised to Normal in all three
+//   this daemon, or (enforce) 30 minutes after a raise if it failed, stayed low or its class reads below Normal again, and
+//   only as the runner's own images (Runner.Listener.exe, then cmd.exe or conhost.exe); in "enforce" each below Normal is raised to Normal in all three
 //   (SetPriorityClass, NtSetInformationProcess ProcessIoPriority, SetProcessInformation ProcessMemoryPriority: same user, no
 //   privilege), and read back. The jobs it starts from then on run at Normal. Nothing is restarted, a job already running
 //   keeps its priority, and a process above Normal is left alone. A "parent" that started after its child (a reused pid) is
@@ -44,13 +45,17 @@ const NEVER_BY_DEFAULT = new Set<string>(['beast']);
 export function runnerPriorityMode(id: string, platform: NodeJS.Platform, real: boolean, configured?: RunnerPriorityMode): RunnerPriorityMode {
   if (!real || platform !== 'win32') return 'off';
   const i = id.toLowerCase();
-  return configured ?? (RUNNER_PRIORITY_ENFORCE.has(i) && !NEVER_BY_DEFAULT.has(i) ? 'enforce' : 'warn');
+  // BEAST: enforce from daemon.json (a local `worker update`, a hand edit, a carried value) is read as warn too
+  if (NEVER_BY_DEFAULT.has(i)) return configured === 'off' ? 'off' : 'warn';
+  return configured ?? (RUNNER_PRIORITY_ENFORCE.has(i) ? 'enforce' : 'warn');
 }
 
 /** In enforce, how long a listener whose raise failed or did not hold is left before it is raised again. */
 export const RAISE_RETRY_MS = 30 * 60_000;
 /** The error the process script gives a "parent" that started after its child: a reused pid, not the parent; the chain ends there. */
 export const REUSED_PID = 'started after its child';
+/** The script's error for a pid whose image is not the runner's (Runner.Listener.exe first, then cmd.exe or conhost.exe). */
+export const NOT_RUNNER = 'not a runner process';
 
 /** How often a runner's scheduled task is read again. */
 export const TASK_EVERY_MS = 60 * 60_000;
@@ -195,6 +200,9 @@ export function processPriorityScript(pids: number[], fix: boolean): string {
     `  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessInformation(IntPtr h, int c, ref int v, int l);`,
     `  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessInformation(IntPtr h, int c, ref int v, int l);`,
     `  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr h, out long c, out long e, out long k, out long u);`,
+    `  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr h, int f, System.Text.StringBuilder s, ref int n);`,
+    // the image a pid runs now: the listing the chain came from may be seconds old, and a dead pid's number is reused
+    `  static string Image(IntPtr h) { var s = new System.Text.StringBuilder(1024); int n = 1024; if (!QueryFullProcessImageName(h, 0, s, ref n)) return ""; string p = s.ToString(); return p.Substring(p.LastIndexOf('\\\\') + 1).ToLowerInvariant(); }`,
     // the creation time of the process One last opened (0: not read), for the next one's notAfter
     `  public static long Last;`,
     `  static string Read(IntPtr h) {`,
@@ -210,7 +218,11 @@ export function processPriorityScript(pids: number[], fix: boolean): string {
     `    IntPtr h = OpenProcess(fix ? 0x0600u : 0x0400u, false, pid);`,
     `    if (h == IntPtr.Zero) return pid + ";;;;;;;OpenProcess failed: error " + Marshal.GetLastWin32Error();`,
     `    try {`,
+    `      string img = Image(h);`,
+    `      bool ok = notAfter == 0 ? img == "runner.listener.exe" : (img == "cmd.exe" || img == "conhost.exe");`,
+    `      if (!ok) return pid + ";;;;;;;${NOT_RUNNER} (" + (img == "" ? "image not read" : img) + ")";`,
     `      long cr, e, k, u; if (GetProcessTimes(h, out cr, out e, out k, out u)) Last = cr;`,
+    `      if (Last == 0) return pid + ";;;;;;;start time not read: error " + Marshal.GetLastWin32Error();`,
     // a parent that started after its child is another process that took a dead parent's pid: left alone, the chain ends
     `      if (notAfter > 0 && Last > notAfter) return pid + ";;;;;;;${REUSED_PID} (a reused pid, not its parent)";`,
     `      string before = Read(h), err = "";`,
@@ -227,7 +239,7 @@ export function processPriorityScript(pids: number[], fix: boolean): string {
     `'@`,
     // in chain order (the listener, then each parent): each is checked against the creation time of the one before it
     `$prev = [long]0`,
-    `$out = foreach ($p in @(${pids.join(', ')})) { $line = [FFRunnerPrio]::One($p, $${fix ? 'true' : 'false'}, $prev); $line; if ($line.Contains('${REUSED_PID}') -or [FFRunnerPrio]::Last -eq 0) { break }; $prev = [FFRunnerPrio]::Last }`,
+    `$out = foreach ($p in @(${pids.join(', ')})) { $line = [FFRunnerPrio]::One($p, $${fix ? 'true' : 'false'}, $prev); $line; if ($line.Contains('${REUSED_PID}') -or $line.Contains('${NOT_RUNNER}') -or [FFRunnerPrio]::Last -eq 0) { break }; $prev = [FFRunnerPrio]::Last }`,
     `[Console]::Out.Write(($out -join "\`n"))`,
   ].join('\n');
 }
@@ -350,7 +362,7 @@ export class RunnerPriority {
         return;
       }
       // a "parent" that started after its child is a stranger with a reused pid: the chain ends before it, from now on
-      const cut = rows.find((r) => r.error?.startsWith(REUSED_PID));
+      const cut = rows.find((r) => r.error?.startsWith(REUSED_PID) || r.error?.startsWith(NOT_RUNNER));
       if (cut && chain.indexOf(cut.pid) > 0) {
         this.cutAt.set(l.pid, cut.pid);
         chain = chain.slice(0, chain.indexOf(cut.pid));
@@ -390,18 +402,18 @@ export class RunnerPriority {
     const isBusy = (r: string) => busy.has(rootKey(r));
     const fixable = enforce ? roots.filter((r) => !isBusy(r)) : [];
     const readOnly = roots.filter((r) => !fixable.includes(r));
-    let rows: TaskRow[];
+    // the set and the read are two scripts: what the first set is said even when the second throws
+    const rows: TaskRow[] = [];
     try {
-      rows = [...(fixable.length ? await this.d.tasks(fixable, true) : []), ...(readOnly.length ? await this.d.tasks(readOnly, false) : [])];
+      if (fixable.length) rows.push(...(await this.d.tasks(fixable, true)));
+      if (readOnly.length) rows.push(...(await this.d.tasks(readOnly, false)));
       if (this.tasksFailing) this.d.log('runner priority: the scheduled tasks read again');
       this.tasksFailing = false;
     } catch (e) {
       if (!this.tasksFailing) this.d.log(`runner priority: could not read the runners' scheduled tasks: ${(e as Error).message.slice(0, 200)}`);
       this.tasksFailing = true;
-      // looked at again at the next hour's read, not every minute while a runner waits
-      this.taskPending.clear();
-      return;
     }
+    // a failed read leaves nothing waiting: looked at again at the next hour's read, not every minute
     this.taskPending.clear();
     for (const r of rows) {
       const name = folderName(r.root);

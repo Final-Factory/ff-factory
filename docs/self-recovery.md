@@ -250,8 +250,10 @@ Normal in all three; 5 and 6 lower the memory priority.
 - **The task.** It reads each running listener's scheduled task at the first tick, for a runner folder not seen before,
   and every hour.
 - **The processes.** It reads the class, I/O and memory priority of the listener and of the cmd.exe and conhost.exe it
-  runs under, when the listener is new or its class reads below Normal. run.cmd starts a relaunched listener under the
-  same cmd.
+  runs under, when the listener is new. Under enforce it looks again 30 minutes after a raise that failed or stayed low,
+  or whose class reads below Normal again. run.cmd starts a relaunched listener (a new pid) under the same cmd. Each pid
+  is checked to be the runner's own image (Runner.Listener.exe, then cmd.exe or conhost.exe) and no younger than its
+  child before anything is read or set.
 
 Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
 - It sets a task above 4 to 4 with `Set-ScheduledTask`. That is the user's own task, so no elevation is needed; the
@@ -265,7 +267,8 @@ Under `enforce` (the machines `RUNNER_PRIORITY_ENFORCE` lists):
 
 The first step listed no machine and only logged (lothsahn's lockout rule). Its lines on LothDesktop (2026-11-26 20:22Z)
 showed both tasks at 7 and both listeners at BelowNormal, I/O 1, memory 2, read at the daemon's Medium integrity. The
-second step lists LothDesktop. BEAST stays log-only, in code as well as in the list, under Ben's standing hold on its
+second step lists LothDesktop. BEAST stays log-only in code: `enforce` in its daemon.json is read as `warn`, and
+`ops_worker runner_priority enforce` is refused for it, under Ben's standing hold on its
 system settings. daemon.json `runnerPriority` (`off`, `warn` or `enforce`) overrides the default at the daemon's start;
 `ops_worker machine_update runner_priority warn` sets it with nobody at the machine, and is the recovery. A failure is
 logged once and changes nothing else. ffu's

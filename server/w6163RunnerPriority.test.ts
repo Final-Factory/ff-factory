@@ -6,6 +6,7 @@ import type { Proc } from '../machine/unity.ts';
 import {
   CLASS,
   RAISE_RETRY_MS,
+  NOT_RUNNER,
   REUSED_PID,
   RUNNER_PRIORITY_ENFORCE,
   RunnerPriority,
@@ -90,6 +91,8 @@ test('w6163: step 2 enforces on lothdesktop only; BEAST never by default; off of
   } finally {
     RUNNER_PRIORITY_ENFORCE.delete('beast');
   }
+  assert.equal(runnerPriorityMode('beast', 'win32', true, 'enforce'), 'warn', 'enforce in BEAST daemon.json (a local worker update, a hand edit) is read as warn');
+  assert.equal(runnerPriorityMode('BEAST', 'win32', true, 'off'), 'off');
   assert.equal(runnerPriorityMode('lothdesktop', 'win32', true, 'enforce'), 'enforce');
   assert.equal(runnerPriorityMode('lothdesktop', 'win32', true, 'off'), 'off');
   assert.equal(runnerPriorityMode('biscuit', 'linux', true), 'off');
@@ -303,7 +306,7 @@ test("w6163: a busy runner's task is set at the first tick it is between jobs, n
 });
 
 test('w6163: a "parent" that started after its child (a reused pid) ends the chain and is not looked at again', async () => {
-  const { rp, lines, raises, cls } = rig('enforce', {
+  const { rp, lines, raises, cls, state } = rig('enforce', {
     raise: (pids) => pids.slice(0, pids.indexOf(102) < 0 ? pids.length : pids.indexOf(102) + 1).map((pid) => (pid === 102 ? { pid, before: {}, after: {}, error: `${REUSED_PID} (a reused pid, not its parent)` } : { pid, before: LOW, after: NORMAL })),
   });
   await rp.tick();
@@ -312,6 +315,38 @@ test('w6163: a "parent" that started after its child (a reused pid) ends the cha
   cls[103] = P.PRIORITY_NORMAL;
   await rp.tick();
   assert.equal(raises.length, 2, 'pid 102 (still low) is a stranger now: no raise every minute for it');
+  cls[11] = P.PRIORITY_BELOW_NORMAL;
+  state.now += RAISE_RETRY_MS;
+  await rp.tick();
+  assert.deepEqual(raises[2], { pids: [11, 103], fix: true }, 'raised again after the back-off: still without the stranger');
+});
+
+test('w6163: the process script checks each pid is the runner image before it reads or sets it', () => {
+  const s = processPriorityScript([11, 103], true);
+  assert.ok(s.includes('QueryFullProcessImageName') && s.includes('img == "runner.listener.exe"') && s.includes('img == "cmd.exe" || img == "conhost.exe"'));
+  assert.ok(s.indexOf('if (!ok) return') < s.indexOf('string before = Read(h)'), 'checked before the first read');
+  assert.ok(s.includes('if (Last == 0) return'), 'a start time not read is a failure, not an unchecked raise');
+  assert.ok(s.includes(`$line.Contains('${NOT_RUNNER}')`));
+});
+
+test('w6163: a not-runner parent ends the chain like a reused pid', async () => {
+  const { rp, lines } = rig('enforce', {
+    raise: (pids) => pids.slice(0, 2).map((pid) => (pid === 103 ? { pid, before: {}, after: {}, error: `${NOT_RUNNER} (powershell.exe)` } : { pid, before: LOW, after: NORMAL })),
+  });
+  await rp.tick();
+  assert.ok(lines.some((l) => l.includes("raised ffu-lothdesktop-1's listener (pid 11)") && l.includes('and its 0 parent(s)')), lines.join('\n'));
+});
+
+test('w6163: tasks the first script set are said even when the busy runners\' read then fails', async () => {
+  const { rp, lines } = rig('enforce', {
+    tasks: (roots, fix) => {
+      if (!fix) throw new Error('Access is denied.');
+      return roots.map((root) => ({ root: root.replace(/\//g, '\\'), task: '\\ffu-lothdesktop-1', before: 7, after: 4 }));
+    },
+  });
+  await rp.tick();
+  assert.ok(lines.some((l) => l.includes("set ffu-lothdesktop-1's scheduled task")), lines.join('\n'));
+  assert.ok(lines.some((l) => l.includes("could not read the runners' scheduled tasks")), lines.join('\n'));
 });
 
 test('w6163: in enforce a raise that fails is tried again after RAISE_RETRY_MS, not every minute', async () => {
