@@ -401,7 +401,8 @@ export class MacUnity {
   /** The editor's own log (-logFile), for a sandbox editor (machine/sandboxes.ts); unset: Unity's default Editor.log. */
   readonly logFile?: string;
   /** w5557: variables the editor starts with on top of the daemon's (a sandbox editor's own FF_GAME_DATA_DIR). */
-  readonly env: Record<string, string>;
+  /** The editor's own environment, read at each start (w5833: a sandbox editor's TMPDIR folder is made then). */
+  private readonly envOf: () => Record<string, string>;
   private readonly d: UnityDeps;
   private readonly bin: () => string;
   /** w5270: what the last start() found of the Burst EditorPref when it was off (undefined: it was on). */
@@ -411,12 +412,13 @@ export class MacUnity {
   /** w5540: whether the last start() was fenced, and why not when it was not. */
   fenced?: { on: boolean; why?: string; warn?: boolean };
 
-  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> } = {}) {
+  constructor(repo: string, deps?: UnityDeps, bin?: () => string, platform: UnityPlatform = 'darwin', where: UnityLocation = {}, opts: { logFile?: string; fence?: () => EditorFence | undefined; env?: Record<string, string> | (() => Record<string, string>) } = {}) {
     this.repo = norm(repo);
     this.platform = platform;
     this.logFile = opts.logFile;
     this.fence = opts.fence;
-    this.env = opts.env ?? {};
+    const env = opts.env ?? {};
+    this.envOf = typeof env === 'function' ? env : () => env;
     this.d = deps ?? realDeps(platform);
     this.bin = bin ?? (() => editorBinary(this.repo, fs.existsSync, (p) => fs.readFileSync(p, 'utf8'), os.homedir(), platform, process.env, where));
   }
@@ -510,6 +512,7 @@ export class MacUnity {
     this.burstNote = await this.d.burstPrefOn?.().catch((e: Error) => `could not check Unity's Burst EditorPref: ${e.message}`);
     let bin = this.bin();
     await this.noAppNap(bin);
+    const env = this.envOf();
     const args = ['-projectPath', this.repo, ...(this.logFile ? ['-logFile', this.logFile] : [])];
     const wanted = this.fence?.();
     const seatbelt = this.platform === 'darwin' && isSeatbeltFence(wanted) ? wanted : undefined;
@@ -521,21 +524,21 @@ export class MacUnity {
       if (this.d.launchFenced) {
         const lc = await this.d.licensingClient?.(bin).catch((e: Error) => `could not start Unity's licensing client: ${e.message}`);
         if (lc) this.burstNote = this.burstNote ? `${this.burstNote}. ${lc}` : lc;
-        pid = await this.d.launchFenced(seatbelt, bin, args, this.repo, this.env);
+        pid = await this.d.launchFenced(seatbelt, bin, args, this.repo, env);
         this.fenced = { on: true, ...(seatbelt.warn ? { warn: true } : {}) };
       } else {
         this.fenced = { on: false, why: 'no fenced launcher here' };
-        pid = await this.d.launch(bin, args, this.repo, this.env);
+        pid = await this.d.launch(bin, args, this.repo, env);
       }
     } else if (fence && fencedBin && this.d.launchFenced) {
       bin = fencedBin;
-      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, this.env);
+      pid = await this.d.launchFenced(fence, bin, [...args, '-licensingIpc', fence.licensingIpc], this.repo, env);
       this.fenced = { on: true };
     } else {
       // A fence the editor cannot use (no junction for its version, a unity_path not shaped <version>\Editor\Unity.exe):
       // it starts unfenced, as agents do when their fence cannot be set up, and says so.
       this.fenced = fence ? { on: false, why: !fencedBin ? `no junction under ${fence.unityDir} for ${bin}` : 'no fenced launcher here' } : undefined;
-      pid = await this.d.launch(bin, args, this.repo, this.env);
+      pid = await this.d.launch(bin, args, this.repo, env);
     }
     for (let i = 0; i < 10; i++) {
       await this.d.sleep(1000);

@@ -191,6 +191,7 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.workerCaps === 'off' || f.workerCaps === 'warn' || f.workerCaps === 'enforce' ? { workerCaps: f.workerCaps } : {}),
     ...(f.transcriptLock === 'on' || f.transcriptLock === 'off' ? { transcriptLock: f.transcriptLock } : {}),
     ...(f.storeLock === 'off' || f.storeLock === 'warn' || f.storeLock === 'on' ? { storeLock: f.storeLock } : {}),
+    ...(f.editorTmpdir === 'on' || f.editorTmpdir === 'off' ? { editorTmpdir: f.editorTmpdir } : {}),
   };
 }
 

@@ -139,13 +139,32 @@ export function workerToolCacheEnv(root: string, platform: NodeJS.Platform = pro
 /**
  * Where a Unity editor the daemon starts keeps its temp files on Windows (w5297): `<root>/tmp/unity` in place of the
  * person's `%LOCALAPPDATA%\Temp` (the editor's crash folders, Bee's and the shader compiler's scratch). Windows only:
- * there Unity's licensing client talks over a named pipe, not a file in the temp folder; on macOS and Linux its socket's
- * place was not checked, so their editors keep the system temp (an exception in docs/worker-root.md 2.6). Empty without a root.
+ * there Unity's licensing client talks over a named pipe, not a file in the temp folder. macOS and Linux: editorTmpdirEnv
+ * (w5833), behind a switch. Empty without a root.
  */
 export function editorTempEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): Record<string, string> {
   if (platform !== 'win32' || !env.FF_WORKER_ROOT) return {};
   const t = path.join(env.FF_WORKER_ROOT, 'tmp', 'unity');
   return { TMP: t, TEMP: t };
+}
+
+/** w5833: the longest TMPDIR a sandbox editor gets. Unix socket paths stop at 104 bytes (macOS; 108 on Linux), and the editor's .NET binds `<TMPDIR>/dotnet-diagnostic-<pid>-<start>-socket` (up to 51 more bytes) and `<TMPDIR>/<random>.xyu/ipc_<pid>_htc_1` there (measured on biscuit). */
+export const EDITOR_TMPDIR_MAX = 50;
+
+/**
+ * A sandbox editor's temp folder on macOS and Linux (w5833, lothsahn: "under no circumstances should workers write outside
+ * of ffw", "And not just Windows, Mac and Linux too"): TMPDIR=`<root>/tmp/editor-<sandbox>` when daemon.json
+ * `editorTmpdir` is "on" (`ops_worker machine_update editor_tmpdir`; off by default, and off is the recovery). Measured on
+ * biscuit (Unity 6000.3.19f1, a batch editor of the game under strace, 2026-11-25): the editor finds the licensing client,
+ * UPM, the shader compiler and ILPP on fixed `/tmp` paths whatever TMPDIR says, and licensed and resolved its packages with
+ * it moved; what follows TMPDIR is .NET's diagnostic and IPC sockets, Roslyn's VBCSCompiler folder, UnityCBMCrashes and
+ * `Path.GetTempPath()` (the game's tests). Windows has editorTempEnv. Empty when off, on Windows, without a root, or past
+ * EDITOR_TMPDIR_MAX.
+ */
+export function editorTmpdirEnv(root: string | undefined, sandbox: string, on: boolean, platform: NodeJS.Platform = process.platform): Record<string, string> {
+  if (!on || platform === 'win32' || !root) return {};
+  const t = path.join(root, 'tmp', `editor-${sandbox}`);
+  return t.length > EDITOR_TMPDIR_MAX ? {} : { TMPDIR: t };
 }
 
 /**
