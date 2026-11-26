@@ -8222,7 +8222,7 @@ ${w.repo ?? ''}
           if (m.awaitingInstall) return `${m.id}: a record for its worker install (ssh target ${m.host}, portal ${m.portalUrl}), no daemon yet. Next, on that machine: the portal's ssh key and a host-key pin (fff-machine-ssh --key, --pin), its credential (fffctl credential issue ${m.id} --to ${m.host}), then its installer; the orchestration worker can do each (docs/ops-worker.md, "A new machine"). list_machines shows it online once its daemon connects.`;
           if (m.root) {
             const pool = poolSettingsOf(m);
-            return `${m.id} is a worker root install (${m.root}): settings changed, no redeploy (it updates by its installer)${pool ? `; ${(m.sandboxes ?? []).length}/${pool.maxSandboxes} sandboxes, up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once` : ''}${mm.isOnline(m.id) ? '; its daemon has them now' : '; its daemon gets them when it connects'}.`;
+            return `${m.id} is a worker root install (${m.root}): settings changed, no redeploy (it updates by its installer)${pool ? `; ${gameSandboxes(m.sandboxes).length}/${pool.maxSandboxes} sandboxes, up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once` : ''}${mm.isOnline(m.id) ? '; its daemon has them now' : '; its daemon gets them when it connects'}.`;
           }
           return `Deploying to ${m.id} (${m.local ? 'this host, no ssh' : `ssh ${m.host}`}, portal ${m.portalUrl}); list_machines shows progress.`;
         }),
