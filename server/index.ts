@@ -3249,8 +3249,26 @@ const tokenSwitch = new TokenSwitch({
   hold: (s, ref, what) => agents.orchestrators.tokenStopBlocked(s.id, { ref, what }, { stamp: "stopped on its Claude token's usage limit (w1745)", told: "stopped on its Claude token's usage limit" }),
   note: (s, line) => agents.orchestrators.noteOnHeld(s.id, line),
   log: (line) => console.log(line),
+  // w5921: an orchestrator (the dispatcher) stuck on a used-up token tells the operators: the owners and everyone with a Claude
+  // pool (lothsahn's and Ben's orchestrators), never the stuck orchestrator itself.
+  alert: (s, line) => {
+    const own = agents.orchestrators.ownerOf(s)?.userId;
+    const to = identity.list().filter((u) => (u.role === 'owner' || vault.hasClaudeFor(u.userId)) && !(own && u.userId.toLowerCase() === own.toLowerCase()));
+    // Only orchestrators that exist: an alert starts none (a new one would spend a turn, maybe on the same used-up pool).
+    agents.orchestrators.toPeople(to, line, true);
+  },
+  dispatcherId: () => agents.orchestrators.dispatcherId,
+  outUntil: (account) => usage.outOf(account)?.until,
+  dispatcherConfigured: () => {
+    const pinned = pinnedDispatcherEntry(cfg);
+    if (pinned === undefined) return `the system payer's pool (${identity.systemPayer().userId}'s; claudeAccounts.dispatcher unset)`;
+    const got = vault.claudeByName(pinned);
+    return `vault token ${got ? `${got.entry.name} …${got.entry.last4}` : pinned} (claudeAccounts.dispatcher)`;
+  },
 });
 agents.accountMoving = (info, why) => tokenSwitch.moving(info, why);
+// w5921: the ledger says why a request sits undecided when the dispatcher is rate-limited, and does not offer it again then.
+agents.orchestrators.dispatcherLimited = () => tokenSwitch.dispatcherLimited();
 if (!isDryRun) {
   sessions.events.on('rateLimit', (s: { info: SessionInfo }, info: RateLimitInfo) => tokenSwitch.rateLimit(s.info, info));
   // A machine's session reports its last result beside the turn's end: read it a moment later, from the store.

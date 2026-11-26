@@ -8774,6 +8774,8 @@ ${w.repo ?? ''}
       benchLock: (id) => this.machines.statsOf(id)?.benchLock,
       // w1949: a worker whose bench ticket or Unity slot waits in its machine's queue shows Blocked on it.
       queueWaits: queueWaitsAll(this.machines.allStats()),
+      // w5921: an undecided request says the dispatcher is rate-limited, not only that it has it to decide.
+      dispatcherLimited: this.orchestrators.dispatcherLimited?.(),
       // The clock the room's since (w1944) and the WRONG flag read.
       now: this.orchestrators.now().getTime(),
     });
