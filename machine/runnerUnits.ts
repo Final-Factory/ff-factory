@@ -13,7 +13,7 @@
 // (a) a failed unit (start-limit-hit or any other result) is reset and started while its volume is above the disk floor;
 // (b) a listener whose _diag log stays busy (a job handed, a worker that finished without the job completing, a poll with
 //     status=Busy) for STUCK_MS with no Runner.Worker under it is restarted: never while a worker runs, never while a bench
-//     turn or the load gate holds it paused;
+//     turn or the load gate holds it paused; a Busy poll after a completed job, or one cancelled, is idle (w6001);
 // (c) every runner unit gets a drop-in (DROPIN_NAME): RestartSec=30s and StartLimitIntervalSec=0, so a short ENOSPC never
 //     ends it for good, and OOMPolicy=continue (w5264): at 11:41:27Z the same day a global OOM killed one test binary of
 //     ffu-biscuit-4's job, and systemd's default OOMPolicy=stop ended the whole unit, cancelling ffu PR #998's check job.
@@ -122,23 +122,41 @@ export function findRunnerUnits(dir: string, exists: (p: string) => boolean = fs
 
 const DIAG_LINE = /^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)Z [A-Z]+ +\w+\] (.*)$/;
 const IDLE = /^(WRITE LINE: .*: Job .* completed with result: |WRITE LINE: .*: Listening for Jobs|Skipping message Job\.|finish job request for job )/;
-const BUSY = /^(Acknowledging runner request '|Job request .* received\.|WRITE LINE: .*: Running job: |Worker finished for job |.*[?&]status=Busy\b)/;
+const BUSY = /^(Acknowledging runner request '|Job request .* received\.|WRITE LINE: .*: Running job: |Worker finished for job )/;
+const BUSY_POLL = /[?&]status=Busy\b/;
+const POLL_CANCELLED = /^Get messages has been cancelled using local token source/;
 
 /**
  * When a listener's log says it went busy and has not been idle since (the oldest busy line after its newest idle one), or
  * undefined when its newest word is idle or it says neither. A 64 KB tail that is all busy lines counts from its oldest.
+ * w6001: a status=Busy poll alone never outweighs an idle word: after "Job ... completed with result: " the listener logs
+ * one more Busy poll, cancelled as it goes back to status=Online, and an idle listener read as busy (biscuit, 2026-11-26:
+ * the (d) restart skipped, (b) restarting idle listeners 10 minutes after each job). So a cancelled Busy poll is not busy,
+ * and Busy polls after the newest idle word count only behind a job line (a job handed, Running job, Worker finished).
  */
 export function busySince(tail: string | undefined): number | undefined {
   if (tail === undefined) return undefined;
   const lines = tail.split('\n');
   let since: number | undefined;
+  let pollSince: number | undefined;
+  let cancelled = false;
   for (let i = lines.length - 1; i >= 0; i--) {
     const m = DIAG_LINE.exec(lines[i].trimEnd());
     if (!m) continue;
-    if (IDLE.test(m[2])) break;
-    if (BUSY.test(m[2])) since = Date.parse(`${m[1].replace(' ', 'T')}Z`);
+    if (IDLE.test(m[2])) return since;
+    const t = Date.parse(`${m[1].replace(' ', 'T')}Z`);
+    if (POLL_CANCELLED.test(m[2])) {
+      cancelled = true;
+    } else if (BUSY.test(m[2])) {
+      since = t;
+      cancelled = false;
+    } else if (BUSY_POLL.test(m[2])) {
+      // the cancel line belongs to the newest poll before it
+      if (!cancelled) pollSince = t;
+      cancelled = false;
+    }
   }
-  return since;
+  return since === undefined || pollSince === undefined ? (since ?? pollSince) : Math.min(since, pollSince);
 }
 
 export interface UnitShow {
