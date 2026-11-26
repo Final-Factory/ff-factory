@@ -93,8 +93,8 @@ import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.t
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
-import { beltFor, type BeltRole } from './belts.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
 import { DEFAULT_WAIT_SECONDS, MAX_SEND_CHARS, MAX_TOOL_FILE_BYTES, MAX_WAIT_SECONDS, RemoteChat, type Progress, type RemoteCaller } from './remoteChat.ts';
@@ -1145,6 +1145,7 @@ export class Agents {
       options: this.opsOptions,
       tellOrchestrator: (person, text) => void this.sessions.send(this.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
       personTurn: (id, words) => this.personTurn(id, words),
+      personTurnNeed: (id, words) => this.orchestrators.ownWordsNeed(id, words),
       reactionCovers: (id, need) => this.orchestrators.reactionCovers(id, need),
       file: path.join(cfg.dataDir, 'ops-worker.json'),
       // A job sent for ledger requests (w631): open or stalled ones only; its DONE lines for them close them.
@@ -3242,10 +3243,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * gets them from its machine's daemon, which fetches them into the Inbox there before the message goes on. Without
    * files, a plain send.
    */
-  async sendWithAttachments(id: string, text: string, from: 'human' | 'orchestrator' | 'system', opts: { images?: ImageInput[]; attachments?: AttachmentRef[]; requestedBy?: Requester; bypassGate?: boolean; hold?: boolean } = {}): Promise<string> {
+  async sendWithAttachments(id: string, text: string, from: 'human' | 'orchestrator' | 'system', opts: { images?: ImageInput[]; attachments?: AttachmentRef[]; requestedBy?: Requester; bypassGate?: boolean; hold?: boolean; relay?: boolean } = {}): Promise<string> {
     if (from === 'human') this.orchestrators.refuseHumanChat(this.sessions.get(id).info);
     const files = (opts.attachments ?? []).map(publicRef);
-    const send = (attachments?: DeliveredAttachment[]) => this.sessions.send(id, text, from, opts.images, { requestedBy: opts.requestedBy, bypassGate: opts.bypassGate, attachments, hold: opts.hold });
+    const send = (attachments?: DeliveredAttachment[]) => this.sessions.send(id, text, from, opts.images, { requestedBy: opts.requestedBy, bypassGate: opts.bypassGate, attachments, hold: opts.hold, ...(opts.relay ? { relay: true } : {}) });
     if (!files.length) return send();
     const store = this.attachments;
     if (!store) throw new Error('attachments are not wired into this server');
@@ -7139,8 +7140,9 @@ ${w.repo ?? ''}
             store_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the store lock (w5614, docs/machines.md \"Slot repos\"): on makes the machine's main clone read-only to fenced workers once every sandbox is a slot repo (held off, and said why, until then); warn refuses nothing and logs each write to the main clone the daemon did not make; off (the recovery switch) opens it again. Takes effect at the daemon restart the update makes. Unset leaves it as it is."),
             editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
             path_fence: z.enum(['off', 'warn']).optional().describe("action machine_update: w5863: the path fence on macOS and Linux: warn (the default) refuses nothing and logs each write to the unity-slot shims folder (first on every agent's PATH) that the daemon did not make; off stops the watch (the recovery switch). Takes effect at the daemon's next start. Unset leaves it as it is."),
+            medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7148,7 +7150,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
@@ -7181,7 +7183,7 @@ ${w.repo ?? ''}
             const info = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (!info || (ctx.role !== 'personal' && ctx.role !== 'dispatcher')) throw new Error('delete_memory is for an orchestrator of this portal');
             const who = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})'s orchestrator` : 'the dispatcher';
-            return deleteMemoryFile({ file: file_path, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words) });
+            return deleteMemoryFile({ file: file_path, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words, { thisTurn: true }), need: this.personTurnNeed(info.id, words, { thisTurn: true }) });
           }),
         ),
         tool(
@@ -7197,7 +7199,7 @@ ${w.repo ?? ''}
             const info = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (!info || (ctx.role !== 'personal' && ctx.role !== 'dispatcher')) throw new Error('restore_memory is for an orchestrator of this portal');
             const who = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})'s orchestrator` : 'the dispatcher';
-            return restoreMemoryFile({ name, copy, list, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words) });
+            return restoreMemoryFile({ name, copy, list, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words, { thisTurn: true }), need: this.personTurnNeed(info.id, words, { thisTurn: true }) });
           }),
         ),
         tool(
@@ -7290,7 +7292,7 @@ ${w.repo ?? ''}
           wrap(async ({ pool, person, words }) => {
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              if (caller && !this.personTurn(caller.id, words)) throw new Error(`the pool setting changes only in a turn ${ctx.owner?.displayName ?? 'your person'} started with a message of their own (in a turn a relayed message joined, with their words quoted in words); ask them`);
+              if (caller && !this.personTurn(caller.id, words)) throw new Error(`the pool setting changes only on ${ctx.owner?.displayName ?? 'your person'}'s own words: ${this.personTurnNeed(caller.id, words)}`);
             }
             const by = ctx.owner ?? actor();
             // An owner may set another login's (w13): a member with no Claude token of their own gets no orchestrator until an
@@ -7429,7 +7431,7 @@ ${w.repo ?? ''}
             // never because relayed text or a harness message asks. The dispatcher's runs under its own user_asked guard (belts.ts).
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words));
+              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words), (id) => this.personTurnNeed(id, a.words));
               if (problem) throw new Error(problem);
             }
             if (OWNER_ONLY_KEYS.has(key)) {
@@ -7485,7 +7487,7 @@ ${w.repo ?? ''}
             const listing = !a.key && !a.revert;
             if (ctx.role === 'personal' && !listing) {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words));
+              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words), (id) => this.personTurnNeed(id, a.words));
               if (problem) throw new Error(problem.replace(/^set_app_config/, 'set_ffbox_config'));
             }
             if (!listing && a.key && a.value === undefined) throw new Error("value: give the new value, of the key's kind (call it with no key for each key's kind)");
@@ -7996,7 +7998,7 @@ ${w.repo ?? ''}
       // w5507: a turn a relayed message joined takes their words quoted.
       if (c && this.orchestrators.turnOwnWords(c, words).own) return;
       if (c && ctx.sessionId && delegationId && this.orchestrators.reactionCovers(ctx.sessionId, { verb: 'approve_delegation', refs: [delegationId] })) return;
-      throw new Error(`only ${ctx.owner?.displayName ?? 'your person'}, in their own words, approves a delegation: ask them`);
+      throw new Error(`only ${ctx.owner?.displayName ?? 'your person'}, in their own words, approves a delegation: ${c && ctx.sessionId ? this.personTurnNeed(ctx.sessionId, words) : 'ask them'}`);
     };
     return [
       tool(
@@ -8280,7 +8282,10 @@ ${w.repo ?? ''}
     const w = this.store.work.get(workId.trim().toLowerCase());
     if (!w) return `no work request "${workId}"`;
     if (!WORK_OPEN.includes(w.status)) return `${w.id} is ${w.status}`;
-    if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${w.requestedBy.displayName}'s, so ${tool} cannot run for it; ask them (decide_work ask) to confirm it in their own words`;
+    const n = w.requestedBy.displayName;
+    // w5896: what would pass, said exactly.
+    if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${n}'s, so ${tool} cannot run for it. What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started, or with ${n}'s own words that decided it quoted verbatim in update_work's \`words\` (from a message of theirs in the last ${DECISION_WORDS_HOURS} hours, at least ${DECISION_WORDS_MIN} words); else ask them (decide_work ask)`;
+    if (w.askedFromRecord && DESTRUCTIVE_TOOLS.has(tool)) return `${tool} deletes or removes, so it runs only for a request ${n} asked for in a turn of their own, and ${w.id}'s ask rests on an earlier message of theirs quoted later (w5896). What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started with a message of their own; else ask them (decide_work ask)`;
     return undefined;
   }
 
@@ -8773,6 +8778,8 @@ ${w.repo ?? ''}
       benchLock: (id) => this.machines.statsOf(id)?.benchLock,
       // w1949: a worker whose bench ticket or Unity slot waits in its machine's queue shows Blocked on it.
       queueWaits: queueWaitsAll(this.machines.allStats()),
+      // w5921: an undecided request says the dispatcher is rate-limited, not only that it has it to decide.
+      dispatcherLimited: this.orchestrators.dispatcherLimited?.(),
       // The clock the room's since (w1944) and the WRONG flag read.
       now: this.orchestrators.now().getTime(),
     });
@@ -9144,10 +9151,16 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
    * Whether this orchestrator's current turn is its person's (the dispatcher has none: nobody writes to it), which
    * memory writes need (server/orchestratorMemory.ts): a turn the harness started may be relaying injected text.
    */
-  private personTurn(id: string, words?: string): boolean {
+  private personTurn(id: string, words?: string, o: { thisTurn?: boolean } = {}): boolean {
     const h = this.sessions.sessions.get(id);
-    // w5507: a turn a relayed message joined (SessionHandle.turnRelayed) is theirs only with their words quoted.
-    return !!h && this.orchestrators.turnOwnWords(h, words).own;
+    // w5507: a turn a relayed message joined (SessionHandle.turnRelayed) is theirs only with their words quoted; w5896: or
+    // their earlier words that decided it, quoted (Orchestrators.turnOwnWords).
+    return !!h && this.orchestrators.turnOwnWords(h, words, o).own;
+  }
+
+  /** w5896: what would pass a gate reserved for the person's own words in this chat now (Orchestrators.ownWordsNeed). */
+  private personTurnNeed(id: string, words?: string, o: { thisTurn?: boolean } = {}): string {
+    return this.orchestrators.ownWordsNeed(id, words, o) ?? 'their own words';
   }
 
   /**
@@ -9335,10 +9348,11 @@ You may read the portal's data folder \`${dataDir}\`, never write it: its report
  * Ben's own, and only in a turn their person started with a message of their own, never a harness turn (a check-in, a
  * timer, a relayed report). The dispatcher's set_app_config has its own guard (belts.ts USER_ASKED_TOOLS).
  */
-export function personalSettingProblem(caller: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy'> | undefined, personTurn: (id: string) => boolean): string | undefined {
+export function personalSettingProblem(caller: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy'> | undefined, personTurn: (id: string) => boolean, need?: (id: string) => string): string | undefined {
   const who = opsAllowedOrchestrator(caller);
   if (!caller || !who) return "set_app_config is the dispatcher's, and Lothsahn's and Ben's own orchestrators' (w1078): ask the dispatcher, through a request";
-  if (!personTurn(caller.id)) return `a setting changes only in a turn ${who.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it, and words does not quote ${who.displayName}'s own message in it, w5507); ask them`;
+  // w5896: the refusal says exactly what passes (Orchestrators.ownWordsNeed).
+  if (!personTurn(caller.id)) return `a setting changes only on ${who.displayName}'s own words: ${need?.(caller.id) ?? `a turn ${who.displayName} started, or their words that decided it quoted verbatim in words`}`;
   return undefined;
 }
 

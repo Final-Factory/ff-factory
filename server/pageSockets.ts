@@ -80,12 +80,12 @@ export class PageSockets<S extends object> {
   }
 
   /** `stateMs`/`stateBytes`: what building and sending the page its first full state took (the page's open waits on it). */
-  opened(ws: S, user: string, req: Pick<http.IncomingMessage, 'headers' | 'socket' | 'url'>, state?: { ms: number; bytes: number }) {
+  opened(ws: S, user: string, req: Pick<http.IncomingMessage, 'headers' | 'socket' | 'url'>, state?: { ms: number; bytes: number; sessions?: number; delta?: boolean }) {
     const { addr, via } = viaOf(req);
     this.open.set(ws, { user, addr, via, at: this.now() });
     const why = reconnectOf(req.url);
     if (/^why=stale\b/.test(why)) this.countDrop(user);
-    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms ${Math.round(state.bytes / 1024)}KB` : ''} (${this.open.size} open)`);
+    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}` : ''} (${this.open.size} open)`);
   }
 
   /**

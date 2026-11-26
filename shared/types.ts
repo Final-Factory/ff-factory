@@ -2473,6 +2473,11 @@ export interface WorkItem {
   requesters: Requester[];
   /** Filed in a turn the person started (their own message), which the destructive tools require. */
   humanAsked: boolean;
+  /**
+   * w5896: humanAsked rests only on an earlier message of the person's quoted verbatim, not on a turn of theirs: the
+   * dispatcher's destructive tools (DESTRUCTIVE_TOOLS, server/belts.ts) still need their words in a turn of their own.
+   */
+  askedFromRecord?: boolean;
   status: WorkStatus;
   createdAt: string;
   updatedAt: string;
@@ -3527,6 +3532,18 @@ export interface AppState {
   /** The running server's version; absent from a server older than 0.1.0. */
   app?: AppVersion;
   sessions: SessionInfo[];
+  /**
+   * w5907: the sessions as of this state, `<boot>.<rev>` (server/pageState.ts SessionRevs). A page that reconnects sends
+   * it back (`have` on /ws) and gets only the sessions changed since. Absent from older servers.
+   */
+  sessionsRev?: string;
+  /**
+   * Set when `sessions` holds only those changed since the page's `have` rev: `ids` are all the sessions the page keeps
+   * (it drops the others and asks for any it lacks). Absent: `sessions` is the whole list.
+   */
+  sessionsDelta?: { since: number; ids: string[] };
+  /** How many finished sessions older than the page's window the server left out (a view asks for one by id). */
+  olderSessions?: number;
   standingAgents: StandingAgent[];
   delegations: DelegationRequest[];
   machines: Machine[];

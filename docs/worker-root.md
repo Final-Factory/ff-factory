@@ -59,7 +59,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
 | `public-identity.gitconfig` | no longer written or read (w3093: the identity rides `GIT_CONFIG_*` itself); an old one is harmless | daemon (`FF_APP_DIR`) | M | no | — |
 | `unity-slots/` (+ its `unity-slot` shims, put first on workers' PATH) | the Unity slot mailbox (w469) | daemon | M | no | `machine/unitySlots.ts:23-24`, `machine/daemon.ts:440,713-720` |
 | `unity-mcp/<place>/` | each place's own `UNITY_MCP_STATUS_DIR` | daemon | S | no | `machine/unityMcp.ts:16-17,62` |
-| `tmp/bench/ff-bench-<pid>-<hex>` (+ `.release`, `.tmp`) | a bench ticket's status files, written by its `bench_queue.py hold` helper (w5905: in the OS temp folder before, `/tmp` for a Linux or macOS daemon); removed when the helper exits on its release, and swept for gone holders by the first ticket each process takes | daemon, and a worker's own ticket | M | no | `machine/benchQueue.ts` (`benchStatusDir`, `sweepBenchStatus`, `BenchTicket.release`) |
+| `tmp/bench-status/ff-bench-<pid>-<hex>` (+ `.release`, `.tmp`, `.warn`, `.warn.tmp`) | a bench ticket's status files, written by its `bench_queue.py hold` helper (w5834, w5905: in the OS temp folder before, `/tmp` for a Linux or macOS daemon; still there when no root is given or the folder cannot be made, warned in the log); all five removed when the helper exits on its release (or 20 s after it), and swept for gone holders by the first ticket each process takes | daemon, and a worker's own ticket | M | no | `machine/benchQueue.ts` (`benchStatusDir`, `sweepBenchStatus`, `BenchTicket.release`) |
 | `agents/<id>/` | standing agents assigned to the machine (`NOTES.md`) | portal via daemon | M | no | `server/machineDeploy.ts:353`; docs/machines.md "Standing agents" |
 
 ### 1.2 Per-agent and per-place things outside `app_dir`
@@ -169,7 +169,7 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   agents/<id>/                   standing agents assigned to this machine
   scratch/                       long-lived scratch (today's _scratch, ffsb-scratch, F:\tmp)
   tmp/ffa-<session>/             agents' TMP/TEMP/TMPDIR (temp_dir)
-  tmp/bench/                     bench tickets' status files (w5905)
+  tmp/bench-status/              bench tickets' status files (w5834, w5905)
   tmp-medium/ffa-<session>/      Medium agents' TMP/TEMP/TMPDIR with daemon.json "mediumAgentFolders": "on" (w5862): read-only to workers
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
   claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
@@ -505,9 +505,21 @@ config's temp folder is always a fence extra). A fenced worker could plant a scr
 - absent or `"warn"` (today, lothsahn's warn-only-first rule): nothing moves; `logs/daemon.log` carries one line
   `WARNING medium agent folders: Medium agents' TMP/TEMP root ... and CARGO_HOME ... are in folders workers write; ...`.
 - `"on"`: Medium agents get `<root>/tmp-medium/ffa-<session>` and `<root>/cache-medium/cargo` (`Daemon.agentTempEnv` in
-  `runSpec`; seeded from the person's `~/.cargo` config, never from `cache/cargo`); sandbox agents keep theirs.
-  `tmp-medium` is in `MEDIUM_ONLY_CHILDREN`, so all three fences keep it from workers. Clean-up, the session sweep,
-  `ff-leftovers` and the agents' read grants find a session's folder in either root (`Daemon.sessionTemps`).
+  `runSpec`); sandbox agents keep theirs. The cargo home is seeded in the background from the person's `~/.cargo`
+  (`CARGO_SEED_PIECES` in `machine/sharedCaches.ts`: its config, `registry/index`, `registry/cache` and `git/db`), always
+  from `~/.cargo` and never from `cache/cargo`; an agent that starts during the seed sees part of it, which costs only
+  downloads. `tmp-medium` is in `MEDIUM_ONLY_CHILDREN`, so all three fences keep it from workers. Clean-up, the session
+  sweep, `ff-leftovers` and the agents' read grants find a session's folder in either root (`Daemon.sessionTemps`); the
+  age-based clean-up rules (`agent-temp`, `temp-old`, `temp-clones`: `cleanupRules`' `mediumTemp`) and the clean-up facts
+  (`CleanupFacts.mediumTempRoot`, judged by `judgePath` and listed by `planFolders`) cover `tmp-medium` too (w5869).
+  `Daemon.sessionTemp`, the one folder `timed_run`, `publish_attachment` and the sweeper's `dirOf` use, picks a session's
+  `tmp-medium` folder only when it exists and the session is not a sandbox one (w5869, w5871's F1): a Medium agent that
+  started before the switch went on, or whose own folder could not be made, keeps its shared-root folder for its life.
+  After the switch, a resumed Medium worker gets a new, empty `tmp-medium/ffa-<session>`; its old shared-root folder stays
+  until the request-aware clean-up removes it.
+- Exposure is judged by `workerWritable`: a folder inside a root child workers write, a fence extra outside the root, or a
+  folder a fence opens whole wherever it is (`workerIntegrityAllow`, `writeLockExtra`, and `<root>/transcripts` while
+  `transcriptLock` is not on; w5869, w5871's F3).
 - A folder that cannot be made, or one a worker could still write, keeps today's with a `WARNING medium agent folders:
   could not make ...` line, so the switch never stops an agent and needs nobody at the machine. No fence, no change.
 Still Low-writable and not covered: an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`.

@@ -94,7 +94,7 @@ test('outside writes: a batch Unity run without -logFile gets one in the worker\
  * the write into it if it can (rootEnv, sharedCaches.ts), else add it to docs/worker-root.md 2.6 and raise the count here.
  */
 const KNOWN: Record<string, [number, string]> = {
-  'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given, warned in the log (w5905: <root>/tmp/bench otherwise)'],
+  'machine/benchQueue.ts': [1, 'exception: the bench helper\'s status file with no root given, warned in the log (w5834: <root>/tmp/bench-status otherwise)'],
   'machine/burstPref.ts': [1, 'exception: Unity\'s Burst EditorPref (registry, plist, ~/.local/share/unity3d)'],
   'machine/daemon.ts': [10, 'the no-root defaults; the Unity slots mailbox (w469); Git Bash /tmp kept from clean-up; the write lock grants Unity its ~/.config/unity3d (w5333, writes nothing itself); the gh self-test names APPDATA in its warning (w5430, reads); the owner secrets a run may not read (w5553, ownerReadDenied: reads, writes nothing; and the owner targets of the read-fence probe, w5747, reads only; the owner-secret label plan named in the read-fence probe line on LothDesktop, w5749, reads only; and on LothDesktop in on mode the owner gh folder and ~/.ssh get their No-Read-Up label, w5749, lothsahn go for C:)'],
   'machine/ownerSecrets.ts': [3, 'the owner secret paths (gh login, ~/.ssh, browsers, Keychain) the fences close to reads (w5548, w5553): names them, writes nothing there'],

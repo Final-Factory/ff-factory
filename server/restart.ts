@@ -14,6 +14,8 @@ import { relocateProblem } from './machineProtocol.ts';
 export interface Unanswered {
   text: string;
   from: 'human' | 'orchestrator' | 'system';
+  /** w5896: text a third party wrote (an FFBox hand-over, another person's message_person), relayed: SessionHandle.turnRelayed. */
+  relay?: boolean;
   /** The person it came from or was sent for (w389: the resume says whose it was). */
   requestedBy?: Requester;
 }

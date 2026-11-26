@@ -101,7 +101,7 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
-import { DROPIN_NAME, RunnerUnits, findRunnerUnits } from './runnerUnits.ts';
+import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
@@ -1014,16 +1014,30 @@ export class Daemon {
     const userUnits = path.join(os.homedir(), '.config', 'systemd', 'user');
     this.runnerUnits = new RunnerUnits({
       units: () => (real && process.platform === 'linux' ? findRunnerUnits(userUnits) : []),
-      readDropin: (unit) => {
+      readDropin: (unit, name = DROPIN_NAME) => {
         try {
-          return fs.readFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), 'utf8');
+          return fs.readFileSync(path.join(userUnits, `${unit}.d`, name), 'utf8');
         } catch {
           return undefined;
         }
       },
-      writeDropin: (unit, text) => {
+      writeDropin: (unit, text, name = DROPIN_NAME) => {
         fs.mkdirSync(path.join(userUnits, `${unit}.d`), { recursive: true });
-        fs.writeFileSync(path.join(userUnits, `${unit}.d`, DROPIN_NAME), text);
+        fs.writeFileSync(path.join(userUnits, `${unit}.d`, name), text);
+      },
+      // w5834: each runner's temp folder inside the worker root (runnerTempDir), made here too so its first start finds it
+      tempDir: (u) => {
+        const t = runnerTempDir(u, cfg.root);
+        if (t) fs.mkdirSync(t, { recursive: true });
+        return t;
+      },
+      startedTmpdir: (pid) => {
+        try {
+          const env = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0');
+          return env.find((e) => e.startsWith('TMPDIR='))?.slice('TMPDIR='.length) ?? null;
+        } catch {
+          return undefined;
+        }
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>
@@ -1173,7 +1187,7 @@ export class Daemon {
         // w5281: old runs in the shared determinism audit folder (<root>/cache/determinism-audit) age out.
         // w5306: playtest sessions in the worker's game data root (<root>/gamedata/PlaytestSessions) age out as in the old folder.
         // w5557: and in each sandbox's own (<root>/gamedata/sandboxes/<id>/PlaytestSessions).
-        const rules = rulesOnInstallDrive(cleanupRules({ ...env, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
+        const rules = rulesOnInstallDrive(cleanupRules({ ...env, mediumTemp: this.mediumFolders().tempRoot, sandboxRoots: root && settings.mode === 'off' ? [root] : [], cacheRoots: root ? [root] : [], gameDataRoots: this.cfg.root ? [workerGameDataDir(this.cfg.root), ...sandboxGameDataDirs(workerGameDataDir(this.cfg.root))] : [] }, DEFAULT_CLEANUP), roots, HOME);
         // w5281: the shared uv cache (<root>/cache/uv) gets `uv cache prune`, daily (hourly while space is low), in the background.
         if (!opts.dryRun) void this.uvPruner?.maybe(low);
         if (!opts.dryRun) void this.mediumUvPruner?.maybe(low);
@@ -1328,7 +1342,7 @@ export class Daemon {
   mediumFolders(): MediumFolders {
     if (!this.mediumMemo) {
       const c = this.cfg;
-      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()] });
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])] });
       for (const line of this.mediumMemo.lines) log(line);
     }
     return this.mediumMemo;
@@ -1345,8 +1359,9 @@ export class Daemon {
     const m = this.mediumFolders().tempRoot;
     if (m) {
       const d = sessionTempDir(m, id);
-      const spec = this.entries.get(id)?.spec;
-      if (spec ? !spec.sandbox : fs.existsSync(d)) return d;
+      // w5869 (w5871's F1): only a folder that exists. A Medium agent started before the switch went on, or one whose own
+      // folder could not be made (agentTempEnv's fallback), runs in the shared root; a sandbox session always does.
+      if (!this.entries.get(id)?.spec?.sandbox && fs.existsSync(d)) return d;
     }
     return sessionTempDir(agentTempRoot(this.cfg.tempDir), id);
   }
@@ -1468,7 +1483,7 @@ export class Daemon {
     return {
       at: new Date().toISOString(),
       connected: this.ws?.readyState === WebSocket.OPEN && this.welcomed,
-      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir) } : {}),
+      ...(c.root ? { root: c.root, tempRoot: agentTempRoot(c.tempDir), ...(this.mediumFolders().tempRoot ? { mediumTempRoot: this.mediumFolders().tempRoot } : {}) } : {}),
       sandboxes: this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
       live: sessionIds,
       resumable: [...this.resumable],

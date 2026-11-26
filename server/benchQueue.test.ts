@@ -130,6 +130,23 @@ test('w1615: benchTicketFor finds the queue script in a checkout or above it, an
   assert.equal(findBenchQueueScript([undefined, path.join(dir, 'Assets', 'Scripts')]), path.join(dir, 'scripts', 'bench', 'bench_queue.py'));
 });
 
+test('w5834: a ticket\'s status file goes inside the worker root, and a folder that cannot be made falls back without refusing', async (t) => {
+  const dir = tmp(t);
+  fs.mkdirSync(path.join(dir, 'scripts', 'bench'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'scripts', 'bench', 'bench_queue.py'), FAKE);
+  const r = benchTicketFor({ mode: 'shared', what: 'x', checkouts: [dir], root: dir, python: process.execPath });
+  assert.equal(r.why, undefined, 'unity-slot run reads any why as a refusal');
+  assert.equal(path.dirname(r.ticket!.status), path.join(dir, 'tmp', 'bench-status'));
+  r.ticket!.release();
+  assert.deepEqual(benchStatusDir(dir), { dir: path.join(dir, 'tmp', 'bench-status') });
+  const no = benchStatusDir(dir, () => {
+    throw new Error('EACCES');
+  });
+  assert.equal(no.dir, os.tmpdir());
+  assert.match(no.why ?? '', /could not make .*bench-status \(EACCES\)/);
+  assert.equal(benchStatusDir(undefined).dir, os.tmpdir());
+});
+
 const GAME = process.env.FF_GAME_REPO;
 test('w1615: against the real bench_queue.py, a shared ticket waits for an exclusive one ahead and gets it when it goes', { skip: !GAME || !findBenchQueueScript([GAME]) ? 'FF_GAME_REPO not set to a checkout with scripts/bench/bench_queue.py' : false }, async (t) => {
   const dir = tmp(t);
@@ -178,7 +195,7 @@ test('w1962: a ticket runs under the copy of bench_queue.py with the newest rule
   assert.equal(newestBenchQueueScript([undefined], undefined), undefined);
 });
 
-test('w5905: a ticket from benchTicketFor keeps its status files in <root>/tmp/bench, never the OS temp folder, and removes them on release', async (t) => {
+test('w5905: a ticket from benchTicketFor keeps its status files in <root>/tmp/bench-status, never the OS temp folder, and removes them on release', async (t) => {
   const root = tmp(t);
   const checkout = path.join(root, 'sandboxes', 'slot1');
   fs.mkdirSync(path.join(checkout, 'scripts', 'bench'), { recursive: true });
@@ -187,26 +204,27 @@ test('w5905: a ticket from benchTicketFor keeps its status files in <root>/tmp/b
   const before = new Set(fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(`ff-bench-${process.pid}-`)));
   const { ticket: k, why } = benchTicketFor({ mode: 'shared', what: 'running editor slot1', checkouts: [checkout], root, python: process.execPath, env });
   if (!k) throw new Error(why);
-  assert.equal(path.dirname(k.status), benchStatusDir(root));
-  assert.equal(benchStatusDir(root), path.join(root, 'tmp', 'bench'));
+  assert.equal(path.dirname(k.status), benchStatusDir(root).dir);
+  assert.equal(benchStatusDir(root).dir, path.join(root, 'tmp', 'bench-status'));
   const until = Date.now() + 10_000;
   while (k.state().line === 'taking a ticket' && Date.now() < until) await new Promise((r) => setTimeout(r, 20));
   fs.writeFileSync(`${k.status}.grant`, '');
   assert.equal((await k.wait(10_000)).kind, 'granted');
+  fs.writeFileSync(`${k.status}.warn`, 'the helper\'s warning (review w5945 F1)');
   k.release();
   const gone = Date.now() + 5000;
-  while (fs.readdirSync(benchStatusDir(root)).some((n) => n.startsWith('ff-bench-') && !n.endsWith('.grant')) && Date.now() < gone) await new Promise((r) => setTimeout(r, 20));
-  assert.deepEqual(fs.readdirSync(benchStatusDir(root)).filter((n) => n.startsWith('ff-bench-') && !n.endsWith('.grant')), [], 'nothing of the ticket is left after its release');
+  while (fs.readdirSync(benchStatusDir(root).dir).some((n) => n.startsWith('ff-bench-') && !n.endsWith('.grant')) && Date.now() < gone) await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(fs.readdirSync(benchStatusDir(root).dir).filter((n) => n.startsWith('ff-bench-') && !n.endsWith('.grant')), [], 'nothing of the ticket is left after its release');
   const after = fs.readdirSync(os.tmpdir()).filter((n) => n.startsWith(`ff-bench-${process.pid}-`) && !before.has(n));
   assert.deepEqual(after, [], 'nothing new in the OS temp folder');
 });
 
 test('w5905: sweepBenchStatus removes the status files of a gone holder and keeps its own, a live one and anything else', (t) => {
   const dir = tmp(t);
-  const names = ['ff-bench-111-28b4c907', 'ff-bench-111-28b4c907.release', 'ff-bench-111-aa.tmp', 'ff-bench-222-0f', 'ff-bench-333-0e', 'ff-bench-333-0e.release', 'notes.txt', 'ff-bench-x-1'];
+  const names = ['ff-bench-111-28b4c907', 'ff-bench-111-28b4c907.release', 'ff-bench-111-aa.tmp', 'ff-bench-111-28b4c907.warn', 'ff-bench-111-28b4c907.warn.tmp', 'ff-bench-222-0f', 'ff-bench-222-0f.warn', 'ff-bench-333-0e', 'ff-bench-333-0e.release', 'notes.txt', 'ff-bench-x-1'];
   for (const n of names) fs.writeFileSync(path.join(dir, n), 'granted t00000071 shared pid 4028549');
   const gone = sweepBenchStatus(dir, { selfPid: 222, alive: (pid) => pid === 333 });
-  assert.deepEqual(gone, ['ff-bench-111-28b4c907', 'ff-bench-111-28b4c907.release', 'ff-bench-111-aa.tmp']);
-  assert.deepEqual(fs.readdirSync(dir).sort(), ['ff-bench-222-0f', 'ff-bench-333-0e', 'ff-bench-333-0e.release', 'ff-bench-x-1', 'notes.txt']);
+  assert.deepEqual(gone, ['ff-bench-111-28b4c907', 'ff-bench-111-28b4c907.release', 'ff-bench-111-28b4c907.warn', 'ff-bench-111-28b4c907.warn.tmp', 'ff-bench-111-aa.tmp']);
+  assert.deepEqual(fs.readdirSync(dir).sort(), ['ff-bench-222-0f', 'ff-bench-222-0f.warn', 'ff-bench-333-0e', 'ff-bench-333-0e.release', 'ff-bench-x-1', 'notes.txt']);
   assert.deepEqual(sweepBenchStatus(path.join(dir, 'none')), [], 'a folder not made yet: nothing to sweep');
 });
