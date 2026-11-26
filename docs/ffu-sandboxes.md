@@ -152,6 +152,28 @@ runs `cargo build`, `test`, `check`, `clippy`, `run`, `bench` or `nextest` outsi
 note to take a slot or wait for one, at most once per 30 min. A machine with no `ffu-sandboxes` folder is left alone. A
 refusal would come in a later, separate change, by lothsahn's lockout rule (warn first).
 
+**A git write in a slot you do not hold is refused** (w6038). In w5681 a worker resumed after a long wait, cd'd into a slot
+path from a saved `$TMPDIR` script, and made a merge commit on another worker's branch; five skill lessons had not stopped
+it. `take` now points the shared clone's `core.hooksPath` at `machine/ffuSlotHooks/` (FF Factory's own code, which no worker
+writes) and writes `slot<N>/holder` (`holder <session>`, `branch <branch>`) beside each checkout whenever it writes
+`slots.json`. The hooks (`reference-transaction`, `pre-push`, `pre-rebase`, sharing `slot-guard.sh`) refuse, naming the
+slot, its holder and the holder's branch:
+
+- any ref write (commit, merge, cherry-pick, rebase, reset, stash, branch, tag; `--no-verify` does not skip
+  `reference-transaction`) and any push, when `FF_SESSION_ID` is not the slot's holder, or the slot is released;
+- the same when the holder's checkout is on a branch other than the one `take` recorded (detached is let through: a rebase,
+  or the "checked out in another slot" case).
+
+Let through: no `FF_SESSION_ID` (a person's shell, the daemon), a slot with no holder file yet, a fetch (remote-tracking refs),
+a checkout's HEAD switch (a symref), and a ref set to the commit it is on (`merge --abort`). FF Factory's own git
+(`gitSpawnSync`: `take`, the rescue, the portal's report) runs with `core.hooksPath` on `server/gitHooks` and never meets
+these hooks; `ff-pr push` and `merge` run the same check in TypeScript (`slotWriteRefusal`) before any git, since their git
+is fenced too. The hooks use shell builtins only (no git call): measured on M5, a commit costs 15 to 20 ms more (14.6 ms
+without, 29 to 35 ms with, 40 empty commits each). Not covered: `git reset --hard` and `git checkout -- <path>` rewrite files
+before their ref update (git has no hook before them), so the ref stays but the files moved; a merge the hook stops leaves its
+files merged (`git merge --abort` puts them back). Recovery if the check ever misfires: `ffu-slot take` rewrites the holder
+file, and a shell with `FF_SESSION_ID` unset skips the check.
+
 ## On the portal (w5912)
 
 Each machine's ffu slots show on its page, in a set of their own under its sandboxes (`web/src/components/FfuSlots.tsx`),
@@ -195,6 +217,15 @@ The rule runs on every hourly pass (the daemon's `cargo-cap` scope), not only on
 #1148 deployed, LothDesktop's 05:34 UTC hourly pass on 2026-11-25 never looked at slot2 to slot4 (25 to 35 GB each, 11 to
 21 GB of it idle `debug/incremental`), because the rule ran only in the full plan (`server/installLeftovers.ts`,
 `ffuSlotTargets`).
+
+**Released targets first (w6044).** A pass plans the released slots' targets before every slower step (the `ffu-slots`
+scope, `cleanupPass`'s `first` step in `server/staleOutput.ts`): a slot no running or resumable worker holds and nothing
+runs from. On a low pass a settled one goes whole with no sweep or size walk; on the hourly pass the cap rule above judges
+it. A held slot is never touched in that step. Why: on BEAST, 2026-11-26, three released targets held 190.6 GB (49.2, 57.7
+and 83.6 GB) while no pass had finished since 2026-11-25 04:09Z; the 09:10Z low pass was cut off 4 min into its `regular`
+step, before the ffu rule ran in its `stale` step. Stage 1 is report-only: the daemon logs `clean-up: ffu slots first
+(report-only, w6044): N item(s) planned in S s: ...` and the later step still removes them. Stage 2 removes them there.
+
 The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
 swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
 2026-11-25 04:40 UTC, before w5499 reached it: the slot targets were 4.1, 19.2, 32.1 and 25.6 GB. Of that, 0, 6.5, 19.9

@@ -133,6 +133,7 @@ const KNOWN: Record<string, [number, string]> = {
   'server/privileged.ts': [1, 'reads'],
   'server/reaper.ts': [3, 'reads'],
   'server/rootFence.ts': [5, 'guard: path lists only'],
+  'server/tmpWriteFence.ts': [5, 'guard (w6008): path patterns it warns on; writes nothing'],
   'server/secretGuard.ts': [3, 'guard: path lists only'],
   'server/standingGuard.ts': [1, 'guard: path lists only'],
   'server/testHistoryCi.ts': [1, 'the portal\'s own scratch'],

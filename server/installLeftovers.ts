@@ -799,8 +799,9 @@ export async function planInstallLeftovers(o: {
   closed?: string[];
   /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'cargo-cap': only the
    * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471); since w3674 it
-   * covers the Unity Library copy cap (library-copy-cap) too. */
-  scope?: 'all' | 'sandboxes' | 'cargo-cap';
+   * covers the Unity Library copy cap (library-copy-cap) too. 'ffu-slots': only the released ffu slots' cargo targets, the
+   * first step of every pass (w6044: BEAST's released targets held 190.6 GB while every pass was cut off before the rule ran). */
+  scope?: 'all' | 'sandboxes' | 'cargo-cap' | 'ffu-slots';
   /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
   low?: boolean;
   /** A low pass says which check kept a temp folder's rebuildable caches once they reach this size (plan.held; default 256 MiB). */
@@ -1195,6 +1196,11 @@ export async function planInstallLeftovers(o: {
   // w5503: the ffu slots' targets are capped on the hourly pass too (the 'cargo-cap' scope), not only on the daily stale
   // pass or a low one: after #1148 deployed, LothDesktop's 05:34 UTC hourly pass on 2026-11-25 never looked at slot2-4
   // (25-35 GB each, 11-21 GB of it an idle incremental cache) because the rule ran only in the full plan.
+  // w6044: the 'ffu-slots' scope, the first step of a pass, takes released slots only (no running or resumable holder,
+  // nothing running from the target); a held slot's sweep and trims stay with the later step. On a low pass a released,
+  // settled target goes whole at once, without the cargo-graph sweep (up to five plans of the whole target) or a size walk
+  // that the whole removal made moot: the rule below takes it whole on a low pass anyway.
+  const firstOnly = o.scope === 'ffu-slots';
   const ffuSlotTargets = async () => {
     // ---- ffu slots' cargo targets (w3764, machine/ffuSlots.ts): <install>/ffu-sandboxes/slot<N>/target, kept warm between
     // workers on purpose (a cold workspace test build costs minutes, a warm one seconds: docs/ffu-sandboxes.md). Only the target
@@ -1260,15 +1266,20 @@ export async function planInstallLeftovers(o: {
       const busy = await cargoTargetBusy(target, path.join(slot, 'ffu'), o.procs, Infinity, now, runners);
       const no = busy ?? neverDelete(target, o.guard);
       if (no) {
-        await keptSlot(no);
+        if (!firstOnly) await keptSlot(no);
         continue;
       }
       const holder = ffuState.slots.find((x) => x.id === e.name)?.holder;
       const holding = holderUp(holder) ? `held by running or resumable worker ${holder}` : undefined;
       const running = runners.length ? `${runners.length === 1 ? 'a program runs' : `${runners.length} programs run`} from it (pid ${runners[0].pid}: ${runners[0].cmd.slice(0, 120)})` : undefined;
+      if (firstOnly && (holding || running)) continue;
       const newest = await newestTopWrite(target);
       const recent = newest > now - settleMs ? `written ${agoText(now - newest)} ago, within the settle time` : undefined;
       const kept = holding ?? running ?? recent;
+      if (firstOnly && o.low) {
+        if (!kept) items.set(target, { path: target, rule: 'ffu-slot-target', why: `ffu ${e.name}'s cargo target, the disk is low, ${holder ? `its holder ${holder} neither runs nor can resume` : 'no worker holds the slot'}, nothing runs from it and nothing in it was written for ${settleMs / 60_000} min; taken first in the pass (w6044); the next build in the slot rebuilds it`, base: slot });
+        continue;
+      }
       const bytes = await sizeOf(target);
       o.ffuSized?.(e.name, bytes);
       const incremental = path.join(target, 'debug', 'incremental');
@@ -1341,6 +1352,13 @@ export async function planInstallLeftovers(o: {
       }
     }
   };
+
+  if (o.scope === 'ffu-slots') {
+    await ffuSlotTargets();
+    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+    plan.items = [...items.values()];
+    return plan;
+  }
 
   if (o.scope === 'cargo-cap') {
     for (const t of [...new Set(o.tempRoots)]) {

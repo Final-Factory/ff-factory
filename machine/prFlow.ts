@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ghEnvFor, readGhAppTokens, remotesOf } from './ghApp.ts';
 import { gitFenceSync, isGit } from '../server/safeGit.ts';
+import { slotWriteRefusal } from './ffuSlots.ts';
 import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg } from './awayRunners.ts';
 import { noPrCi } from './ciPaths.ts';
 import { fontAtlasNoise, mayBeDynamicFont } from '../server/editorNoise.ts';
@@ -43,6 +44,8 @@ export interface PrDeps {
   updatePlugin?: () => string | undefined;
   /** The environment ff-pr runs in, named when gh cannot authenticate (w5430). None: nothing is named. */
   env?: NodeJS.ProcessEnv;
+  /** w6038: the folder ff-pr runs in; in an ffu slot its session does not hold (FF_SESSION_ID in env), push and merge refuse. None: no check. */
+  cwd?: string;
 }
 
 /** One workflow run on the PR's head, as `gh run list --json` answers it. */
@@ -603,6 +606,12 @@ export function prMain(argv: string[], d: PrDeps): number {
     d.write(`ff-pr: ${a}\n${USAGE}`);
     return 2;
   }
+  // w6038: ff-pr's own git runs FF Factory's hooks, not the ffu slot's, so it checks the slot's holder and branch itself.
+  const slot = a.cmd !== 'status' && d.cwd ? slotWriteRefusal(d.cwd, d.env?.FF_SESSION_ID, `ff-pr ${a.cmd}`) : undefined;
+  if (slot) {
+    d.write(`${slot}\n`);
+    return 1;
+  }
   const auth = ghAuthProblem(d);
   if (auth) {
     d.write(auth);
@@ -626,6 +635,7 @@ export const realPrDeps: PrDeps = {
   evidenceScript: () => findLocalPrEvidence(),
   updatePlugin: () => updateLocalPlugin(),
   env: process.env,
+  cwd: process.cwd(),
 };
 
 /** Write the ff-pr shims (sh for Git Bash and macOS/Linux, .cmd for PowerShell) into the agents' bin folder. */
