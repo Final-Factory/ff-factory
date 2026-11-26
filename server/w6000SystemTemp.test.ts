@@ -173,7 +173,6 @@ const CENSUS: Record<string, [number, string]> = {
   'server/testHistoryCi.ts': [2, 'the portal\'s test history download: its data folder, os.tmpdir() only when that is missing (portal VM)'],
   'server/testMachine.ts': [4, 'test kit: the test run\'s TMPDIR'],
   'server/testPorts.ts': [1, 'test kit: port lock files in the test run\'s TMPDIR'],
-  'server/tmpWriteFence.ts': [1, 'a comment of the /tmp write fence\'s argument parsing (w6008)'],
 };
 
 /**
