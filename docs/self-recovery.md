@@ -239,6 +239,19 @@ paused listener is in SIGSTOP, so it does not poll at all. After SIGCONT it open
 `status=Busy` only if it was already stuck before the pause. What the pause can do is hide a stuck listener for as long
 as a bench turn lasts. Rule (b) picks it up 10 minutes after the turn ends.
 
+### Windows CI runners at Normal priority (w6163)
+
+A Windows runner started through its scheduled task (`Start-ScheduledTask`, which the daemon uses to start one again) ran at
+the task's priority, 7 by default (BelowNormal), and its jobs inherited it. At logon it starts from the Startup folder's
+`.cmd` at Normal. `machine/runnerPriority.ts` (once a minute from `machine/daemon.ts`) reads each running listener's
+scheduled task at the first tick, for a runner folder not seen before, and every hour. On the machines
+`RUNNER_PRIORITY_ENFORCE` lists (lothdesktop), it sets a task above 6 to 5 (Normal) with `Set-ScheduledTask`. That is the
+user's own task, so it needs no elevation and writes no file. It also raises a listener below Normal to Normal, so the jobs
+it starts after that run at Normal. Nothing is restarted, and a job already running keeps its priority. Every other Windows
+machine, BEAST included (Ben's standing hold on its system settings), only logs `runner priority:` lines. daemon.json
+`runnerPriority` (`off`, `warn` or `enforce`) overrides the default at the daemon's start; `warn` is the recovery. A failure
+is logged once and changes nothing else. ffu's `install-ffu-runner.ps1` registers new tasks at 5 (ffu #1204).
+
 ### Runner temp folders on macOS and Windows (w5999)
 
 On Linux each runner unit's `ff-runner-tmpdir.conf` drop-in (w5834) puts its temp files inside the worker root. The
