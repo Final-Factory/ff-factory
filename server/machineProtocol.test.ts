@@ -175,7 +175,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
 // w5703 (no bump): LaunchSpec `transcriptLabels`, set by the machine's own daemon for its own agent host; an older host
 // ignores it (the conversation is then not labelled, as with the switch off).
-const DECIDED = { protocol: 9, fingerprint: '06643f713ae88528' };
+// w5912 (no bump): `ffuSlots` on `stats`, optional; an older portal drops it and an older daemon never sends it (the machine
+// page then shows no ffu slots section).
+const DECIDED = { protocol: 9, fingerprint: '805ff4c32acefa79' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

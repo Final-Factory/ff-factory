@@ -62,6 +62,7 @@ const NOT_GIT: Record<string, string> = {
   'machine/ghApp.ts|gh': 'gh',
   'machine/unitySlots.ts|run.cmd': "a worker's own batch command (unity-slot run)",
   'machine/unitySlots.ts|process.execPath': 'node',
+  'machine/ffuSlots.ts|process.execPath': 'node (the daemon runs `ffu-slot list --json`, w5912)',
   'server/publicGit.ts|cmd': 'gh and curl',
   'server/voice.ts|c.python': 'python',
   'server/machineDeployWin.ts|cmd': 'powershell or ssh',
