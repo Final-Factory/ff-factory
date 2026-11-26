@@ -87,11 +87,13 @@ export function outsideWatchConfig(
 }
 
 /**
- * Which machine watches: the configured one, else "m5" if there is one, else the first that is not in `inside` (the
- * portal's own host as a machine: it goes down with the portal, so it cannot watch it from outside, w424).
+ * Which machine watches: the configured one, else a provider that can (`providers`: "ffbox" while FFBox's link is set
+ * up, w5892: an always-on Linux box off this host), else "m5" if there is one, else the first that is not in `inside`
+ * (the portal's own host as a machine: it goes down with the portal, so it cannot watch it from outside, w424).
  */
-export function watcherOf(configured: string | undefined, machines: string[], inside: readonly string[] = []): string | undefined {
-  if (configured) return machines.includes(configured) ? configured : undefined;
+export function watcherOf(configured: string | undefined, machines: string[], inside: readonly string[] = [], providers: readonly string[] = []): string | undefined {
+  if (configured) return machines.includes(configured) || providers.includes(configured) ? configured : undefined;
+  if (providers.length) return providers[0];
   return machines.includes('m5') ? 'm5' : machines.find((m) => !inside.includes(m));
 }
 

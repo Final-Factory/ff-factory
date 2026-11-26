@@ -23,7 +23,7 @@ import { Toasts } from './components/Toasts';
 import { Lightbox } from './components/Images';
 import { SearchView } from './components/SearchView';
 import { reloadNow, useNewVersion } from './freshness';
-import { setDrawer, toast, toastError, useStore } from './store';
+import { setDrawer, toast, toastError, useStore, wantSession } from './store';
 import { sessionRoute } from './attention';
 import { displayName, fmtBytes, fmtClock, href, navigate, useMediaQuery, useRoute, type Route } from './util';
 import { brandOf, productOf, useProduct } from './brand';
@@ -444,7 +444,7 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
   }
   if (route.view === 'session') {
     const s = app.sessions.find((x) => x.id === route.sessionId);
-    if (!s) return { node: <Missing what="session" />, layout: 'single', title: 'Not found' };
+    if (!s) return { node: <MissingSession id={route.sessionId} />, layout: 'single', title: 'Session' };
     if (s.id === app.orchestratorId) return { node: null, layout: 'single', title: 'Orchestrator' };
     if (s.kind === 'orchestrator') return renderRoute(sessionRoute(s, app), app, wide);
     return {
@@ -471,6 +471,17 @@ function renderRoute(route: Route, app: AppState, wide: boolean): { node: ReactN
     };
   }
   return { node: null, layout: 'single', title: 'Orchestrator' };
+}
+
+/**
+ * A session the page's state does not hold (w5907): a finished one older than the page's window is fetched (wantSession)
+ * and shown once it comes; only one the server has no record of is "no longer exists".
+ */
+function MissingSession({ id }: { id: string }) {
+  const lookup = useStore((s) => s.sessionLookups[id]);
+  useEffect(() => wantSession(id), [id]);
+  if (lookup === 'none') return <Missing what="session" />;
+  return <div className="panel-empty">{lookup === 'loading' ? <p>Loading this older session…</p> : <p>Loading…</p>}</div>;
 }
 
 function Missing({ what }: { what: string }) {

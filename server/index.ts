@@ -124,7 +124,7 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
-import { pageSessions, stateSizes } from './pageState.ts';
+import { pageNamedSessions, pageSession, pageSessions, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
@@ -476,12 +476,18 @@ const watcher = () =>
         cfg.outsideWatch?.machine,
         machines.list().map((m) => m.id),
         machines.list().filter((m) => m.local).map((m) => m.id),
+        providers.enabled ? [providers.id] : [],
       );
 // Without publicUrl, the address the other machines were deployed with (add_machine's portal_url) is the same portal; the
 // local machine's loopback address is not (w424).
 const portalUrl = () => watchedPortalUrl(cfg.publicUrl, machines.list());
 const watchConfig = () => outsideWatchConfig({ ...cfg.outsideWatch, publicUrl: portalUrl(), name: os.hostname() }, outside);
 machines.outsideWatchFor = (id) => (id === watcher() ? (watchConfig() ?? null) : null);
+// FFBox watches through its connector (w5892): it gets the topic while it is the watcher, null otherwise. Every minute,
+// so a config change reaches it without a hook; the manager sends a value once per link.
+const pushProviderWatch = () => providers.setOutsideWatch(watcher() === providers.id ? (watchConfig()?.ntfyTopic ?? null) : null);
+pushProviderWatch();
+setInterval(pushProviderWatch, 60_000).unref();
 const learnNetwork = () =>
   void collectNetwork()
     .then((n) => {
@@ -1179,20 +1185,33 @@ function poolPeople(): PoolPerson[] {
   return identity.list().map((u) => ({ userId: u.userId, displayName: u.displayName, hasPool: owners.includes(u.userId.toLowerCase()) }));
 }
 
-/** The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). */
-function appState(user: string | undefined): AppState {
+/** When each session last changed, for a reconnecting page's state (w5907, server/pageState.ts). */
+const sessionRevs = new SessionRevs();
+bus.on('event', (e: ServerEvent) => sessionRevs.note(e));
+
+/**
+ * The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). `have`: the
+ * sessionsRev of the state a reconnecting page holds (w5907): its sessions part then holds only what changed since.
+ */
+function appState(user: string | undefined, have?: string | null): AppState {
   // w5533: only a signed-in login gets a state; a page whose login is gone is closed before it gets here (openPages).
   const me = auth.userInfo(user);
   if (!me) throw new HttpError(401, 'login required');
   const mine = agents.orchestrators.personalFor(me);
   const work = agents.orchestrators.forPage();
+  const standingAgents = agents.standing.list();
+  const machineList = machines.list().map(machineView);
+  const live = liveHub.viewsFor(me.userId);
+  // w5861: without the fields the page never reads; w5907: only the sessions the page shows on open (server/pageState.ts).
+  const named = pageNamedSessions({ work, ids: [mine.info.id, agents.dispatcherId], standing: standingAgents, machines: machineList, live });
+  const kept = pageSessions(store.sessions.values(), named, Date.now());
   return {
     app: appNow(),
-    // w5861: without the fields the page never reads (server/pageState.ts): the whole list had reached 18 MB.
-    sessions: pageSessions(store.sessions.values(), work, Date.now()),
-    standingAgents: agents.standing.list(),
+    ...sessionsPart(kept.sessions, sessionRevs, sessionRevs.since(have)),
+    olderSessions: kept.older,
+    standingAgents,
     delegations: [...store.delegations.values()],
-    machines: machines.list().map(machineView),
+    machines: machineList,
     providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
     ffbox: providers.summary(),
     max: max.summary(),
@@ -1213,7 +1232,7 @@ function appState(user: string | undefined): AppState {
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true }, project: projectView(cfg) },
     settings: store.settings,
     poolPeople: poolPeople(),
-    live: liveHub.viewsFor(me.userId),
+    live,
     // w4238: an owner's page offers the buttons of another owner's waiting question; a member's page never needs the list.
     ...(me.role === 'owner' ? { owners: identity.list().filter((x) => x.role === 'owner').map((x) => ({ userId: x.userId, displayName: x.displayName })) } : {}),
   };
@@ -1263,6 +1282,18 @@ const routes: [string, RegExp, Handler][] = [];
 const route = (method: string, pattern: string, h: Handler) => routes.push([method, new RegExp(`^${pattern}$`), h]);
 
 route('GET', '/api/state', async (req) => appState(auth.user(req)));
+// w5907: sessions the page's state left out (finished, older than its window), as the page gets them, for a view that
+// shows one (a session's page, a sandbox's older agent). At most 200 ids; an unknown id is left out of the answer.
+route('GET', '/api/sessions', async (req, _p, url) => {
+  if (!auth.userInfo(auth.user(req))) throw new HttpError(401, 'login required');
+  const ids = (url.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+  if (!ids.length || ids.length > 200) throw new HttpError(400, '"ids" takes 1 to 200 session ids');
+  const named = new Set(ids);
+  return ids.flatMap((id) => {
+    const s = store.sessions.get(id);
+    return s ? [pageSession(s, named, Date.now())] : [];
+  });
+});
 
 // ---- the live view (w1398, docs/live-view.md): a session's knobs, for its requester and the owners
 const liveFor = (req: http.IncomingMessage, sessionId: string) => {
@@ -2717,14 +2748,14 @@ server.on('upgrade', (req, socket, head) => {
       clients.delete(ws);
     });
     const t0 = performance.now();
-    const state = appState(user);
+    const state = appState(user, new URL(req.url ?? '/', 'http://x').searchParams.get('have'));
     const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
     const built = performance.now() - t0;
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));
@@ -3356,9 +3387,22 @@ const outsideWatchLines = () => {
   const w = watcher();
   const c = watchConfig();
   if (!w || !c) return [`Outside watchdog: off (${isDryRun ? 'a dry run' : cfg.outsideWatch?.enabled === false ? 'outsideWatch.enabled is false' : !c ? 'no publicUrl to watch' : 'no machine to watch from'})`];
+  if (w === providers.id) return [providerWatchLine(c.ntfyTopic)];
   return [
     `Outside watchdog: ${w} checks ${c.healthUrl} and pings ${c.host} every 60 s${machines.isOnline(w) ? '' : ` (${w} is offline now)`}; alerts go to ntfy topic "${c.ntfyTopic}" (subscribe in the ntfy app); Wake-on-LAN ${c.mac ? `to ${c.mac}${c.broadcast ? ` via ${c.broadcast}` : ''}` : 'not possible yet (MAC unknown)'}`,
   ];
+};
+/** The outside watchdog's line while FFBox watches (w5892): what FFBox last reported, never more than the topic shown. */
+const providerWatchLine = (topic: string) => {
+  const o = providers.outsideWatch;
+  const at = (iso?: string) => (iso ? `${iso.slice(11, 16)}Z` : '?');
+  const link = !providers.online ? ' (its connector is offline now)' : !providers.takesOutsideWatch ? " (its connector does not take outside_watch yet: update FFBox)" : '';
+  const seen = !o
+    ? 'no report from it yet'
+    : o.state === 'idle'
+      ? `idle (no topic or no URL), reported ${at(o.at)}`
+      : `last check ${o.state} at ${at(o.checkedAt)}${o.state === 'down' && o.failingSince ? ` (failing since ${at(o.failingSince)})` : ''}, ${o.checks} checks and ${o.alerts} alerts since FFBox's ffwatch started${o.announcedAt ? `, test alert sent ${o.announcedAt.slice(0, 16).replace('T', ' ')}Z` : ''}${o.lastAlert && !o.lastAlert.ok ? `; its last alert ("${o.lastAlert.title}") failed to reach ntfy` : ''}`;
+  return `Outside watchdog: FFBox checks ${o?.healthUrl ?? 'the portal'} every ${o?.intervalSecs ?? 60} s, alerting after ${o?.failures ?? 3} misses${link}; ${seen}; alerts go to ntfy topic "${topic}" (subscribe in the ntfy app); no ping or Wake-on-LAN (FFBox is not on the tailnet); the machines' copies are off (m5's retired, w5892)`;
 };
 usage.start();
 

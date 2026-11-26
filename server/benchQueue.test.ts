@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { readBenchLock } from '../machine/benchLock.ts';
-import { BenchTicket, benchQueueDir, benchTicketFor, findBenchQueueScript, heldTicket, newestBenchQueueScript, queueTickets, rulesVersion } from '../machine/benchQueue.ts';
+import { BenchTicket, benchQueueDir, benchStatusDir, benchTicketFor, findBenchQueueScript, heldTicket, newestBenchQueueScript, queueTickets, rulesVersion } from '../machine/benchQueue.ts';
 
 /**
  * w1615: the bench queue is the game repo's scripts/bench/bench_queue.py (its own tests kill holders and waiters with
@@ -126,6 +126,23 @@ test('w1615: benchTicketFor finds the queue script in a checkout or above it, an
   fs.writeFileSync(path.join(dir, 'scripts', 'bench', 'bench_queue.py'), '');
   fs.mkdirSync(path.join(dir, 'Assets', 'Scripts'), { recursive: true });
   assert.equal(findBenchQueueScript([undefined, path.join(dir, 'Assets', 'Scripts')]), path.join(dir, 'scripts', 'bench', 'bench_queue.py'));
+});
+
+test('w5834: a ticket\'s status file goes inside the worker root, and a folder that cannot be made falls back without refusing', async (t) => {
+  const dir = tmp(t);
+  fs.mkdirSync(path.join(dir, 'scripts', 'bench'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'scripts', 'bench', 'bench_queue.py'), FAKE);
+  const r = benchTicketFor({ mode: 'shared', what: 'x', checkouts: [dir], root: dir, python: process.execPath });
+  assert.equal(r.why, undefined, 'unity-slot run reads any why as a refusal');
+  assert.equal(path.dirname(r.ticket!.status), path.join(dir, 'tmp', 'bench-status'));
+  r.ticket!.release();
+  assert.deepEqual(benchStatusDir(dir), { dir: path.join(dir, 'tmp', 'bench-status') });
+  const no = benchStatusDir(dir, () => {
+    throw new Error('EACCES');
+  });
+  assert.equal(no.dir, os.tmpdir());
+  assert.match(no.why ?? '', /could not make .*bench-status \(EACCES\)/);
+  assert.equal(benchStatusDir(undefined).dir, os.tmpdir());
 });
 
 const GAME = process.env.FF_GAME_REPO;

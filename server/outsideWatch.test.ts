@@ -139,6 +139,11 @@ test('outside watch (portal side): topic made once, network, config and who watc
   assert.equal(watcherOf(undefined, ['beast', 'lothdesktop'], ['beast']), 'lothdesktop');
   assert.equal(watcherOf(undefined, ['beast'], ['beast']), undefined);
   assert.equal(watcherOf('beast', ['beast'], ['beast']), 'beast', 'configured by hand: as asked');
+  // FFBox, an always-on box off this host, watches whenever its link is set up (w5892): m5 is no longer the watcher.
+  assert.equal(watcherOf(undefined, ['m3', 'm5'], [], ['ffbox']), 'ffbox');
+  assert.equal(watcherOf('ffbox', ['m5'], [], ['ffbox']), 'ffbox');
+  assert.equal(watcherOf('m5', ['m5'], [], ['ffbox']), 'm5', 'configured by hand: as asked');
+  assert.equal(watcherOf('ffbox', ['m5'], [], []), undefined, 'ffbox configured without its link: off, not m5');
   // What the Mac keeps between runs.
   const f = path.join(dir, 'ow.json');
   fs.writeFileSync(f, JSON.stringify(c));

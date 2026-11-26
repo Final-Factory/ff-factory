@@ -5,6 +5,7 @@ import { noteServedBuild } from './freshness';
 import { initNotifications, onNotice } from './notify';
 import { noteMachineStats } from './util';
 import { SOCKET_FAILURE_CHECK_MS } from '../../shared/socketPolicy';
+import { mergeSessions, sessionsHave } from '../../shared/pageSessions';
 
 export type AuthState = 'unknown' | 'needed' | 'ok';
 
@@ -37,6 +38,11 @@ export interface StoreState {
   showLatest: Record<string, number>;
   /** The messages from people this page's bubble cleared (w1546), by session id: hidden until the server drops them. */
   clearing: Record<string, string[]>;
+  /**
+   * w5907: sessions a view asked for that the page's state left out (finished, older than its window): `loading` while
+   * fetched, `none` when the server has no such session. A fetched one joins app.sessions.
+   */
+  sessionLookups: Record<string, 'loading' | 'none'>;
 }
 
 /** A message being replied to: its seq (the server quotes it from the transcript), and how the page labels it. */
@@ -78,6 +84,7 @@ let state: StoreState = {
   replying: {},
   showLatest: {},
   clearing: {},
+  sessionLookups: {},
 };
 
 const listeners = new Set<() => void>();
@@ -393,6 +400,7 @@ function startSocket() {
       set({ streaming: {} });
       for (const id of openSessions.keys()) void loadTranscript(id);
     },
+    have: (gapMs) => sessionsHave(state.app ?? undefined, gapMs),
     onFailure: async () => {
       try {
         // Bounded: a path that hangs (w5318) must not hold the next attempt.
@@ -421,9 +429,64 @@ setUnauthorizedHandler(() => {
  */
 function gotState(app: AppState) {
   if (state.auth === 'needed') return;
+  if (app.sessionsDelta && !state.app) {
+    // Only what changed, and nothing to lay it on (cannot happen: the page sends its rev only with a state): fetch it all.
+    void api.state(SOCKET_FAILURE_CHECK_MS).then(gotState, () => {});
+    return;
+  }
   const first = state.auth !== 'ok';
-  set({ app, auth: 'ok' });
+  // w5907: a delta (a reconnect) lays the changed sessions on the page's own; either way the older ones views fetched stay.
+  const { sessions, missing } = mergeSessions(state.app?.sessions, app, fetchedSessions);
+  set({ app: { ...app, sessions, sessionsDelta: undefined }, auth: 'ok' });
+  if (missing.length) void fetchSessions(missing, false);
   if (first) void initNotifications();
+}
+
+/** Older sessions views fetched by id (wantSession): kept across new states until the page reloads. */
+const fetchedSessions = new Set<string>();
+
+async function fetchSessions(ids: string[], extra: boolean) {
+  for (let i = 0; i < ids.length; i += 200) {
+    const chunk = ids.slice(i, i + 200);
+    try {
+      const got = await api.sessions(chunk);
+      const found = new Set(got.map((x) => x.id));
+      if (extra) for (const id of found) fetchedSessions.add(id);
+      set((s) => {
+        if (!s.app) return {};
+        let sessions = s.app.sessions;
+        // A live event may have brought a newer copy meanwhile: that one stays.
+        for (const x of got) if (!sessions.some((y) => y.id === x.id)) sessions = [...sessions, x];
+        const sessionLookups = { ...s.sessionLookups };
+        for (const id of chunk) {
+          if (found.has(id)) delete sessionLookups[id];
+          else if (sessionLookups[id]) sessionLookups[id] = 'none';
+        }
+        return { app: { ...s.app, sessions }, sessionLookups };
+      });
+    } catch {
+      // Unreachable: let a view ask again (wantSession) rather than say "not found".
+      set((s) => ({ sessionLookups: Object.fromEntries(Object.entries(s.sessionLookups).filter(([id]) => !chunk.includes(id))) }));
+    }
+  }
+}
+
+/** Older sessions a place lists ("+N older", w5907): fetched once, then shown with the rest. */
+export function loadSessions(ids: string[]) {
+  const want = ids.filter((id) => !state.sessionLookups[id] && !state.app?.sessions.some((s) => s.id === id));
+  if (!want.length) return;
+  set((s) => ({ sessionLookups: { ...s.sessionLookups, ...Object.fromEntries(want.map((id) => [id, 'loading' as const])) } }));
+  void fetchSessions(want, true);
+}
+
+/**
+ * A view shows this session (w5907): when the page's state left it out (finished and older than the page's window),
+ * fetch it. Call from an effect; sessionLookups says `loading` meanwhile and `none` when the server has no such session.
+ */
+export function wantSession(id: string | undefined) {
+  if (!id || !state.app || state.app.sessions.some((s) => s.id === id) || state.sessionLookups[id]) return;
+  set((s) => ({ sessionLookups: { ...s.sessionLookups, [id]: 'loading' } }));
+  void fetchSessions([id], true);
 }
 
 /** A socket attempt not open by then (w5318: a Funnel attempt can hang) no longer holds the page: it fetches the state. */
