@@ -640,3 +640,46 @@ test(`w6047 (the w6159 review, 2): a resume of a request handed back meanwhile a
   assert.equal(sent.filter((m) => /CI cleared/.test(m.text)).length, 0, "not forwarded (a resume is the old worker's own wait, w5949)");
   assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0, 'not put back for the old worker');
 });
+
+// w6047 (the w6172 review): a person's answer or note comes as a resume (wakeNow -> [wake_me] … Your note: [answer] …); it
+// always goes (w2495), so the w6159 drop of the old worker's own resume never takes it.
+for (const mode of ['on', 'warn'] as const) {
+  for (const kind of ['answer', 'note'] as const) {
+    test(`w6047 (the w6172 review, "${mode}"): a person's ${kind} for a request handed back meanwhile and already on a next worker reaches that worker`, async (t) => {
+      const { store, sessions, agents, worker, request, roomMove, settled, sent } = await setup(t, mode);
+      const x = agents as unknown as Internals;
+      const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+      const note = kind === 'answer'
+        ? '[answer] lothsahn answered on w5870 "FF Factory fix", in their own words: use the second option'
+        : '[note] lothsahn added a note on w5870 "FF Factory fix" that names you, in their own words: use the second option';
+      const words: QueuedSend = { uuid: `u-words-${kind}`, id: '5449aaaa', text: `[wake_me] Time is up. Your note: ${note}`, from: 'system', at: new Date(Date.now() - 50_000).toISOString(), why: BISCUIT_FULL, resumeOf: { work: 'w5870', note } };
+      (agents as unknown as { liveHub: unknown }).liveHub = {
+        endFor: async () => {
+          const b = store.work.get('w5870')!;
+          agents.orchestrators.handBack(b, store.sessions.get('5449aaaa')!, pausedHb);
+          const n = nextW('next1', 'lothdesktop');
+          store.putSession(n);
+          agents.orchestrators.linkWorker(b.id, n, 'started worker next1 in lothdesktop/slot2');
+          assert.equal(roomMove(s, words, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+          return undefined;
+        },
+        running: () => false,
+      };
+      const handOff: (string | undefined)[] = [];
+      const start = x.startMoved;
+      x.startMoved = async (info, w, to, why, hold, branch, lead, hb) => {
+        handOff.push(hb.message);
+        return start(info, w, to, why, hold, branch, lead, hb);
+      };
+      request(['5449aaaa'], 'w5869');
+      request(['5449aaaa'], 'w5870');
+      const person: QueuedSend = { uuid: 'u-person', id: '5449aaaa', text: 'lothsahn: also rename the w5869 flag', from: 'human', at: new Date(Date.now() - 60_000).toISOString(), why: BISCUIT_FULL };
+      assert.equal(roomMove(s, person, BISCUIT_FULL, Date.now()), true);
+      await settled('5449aaaa');
+      const reached = sent.filter((m) => m.id === 'next1' && /use the second option/.test(m.text)).length + sessions.queued().filter((m) => m.id === 'next1' && /use the second option/.test(m.text)).length;
+      assert.equal(reached, 1, `the ${kind} reaches next1, once`);
+      assert.match(handOff[0] ?? '', /^lothsahn: also rename the w5869 flag$/, "not in w5869's hand-off");
+      assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa' && /use the second option/.test(m.text)).length, 0, 'not put back for the old worker');
+    });
+  }
+}

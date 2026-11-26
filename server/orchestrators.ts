@@ -130,6 +130,14 @@ const cardMedia = (ask: Ask) => new Set([ask.question, ...ask.options.map((o) =>
 const ANSWER_MARK = '[answer] ';
 /** How a person's note that names one worker of several starts its resume (noteToWorker, w3117); it goes like an answer. */
 const NOTE_MARK = '[note] ';
+/**
+ * w6047 (the w6172 review): a resume that carries a person's own words (an [answer] to its [needs you], a [note] naming the
+ * worker, sent as a check-in by wakeNow), which always goes (w2495), unlike the old worker's own gate or check-in.
+ */
+export function personsResume(m: { text: string; resumeOf?: { note: string } }): boolean {
+  const note = m.resumeOf?.note ?? /^\[wake_me\][^\n]*?Your note: ([\s\S]*)$/.exec(m.text)?.[1] ?? '';
+  return note.startsWith(ANSWER_MARK) || note.startsWith(NOTE_MARK);
+}
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;

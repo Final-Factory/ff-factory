@@ -96,7 +96,7 @@ import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.t
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, dispatcherPoolPerson, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, moveBeforeOf, type MoveBefore, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, moveBeforeOf, type MoveBefore, Orchestrators, personsResume, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
 import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
@@ -4568,7 +4568,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * it went to.
    */
   private forwardToHeirs(info: SessionInfo, ws: WorkItem[], q: QueuedSend, pick?: (w: WorkItem) => SessionInfo | undefined): string[] {
-    if (q.resumeOf || /^\[wake_me\]/.test(q.text)) return [];
+    // w6047 (the w6172 review): a person's answer or note that came as a resume always goes (w2495, personsResume).
+    if ((q.resumeOf || /^\[wake_me\]/.test(q.text)) && !personsResume(q)) return [];
     const at = `${info.machineId}/${info.machineSandbox}`;
     const heirs = new Map<string, { s: SessionInfo; ids: string[] }>();
     for (const w of ws) {
@@ -4962,8 +4963,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w6047 (the w6159 review, 2): a gate resume or a check-in is the old worker's own wait. A next worker placed on its request
     // read its hand-off already and sets its own (forwardToHeirs never forwards one, the w5949 review), so a resume goes only
     // into the hand-off of the request it resumes while that has no next worker yet, never into one already read; the other
-    // messages, each by its own send, go on as below.
-    const resume = (m: QueuedSend | undefined) => !!m && (!!m.resumeOf || /^\[wake_me\]/.test(m.text));
+    // messages, each by its own send, go on as below. The w6172 review: a person's answer or note sent as a resume
+    // (personsResume, the w2495 rule) is no such wait; it goes like any other message, forwarded to that next worker.
+    const resume = (m: QueuedSend | undefined) => !!m && !personsResume(m) && (!!m.resumeOf || /^\[wake_me\]/.test(m.text));
     const own = sends && sends.length === texts.length && texts.length ? sends : undefined;
     if (own && own.some(resume) && !own.every(resume)) {
       const plain = own.map((m, i) => (resume(m) ? -1 : i)).filter((i) => i >= 0);
