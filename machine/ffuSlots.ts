@@ -30,7 +30,6 @@
 import { execFile, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { gitSpawnSync, splitGlobal } from '../server/safeGit.ts';
 import type { CleanupFacts } from '../server/cleanupFolders.ts';
@@ -197,12 +196,12 @@ const NATIVE_HOOK_SRC = path.join(FFU_SLOT_HOOKS, 'native', 'reference_transacti
 const NATIVE_HOOK_SHELL = ['pre-push', 'pre-rebase', 'slot-guard.sh'];
 export const nativeSlotHooksBase = (root: string) => path.join(slotsBase(root), 'hooks');
 
-/** rustc for the native hook (w6062): on PATH, else in the machine's cargo homes (LothDesktop's `<root>/tools/cargo`, with its rustup beside it as ffu-build-test's ci_local.sh finds it). */
-export function findRustc(env: NodeJS.ProcessEnv, root: string, home = os.homedir()): { cmd: string; env: NodeJS.ProcessEnv } | undefined {
+/** rustc for the native hook (w6062): on PATH, else in the machine's cargo homes (LothDesktop's `<root>/tools/cargo`, with its rustup beside it as ffu-build-test's ci_local.sh finds it), never the home folder (server/outsideWrites.test.ts). */
+export function findRustc(env: NodeJS.ProcessEnv, root: string): { cmd: string; env: NodeJS.ProcessEnv } | undefined {
   const exe = process.platform === 'win32' ? 'rustc.exe' : 'rustc';
   const runs = (cmd: string, e: NodeJS.ProcessEnv) => spawnSync(cmd, ['-V'], { env: e, windowsHide: true, timeout: 60_000 }).status === 0;
   if (runs('rustc', env)) return { cmd: 'rustc', env };
-  const homes = [env.CARGO_HOME, root && path.join(root, 'tools', 'cargo'), root && path.join(root, 'cache', 'cargo'), home && path.join(home, '.cargo')];
+  const homes = [env.CARGO_HOME, root && path.join(root, 'tools', 'cargo'), root && path.join(root, 'cache', 'cargo')];
   for (const h of homes) {
     if (!h) continue;
     const cmd = path.join(h, 'bin', exe);

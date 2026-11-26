@@ -65,6 +65,8 @@ const NOT_GIT: Record<string, string> = {
   'machine/unitySlots.ts|run.cmd': "a worker's own batch command (unity-slot run)",
   'machine/unitySlots.ts|process.execPath': 'node',
   'machine/ffuSlots.ts|process.execPath': 'node (the daemon runs `ffu-slot list --json`, w5912)',
+  'machine/ffuSlots.ts|cmd': 'rustc -V, to find rustc for the native slot hook (findRustc, w6062)',
+  'machine/ffuSlots.ts|rustc.cmd': 'rustc, building the native slot hook (ensureNativeSlotHooks, w6062)',
   'server/publicGit.ts|cmd': 'gh and curl',
   'server/voice.ts|c.python': 'python',
   'server/machineDeployWin.ts|cmd': 'powershell or ssh',
