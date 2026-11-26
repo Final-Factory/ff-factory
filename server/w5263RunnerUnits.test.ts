@@ -195,7 +195,7 @@ function tmpWorld(over: Partial<World> = {}, env: Record<number, string | null |
   const { w, d } = world({ tail: { [R2]: ENDED_TAIL }, ...over });
   for (const u of ['ffu-runner.service', 'ffu-biscuit-2.service']) w.dropins.set(`${u}/${DROPIN_NAME}`, DROPIN);
   // what systemd has loaded: a daemon-reload loads each unit's TMPDIR drop-in, unless it is told to fail
-  const sd = { loaded: new Map<string, string>(), reloadFails: 0, override: '' };
+  const sd = { loaded: new Map<string, string>(), reloadFails: 0, override: '', showFails: false };
   const units = new RunnerUnits({
     ...d,
     systemctl: async (args) => {
@@ -211,6 +211,7 @@ function tmpWorld(over: Partial<World> = {}, env: Record<number, string | null |
           if (m) sd.loaded.set(k.slice(0, -TMPDIR_DROPIN_NAME.length - 1), m[1]);
         }
       }
+      if (args[0] === 'show' && args.includes('Environment') && sd.showFails) throw new Error('Failed to connect to bus');
       if (args[0] === 'show' && args.includes('Environment')) return `Environment=${[sd.loaded.get(args.at(-1)!), sd.override].filter(Boolean).join(' ')}\n`;
       return out;
     },
@@ -275,6 +276,50 @@ test('(d) a listener that took a job since the pass began is not restarted (a fr
   w.census = { listeners, workers: [], leftovers: [] };
   const census = w.census;
   Object.defineProperty(w, 'census', { get: () => (++looks > 1 ? { ...census, listeners: [{ ...listeners[0], busy: true }] } : census) });
+  await units.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+});
+
+/** w5890, the second review of #1285: its probes, kept as tests. */
+test('(d) a daemon-reload that keeps failing is said once and the pass goes on: a failed unit is still started', async () => {
+  const { w, units, sd } = tmpWorld({ show: { 'ffu-runner.service': 'ActiveState=failed\nResult=start-limit-hit\n', 'ffu-biscuit-2.service': 'ActiveState=active\nResult=success\n' } }, { 710511: null });
+  sd.reloadFails = 1000;
+  for (let i = 0; i < 60; i++) {
+    await units.tick();
+    w.now += 60_000;
+  }
+  assert.equal(w.calls.filter((c) => c === 'daemon-reload (failed)').length, 60, 'retried each pass');
+  assert.ok(w.calls.includes('start ffu-runner.service'), 'failed-unit recovery still runs');
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), [], 'nothing loaded, so no restart for TMPDIR');
+  assert.equal(w.logs.filter((l) => l.includes('daemon-reload failed')).length, 1);
+});
+
+test('(d) a failing show -p Environment skips only that restart, said once', async () => {
+  const { w, units, sd } = tmpWorld({ show: { 'ffu-runner.service': 'ActiveState=failed\nResult=start-limit-hit\n', 'ffu-biscuit-2.service': 'ActiveState=active\nResult=success\n' } }, { 710511: null });
+  sd.showFails = true;
+  await units.tick();
+  await units.tick();
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+  assert.ok(w.calls.includes('start ffu-runner.service'));
+  assert.equal(w.logs.filter((l) => l.includes('could not read its loaded environment')).length, 1);
+});
+
+test('(d) an override that wins owes one reload, not one each pass', async () => {
+  const { w, units, sd } = tmpWorld({}, { 710511: null });
+  sd.override = '"TMPDIR=/tmp/elsewhere"';
+  for (let i = 0; i < 120; i++) {
+    await units.tick();
+    w.now += 60_000;
+  }
+  assert.ok(w.calls.filter((c) => c === 'daemon-reload').length <= 2, `reloads: ${w.calls.filter((c) => c === 'daemon-reload').length}`);
+  assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
+});
+
+test('(d) a listener a bench turn pauses after the first look is not restarted', async () => {
+  const { w, units } = tmpWorld({}, { 710511: null });
+  let looks = 0;
+  const paused = new Set<number>([710511]);
+  Object.defineProperty(w, 'paused', { get: () => (++looks > 1 ? paused : new Set<number>()) });
   await units.tick();
   assert.deepEqual(w.calls.filter((c) => c.startsWith('restart')), []);
 });

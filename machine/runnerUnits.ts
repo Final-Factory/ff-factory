@@ -196,6 +196,8 @@ export class RunnerUnits {
   private said = new Set<string>();
   /** A daemon-reload this daemon owes systemd: a drop-in written by a pass whose reload failed (w5834 F1), retried each pass. */
   private reloadOwed = false;
+  /** Units whose unloaded TMPDIR owed one reload already (w5890 F2): an override that wins asks no reload each pass after. */
+  private tmpReloadAsked = new Set<string>();
   /** Units restarted once for their temp folder (w5834): never again while this daemon runs; a listener still without it is said once. */
   private tmpRestarted = new Set<string>();
 
@@ -226,24 +228,37 @@ export class RunnerUnits {
    * census still shows it idle with no job worker (N1: the pass's census can be several restarts old). Anything else is said
    * once and the unit is left running as it is.
    */
+  private sayOnce(key: string, text: string) {
+    if (!this.said.has(key)) this.d.log(`runner units: ${text} (w5834)`);
+    this.said.add(key);
+  }
+
   private async tmpRestartable(unit: string, root: string, want: string, pid: number): Promise<boolean> {
-    const sayOnce = (key: string, text: string) => {
-      if (!this.said.has(`${unit}/${key}`)) this.d.log(`runner units: ${unit} (${root}): ${text} (w5834)`);
-      this.said.add(`${unit}/${key}`);
-    };
+    const sayOnce = (key: string, text: string) => this.sayOnce(`${unit}/${key}`, `${unit} (${root}): ${text}`);
     if (this.tmpRestarted.has(unit)) {
       sayOnce('tmp-again', `listener pid ${pid} still started without TMPDIR=${want} after its one restart: left running; check \`systemctl --user show -p Environment ${unit}\` for an override`);
       return false;
     }
-    if (!loadedHasTmpdir(await this.d.systemctl(['show', '-p', 'Environment', unit]), want)) {
-      this.reloadOwed = true;
+    let loaded: string | undefined;
+    try {
+      loaded = await this.d.systemctl(['show', '-p', 'Environment', unit]);
+    } catch (e) {
+      // w5890 F1: a failing show only skips this restart; the rest of the pass goes on
+      sayOnce('tmp-show', `could not read its loaded environment (${(e as Error).message}): not restarted for TMPDIR`);
+      return false;
+    }
+    if (!loadedHasTmpdir(loaded, want)) {
+      // one reload owed per unit: a pending reload loads it; an override that wins would otherwise ask one every pass (w5890 F2)
+      if (!this.tmpReloadAsked.has(unit)) this.reloadOwed = true;
+      this.tmpReloadAsked.add(unit);
       sayOnce('tmp-unloaded', `systemd has not loaded TMPDIR=${want} (a daemon-reload pending, or another drop-in overrides it): not restarted for it`);
       return false;
     }
     const fresh = await this.d.census();
     const r = flat(root);
     const l = fresh.listeners.find((x) => x.pid === pid);
-    return !!l && !l.busy && !fresh.workers.some((w) => flat(w.root) === r);
+    // w5890 F3: a bench turn may have paused it since the pass's first look
+    return !!l && !l.busy && !fresh.workers.some((w) => flat(w.root) === r) && !this.d.paused().has(pid);
   }
 
   private async step() {
@@ -283,9 +298,15 @@ export class RunnerUnits {
     }
     if (wrote || this.reloadOwed) {
       // owed until it succeeds: a failed reload leaves the drop-ins on disk but not loaded, and the next pass writes nothing
+      // and a failing one is said once and lets the rest of the pass run: failed units and stuck listeners still recover (w5890 F1)
       this.reloadOwed = true;
-      await this.d.systemctl(['daemon-reload']);
-      this.reloadOwed = false;
+      try {
+        await this.d.systemctl(['daemon-reload']);
+        this.reloadOwed = false;
+        this.said.delete('daemon-reload');
+      } catch (e) {
+        this.sayOnce('daemon-reload', `daemon-reload failed (${(e as Error).message}): retried each pass, the rest of this pass goes on`);
+      }
     }
     let census: RunnerCensus | undefined;
     for (const u of units) {
