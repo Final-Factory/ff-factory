@@ -9,7 +9,7 @@ import type { Config } from './config.ts';
 import type { Store } from './store.ts';
 import type { CompactionTrigger, DeliveredAttachment, EffortLevel, ImageInput, ImageRef, OrchestratorRole, PendingPermission, PermissionMode, Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { attachmentBlock } from '../shared/attachments.ts';
-import { RELAYED_MARK } from '../shared/conditional.ts';
+import { JOINED_MARK, RELAYED_MARK } from '../shared/conditional.ts';
 import { emit } from './store.ts';
 import { accountKeyOf } from './usage.ts';
 import { senderOf, type SessionSnapshot, type Unanswered } from './restart.ts';
@@ -66,6 +66,8 @@ export interface QueuedSend {
   requestedBy?: Requester;
   attachments?: DeliveredAttachment[];
   bypassGate?: boolean;
+  /** w5896: a third party's text relayed (SessionHandle.send's relay). */
+  relay?: boolean;
   at: string;
   why: string;
   /**
@@ -348,7 +350,7 @@ export interface SessionHandle {
    * `attachments` (docs/attachments.md): files that come with it, with where this agent's copy is; on a machine, the
    * daemon fetches the copies first and fills that in.
    */
-  send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[], requestedBy?: Requester, attachments?: DeliveredAttachment[]): string;
+  send(text: string, from?: 'human' | 'orchestrator' | 'system', uuid?: string, images?: ImageInput[], requestedBy?: Requester, attachments?: DeliveredAttachment[], relay?: boolean): string;
   interrupt(): Promise<void>;
   /**
    * Interrupt it and say what became of that (w3673): a machine worker's daemon answers whether its agent got the interrupt
@@ -597,7 +599,10 @@ export class AgentSession implements SessionHandle {
   private readonly outstanding = new Map<string, Unanswered & { attachments?: DeliveredAttachment[] }>();
   /** The message the current turn answers first (w607): its sender is turnFrom. Cleared when the turn ends. */
   private turnStarter?: { uuid: string; from: 'human' | 'orchestrator' | 'system' };
-  /** A message not the person's own joined the turn they started (w5507): turnRelayed. Cleared with turnStarter. */
+  /**
+   * A third party's relayed text joined the turn they started (w5507, narrowed by w5896): turnRelayed. FF Factory's own
+   * notices (a [worker update], a [dispatch], a [ledger] line, a check-in) join without it. Cleared with turnStarter.
+   */
   private relayedInTurn = false;
   /** Stopped or interrupted by a person or the orchestrator since its last message: a restart leaves it alone. */
   private stoppedOnPurpose = false;
@@ -680,7 +685,7 @@ export class AgentSession implements SessionHandle {
   }
 
   /** Queue a user message; returns its uuid, which the answering turn's result lists in `answers`. */
-  send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = [], requestedBy?: Requester, attachments: DeliveredAttachment[] = []): string {
+  send(text: string, from: 'human' | 'orchestrator' | 'system' = 'human', uuid: string = randomUUID(), images: ImageInput[] = [], requestedBy?: Requester, attachments: DeliveredAttachment[] = [], relay = false): string {
     // The dry run (server/dryRun.ts): the last word on any process start, whoever sends.
     const no = this.q ? undefined : dryRunStartRefusal(this.info, from);
     if (no) throw new Error(`not started: ${no}`);
@@ -694,18 +699,20 @@ export class AgentSession implements SessionHandle {
     else if (pick && pick.model !== this.liveModel) this.switchModel(pick.model, pick.kind);
     // The message that opens a turn decides whose it is (w607); one sent while it runs joins it without changing that.
     if (opensTurn) this.turnStarter = { uuid, from };
-    // w5507: a message that is not the person's own (a [worker update], a [dispatch], an FFBox relay) joining a turn they
-    // started marks the turn relayed, so a gate reserved for their own words asks for those words (turnRelayed), and
-    // says so to the agent at its end.
+    // w5507: a third party's text relayed (an FFBox hand-over, another person's message_person) joining a turn they started
+    // marks the turn relayed, so a gate reserved for their own words asks for those words (turnRelayed), and says so to
+    // the agent at its end. w5896 (lothsahn: "when other messages come in it doesn't override the setting"): FF Factory's
+    // own notices (a [worker update], a [dispatch], a [ledger] line) join it as data, marked, and the turn stays theirs.
     else if (from !== 'human' && this.turnStarter?.from === 'human') {
-      this.relayedInTurn = true;
-      if (this.info.kind === 'orchestrator' && text && !text.endsWith(RELAYED_MARK)) text = `${text}\n\n${RELAYED_MARK}`;
+      if (relay) this.relayedInTurn = true;
+      const mark = relay ? RELAYED_MARK : JOINED_MARK;
+      if (this.info.kind === 'orchestrator' && text && !text.endsWith(RELAYED_MARK) && !text.endsWith(JOINED_MARK)) text = `${text}\n\n${mark}`;
     }
     this.lastFrom = from;
     this.lastUuid = uuid;
     this.stoppedOnPurpose = false;
     clearTimeout(this.graceTimer);
-    this.outstanding.set(uuid, { text, from, ...(requestedBy ? { requestedBy } : {}), ...(attachments.length ? { attachments } : {}) });
+    this.outstanding.set(uuid, { text, from, ...(requestedBy ? { requestedBy } : {}), ...(attachments.length ? { attachments } : {}), ...(relay ? { relay } : {}) });
     // Images arrive stored already (with an id) or are kept here, so the transcript can show them.
     const refs = images.map((i) => ({ id: i.id ?? this.store.saveImage(this.info.id, i.mediaType, i.data), mediaType: i.mediaType }));
     this.store.append(this.info.id, { kind: 'user', text, from, uuid, ...(refs.length ? { images: refs } : {}), ...(attachments.length ? { attachments } : {}), ...(requestedBy ? { requestedBy } : {}) });
@@ -919,7 +926,7 @@ export class AgentSession implements SessionHandle {
       const uuid = randomUUID();
       this.sentAgain.add(uuid);
       try {
-        this.send(`${m.text}${note}`, m.from, uuid, [], m.requestedBy, m.attachments ?? []);
+        this.send(`${m.text}${note}`, m.from, uuid, [], m.requestedBy, m.attachments ?? [], !!m.relay);
       } catch (e) {
         this.store.append(this.info.id, { kind: 'error', text: `A message this agent had not read when its process ended could not be sent again: ${(e as Error).message}` });
         return;
@@ -1079,8 +1086,8 @@ export class AgentSession implements SessionHandle {
         if (this.turnStarter && answered.includes(this.turnStarter.uuid)) {
           const next = this.outstanding.entries().next();
           if (!next.done) this.turnStarter = { uuid: next.value[0], from: next.value[1].from };
-          // The next turn is relayed (w5507) when a message not its person's waits in it behind theirs.
-          this.relayedInTurn = !next.done && [...this.outstanding].some(([u, x]) => u !== next.value[0] && x.from !== 'human');
+          // The next turn is relayed (w5507) when a third party's relayed text waits in it behind theirs (w5896).
+          this.relayedInTurn = !next.done && [...this.outstanding].some(([u, x]) => u !== next.value[0] && x.from !== 'human' && !!x.relay);
         }
         this.store.append(id, {
           kind: 'result',
@@ -2077,7 +2084,7 @@ export class SessionManager {
   private deliver(s: SessionHandle, q: QueuedSend, now: number, held: Set<string>, drop: () => void): boolean {
     try {
       this.lastResumeOf.set(q.id, q.resumeOf);
-      s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments);
+      s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments, !!q.relay);
       drop();
       return true;
     } catch (e) {
@@ -2115,7 +2122,7 @@ export class SessionManager {
    * `hold` (w496: a worker's first prompt, its brief): what would refuse it now (a machine's daemon that is outdated or
    * offline, or its guard) queues it instead, and it goes as soon as it can, before any later message to the session.
    */
-  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean; ops?: OpsPass; resumeOf?: { work: string; note: string } } = {}): string {
+  send(id: string, text: string, from: 'human' | 'orchestrator' | 'system' = 'human', images?: ImageInput[], opts: { bypassGate?: boolean; requestedBy?: Requester; attachments?: DeliveredAttachment[]; hold?: boolean; ops?: OpsPass; resumeOf?: { work: string; note: string }; relay?: boolean } = {}): string {
     const s = this.get(id);
     // The orchestration worker (w597, server/opsWorker.ts) hears only Lothsahn's and Ben's own orchestrators (through
     // OpsWorker.send), its own wake_me and a restart's resume: no other sender, a harness notice included, reaches it.
@@ -2127,7 +2134,7 @@ export class SessionManager {
       return '';
     }
     const queue = (why: string, on: 'capacity' | 'machine' | 'pool', account = false) =>
-      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why, on, ...(account ? { account } : {}) });
+      this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.relay ? { relay: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why, on, ...(account ? { account } : {}) });
     // A worker whose person's Claude pool is held (w1129): its message waits for the pool, never refused or dropped. On
     // 2026-10-12 every wake-up, gate resume and dispatcher follow-up to lothsahn's workers was refused this way for hours.
     const pooled = (e: unknown) => s.info.kind === 'worker' && poolHeld(e);
@@ -2135,7 +2142,7 @@ export class SessionManager {
     // placement, no start); a person's or an orchestrator's tries again now, its parked ones first.
     const poolWait = s.info.kind === 'worker' && !isMidTurn(s.info) && !s.live ? this.poolWait?.(s) : undefined;
     if (poolWait && from === 'system' && this.parked(id).length) {
-      return this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why: poolWait, on: 'pool', parked: true });
+      return this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.relay ? { relay: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why: poolWait, on: 'pool', parked: true });
     }
     if (this.unpark(id)) this.drainSoon();
     // ANOTHER PERSON'S ACCOUNT (w1076): its process restarts on its requests' person's tokens first; the message waits.
@@ -2147,7 +2154,7 @@ export class SessionManager {
     // w1749: while an orchestrator's automatic compaction runs or is retried, its messages wait in the (saved) send queue,
     // so a stop or a restart in the middle loses none, and each goes after the compaction.
     const compacting = this.compactHold?.(s, true);
-    if (compacting) return this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why: compacting, on: 'capacity', compaction: true });
+    if (compacting) return this.enqueue({ uuid: randomUUID(), id, text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}), ...(opts.bypassGate ? { bypassGate: true } : {}), ...(opts.relay ? { relay: true } : {}), ...(opts.resumeOf ? { resumeOf: opts.resumeOf } : {}), at: new Date().toISOString(), why: compacting, on: 'capacity', compaction: true });
     const move = this.moveFor(s);
     if (move) return queue(move, 'capacity', true);
     // ALL RUNNING SLOTS BUSY (w384): the message waits and goes when a turn ends, instead of being refused. So does any
@@ -2169,7 +2176,7 @@ export class SessionManager {
     if (this.freshStart?.(s, { text, from, ...(images?.length ? { images } : {}), ...(opts.requestedBy ? { requestedBy: opts.requestedBy } : {}), ...(opts.attachments?.length ? { attachments: opts.attachments } : {}) })) return '';
     try {
       this.lastResumeOf.set(id, opts.resumeOf);
-      return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments);
+      return s.send(text, from, undefined, images, opts.requestedBy, opts.attachments, !!opts.relay);
     } catch (e) {
       if (pooled(e)) {
         const uuid = queue((e as Error).message, 'pool');
