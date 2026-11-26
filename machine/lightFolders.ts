@@ -45,32 +45,48 @@ export interface RepoScan {
  * Scans `dir` for git repositories, `depth` levels down. A folder it does not walk into is still checked for a `.git` of its
  * own (w6031, the w6027 review: a clone 4 levels down or one named `build` was missed and a delete would have lost it):
  * - one level past `depth`: a repository there is found; one that is not and holds folders of its own is `unsure`;
- * - a build cache (node_modules, target, Library, ...): a repository of that name is found; the cache is never walked.
- * Links are never followed and a folder it cannot read is skipped, as before.
+ * - a build cache (node_modules, target, Library, ...): a repository of that name, or one directly inside it, is found; the
+ *   cache is never walked deeper;
+ * - a folder it cannot read is `unsure` (one that is gone is skipped).
+ * Links are never followed.
  */
 export function scanRepos(dir: string, depth = 3): RepoScan {
   const repos: string[] = [];
   const unsure: string[] = [];
-  const walk = (d: string, left: number) => {
-    let names: fs.Dirent[];
+  // w6031 (the w6046 review): a folder that is gone holds nothing, but one that cannot be read may hold a clone: unsure.
+  const read = (d: string): fs.Dirent[] | undefined => {
     try {
-      names = fs.readdirSync(d, { withFileTypes: true });
-    } catch {
-      return;
+      return fs.readdirSync(d, { withFileTypes: true });
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') unsure.push(d);
+      return undefined;
     }
+  };
+  const dirsOf = (names: fs.Dirent[]) => names.filter((n) => n.isDirectory() && !n.isSymbolicLink());
+  const walk = (d: string, left: number) => {
+    const names = read(d);
+    if (!names) return;
     if (names.some((n) => n.name === '.git')) {
       repos.push(d);
       return;
     }
-    const dirs = names.filter((n) => n.isDirectory() && !n.isSymbolicLink());
+    const dirs = dirsOf(names);
     if (left < 0) {
       if (dirs.length) unsure.push(d);
       return;
     }
     for (const n of dirs) {
       const p = path.join(d, n.name);
-      if (!SKIP.has(n.name)) walk(p, left - 1);
-      else if (fs.existsSync(path.join(p, '.git'))) repos.push(p);
+      if (!SKIP.has(n.name)) {
+        walk(p, left - 1);
+        continue;
+      }
+      // A cache is read once, never walked: a clone of that name, or one directly inside it (build/ffr), is found.
+      const inner = read(p);
+      if (!inner) continue;
+      if (inner.some((c) => c.name === '.git')) repos.push(p);
+      else for (const c of dirsOf(inner)) if (fs.existsSync(path.join(p, c.name, '.git'))) repos.push(path.join(p, c.name));
     }
   };
   walk(dir, depth);
@@ -92,7 +108,7 @@ const realGit: GitRun = (cwd, args) => run('git', ['-C', cwd, ...args], { timeou
 export async function unsavedWork(dir: string, git: GitRun = realGit): Promise<string[]> {
   const lines: string[] = [];
   const scan = scanRepos(dir);
-  for (const d of scan.unsure) lines.push(`${path.relative(dir, d) || '.'}: holds folders deeper than the scan looks for clones`);
+  for (const d of scan.unsure) lines.push(`${path.relative(dir, d) || '.'}: could not be searched to the end for clones (too deep or unreadable)`);
   for (const repo of scan.repos) {
     const rel = path.relative(dir, repo) || '.';
     const status = await git(repo, ['status', '--porcelain', '--untracked-files=normal']);

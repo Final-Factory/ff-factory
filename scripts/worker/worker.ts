@@ -2557,7 +2557,7 @@ export async function sandboxRisks(sandboxesDir: string): Promise<SandboxRisk[]>
   const scan = scanRepos(lightDir, 4);
   const rel = (p: string) => path.relative(sandboxesDir, p).split(path.sep).join('/');
   for (const repo of scan.repos) repos.push([rel(repo), repo]);
-  for (const d of scan.unsure) out.push({ sandbox: rel(d), unpushed: ['(not searched: it holds folders deeper than the scan looks for clones; check it by hand)'], dirty: [] });
+  for (const d of scan.unsure) out.push({ sandbox: rel(d), unpushed: ['(not searched to the end for clones: too deep or unreadable; check it by hand)'], dirty: [] });
   for (const [name, dir] of repos) {
     if (!fs.existsSync(path.join(dir, '.git'))) continue;
     // A slot repo (w5614, its .git a folder) holds its other branches and its stash itself, not in the kept clone.
