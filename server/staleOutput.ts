@@ -302,6 +302,12 @@ export async function cleanupPass(o: {
    * plan, so an idle target over the cap stayed up to a day). Run when the stale plan is not due and the mode is on.
    */
   cap?: () => Promise<StalePlan>;
+  /**
+   * The released ffu slots' cargo targets, planned first, before every slower step (w6044: on BEAST, 2026-11-26, three released
+   * targets held 190.6 GB while the passes were cut off in their regular step, before the ffu rule ran in the stale or cap
+   * step). Report-only for now: the plan is said (report) and nothing of it is removed here; the later step still takes them.
+   */
+  first?: { plan(): Promise<StalePlan>; report?(items: CleanupItem[], ms: number): void };
   /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
   own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
   /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
@@ -343,6 +349,13 @@ export async function cleanupPass(o: {
     }
   };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
+  // w6044: the released ffu slots' targets first, report-only (a later change removes them here).
+  const first = o.first;
+  if (first && o.mode !== 'off' && !o.opts.dryRun) {
+    const t0 = Date.now();
+    const fp = await timed('ffu first', () => first.plan().catch(() => ({ items: [], listed: [] }) as StalePlan));
+    first.report?.(o.root ? fenceToRoot(fp.items, o.root).inside : fp.items, Date.now() - t0);
+  }
   // A failure there must not cost the regular pass: nothing of it is removed then.
   const ownPlan = o.own;
   // Planned first (w5795): the removals of each step below keep clear of what it keeps or removes itself (withoutOverlap).

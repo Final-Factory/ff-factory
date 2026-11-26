@@ -52,10 +52,11 @@ export const maxProbeArgv = (shell: string, file: string) => [shell, '-c', MAX_E
 
 /**
  * The environment for a shell the daemon runs from a folder workers write (w5717: the agent Git's bash, which a Low
- * worker could replace): only what Windows needs to start a process, none of the daemon's tokens or keys.
+ * worker could replace): only what Windows needs to start a process and its temp folder, none of the daemon's tokens or keys.
  */
 export function bareEnv(from: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const keep = ['SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'SystemDrive', 'SYSTEMDRIVE'];
+  // w6000: and the temp folder (the daemon's own, <root>/tmp-daemon), so even this shell has no reason to reach the system's.
+  const keep = ['SystemRoot', 'SYSTEMROOT', 'windir', 'WINDIR', 'SystemDrive', 'SYSTEMDRIVE', 'TEMP', 'TMP'];
   const out: NodeJS.ProcessEnv = {};
   for (const k of Object.keys(from)) if (keep.includes(k)) out[k] = from[k];
   return out;

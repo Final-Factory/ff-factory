@@ -223,3 +223,37 @@ test('describeCutOff says what a cut-off pass had removed by then (w5795)', () =
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// w6044: BEAST, 2026-11-26: the 09:10Z low pass was cut off 4 min into its regular step having removed nothing, while three
+// released ffu slot targets held 190.6 GB that the ffu rule (in the later stale or cap step) would have taken. The released
+// targets are now planned first, before the regular step; report-only, so the plan is said and nothing of it goes here.
+test('cleanupPass plans the released ffu targets first, before the regular step, and removes nothing of them (report-only, w6044)', async () => {
+  const { cleanupPass } = await import('./staleOutput.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-ffufirst-'));
+  try {
+    const t = path.join(root, 'ffu-sandboxes', 'slot1', 'target');
+    fs.mkdirSync(t, { recursive: true });
+    const steps: string[] = [];
+    const reported: { paths: string[]; ms: number }[] = [];
+    const r = await cleanupPass({
+      opts: { stale: false, dryRun: false, step: (n: string) => void steps.push(n) },
+      guard: { keep: [], inUse: [], home: path.join(root, 'nobody') },
+      mode: 'on',
+      regular: async () => [],
+      stale: async () => ({ items: [], listed: [] }),
+      first: { plan: async () => ({ items: [{ path: t, rule: 'ffu-slot-target', why: 'test' }, { path: path.join(os.tmpdir(), 'outside'), rule: 'ffu-slot-target', why: 'test' }], listed: [] }), report: (items, ms) => void reported.push({ paths: items.map((i) => i.path), ms }) },
+      root,
+    });
+    assert.equal(steps[0], 'ffu first');
+    assert.equal(steps[1], 'regular');
+    assert.deepEqual(reported.map((x) => x.paths), [[t]], 'said once, fenced to the install folder');
+    assert.ok(fs.existsSync(t), 'report-only: the target stays');
+    assert.equal(r.removed.length, 0);
+    const off: string[] = [];
+    await cleanupPass({ opts: { stale: false, dryRun: true }, guard: { keep: [], inUse: [], home: root }, mode: 'on', regular: async () => [], stale: async () => ({ items: [], listed: [] }), first: { plan: async () => (off.push('dry'), { items: [], listed: [] }) } });
+    await cleanupPass({ opts: { stale: false, dryRun: false }, guard: { keep: [], inUse: [], home: root }, mode: 'off', regular: async () => [], stale: async () => ({ items: [], listed: [] }), first: { plan: async () => (off.push('off'), { items: [], listed: [] }) } });
+    assert.deepEqual(off, [], 'not planned in a dry run or with the stale-output rules off');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
