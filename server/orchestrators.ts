@@ -98,6 +98,25 @@ import { openQuestionsOf } from './reports.ts';
 import { DISK_CLEANUP_FLOOR_GB, REPORT_KINDS, WORK_PRIORITIES, asWorkPriority, atLeast, questionFor, type ReportKind, type ReportSummary } from '../shared/types.ts';
 import { FOR_YOU_CHARS, FOR_YOU_KEPT, forYouId, splitForYou } from '../shared/forYou.ts';
 
+/** w5976: what a room move changes on a request, taken before it (moveBeforeOf), so Orchestrators.moveUndone can put it back. */
+export interface MoveBefore {
+  status: WorkItem['status'];
+  queuedFor?: WorkItem['queuedFor'];
+  handedBack?: WorkItem['handedBack'];
+  gateResumes?: WorkItem['gateResumes'];
+  link?: NonNullable<WorkItem['links']>[string];
+}
+
+export function moveBeforeOf(w: WorkItem, sessionId: string): MoveBefore {
+  return {
+    status: w.status,
+    ...(w.queuedFor ? { queuedFor: w.queuedFor } : {}),
+    ...(w.handedBack ? { handedBack: w.handedBack } : {}),
+    ...(w.gateResumes ? { gateResumes: [...w.gateResumes] } : {}),
+    ...(w.links?.[sessionId] ? { link: w.links[sessionId] } : {}),
+  };
+}
+
 /** w2045: the most of a worker's after-merge report a merge-on-green gate keeps (a DONE report is rarely longer). */
 const MERGE_ON_GREEN_REPORT_CHARS = 12_000;
 
@@ -2204,6 +2223,34 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.moveOff(w, s.id, `moved to ${h.to}: ${h.why}`);
     this.stamp(w, `moved from ${from} to ${h.to} (w2046), from branch ${h.branch ?? 'unknown'}${h.saved ? `; ${h.saved}` : ''}`);
     this.store.putWork(w);
+  }
+
+  /**
+   * w5976, config movedAwayWorkers "on" (Agents.moveForRoom): a move whose fresh session did not start gives request `w` back
+   * to worker `s`, the one it was to leave, as it was before the move (`before`): linked again with its gate resumes, its
+   * hand-off and its Queued state undone. A request the move had not touched yet is left as it is. Without it the request sat
+   * Queued with no worker while `s` kept its movedAway mark (the w5950 review: handBack before startMoved succeeds).
+   */
+  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string) {
+    if (!isOpen(w)) return;
+    const off = !w.sessionIds.includes(s.id);
+    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return;
+    if (off) w.sessionIds = [...w.sessionIds, s.id];
+    w.links = { ...w.links, [s.id]: before.link ?? { at: this.now().toISOString(), how: 'sent' } };
+    if (w.movedOff?.[s.id]) {
+      const { [s.id]: _undone, ...rest } = w.movedOff;
+      w.movedOff = Object.keys(rest).length ? rest : undefined;
+    }
+    const mine = (before.gateResumes ?? []).filter((r) => r.session === s.id && !w.gateResumes?.some((x) => x.session === r.session && x.at === r.at));
+    if (mine.length) w.gateResumes = [...(w.gateResumes ?? []), ...mine];
+    if (w.handedBack?.session === s.id) w.handedBack = before.handedBack;
+    if (w.status === 'queued' && before.status !== 'queued') {
+      w.status = before.status;
+      w.queuedFor = before.queuedFor;
+    }
+    this.stamp(w, `given back to worker ${s.id}: ${why} (w5976)`);
+    this.store.putWork(w);
+    console.log(`ledger: ${w.id}: given back to worker ${s.id}, its move did not start (w5976): ${why}`);
   }
 
   /**

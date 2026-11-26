@@ -2732,7 +2732,7 @@ LothDesktop and Beast, not just when BEAST is full").
       branch its new worker carries is never pushed from there), and each new worker gets "[forwarded, w5942] … [w5950] Your
       request's old worker … " naming where that work went. Only when `movedAwayVerdict` holds the w5949 review's conditions:
       (a) its open requests no longer list it (else `awayMoveUndone`, w3425, clears the mark); (b) every request moved off it
-      has another worker (a failed start hands the request back with none: kept); (c) that worker is in another sandbox and
+      has another worker (a failed start hands the request back with none: kept; with "on" it is given back instead, w5976 below); (c) that worker is in another sandbox and
       started (live, mid-turn, or ran a turn), not errored or stopped on purpose, a live one preferred; (d) the save is
       skipped when another agent works in its sandbox, its process did not end within 10 s or its branch is unknown, and
       said so in the message; (e) the "too long ago to resume" report names a moved-away worker's new worker to message,
@@ -2740,6 +2740,17 @@ LothDesktop and Beast, not just when BEAST is full").
       could stop the only copy of the work: … (w5950)". The side branch is local-first: the sandbox's branch is one WIP
       commit ahead until that sandbox is switched or cleaned. Recovery needs nobody at any machine: an owner's request to
       the dispatcher, set_app_config `movedAwayWorkers` `"off"` (or `null` for `"warn"`).
+    - **A move that does not start gives the work back** (w5976, under the same `"on"`): `Agents.moveForRoom` sets
+      `movedAway` before `startMoved` succeeds, and a failed start used to hand the request back Queued with no worker
+      (`Orchestrators.handBack`). With `"on"` the other requests are handed back only once the fresh session started, and a
+      failed start (no seat there, an error status, a link refused, before or after `movedForRoom` took it off) gives every
+      request back to the old worker (`Agents.giveBack`, `Orchestrators.moveUndone`): linked again with its link, gate
+      resumes, hand-off and Queued state as they were before the move (`moveBeforeOf`), its `movedAway` mark cleared, and the
+      message the move took queued for it again with its first time (`SessionManager.putBack`). Its sandbox stays released
+      (its work was saved), so it resumes when a sandbox frees on its own computer, and it is not retired. The computer
+      whose start failed is no move target for `REFUSED_FOR_MS` ("a moved session did not start there … (w5976)",
+      `MoveGuard.noteRefusal`), so the next drain moves it elsewhere or keeps it waiting, never the same start again. `"warn"`
+      and `"off"` keep the hand-back. Tests: `server/w5976MoveGiveBack.test.ts`.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
