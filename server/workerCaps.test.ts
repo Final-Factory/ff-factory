@@ -794,3 +794,13 @@ test('enforce: a process list without the host ends nothing, and says why', { ti
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("w5973: a watch of another process's host never takes this process's own scope (an agent's claude was ended by this suite)", { skip: process.platform !== 'linux', timeout: 30_000 }, async () => {
+  const logs: string[] = [];
+  const stop = await startWorkerCaps({ caps: capsFor(), mode: 'warn', platform: 'linux', hostPid: 2_000_000_000, appDir: os.tmpdir(), onCap: () => undefined, log: (s) => logs.push(s), ps: () => [], watch: { POLL_MS: 50 } });
+  try {
+    assert.equal(logs.some((l) => l.includes('in scope')), false, logs.join('\n'));
+  } finally {
+    await stop();
+  }
+});

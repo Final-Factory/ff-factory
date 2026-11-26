@@ -368,3 +368,34 @@ test("w3398: every leg the settings allow fits in one planned turn, which ends b
   assert.equal(runTurns(max, 4), 80, 'the longest leg plays one per turn');
   assert.equal(runTurns(timedSettingsOf({ rounds: 1, sample_s: 5, settle_s: 5 }) as TimedSettings, 2), 1, 'a short run: one turn');
 });
+
+test("w5973: a leg past its bound is 'timeout' even when the player's exit comes before the tree's stop answers", async () => {
+  const { EventEmitter } = await import('node:events');
+  const { legExit } = await import('../machine/timedRunner.ts');
+  type Fake = InstanceType<typeof EventEmitter> & { exitCode: null; signalCode: null };
+  const fake = () => Object.assign(new EventEmitter(), { exitCode: null, signalCode: null }) as Fake;
+  // The stop makes the player exit at once, and answers only later (Windows' taskkill, measured on lothdesktop by w5998).
+  const c1 = fake();
+  let answered = false;
+  const got = legExit(c1 as never, 10, async (c) => {
+    (c as unknown as Fake).emit('exit', 1);
+    await new Promise((r) => setTimeout(r, 30));
+    answered = true;
+  });
+  assert.equal(await got, 'timeout');
+  assert.equal(answered, true, 'the leg ends once the stop answered');
+  // An error after the bound is a timeout too.
+  const c2 = fake();
+  assert.equal(await legExit(c2 as never, 10, async (c) => void (c as unknown as Fake).emit('error', new Error('gone'))), 'timeout');
+  // A failed stop still ends the leg.
+  assert.equal(await legExit(fake() as never, 10, async () => { throw new Error('access denied'); }), 'timeout');
+  // Within the bound: its own exit code and error, and no stop.
+  const c3 = fake();
+  const own = legExit(c3 as never, 60_000, async () => assert.fail('stopped'));
+  c3.emit('exit', 0);
+  assert.equal(await own, 0);
+  const c4 = fake();
+  const err = legExit(c4 as never, 60_000, async () => assert.fail('stopped'));
+  c4.emit('error', new Error('ENOENT'));
+  assert.equal(await err, 'error: ENOENT');
+});
