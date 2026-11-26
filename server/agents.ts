@@ -4006,9 +4006,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w5895: a hold or lift of `machine` landed (hold_machine, update_work hold, or config placement.hold): every open
    * request's unset ask for that machine and action is now set, not only `workId`'s. An ask left unset by a hold that came
    * another way would come back as HOLD ASKED, NOT SET once the hold is lifted, and the guard would let the dispatcher
-   * hold the machine again (w5943's review of #1307 at c72eeb05).
+   * hold the machine again (w5943's review of #1307 at c72eeb05). Only an ask now in force is marked (holdAskInForce): a
+   * lift while a drain or a config hold still holds the machine, or a lift with nothing to lift, spends no ask (w5969's
+   * review at d4df9ff1, its probe B3).
    */
   markHoldAsksSet(machine: string, action: 'hold' | 'lift', by: string, workId?: string): void {
+    if (!this.holdAskInForce(machine, action)) return;
     const at = (this.orchestrators?.now() ?? new Date()).toISOString();
     for (const w of this.store.work.values()) {
       if (!isOpen(w) || !w.holdAsk || w.holdAsk.set || w.holdAsk.action !== action || placeId(w.holdAsk.machine) !== placeId(machine)) continue;
@@ -4023,15 +4026,42 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * later lift, or the hold's hours running out, must not bring the line back and ask the dispatcher to hold it again
    * (w5940's review of #1307 at ae282369).
    */
+  /**
+   * w5895: a person's own hold of `machine` (a drain, hold_machine, or config placement.hold) is on. A pause, a coming build
+   * or a person playing holds a machine too (placement()), but no lift of a person's ends those.
+   */
+  private personHeld(machine: string): { drain: boolean; config: boolean } {
+    const id = placeId(machine);
+    return {
+      drain: !!drainOf(this.store.machines.get(id), this.orchestrators?.now().getTime() ?? Date.now()),
+      config: Object.keys(this.cfg.placement?.hold ?? {}).some((k) => placeId(k) === id),
+    };
+  }
+
+  /**
+   * w5895: whether a hold or lift ask of `machine` is in force: a hold while placement holds it (a pause counts, as it keeps
+   * work off); a lift once neither the person's drain nor a config hold holds it. One test for marking an ask set and for the
+   * NOT SET line, so they never disagree (w5969's review at d4df9ff1).
+   */
+  holdAskInForce(machine: string, action: 'hold' | 'lift'): boolean {
+    if (action === 'lift') {
+      const p = this.personHeld(machine);
+      return !p.drain && !p.config;
+    }
+    return Object.keys(this.placement().hold ?? {}).some((k) => placeId(k) === placeId(machine));
+  }
+
   unsetHoldAsks(machine?: string): string[] {
-    const prefs = this.placement();
-    const held = (id: string) => Object.keys(prefs.hold ?? {}).some((k) => placeId(k) === placeId(id));
     return [...this.store.work.values()]
       .filter((w) => isOpen(w) && w.holdAsk && !w.holdAsk.set && (!machine || placeId(w.holdAsk.machine) === placeId(machine)))
-      .filter((w) => (w.holdAsk!.action === 'hold' ? !held(w.holdAsk!.machine) : !!drainOf(this.store.machines.get(placeId(w.holdAsk!.machine)), this.orchestrators?.now().getTime() ?? Date.now())))
+      .filter((w) => !this.holdAskInForce(w.holdAsk!.machine, w.holdAsk!.action))
       .map((w) => {
         const h = w.holdAsk!;
-        return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} ASKED, NOT SET: ${w.id}: ${h.who} asked at ${h.at.slice(11, 16)}Z to ${h.action} ${h.machine} ("${h.words.slice(0, 120)}"); the dispatcher sets it with hold_machine machine=${h.machine} action=${h.action} work_id=${w.id} (w5895).`;
+        // A lift of a hold set in config is a set_app_config placement.hold change, not hold_machine (w5969, B4).
+        const how = h.action === 'lift' && this.personHeld(h.machine).config
+          ? `${h.who}'s orchestrator sets it in ${h.who}'s own turn with set_app_config placement.hold without ${h.machine} (the dispatcher's guard opens only hold_machine)${this.personHeld(h.machine).drain ? `, and the dispatcher lifts the drain with hold_machine machine=${h.machine} action=lift work_id=${w.id}` : ''}`
+          : `the dispatcher sets it with hold_machine machine=${h.machine} action=${h.action} work_id=${w.id}`;
+        return `${h.action === 'hold' ? 'HOLD' : 'LIFT'} ASKED, NOT SET: ${w.id}: ${h.who} asked at ${h.at.slice(11, 16)}Z to ${h.action} ${h.machine} ("${h.words.slice(0, 120)}"); ${how} (w5895).`;
       });
   }
 

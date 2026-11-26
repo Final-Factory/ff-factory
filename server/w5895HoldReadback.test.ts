@@ -270,3 +270,48 @@ test('w5895: a hold set through config placement.hold, then removed, spends the 
   assert.ok(!off.isError, off.text);
   await noReHold(env);
 });
+
+// w5969's review of #1307 at d4df9ff1: removing a machine from config placement.hold spent a lift ask while a drain still
+// held it (probe B3), and a lift of a config-only hold never showed NOT SET (B4). An ask is now spent only once in force.
+test('w5895: a lift ask is not spent by a config placement.hold removal while the drain still holds; the dispatcher\'s lift then goes through (B3)', async (t) => {
+  const env = await heldScene(t);
+  const disp = env.dispatcher();
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn' })).isError);
+  assert.ok(!(await env.call(disp.info, 'set_app_config', { key: 'placement.hold', value: { pc: { why: 'lothsahn: hold it' } }, user_asked: true })).isError);
+  asTurn(env.chat(LOTH), 'system');
+  const ask = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop' });
+  assert.ok(!ask.isError, ask.text);
+  assert.ok(!(await env.call(disp.info, 'set_app_config', { key: 'placement.hold', value: null, user_asked: true })).isError);
+  assert.ok(env.store.machines.get('pc')!.drain, 'still drained');
+  assert.equal(env.store.work.get('w5814')!.holdAsk?.set, undefined, 'the lift is not in force, so its ask is not spent');
+  asTurn(disp, 'system');
+  const st = await env.call(disp.info, 'system_status', {});
+  assert.match(st.text, /LIFT ASKED, NOT SET: w5814: .*hold_machine machine=pc action=lift work_id=w5814/);
+  const lift = await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
+  assert.ok(!lift.isError, lift.text);
+  assert.equal(env.store.machines.get('pc')!.drain, undefined);
+  assert.ok(env.store.work.get('w5814')!.holdAsk?.set);
+  assert.doesNotMatch((await env.call(disp.info, 'system_status', {})).text, /ASKED, NOT SET/);
+});
+
+test('w5895: a lift ask of a config-only hold shows NOT SET with who lifts it, and the config removal spends it (B4)', async (t) => {
+  const env = await heldScene(t);
+  const disp = env.dispatcher();
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'set_app_config', { key: 'placement.hold', value: { pc: { why: 'lothsahn: hold it' } }, user_asked: true })).isError);
+  asTurn(env.chat(LOTH), 'system');
+  const ask = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop' });
+  assert.ok(!ask.isError, ask.text);
+  asTurn(disp, 'system');
+  // A hold_machine lift has no drain to lift: it spends nothing while the config hold stays.
+  await env.call(disp.info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
+  assert.equal(env.store.work.get('w5814')!.holdAsk?.set, undefined);
+  const st = await env.call(disp.info, 'system_status', {});
+  assert.match(st.text, /LIFT ASKED, NOT SET: w5814: .*set_app_config placement\.hold without pc/);
+  asTurn(disp, 'human');
+  assert.ok(!(await env.call(disp.info, 'set_app_config', { key: 'placement.hold', value: null, user_asked: true })).isError);
+  assert.equal(env.store.work.get('w5814')!.holdAsk?.set?.by, 'config placement.hold');
+  asTurn(disp, 'system');
+  assert.doesNotMatch((await env.call(disp.info, 'system_status', {})).text, /ASKED, NOT SET/);
+});
