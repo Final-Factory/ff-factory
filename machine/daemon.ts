@@ -26,7 +26,7 @@ import { createRequire } from 'node:module';
 import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type LaunchSpec, type ToolHandler } from '../server/launch.ts';
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
-import { LoopWatch, linkBeat } from '../server/loopWatch.ts';
+import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
@@ -1719,18 +1719,18 @@ export class Daemon {
         message: (m) => this.onTray(m),
       });
       void this.tray.start();
-      this.timers.push(setInterval(() => this.trayState(), 30_000));
+      this.timers.push(setInterval(loopLabel('timer trayState', () => this.trayState()), 30_000));
     } else this.pause.setTray(process.platform === 'win32' ? 'off (daemon.json tray)' : 'none (Windows only)');
     // The machine's gh login and its token's scopes (w1463): read now, every 30 minutes, and when gh's hosts file changes.
     if (this.probes.gh) {
       this.ghLogin = new GhLoginWatch({ run: this.probes.gh, look: () => lookHostsFile(), now: () => new Date(), send: (gh) => this.send({ type: 'gh_login', gh }), log: (line) => log(line) });
-      this.timers.push(setInterval(() => void this.ghLogin!.tick(), GH_LOOK_EVERY_MS));
+      this.timers.push(setInterval(loopLabel('timer ghLogin.tick', () => void this.ghLogin!.tick()), GH_LOOK_EVERY_MS));
       void this.ghLogin.tick();
     }
     // The machine's Steam client (w2459): read now and every 5 minutes, for pair runs that need Steam.
     if (this.probes.steam) {
       this.steamClient = new SteamClientWatch({ ...this.probes.steam(), send: (steam, desktop) => this.send({ type: 'steam_client', steam, ...(desktop ? { desktop } : {}) }), log: (line) => log(line) });
-      this.timers.push(setInterval(() => void this.steamClient!.tick(), STEAM_READ_EVERY_MS));
+      this.timers.push(setInterval(loopLabel('timer steamClient.tick', () => void this.steamClient!.tick()), STEAM_READ_EVERY_MS));
       void this.steamClient.tick();
     }
     // The GPU Whisper (w615): installs in the background if needed, then loads and stays loaded while VRAM allows.
@@ -1740,11 +1740,11 @@ export class Daemon {
     }
     // The sandboxes' editors (state, hang/crash watch), their git status, the disk guard and the idle-editor stop.
     // A first look at once: until it, the portal shows every sandbox's git as "not read yet" (and its editor stopped).
-    this.timers.push(setInterval(() => void this.pool.tick(), 30_000));
+    this.timers.push(setInterval(loopLabel('timer pool.tick', () => void this.pool.tick()), 30_000));
     void this.pool.tick();
     // w4672: a hello that offered no update over the link (root.json unreadable then: its Dev Drive not yet attached) is
     // offered again once the install record is back, without waiting for the next reconnect.
-    this.timers.push(setInterval(() => this.offerSelfUpdate(), REOFFER_MS.value));
+    this.timers.push(setInterval(loopLabel('timer offerSelfUpdate', () => this.offerSelfUpdate()), REOFFER_MS.value));
     // w5377: the worker fence, set up in the background (Windows labels folders); w5555: sandbox workers wait until it is
     // decided, and are held if it failed, never started unfenced.
     void this.fenceSetup();
@@ -1776,24 +1776,24 @@ export class Daemon {
     } catch (e) {
       log(`github apps: could not write the gh shim: ${(e as Error).message}`);
     }
-    this.timers.push(setInterval(() => void this.slotTick(), 5_000));
+    this.timers.push(setInterval(loopLabel('timer slotTick', () => void this.slotTick()), 5_000));
     // w1829: another worker's timed run holds the bench lock: the other editors and players close, and come back after.
-    this.timers.push(setInterval(() => void this.benchTurn.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.benchRunners.tick(), 5_000));
-    this.timers.push(setInterval(() => void this.loadGate.tick().then(() => this.sendRunnerHold()), 5_000));
-    this.timers.push(setInterval(() => void this.runnerUnits.tick(), 60_000));
-    if (this.ciFirst.enabled) this.timers.push(setInterval(() => void this.ciFirst.tick(), 60_000));
+    this.timers.push(setInterval(loopLabel('timer benchTurn.tick', () => void this.benchTurn.tick()), 5_000));
+    this.timers.push(setInterval(loopLabel('timer benchRunners.tick', () => void this.benchRunners.tick()), 5_000));
+    this.timers.push(setInterval(loopLabel('timer loadGate.tick', () => void this.loadGate.tick().then(() => this.sendRunnerHold())), 5_000));
+    this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
+    if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
-    this.timers.push(setInterval(() => this.benchPriorities(), 5_000));
+    this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
     // Orphaned and hung batch builds (w791): looked at once a minute, and when a worker asks (unity clear_batch).
-    this.timers.push(setInterval(() => void this.reaper.tick(), 15_000));
-    if (this.procsBroker) this.timers.push(setInterval(() => void this.procsBroker?.tick(), PROCS_POLL_MS));
+    this.timers.push(setInterval(loopLabel('timer reaper.tick', () => void this.reaper.tick()), 15_000));
+    if (this.procsBroker) this.timers.push(setInterval(loopLabel('timer procsBroker.tick', () => void this.procsBroker?.tick()), PROCS_POLL_MS));
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
-    if (this.cfg.leftovers !== false) this.timers.push(setInterval(() => void this.leftovers.tick().then(() => this.feedPersonPlay()), 15_000));
+    if (this.cfg.leftovers !== false) this.timers.push(setInterval(loopLabel('timer leftovers.tick', () => void this.leftovers.tick().then(() => this.feedPersonPlay())), 15_000));
     // The ledger facts for a clean-up worker's deletes (w1379): written every 30 s, so a stale file means a daemon that is not running.
-    this.timers.push(setInterval(() => this.writeCleanupFacts(), 30_000));
+    this.timers.push(setInterval(loopLabel('timer writeCleanupFacts', () => this.writeCleanupFacts()), 30_000));
     this.writeCleanupFacts();
     // Agent hosts nobody follows (w799): an orphan is stopped, a gone host's folder removed after a while.
     if (this.hosted) {
@@ -1811,10 +1811,10 @@ export class Daemon {
         now: () => Date.now(),
       });
       this.timers.push(
-        setInterval(() => {
+        setInterval(loopLabel('timer hostWatch.tick', () => {
           for (const [id, s] of this.hostSessions) if (!s.followed && this.entries.get(id)?.s !== s) this.hostSessions.delete(id);
           void this.hostWatch!.tick().catch((e) => log(`agent hosts: the watch failed: ${(e as Error).message}`));
-        }, HOST_WATCH.LOOK_EVERY_MS),
+        }), HOST_WATCH.LOOK_EVERY_MS),
       );
     }
     // Each agent's Unity MCP server finds only its own place's editor (machine/unityMcp.ts).
@@ -1842,34 +1842,34 @@ export class Daemon {
       }
       addMcpStatusDir(editors);
     }
-    this.timers.push(setInterval(() => void this.refreshMcpScopes(), 5_000));
-    this.timers.push(setInterval(() => this.syncHostEditors(), 5_000));
+    this.timers.push(setInterval(loopLabel('timer refreshMcpScopes', () => void this.refreshMcpScopes()), 5_000));
+    this.timers.push(setInterval(loopLabel('timer syncHostEditors', () => this.syncHostEditors()), 5_000));
     // Watch the portal's host from outside, with the config the portal last sent (it works while the portal is down).
     const watch = readOutsideWatch(outsideWatchFile(appDirOfConfig(this.cfg)));
     if (watch) this.outsideWatch = new OutsideWatch(watch);
-    this.timers.push(setInterval(() => void this.outsideWatch?.tick(), 60_000));
-    this.timers.push(setInterval(() => this.heartbeat(), LINK_BEAT_MS));
+    this.timers.push(setInterval(loopLabel('timer outsideWatch.tick', () => void this.outsideWatch?.tick()), 60_000));
+    this.timers.push(setInterval(loopLabel('timer heartbeat', () => this.heartbeat()), LINK_BEAT_MS));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
-    this.timers.push(setInterval(() => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`)), 10_000));
-    this.timers.push(setInterval(() => void this.reportStats(), STATS_MS));
-    this.timers.push(setInterval(() => void this.reportBenchHours(), BENCH_HOURS_MS));
+    this.timers.push(setInterval(loopLabel('timer selfUpdate.tick', () => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`))), 10_000));
+    this.timers.push(setInterval(loopLabel('timer reportStats', () => void this.reportStats()), STATS_MS));
+    this.timers.push(setInterval(loopLabel('timer reportBenchHours', () => void this.reportBenchHours()), BENCH_HOURS_MS));
     this.timers.push(
-      setInterval(() => {
+      setInterval(loopLabel('timer testHistory.tick', () => {
         if (this.ws?.readyState !== WebSocket.OPEN) return;
         try {
           this.testHistory.tick();
         } catch (e) {
           log(`test history: ${(e as Error).message}`);
         }
-      }, TEST_HISTORY_MS),
+      }), TEST_HISTORY_MS),
     );
     // A stopped worker's temp folder (w913): swept a few minutes after its process ended, its clones after six hours.
-    this.timers.push(setInterval(() => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`)), 30_000));
+    this.timers.push(setInterval(loopLabel('timer sweeper.tick', () => void this.sweeper.tick().catch((e) => log(`session sweep failed: ${(e as Error).message}`))), 30_000));
     // Clean-up: every minute it looks whether a pass is due (every everyMinutes, sooner below softFreeGB).
     // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
     // A timed run defers the clean-up (its legs measure the disk), but not below disk_warn_gb + 5 GB (w3700: CleanupRunnerDeps.hold).
-    this.timers.push(setInterval(() => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`)), 60_000));
+    this.timers.push(setInterval(loopLabel('timer cleaner.tick', () => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`))), 60_000));
     // Its own logs (w2038): every run's kept, the old ones gzipped, the folder capped (machine/logRetention.ts).
     const logsDir = path.join(appDirOfConfig(this.cfg), 'logs');
     const keepLogs = () => {
@@ -1877,11 +1877,11 @@ export class Daemon {
       if (line) log(line);
     };
     keepLogs();
-    this.timers.push(setInterval(keepLogs, LOG_MAINTAIN_EVERY_MS));
+    this.timers.push(setInterval(loopLabel('timer keepLogs', keepLogs), LOG_MAINTAIN_EVERY_MS));
     // Git Bash's /tmp (Windows, w603): kept out of clean-up and made again if anything else removes it.
     if (process.platform === 'win32') {
       void this.ensureBashTmp();
-      this.timers.push(setInterval(() => void this.ensureBashTmp(), 5 * 60_000));
+      this.timers.push(setInterval(loopLabel('timer ensureBashTmp', () => void this.ensureBashTmp()), 5 * 60_000));
     }
     // What agents here did as Max (the ffdiscord CLI's lines of the agents that are not fenced): forwarded, and queued while
     // the link is down. w5552: only this one file, in the daemon's folder; the root's `max` folder and the daemon folder's
@@ -1907,7 +1907,7 @@ export class Daemon {
       if (file === maxFile) this.maxTail = tail;
       let saved = offset;
       this.timers.push(
-        setInterval(() => {
+        setInterval(loopLabel('timer maxTail.poll', () => {
           tail.poll();
           if (tail.position !== saved) {
             saved = tail.position;
@@ -1917,7 +1917,7 @@ export class Daemon {
               /* read again after a restart: the portal drops duplicates */
             }
           }
-        }, 3000),
+        }), 3000),
       );
     }
   }
@@ -2070,7 +2070,8 @@ export class Daemon {
     ws.on('message', (d) => {
       this.lastPong = Date.now();
       try {
-        this.onMessage(JSON.parse(String(d)) as ToDaemon);
+        const m = JSON.parse(String(d)) as ToDaemon;
+        loopRun(`link ${m.type}`, () => this.onMessage(m));
       } catch (e) {
         log('bad message:', (e as Error).message);
       }
@@ -3631,7 +3632,7 @@ export class Daemon {
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
       // w5938: off the event loop (compilerServersAsync), and one look at a time.
       let looking = false;
-      this.timers.push(setInterval(async () => {
+      this.timers.push(setInterval(loopLabel('timer strayLowServers', async () => {
         if (looking) return;
         looking = true;
         try {
@@ -3648,7 +3649,7 @@ export class Daemon {
         } finally {
           looking = false;
         }
-      }, 15_000));
+      }), 15_000));
     } catch (e) {
       this.lowFail((e as Error).message);
     }
@@ -3753,11 +3754,11 @@ export class Daemon {
    */
   private watchLoginLabels(exec: Exec, say: (line: string) => void): void {
     if (this.loginRelabel || !this.loginFiles.closed.length) return;
-    this.loginRelabel = setInterval(() => {
+    this.loginRelabel = setInterval(loopLabel('timer loginRelabel', () => {
       if (!this.cfg.root || readFenceMode(appDirOfConfig(this.cfg)) !== 'on') return;
       const t = this.loginFiles.closed.filter((f) => fs.existsSync(f)).map((f) => ({ path: f, sddl: NO_READ_UP.file }));
       if (t.length) void labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }).catch((e) => say(`worker integrity: login read labels: ${(e as Error).message}`));
-    }, 60_000);
+    }), 60_000);
     this.loginRelabel.unref();
   }
 
