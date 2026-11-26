@@ -158,6 +158,7 @@ import { displayName } from '../shared/labels.ts';
 import type { StandingAgentInput, StandingTrigger } from '../shared/types.ts';
 import { collectResume, orchestratorWasBusy, readUpdateResult, restartSummary, resumeMessage, systemdSupervised, versionLine, waitingOnWakeLine, writeUpdateWanted, type AppNow, type RestartRequest, type ResumeFile, type ResumeOutcome } from './restart.ts';
 import { appVersion, formatVersion } from './version.ts';
+import { ffuSlotLines, type FfuHolder } from './ffuSlotsView.ts';
 import { PREFER_TOOLS } from './bashNudge.ts';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
@@ -6880,6 +6881,12 @@ A report is for a person who asked for one, and people want very few. File one w
     return this.machines.list().filter((m) => poolSettingsOf(m) && canPushWorkflows(m.gh) === true).map((m) => m.id);
   }
 
+  /** An ffu slot's holder as list_sandboxes names it (w5912): its title and the requests it is on. */
+  private readonly ffuHolder = (id: string): FfuHolder | undefined => {
+    const s = this.store.sessions.get(id);
+    return s ? { title: s.title, requests: this.workIdsOf(s) } : undefined;
+  };
+
   /** A place's sessions, for sorting places by their agents' state (w509). */
   private sessionsOf(ids: readonly string[]): SessionInfo[] {
     return ids.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s);
@@ -6906,6 +6913,9 @@ A report is for a person who asked for one, and people want very few. File one w
       // w5924: light agent folders, apart from the game sandboxes: one per agent-only worker, made when it starts.
       const offers = this.machines.offersLight(m.id);
       if (lights.length || offers) parts.push(`Light agent folders (w5924; agent-only work, no editor, counted against the agent cap only): ${lightUseText(lights.map((x) => this.lightBusy(x)), offers)}`, ...lights.map((x) => this.describeLightFolder(m, x)));
+      // Its ffu build slots (w5912), a set of their own beside the game sandboxes: who holds each, and which holds are stale.
+      const ffu = ffuSlotLines(m.id, this.machines.statsOf(m.id)?.ffuSlots, this.ffuHolder);
+      if (ffu.length) parts.push('', ...ffu);
     }
     const cap = [...capacityLines(this.places(), this.lastPlaced, this.placement()), ...[this.timedRuns?.capacityLine()].filter((l): l is string => !!l)];
     this.logTimedLine(cap);
@@ -7920,6 +7930,14 @@ ${w.repo ?? ''}
     return !!pid && !!(await commandLine(pid))?.includes(marker);
   }
 
+  /** list_machines' ffu slots of a machine (w5912), indented under it; none when its daemon reported none. */
+  private ffuMachineLines(m: Machine, detail: boolean): string[] {
+    const r = this.machines.statsOf(m.id)?.ffuSlots;
+    if (!r) return [];
+    const slots = detail ? r.slots : r.slots.map(({ why: _why, ...rest }) => rest);
+    return ffuSlotLines(m.id, { ...r, slots }, this.ffuHolder).map((l) => `  ${l}`);
+  }
+
   private describeMachine(m: Machine, detail = false) {
     const g = m.git;
     const pool = poolSettingsOf(m);
@@ -7939,6 +7957,8 @@ ${w.repo ?? ''}
       // The portal hosts its daemon follows (w5576): online machines only.
       ...(this.machines.isOnline(m.id) ? [`  ${describePortalPin(this.machines.portalPinOf(m.id))}`] : []),
       sandboxes,
+      // Its ffu build slots (w5912): who holds each; the why of each with detail (list_sandboxes always says it).
+      ...this.ffuMachineLines(m, detail),
       // A person playing Final Factory there (w1894): why it is busy and until when.
       ...(this.machines.personPlayOf(m.id) ? [`  playing: ${playLine(this.machines.personPlayOf(m.id)!)}`] : []),
       // Reserved for higher work (w1643, config placement.minPriority): who may be placed here.

@@ -127,6 +127,7 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
+import { pageAllStats } from './ffuSlotsView.ts';
 import { pageNamedSessions, pageSession, pageSessions, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
 import { drainOf, drainHold } from './machineDrain.ts';
@@ -1232,7 +1233,7 @@ function appState(user: string | undefined, have?: string | null): AppState {
     host: hostForUser({ ...host, drain: drainer.status }, me.userId),
     usage: usage.usage,
     accounts: accountsNow(),
-    machineStats: machines.allStats(),
+    machineStats: pageAllStats(machines.allStats()),
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
