@@ -116,7 +116,12 @@ export function guardOldShimBin(bin: string, o: { target: string; quarantine: st
   const evict = (): boolean => {
     const st = lstat(bin);
     if (!st) return false;
+    // w6080 F: a worker's chmod of <root>/tools-medium or of the quarantine (Landlock refuses none) stopped every
+    // rename into it, and of the mailbox (bin's parent, which a rename out of needs write on) the same: each put back.
+    ownFolderBits(path.dirname(bin), 0o700);
+    ownFolderMode(path.dirname(o.quarantine), 0o755);
     fs.mkdirSync(o.quarantine, { recursive: true, mode: 0o700 });
+    ownFolderMode(o.quarantine, 0o700);
     const away = path.join(o.quarantine, `bin-${process.pid}-${now()}-${n++}`);
     for (let i = 0; ; i++) {
       // w6074 D: moving a folder to another parent needs write on the folder itself (its `..`), so a worker's chmod 555
@@ -211,24 +216,53 @@ export function guardOldShimBin(bin: string, o: { target: string; quarantine: st
   return stop;
 }
 
-/** Set a folder's mode through a handle that never follows a link (no chmod through a path a worker can swap). */
-export function ownFolderMode(p: string, mode: number): boolean {
+/**
+ * A handle on a real folder at `p`, never through a link. A folder whose owner may not read it (a worker's chmod 000;
+ * w6080 P13r) cannot be opened even by its owner: then, if it is a real folder, owner rwx is given back by path and it is
+ * opened again, and refused if what opened is not what was looked at (a swap in between).
+ */
+function openOwnFolder(p: string): number | undefined {
   const c = fs.constants;
-  let fd: number;
+  const flags = c.O_RDONLY | (c.O_DIRECTORY ?? 0) | (c.O_NOFOLLOW ?? 0);
   try {
-    fd = fs.openSync(p, c.O_RDONLY | (c.O_DIRECTORY ?? 0) | (c.O_NOFOLLOW ?? 0));
-  } catch {
-    return false;
+    return fs.openSync(p, flags);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EACCES') return undefined;
   }
+  const st = lstat(p);
+  if (!st?.isDirectory()) return undefined;
+  try {
+    fs.chmodSync(p, (st.mode & 0o7777) | 0o700);
+    const fd = fs.openSync(p, flags);
+    const now = fs.fstatSync(fd);
+    if (now.ino === st.ino && now.dev === st.dev) return fd;
+    fs.closeSync(fd);
+  } catch {
+    // Left as it is; the next look tries again.
+  }
+  return undefined;
+}
+
+/** Set a real folder's mode (`set` gives the whole mode, else `bits` are added to it), never through a link. */
+function ownFolder(p: string, mode: number, set: boolean): boolean {
+  const fd = openOwnFolder(p);
+  if (fd === undefined) return false;
   try {
     const st = fs.fstatSync(fd);
     if (!st.isDirectory()) return false;
-    if ((st.mode & 0o7777) !== mode) fs.fchmodSync(fd, mode);
+    const want = set ? mode : (st.mode & 0o7777) | mode;
+    if ((st.mode & 0o7777) !== want) fs.fchmodSync(fd, want);
     return true;
   } finally {
     fs.closeSync(fd);
   }
 }
+
+/** Set a folder's mode through a handle that never follows a link (no chmod through a path a worker can swap). */
+export const ownFolderMode = (p: string, mode: number) => ownFolder(p, mode, true);
+
+/** Give a folder at least `bits` (its other bits kept), the same way. */
+export const ownFolderBits = (p: string, bits: number) => ownFolder(p, bits, false);
 
 /** Remove a tree only the daemon can write (the quarantine): every real folder in it made 0700 first, links never followed. */
 function removeTree(p: string) {
@@ -248,6 +282,9 @@ function removeTree(p: string) {
  * each file in it readable and writable by its owner again. No worker can make a link there, so a plain chmod is safe.
  */
 export function readyShimDir(dir: string): void {
+  // w6080 G: and its parent, <root>/tools-medium: a chmod 000 there (or 555 before the shims folder exists, a first
+  // deploy) made writeShims fail too.
+  ownFolderMode(path.dirname(dir), 0o755);
   if (!lstat(dir)) return;
   ownFolderMode(dir, 0o755);
   for (const n of fs.readdirSync(dir)) {
@@ -264,7 +301,13 @@ export function readyShimDir(dir: string): void {
 export function guardShimModes(dir: string, o: { log: (l: string) => void; everyMs?: number; now?: () => number }): () => void {
   const now = o.now ?? Date.now;
   const want = new Map<string, number>();
-  for (const n of fs.readdirSync(dir)) {
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    // Not there (the daemon could not write it, w6080): the folders' modes are still guarded.
+  }
+  for (const n of names) {
     const st = lstat(path.join(dir, n));
     if (st?.isFile()) want.set(n, st.mode & 0o7777);
   }
@@ -272,8 +315,11 @@ export function guardShimModes(dir: string, o: { log: (l: string) => void; every
   const mend = () => {
     const fixed: string[] = [];
     try {
-      const d = lstat(dir);
-      if (d?.isDirectory() && (d.mode & 0o7777) !== 0o755 && ownFolderMode(dir, 0o755)) fixed.push(dir);
+      // w6080 G: <root>/tools-medium as well: a chmod 000 there takes the shims from every agent.
+      for (const f of [path.dirname(dir), dir]) {
+        const d = lstat(f);
+        if (d?.isDirectory() && (d.mode & 0o7777) !== 0o755 && ownFolderMode(f, 0o755)) fixed.push(f);
+      }
       for (const [n, m] of want) {
         const p = path.join(dir, n);
         const st = lstat(p);
@@ -289,19 +335,32 @@ export function guardShimModes(dir: string, o: { log: (l: string) => void; every
     for (const f of fresh) said.set(f, t);
     if (fresh.length) o.log(`path fence: put back the mode the daemon gave in the shims folder: ${fresh.join(', ')}`);
   };
-  let w: fs.FSWatcher | undefined;
-  try {
-    w = fs.watch(dir, { persistent: false }, () => mend());
-    w.on('error', () => undefined);
-  } catch {
-    w = undefined;
+  const ws: fs.FSWatcher[] = [];
+  for (const f of [dir, path.dirname(dir)]) {
+    try {
+      const w = fs.watch(f, { persistent: false }, () => mend());
+      w.on('error', () => undefined);
+      ws.push(w);
+    } catch {
+      // The timer still mends.
+    }
   }
   const timer = setInterval(mend, o.everyMs ?? 60_000);
   timer.unref?.();
   return () => {
     clearInterval(timer);
-    w?.close();
+    for (const w of ws) w.close();
   };
+}
+
+/**
+ * w6080 (off and warn): the shims go in the mailbox's `bin`; where `bin` is still the link guardOldShimBin made (to
+ * <root>/tools-medium/shims, perhaps gone), take the link away first so they are written into a real folder there.
+ */
+export function unlinkShimBinLink(bin: string): boolean {
+  if (!lstat(bin)?.isSymbolicLink()) return false;
+  fs.unlinkSync(bin);
+  return true;
 }
 
 const lstat = (p: string) => {

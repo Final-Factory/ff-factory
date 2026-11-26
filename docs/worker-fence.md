@@ -656,6 +656,14 @@ Two more holes, from w5872's review:
     folder 0755 and each file in it owner read and write again (`readyShimDir`). While it runs, `guardShimModes` puts
     back the modes it wrote, on every change it sees there and every minute, logged as `path fence: put back the mode
     ...`. A worker still wins the moment before that.
+  - **One folder up** (w6080's review, measured on biscuit). `chmod 500` of `tools-medium/quarantine` stopped every
+    rename into it, so a worker's folder stayed at `bin` (P12). `chmod 000` of `tools-medium`, or 555 before the shims
+    folder exists (a first deploy), made `writeShims` fail at start (P13r, P15), and the fallback to warn then wrote the
+    shims into the mailbox's `bin`, which workers write, so their own `ff-pr` ran. Now each eviction gives the mailbox
+    owner rwx, `tools-medium` 0755 and the quarantine 0700 first; `readyShimDir` and `guardShimModes` cover
+    `tools-medium` as well as the shims folder; and in `on` there is no fallback into the mailbox at all (below). A
+    folder whose owner may not read it cannot be opened, even by its owner: then a real folder gets owner rwx back by
+    path, and the handle opened after is refused if it is not the folder looked at.
   - Other locked folders (`secrets`, the daemon's) can be made unreadable the same way: a denial of service, not a way
     to run code, and not covered here.
 - **Grants add up.** A `writeLockExtra` (or `extraRoots`) folder that holds a locked one, or sits in one (the root,
@@ -666,7 +674,7 @@ The switch is the daemon setting `pathFence`: `on` (unset is `on`), `warn` (w586
 mailbox, and each change there the daemon did not make is logged, `path fence (warn): ...`, once per name per hour) or
 `off` (in the mailbox, unwatched). Set it from anywhere with `ops_worker machine_update path_fence off`, so recovery
 needs nobody at the machine: the daemon then writes the shims to the mailbox again, and new agents get that on their
-PATH. If the daemon cannot write `tools-medium/shims`, it falls back to the mailbox, watched as in warn.
+PATH. If the daemon cannot write `tools-medium/shims`, it stays in `on`: agents run whatever shims are there, the guards run, the write is tried again each minute, and the log line names `path_fence off` as the recovery. It never falls back to the mailbox's `bin`, which fenced workers write (w6080). In off and warn, a link the guard left at `bin` is taken away before the shims are written there, so they go into a real folder.
 
 Proof (`server/pathFence.test.ts`, live on Linux with Landlock): under the lock a sandbox worker runs with, in
 `<root>/tools-medium/shims` the shim runs from PATH while an overwrite, append, truncate, new file, remove, rename in or

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, watchShimBin } from '../machine/pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin } from '../machine/pathFence.ts';
 import { writeShims } from '../machine/unitySlots.ts';
 import { hostsWithPathDir } from '../machine/agentHost.ts';
 import { FF_LANDLOCK, LOCKED_CHILDREN, readLockArgs, writeLockArgs } from '../machine/writeLock.ts';
@@ -452,6 +452,94 @@ const lstatOrUndefined = (p: string) => {
     return undefined;
   }
 };
+
+// w6080 (the third review): chmod one folder up, of <root>/tools-medium, the quarantine or the mailbox.
+const toolsMedium = (g: { target: string }) => path.dirname(g.target);
+const plantAtBin = (g: { bin: string }) => {
+  fs.writeFileSync(path.join(g.bin, 'ff-pr'), '#!/bin/sh\necho EVIL\n', { mode: 0o755 });
+  fs.chmodSync(g.bin, 0o555);
+};
+const unmode = (...ps: string[]) => {
+  for (const p of ps) if (lstatOrUndefined(p)?.isDirectory()) fs.chmodSync(p, 0o755);
+};
+
+test('w6080 probe P12 (F): a worker\'s chmod 500 of the quarantine does not stop its folder at the old bin being taken out', notWinNorRoot, () => {
+  const g = guardRoot();
+  const q = shimQuarantineDir(g.root);
+  fs.mkdirSync(q, { recursive: true });
+  fs.chmodSync(q, 0o500);
+  plantAtBin(g);
+  const stop = guardOldShimBin(g.bin, g.opts(() => ['s1'], 60_000));
+  try {
+    assert.ok(g.only(), 'agents started before the move run the daemon\'s ff-pr, not EVIL');
+  } finally {
+    stop();
+    unmode(q, g.bin);
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6080 (F): nor a chmod 555 of <root>/tools-medium, nor of the mailbox the old bin sits in', notWinNorRoot, () => {
+  for (const which of ['tools-medium', 'mailbox'] as const) {
+    const g = guardRoot();
+    const folder = which === 'mailbox' ? path.dirname(g.bin) : toolsMedium(g);
+    plantAtBin(g);
+    fs.chmodSync(folder, 0o555);
+    const stop = guardOldShimBin(g.bin, g.opts(() => ['s1'], 60_000));
+    try {
+      assert.ok(g.only(), `${which}: the daemon's ff-pr, not EVIL`);
+    } finally {
+      stop();
+      unmode(folder, g.bin);
+      fs.rmSync(g.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('w6080 probes P13r and P15 (G): a worker\'s chmod of <root>/tools-medium does not stop the daemon writing its shims at start', notWinNorRoot, () => {
+  for (const [mode, shimsThere] of [[0o000, true], [0o555, false]] as const) {
+    const g = guardRoot();
+    if (!shimsThere) fs.rmSync(g.target, { recursive: true });
+    fs.chmodSync(toolsMedium(g), mode);
+    try {
+      readyShimDir(g.target);
+      writeShims(g.target);
+      assert.equal(fs.statSync(path.join(g.target, 'unity-slot')).mode & 0o777, 0o755, `tools-medium ${mode.toString(8)}: writeShims wrote unity-slot`);
+    } finally {
+      unmode(toolsMedium(g));
+      fs.rmSync(g.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('w6080 probe P13 (G): while the daemon runs, a worker\'s chmod 000 of <root>/tools-medium is put back', notWinNorRoot, async () => {
+  const g = guardRoot();
+  const stop = guardShimModes(g.target, { log: (l) => g.lines.push(l), everyMs: 100 });
+  try {
+    fs.chmodSync(toolsMedium(g), 0o000);
+    assert.ok(await waitFor(() => (fs.statSync(toolsMedium(g)).mode & 0o777) === 0o755), 'tools-medium is 0755 again');
+    assert.ok(fs.existsSync(path.join(g.target, 'ff-pr')), 'and every agent finds ff-pr');
+  } finally {
+    stop();
+    unmode(toolsMedium(g));
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
+
+test('w6080: in off and warn, the link an earlier on start left at the old bin goes before the shims are written there', notWin, () => {
+  const g = guardRoot();
+  try {
+    fs.rmSync(g.bin, { recursive: true });
+    fs.rmSync(g.target, { recursive: true });
+    fs.symlinkSync(g.target, g.bin);
+    assert.equal(unlinkShimBinLink(g.bin), true);
+    writeShims(g.bin);
+    assert.ok(fs.lstatSync(g.bin).isDirectory() && fs.existsSync(path.join(g.bin, 'unity-slot')), 'a real folder with the shims');
+    assert.equal(unlinkShimBinLink(g.bin), false, 'a real folder is left alone');
+  } finally {
+    fs.rmSync(g.root, { recursive: true, force: true });
+  }
+});
 
 test('live w5899 enforce: an extra writable folder over the root does not open <root>/tools-medium/shims', { skip: !landlock && 'needs Linux with Landlock' }, () => {
   const root = fakeRoot();

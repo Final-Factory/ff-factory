@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, watchShimBin } from './pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -52,7 +52,7 @@ import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
-import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, installShims, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -1865,18 +1865,30 @@ export class Daemon {
       // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
       // w6074 E: a worker's chmod there (Landlock does not refuse one) must not make the daemon fall back to warn.
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) readyShimDir(enforcedShimDir(this.cfg.root));
+      // w6080: off and warn write into the mailbox's bin; the link an earlier on start left there goes first.
+      else if (process.platform !== 'win32') unlinkShimBinLink(oldBin);
       this.slotBin = shims(writeShims(process.platform === 'win32' && this.cfg.root ? toolsShimsDir(this.cfg.root) : shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
-      // w5899: a shims folder the daemon cannot write leaves agents without unity-slot; the mailbox's is the fallback.
-      if (pf === 'on') {
-        pf = 'warn';
-        try {
-          this.slotBin = shims(installShims(this.slotMailbox));
-          log(`path fence: could not write ${this.cfg.root ? enforcedShimDir(this.cfg.root) : 'the shims folder'}; the shims stay in ${oldBin}, watched as in warn`);
-        } catch (e2) {
-          log(`unity slots: could not write the unity-slot commands in ${oldBin} either: ${(e2 as Error).message}`);
-        }
+      if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) {
+        // w6080 G: never a fallback into the mailbox's bin, which fenced workers write (a worker that made this write
+        // fail had its own ff-pr run by every agent). Agents keep whatever shims are in the enforced folder, the guards
+        // run, and the write is tried again each minute; path_fence off (ops_worker machine_update) is the recovery.
+        const dir = enforcedShimDir(this.cfg.root);
+        this.slotBin = dir;
+        log(`path fence: could not write the shims in ${dir} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); agents run what is there until a write succeeds, tried again each minute. Not put in ${oldBin}, which fenced workers can write. Recovery: path_fence off`);
+        const retry = setInterval(() => {
+          try {
+            readyShimDir(dir);
+            shims(writeShims(dir));
+            clearInterval(retry);
+            log(`path fence: wrote the shims in ${dir}`);
+          } catch {
+            // Logged once above; the next minute tries again.
+          }
+        }, 60_000);
+        retry.unref?.();
+        this.timers.push(retry);
       }
     }
     if (process.platform === 'win32') {
