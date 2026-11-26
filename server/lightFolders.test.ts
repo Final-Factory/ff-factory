@@ -314,6 +314,10 @@ test('w5924: through a real daemon: its hello offers light folders; the portal m
   const m = store.machines.get('pc')!;
   assert.deepEqual(gameSandboxes(m.sandboxes).map((s) => s.id), ['sb1']);
   assert.deepEqual(lightFolders(m.sandboxes).map((s) => s.id), ['agent1', 'agent2']);
+  // The worker installer's --max-sandboxes check reads whoami (w5924: it counted the light folders and refused updates).
+  const me = mm.selfStatus('pc');
+  assert.deepEqual(me.sandboxes, ['sb1'], 'whoami lists game sandboxes only');
+  assert.deepEqual(me.lights, ['agent1', 'agent2']);
   await assert.rejects(mm.unity('pc', 'start', false, 'agent1'), /light agent folder \(w5924\).*no Unity editor/);
   await assert.rejects(mm.deleteLightFolder('pc', 'sb1'), /is a game sandbox, not a light folder/);
   // A clone with an unpushed commit keeps it; once gone, the folder is deleted.
