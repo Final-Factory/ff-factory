@@ -175,7 +175,10 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // only to a daemon whose hello offered steamInstall, and an older daemon ignores `account`.
 // w5703 (no bump): LaunchSpec `transcriptLabels`, set by the machine's own daemon for its own agent host; an older host
 // ignores it (the conversation is then not labelled, as with the switch off).
-const DECIDED = { protocol: 9, fingerprint: '06643f713ae88528' };
+// w5916 (no bump): `runner_hold` both ways (the portal's hold for the daemon's CI runners, the daemon's report); neither
+// onMessage switch has a default, so an older daemon ignores the hold (its runners take jobs as before) and an older portal
+// drops the report.
+const DECIDED = { protocol: 9, fingerprint: 'b1f9d41da4936629' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

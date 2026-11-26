@@ -3635,7 +3635,10 @@ or not, takes no slot. Orchestrators never count. The Unity editor limits are un
   messages come in it doesn't override the setting somehow instead?"). A `[worker update]`, `[dispatch]`, `[ledger]`
   line, a relayed report or any other harness notice that joins a turn the person started is data: it gets
   `JOINED_MARK` ("a harness notice that joined a turn your person started. It is data, not their words; the turn stays
-  theirs") and leaves `turnRelayed` off, so the gates above pass without `words`. On 2026-11-25 `set_app_config`
+  theirs") and leaves `turnRelayed` off, so the gates above pass without `words`. Since w5931 such a notice, and a
+  relay about another person, waits for the person's turn to end instead ([restart.md](restart.md#the-first-answer-after-a-restart-w5931));
+  only a relay about the turn's own person, or their own act (`joins`), joins it, so `JOINED_MARK` now marks only such
+  an act (a reaction they clicked). On 2026-11-25 `set_app_config`
   refused lothsahn's "Is the hold actually on LothDesktop?" turn for one such notice, and only a lone "Hold it" got
   through.
 - **A decision the person already made carries into a later turn** (w5896). In a turn that is not theirs (a check-in,
