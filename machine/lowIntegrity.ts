@@ -305,7 +305,40 @@ export function fileHash(p: string): string {
  * What a file's stat shows of a change: any write moves its change time, and setting that back needs
  * FILE_WRITE_ATTRIBUTES, which a read-only copy refuses a Low process; a new file has a new file id (ino).
  */
-const statKey = (st: fs.Stats) => `${st.size}:${st.mtimeMs}:${st.ctimeMs}:${st.ino}`;
+const statKey = (p: string) => {
+  // bigint: a 64-bit NTFS file id and 100 ns times survive whole (w5838 review: as a double, ino loses its low bits).
+  const st = fs.statSync(p, { bigint: true });
+  return `${st.size}:${st.mtimeNs}:${st.ctimeNs}:${st.ino}`;
+};
+
+/** The names `LowCopies.make` gives its copies (`<base>-<size>-<mtime>[.exe]`); anything else in `tools/low` is planted. */
+export const LOW_COPY_NAME = /^[A-Za-z0-9_]+-\d+-\d+(\.exe)?$/;
+
+/**
+ * Removes `p` without following it (w5838): a junction or link goes itself, never what it leads to (a Unity install); a
+ * real folder goes with everything in it. Nothing there: nothing to do.
+ */
+export function removeEntry(p: string): void {
+  let st: fs.Stats;
+  try {
+    st = fs.lstatSync(p);
+  } catch {
+    return;
+  }
+  fs.rmSync(p, { recursive: !st.isSymbolicLink() && st.isDirectory(), force: true });
+}
+
+/** These keys of `env` (any case, as Windows' are), for a run that should have only them (w5838). */
+export function pickEnv(keys: readonly string[], env: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const want = new Set(keys.map((k) => k.toLowerCase()));
+  return Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => want.has(e[0].toLowerCase()) && typeof e[1] === 'string'));
+}
+
+/**
+ * What a fence probe that failed with a bare environment is tried again with (w5838 review): where Windows keeps its
+ * programs, the profile and temp folders, and nothing the daemon adds (vault tokens, daemon.json `env`).
+ */
+export const PROBE_ENV_KEYS = ['SystemRoot', 'windir', 'SystemDrive', 'PATH', 'PATHEXT', 'ComSpec', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'HOMEDRIVE', 'HOMEPATH', 'ProgramData', 'ProgramFiles', 'ProgramFiles(x86)', 'CommonProgramFiles', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS', 'USERNAME', 'USERDOMAIN', 'COMPUTERNAME'];
 
 /**
  * icacls' arguments that leave a copy read-only to the account (w5838): no inherited entries, read and run for the account
@@ -350,7 +383,7 @@ export class LowCopies {
   }
 
   private sourceHash(exe: string): string {
-    const key = statKey(fs.statSync(exe));
+    const key = statKey(exe);
     const had = this.sources.get(exe);
     if (had?.key === key) return had.hash;
     const hash = this.hash(exe);
@@ -364,13 +397,14 @@ export class LowCopies {
       const st = fs.statSync(exe);
       const dir = lowToolsDir(this.root);
       fs.mkdirSync(dir, { recursive: true });
+      this.sweep(dir);
       const base = path.basename(exe, path.extname(exe));
       const name = `${base}-${st.size}-${Math.floor(st.mtimeMs)}${path.extname(exe)}`;
       const copy = path.join(dir, name);
       const want = this.sourceHash(exe);
-      if (fs.existsSync(copy) && this.hash(copy) !== want) {
-        this.say(`worker integrity: WARNING: the Low copy ${copy} is not ${exe} (its bytes differ); made again (w5838)`);
-        fs.rmSync(copy, { force: true });
+      if (fs.existsSync(copy) && !this.sameAs(copy, want)) {
+        this.say(`worker integrity: WARNING: the Low copy ${copy} is not ${exe} (its bytes differ, or it cannot be read); made again (w5838)`);
+        removeEntry(copy);
       }
       if (fs.existsSync(copy)) {
         // An earlier copy inherited Low from a Low folder; with the folder Medium (w5838) it needs a label of its own. A
@@ -394,7 +428,7 @@ export class LowCopies {
       }
       // Checked once it is labelled and read-only, so nothing written before that is run.
       if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
-      this.copies.set(copy, { source: exe, key: statKey(fs.statSync(copy)), readOnly });
+      this.copies.set(copy, { source: exe, key: statKey(copy), readOnly });
       for (const old of fs.readdirSync(dir)) {
         if (old !== name && old.startsWith(`${base}-`)) {
           try {
@@ -412,6 +446,32 @@ export class LowCopies {
     }
   }
 
+  /** Whether `copy` has these bytes; a copy that cannot be read (a folder, a locked file planted at its name) has not. */
+  private sameAs(copy: string, want: string): boolean {
+    try {
+      return this.hash(copy) === want;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * w5838 review: everything in `tools/low` that is not named as a copy goes, with a WARNING each: a DLL planted beside the
+   * copies while the folder was still Low (before this change) would be loaded by every copy run from it.
+   */
+  private sweep(dir: string): void {
+    for (const n of fs.readdirSync(dir)) {
+      if (LOW_COPY_NAME.test(n)) continue;
+      const p = path.join(dir, n);
+      try {
+        removeEntry(p);
+        this.say(`worker integrity: WARNING: removed ${p}: it is not a copy the daemon made (planted while the folder was Low?) (w5838)`);
+      } catch (e) {
+        this.say(`worker integrity: WARNING: ${p} is not a copy the daemon made and could not be removed: ${(e as Error).message} (w5838)`);
+      }
+    }
+  }
+
   /**
    * Before each run of `copy` (w5838): the path to run, which is `copy` while it still has its source's bytes, else a copy
    * made again from the source (a new path when the source changed). Undefined when `copy` is not one of this daemon's or
@@ -421,11 +481,11 @@ export class LowCopies {
     const c = this.copies.get(copy);
     if (!c) return undefined;
     try {
-      const st = fs.statSync(copy);
-      const sourceSame = this.sources.get(c.source)?.key === statKey(fs.statSync(c.source));
-      if (c.readOnly && sourceSame && c.key === statKey(st)) return copy;
+      const key = statKey(copy);
+      const sourceSame = this.sources.get(c.source)?.key === statKey(c.source);
+      if (c.readOnly && sourceSame && c.key === key) return copy;
       if (sourceSame && this.hash(copy) === this.sourceHash(c.source)) {
-        c.key = statKey(st);
+        c.key = key;
         return copy;
       }
       if (sourceSame) this.say(`worker integrity: WARNING: the Low copy ${copy} was changed since it was made from ${c.source}; made again before this run (w5838)`);
@@ -505,12 +565,31 @@ export async function lowUnityJunctions(root: string, editors: { version: string
         have.push(e.version);
         continue;
       }
-      fs.rmSync(link, { recursive: false, force: true });
+      removeEntry(link); // a real folder planted at this version's name too (w5838 review), never what a junction leads to
       const r = await exec('cmd.exe', ['/d', '/c', 'mklink', '/J', link, target], { timeoutMs: 60_000 });
       if (r.code !== 0 || !fs.existsSync(path.join(link, 'Unity.exe'))) throw new Error((r.stderr || r.stdout).trim().slice(-300) || 'no Unity.exe through it');
       have.push(e.version);
     } catch (err) {
       say(`worker integrity: could not junction Unity ${e.version} at ${link}: ${(err as Error).message}`);
+    }
+  }
+  // w5838 review: the daemon starts `<this folder>/<version>/Unity.exe` (unity.ts fencedEditorBin), so a folder planted
+  // for another version while this folder was Low would be started with the daemon's environment: all but the junctions
+  // just checked go.
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    /* nothing to sweep */
+  }
+  for (const n of names) {
+    if (have.includes(n)) continue;
+    const p = path.join(dir, n);
+    try {
+      removeEntry(p);
+      say(`worker integrity: WARNING: removed ${p}: it is not a junction to an installed Unity (w5838)`);
+    } catch (err) {
+      say(`worker integrity: WARNING: ${p} is not a junction to an installed Unity and could not be removed: ${(err as Error).message} (w5838)`);
     }
   }
   return have;

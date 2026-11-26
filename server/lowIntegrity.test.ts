@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, MEDIUM_TOOLS, isReadOnlyCopy, junctionLeadsTo, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -274,6 +274,14 @@ test('currentAccount names DOMAIN\\user as icacls takes it', () => {
  * A fake icacls for LowCopies (w5838): remembers which files carry a Low label and which the read-only grants; a file
  * written after them (fs.writeFileSync) keeps its marks, as an NTFS write keeps its ACL, which is the case the hash catches.
  */
+// The marks belong to the file, not its name: a copy removed and made again starts with none. Not the file id alone: Linux
+// gives a new file the id of one just removed (CI, w5838). Its change time too, which a write also moves (NTFS keeps the
+// DACL then; no test here needs it kept).
+const markKey = (p: string) => {
+  const st = fs.statSync(p, { bigint: true });
+  return `${p}#${st.ino}#${st.ctimeNs}`;
+};
+
 const icaclsSync = (o: { readOnlyFails?: boolean } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string> } => {
   const calls: string[][] = [];
   const low = new Set<string>();
@@ -285,8 +293,7 @@ const icaclsSync = (o: { readOnlyFails?: boolean } = {}): { exec: ExecSync; call
     exec: (_cmd, args) => {
       calls.push(args);
       const [path0, ...rest] = args;
-      // The marks belong to the file, not its name: a copy removed and made again starts with none.
-      const f = `${path0}#${fs.statSync(path0).ino}`;
+      const f = markKey(path0);
       if (!rest.length) return { code: 0, stdout: `${path0} ${ro.has(f) ? 'OWNER RIGHTS:(RX)' : 'BUILTIN\\Users:(I)(RX)'}\n${low.has(f) ? 'Mandatory Label\\Low Mandatory Level:(NW)' : ''}`, stderr: '' };
       if (rest[0] === '/setintegritylevel') {
         if (ro.has(f)) return { code: 5, stdout: '', stderr: 'Access is denied.' };
@@ -308,7 +315,7 @@ test('LowCopies names the copy by size and mtime, labels it Low and read-only, a
   const copies = new LowCopies(root, () => {}, f.exec, 'BEAST\\rydin');
   const first = copies.make(exe);
   assert.ok(first && fs.existsSync(first) && path.basename(first).startsWith('claude-2-'));
-  const id = `${first}#${fs.statSync(first!).ino}`;
+  const id = markKey(first!);
   assert.ok(f.low.has(id) && f.ro.has(id), 'labelled Low, then read-only');
   assert.deepEqual(
     f.calls.find((c) => c[0] === first && c[1] === '/inheritance:r'),
@@ -356,6 +363,59 @@ test('w5838: a replaced copy whose source is gone is not run', () => {
   fs.writeFileSync(copy, 'evil');
   fs.rmSync(exe);
   assert.equal(copies.check(copy), undefined);
+});
+
+test('w5838 review: what was planted in tools/low before it was Medium goes before any copy runs, with a WARNING each', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'claude.exe');
+  fs.writeFileSync(exe, 'the real claude');
+  const dir = path.join(root, 'tools', 'low');
+  fs.mkdirSync(path.join(dir, 'claude.exe.local'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'claude.exe.local', 'version.dll'), 'evil');
+  fs.writeFileSync(path.join(dir, 'version.dll'), 'evil');
+  fs.writeFileSync(path.join(dir, 'node-1-2.exe.part'), 'evil');
+  fs.writeFileSync(path.join(dir, 'gh-10-20.exe'), 'a copy of another program, kept');
+  const said: string[] = [];
+  const copy = new LowCopies(root, (l) => void said.push(l), icaclsSync().exec, 'BEAST\\rydin').make(exe)!;
+  assert.deepEqual(fs.readdirSync(dir).sort(), [path.basename(copy), 'gh-10-20.exe'].sort());
+  assert.equal(said.filter((l) => /WARNING: removed .*not a copy the daemon made/.test(l)).length, 3, said.join('\n'));
+  assert.ok(LOW_COPY_NAME.test('node-1-2.exe') && LOW_COPY_NAME.test('node-1-2') && !LOW_COPY_NAME.test('node-1-2.exe.part') && !LOW_COPY_NAME.test('version.dll'));
+});
+
+test('w5838 review: a folder or unreadable file planted at the copy\'s own name is removed and the copy made', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  const exe = path.join(root, 'claude.exe');
+  fs.writeFileSync(exe, 'the real claude');
+  const st = fs.statSync(exe);
+  const at = path.join(root, 'tools', 'low', `claude-${st.size}-${Math.floor(st.mtimeMs)}.exe`);
+  fs.mkdirSync(path.join(at, 'inside'), { recursive: true });
+  const said: string[] = [];
+  const copy = new LowCopies(root, (l) => void said.push(l), icaclsSync().exec, 'BEAST\\rydin').make(exe);
+  assert.equal(copy, at);
+  assert.equal(fs.readFileSync(copy!, 'utf8'), 'the real claude');
+  assert.ok(said.some((l) => /WARNING/.test(l) && /cannot be read/.test(l)), said.join('\n'));
+});
+
+test('w5838 review: tools/unity-low keeps only the junctions it checked; a planted folder goes and a link never takes its target with it', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowunity-'));
+  const dir = lowUnityDir(root);
+  fs.mkdirSync(path.join(dir, '6000.9.9f1'), { recursive: true });
+  fs.writeFileSync(path.join(dir, '6000.9.9f1', 'Unity.exe'), 'evil');
+  const install = path.join(root, 'install', 'Editor');
+  fs.mkdirSync(install, { recursive: true });
+  fs.writeFileSync(path.join(install, 'Unity.exe'), 'the real Unity');
+  fs.symlinkSync(install, path.join(dir, '6000.1.0f1'), 'junction');
+  const said: string[] = [];
+  const have = await lowUnityJunctions(root, [], async () => ({ code: 1, stdout: '', stderr: 'no' }), (l) => void said.push(l));
+  assert.deepEqual(have, []);
+  assert.deepEqual(fs.readdirSync(dir), [], said.join('\n'));
+  assert.equal(fs.readFileSync(path.join(install, 'Unity.exe'), 'utf8'), 'the real Unity', 'what the link led to is untouched');
+  assert.equal(said.filter((l) => /WARNING: removed/.test(l)).length, 2, said.join('\n'));
+});
+
+test('w5838 review: pickEnv keeps only the named keys, whatever their case', () => {
+  assert.deepEqual(pickEnv(['PATH', 'USERPROFILE'], { Path: 'p', USERPROFILE: 'u', GH_TOKEN: 'secret' }), { Path: 'p', USERPROFILE: 'u' });
+  assert.ok(!PROBE_ENV_KEYS.some((k) => /TOKEN|KEY|SECRET/i.test(k)));
 });
 
 test('w5838: isReadOnlyCopy wants the OWNER RIGHTS entry and nothing inherited', () => {

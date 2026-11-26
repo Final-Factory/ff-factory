@@ -761,11 +761,17 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       editor Medium (warn-only, as before the fence).
     - The probes of a copy (`claude --version`, the editor launcher, the transcript lock, `gh auth status`) run with
       `bareEnv` (`machine/maxEventsFence.ts`), none of the daemon's tokens; gh gets only its login folder. A probe that
-      fails bare is tried once with the daemon's environment and logged as a `WARNING`, so no machine loses its fence to
-      this change.
+      fails bare is tried once with Windows' own variables (`PROBE_ENV_KEYS`: `PATH`, the profile and temp folders, never a
+      token or daemon.json `env`) and logged as a `WARNING`, so no machine loses its fence to this change.
+    - Whatever was planted while the folders were still Low goes at the daemon's start, each with a `WARNING`: in
+      `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `<base>-<size>-<mtime>.exe`), so no DLL beside a copy
+      is loaded by it; a copy's name that cannot be read (a folder, a locked file) is removed and the copy made; in
+      `tools\unity-low` everything but the junctions just checked, since the daemon starts `<that folder>\<version>\Unity.exe`
+      (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`).
     - A junction is made again unless it leads to its Unity (`junctionLeadsTo`).
     - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to `<root>\tools\shims`,
-      not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included.
+      not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included; the old `bin` is
+      removed.
 - A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).

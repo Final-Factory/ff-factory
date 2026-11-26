@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -1645,6 +1645,14 @@ export class Daemon {
       // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
       // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
       this.slotBin = process.platform === 'win32' && this.cfg.root ? writeShims(toolsShimsDir(this.cfg.root)) : installShims(this.slotMailbox);
+      // w5838 review: the old shims, in a folder Low workers write, go, so no stale PATH or copied command line runs them.
+      if (this.slotBin !== path.join(this.slotMailbox, 'bin')) {
+        try {
+          removeEntry(path.join(this.slotMailbox, 'bin'));
+        } catch (e) {
+          log(`unity slots: could not remove the old shim folder ${path.join(this.slotMailbox, 'bin')}: ${(e as Error).message}`);
+        }
+      }
       // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
       installLeftoversShim(this.slotBin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
       // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
@@ -3189,15 +3197,16 @@ export class Daemon {
 
   /**
    * w5838: a fence probe of a Low copy with nothing of the daemon's environment (maxEventsFence.ts bareEnv). Warn-only, so a
-   * program that needs more to start never turns the fence off: a failure there is tried once more with the daemon's
-   * environment (the copy was just checked against its source) and said as a WARNING.
+   * program that needs more to start never turns the fence off: a failure there is tried once more with Windows' own
+   * variables (PROBE_ENV_KEYS: PATH, the profile and temp folders; never the vault tokens or daemon.json `env`, w5838
+   * review) and said as a WARNING.
    */
   private bareProbe(argv: string[], what: string): ReturnType<typeof probeFence> {
     const bare = probeFence(argv, { timeoutMs: 60_000, env: bareEnv() });
     if (bare.ok) return bare;
-    const full = probeFence(argv, { timeoutMs: 60_000 });
-    if (full.ok) log(`worker integrity: WARNING: ${what} did not run with a bare environment (${bare.why}) but did with the daemon's; its probe keeps the daemon's environment (w5838)`);
-    return full;
+    const more = probeFence(argv, { timeoutMs: 60_000, env: { ...bareEnv(), ...pickEnv(PROBE_ENV_KEYS) } });
+    if (more.ok) log(`worker integrity: WARNING: ${what} did not run with a bare environment (${bare.why}) but did with Windows' own variables; its probe keeps those (w5838)`);
+    return more;
   }
 
   private ghMemo?: { at: number; token?: string };
@@ -3593,7 +3602,7 @@ export class Daemon {
       const copy = this.lowCopies?.make(exe);
       if (!copy) return loud('no Low copy of gh to test with');
       // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
-      const env = { ...bareEnv(), ...(process.env.USERPROFILE ? { USERPROFILE: process.env.USERPROFILE } : {}), ...lowEnv(root, undefined, 'PATH', process.env.PATH, gh), GH_TOKEN: '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
+      const env = { ...bareEnv(), ...pickEnv(['USERPROFILE']), ...lowEnv(root, undefined, 'PATH', process.env.PATH, gh), GH_TOKEN: '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
       const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token/i.test(l));
       if (r.code !== 0) return loud(`gh auth status at Low exited ${r.code}: ${said.slice(0, 3).join(' / ').trim().slice(0, 300)}`);
