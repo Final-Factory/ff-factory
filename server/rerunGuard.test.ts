@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkFlakyRerun, portalDropReader, rerunTargets, readJobLog, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
+import { checkFlakyRerun, oomKill, portalDropReader, rerunTargets, readJobLog, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
 import { sandboxGuard } from './guard.ts';
 
 // w3784: both fixtures are the `test (ffu-windows)` job of ffu PR #510's CI run 42538461342, read with
@@ -265,4 +265,43 @@ test('w5271: a log with escape sequences is read (with --allow-escape-sequences 
 
   const cmd = 'gh run rerun 45155653650 --failed -R Final-Factory/ffu';
   assert.equal(await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { [STOPPED.id]: STOPPED_ANSI_LOG }).r }), undefined);
+});
+
+// w6140: ffu run 45857906682's "check" (job 140043729184, ffu-biscuit-2, attempt 1): its lavapipe step's test binary was
+// SIGKILLed ("./tools/run_built_tests.sh: line 51: 344007 Killed") and the job's runner-health step then read "swap free 5 MB
+// of 8191 MB" and warned "swap is 100 % full". The job and its log are from `gh api repos/Final-Factory/ffu/actions/jobs/
+// 140043729184` and `.../logs` (2026-11-26), the log trimmed to the failed step's start, its last lines and the health step.
+const OOM = load('rerun-oom-killed-job.json');
+const OOM_LOG = text('rerun-oom-killed-job.txt');
+
+test('w6140: a SIGKILLed step beside a full swap is out of memory, rerun once at attempt 1; a kill without memory pressure is not', async () => {
+  assert.equal(oomKill(OOM_LOG), './tools/run_built_tests.sh: line 51: 344007 Killed ( cd "$dir" && "$exe" "$@" ); runner health: swap free 5 MB of 8191 MB');
+  const cmd = 'gh run rerun 45857906682 --failed -R Final-Factory/ffu';
+  assert.equal(OOM.run_attempt, 1);
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, OOM], [], { [OOM.id]: OOM_LOG }).r }), undefined);
+  // A second attempt is the machine's to fix.
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([{ ...OOM, run_attempt: 2 }], [], { [OOM.id]: OOM_LOG }).r }))!, /Refused \(w3836\).*attempt 2/);
+
+  // Negative: the same kill with the runner's memory healthy (no swap pressure, 21 % available) is a real failure.
+  const healthy = OOM_LOG.replace('swap free 5 MB of 8191 MB', 'swap free 7900 MB of 8191 MB').replace(/^.*##\[warning\]swap is 100 % full.*$/m, '');
+  assert.equal(oomKill(healthy), undefined);
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([OOM], [], { [OOM.id]: healthy }).r }))!, /Refused \(w3784\): "check" \(job 140043729184\).*a real failure/);
+  // Negative: memory pressure with no kill (the binary failed by itself) is a real failure.
+  const noKill = OOM_LOG.replace(/^.*344007 Killed.*$/m, '');
+  assert.equal(oomKill(noKill), undefined);
+  assert.ok(await checkFlakyRerun(cmd, { reader: reader([OOM], [], { [OOM.id]: noKill }).r }));
+  // Negative: a failed test beside the kill keeps it refused.
+  assert.equal(oomKill(OOM_LOG.replace('##[error]Process completed', 'test result: FAILED. 27 passed; 1 failed\n##[error]Process completed')), undefined);
+  // Negative: a kill in a step that went on to pass (the next step starts before any failure) does not count.
+  const passedStep = OOM_LOG.replace(/^(.*344007 Killed.*)$/m, '$1\n2026-11-26T16:40:08.7Z ##[group]Run next step');
+  assert.equal(oomKill(passedStep), undefined);
+
+  // Exit 137 and cargo's signal 9 are kills too; available memory under 5 % of RAM is pressure too.
+  const exit137 = noKill.replace('exit code 1.', 'exit code 137.');
+  assert.match(oomKill(exit137)!, /exit code 137.*swap free 5 MB/);
+  const sig9 = noKill.replace('##[error]Process completed', "error: test failed, to rerun pass `-p ffu-client --lib`\nprocess didn't exit successfully: `ffu-xyz` (signal: 9, SIGKILL: kill)\n##[error]Process completed");
+  assert.match(oomKill(sig9)!, /signal: 9, SIGKILL/);
+  const lowAvail = healthy.replace('available 5611 MB of 27186 MB', 'available 900 MB of 27186 MB');
+  assert.match(oomKill(lowAvail)!, /runner health: available 900 MB of 27186 MB$/);
+  assert.equal(oomKill(healthy.replace('available 5611 MB', 'available 1400 MB')), undefined);
 });
