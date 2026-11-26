@@ -22,6 +22,10 @@
  *   value back, else a neutral one (git-lfs's standard filter for `filter.lfs.*`, so LFS files still check out). A
  *   repository's credential helpers are dropped and the user's and system's added again in their order. This one has a
  *   race: a worker who writes the key between the scan and the call wins it, so it narrows the gap without closing it.
+ *   The scan also reads the keys that pick where an https call goes and whom it trusts (w6100): a repository's own
+ *   `http[.<url>].proxy`, `remote.<name>.proxy` and `http.curloptResolve` fall back to empty (no proxy, no forced address),
+ *   `http[.<url>].sslVerify` to true, `http.schannelUseSSLCAInfo` to false; a repository-set CA file or path, TLS backend
+ *   or git-lfs URL has no such value (isTrustKey) and makes a network call refused.
  *   Calls that start none of those programs and read no object (config, symbolic-ref, worktree list, a plain rev-parse:
  *   needsScan) skip it (w5991).
  * - `diff`, `log`, `show` and `whatchanged` also get `--no-ext-diff --no-textconv`: `diff.external` cannot be overridden
@@ -77,7 +81,7 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
 
 /** Keys a repository may name a program in, read per call (canonical names: section and key lower case). */
 export const SCANNED_KEYS =
-  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof))$';
+  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|http\\.(.+\\.)?(proxy|sslverify|sslcainfo|sslcapath|sslbackend|schannelusesslcainfo|curloptresolve)|remote\\..+\\.(proxy|lfsurl|lfspushurl)|lfs\\.(url|pushurl))$';
 
 /** Scopes no worker writes: the user's and system's config, the caller's own command line (`unknown` is Apple git's Xcode config). */
 const TRUSTED_SCOPES = new Set(['system', 'global', 'command', 'unknown']);
@@ -95,11 +99,22 @@ function neutral(key: string): string {
   if (/^remote\..+\.receivepack$/.test(key)) return 'git-receive-pack';
   if (/^submodule\..+\.update$/.test(key)) return 'checkout';
   if (key === 'core.sshcommand') return 'ssh';
+  if (/^http\..*sslverify$/.test(key)) return 'true';
   return '';
 }
 
 const isCredential = (key: string) => /^credential\.(.+\.)?helper$/.test(key);
 const isUrlRewrite = (key: string) => /^url\..+\.(insteadof|pushinsteadof)$/.test(key);
+/**
+ * Keys that choose whom a call trusts or where git-lfs sends it, and that have no neutral value (w6100): an empty
+ * `http.sslCAInfo` or `http.sslBackend` makes every https call fail, an empty `lfs.url` leaves git-lfs with no endpoint
+ * (measured, git 2.56.1 and git-lfs on Windows). A user's or system's value is put back; a repository's own one alone is
+ * left in place, and a call that reaches a remote with one is refused (REPO_TRUST_KEYS).
+ */
+const isTrustKey = (key: string) => /^(http\.(.+\.)?(sslcainfo|sslcapath|sslbackend)|remote\..+\.(lfsurl|lfspushurl)|lfs\.(url|pushurl))$/.test(key);
+
+/** 'warn': log a network call with a repository-set isTrustKey key and make it; 'enforce': refuse it (w6100, lockout rule). */
+export const REPO_TRUST_KEYS: 'warn' | 'enforce' = 'warn';
 
 /** Subcommands that reach a remote, where a repository's `url.<base>.insteadOf` could send the call (and a token) elsewhere. */
 const NETWORK = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote', 'remote', 'submodule', 'lfs', 'archive']);
@@ -110,9 +125,18 @@ const NETWORK = new Set(['fetch', 'pull', 'push', 'clone', 'ls-remote', 'remote'
  * through one is not made at all.
  */
 export function refusal(args: string[], rows: { scope: string; key: string }[]): string | undefined {
+  if (!NETWORK.has(args[splitGlobal(args).sub] ?? '')) return undefined;
   const bad = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isUrlRewrite(r.key));
-  if (!bad || !NETWORK.has(args[splitGlobal(args).sub] ?? '')) return undefined;
-  return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote; remove it with \`git config --local --unset-all ${bad.key}\` in that repository`;
+  if (bad)
+    return `refused by FF Factory (w5573): the repository's own config sets ${bad.key}, which could send this call to another remote; remove it with \`git config --local --unset-all ${bad.key}\` in that repository`;
+  const trust = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && isTrustKey(r.key) && !rows.some((t) => t.key === r.key && TRUSTED_SCOPES.has(t.scope) && t.scope !== 'command'));
+  if (!trust) return undefined;
+  const no = `the repository's own config sets ${trust.key}, which could make this call trust or reach another server; remove it with \`git config --local --unset-all ${trust.key}\` in that repository`;
+  if (REPO_TRUST_KEYS === 'warn') {
+    console.warn(`safeGit (w6100, warn-only): would refuse git ${args[splitGlobal(args).sub]}: ${no}`);
+    return undefined;
+  }
+  return `refused by FF Factory (w6100): ${no}`;
 }
 
 /** `git config --show-scope -z --get-regexp` output: scope NUL key LF value NUL ... */
@@ -141,6 +165,7 @@ export function scannedOverrides(rows: { scope: string; key: string; value: stri
     if (isCredential(r.key) || isUrlRewrite(r.key) || seen.has(r.key)) continue;
     seen.add(r.key);
     const back = trusted.filter((t) => t.key === r.key).at(-1);
+    if (!back && isTrustKey(r.key)) continue;
     out.push([r.key, back ? back.value : neutral(r.key)]);
   }
   if (repo.some((r) => isCredential(r.key))) {
