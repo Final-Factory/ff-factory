@@ -650,7 +650,7 @@ Every agent the daemon starts, fenced or not, finds the daemon's shims first on 
 unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. Off Windows they lived in the Unity slots mailbox's `bin`
 (`machine/unitySlots.ts` installShims), and both fences let a worker write the whole mailbox (Landlock `--rw <mailbox>`
 in `machine/writeLock.ts`, Seatbelt's extraWritable in `server/workerFence.ts`): a fenced worker could replace `ff-pr`
-and have it run outside the fence in the next unfenced agent. Windows moved its shims to `<root>/tools/shims` (w5838).
+and have it run outside the fence in the next unfenced agent. Windows moved its shims to `<root>/tools/shims` (w5838), then to `<root>/tools-medium/shims`, the name used here too (w6101).
 
 With the path fence **on** (w5899, the default) the shims live in `<root>/tools-medium/shims` (`enforcedShimDir` in
 `machine/pathFence.ts`), a folder both fences already keep read-only (`LOCKED_CHILDREN`, `READ_ONLY_IN_ROOT`), so no

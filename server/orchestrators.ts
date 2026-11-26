@@ -842,6 +842,8 @@ export class Orchestrators {
   onTurnBudget?: (session: SessionInfo, users: string[], what: string) => void;
   /** Notices gathered for the dispatcher, per person they are about. */
   private readonly gathered = new Map<string, { by: Requester; texts: string[]; timer: NodeJS.Timeout }>();
+  /** close() ran: nothing more is gathered, so no timer set after it sends into a store that is gone (w6152). */
+  private closed = false;
   private capacityTimer?: NodeJS.Timeout;
   /** w2956: the pending standing-target check (fanOutSoon). */
   private fanOutTimer?: NodeJS.Timeout;
@@ -934,6 +936,7 @@ export class Orchestrators {
   }
 
   close() {
+    this.closed = true;
     clearTimeout(this.digestTimer);
     for (const g of this.gathered.values()) clearTimeout(g.timer);
     this.gathered.clear();
@@ -1233,6 +1236,9 @@ export class Orchestrators {
 
   /** Gather a notice for the dispatcher: a burst of filings from one person reaches it as one message. */
   private gatherForDispatcher(by: Requester, text: string, lane?: 'intake') {
+    // w6152: a worker failure heard after close() (ledgerSweep.test.ts, as its sessions stopped) was sent 100 ms later,
+    // into a test's removed folder (ENOENT).
+    if (this.closed) return;
     const key = lane ? `${lane}:${by.userId.toLowerCase()}` : by.userId.toLowerCase();
     const g = this.gathered.get(key) ?? { by, texts: [], timer: undefined as unknown as NodeJS.Timeout };
     clearTimeout(g.timer);

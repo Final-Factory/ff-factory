@@ -1,0 +1,1 @@
+- Tests: the 36 server test files that boot Agents now close it before they remove their data folder, a closed Orchestrators gathers no more dispatcher notices, and testMachine's stop() warns when the machine's link is still open after 5 s, where it used to stay silent (w6152, after w5915's ENOENT on BEAST).

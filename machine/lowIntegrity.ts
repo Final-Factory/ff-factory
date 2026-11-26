@@ -19,7 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES } from '../server/claudeHome.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES, TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
 /** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
@@ -177,14 +177,85 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
     } else medium.push(path.join(tools, 'node'));
   }
   medium.push(...fenced, ...lockedStore);
+  // w6101: the shims moved to <root>/tools-medium/shims, first on every agent's PATH, Medium ones included. tools-medium is
+  // never labelled (MEDIUM_ONLY_CHILDREN), but a rollout before w5539 labelled it Low, which nothing undid (w5876's review):
+  // there a Low worker could rename the shims folder away (the parent's FILE_DELETE_CHILD) or plant a command in it. Both
+  // are kept Medium (labelLow relabels only one that reads Low).
+  const tm = i.children.find((c) => c.dir && c.name.toLowerCase() === TOOLS_MEDIUM_CHILD);
+  if (tm) medium.push(path.join(i.root, tm.name), path.join(i.root, tm.name, 'shims'));
   return { dirs, files, medium };
 }
 
 /** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
 export const MEDIUM_TOOLS = ['node', 'low', 'unity-low', 'shims'];
 
-/** Where the daemon writes the workers' shims on Windows with a root (w5838): a Medium folder, not the Low slots mailbox. */
+/**
+ * Where the daemon wrote the workers' shims on Windows from w5838 (a Medium folder, not the Low slots mailbox) until w6101
+ * moved them to `<root>/tools-medium/shims` (pathFence.ts enforcedShimDir), the one name on every OS. Still written, and
+ * Medium (MEDIUM_TOOLS), while an agent host started before the move has it on its PATH (agentHost.ts hostsWithPathDir).
+ */
 export const toolsShimsDir = (root: string) => path.join(root, 'tools', 'shims');
+
+/**
+ * The files the daemon writes in the shims folder on Windows (w6101): unity-slot, ff-leftovers, ff-pr and ffu-slot, each
+ * a `sh` script and a `.cmd`. installPythonShim writes none on Windows. A test writes them all and compares.
+ */
+export const WINDOWS_SHIM_FILES = ['ff-leftovers', 'ff-leftovers.cmd', 'ff-pr', 'ff-pr.cmd', 'ffu-slot', 'ffu-slot.cmd', 'unity-slot', 'unity-slot.cmd'];
+
+/**
+ * w6101: what sits in a Windows shims folder that the daemon does not write (WINDOWS_SHIM_FILES), by name. Every agent's
+ * PATH starts there, so a `git.cmd` planted while `tools-medium` was still Low (a rollout before w5539) would run for
+ * Medium agents too. Warn only: the daemon logs each one; nothing is removed. A folder that cannot be read answers its error.
+ */
+export function strayShimFiles(dir: string, list: (d: string) => string[] = (d) => fs.readdirSync(d)): { strays: string[]; error?: string } {
+  try {
+    const want = new Set(WINDOWS_SHIM_FILES);
+    // The temporary files writeAtomic and the installers leave on a failed write (`….tmp`) run by no bare name.
+    return { strays: list(dir).filter((n) => !want.has(n.toLowerCase()) && !n.toLowerCase().endsWith('.tmp')).sort() };
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { strays: [] } : { strays: [], error: (e as Error).message };
+  }
+}
+
+/** w6101: the Windows shims folder, `<root>/tools-medium/shims`: the name macOS and Linux use (pathFence.ts enforcedShimDir). */
+export const windowsShimsDir = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, 'shims');
+
+/**
+ * w6101: the Windows daemon's shims at start. They are written to `<root>/tools-medium/shims` (windowsShimsDir), which is
+ * put first on new agents' PATH. `<root>/tools/shims` (toolsShimsDir, Medium) is written too, so an agent host started
+ * before the move, with that folder first on its PATH, runs this daemon's shims; `waits` names those hosts
+ * (hostsWithPathDir), and the log says how many there are. Nothing is refused or removed here (warn first, lothsahn's
+ * lockout rule). A failed write in the new folder falls back to the old one, which is Medium, so recovery needs nobody
+ * at the machine; it is a WARNING. A file there that the daemon does not write is a WARNING (strayShimFiles). Answers
+ * the folder to put first on PATH, or undefined if neither could be written.
+ */
+export function windowsShims(root: string, o: { write: (dir: string) => void; waits: () => string[]; log: (l: string) => void; list?: (d: string) => string[] }): string | undefined {
+  const dir = windowsShimsDir(root);
+  const old = toolsShimsDir(root);
+  let bin: string | undefined;
+  try {
+    o.write(dir);
+    bin = dir;
+  } catch (e) {
+    o.log(`unity slots: WARNING: could not write the shims in ${dir} (${(e as Error).message}); new agents get ${old} first on their PATH instead, which Low workers cannot write either, and the next daemon start tries again (w6101)`);
+  }
+  let oldOk = false;
+  try {
+    o.write(old);
+    oldOk = true;
+  } catch (e) {
+    o.log(`unity slots: WARNING: could not write the shims in ${old}: ${(e as Error).message}${bin ? `; agents started before the move to ${dir} run what is left there` : ''} (w6101)`);
+  }
+  if (!bin && oldOk) bin = old;
+  if (bin === dir) {
+    const w = o.waits();
+    o.log(`unity slots: the shims are in ${dir}, first on new agents' PATH (w6101); ${old} is written too, for ${w.length ? `the ${w.length} agent host(s) started before the move that have it on their PATH (${w.join(', ')})` : 'agent hosts started before the move (none has it on its PATH now)'}`);
+    const s = strayShimFiles(dir, o.list);
+    if (s.error) o.log(`unity slots: WARNING: could not read ${dir} to look for files the daemon does not write there: ${s.error} (w6101)`);
+    for (const n of s.strays) o.log(`unity slots: WARNING: ${path.join(dir, n)} is not a shim the daemon writes, and every agent's PATH starts in this folder; left in place (warn only, w6101)`);
+  }
+  return bin;
+}
 
 type Ran = { code: number | null; stdout: string; stderr: string };
 export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<Ran>;

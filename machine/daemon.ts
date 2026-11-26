@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -76,12 +76,12 @@ import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.
 import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
-import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard } from '../server/cleanup.ts';
+import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard, type CleanupItem, type CleanupRun } from '../server/cleanup.ts';
 import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
-import { cleanupPass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
+import { cleanupPass, firstAlonePass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
 import { hubEditorDirs, hubListedEditors, listWinDialogs, macEditorFenceFor, macEditorStatusDir, realDeps as realUnityDeps, type EditorFence, type LowEditorFence, type SeatbeltEditorFence } from './unity.ts';
@@ -110,7 +110,7 @@ import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
-import { WIN_CI_FIRST, WinCiFirst, machineBusyMs } from './ciFirstWin.ts';
+import { WIN_CI_FIRST, WinCiFirst, machineBusyMs, readLowered, writeLowered } from './ciFirstWin.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -293,6 +293,13 @@ export interface DaemonConfig {
    * write there. Set remotely by `ops_worker machine_update tools_disk_lock`, read at the daemon's start; "warn" is the recovery.
    */
   toolsDiskLock?: ToolsDiskLockMode;
+  /**
+   * w6110: CI jobs go first on a Windows CI-first machine (machine/ciFirstWin.ts, WIN_CI_FIRST: lothdesktop): "warn" (the default
+   * when unset) only logs what the agents' processes take beside a CI job; "enforce" lowers the processes agents' tools start to
+   * Idle while a job runs, recorded in <root>/tmp/ci-first-lowered.json and raised back when it is off or warn again; "off"
+   * stops it. Set remotely by `ops_worker machine_update win_ci_first`, read at the daemon's start; "warn" is the recovery.
+   */
+  winCiFirst?: 'off' | 'warn' | 'enforce';
   /**
    * w5863, w5899: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "on" (the default
    * when unset) puts the unity-slot shims on every agent's PATH in <root>/tools-medium/shims, which fenced workers cannot
@@ -1160,11 +1167,17 @@ export class Daemon {
       settings: real && process.platform === 'win32' ? WIN_CI_FIRST[cfg.id.toLowerCase()] : undefined,
       procs: () => pd.procs(),
       census: (procs) => runnerCensus(procs),
-      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid! })),
+      // the host writes its own start to its record (agentHost.ts), so a pid Windows gave to another process started later
+      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid!, startedAt: hostStartedAt(h.dir) })),
       priorityOf: (pid) => priorityOf(pid),
       facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
       machineBusyMs: () => machineBusyMs(),
       self: process.pid,
+      mode: cfg.winCiFirst,
+      held: () => !!(this.timedHolderHere() ?? this.personHolder()),
+      setPriority: (pid, priority) => setPriorityOf(pid, priority),
+      // no worker root, no record: enforce then lowers nothing (nothing a restart could undo)
+      record: cfg.root ? { read: () => readLowered(cfg.root!), write: (l) => writeLowered(cfg.root!, l) } : undefined,
       now: () => Date.now(),
       log: (line) => log(line),
     });
@@ -1338,16 +1351,9 @@ export class Daemon {
               closed: this.closedSessionDirs(),
               ffuSized: this.ffuSized,
             }),
-          // w6044: the released ffu slots' targets planned first, before the slow steps a restart cuts off; report-only for now.
-          first: {
-            plan: async () =>
-              planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
-            report: (items, ms, run) =>
-              log(
-                `clean-up: ffu slots first (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
-              ),
-          },
-          busyNow: anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard())),
+          // w6044: the released ffu slots' targets taken first, before the slow steps a restart cuts off.
+          first: this.ffuFirstStep(low, guard, ''),
+          busyNow: this.cleanupBusyNow(),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
@@ -1383,7 +1389,47 @@ export class Daemon {
         log(text);
         appendCleanupLog(appDirOfConfig(cfg), { at: new Date().toISOString(), trigger: m.trigger, cutOff: true, startedAt: new Date(m.startedAt).toISOString(), removed: 0, freedBytes: 0 });
       },
+      // w6044 stage 3: a low trigger that meets a pass in flight that is not low runs the released ffu slots' first step alone.
+      firstAlone: (trigger) => this.ffuFirstAlone(trigger),
     });
+  }
+
+  /** Asked right before each removal (runnerBusyNow, ffuSlotBusyNow): a runner's job or a slot taken since the plan keeps it. */
+  private cleanupBusyNow() {
+    return anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard()));
+  }
+
+  /** The released ffu slots' first step (w6044), its plan at `low` and its log line; `mid` names a step run apart from a pass. */
+  private ffuFirstStep(low: boolean, guard: CleanupGuard, mid: string) {
+    return {
+      plan: async () =>
+        planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+      report: (items: CleanupItem[], ms: number, run?: CleanupRun) =>
+        log(
+          `clean-up: ffu slots first${mid} (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
+        ),
+    };
+  }
+
+  /**
+   * w6044 stage 3: the released ffu slots' first step alone, at low, while a pass that is not low runs (CleanupRunner
+   * firstAlone). That pass's own first step ran with the 7-day idle rule, and it runs on for an hour or more (BEAST, 2026-11-26).
+   * It removes with the stale-output mode on (stage 3b), and what it freed goes in the clean-up history (cleanup-log.jsonl).
+   */
+  private async ffuFirstAlone(trigger: string) {
+    const guard = this.cleanupGuard();
+    const mode = staleOutputSettings(this.cleanupSettings.staleOutput).mode;
+    const startedAt = new Date().toISOString();
+    const run = await firstAlonePass({
+      mode,
+      root: this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined,
+      guard,
+      first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}${mode === 'on' ? '' : ', report-only'})`),
+      busyNow: this.cleanupBusyNow(),
+    });
+    // The w6142 review: what the step alone frees shows in the clean-up history, not only in its log line.
+    if (run && run.removed.length > 0)
+      appendCleanupLog(appDirOfConfig(this.cfg), { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) });
   }
 
   /**
@@ -1884,13 +1930,17 @@ export class Daemon {
     };
     let shimModes: ShimModeGuard | undefined;
     try {
-      // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
-      // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
+      // w5838, w6101: on Windows the shims sit in <root>/tools-medium/shims, labelled Medium (lowIntegrity.ts lowTargets),
+      // not in the mailbox's bin, which Low workers write: every agent's PATH starts there, Medium ones included. The old
+      // <root>/tools/shims is written too while agents started before the move have it on their PATH (windowsShims).
       // w6074 E: a worker's chmod there (Landlock does not refuse one) must not make the daemon fall back to warn.
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) readyShimDir(enforcedShimDir(this.cfg.root));
       // w6080: off and warn write into the mailbox's bin; the link an earlier on start left there goes first.
       else if (process.platform !== 'win32') unlinkShimBinLink(oldBin);
-      this.slotBin = shims(writeShims(process.platform === 'win32' && this.cfg.root ? toolsShimsDir(this.cfg.root) : shimDirFor(pf, this.slotMailbox, this.cfg.root)));
+      if (process.platform === 'win32' && this.cfg.root) {
+        const root = this.cfg.root;
+        this.slotBin = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []), log });
+      } else this.slotBin = shims(writeShims(shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) {
@@ -1937,7 +1987,28 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
-    if (this.winCiFirst.enabled) this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`))), 60_000));
+    if (this.winCiFirst.enabled) {
+      const tick = () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`));
+      this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
+      // what an earlier daemon lowered is raised back (or kept, in enforce) soon after the start, not a minute later
+      if (Object.keys(this.winCiFirst.loweredNow()).length) setTimeout(tick, 10_000).unref();
+      // a bench or a person's turn that begins (or ends) is acted on within 5 s, not at the next minute's tick
+      if (this.winCiFirst.mode === 'enforce') {
+        let wasHeld = false;
+        this.timers.push(
+          setInterval(
+            loopLabel('timer winCiFirst.held', () => {
+              const held = !!(this.timedHolderHere() ?? this.personHolder());
+              if (held !== wasHeld) {
+                wasHeld = held;
+                tick();
+              }
+            }),
+            5_000,
+          ),
+        );
+      }
+    }
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
@@ -4514,6 +4585,7 @@ export class Daemon {
       log: (line) => log(line),
       capsMode: () => capsModeOf(this.cfg.workerCaps),
       toolsCpu: (pid) => this.toolsCpu(pid),
+      toolsLowered: (pid) => this.winCiFirst.toolsLowered(pid),
       // Its tree being stopped (w799): its sandbox is taken until it is gone.
       stopping: (h, on) => {
         const sandbox = holder.e?.spec?.sandbox ?? hostPlace(h.dir)?.sandbox;

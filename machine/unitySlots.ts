@@ -1955,7 +1955,7 @@ export function installShims(dir: string, node = process.execPath, nodeArgs = pr
   return writeShims(path.join(dir, 'bin'), node, nodeArgs, script);
 }
 
-/** Write the shims into `bin` itself (w5838: `<root>/tools/shims` on Windows, a folder Low workers cannot write); returns it. */
+/** Write the shims into `bin` itself (w5838, w6101: `<root>/tools-medium/shims` on Windows, a folder Low workers cannot write); returns it. */
 export function writeShims(bin: string, node = process.execPath, nodeArgs = process.execArgv.filter((a) => /strip-types|transform-types/.test(a)), script = import.meta.filename): string {
   fs.mkdirSync(bin, { recursive: true });
   const s = shimScripts(node, nodeArgs, script);

@@ -59,6 +59,11 @@
   With -Update (w5959, docs/worker-root.md): set what the daemon does about a virtual disk (.vhd, .vhdx) in a Low
   <root>\tools child in daemon.json (toolsDiskLock), as ops_worker machine_update tools_disk_lock does: on keeps that
   child Medium, so workers cannot write there; warn only logs it (the recovery). Left out: the install keeps what it has.
+.PARAMETER WinCiFirst
+  With -Update (w6110, machine/ciFirstWin.ts): set what the daemon does about the agents' processes beside a CI job on a
+  Windows CI-first machine in daemon.json (winCiFirst), as ops_worker machine_update win_ci_first does: enforce lowers the
+  processes agents' tools start to BelowNormal while a job runs, warn (the default) only logs what they take (the
+  recovery), off stops it. Left out: the install keeps what it has.
 .PARAMETER MediumAgentFolders
   With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
   temp root and cargo home in daemon.json (mediumAgentFolders), as ops_worker machine_update medium_agent_folders does:
@@ -123,6 +128,7 @@ param(
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
     [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
+    [ValidateSet('off', 'warn', 'enforce')][string]$WinCiFirst,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -293,6 +299,7 @@ if ($Update) {
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
     if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }
+    if ($WinCiFirst) { $argv += @('--win-ci-first', $WinCiFirst) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }

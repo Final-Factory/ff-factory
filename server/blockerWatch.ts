@@ -1253,8 +1253,9 @@ export async function ghChecks(ref: string, run: Runner = runProc, online?: (mac
     console.warn(`blocker watch: gh cannot read pull requests' checks (${ghSaid(r)}); CI blocks read their GitHub Actions runs instead`);
   }
   const body = JSON.parse(a.stdout) as { workflow_runs?: (GhRun & { id?: number })[] };
-  const settled = await settleAwayRuns(m[1], body.workflow_runs ?? [], away, get);
-  const s = runsState({ workflow_runs: body.workflow_runs }, ref, want ?? pr.headRefOid);
+  const runs = await orUnindexedRuns(m[1], want ?? pr.headRefOid, body.workflow_runs ?? [], get);
+  const settled = await settleAwayRuns(m[1], runs, away, get);
+  const s = runsState({ workflow_runs: runs }, ref, want ?? pr.headRefOid);
   return settled && s.green ? { ...s, text: s.text + awayNote(settled, away) } : s;
 }
 
@@ -1271,7 +1272,7 @@ async function runsAtHead(ref: string, repo: string, head: string, at: string | 
   } catch {
     return notAtHead(ref, head, at);
   }
-  runs = runs.filter((r) => !r.head_sha || sameCommit(r.head_sha, head));
+  runs = (await orUnindexedRuns(repo, head, runs, get)).filter((r) => !r.head_sha || sameCommit(r.head_sha, head));
   if (!runs.length) return { ...notAtHead(ref, head, at), none: true };
   const settled = await settleAwayRuns(repo, runs, away, get);
   const s = runsState({ workflow_runs: runs }, ref, head);
@@ -1294,8 +1295,39 @@ async function queuedRunsOr(none: CiState, ref: string, repo: string, head: stri
   } catch {
     return none;
   }
-  const q = queuedRunsState(runs, ref);
+  const q = queuedRunsState(await orUnindexedRuns(repo, head, runs, get), ref);
   return q ? { ...q, head } : none;
+}
+
+/**
+ * w6158: a commit's runs when the `head_sha` filter gave none of them. GitHub's filtered run search (head_sha, branch,
+ * status, event, created, check_suite_id) can miss a run for a long time while the unfiltered list has it: measured
+ * 2026-11-26 on Final-Factory/ffu#1203, run 45871131161 (pull_request, head b3d2850, created 17:50:46Z, status "queued"
+ * with jobs running) was absent from every filtered list at 18:15 and after, while `actions/runs?per_page=100` and
+ * `commits/<sha>/check-suites` both had it. Two workers were resumed with "no CI run exists" by that miss. So the newest
+ * 100 runs unfiltered are searched for the head, then the commit's GitHub Actions check suites (those with check runs; a
+ * suite with none is an app that never ran here). Runs that cannot be read leave `runs` as they were.
+ */
+export async function orUnindexedRuns(repo: string, head: string, runs: (GhRun & { id?: number })[], get: (path: string) => Promise<RunResult>): Promise<(GhRun & { id?: number })[]> {
+  if (runs.some((r) => !r.head_sha || sameCommit(r.head_sha, head))) return runs;
+  const l = await get(`repos/${repo}/actions/runs?per_page=100`);
+  if (l.code === 0) {
+    try {
+      const found = ((JSON.parse(l.stdout) as { workflow_runs?: (GhRun & { id?: number })[] }).workflow_runs ?? []).filter((r) => !!r.head_sha && sameCommit(r.head_sha, head));
+      if (found.length) return found;
+    } catch {
+      /* unreadable: the check suites next */
+    }
+  }
+  const c = await get(`repos/${repo}/commits/${head}/check-suites?per_page=100`);
+  if (c.code !== 0) return runs;
+  try {
+    const suites = (JSON.parse(c.stdout) as { check_suites?: { id?: number; status?: string; conclusion?: string | null; head_sha?: string; latest_check_runs_count?: number; app?: { slug?: string } }[] }).check_suites ?? [];
+    const actions = suites.filter((x) => x.app?.slug === 'github-actions' && (x.latest_check_runs_count ?? 0) > 0);
+    return actions.length ? actions.map((x) => ({ name: `GitHub Actions check suite ${x.id ?? '?'}`, status: x.status, conclusion: x.conclusion, head_sha: x.head_sha ?? head })) : runs;
+  } catch {
+    return runs;
+  }
 }
 
 /** w3527: what a head's workflow runs say when its pull request has no check runs yet: pending while any is unfinished; undefined when it has none or all finished (the rollup's "no checks" stands). */

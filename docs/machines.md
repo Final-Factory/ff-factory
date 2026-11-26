@@ -1261,7 +1261,11 @@ older daemon ignores it and keeps making worktrees.
   With `all`, a worktree becomes a slot repo when a worker is placed in it (the switch to its branch), under the same
   checks except the live agent (the placed one waits on the switch). A failure leaves the worktree whole and the switch
   goes on. The look logs why it passes a worktree by ("not becoming a slot repo yet: an agent is live there"), once
-  each time the reason changes.
+  each time the reason changes. Limits at a placement (w6086's review): up to 90 s waiting for the main clone's lock
+  (past it nothing is done and nothing is held against the sandbox), then up to 90 s of conversion once it holds the
+  lock, plus up to 10 s for a cut git call to end. A conversion that fails or times out after taking the lock is skipped
+  at that sandbox's placements for 6 h (`CONVERT_BACKOFF_MS`); the idle look still tries. A cut that lands after the
+  swap leaves a whole slot repo and logs "became a slot repo".
 - **One branch, one sandbox**: git no longer refuses a branch another sandbox holds, since they share no refs, so the
   pool does (`slotBranchHolder`): `switch_branch` and `create_sandbox` to a branch a slot-repo sandbox holds are
   refused with "branch X is checked out in sandbox Y". Between two worktrees git still refuses in its own words.
@@ -1318,6 +1322,10 @@ older daemon ignores it and keeps making worktrees.
   `tools_disk_lock` (`warn` or `on`, Windows only) writes daemon.json `toolsDiskLock`; the daemon restarts with it. `on`
   keeps a `<root>\tools` child that holds a `.vhd`/`.vhdx` Medium, so workers cannot write there; `warn` (unset) only logs it
   and is the way back.
+- **CI jobs go first on a Windows CI-first machine** (w6110; docs/self-recovery.md "CI jobs go first on LothDesktop"):
+  `ops_worker` `machine_update` `win_ci_first` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `winCiFirst`;
+  the daemon restarts with it. `enforce` lowers agents' tools to Idle while a CI job runs (the jobs themselves run BelowNormal); `warn` (unset) only logs
+  what they use and raises back anything lowered, the way back.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 

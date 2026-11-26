@@ -617,3 +617,54 @@ test('w5845: a pr gate the planner (named by Part of:) set on a row PR that name
   assert.equal(ownsPr(linked[0], ref, { requests: ['w5476'], partOf: ['w2895'] }), false);
   assert.equal(ownsPr(linked[0], ref, { partOf: ['w2895'] }), true);
 });
+
+test('w6158: a queued pull_request run the head_sha filter misses is found in the unfiltered list or the check suites, and its wait stays blocked', async () => {
+  // Measured 2026-11-26 on Final-Factory/ffu#1203: run 45871131161 (pull_request, w6079-disc-glow, head b3d2850, created
+  // 17:50:46Z, "queued" while its jobs ran) was in `actions/runs?per_page=100` and the commit's check suites, never in
+  // `actions/runs?head_sha=...` (nor branch=, status=, event=, created=, check_suite_id=).
+  const ref = 'Final-Factory/ffu#1203';
+  const head = 'b3d285047a13b9c337bcb2ee540768a804548df9';
+  const run = { id: 45871131161, name: 'ci', event: 'pull_request', head_branch: 'w6079-disc-glow', head_sha: head, status: 'queued', conclusion: null, created_at: '2026-11-26T17:50:46Z' };
+  const other = { id: 45870313400, name: 'ci', head_sha: 'a246ddfd23f0e0fbb6d16b1b6a1bc65e40729e20', status: 'queued', conclusion: null };
+  const filtered = { match: new RegExp(`^gh api repos/Final-Factory/ffu/actions/runs\\?head_sha=${head}&per_page=100$`), out: { total_count: 0, workflow_runs: [] } };
+  const unfiltered = (runs: unknown[]) => ({ match: /^gh api repos\/Final-Factory\/ffu\/actions\/runs\?per_page=100$/, out: { workflow_runs: runs } });
+  const suites = { match: new RegExp(`^gh api repos/Final-Factory/ffu/commits/${head}/check-suites\\?per_page=100$`), out: { check_suites: [
+    { id: 124105450513, app: { slug: 'ffgithubrunners' }, status: 'queued', conclusion: null, head_sha: head, latest_check_runs_count: 0 },
+    { id: 124105471667, app: { slug: 'github-actions' }, status: 'queued', conclusion: null, head_sha: head, latest_check_runs_count: 10 },
+  ] } };
+  const pushedAt = NOW - 25 * 60_000;
+  const stillBlocked = (s: Awaited<ReturnType<typeof ghChecks>>) => {
+    assert.equal(s.none, undefined, s.text);
+    assert.equal(s.done, false);
+    const ci = block({ kind: 'ci', ref, what: 'CI on #1203', at: new Date(pushedAt).toISOString() });
+    assert.equal(blockerVerdict(ci, facts([], { ci: () => s, prHealth: () => ({ state: 'open', head, headSeenAt: pushedAt }) })).state, 'open', 'queued 25 min: still blocked');
+  };
+  // The rollup refused (the portal's fine-grained token): the PR's head, then its runs. The filtered list is empty; the unfiltered one has it.
+  const refused = (more: { match: RegExp; out?: unknown; err?: string }[]) =>
+    fakeGh([
+      { match: /actions\/runners/, err: 'refused' },
+      { match: /statusCheckRollup/, err: REFUSED },
+      { match: /--json state,headRefOid$/, out: { state: 'OPEN', headRefOid: head } },
+      filtered,
+      ...more,
+    ]);
+  const viaList = await ghChecks(ref, refused([unfiltered([other, run])]).run);
+  assert.equal(viaList.text, `1 of 1 workflow runs on ${ref} still running (ci)`);
+  stillBlocked(viaList);
+  // Past the newest 100 (or the list unreadable): the commit's GitHub Actions check suite says it runs.
+  const viaSuites = await ghChecks(ref, refused([unfiltered([other]), suites]).run);
+  assert.equal(viaSuites.text, `1 of 1 workflow runs on ${ref} still running (GitHub Actions check suite 124105471667)`);
+  stillBlocked(viaSuites);
+  // An empty rollup (no check runs yet) with the same filtered miss.
+  const empty = fakeGh([
+    { match: /actions\/runners/, err: 'refused' },
+    { match: /--json state,statusCheckRollup,headRefOid$/, out: { state: 'OPEN', statusCheckRollup: [], headRefOid: head } },
+    filtered,
+    unfiltered([run]),
+  ]);
+  stillBlocked(await ghChecks(ref, empty.run));
+  // Truly no run anywhere (no list entry, no Actions suite with check runs): still "no workflow runs yet", so the grace clear can fire.
+  const none = await ghChecks(ref, refused([unfiltered([other]), { ...suites, out: { check_suites: [suites.out.check_suites[0]] } }]).run);
+  assert.equal(none.none, true);
+  assert.match(none.text, /has no workflow runs yet/);
+});

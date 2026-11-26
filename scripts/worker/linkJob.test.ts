@@ -112,6 +112,9 @@ test('w5554: the worker caps mode goes through to the installer update as named;
   // w5959: the tools disk lock, warn or on from the wire; anything else is dropped, never guessed at.
   for (const m of ['warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { toolsDiskLock: m }), { source: '/src', toolsDiskLock: m });
   assert.deepEqual(updateFlagsOf('/src', { toolsDiskLock: 'off' as never }), { source: '/src' });
+  // w6110: win ci first, off, warn or enforce from the wire; anything else is dropped.
+  for (const m of ['off', 'warn', 'enforce'] as const) assert.deepEqual(updateFlagsOf('/src', { winCiFirst: m }), { source: '/src', winCiFirst: m });
+  assert.deepEqual(updateFlagsOf('/src', { winCiFirst: 'on' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'on' as never }), { source: '/src' });
 });
 
