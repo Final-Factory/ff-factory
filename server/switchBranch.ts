@@ -2,6 +2,7 @@ import { run } from './proc.ts';
 import { parseStatus } from './gitStatus.ts';
 import { restoreCommittedBytes } from './committedBytes.ts';
 import { savedBranch } from './saveWork.ts';
+import { guardRemote } from './remoteGuard.ts';
 
 const ENV = { ...process.env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
 const SHARED = /^(master|main|develop)$/;
@@ -74,6 +75,12 @@ export async function switchBranch(opts: {
   }
   const from = st.branch;
   if (from === branch) return { from, to: branch, notes: [`already on ${branch}`] };
+  // w6099: the switch pushes and fetches origin.
+  const no = await guardRemote(async (a) => {
+    const g = await git(dir, a);
+    return g.code === 0 ? g.stdout : undefined;
+  }, `the switch's push and fetch in ${dir}`);
+  if (no) throw new Error(`${no}; nothing was switched`);
 
   // Commits on the current branch that no remote has would be stranded: push them first.
   if (from !== 'detached HEAD') {
