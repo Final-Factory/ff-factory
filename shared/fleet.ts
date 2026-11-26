@@ -7,6 +7,7 @@ import { AGENT_STATE_RANK, agentState, holdsSandbox, placeRank, sortAgents } fro
 import { holdsOf, workLiveAll } from './workState.ts';
 import { newestFirst } from './blockers.ts';
 import { liveReady, type LiveReady } from './liveReady.ts';
+import { isLight } from './sandboxKind.ts';
 
 /**
  * Agents with a process (working, waiting on someone, idle), and stopped ones their wake_me or a queued message will
@@ -133,6 +134,11 @@ export interface FleetComputer {
   /** Its bench queue's mode, holders and waiters (w1835), from its daemon's stats; absent: no daemon, or one before it. */
   bench?: BenchState;
   sandboxes: FleetSandbox[];
+  /**
+   * w5924: its light agent folders, apart from the game sandboxes (one per agent-only worker, no editor, counted against
+   * the agent cap only): never in `sandboxes`, so "1/3 sandboxes" counts game sandboxes alone.
+   */
+  lights: FleetSandbox[];
   /** max_sandboxes (machines) or limits.maxSandboxes (host), when known. */
   sandboxLimit?: number;
   /** Unity editors there: every one its daemon counts (w469), else the sandbox editors running or starting. */
@@ -227,10 +233,11 @@ const inUseFirst = (list: FleetSandbox[]) =>
     .map((x) => x.s);
 
 function summarize(c: Omit<FleetComputer, 'live' | 'busy' | 'attention'>): FleetComputer {
-  const places = c.sandboxes.map((s) => s.agents);
+  const all = [...c.sandboxes, ...c.lights];
+  const places = all.map((s) => s.agents);
   const live = places.reduce((n, p) => n + p.live.length, 0);
   const busy = places.reduce((n, p) => n + p.live.filter(busyAgent).length, 0);
-  const attention = c.sandboxes.reduce((n, s) => n + s.attention, 0);
+  const attention = all.reduce((n, s) => n + s.attention, 0);
   return { ...c, live, busy, attention };
 }
 
@@ -248,7 +255,8 @@ export function fleetOf(
   const ledger = chatLedger(app.work, byId, now);
   const host = (local?: Machine) => {
     // With its own daemon, this host's sandboxes are that daemon's; without one it holds none (the portal, w510).
-    const daemonSandboxes = local ? machineSandboxes(local) : [];
+    const daemonAll = local ? machineSandboxes(local) : [];
+    const daemonSandboxes = daemonAll.filter((s) => !isLight(s.machineSandbox));
     return summarize({
       key: 'host',
       name: app.system?.hostname ? shortHost(app.system.hostname) : 'This host',
@@ -259,6 +267,7 @@ export function fleetOf(
       stats: app.system,
       ...(local && app.machineStats?.[local.id]?.bench ? { bench: app.machineStats[local.id].bench } : {}),
       sandboxes: inUseFirst(daemonSandboxes),
+      lights: daemonAll.filter((s) => isLight(s.machineSandbox)),
       sandboxLimit: local?.sandboxRoot ? (local.maxSandboxes ?? 3) : undefined,
       // Every Unity process there, as its daemon counts them (w469), else the sandbox editors it reports.
       editors: (local && app.machineStats?.[local.id]?.unity?.used) ?? daemonSandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
@@ -288,7 +297,8 @@ export function fleetOf(
     });
   const local = app.machines.find((m) => m.local);
   const machines = app.machines.filter((m) => m !== local).map((m) => {
-    const sandboxes = machineSandboxes(m);
+    const all = machineSandboxes(m);
+    const sandboxes = all.filter((s) => !isLight(s.machineSandbox));
     return summarize({
       key: m.id,
       name: m.name ?? m.id,
@@ -299,6 +309,7 @@ export function fleetOf(
       stats: app.machineStats?.[m.id],
       ...(app.machineStats?.[m.id]?.bench ? { bench: app.machineStats[m.id].bench } : {}),
       sandboxes: inUseFirst(sandboxes),
+      lights: all.filter((s) => isLight(s.machineSandbox)),
       // Pool defaults as the daemon applies them (docs/machines.md): 3 sandboxes, 2 editors once sandbox_root is set.
       sandboxLimit: m.sandboxRoot ? (m.maxSandboxes ?? 3) : undefined,
       editors: app.machineStats?.[m.id]?.unity?.used ?? sandboxes.filter((s) => s.unity === 'running' || s.unity === 'starting').length,
@@ -329,7 +340,9 @@ export function capacityLine(c: FleetComputer): string {
   if (!c.host && c.sandboxLimit === undefined) return 'no sandboxes';
   // "1/3 sandboxes" counts against the limit, so it stays plural; "1 sandbox" without one does not.
   const n = (count: number, limit: number | undefined, one: string, many: string) => (limit !== undefined ? `${count}/${limit} ${many}` : `${count} ${count === 1 ? one : many}`);
-  return `${n(sandboxesInUse(c), c.sandboxLimit, 'sandbox', 'sandboxes')} · ${n(c.editors, c.editorLimit, 'editor', 'editors')}`;
+  // w5924: its light agent folders, when it has any, said apart: they are no game sandboxes.
+  const lights = c.lights?.length ? ` · ${c.lights.length} light` : '';
+  return `${n(sandboxesInUse(c), c.sandboxLimit, 'sandbox', 'sandboxes')} · ${n(c.editors, c.editorLimit, 'editor', 'editors')}${lights}`;
 }
 
 /**
@@ -340,7 +353,8 @@ export function capacityHint(c: FleetComputer): string | undefined {
   if (c.sandboxLimit === undefined) return undefined;
   const inUse = sandboxesInUse(c);
   const made = c.sandboxes.length;
-  return `Sandboxes: ${inUse} in use, ${made - inUse} free${made < c.sandboxLimit ? `; ${made} of ${c.sandboxLimit} made` : ''}`;
+  const lights = c.lights?.length ? `. Light agent folders (agent-only work, no editor): ${c.lights.length}` : '';
+  return `Sandboxes: ${inUse} in use, ${made - inUse} free${made < c.sandboxLimit ? `; ${made} of ${c.sandboxLimit} made` : ''}${lights}`;
 }
 
 /**

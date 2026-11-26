@@ -416,7 +416,7 @@ export interface SessionInfo {
   savedWork?: { sha: string; files: number; pushed: boolean; branch: string; at: string; sideRef?: string };
   /** Placed again in another sandbox than the one it stopped in (w640): its next message says where, then this goes. */
   /** `shared` (w1135): work that is not the game's, resumed on an agent seat beside another agent; its game tree is that agent's. */
-  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true };
+  movedFrom?: { sandbox: string; path: string; at: string; why: string; branch: string; shared?: true; light?: true };
   /**
    * Its Live view ended because its sandbox was released while it waited (w1582, server/placeAgain.ts liveLostNote): its
    * next message asks it to stage the view again with these settings, then this goes.
@@ -1142,6 +1142,8 @@ export interface WorkerFenceReport {
   since?: string;
 }
 
+import type { RunnerHoldReport } from './runnerHold.ts';
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -1195,6 +1197,11 @@ export interface Machine {
    * with the probe's error. A failed fence holds its sandbox workers, and placement counts the machine busy.
    */
   fence?: WorkerFenceReport;
+  /**
+   * w5916: what a person's hold (placement.hold, a drain) does to its CI runners, as its daemon last said: which are
+   * stopped, which still run a job. Absent with no hold. Shown beside the hold (runnerHoldText).
+   */
+  runnerHold?: RunnerHoldReport;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.
@@ -1303,6 +1310,12 @@ export interface Machine {
 export interface MachineSandbox {
   /** The folder name, also the Unity project and MCP instance name ("<id>@<hash>"). Addressed as "<machine>/<id>". */
   id: string;
+  /**
+   * "light" (w5924, machine/lightFolders.ts): a light agent folder, `<sandbox_root>/agent-work/<id>` (ids agent1, agent2,
+   * ...), for work that needs only an agent slot: a plain folder, no branch, no Library, no editor. It counts against the
+   * machine's agent cap only, never among its game sandboxes (shared/sandboxKind.ts). Unset: a game sandbox.
+   */
+  kind?: 'light';
   branch: string;
   base: string;
   path: string;
@@ -1900,9 +1913,10 @@ export interface TokenWarning {
    * exhausted: every token of the person is used up; held: every token is at a limit (new work waits); reserve: runs are
    * inside the dispatcher's buffer; ci-read: the portal's GitHub token cannot read CI on pull requests (w889); github-token:
    * a GitHub token lacks a required repository or permission, or nears its expiry (w904); github-rate-limit: GitHub is rate
-   * limiting a token's account, which says nothing about the token's permissions (w1186).
+   * limiting a token's account, which says nothing about the token's permissions (w1186); gh-login: GitHub refuses a
+   * machine's own gh login with 401 (w5932).
    */
-  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit';
+  kind: 'exhausted' | 'held' | 'reserve' | 'ci-read' | 'github-token' | 'github-rate-limit' | 'gh-login';
   /** The user id whose pool it is: only that person's pages show it (server/index.ts hostForUser). Absent: for everyone. */
   person?: string;
   /** The owners see it too, besides `person` (w904: a GitHub token that lacks a requirement). */

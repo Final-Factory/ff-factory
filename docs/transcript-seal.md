@@ -57,7 +57,8 @@ close that:
   is already in use"). So the Linux and Windows fences cannot be given the new file ahead of time.
 
 FF Factory itself writes into a transcript in one place: the tool-schema refresh before a resume (`server/keptTools.ts`,
-w2626), same length, in place. The seal is checked before it and the hash taken again after it.
+w2626), same length, in place. The seal is checked before it and the hash taken again after it, from the hash checkpoint (every 64 MB) at or before
+the first byte it rewrote, not from the start (w5931, `rehashFrom`).
 
 ## The cases at resume
 
