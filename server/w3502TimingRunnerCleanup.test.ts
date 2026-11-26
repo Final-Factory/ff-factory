@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { CleanupGuard } from './cleanup.ts';
-import { fenceToRoot } from './cleanup.ts';
+import { CleanupRunner, fenceToRoot } from './cleanup.ts';
 import { cleanupPass } from './staleOutput.ts';
-import { installLeftoverSettings, mergePlans, planInstallLeftovers, runnerBusyNow, runnerJobWhy, timingHeld, type ProcLite } from './installLeftovers.ts';
+import { installLeftoverSettings, mergePlans, planInstallLeftovers, runnerBusyNow, runnerJobWhy, runnerWorkRoute, timingHeld, type ProcLite } from './installLeftovers.ts';
 import { judgeTiming } from './cleanupFolders.ts';
 
 /**
@@ -236,4 +236,45 @@ test('w5502: a job handed out between the plan and the rename keeps its job fold
   // An unreadable process list keeps the item too, and other rules are never asked.
   assert.match((await runnerBusyNow(async () => undefined)({ rule: 'ffu-runner-work', runner: path.join(root, 'ffu-runners', 'r1') })) ?? '', /could not be read/);
   assert.equal(await runnerBusyNow(async () => undefined)({ rule: 'timing-cache' }), undefined);
+});
+
+test("w5929: machine_cleanup's asked pass takes an idle runner's job folder written hours ago on a disk that is not low; a busy runner still keeps it", async (t) => {
+  const root = install(t);
+  runnersTree(root);
+  // LothDesktop's case (w5911): V: well above the soft threshold, the job folders hours old, far under runnerWorkDays.
+  put(root, 'ffu-runners/r1/_work/ffu/ffu/target/debug/fresh.rlib', 2);
+  put(root, 'ffu-runners/r2/_work/ffu/ffu/target/debug/fresh.rlib', 2);
+  const procs = [listener(root, 'r1', 100), listener(root, 'r2', 200), worker(root, 'r2', 201, 200)];
+  const seen: boolean[] = [];
+  let planned: Awaited<ReturnType<typeof plan>> | undefined;
+  const runner = new CleanupRunner({
+    settings: () => ({ everyMinutes: 60, softFreeGB: 60 }),
+    diskPaths: () => [root],
+    statfs: async () => ({ free: 170 * 2 ** 30, total: 360 * 2 ** 30 }),
+    // The daemon's pass hands `low` to planInstallLeftovers (machine/daemon.ts, the stale step); this one plans and removes nothing.
+    pass: async (low) => {
+      seen.push(low);
+      planned = await plan(root, { low, procs, runnerLog: () => idleLog(NOW - HOUR) });
+      return { removed: [], failed: [], bytes: 0 };
+    },
+    consumers: async () => [],
+    log: () => undefined,
+    done: () => undefined,
+  });
+  assert.equal((await runner.tick())?.trigger, 'hourly');
+  assert.ok(!taken(root, planned!).has('ffu-runners/r1/_work/ffu'), 'the hourly pass keeps it: 2 h is under runnerWorkDays');
+  assert.equal((await runner.run('asked'))?.trigger, 'asked');
+  assert.deepEqual(seen, [false, true], 'an asked pass is a low one whatever the free space');
+  const got = taken(root, planned!);
+  assert.ok(got.has('ffu-runners/r1/_work/ffu'), 'idle r1: its job folder goes on the asked pass');
+  assert.ok(![...got].some((x) => x.startsWith('ffu-runners/r2/')), 'r2 runs a job: kept even on an asked pass');
+  for (const x of got) assert.ok(!path.isAbsolute(x) && !x.startsWith('..'), `inside the install folder: ${x}`);
+});
+
+test('w5929: the route a worker is told names machine_cleanup and the two ages, from the settings', () => {
+  const s = runnerWorkRoute();
+  assert.match(s, /machine_cleanup on this machine/);
+  assert.match(s, /after 14 days untouched, or 15 min when the disk is low/);
+  assert.match(s, /only while|while no job runs/);
+  assert.match(runnerWorkRoute({ runnerWorkDays: 3, lowCacheSettleMinutes: 20 }), /after 3 days untouched, or 20 min/);
 });

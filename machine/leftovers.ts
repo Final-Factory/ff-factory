@@ -51,6 +51,7 @@ import { run } from '../server/proc.ts';
 import { factsProblem, finishedRows, finishedSession, judgePath, judgeWithGit, planFolders, renderFolders, type CleanupFacts, type FolderRow, type SlotContext } from '../server/cleanupFolders.ts';
 import { isAlive } from '../server/proc.ts';
 import { freeableBytes, norm, within, type Freeable } from '../server/cleanup.ts';
+import { runnerWorkRoute } from '../server/installLeftovers.ts';
 import { publishedFile, readPublished } from '../server/published.ts';
 import { parsePsJson } from '../server/watchdog.ts';
 import { driveLabel, inNeverGames, installDrive, onInstallDrive } from '../server/rootFence.ts';
@@ -1614,7 +1615,7 @@ export async function removeFolders(
       // _work\ffu at 2026-11-25 03:24 UTC.
       const runnerWork = /^ffu-runners\/[^/]+\/_work\/./i.test(path.relative(root, p).split(path.sep).join('/'));
       if (runnerWork && (code === 'EPERM' || code === 'EACCES')) {
-        no(a, `a fenced worker cannot delete an FFU runner's folders (${code}: they carry a Medium integrity label a Low integrity process cannot write); the daemon's clean-up rule ffu-runner-work removes this one on its own pass while no job runs: after 15 min untouched when the disk is low, else after 14 days`);
+        no(a, `a fenced worker cannot delete an FFU runner's folders (${code}: they carry a Medium integrity label a Low integrity process cannot write); ${runnerWorkRoute()}`);
         continue;
       }
       no(a, `the delete failed part-way (${code ?? (e as Error).message})${fs.existsSync(p) ? '; what is left stays: run it again, or report it' : ''}`);

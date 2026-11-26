@@ -250,7 +250,10 @@ leave behind.
 Label\Medium Mandatory Level:(OI)(CI)(NW)`, inherited by `_work`), so a fenced worker at Low integrity gets EPERM on every
 file there, job or no job. `ff-leftovers remove` of a runner job folder therefore says the daemon takes it: the daemon runs
 at Medium, and its rule `ffu-runner-work` (`server/installLeftovers.ts`) removes a job folder while no job runs, after 15
-min untouched on a low pass, else after `runnerWorkDays` (14). It renames the folder aside before deleting
+min untouched on a low pass, else after `runnerWorkDays` (14). A disk that is not low gets no low pass by itself, so `machine_cleanup` asks for one: its
+asked pass counts as low (`server/cleanup.ts` `run`) and takes the folder once untouched 15 min, while no job runs. The
+dispatcher has it, and since w5929 so does a worker on a disk clean-up request of its own machine (`Agents.workerCleanup`);
+`ff-leftovers` says so (`runnerWorkRoute` in `server/installLeftovers.ts`). It renames the folder aside before deleting
 (`server/renameAway.ts`), and the rename fails on a file a job holds open, so a running job keeps its folder. It took
 LothDesktop's 9.9 GB `_work\ffu` at 2026-11-24 19:34 and 2026-11-25 03:24 UTC (portal clean-up log); a CI job builds it
 again.

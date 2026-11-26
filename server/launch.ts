@@ -245,6 +245,10 @@ export const CATALOG = {
     player: z.string().max(20).optional().describe("w4613: the attachment id publish_attachment answered for your built player of the head commit (publish_attachment player: <commit>). A leg on a computer of the same OS that lacks it fetches it into its own player cache instead of building (a Windows build took 229 s; its pack is about 750 MB); a leg on another OS builds as before. Without commit, the player's commit is the run's."),
     commit: z.string().max(40).optional().describe('w2057: the head commit the legs run (git rev-parse HEAD). A pair run of the same pull request that finished on it answers with its result, and nothing is filed. w4601: a leg goes first on a computer whose player cache already holds a player of it, and is told its path, so pass it whenever you know it. w4925: a run whose commit CI fails to compile (error CS) ends with those errors before any leg builds or runs a player.'),
   },
+  /** w5929: a clean-up worker asks its own machine's daemon for one clean-up pass now (Agents.workerCleanup). */
+  machine_cleanup: {
+    dry_run: z.boolean().optional().describe('List what the pass would remove and what it would keep, removing nothing.'),
+  },
   /** w2969 (docs/orchestrators.md, "Follow-up requests"): briefs a worker wrote for new requests, which only an orchestrator can file. */
   hand_up_requests: {
     items: z

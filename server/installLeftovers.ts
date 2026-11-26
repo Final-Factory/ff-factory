@@ -214,6 +214,18 @@ export function timingHeld(root: string, inFlight?: string, alive: (pid: number)
 }
 
 /**
+ * How an idle FFU runner's job folder goes when a worker cannot delete it (w5929): on Windows the runners' Medium integrity
+ * label refuses a fenced worker (w5499), and the daemon's own hourly pass takes it only after runnerWorkDays, so on a disk that
+ * is not low a clean-up worker was told "the daemon removes it" with no way to make that happen (w5911, LothDesktop's 15.1 GB
+ * _work\ffu). machine_cleanup (the dispatcher's tool, and a disk clean-up worker's on its own machine: Agents.workerCleanup)
+ * runs an 'asked' pass, which counts as low (server/cleanup.ts run), so ffu-runner-work takes the folder after the settle
+ * time, with its job check and its rename-aside unchanged.
+ */
+export function runnerWorkRoute(s: Pick<InstallLeftoverSettings, 'runnerWorkDays' | 'lowCacheSettleMinutes'> = INSTALL_LEFTOVER_DEFAULTS): string {
+  return `the daemon's rule ffu-runner-work takes it while no job runs: by itself only after ${s.runnerWorkDays} days untouched, or ${s.lowCacheSettleMinutes} min when the disk is low, and at once on a machine_cleanup pass (an asked pass counts as a low one and takes a job folder untouched ${s.lowCacheSettleMinutes} min). On a disk clean-up request of this machine run mcp__machine__machine_cleanup yourself; on any other request it stays until then: name it in your report for the dispatcher's machine_cleanup on this machine`;
+}
+
+/**
  * Why an Actions runner's `_work` must stay now, or undefined when the runner holds no job (w3502): unknown processes, a
  * Runner.Worker of this runner, any process run from its _work folder, or a listener whose _diag log says it was just handed a
  * job (machine/benchRunners.ts holdsJob, the check that pauses LothDesktop's FFU runners safely). A runner whose listener is
