@@ -145,7 +145,9 @@ export function workerToolCacheEnv(root: string, platform: NodeJS.Platform = pro
 export function editorTempEnv(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): Record<string, string> {
   if (platform !== 'win32' || !env.FF_WORKER_ROOT) return {};
   const t = path.join(env.FF_WORKER_ROOT, 'tmp', 'unity');
-  return { TMP: t, TEMP: t };
+  // TMPDIR too (w6000): Git Bash, Python and the tools the editor starts read it, and inherited it would be the daemon's
+  // own <root>/tmp-daemon, closed to a fenced (Low) editor.
+  return { TMP: t, TEMP: t, TMPDIR: t };
 }
 
 /** w5833: the longest TMPDIR a sandbox editor gets. Unix socket paths stop at 104 bytes (macOS; 108 on Linux), and the editor's .NET binds `<TMPDIR>/dotnet-diagnostic-<pid>-<start>-socket` (up to 51 more bytes) and `<TMPDIR>/<random>.xyu/ipc_<pid>_htc_1` there (measured on biscuit). */

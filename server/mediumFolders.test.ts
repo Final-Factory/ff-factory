@@ -206,3 +206,26 @@ for (const [mode, folders, said] of [['on', undefined, 'warn'], ['on', 'on', 'on
     } else assert.equal(medium.DOTNET_CLI_HOME, undefined);
   });
 }
+
+test('w6000 (w6024 review, point 1): a Medium agent whose own temp folder cannot be made falls back to the shared root, not to the system temp', (t) => {
+  const root = install(t);
+  const tempDir = path.join(root, 'tmp');
+  const was = process.env.FF_SYSTEM_TMPDIR;
+  process.env.FF_SYSTEM_TMPDIR = path.join(root, 'sys-tmp');
+  t.after(() => (was === undefined ? delete process.env.FF_SYSTEM_TMPDIR : (process.env.FF_SYSTEM_TMPDIR = was)));
+  const d = new Daemon(
+    { portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(root, 'repo'), appDir: path.join(root, 'daemon'), root, tempDir, maxEventsFile: null, workerIntegrity: 'low', writeLock: true, workerFence: 'seatbelt', mediumAgentFolders: 'on' },
+    () => {
+      throw new Error('no sessions here');
+    },
+    PROBES,
+  );
+  t.after(() => d.shutdown());
+  assert.equal(d.mediumFolders().tempRoot, mediumTempRoot(root), 'planned');
+  // Its root turns into a file after the plan: sessionTempEnv cannot make the session's folder there.
+  fs.rmSync(mediumTempRoot(root), { recursive: true, force: true });
+  fs.writeFileSync(mediumTempRoot(root), '');
+  assert.equal(sessionTempEnv(mediumTempRoot(root), 'med-x').TMP, process.env.FF_SYSTEM_TMPDIR, 'sessionTempEnv alone names the system temp');
+  const env = (d as unknown as Inside).agentTempEnv('med-x', false);
+  for (const k of ['TMP', 'TEMP', 'TMPDIR']) assert.equal(env[k], sessionTempDir(tempDir, 'med-x'), k);
+});

@@ -105,6 +105,7 @@ import { benchLockDir, readBenchLock, readBenchQueue, readPassedMarks, timedHold
 import { editorBenchSession, editorSessions, passedShared, raisedSessions, type PassedMark } from './benchRaise.ts';
 import { readBenchWarnings } from './benchWarnings.ts';
 import { BenchRunners, isOpsRunner, readListenerLog, readRunnersFile, runnerCensus, sendSignal, writeRunnersFile } from './benchRunners.ts';
+import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
@@ -278,6 +279,12 @@ export interface DaemonConfig {
    * editor_tmpdir`, read at the daemon's start, and off is the recovery. Windows editors have `<root>/tmp/unity` always.
    */
   editorTmpdir?: 'on' | 'off';
+  /**
+   * w6000: "on" (the default when unset) points the daemon's own TMPDIR, TEMP and TMP at `<root>/tmp-daemon`
+   * (machine/daemonTemp.ts), so its os.tmpdir() and what it starts write inside the worker root. Set remotely by `ops_worker
+   * machine_update daemon_tmpdir`, read at the daemon's start; "off" is the recovery.
+   */
+  daemonTmpdir?: 'on' | 'off';
   /**
    * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
    * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
@@ -464,7 +471,7 @@ export function readToken(cfg: Pick<DaemonConfig, 'token' | 'tokenFile'>, read: 
 export const appDirOfConfig = (cfg: Pick<DaemonConfig, 'appDir'>, home = HOME) => cfg.appDir || path.join(home, '.ff-factory');
 
 /** Where agents' own temp folders go: the machine's temp_dir, else the system's. Exported for tests. */
-export const agentTempRoot = (tempDir: string | undefined) => tempDir || os.tmpdir();
+export const agentTempRoot = (tempDir: string | undefined) => tempDir || systemTempDir();
 
 /** The `claude` folder of each agent's temp folder (<temp root>/<ffa-session>/claude): Claude Code's background task output. */
 export function cliTempFolders(tempRoot: string): string[] {
@@ -1209,7 +1216,7 @@ export class Daemon {
     } catch {
       // never sent yet: the defaults
     }
-    const env = hostCleanupEnv(cfg.tempDir);
+    const env = hostCleanupEnv(cfg.tempDir, cfg.root);
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
@@ -1480,7 +1487,11 @@ export class Daemon {
    */
   private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
     const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
-    const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    // Its own folder only when sessionTempEnv made it there (w6024 review, point 1): its fallback names the system temp,
+    // which must not pass for the Medium folder and skip the shared root and this warning.
+    const want = m.tempRoot ? sessionTempDir(m.tempRoot, id) : undefined;
+    const made = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    const own = want && made.TMP === want ? made : {};
     if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
     const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' && own.TMP ? 'on' : 'warn' };
     return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}), ...caches };
@@ -1514,7 +1525,7 @@ export class Daemon {
       inUse: [
         ...[...this.entries.values()].filter((e) => e.s.live).flatMap((e) => this.sessionTemps(e.s.info.id)),
         // Every bash of this user uses it as /tmp, whichever session's folder it was.
-        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
+        ...[keepGitBashTmp(this.bashTmp, [systemTempDir(), os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
       ],
       home: HOME,
       // Before the portal's welcome nobody knows which stopped workers a request waits for (w1379): every worker folder stays.
@@ -4995,6 +5006,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   const cargo = cfg.root ? workerCargoHome(cfg.root, process.env, HOME) : undefined;
   if (cargo) process.env.CARGO_HOME = cargo.home;
   if (cfg.root) for (const [k, v] of Object.entries(rootEnv(cfg.root))) process.env[k] ??= v;
+  // w6000: the daemon's own temp folder inside the root (machine/daemonTemp.ts); a folder that cannot be made only warns.
+  log(applyDaemonTmpdir(process.env, cfg.root, cfg.daemonTmpdir).line);
   // w5565: the workers' uv cache carried over from an older daemon moves to the Medium one too.
   const mediumUv = cfg.root ? mediumUvCacheFor(process.env, cfg.root) : undefined;
   if (mediumUv) process.env.UV_CACHE_DIR = mediumUv;
