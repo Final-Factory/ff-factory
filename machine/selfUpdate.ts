@@ -94,9 +94,13 @@ export function jobInFlight(job: UpdateJob | undefined): boolean {
  * not the job's any more (its pid now another program's), or is hung: alive but its update-job.log unwritten for `quietMs`.
  * A live job process whose log still grows is never ended, however old. `quietMs` is a guess with room: the job's longest
  * silent steps are the 3 min wait for the portal (linkJob.ts PUT_BACK) and an installer step; a tools run ends itself at
- * 30 min (linkJob.ts TOOLS_JOB_MS).
+ * 30 min (linkJob.ts TOOLS_JOB_MS). Both clocks count only time this daemon was awake to look (w5983's review): a look
+ * more than `gapMs` after the last (the computer slept, the loop was blocked, the daemon restarted) starts them again, so a
+ * job frozen by sleep is not taken for hung when the computer wakes. A staged job, or one whose process is gone, is ended
+ * only once this daemon has watched it so for `watchMs`: after a reboot the job's own logon task takes it over first
+ * (linkJob.ts resumes it, or puts the old code back).
  */
-export const JOB_LIMIT = { stagedMs: 10 * 60_000, inFlightMs: 45 * 60_000, quietMs: 15 * 60_000 };
+export const JOB_LIMIT = { stagedMs: 10 * 60_000, inFlightMs: 45 * 60_000, quietMs: 15 * 60_000, watchMs: 5 * 60_000, gapMs: 3 * 60_000 };
 
 const minutes = (ms: number) => Math.round(ms / 60_000);
 
@@ -114,38 +118,46 @@ export function jobOverdue(job: UpdateJob | undefined, now = Date.now()): string
 export interface JobLook {
   /** The process's command line; undefined when it cannot be read (then it is never ended as another program's). */
   command?: string;
-  /** When its update-job.log last grew (its mtime, or a growth this daemon saw). */
+  /** When its update-job.log last grew, as this daemon saw it awake (endOverdue); undefined: never. */
   logAt?: number;
+  /** How long this daemon has watched the job, awake, as it is now (staged, or its process gone); undefined: not yet. */
+  watchedMs?: number;
 }
 
 /**
- * Whether a job is to be ended (w5938), and why: undefined for one within its limits, ended, or progressing. `kill` says its
- * process is alive and hung, and is ended first. The pid is the job's only when its command line names linkJob.ts.
+ * Whether a job past its limit is to be ended (w5938), and why: undefined for one within its limits or done. `kill` says its
+ * process is alive and hung, and is ended first; `hold` says why one past its limit is not ended (yet). The pid is the job's
+ * only when its command line names linkJob.ts.
  */
-export function jobToEnd(job: UpdateJob | undefined, now: number, look: JobLook = {}): { reason: string; kill: boolean } | undefined {
+export function jobToEnd(job: UpdateJob | undefined, now: number, look: JobLook = {}): { reason: string; kill: boolean; hold?: string } | undefined {
   if (!job || job.phase === 'done') return undefined;
   const age = now - Date.parse(job.createdAt);
   const id = `job ${job.id.slice(0, 8)} (${job.form})`;
+  // Staged, or its process gone: ended once watched so for watchMs, so a logon task resuming it after a reboot goes first.
+  const watched = (reason: string) => {
+    const w = look.watchedMs ?? 0;
+    return w >= JOB_LIMIT.watchMs ? { reason, kill: false } : { reason, kill: false, hold: `this daemon has watched it so for ${minutes(w)} of the ${minutes(JOB_LIMIT.watchMs)} min it waits for the job's own task to take it over` };
+  };
   if (job.phase === 'staged') {
     if (!(age > JOB_LIMIT.stagedMs)) return undefined;
-    return { reason: `${id} was staged ${minutes(age)} min ago and its process never took it (limit ${minutes(JOB_LIMIT.stagedMs)} min)`, kill: false };
+    return watched(`${id} was staged ${minutes(age)} min ago and its process never took it (limit ${minutes(JOB_LIMIT.stagedMs)} min)`);
   }
   if (!(age > JOB_LIMIT.inFlightMs)) return undefined;
   const over = `${id} has run ${minutes(age)} min (limit ${minutes(JOB_LIMIT.inFlightMs)} min)`;
-  if (!alive(job.pid)) return { reason: `${over} and its process (pid ${job.pid ?? 'none'}) is gone without a result`, kill: false };
-  if (look.command !== undefined && !/linkJob\.ts/.test(look.command)) return { reason: `${over} and its pid ${job.pid} is now another program's, so its process is gone without a result`, kill: false };
-  if (look.command === undefined) return undefined; // alive, and not known to be the job's: never ended
-  const quiet = look.logAt === undefined ? Infinity : now - look.logAt;
-  if (!(quiet > JOB_LIMIT.quietMs)) return undefined; // alive and writing its log: progressing
-  return { reason: `${over} and its process (pid ${job.pid}) is hung: its log unwritten for ${Number.isFinite(quiet) ? `${minutes(quiet)} min` : 'its whole run'} (limit ${minutes(JOB_LIMIT.quietMs)} min)`, kill: true };
+  if (!alive(job.pid)) return watched(`${over} and its process (pid ${job.pid ?? 'none'}) is gone without a result`);
+  if (look.command !== undefined && !/linkJob\.ts/.test(look.command)) return watched(`${over} and its pid ${job.pid} is now another program's, so its process is gone without a result`);
+  if (look.command === undefined) return { reason: over, kill: false, hold: `its process (pid ${job.pid}) is alive and its command line could not be read, so it is not known to be the job's` };
+  const quiet = look.logAt === undefined ? 0 : now - look.logAt;
+  if (!(quiet > JOB_LIMIT.quietMs)) return { reason: over, kill: false, hold: 'its process is alive and still writing its log' };
+  return { reason: `${over} and its process (pid ${job.pid}) is hung: its log unwritten for ${minutes(quiet)} min while this daemon watched (limit ${minutes(JOB_LIMIT.quietMs)} min)`, kill: true };
 }
 
 /** The refusal while a job is in flight: which job, how long, and whether it is past its limit (w5938). */
-export function inFlightRefusal(job: UpdateJob | undefined, now = Date.now()): string {
+export function inFlightRefusal(job: UpdateJob | undefined, now = Date.now(), hold = 'its process is alive and still writing its log'): string {
   const base = 'an update job of this machine is still running';
   if (!job || !jobInFlight(job)) return base;
   const over = jobOverdue(job, now);
-  if (over) return `${base}: ${over}, but its process is alive and still writing its log, so it is not ended (w5938)`;
+  if (over) return `${base}: ${over}, but ${hold}, so it is not ended (w5938)`;
   return `${base} (job ${job.id.slice(0, 8)}, ${job.form}, ${minutes(now - Date.parse(job.createdAt))} min since it was made)`;
 }
 
@@ -153,13 +165,25 @@ export function inFlightRefusal(job: UpdateJob | undefined, now = Date.now()): s
 export async function processCommand(pid: number, platform: NodeJS.Platform = process.platform): Promise<string | undefined> {
   try {
     if (platform === 'linux') return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
-    const run = (cmd: string, args: string[]) =>
-      new Promise<string | undefined>((resolve) => execFile(cmd, args, { timeout: 15_000, windowsHide: true }, (e, out) => resolve(e ? undefined : String(out).trim())));
-    if (platform === 'win32') return await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CommandLine`]) || undefined;
-    return await run('ps', ['-o', 'command=', '-p', String(Math.trunc(pid))]) || undefined;
+    const o = { timeout: 15_000, windowsHide: true };
+    const out = await new Promise<string | undefined>((resolve) => {
+      const done = (e: Error | null, out: string) => resolve(e ? undefined : String(out).trim());
+      if (platform === 'win32') execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${Math.trunc(pid)}').CommandLine`], o, done);
+      else execFile('ps', ['-o', 'command=', '-p', String(Math.trunc(pid))], o, done);
+    });
+    return out || undefined;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Stop a hung job process (w5938). On Windows the job's git, npm or installer would outlive its node (TerminateProcess ends
+ * that one process), so its whole tree is ended with taskkill /T /F; elsewhere the signal goes to the job process.
+ */
+export async function stopProcess(pid: number, sig: NodeJS.Signals, platform: NodeJS.Platform = process.platform): Promise<void> {
+  if (platform !== 'win32') return void process.kill(pid, sig);
+  await new Promise<void>((resolve, reject) => execFile('taskkill', ['/PID', String(Math.trunc(pid)), '/T', '/F'], { timeout: 15_000, windowsHide: true }, (e) => (e && alive(pid) ? reject(e) : resolve())));
 }
 
 /** The machine's credential never leaves in a report: any ffm_ token in the text is cut down to its id. */
@@ -424,7 +448,9 @@ export interface SelfUpdaterDeps {
   launch?: typeof launchJob;
   /** w5938: a job process's command line (processCommand) and the signal that ends a hung one; tests replace them. */
   command?: (pid: number) => Promise<string | undefined>;
-  kill?: (pid: number, signal: NodeJS.Signals) => void;
+  kill?: (pid: number, signal: NodeJS.Signals) => void | Promise<void>;
+  /** How long a stopped job process is waited for after each signal (w5938); tests shorten it. */
+  stopWaitMs?: number;
   /** w5546: sets the worker read fence's mode (daemon_control read-fence-off / read-fence-warn / read-fence-on). */
   readFence?: (mode: 'off' | 'warn' | 'on') => Promise<void>;
   remove?: typeof removeJob;
@@ -455,8 +481,14 @@ export class SelfUpdater {
   private removing: Promise<void> | undefined;
   /** Jobs past their limit already warned of (JOB_LIMIT), so the tick says it once. */
   private readonly overdueWarned = new Set<string>();
-  /** The job's update-job.log as this daemon last saw it: its size, and when it grew (JobLook.logAt). */
-  private logSeen: { size: number; at: number } | undefined;
+  /** The job's update-job.log as this daemon last looked (`seen`): its size, and when it grew or the clock started (JobLook.logAt). */
+  private logSeen: { id: string; size: number; at: number; seen: number } | undefined;
+  /** The job as this daemon last looked (`seen`), and since when it has been so (JobLook.watchedMs). */
+  private watch: { key: string; since: number; seen: number } | undefined;
+  /** The job process's command line as last read, so Windows starts PowerShell once in 5 min, not every tick. */
+  private commandSeen: { pid: number; command: string | undefined; at: number } | undefined;
+  /** Why the job past its limit is not ended, for the tick's warning and the refusal. */
+  private held: { id: string; hold: string; stopFailedAt?: number } | undefined;
   /** An overdue job being ended: the tick and a new update wait for the one look (endOverdue). */
   private ending: Promise<void> | undefined;
   /** Answers to the portal's calls, kept until the link surely had them (ANSWERS). */
@@ -548,7 +580,7 @@ export class SelfUpdater {
     await this.removing;
     if (this.busy) return refuse('an update job of this machine is still running (this daemon is fetching or starting one)');
     const prior = readJson<UpdateJob>(f.job);
-    if (jobInFlight(prior)) return refuse(inFlightRefusal(prior, this.now()));
+    if (jobInFlight(prior)) return refuse(inFlightRefusal(prior, this.now(), this.holdOf(prior)));
     this.busy = true;
     try {
       this.deps.log(`update over the link: ${msg.form} to ff-factory ${msg.commit.slice(0, 12)}; fetching the bundle (${msg.bundle.size} bytes)`);
@@ -593,7 +625,7 @@ export class SelfUpdater {
     await this.endOverdue();
     await this.removing;
     const prior = readJson<UpdateJob>(updateFiles(this.deps.appDir).job);
-    if (this.busy || jobInFlight(prior)) return answer(false, this.busy ? 'an update job of this machine is still running' : inFlightRefusal(prior, this.now()));
+    if (this.busy || jobInFlight(prior)) return answer(false, this.busy ? 'an update job of this machine is still running' : inFlightRefusal(prior, this.now(), this.holdOf(prior)));
     try {
       const how = await this.start(this.job('uninstall', msg.id, inst.service), inst.service);
       this.deps.log(`unload over the link: job ${msg.id} started as ${how}`);
@@ -607,6 +639,10 @@ export class SelfUpdater {
    * w5938: end a job past its limit (jobToEnd) with nobody at the machine: a hung process is stopped first, then the job gets a
    * failed result (sent by the tick like any other) and its done phase, so updates are taken again. The daemon runs on.
    */
+  /** Why the job in flight is not ended, as the last look found (inFlightRefusal's words). */
+  private holdOf(job: UpdateJob | undefined): string | undefined {
+    return job && this.held?.id === job.id ? this.held.hold : undefined;
+  }
   endOverdue(): Promise<void> {
     this.ending ??= this.endOverdueOnce().finally(() => (this.ending = undefined));
     return this.ending;
@@ -617,31 +653,57 @@ export class SelfUpdater {
     if (!job || job.phase === 'done') return;
     const now = this.now();
     const look: JobLook = {};
+    // A look long after the last (sleep, a blocked loop, a restart): what came before it was not watched, so the clocks start.
+    const fresh = (seen: number | undefined) => seen === undefined || now - seen > JOB_LIMIT.gapMs || now < seen;
+    let size = -1;
     try {
-      const st = fs.statSync(f.log);
-      // First sight: its mtime says when it last grew; a size change seen later is growth then (an mtime that lags, Windows).
-      if (!this.logSeen) this.logSeen = { size: st.size, at: st.mtimeMs };
-      else if (this.logSeen.size !== st.size) this.logSeen = { size: st.size, at: now };
-      look.logAt = Math.max(st.mtimeMs, this.logSeen.at);
+      size = fs.statSync(f.log).size;
     } catch {
-      // no log yet: never written
+      // no log yet
     }
-    // Its command line only once it is past its limit: on Windows each look starts PowerShell, and the tick runs every 10 s.
-    if (job.phase === 'running' && job.pid && alive(job.pid) && now - Date.parse(job.createdAt) > JOB_LIMIT.inFlightMs) look.command = await (this.deps.command ?? processCommand)(job.pid);
+    const ls = this.logSeen;
+    this.logSeen = { id: job.id, size, seen: now, at: !ls || ls.id !== job.id || ls.size !== size || fresh(ls.seen) ? now : ls.at };
+    look.logAt = this.logSeen.at;
+    // Its command line only once it is past its limit, and once in 5 min: on Windows each look starts PowerShell.
+    const pastLimit = now - Date.parse(job.createdAt) > JOB_LIMIT.inFlightMs;
+    if (job.phase === 'running' && job.pid && alive(job.pid) && pastLimit) {
+      const c = this.commandSeen;
+      const seen = c && c.pid === job.pid && now - c.at < 5 * 60_000 && now >= c.at ? c : { pid: job.pid, command: await (this.deps.command ?? processCommand)(job.pid), at: now };
+      this.commandSeen = seen;
+      look.command = seen.command;
+    }
+    const gone = job.phase === 'running' && (!alive(job.pid) || (look.command !== undefined && !/linkJob\.ts/.test(look.command)));
+    const key = `${job.id}|${job.phase}|${job.pid ?? ''}|${gone}`;
+    const w = this.watch;
+    this.watch = { key, seen: now, since: !w || w.key !== key || fresh(w.seen) ? now : w.since };
+    look.watchedMs = now - this.watch.since;
     const end = jobToEnd(job, now, look);
     if (!end) return;
+    if (end.hold) {
+      this.held = { id: job.id, hold: end.hold };
+      return;
+    }
     if (end.kill && job.pid) {
-      const kill = this.deps.kill ?? ((pid: number, sig: NodeJS.Signals) => process.kill(pid, sig));
+      // One that did not end when stopped is tried again in 5 min, not at every tick (each try waits up to 10 s).
+      const h = this.held;
+      if (h?.id === job.id && h.stopFailedAt !== undefined && now - h.stopFailedAt < 5 * 60_000 && now >= h.stopFailedAt) return;
+      // Its command line read again just before it is stopped: a cached one must never stop another program.
+      const now3 = await (this.deps.command ?? processCommand)(job.pid);
+      if (!now3 || !/linkJob\.ts/.test(now3)) return;
+      const kill = this.deps.kill ?? stopProcess;
       try {
-        kill(job.pid, 'SIGTERM');
-        for (let i = 0; i < 20 && alive(job.pid); i++) await new Promise((r) => setTimeout(r, 250));
-        if (alive(job.pid)) kill(job.pid, 'SIGKILL');
-        for (let i = 0; i < 20 && alive(job.pid); i++) await new Promise((r) => setTimeout(r, 250));
+        const steps = Math.ceil((this.deps.stopWaitMs ?? 5_000) / 250);
+        await kill(job.pid, 'SIGTERM');
+        for (let i = 0; i < steps && alive(job.pid); i++) await new Promise((r) => setTimeout(r, 250));
+        if (alive(job.pid)) await kill(job.pid, 'SIGKILL');
+        for (let i = 0; i < steps && alive(job.pid); i++) await new Promise((r) => setTimeout(r, 250));
       } catch (e) {
         this.deps.log(`update over the link: ending hung job ${job.id.slice(0, 8)} (pid ${job.pid}) failed: ${(e as Error).message}`);
       }
       if (alive(job.pid)) {
-        this.deps.log(`update over the link: WARNING ${end.reason}; its process did not end when stopped, so the job is left in flight (w5938)`);
+        const hold = 'its process did not end when stopped';
+        if (this.held?.hold !== hold) this.deps.log(`update over the link: WARNING ${end.reason}; ${hold}, so the job is left in flight (w5938)`);
+        this.held = { id: job.id, hold, stopFailedAt: now };
         return;
       }
     }
@@ -685,7 +747,7 @@ export class SelfUpdater {
     const over = jobOverdue(job, this.now());
     if (over && job && !this.overdueWarned.has(job.id)) {
       this.overdueWarned.add(job.id);
-      this.deps.log(`update over the link: WARNING ${over}; its process is alive and still writing its log, so it is left to run and updates are refused meanwhile (w5938)`);
+      this.deps.log(`update over the link: WARNING ${over}; ${this.holdOf(job) ?? 'it is not ended yet'}, so it is left to run and updates are refused meanwhile (w5938)`);
     }
     if (job?.reported && !job.removed && job.phase === 'done' && !alive(job.pid) && !this.busy) {
       // Busy meanwhile, so no new job starts while the old one's task or LaunchAgent is removed (it would be removed too).

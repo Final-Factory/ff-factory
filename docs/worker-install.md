@@ -363,7 +363,12 @@ reach its port 22 (desktop-coosego) can now be updated, restarted and unloaded a
    in `update-job.log` and the daemon log (`update over the link: FAILED the daemon ended the job: ...`). The tick reports it
    and removes the job's task like any other; the daemon runs on its current code and takes the next update. A live job
    process still writing its log is never ended, however old: it is warned of once and the refusal says why. A pid whose
-   command line cannot be read is never stopped.
+   command line cannot be read is never stopped, and the command line is read again just before a stop. Both clocks count
+   only time the daemon was awake to look (w5983's review): a look over 3 min after the last (the computer slept, the loop
+   was blocked, the daemon restarted) starts them again, so a job frozen by sleep is not taken for hung when the computer
+   wakes. A staged job, or one whose process is gone, is ended only after the daemon has watched it so for 5 min, so after a
+   reboot the job's own logon task resumes it (or puts the old code back) first. On Windows the stop ends the job's whole
+   process tree (`taskkill /T /F`); a process that does not end is left in flight, said so, and tried again in 5 min.
 
 **Who uses it.** The rollout after a verified deploy, for the daemon step and the agent tools ([ops-worker.md](ops-worker.md#after-a-verified-deploy-w887));
 `ops_worker machine_update`, which the portal then runs itself (no ssh, no worker job) and reports to the caller's
