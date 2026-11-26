@@ -216,3 +216,105 @@ export function movedPrompt(m: { id: string; from: string; to: string; old: stri
   if (m.brief) lines.push(`\nThe brief its worker started from (the dispatcher's words then; where it names ${m.from} or that worker's sandbox, you are on ${m.to} now):\n~~~text\n${m.brief}\n~~~`);
   return lines.join('\n');
 }
+
+/**
+ * w5942: the waits for an agent seat on the worker's own computer by the portal's count, not for a sandbox. A seat there frees
+ * when any turn there ends. Not a refusal by its daemon's count ("N agents mid-turn on X by its daemon's count"):
+ * SessionManager.requeueRefused queues that message again with a fresh time on every refusal, so a wait measured from it had
+ * no end (the w5949 review, B1: 391493b1 and f305bf10 were each refused 4 times 22 to 28 s apart at 06:46:39-06:47:53Z on
+ * 2026-11-25), and a computer whose daemon refuses is not one a seat frees on soon.
+ */
+export const SEAT_WAIT = /^(no agent seat is free on |\d+ agents mid-turn (?!.* by its daemon's count))/;
+
+/** The mark a Queued line carries while a warm worker waits for a seat on its own computer, or a moved request waits where it went (w5942): no WRONG. */
+export const WARM_MARK = 'it keeps its conversation and waits on its own computer (w5942)';
+
+/**
+ * w5942: a resume that has its conversation (a worker that ran a turn: SessionInfo.turns > 0) and waits only for an agent seat
+ * on its own computer waits there up to HOME_WAIT_MS before a fresh session elsewhere takes its work; one that never ran a turn
+ * has nothing to lose and moves after MOVE_AFTER_MS as before. On 2026-11-25 aa98e369 (w5869), 793a23a8 (w5895) and 41a634be
+ * (w5912) were each placed again in their own biscuit sandbox (which ends the w4738 wait), then moved 20 to 30 s later for
+ * "4 agents mid-turn on biscuit (cap 4)", each a fresh session that read its work again from nothing. `queuedAt` is the
+ * earliest the worker has waited so (MoveGuard.waitingSince), so a message sent again does not start the wait afresh.
+ */
+export function warmWait(turns: number | undefined, hold: string, queuedAt: number, now: number): string | undefined {
+  if (!(turns && turns > 0) || !SEAT_WAIT.test(hold)) return undefined;
+  const until = queuedAt + HOME_WAIT_MS;
+  if (now >= until) return undefined;
+  return `${WARM_MARK}: a seat there frees when a turn there ends; it moves to a computer with room at ${new Date(until).toISOString().slice(11, 16)}Z if none has`;
+}
+
+/**
+ * w5942: the longest a computer whose daemon refused a start at its agent cap stays no target for a room move without news. It
+ * is a target again at once when a start there goes through (MoveGuard.startedOn). The w5949 review measured beast's miscount
+ * at 10 to 18 min on 2026-11-25 (refused at 06:37Z, again at 06:46-06:47Z, back at 06:55:06Z), past the first 5 min; a
+ * reconnect is no news (beast reconnected between those refusals and its count stayed wrong). 30 min is a judgment: past the
+ * longest measured, and the bound is the recovery that needs nobody.
+ */
+export const REFUSED_FOR_MS = 30 * 60_000;
+
+/**
+ * w5942: what the room moves remember between drains, so a request moves at most once per wait.
+ *
+ * - `moved`: when each request last moved (a room move or an away move). A room move of a request moved within HOME_WAIT_MS
+ *   waits where it went instead: w5892 went c89b46d1 → c1e9dd0c → c89b46d1 and w5869 went biscuit → beast → biscuit →
+ *   lothdesktop within the hour on 2026-11-25. An away move (its computer offline past w2544's grace) and urgent work are not
+ *   held by it: those wait for nothing that frees.
+ * - `refused`: computers whose daemon refused a start at its agent cap (machines.ts AGENT_CAP_REFUSAL). The portal counted
+ *   beast at 2 of 6 mid-turn while its daemon counted 6 live, so moves kept choosing beast and its daemon kept refusing them
+ *   (w5932's 60a433cb and d4f2c3ca, w5938's 76deb562, none of which ran a turn). Such a computer is no move target for
+ *   REFUSED_FOR_MS.
+ */
+export class MoveGuard {
+  private readonly moved = new Map<string, { at: number; to: string }>();
+  private readonly refused = new Map<string, { at: number; why: string }>();
+  private readonly waiting = new Map<string, { since: number; turns: number }>();
+
+  /**
+   * The earliest a worker has waited for a seat at its present turn count (warmWait's start): a message queued again, or a
+   * new one, does not start its wait afresh. A turn it runs starts the count again.
+   */
+  waitingSince(session: string, turns: number, queuedAt: number): number {
+    const w = this.waiting.get(session);
+    if (w && w.turns === turns && w.since <= queuedAt) return w.since;
+    this.waiting.set(session, { since: queuedAt, turns });
+    return queuedAt;
+  }
+
+  noteMove(ids: string[], to: string, now: number) {
+    for (const id of ids) this.moved.set(id, { at: now, to });
+  }
+
+  /** Why a room move of these requests waits (one moved within HOME_WAIT_MS), or undefined. */
+  movedLately(ids: string[], now: number): string | undefined {
+    for (const id of ids) {
+      const m = this.moved.get(id);
+      if (!m) continue;
+      if (now - m.at >= HOME_WAIT_MS) {
+        this.moved.delete(id);
+        continue;
+      }
+      return `${WARM_MARK}: ${id} moved to ${m.to} ${Math.round((now - m.at) / 60_000)} min ago and moves at most once per wait; it moves again at ${new Date(m.at + HOME_WAIT_MS).toISOString().slice(11, 16)}Z if no seat has freed`;
+    }
+    return undefined;
+  }
+
+  noteRefusal(machine: string, why: string, now: number) {
+    this.refused.set(machine, { at: now, why });
+  }
+
+  /** A start on `machine` went through: its daemon's count has room again, so it is a move target again. */
+  startedOn(machine: string) {
+    this.refused.delete(machine);
+  }
+
+  /** The computers no room move may go to now, with why (MoveFacts.held). */
+  refusals(now: number): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, r] of this.refused) {
+      if (now - r.at >= REFUSED_FOR_MS) this.refused.delete(id);
+      else out[id] = `its daemon refused a start at its agent cap ${Math.round((now - r.at) / 1000)} s ago (w5942): ${r.why}`;
+    }
+    return out;
+  }
+}

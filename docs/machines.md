@@ -2649,6 +2649,33 @@ LothDesktop and Beast, not just when BEAST is full").
     takes it first (w3507, w4620: strict priority holds; the wait is capped, so it never holds work back past 15 min). A
     worker released idle or with a far check-in, a hold on its computer (w4238) and an away computer (w2544) move as before.
     An urgent or frantic resume does not wait (w5260, above): it frees a sandbox from idle lower work there, else moves.
+  - **A request moves at most once per wait, and a warm worker waits for its seat** (w5942, lothsahn, 2026-11-25). That
+    morning beast's daemon was stuck mid-update (job 977d56f7 answered 13 min late and failed; it went offline at 06:04:45Z,
+    06:20:37Z, 06:23:31Z and 06:37:50Z). Biscuit sat at its agent cap of 4, and the portal counted beast at 2 of 6 mid-turn
+    while beast's daemon counted 6 live and refused every start ("N agents mid-turn on beast by its daemon's count", which
+    `ROOM_WAIT` reads as room to move for). w5869 went biscuit → beast (81122653, refused) → biscuit (aa98e369 placed again)
+    → lothdesktop (19889673) within 20 min, w5892 went c89b46d1 → c1e9dd0c → c89b46d1, and w5932's fresh workers 60a433cb
+    and d4f2c3ca never ran a turn (measured, the portal journal). The fixes (`server/resumeMove.ts`, `Agents.roomMove`):
+    - A request moved within `HOME_WAIT_MS` (15 min) waits where it went (`MoveGuard.movedLately`, noted in `moveForRoom` once
+      the fresh session started, for room and away moves; a failed start goes back unheld), Queued "… moves at most once per wait (w5942)". Urgent work and away moves (w2544) are not held.
+    - A worker that ran a turn (`SessionInfo.turns > 0`) and waits only for an agent seat on its own computer (`SEAT_WAIT`:
+      "no agent seat is free on", "N agents mid-turn", by the portal's count) waits there up to `HOME_WAIT_MS` from when it
+      first waited at its turn count (`warmWait`, `MoveGuard.waitingSince`: a message queued again does not start it afresh), as the
+      w4738 wait does for a released one. Placing it again in its own sandbox clears `placeReleased`, and so the w4738 wait.
+      One that never ran a turn moves after `MOVE_AFTER_MS` as before. Both checks run after the w2079 hand-over, so an old
+      worker whose requests went elsewhere never holds a message for them. A refusal by its daemon's count is no seat wait:
+      `requeueRefused` queues it again with a fresh time on every refusal (the w5949 review, B1).
+    - A computer whose daemon refused a start at its agent cap (`machines.ts` `capRefused`, `AGENT_CAP_REFUSAL`) is no move
+      target, whatever the portal's count says (`MoveFacts.held`), until a start there goes through (`capStarted`, its first
+      mid-turn report) or `REFUSED_FOR_MS` (30 min, a judgment past beast's measured 10 to 18 min miscount; a reconnect is no
+      news, since beast reconnected between refusals with its count still wrong).
+    - A message for a worker whose requests all went to other workers is forwarded to the worker each request is with now
+      (`Agents.forwardToHeirs`: "[forwarded, w5942] This message was queued for worker …", keeping its sender), not dropped.
+      A gate resume (`resumeOf`) or a check-in (`[wake_me] …`) stays dropped: the new worker sets its own wait.
+    - Warn only (lothsahn's lockout rule): a worker whose work moved off it (`movedAway`) and that its daemon's hello still
+      reports live, or that a resume after a drop would wake, is journalled and reported "[machines] … (w5942, warn only)"
+      (`Machines.warnMovedAway`). On 2026-11-25 beast came back at 06:20:26Z still running d732483b and 847ebd50 while w5869
+      and w5891 ran on biscuit too: two live workers on one request. Stopping them is a separate, reviewed change.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,
