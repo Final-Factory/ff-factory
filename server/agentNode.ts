@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { TOOLS_MEDIUM_CHILD } from './claudeHome.ts';
 
 /**
  * The agents' node on a Windows worker root (w1742; lothsahn, 2026-10-22: "we're making random folders under the temp
@@ -69,8 +70,11 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * w5839: before w5717 a Low worker could rename `tools\node` aside and put its own node.exe there, which Medium agents,
  * BEAST's instance portals, the updater task and the elevated `worker.ts tools` run. w5717 closed that from its deploy
  * on; this finds one put there before. Nothing here runs the installed node: what is there is read from this record,
- * which `tools` (Medium) writes beside it when it puts the pinned node there: the version and the SHA-256 of every file
- * in the folder. Every tools run hashes the folder again. The record must itself be the pinned download's (its files'
+ * which `tools` (Medium) writes when it puts the pinned node there: the version, the SHA-256 of every file in the folder
+ * and the folder's identity (`folderId`). It lives in `<root>\tools-medium`, which no daemon labels Low, rolled back or
+ * not; the one `tools\node.json` of before w5868's review, which a rolled-back daemon left Low-writable, is never read.
+ * Every tools run hashes the folder again, and a folder that is not the recorded one (a Low worker's copy of the pinned
+ * bytes, its write handles kept open across a relabel: w5868's review) is put there again. The record must itself be the pinned download's (its files'
  * digest is `AGENT_NODE.treeSha256`), so one a Low worker wrote while `tools` was Low (before w5717, or a daemon
  * rolled back) cannot vouch for a planted DLL or script. A record that is not, a file that differs, is missing or was
  * added (a DLL beside node.exe loads before the system's), a link where the folder should be, or no record at all, is
@@ -78,8 +82,19 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * there with Low labels of its own matches every hash and stays writable from Low, so the labels and access entries are
  * read first (`labelProblem`, w5866's review).
  */
-export const agentNodeStamp = (root: string) => path.join(root, 'tools', 'node.json');
-type Stamp = { version: string; files: Record<string, string> };
+export const agentNodeStamp = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, 'agent-node.json');
+/** Where the record lived before w5868's review: in `tools`, which a rolled-back daemon labels Low. Never read. */
+const legacyStamp = (root: string) => path.join(root, 'tools', 'node.json');
+type Stamp = { version: string; files: Record<string, string>; folder?: string };
+
+/**
+ * The identity of the folder at `p`: its volume and NTFS file id. A rename keeps it (also into another folder); a new
+ * folder gets a new one (measured on BEAST's F:, w5839). A Low worker cannot give a folder it made the id of ours.
+ */
+export const folderId = (p: string): string => {
+  const st = fs.statSync(p, { bigint: true });
+  return `${st.dev}:${st.ino}`;
+};
 type Pin = { exeSha256: string; treeSha256: string };
 const sha = (file: string) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
@@ -149,6 +164,15 @@ function stampCheck(stampFile: string, dir: string, pin: Pin): { ok: true; files
   if (s.version !== AGENT_NODE.version || s.files['node.exe'] !== pin.exeSha256 || treeDigest(s.files) !== pin.treeSha256) {
     return { ok: false, why: `its record is not of the pinned ${AGENT_NODE.version}` };
   }
+  // The folder must be the one this record was written for: one a Low worker made and filled with the pinned bytes,
+  // its write handles kept open across a relabel, is another folder (w5868's review).
+  let id: string;
+  try {
+    id = folderId(dir);
+  } catch (e) {
+    return { ok: false, why: `its folder could not be read (${(e as Error).message})` };
+  }
+  if (s.folder !== id) return { ok: false, why: `its record is of another folder (${s.folder ?? 'none named'}, not ${id})` };
   let now: Record<string, string>;
   try {
     now = treeHashes(dir);
@@ -260,7 +284,9 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
   const stampFile = agentNodeStamp(root);
   const pin = d.pin ?? { exeSha256: AGENT_NODE.exeSha256, treeSha256: AGENT_NODE.treeSha256 };
   const tools = path.dirname(dir);
+  const medium = path.dirname(stampFile);
   sweepOld(tools, (d.now ?? Date.now)());
+  sweepOld(medium, (d.now ?? Date.now)());
   // The labels first: once nothing Low can write the files, what is hashed next stays what runs.
   const lab = !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
   const st = lab ? { ok: false as const, why: lab } : stampCheck(stampFile, dir, pin);
@@ -269,9 +295,13 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     return 'current';
   }
   const why = st.why;
-  const stage = path.join(tools, `node-${AGENT_NODE.version}-${(d.now ?? Date.now)()}.part`);
+  // Unpacked in tools-medium, a root child no daemon labels Low (claudeHome.ts MEDIUM_ONLY_CHILDREN): its files are Medium
+  // from birth, so no Low worker ever holds a handle to one, even while `tools` is Low (w5868's review). A rename keeps
+  // them so on the way to `tools\node`, on the same volume.
+  const stage = path.join(medium, `node-${AGENT_NODE.version}-${(d.now ?? Date.now)()}.part`);
   try {
     fs.mkdirSync(tools, { recursive: true });
+    fs.mkdirSync(medium, { recursive: true });
     fs.mkdirSync(stage);
     const url = `https://nodejs.org/dist/${AGENT_NODE.version}/${AGENT_NODE.zip}`;
     const bytes = await (d.download ?? fetchBytes)(url);
@@ -325,8 +355,9 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     let unrecorded = '';
     try {
       remove(`${stampFile}.part`);
-      fs.writeFileSync(`${stampFile}.part`, `${JSON.stringify({ version: AGENT_NODE.version, files: fresh } satisfies Stamp)}\n`);
+      fs.writeFileSync(`${stampFile}.part`, `${JSON.stringify({ version: AGENT_NODE.version, files: fresh, folder: folderId(dir) } satisfies Stamp)}\n`);
       fs.renameSync(`${stampFile}.part`, stampFile);
+      remove(legacyStamp(root));
     } catch (e) {
       unrecorded = `; WARNING: its record could not be written (${(e as Error).message}), so the next rollout puts it there again`;
     }

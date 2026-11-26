@@ -47,6 +47,7 @@ function icaclsTree(dir: string, own: Record<string, string> = {}): string {
 function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean; own?: Record<string, string>; readOut?: string } = {}) {
   const said: string[] = [];
   const ran: string[] = [];
+  const tarInto: string[] = [];
   const d: AgentNodeDeps = {
     platform: 'win32',
     say: (l) => void said.push(l),
@@ -63,6 +64,7 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
       }
       if (cmd === 'icacls') return o.icaclsFails ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
       if (cmd === 'tar') {
+        tarInto.push(args[args.indexOf('-C') + 1]);
         if (o.tarFails) return { code: 1, stdout: '', stderr: 'bad zip' };
         const into = path.join(args[args.indexOf('-C') + 1], unpackedName);
         fs.mkdirSync(path.join(into, 'node_modules', 'npm'), { recursive: true });
@@ -75,7 +77,7 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
       return fs.existsSync(cmd) ? { code: 0, stdout: `${fs.readFileSync(cmd, 'utf8')}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'no such file' };
     },
   };
-  return { d, said, ran };
+  return { d, said, ran, tarInto };
 }
 
 /** A download whose SHA-256 is the pinned one, as far as the code can tell: the pin replaced for the test. */
@@ -92,7 +94,7 @@ test('the agent node goes to <root>/tools/node with its record, is verified on t
     const f = fake(zip);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json'], 'nothing left beside it but the record');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node'], 'nothing left beside it but the record');
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no node\.exe there\)/);
     const rec = JSON.parse(fs.readFileSync(agentNodeStamp(root), 'utf8')) as { version: string; files: Record<string, string> };
     assert.equal(rec.version, AGENT_NODE.version);
@@ -104,7 +106,7 @@ test('the agent node goes to <root>/tools/node with its record, is verified on t
     fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ version: 'v22.0.0', files: { ...rec.files, 'node.exe': shaOf('v22.0.0') } }));
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json']);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record is not of the pinned v/);
   });
 });
@@ -200,9 +202,9 @@ test('w5839: a staging folder a run left behind is swept, and never stops the ne
     const theirs = `node-${AGENT_NODE.version}-${now - 60_000}.part`;
     fs.mkdirSync(path.join(root, 'tools', theirs));
     assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now }), 'installed');
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json', theirs].sort());
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', theirs].sort());
     assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now + 2 * 60 * 60_000 }), 'current');
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json']);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
   });
 });
 
@@ -249,7 +251,7 @@ test('w5839: an old node folder a swap could not delete (a node still ran from i
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     fs.mkdirSync(path.join(root, 'tools', 'node.old-1795650065661'));
     assert.equal(await ensureAgentNode(root, f.d), 'current');
-    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json']);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node']);
   });
 });
 
@@ -317,6 +319,45 @@ test("w5839: labelProblem reads icacls's layout: paths and accounts with spaces,
   assert.match(labelProblem([top, file('x.js', 'Mandatory Label\\Medium Mandatory Level:(NW)'), sum(2)].join('\r\n'), dir)!, /x\.js holds an access entry of its own/);
   assert.match(labelProblem([file('x.js'), sum(1)].join('\r\n'), 'F:\\other')!, /outside/);
   assert.equal(labelProblem(sum(0), dir), 'icacls named nothing');
+});
+
+test("w5839: another folder with the pinned bytes, inherited Medium labels and a copy of the record is put there again (w5868's review)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // Unpacked in tools-medium, where no Low worker holds a handle, and the record kept there too.
+    assert.ok(f.tarInto.every((p) => p.startsWith(path.join(root, 'tools-medium') + path.sep)), f.tarInto.join(', '));
+    assert.ok(agentNodeStamp(root).startsWith(path.join(root, 'tools-medium') + path.sep));
+    // A Low worker's copy, byte for byte, in a folder of its own put at tools\node (its handles survive a relabel).
+    const copy = path.join(root, 'tools', 'copy');
+    fs.cpSync(agentNodeDir(root), copy, { recursive: true });
+    fs.renameSync(agentNodeDir(root), path.join(root, 'tools', 'aside'));
+    fs.renameSync(copy, agentNodeDir(root));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(its record is of another folder /);
+    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    // Ours, moved aside and back, is still ours.
+    fs.renameSync(agentNodeDir(root), path.join(root, 'tools', 'away'));
+    fs.renameSync(path.join(root, 'tools', 'away'), agentNodeDir(root));
+    assert.equal(await ensureAgentNode(root, f.d), 'current');
+  });
+});
+
+test('w5839: the record in tools of before w5868 is never read, and goes once the record is in tools-medium', async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    const rec = fs.readFileSync(agentNodeStamp(root), 'utf8');
+    fs.rmSync(agentNodeStamp(root));
+    fs.writeFileSync(path.join(root, 'tools', 'node.json'), rec);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
+  });
 });
 
 test('not Windows: nothing to place, and nothing goes on PATH; Windows: the folder once node.exe is there (w1742)', async () => {
