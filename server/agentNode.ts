@@ -19,14 +19,15 @@ import path from 'node:path';
 
 /**
  * The pinned build: nodejs.org's SHASUMS256.txt for v24.22.1 (fetched and checked 2026-10-22, w1742). `exeSha256` is the
- * node.exe inside that zip (w5839: unpacked with Windows' tar.exe and hashed, 2026-11-25; BEAST's tools\node\node.exe had
- * the same digest, and all 1994 files of its tools\node matched the zip's).
+ * node.exe inside that zip and `treeSha256` the digest of all its files (`treeDigest`), both from the zip unpacked with
+ * Windows' tar.exe (w5839, 2026-11-25: 1994 files; BEAST's tools\node gave the same two digests).
  */
 export const AGENT_NODE = {
   version: 'v24.22.1',
   zip: 'node-v24.22.1-win-x64.zip',
   sha256: 'd2046d28c2c3dcd211ac5145c0bf30e2047ef9dfb306693c8c6e2eccd8b95fa5',
   exeSha256: 'd702daa815eabbff763c7d3808e235cf031cf2ca70211b56847bc72f51e240e5',
+  treeSha256: '3983141a10f864dbf120545a5bb459883bfff0ce450d8831cb0a1e8caddafa7b',
 } as const;
 
 /** The firewall group of the node's rule (scripts/worker/firewall.ps1 $NodeGroup). */
@@ -45,8 +46,8 @@ export interface AgentNodeDeps {
   /** Windows' own tar.exe (bsdtar reads zip; Git Bash's GNU tar does not). */
   tar?: string;
   now?: () => number;
-  /** Tests: the node.exe digest to expect instead of the pinned one. */
-  exeSha256?: string;
+  /** Tests: the digests to expect instead of the pinned ones. */
+  pin?: { exeSha256: string; treeSha256: string };
 }
 
 export type AgentNodeResult = 'current' | 'installed' | 'busy' | 'skipped' | 'failed';
@@ -69,12 +70,15 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * BEAST's instance portals, the updater task and the elevated `worker.ts tools` run. w5717 closed that from its deploy
  * on; this finds one put there before. Nothing here runs the installed node: what is there is read from this record,
  * which `tools` (Medium) writes beside it when it puts the pinned node there: the version and the SHA-256 of every file
- * in the folder. Every tools run hashes the folder again. A record whose node.exe is not the pinned one, a file that
- * differs, is missing or was added (a DLL beside node.exe loads before the system's), or no record at all, is a node
- * checked against a fresh pinned download and put there again when it differs.
+ * in the folder. Every tools run hashes the folder again. The record must itself be the pinned download's (its files'
+ * digest is `AGENT_NODE.treeSha256`), so one a Low worker wrote while `tools` was Low (before w5717, or a daemon
+ * rolled back) cannot vouch for a planted DLL or script. A record that is not, a file that differs, is missing or was
+ * added (a DLL beside node.exe loads before the system's), a link where the folder should be, or no record at all, is
+ * a node put there again from a fresh pinned download.
  */
 export const agentNodeStamp = (root: string) => path.join(root, 'tools', 'node.json');
 type Stamp = { version: string; files: Record<string, string> };
+type Pin = { exeSha256: string; treeSha256: string };
 const sha = (file: string) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 /** Every file under `dir` by its path inside it ('/'-joined): its SHA-256, or 'link' for a link or junction. */
@@ -93,6 +97,11 @@ export function treeHashes(dir: string): Record<string, string> {
   return out;
 }
 
+/** One digest of a whole tree: SHA-256 of "<path>\t<sha256>\n" for each file, in path order. */
+export function treeDigest(files: Record<string, string>): string {
+  return crypto.createHash('sha256').update(Object.keys(files).sort().map((k) => `${k}\t${files[k]}\n`).join('')).digest('hex');
+}
+
 /** How `got` differs from `want`, the first few files named; undefined when they are the same. */
 export function treeDiff(want: Record<string, string>, got: Record<string, string>): string | undefined {
   const differs = Object.keys(want).filter((k) => k in got && got[k] !== want[k]);
@@ -103,18 +112,41 @@ export function treeDiff(want: Record<string, string>, got: Record<string, strin
   return said.length ? said.join('; ') : undefined;
 }
 
+/** A link or junction (or anything but a plain folder) at `p`; false when nothing is there. */
+const notAFolder = (p: string): boolean => {
+  let s: fs.Stats;
+  try {
+    s = fs.lstatSync(p);
+  } catch {
+    return false;
+  }
+  if (s.isSymbolicLink() || !s.isDirectory()) return true;
+  // Node does not see a junction as a link on Windows (lstat says folder, readlink EINVAL; measured on Node v24.22.1,
+  // w5839): where it resolves to does.
+  try {
+    const real = fs.realpathSync.native(p);
+    return real.toLowerCase() !== path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p)).toLowerCase();
+  } catch {
+    return true;
+  }
+};
+
 /** Whether the node at `dir` is the pinned one by its record; else why not. Reads files only. */
-function stampCheck(stampFile: string, dir: string, exeSha: string): { ok: true; files: number } | { ok: false; why: string } {
+function stampCheck(stampFile: string, dir: string, pin: Pin): { ok: true; files: number } | { ok: false; why: string } {
+  if (notAFolder(dir)) return { ok: false, why: `${dir} is a link or a file, not a folder` };
   if (!fs.existsSync(path.join(dir, 'node.exe'))) return { ok: false, why: 'no node.exe there' };
   let s: Stamp;
   try {
+    if (!fs.lstatSync(stampFile).isFile()) throw new Error('not a plain file');
     s = JSON.parse(fs.readFileSync(stampFile, 'utf8')) as Stamp;
     if (typeof s.version !== 'string' || !s.files || typeof s.files !== 'object') throw new Error('not a record');
   } catch {
     return { ok: false, why: `no record of its install (${stampFile})` };
   }
-  // The record is checked against the pin too: one written by anyone else cannot vouch for another node.exe.
-  if (s.version !== AGENT_NODE.version || s.files['node.exe'] !== exeSha) return { ok: false, why: `its record is not of the pinned ${AGENT_NODE.version}` };
+  // The record is checked against the pin: one written by anyone else cannot vouch for another file.
+  if (s.version !== AGENT_NODE.version || s.files['node.exe'] !== pin.exeSha256 || treeDigest(s.files) !== pin.treeSha256) {
+    return { ok: false, why: `its record is not of the pinned ${AGENT_NODE.version}` };
+  }
   let now: Record<string, string>;
   try {
     now = treeHashes(dir);
@@ -125,20 +157,22 @@ function stampCheck(stampFile: string, dir: string, exeSha: string): { ok: true;
   return diff ? { ok: false, why: `its files are not the recorded ones: ${diff}` } : { ok: true, files: Object.keys(now).length };
 }
 
-/**
- * Deletes an old node folder; false when it could not. Windows lets a folder be renamed while a node.exe in it runs, but
- * not deleted (EPERM; measured on BEAST, w5839): the agents that run from it keep it until they end.
- */
-function removeOld(old: string): boolean {
+/** Deletes a path; false when it could not. Never throws. */
+function remove(p: string): boolean {
   try {
-    fs.rmSync(old, { recursive: true, force: true });
+    fs.rmSync(p, { recursive: true, force: true });
     return true;
   } catch {
     return false;
   }
 }
 
-/** The old node folders an earlier swap could not delete, deleted once nothing runs from them. */
+/**
+ * The old node folders an earlier swap could not delete, and staging folders a run left, deleted once nothing holds
+ * them. Windows lets a folder be renamed while a node.exe in it runs, but not deleted (EPERM; measured on BEAST, w5839):
+ * the agents that run from it keep it until they end. Each run stages in a folder of its own, so one left behind never
+ * stops the next.
+ */
 function sweepOld(tools: string): void {
   let names: string[];
   try {
@@ -146,7 +180,7 @@ function sweepOld(tools: string): void {
   } catch {
     return;
   }
-  for (const n of names) if (/^node\.old-\d+$/.test(n)) removeOld(path.join(tools, n));
+  for (const n of names) if (/^node\.old-\d+$/.test(n) || /^node-v[\d.]+(-\d+)?\.part$/.test(n)) remove(path.join(tools, n));
 }
 
 /**
@@ -154,24 +188,28 @@ function sweepOld(tools: string): void {
  * `<root>\tools`. Each run says one line the rollout log keeps: "node verified", or "node reinstalled (why)", or a WARNING
  * "node not reinstalled (why)" when it could not, and then the node there stays (lothsahn's lockout rule: never leave the
  * machine without node). A folder that cannot be moved aside keeps its node: 'busy', and the next rollout tries again.
+ *
+ * A node with no record is always swapped for the fresh one, even when its files match: a folder this run unpacked and
+ * labelled Medium is known to be nobody else's, while one a Low worker could once write may hold a Low label of its own
+ * (one swap per machine, w5839's review).
  */
 export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<AgentNodeResult> {
   if (d.platform !== 'win32') return 'skipped';
   const dir = agentNodeDir(root);
   const stampFile = agentNodeStamp(root);
-  const exeSha = d.exeSha256 ?? AGENT_NODE.exeSha256;
-  sweepOld(path.dirname(dir));
-  const st = stampCheck(stampFile, dir, exeSha);
+  const pin = d.pin ?? { exeSha256: AGENT_NODE.exeSha256, treeSha256: AGENT_NODE.treeSha256 };
+  const tools = path.dirname(dir);
+  sweepOld(tools);
+  const st = stampCheck(stampFile, dir, pin);
   if (st.ok) {
     d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download).`);
     return 'current';
   }
   const why = st.why;
-  const tools = path.dirname(dir);
-  const stage = path.join(tools, `node-${AGENT_NODE.version}.part`);
+  const stage = path.join(tools, `node-${AGENT_NODE.version}-${(d.now ?? Date.now)()}.part`);
   try {
-    fs.rmSync(stage, { recursive: true, force: true });
-    fs.mkdirSync(stage, { recursive: true });
+    fs.mkdirSync(tools, { recursive: true });
+    fs.mkdirSync(stage);
     const url = `https://nodejs.org/dist/${AGENT_NODE.version}/${AGENT_NODE.zip}`;
     const bytes = await (d.download ?? fetchBytes)(url);
     const sum = crypto.createHash('sha256').update(bytes).digest('hex');
@@ -182,54 +220,55 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     const x = await d.exec(tar, ['-xf', zip, '-C', stage], { timeoutMs: 10 * 60_000 });
     if (x.code !== 0) throw new Error(`tar could not unpack ${zip}: ${(x.stderr || x.stdout).trim().slice(-300)}`);
     const unpacked = path.join(stage, AGENT_NODE.zip.replace(/\.zip$/, ''));
+    // Medium on its own label before it is hashed: a daemon that starts during this run labels each other folder in
+    // tools Low (machine/lowIntegrity.ts lowTargets), this one too. Hashed after, so what was written before is seen.
+    const lab = await d.exec('icacls', [unpacked, '/setintegritylevel', '(OI)(CI)medium'], { timeoutMs: 30 * 60_000 });
+    if (lab.code !== 0) throw new Error(`could not label ${unpacked} Medium: ${(lab.stderr || lab.stdout).trim().slice(-200)}`);
     const fresh = treeHashes(unpacked);
-    if (fresh['node.exe'] !== exeSha) throw new Error(`the unpacked node.exe has SHA-256 ${fresh['node.exe'] ?? 'none'}, not the pinned ${exeSha}`);
+    if (fresh['node.exe'] !== pin.exeSha256) throw new Error(`the unpacked node.exe has SHA-256 ${fresh['node.exe'] ?? 'none'}, not the pinned ${pin.exeSha256}`);
+    if (treeDigest(fresh) !== pin.treeSha256) throw new Error(`the unpacked files' digest is ${treeDigest(fresh)}, not the pinned ${pin.treeSha256}`);
     const got = await versionOf(d, path.join(unpacked, 'node.exe'));
     if (got !== AGENT_NODE.version) throw new Error(`the unpacked node says ${got ?? 'nothing'}, not ${AGENT_NODE.version}`);
-    const stamp = (): void => {
-      fs.writeFileSync(`${stampFile}.part`, `${JSON.stringify({ version: AGENT_NODE.version, files: fresh } satisfies Stamp)}\n`);
-      fs.renameSync(`${stampFile}.part`, stampFile);
-    };
-    // A node from before the record (w5839) whose files are the pinned download's: recorded, not swapped.
-    if (fs.existsSync(dir)) {
-      let there: Record<string, string> | undefined;
-      try {
-        there = treeHashes(dir);
-      } catch {
-        there = undefined;
-      }
-      if (there && !treeDiff(fresh, there)) {
-        stamp();
-        fs.rmSync(stage, { recursive: true, force: true });
-        d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (${why}; its ${Object.keys(fresh).length} files match a fresh pinned download, recorded).`);
-        return 'current';
-      }
-    }
     let old: string | undefined;
-    if (fs.existsSync(dir)) {
+    if (fs.existsSync(dir) || notAFolder(dir)) {
       old = path.join(tools, `node.old-${(d.now ?? Date.now)()}`);
       try {
         fs.renameSync(dir, old);
       } catch (e) {
         d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is in use (${(e as NodeJS.ErrnoException).code}); the node there stays until the next rollout.`);
-        fs.rmSync(stage, { recursive: true, force: true });
+        remove(stage);
         return 'busy';
       }
     }
     try {
       fs.renameSync(unpacked, dir);
     } catch (e) {
-      // Never leave the machine without node: the old folder goes back.
-      if (old) fs.renameSync(old, dir);
+      // Never leave the machine without node: the old folder goes back, and if even that fails, the line says where it is.
+      if (old) {
+        try {
+          fs.renameSync(old, dir);
+        } catch (back) {
+          d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is MISSING: the new node could not be moved in (${(e as Error).message}) nor the old one back from ${old} (${(back as Error).message}); the next rollout puts one there.`);
+          remove(stage);
+          return 'failed';
+        }
+      }
       throw e;
     }
-    stamp();
-    fs.rmSync(stage, { recursive: true, force: true });
-    const kept = old && !removeOld(old) ? ` (${path.basename(old)} is still in use by a node that runs from it; a later rollout deletes it)` : '';
-    d.say(`Agent node: node reinstalled (${why}): ${AGENT_NODE.version} at ${dir}; the daemon puts it first on its agents' PATH${kept}.`);
+    let unrecorded = '';
+    try {
+      remove(`${stampFile}.part`);
+      fs.writeFileSync(`${stampFile}.part`, `${JSON.stringify({ version: AGENT_NODE.version, files: fresh } satisfies Stamp)}\n`);
+      fs.renameSync(`${stampFile}.part`, stampFile);
+    } catch (e) {
+      unrecorded = `; WARNING: its record could not be written (${(e as Error).message}), so the next rollout puts it there again`;
+    }
+    remove(stage);
+    const kept = old && !remove(old) ? ` (${path.basename(old)} is still in use by a node that runs from it; a later rollout deletes it)` : '';
+    d.say(`Agent node: node reinstalled (${why}): ${AGENT_NODE.version} at ${dir}; the daemon puts it first on its agents' PATH${kept}${unrecorded}.`);
     return 'installed';
   } catch (e) {
-    fs.rmSync(stage, { recursive: true, force: true });
+    remove(stage);
     d.say(`WARNING: Agent node: node not reinstalled (${why}): could not put ${AGENT_NODE.version} at ${dir}: ${(e as Error).message}; the node there stays.`);
     return 'failed';
   }

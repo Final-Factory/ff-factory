@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, agentNodeStamp, ensureAgentNode, treeDiff, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, agentNodeStamp, ensureAgentNode, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
@@ -20,7 +20,13 @@ const unpackedName = AGENT_NODE.zip.replace(/\.zip$/, '');
 const shaOf = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 
 /** Deps whose "node.exe" is a text file holding its version, and whose tar makes the unpacked folder (node.exe, npm.cmd). */
-function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string } = {}) {
+/** The pin of the fake download's tree: what the fake tar unpacks when its node.exe says `version`. */
+const pinOf = (version: string) => {
+  const files = { 'node.exe': shaOf(version), 'node_modules/npm/index.js': shaOf('npm'), 'npm.cmd': shaOf('@echo npm') };
+  return { exeSha256: files['node.exe'], treeSha256: treeDigest(files) };
+};
+
+function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean } = {}) {
   const said: string[] = [];
   const ran: string[] = [];
   const d: AgentNodeDeps = {
@@ -28,9 +34,10 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string } = {}
     say: (l) => void said.push(l),
     download: async () => zipBytes,
     tar: 'tar',
-    exeSha256: shaOf(o.version ?? AGENT_NODE.version),
+    pin: pinOf(o.pinVersion ?? AGENT_NODE.version),
     exec: async (cmd, args) => {
       ran.push(cmd);
+      if (cmd === 'icacls') return o.icaclsFails ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
       if (cmd === 'tar') {
         if (o.tarFails) return { code: 1, stdout: '', stderr: 'bad zip' };
         const into = path.join(args[args.indexOf('-C') + 1], unpackedName);
@@ -100,18 +107,19 @@ test('w5839: a node.exe replaced, a file added beside it or a file removed is re
   });
 });
 
-test('w5839: a node from before the record is checked against a fresh download: the pinned one is recorded, not swapped; a planted one, or one a planted record vouches for, is reinstalled', async () => {
+test('w5839: a node from before the record is always swapped, even one whose files match; a planted one, or one a planted record vouches for, is reinstalled', async () => {
   const root = tmp();
   const zip = Buffer.from('a zip');
   await pinned(zip, async () => {
     const f = fake(zip);
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     fs.rmSync(agentNodeStamp(root));
-    const mark = path.join(agentNodeDir(root), 'npm.cmd');
-    const before = fs.statSync(mark).ino;
-    assert.equal(await ensureAgentNode(root, f.d), 'current');
-    assert.match(f.said.at(-1)!, /^Agent node: node verified: .*\(no record of its install .*\); its 3 files match a fresh pinned download, recorded\)/);
-    assert.equal(fs.statSync(mark).ino, before, 'the folder there was kept');
+    // The old folder carries a mark of its own: gone after the run, so the folder was swapped, not kept.
+    const before = fs.readdirSync(agentNodeDir(root)).sort();
+    fs.writeFileSync(path.join(agentNodeDir(root), 'mark'), '');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
+    assert.deepEqual(fs.readdirSync(agentNodeDir(root)).sort(), before, 'the folder there was swapped, not kept');
     assert.ok(fs.existsSync(agentNodeStamp(root)));
     // A planted node.exe with no record.
     fs.rmSync(agentNodeStamp(root));
@@ -124,9 +132,62 @@ test('w5839: a node from before the record is checked against a fresh download: 
     fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ ...rec, files: { ...rec.files, 'node.exe': shaOf('a planted node') } }));
     assert.equal(await ensureAgentNode(root, f.d), 'installed');
     assert.match(f.said.at(-1)!, /its record is not of the pinned/);
+    // The genuine node.exe, a planted DLL beside it, and a record forged to list the DLL too (w5854's first hole).
+    fs.writeFileSync(path.join(agentNodeDir(root), 'version.dll'), 'a planted DLL');
+    fs.writeFileSync(agentNodeStamp(root), JSON.stringify({ ...rec, files: { ...rec.files, 'version.dll': shaOf('a planted DLL') } }));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /its record is not of the pinned/);
+    assert.ok(!fs.existsSync(path.join(agentNodeDir(root), 'version.dll')));
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
+    assert.equal(await ensureAgentNode(root, f.d), 'current');
     assert.ok(!f.ran.includes(agentNodeExe(root)));
   });
+});
+
+test("w5839: a junction at tools\\node is refused and a real folder put there; the folder it pointed at is left alone (w5854's second hole)", async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // A copy of the genuine folder elsewhere, and tools\node a junction to it: its record and its files match.
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.cpSync(agentNodeDir(root), elsewhere, { recursive: true });
+    fs.rmSync(agentNodeDir(root), { recursive: true });
+    fs.symlinkSync(elsewhere, agentNodeDir(root), 'junction');
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(.* is a link or a file, not a folder\)/);
+    const st = fs.lstatSync(agentNodeDir(root));
+    assert.ok(st.isDirectory() && !st.isSymbolicLink());
+    assert.ok(fs.existsSync(path.join(elsewhere, 'node.exe')), 'nothing was deleted through the junction');
+    assert.equal(await ensureAgentNode(root, f.d), 'current');
+  });
+});
+
+test('w5839: a staging folder a run left behind is swept, and never stops the next run', async () => {
+  const root = tmp();
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip);
+    fs.mkdirSync(path.join(root, 'tools', `node-${AGENT_NODE.version}.part`, 'x'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'tools', `node-${AGENT_NODE.version}-123.part`), { recursive: true });
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json']);
+  });
+});
+
+test('w5839: a fresh folder that cannot be labelled Medium is not put in place, and the node there stays', async () => {
+  const root = tmp();
+  fs.mkdirSync(agentNodeDir(root), { recursive: true });
+  fs.writeFileSync(agentNodeExe(root), 'v22.0.0');
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const f = fake(zip, { icaclsFails: true });
+    assert.equal(await ensureAgentNode(root, f.d), 'failed');
+    assert.match(f.said.at(-1)!, /^WARNING: Agent node: node not reinstalled .*could not label .* Medium.*the node there stays\.$/);
+  });
+  assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'v22.0.0');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
 });
 
 test('a download with the wrong SHA-256, a failed unpack or a wrong node.exe leaves the old node and no part folder (w1742, w5839)', async () => {
@@ -141,10 +202,10 @@ test('a download with the wrong SHA-256, a failed unpack or a wrong node.exe lea
     assert.equal(await ensureAgentNode(root, fake(zip, { tarFails: true }).d), 'failed');
     // The unpacked node.exe is not the pinned one.
     const wrong = fake(zip, { version: 'v1.0.0' });
-    assert.equal(await ensureAgentNode(root, { ...wrong.d, exeSha256: shaOf(AGENT_NODE.version) }), 'failed');
+    assert.equal(await ensureAgentNode(root, wrong.d), 'failed');
     assert.match(wrong.said.at(-1)!, /the unpacked node\.exe has SHA-256/);
     // Its hash is right but it says another version.
-    assert.equal(await ensureAgentNode(root, fake(zip, { version: 'v1.0.0' }).d), 'failed');
+    assert.equal(await ensureAgentNode(root, fake(zip, { version: 'v1.0.0', pinVersion: 'v1.0.0' }).d), 'failed');
   });
   assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), 'v22.0.0');
   assert.deepEqual(fs.readdirSync(path.join(root, 'tools')), ['node']);
@@ -166,6 +227,12 @@ test('w5839: treeDiff names what differs, what is missing and what was added', (
   assert.equal(treeDiff({ a: '1', b: '2' }, { b: '2', a: '1' }), undefined);
   assert.equal(treeDiff({ a: '1', b: '2', c: '3' }, { a: 'x', c: '3', d: '4' }), '1 differ (a); 1 missing (b); 1 added (d)');
   assert.equal(treeDiff({}, { a: '1', b: '1', c: '1', d: '1' }), '4 added (a, b, c, ...)');
+});
+
+test('w5839: treeDigest does not depend on the order of the record, and changes with any file', () => {
+  assert.equal(treeDigest({ a: '1', b: '2' }), treeDigest({ b: '2', a: '1' }));
+  assert.notEqual(treeDigest({ a: '1', b: '2' }), treeDigest({ a: '1', b: '2', c: '3' }));
+  assert.notEqual(treeDigest({ a: '1', b: '2' }), treeDigest({ a: '1', b: '3' }));
 });
 
 test('not Windows: nothing to place, and nothing goes on PATH; Windows: the folder once node.exe is there (w1742)', async () => {
