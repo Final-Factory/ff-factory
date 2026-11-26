@@ -801,6 +801,10 @@ export function strayLowServers(servers: { pid: number; rid: number; dll: string
  */
 export const NO_READ_UP = { dir: 'S:(ML;OICI;NWNR;;;ME)', file: 'S:(ML;;NWNR;;;ME)' };
 export const READ_BACK = { dir: 'S:(ML;OICI;NW;;;ME)', file: 'S:(ML;;NW;;;ME)' };
+/** What a label not set because the read fence changed is said as (w6120). */
+const STOPPED = 'not set: the read fence changed (w6120)';
+/** A label target that gives a path back to workers (no No-Read-Up): setting it only ever opens (w6120). */
+const givenBack = (x: { sddl: string }) => !x.sddl.includes('NWNR');
 
 export interface LabelTarget {
   path: string;
@@ -860,8 +864,14 @@ export function onSystemDrive(p: string, systemDrive = process.env.SystemDrive |
 
 const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
-/** The PowerShell that sets each label and prints `ok <i>` or `err <i> <win32 error>` per target. Exported for tests. */
-export function labelScript(t: readonly LabelTarget[]): string {
+/**
+ * The PowerShell that sets each label and prints `ok <i>` or `err <i> <win32 error>` per target. With `stop` (w6120), before
+ * each closing (No-Read-Up) target it reads the read fence's mode file, and from the first time that does not hold `want`
+ * on it prints `stopped <i>` for each closing target instead of setting it; a given-back target is always set. Exported
+ * for tests.
+ */
+export function labelScript(t: readonly LabelTarget[], stop?: { file: string; want: string }): string {
+  const set = (x: LabelTarget, i: number) => `$r = [FfLabel]::Set(${psq(x.path)}, ${psq(x.sddl)}); if ($r -eq 0) { 'ok ${i}' } else { 'err ${i} ' + $r }`;
   return [
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -TypeDefinition @"',
@@ -878,7 +888,8 @@ export function labelScript(t: readonly LabelTarget[]): string {
     '  }',
     '}',
     '"@',
-    ...t.map((x, i) => `$r = [FfLabel]::Set(${psq(x.path)}, ${psq(x.sddl)}); if ($r -eq 0) { 'ok ${i}' } else { 'err ${i} ' + $r }`),
+    ...(stop ? ['$ffStop = $false', `function FfWanted { try { return ([IO.File]::ReadAllText(${psq(stop.file)}).Trim() -eq ${psq(stop.want)}) } catch { return $false } }`] : []),
+    ...t.map((x, i) => (stop && !givenBack(x) ? `if (-not $ffStop -and -not (FfWanted)) { $ffStop = $true }; if ($ffStop) { 'stopped ${i}' } else { ${set(x, i)} }` : set(x, i))),
   ].join('\n');
 }
 
@@ -886,8 +897,17 @@ export function labelScript(t: readonly LabelTarget[]): string {
  * Sets the No-Read-Up labels (w5546). A target on the system drive is skipped and said; one refused for want of
  * WRITE_OWNER gets the account's Full grant first (as labelLow, w5402) and is tried again. Returns whether every label not
  * skipped was set; never throws.
+ *
+ * `still` (w6120): whether this pass is still wanted (the read fence still `on`). Once it is not, no closing step starts:
+ * the label run does not start, no more grants are made for closed paths, and the retry after the grants sets only the
+ * given-back paths that were refused (a given-back label only opens, and a closed parent set by the first run would
+ * otherwise keep the folder inside it closed until the next pass opens it). Returns false then, said as a stop, so the next
+ * pass (the new mode's) sets what it wants. `stopUnless` (the mode file and the mode wanted) stops a label run between its
+ * Sets too (labelScript); the Set going at that moment runs to its end, as one Set walks a folder inside Windows.
  */
-export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean; grant?: boolean; what?: string } = {}): Promise<boolean> {
+export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean; grant?: boolean; what?: string; still?: () => boolean; stopUnless?: { file: string; want: string; onStop?: () => void } } = {}): Promise<boolean> {
+  let stopped = false;
+  const still = () => !stopped && (o.still ?? (() => true))();
   const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
   const todo: LabelTarget[] = [];
   for (const x of t) {
@@ -901,45 +921,64 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
     todo.push(x);
   }
   if (!todo.length) return true;
+  if (!still()) {
+    say(`worker integrity: read labels not set on ${todo.length} path(s): the read fence changed before the label run started (${o.what ?? "the daemon's folder, secrets and root.json"}); the next pass sets the new mode's`);
+    return false;
+  }
   // w5980: the given-back paths first. Setting a closed folder's label walks everything inside it, so a given-back folder
   // labelled after its closed parent sat closed until the walk reached its own label: on LothDesktop the gh shim's
   // app\machine\ghApp.ts read as missing to Low workers for minutes (15:54-15:55 UTC, 2026-11-26). A given-back folder that
   // already carries its explicit label keeps it through the parent's walk (the explicit label comes first and wins).
   todo.sort((a, b) => Number(a.sddl.includes('NWNR')) - Number(b.sddl.includes('NWNR')));
   const runOnce = async (list: readonly LabelTarget[]) => {
-    const script = labelScript(list);
+    const script = labelScript(list, o.stopUnless);
     const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
     const failed = new Map<number, string>();
     const seen = new Set<number>();
     for (const line of r.stdout.split(/\r?\n/)) {
-      const m = /^(ok|err) (\d+)(?: (\d+))?$/.exec(line.trim());
+      const m = /^(ok|err|stopped) (\d+)(?: (\d+))?$/.exec(line.trim());
       if (!m) continue;
       seen.add(Number(m[2]));
       if (m[1] === 'err') failed.set(Number(m[2]), m[3] ?? '?');
+      if (m[1] === 'stopped') {
+        stopped = true;
+        failed.set(Number(m[2]), STOPPED);
+      }
     }
     list.forEach((_, i) => !seen.has(i) && failed.set(i, `no answer (${(r.stderr || r.stdout).trim().slice(-200)})`));
     return failed;
   };
   let failed = await runOnce(todo);
+  if (stopped) say(`worker integrity: the read fence changed during the label run: ${[...failed.values()].filter((c) => c === STOPPED).length} closed path(s) left without their label`);
   const account = o.account ?? currentAccount();
   const denied = [...failed].filter(([, c]) => c === '5').map(([i]) => todo[i]);
   // w5749: the owner's folders on the system drive get their label only (lothsahn's go), never a grant.
   if (denied.length && account && o.grant !== false) {
+    // w6120: once the mode changed, only the given-back paths (which open) are granted and set again, never a closed one.
+    const retry: LabelTarget[] = [];
     for (const x of denied) {
+      if (!givenBack(x) && (stopped || (stopped = !still()))) continue;
       const g = await exec('icacls', [x.path, '/grant', `${account}:${x.sddl.includes('OICI') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
       if (g.code === 0) say(`worker integrity: gave ${account} Full on ${x.path}, which setting its label needs (WRITE_OWNER)`);
+      retry.push(x);
     }
-    const again = await runOnce(denied);
+    if (!stopped && !still()) stopped = true;
+    const list = stopped ? retry.filter(givenBack) : retry;
+    if (stopped) say(`worker integrity: the read fence changed: ${denied.length - list.length} closed path(s) refused for want of WRITE_OWNER get no grant or retry and stay without their label${list.length ? `; setting the ${list.length} given-back one(s) only` : ''}`);
+    const again = list.length ? await runOnce(list) : new Map<number, string>();
     const rest = new Map<number, string>();
     for (const [i, c] of failed) {
-      const j = denied.indexOf(todo[i]);
-      if (j < 0) rest.set(i, c);
-      else if (again.has(j)) rest.set(i, again.get(j)!);
+      const j = list.indexOf(todo[i]);
+      if (j >= 0) {
+        if (again.has(j)) rest.set(i, again.get(j)!);
+      } else if (stopped && denied.includes(todo[i])) rest.set(i, STOPPED);
+      else rest.set(i, c);
     }
     failed = rest;
   }
   for (const [i, c] of failed) say(`worker integrity: could not set ${todo[i].sddl} on ${todo[i].path}: ${c}`);
   say(`worker integrity: read labels set on ${todo.length - failed.size} of ${todo.length} paths (${o.what ?? "No-Read-Up on the daemon's folder, secrets and root.json; their worker reads given back"})`);
+  if (stopped) o.stopUnless?.onStop?.();
   return failed.size === 0;
 }
 
@@ -962,7 +1001,8 @@ export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (
  * The C# of relabelInside: walks each root, never into a reparse point nor below a skipped (read-back) folder, leaves the
  * label targets themselves alone (but walks into them), and on every other path with an EXPLICIT label at Medium or above
  * adds No-Read-Up (close) or takes it off (open), keeping the label's level, flags and other rights. Prints `set <path>`,
- * `err <code> <path>` and last `done <looked at> <changed> <failed>`. No `$` or backtick inside: it sits in a PowerShell
+ * `err <code> <path>`, `stopped <looked at>` once the stop file no longer holds the wanted mode (w6120; checked every 256
+ * paths, an empty stop file name never), and last `done <looked at> <changed> <failed>`. No `$` or backtick inside: it sits in a PowerShell
  * here-string.
  */
 const RELABEL_CS = String.raw`using System; using System.IO; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text.RegularExpressions;
@@ -989,13 +1029,18 @@ public static class FfWalk {
     int n; if (l.StartsWith("S-1-16-") && int.TryParse(l.Substring(7), out n)) return n; return -1;
   }
   static bool Inherited(string flags) { for (int i = 0; i + 1 < flags.Length; i += 2) if (flags.Substring(i, 2) == "ID") return true; return false; }
-  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close) {
+  static bool Wanted(string stopFile, string want) {
+    if (stopFile.Length == 0) return true;
+    try { return File.ReadAllText(stopFile).Trim() == want; } catch { return false; }
+  }
+  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close, string stopFile, string want) {
     var o = new List<string>(); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var sk = new HashSet<string>(skip, StringComparer.OrdinalIgnoreCase); var tg = new HashSet<string>(targets, StringComparer.OrdinalIgnoreCase);
     var rx = new Regex(@"\(ML;([A-Z]*);([A-Z]*);;;([A-Z0-9-]+)\)");
     var st = new Stack<KeyValuePair<string, bool>>(); foreach (var r in roots) st.Push(new KeyValuePair<string, bool>(r, true));
-    int looked = 0, changed = 0, failed = 0;
+    int looked = 0, changed = 0, failed = 0, steps = 0;
     while (st.Count > 0) {
+      if (steps++ % 256 == 0 && !Wanted(stopFile, want)) { o.Add("stopped " + looked); break; }
       var e = st.Pop(); string p = e.Key.TrimEnd('\\'); if (!seen.Add(p) || sk.Contains(p)) continue;
       FileAttributes a; try { a = File.GetAttributes(p); } catch { continue; }
       if (!e.Value && (a & FileAttributes.ReparsePoint) != 0) continue;
@@ -1024,9 +1069,9 @@ public static class FfWalk {
 }`;
 
 /** The PowerShell that runs RELABEL_CS on these roots. Exported for tests. */
-export function relabelScript(roots: readonly string[], skip: readonly string[], targets: readonly string[], close: boolean): string {
+export function relabelScript(roots: readonly string[], skip: readonly string[], targets: readonly string[], close: boolean, stop?: { file: string; want: string }): string {
   const arr = (a: readonly string[]) => `@(${a.map(psq).join(', ')})`;
-  return ["$ErrorActionPreference = 'Stop'", 'Add-Type -TypeDefinition @"', RELABEL_CS, '"@', `[FfWalk]::Run([string[]]${arr(roots)}, [string[]]${arr(skip)}, [string[]]${arr(targets)}, $${close})`].join('\n');
+  return ["$ErrorActionPreference = 'Stop'", 'Add-Type -TypeDefinition @"', RELABEL_CS, '"@', `[FfWalk]::Run([string[]]${arr(roots)}, [string[]]${arr(skip)}, [string[]]${arr(targets)}, $${close}, ${psq(stop?.file ?? '')}, ${psq(stop?.want ?? '')})`].join('\n');
 }
 
 /**
@@ -1039,13 +1084,17 @@ export function relabelScript(roots: readonly string[], skip: readonly string[],
  * closed folders gets NR too, keeping its level; `open` takes that NR off again. Read-back folders, the label targets
  * themselves, reparse points and the system drive are never touched. Returns whether every path that needed it was set;
  * never throws.
+ *
+ * `stopUnless` (w6120, close only): the read fence's mode file and the mode this pass sets; the walk stops once the file
+ * holds another (checked every 256 paths), and false is returned, said as a stop. Stopping leaves fewer paths closed,
+ * never more. `open` always walks to the end: it is the way back.
  */
-export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | 'open', exec: Exec, say: (line: string) => void, o: { systemDrive?: (p: string) => boolean } = {}): Promise<boolean> {
+export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | 'open', exec: Exec, say: (line: string) => void, o: { systemDrive?: (p: string) => boolean; stopUnless?: { file: string; want: string; onStop?: () => void } } = {}): Promise<boolean> {
   const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
   const roots = t.filter((x) => x.sddl === NO_READ_UP.dir && !sys(x.path)).map((x) => x.path);
   if (!roots.length) return true;
   const skip = t.filter((x) => x.sddl === READ_BACK.dir).map((x) => x.path);
-  const script = relabelScript(roots, skip, t.map((x) => x.path), mode === 'close');
+  const script = relabelScript(roots, skip, t.map((x) => x.path), mode === 'close', mode === 'close' ? o.stopUnless : undefined);
   const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
   const lines = r.stdout.split(/\r?\n/).map((l) => l.trim());
   const done = lines.map((l) => /^done (\d+) (\d+) (\d+)$/.exec(l)).find(Boolean);
@@ -1056,8 +1105,11 @@ export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | '
   const errs = lines.filter((l) => l.startsWith('err '));
   for (const e of errs.slice(0, 20)) say(`worker integrity: explicit label inside a closed folder: ${e}`);
   const [looked, changed, failed] = done.slice(1).map(Number);
-  if (changed || failed) say(`worker integrity: ${mode === 'close' ? 'No-Read-Up added to' : 'No-Read-Up taken off'} ${changed} explicitly labelled path(s) inside the closed folders (${looked} looked at${failed ? `, ${failed} could not be` : ''})`);
-  return failed === 0;
+  const stopped = lines.some((l) => /^stopped \d+$/.test(l));
+  if (stopped) o.stopUnless?.onStop?.();
+  if (stopped) say(`worker integrity: the read fence changed during the walk inside the closed folders: stopped after ${looked} path(s), ${changed} given No-Read-Up; the next pass sets the new mode's`);
+  else if (changed || failed) say(`worker integrity: ${mode === 'close' ? 'No-Read-Up added to' : 'No-Read-Up taken off'} ${changed} explicitly labelled path(s) inside the closed folders (${looked} looked at${failed ? `, ${failed} could not be` : ''})`);
+  return failed === 0 && !stopped;
 }
 
 /** An empty label SACL: setting it takes a path's explicit label off, so it inherits its parent's again (w5749, measured). */

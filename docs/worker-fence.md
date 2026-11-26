@@ -203,8 +203,23 @@ closed under `warn`. Now each switch's pass
 (`applyReadLabelsInTurn`, machine/daemon.ts) waits for the one before, sets the mode the `read-fence` file says when it
 starts, and an `on` pass stops between its steps once the file says otherwise; the next pass then sets the new mode. A
 switch sent during a long pass answers only when the passes before it are done, so the portal's wait may run out: read
-`daemon.log` for `the read fence is <mode>` rather than sending it again. on's probe undoing its own labels and the login watcher still label outside this
-queue, and a pass stops only between its steps, so an `off` during a first `on` waits for the label run under way. And the given-back paths get their labels
+`daemon.log` for `the read fence is <mode>` rather than sending it again.
+
+An `on` pass also stops inside its long steps (w6120): its label run reads the `read-fence` file before each closing
+label and sets no more of them once it says otherwise (the given-back labels are always set, and the one Set under way
+runs to its end, as one Set walks a folder inside Windows); a closed path refused for want of WRITE_OWNER gets no grant
+and no retry once the mode changed, while a given-back one still does; and the walk inside the closed folders checks the
+file every 256 paths and stops. A closed path left unlabelled that way stays open, which only ever lets a worker read
+more, never less, and the next pass (the new mode's) sets everything it wants. Once a pass has seen the mode change it
+stays stopped, even if the file says `on` again (`on`, `warn`, `on`): the later switch has queued a pass of its own.
+`warn` and `off` passes only open, so they always run to the end. So an `off` sent during a first `on` waits for at most
+one Set's walk, not the whole label run.
+
+The login watcher's minute tick (w5559, No-Read-Up on new Claude login files) runs in the same queue, and only while
+the file says `on` when its turn comes: beside a pass it could label a login file after an `off` pass had opened it. A
+tick already waiting is not queued twice. on's probe undoing its own labels (readFenceWin.ts) stays outside the queue
+on purpose: it only opens, so beside any pass it leaves nothing closed that a mode does not want, and in the queue it
+would wait behind a slow pass while workers are locked out. And the given-back paths get their labels
 before the closed folders that hold them (`labelNoReadUp`): labelled after, `app\machine` sat closed under the
 daemon folder's walk, and the gh shim's `ghApp.ts` read as missing to Low workers for minutes (15:54-15:55 UTC).
 
