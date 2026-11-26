@@ -818,6 +818,80 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   longer make a new folder in `tools`; a tool that needs one makes it from the daemon or `worker.ts tools`. A daemon
   from before w5717 passes no children and labels `tools` Low again (the rollback). Proof:
   `server/toolsLabelsWin.test.ts` on the Windows runner.
+  - **A node.exe planted before w5717 deployed is found and replaced** (w5839). `worker.ts tools` keeps a record of
+    the agents' node in `<root>\daemon\agent-node\record.json`: the version, the SHA-256 of every file in `tools\node`
+    and that folder's identity (`folderId`: its volume and NTFS file id, which a rename keeps and a new folder never has,
+    measured on BEAST's F:), written from the pinned download it unpacked. The record and the unpacking stage both live
+    in `daemon\agent-node`: `daemon` and `secrets` are the only root children every daemon version keeps Medium, from
+    the first Windows fence on (w5377, 02cd43ca); before w5539 every other root child, `tools-medium` too, was labelled
+    Low, and nothing labels it Medium again (w5876's review). A Low worker can make a folder of the pinned bytes while a
+    rolled-back daemon has `tools` Low, keep write handles open on its files, and those handles outlive the Medium relabel
+    (w5868's review), so only a folder this run made is trusted, and its files are Medium from birth. The record's folder
+    is read with icacls too before the record is: one with a Low label or an access entry of its own is put aside
+    (`daemon\agent-node.old-<ms>`, deleted) for a new one and nothing in it is trusted; one that cannot be put aside
+    leaves the node there with a WARNING. The records of before, `tools\node.json` and `tools-medium\agent-node.json`,
+    are never read and are deleted. Every tools run hashes the folder again (1994 files in about 360 ms on BEAST,
+    measured) and never runs the installed node.exe. The record itself must be the pinned one: its node.exe hash is
+    `AGENT_NODE.exeSha256` and the digest of its whole file list is `AGENT_NODE.treeSha256` (`treeDigest`), so a record a
+    Low worker left in the old Low `tools` cannot vouch for another node or for a DLL it added (w5854's review). A
+    junction or link at `tools\node` is refused (Node's `lstat` calls a junction a folder on Windows, measured on
+    v24.22.1, so `notAFolder` compares its real path). Matching bytes are not enough either (w5866's review): a Low
+    process can give a file it wrote a Low label of its own (`Mandatory Label\Low Mandatory Level:(NW)`, no `(I)`;
+    measured from a Low sandbox on BEAST, 2026-11-25), and a file's own label beats the Medium one it would inherit, so a
+    pinned copy a Low worker put there while `tools` was Low stays writable from Low, npm's scripts included. So each
+    run first reads `icacls tools\node /T /C` (`labelProblem`): any label below Medium, any access entry a file or
+    folder holds of its own (all but the folder's own Medium label are inherited on BEAST's live copy, 2459 entries),
+    a failure or output it cannot read, all mean a fresh copy. The read takes about 5 s on BEAST (measured; the
+    parse 12 ms). Labels are read in English, as in `machine/lowIntegrity.ts`. A file that differs, is missing or was added, or no record at
+    all, means a fresh pinned download swapped in at the same path, even when the files there match: a folder this run
+    unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. A handle outlives a relabel, so
+    labels, hashes and identity can all be right while a Low process that survived two rollbacks still holds a write
+    handle on the real folder (w5882's review). So after the labels (once they refuse Low a new write open, w5951's
+    review), each run reads which processes below Medium hold
+    anything under `tools\node` or `daemon\agent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
+    list, `NtQueryInformationProcess` class 51, its file and section handles and its mapped views; the system-wide handle
+    table is refused to a Low session, 0xC0000022, measured), each folder resolved first to the final form Windows names an
+    open file by, so a short 8.3 name, a junction or a subst drive in the root still matches (w5926's review). A File
+    handle is matched by its file's identity, not its path (w5951's review): the volume serial and 128-bit file id
+    (`FILE_ID_INFO`) of every file and folder under the two folders are read first, and each handle's are compared, so a
+    handle opened through a second hard link deleted since (Windows then gives it no path) is still found. A write handle
+    the read cannot copy, or one on the node's volume whose file id cannot be read, is a holder, never skipped; so is a
+    writable file view whose name on that volume no longer opens. The C# goes gzipped into `-EncodedCommand`, which
+    passed Windows' 32,767-character command line as plain text. Only access that can change the files counts there: a
+    File handle with write, append, attribute, EA, delete, DACL or owner rights, a Section with map-write, a view mapped
+    writable (w5886's review). A Low worker that runs this node or works in its folder holds read handles only, since the
+    Medium label refuses it any other open, and is left alone (measured: a Low node with its working folder in
+    `tools\node` and npm's `index.js` open, and the node verified). It says a WARNING naming the writers and does not
+    trust the node, so it is swapped; nothing is ended in this stage (lothsahn's lockout rule: warn first, w5926's review).
+    A process whose handles it cannot read (Windows' own sandboxed services, as DefenderAiPlatformHost on the CI runner)
+    is not named, and a failed read means a fresh copy. A file with a second hard link is
+    never trusted either: a handle opened through that name has a path outside the folder (w5886's review; the pinned
+    download has one name per file, and BEAST's live copy has none with two, measured). The read covers 110 to 122 Low
+    processes and about 30k handles in 3 to 6 s on BEAST (measured). A rename refused because a file in the folder is
+    held open is tried three times, the Low processes holding anything in it (reads too) named once in a WARNING and not
+    ended; a folder still held keeps its node, with a WARNING, until a later rollout finds it free, and until then
+    agents keep running that untrusted node, since `agentNodePathDir` puts `tools\node` on their PATH once node.exe is
+    there (w5951's review, N2: the warn-only stage never leaves a machine without node) (measured on BEAST: a Low
+    writer on npm's `index.js` gave `busy` and kept running, and the run after it exited swapped the node). A node.exe that runs does not block the rename (measured). Each run stages in
+    `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
+    may be another rollout's, still unpacking). **Every rollout swaps the node, even one that passes every check**
+    (w5964's review, B1): a Low process can hide a write handle from the holder read by moving it to a new handle value
+    in a loop while the read copies them one at a time (measured from a Low sandbox: about 10 million moves in 150 s, the
+    writer named in 0 of 12 reads, then `PLANTED` written into the file), and can pass it between two Low processes. The
+    fresh copy is Medium from birth and a handle to the old one stays on the old files (`tools\node.old-<ms>`), so the
+    checks no longer decide whether to swap, only what the line says and which writers it names. The swap unpacks the zip
+    kept in `daemon\agent-node\<zip>` when its SHA-256 is the pinned one (hashed in memory and those same bytes unpacked),
+    else downloads it and keeps it (`pinnedZip`), so a rollout needs no network once a machine has it. A Low process that
+    puts an empty access list on itself is never listed as Low by the read (w5964's review, N1): the swap does not rest on
+    the read. The rollout log says
+    `Agent node: node reinstalled (verified: ...; swapped anyway, ...): ...` for a node that passed every check,
+    `Agent node: node reinstalled (<why>): ...` for one that did not, or
+    `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or
+    swap failed: the machine is never left without node (if even moving the old folder back fails, the line says
+    `tools\node is MISSING` and where it is, and the next rollout puts one there). Windows lets `tools\node` be renamed
+    aside while a node.exe in it runs but not deleted (EPERM, measured on BEAST), so the old folder stays as
+    `tools\node.old-<ms>` until a later run deletes it. A Low session cannot label a folder Medium ("may not be
+    assigned as the label", measured), so the end-to-end run from a sandbox fakes only `icacls`.
   - **A test of what a Low worker can do on Windows must drop privileges, not only lower the label.** A GitHub runner's
     token is elevated, and a Low copy of it keeps SeBackupPrivilege and SeRestorePrivilege, which pass any integrity
     label and access list. In run 45641049172 the runner's Low node renamed `tools\node` under a Medium `tools`, and the
