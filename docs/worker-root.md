@@ -790,10 +790,18 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     `AGENT_NODE.exeSha256` and the digest of its whole file list is `AGENT_NODE.treeSha256` (`treeDigest`), so a record a
     Low worker left in the old Low `tools` cannot vouch for another node or for a DLL it added (w5854's review). A
     junction or link at `tools\node` is refused (Node's `lstat` calls a junction a folder on Windows, measured on
-    v24.22.1, so `notAFolder` compares its real path). A file that differs, is missing or was added, or no record at
+    v24.22.1, so `notAFolder` compares its real path). Matching bytes are not enough either (w5866's review): a Low
+    process can give a file it wrote a Low label of its own (`Mandatory Label\Low Mandatory Level:(NW)`, no `(I)`;
+    measured from a Low sandbox on BEAST, 2026-11-25), and a file's own label beats the Medium one it would inherit, so a
+    pinned copy a Low worker put there while `tools` was Low stays writable from Low, npm's scripts included. So each
+    run first reads `icacls tools\node /T /C` (`labelProblem`): any label below Medium, any access entry a file or
+    folder holds of its own (all but the folder's own Medium label are inherited on BEAST's live copy, 2459 entries),
+    a failure or output it cannot read, all mean a fresh copy. The read takes about 5 s on BEAST (measured; the
+    parse 12 ms). Labels are read in English, as in `machine/lowIntegrity.ts`. A file that differs, is missing or was added, or no record at
     all, means a fresh pinned download swapped in at the same path, even when the files there match: a folder this run
     unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. Each run stages in
-    `tools\node-<version>-<ms>.part` and sweeps the ones an earlier run left. The rollout log says
+    `tools\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
+    may be another rollout's, still unpacking). The rollout log says
     `Agent node: node verified: ...`, `Agent node: node reinstalled (<why>): ...`, or
     `WARNING: Agent node: node not reinstalled (<why>): ...; the node there stays` when the download, unpack, label or
     swap failed: the machine is never left without node (if even moving the old folder back fails, the line says

@@ -74,7 +74,9 @@ async function versionOf(d: AgentNodeDeps, exe: string): Promise<string | undefi
  * digest is `AGENT_NODE.treeSha256`), so one a Low worker wrote while `tools` was Low (before w5717, or a daemon
  * rolled back) cannot vouch for a planted DLL or script. A record that is not, a file that differs, is missing or was
  * added (a DLL beside node.exe loads before the system's), a link where the folder should be, or no record at all, is
- * a node put there again from a fresh pinned download.
+ * a node put there again from a fresh pinned download. Matching bytes are not enough: a pinned copy a Low worker put
+ * there with Low labels of its own matches every hash and stays writable from Low, so the labels and access entries are
+ * read first (`labelProblem`, w5866's review).
  */
 export const agentNodeStamp = (root: string) => path.join(root, 'tools', 'node.json');
 type Stamp = { version: string; files: Record<string, string> };
@@ -157,6 +159,61 @@ function stampCheck(stampFile: string, dir: string, pin: Pin): { ok: true; files
   return diff ? { ok: false, why: `its files are not the recorded ones: ${diff}` } : { ok: true, files: Object.keys(now).length };
 }
 
+/**
+ * What in `icacls <dir> /T` lets a Low worker write the node: a Low or Untrusted label, or any label below Medium; or an
+ * access entry an entry in the tree holds of its own (not inherited), save the folder's own Medium label. A pinned copy
+ * a Low worker put there while `tools` was Low (a daemon rolled back below w5717) and relabelled Low file by file keeps
+ * those labels after the roll-forward (a file's own label beats an inherited one, w5377) and its bytes match the record,
+ * so only its labels show it (w5866's review). Output this cannot read counts against the folder: the node is put there
+ * again, which needs nobody. On BEAST's live `tools\node` every entry but the folder's Medium label is inherited (2459
+ * entries in 5.3 s, measured). Labels are matched in English, as everywhere in machine/lowIntegrity.ts; another
+ * language's names are unread labels, so that machine reinstalls each rollout rather than trusting them.
+ */
+export function labelProblem(out: string, dir: string): string | undefined {
+  const lines = out.split(/\r?\n/);
+  const sum = lines.find((l) => /^Successfully processed \d+ files; Failed processing (\d+) files/.test(l));
+  if (!sum) return 'icacls did not finish';
+  if (!/Failed processing 0 files/.test(sum)) return `icacls could not read some: ${sum.trim()}`;
+  let entry = '';
+  let root = true;
+  let seen = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw === sum) break;
+    if (!raw.trim()) {
+      if (entry) root = false;
+      continue;
+    }
+    let ace = raw.trim();
+    if (!/^\s/.test(raw)) {
+      // An entry's first line: its path, then its first access entry. The lines after it are indented to where that
+      // entry starts, which is how the path is told from the entry (both hold spaces and backslashes).
+      if (!raw.toLowerCase().startsWith(dir.toLowerCase())) return `icacls named ${raw.slice(0, 120)}, outside ${dir}`;
+      const next = lines[i + 1] ?? '';
+      const col = /^\s+\S/.test(next) ? next.length - next.trimStart().length : -1;
+      if (col <= dir.length || raw[col - 1] !== ' ') return `icacls line not read: ${raw.slice(0, 120)}`;
+      entry = raw.slice(0, col - 1);
+      ace = raw.slice(col);
+      seen++;
+    }
+    const flags = ace.slice(ace.lastIndexOf(':') + 1);
+    if (!/^(\([A-Z,]+\))+$/.test(flags)) return `icacls line not read: ${ace.slice(0, 120)}`;
+    const label = /\((NW|NR|NX)\)/.test(flags) || /Mandatory Label\\/i.test(ace);
+    if (label && !/^Mandatory Label\\(Medium|Medium Plus|High|System) Mandatory Level:/i.test(ace)) return `${entry} is labelled ${ace}`;
+    if (!flags.includes('(I)') && !(root && label)) return `${entry} holds an access entry of its own: ${ace}`;
+  }
+  return seen ? undefined : 'icacls named nothing';
+}
+
+async function labelCheck(dir: string, d: AgentNodeDeps): Promise<string | undefined> {
+  const r = await d.exec('icacls', [dir, '/T', '/C'], { timeoutMs: 5 * 60_000 });
+  const p = r.code === 0 ? labelProblem(r.stdout, dir) : `icacls could not read it (${r.code}: ${(r.stderr || r.stdout).trim().slice(-200)})`;
+  return p && `its labels let a Low worker write it: ${p}`;
+}
+
+/** How long a stage folder is taken to be another rollout's, still running (an unpack takes seconds: 1.8 s measured). */
+const STAGE_TTL_MS = 60 * 60_000;
+
 /** Deletes a path; false when it could not. Never throws. */
 function remove(p: string): boolean {
   try {
@@ -173,14 +230,18 @@ function remove(p: string): boolean {
  * the agents that run from it keep it until they end. Each run stages in a folder of its own, so one left behind never
  * stops the next.
  */
-function sweepOld(tools: string): void {
+function sweepOld(tools: string, now: number): void {
   let names: string[];
   try {
     names = fs.readdirSync(tools);
   } catch {
     return;
   }
-  for (const n of names) if (/^node\.old-\d+$/.test(n) || /^node-v[\d.]+(-\d+)?\.part$/.test(n)) remove(path.join(tools, n));
+  for (const n of names) {
+    // Another rollout's stage of the last hour may still be in use (w5866's review): it is left to that run.
+    const part = /^node-v[\d.]+(?:-(\d+))?\.part$/.exec(n);
+    if (/^node\.old-\d+$/.test(n) || (part && !(part[1] && now - Number(part[1]) < STAGE_TTL_MS))) remove(path.join(tools, n));
+  }
 }
 
 /**
@@ -199,10 +260,12 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
   const stampFile = agentNodeStamp(root);
   const pin = d.pin ?? { exeSha256: AGENT_NODE.exeSha256, treeSha256: AGENT_NODE.treeSha256 };
   const tools = path.dirname(dir);
-  sweepOld(tools);
-  const st = stampCheck(stampFile, dir, pin);
+  sweepOld(tools, (d.now ?? Date.now)());
+  // The labels first: once nothing Low can write the files, what is hashed next stays what runs.
+  const lab = !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
+  const st = lab ? { ok: false as const, why: lab } : stampCheck(stampFile, dir, pin);
   if (st.ok) {
-    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download).`);
+    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, and no Low label or access entry of their own lets a Low worker write them).`);
     return 'current';
   }
   const why = st.why;
@@ -252,6 +315,10 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
           remove(stage);
           return 'failed';
         }
+      } else {
+        d.say(`WARNING: Agent node: node not reinstalled (${why}): ${dir} is MISSING: there was none and the new one could not be moved in (${(e as Error).message}); the next rollout puts one there.`);
+        remove(stage);
+        return 'failed';
       }
       throw e;
     }
@@ -269,7 +336,8 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     return 'installed';
   } catch (e) {
     remove(stage);
-    d.say(`WARNING: Agent node: node not reinstalled (${why}): could not put ${AGENT_NODE.version} at ${dir}: ${(e as Error).message}; the node there stays.`);
+    const left = fs.existsSync(path.join(dir, 'node.exe')) ? 'the node there stays' : `${dir} has no node yet; the next rollout tries again`;
+    d.say(`WARNING: Agent node: node not reinstalled (${why}): could not put ${AGENT_NODE.version} at ${dir}: ${(e as Error).message}; ${left}.`);
     return 'failed';
   }
 }

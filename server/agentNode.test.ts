@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, agentNodeStamp, ensureAgentNode, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
+import { AGENT_NODE, agentNodeDir, agentNodeExe, agentNodePathDir, agentNodeStamp, ensureAgentNode, labelProblem, treeDiff, treeDigest, firewallCheckScript, parseFirewallCheck, type AgentNodeDeps } from './agentNode.ts';
 
 /**
  * w1742: the agents' node lives at one fixed path per Windows worker root, so no worker unpacks its own into a session temp
@@ -26,7 +26,25 @@ const pinOf = (version: string) => {
   return { exeSha256: files['node.exe'], treeSha256: treeDigest(files) };
 };
 
-function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean } = {}) {
+/**
+ * `icacls <dir> /T /C` as Windows prints it (the layout of BEAST's live tools\node, w5839): each entry's path, its first
+ * access entry on the same line and the rest indented under it, a blank line between entries. Every entry inherits, save
+ * the folder's own Medium label; `own` adds a line to the entries it names (a path relative to the folder, '' for it).
+ */
+function icaclsTree(dir: string, own: Record<string, string> = {}): string {
+  const walk = (rel: string): string[] => [rel, ...(fs.statSync(path.join(dir, rel)).isDirectory() ? fs.readdirSync(path.join(dir, rel)).sort().flatMap((n) => walk(rel ? `${rel}/${n}` : n)) : [])];
+  const out: string[] = [];
+  for (const rel of walk('')) {
+    const p = rel ? `${dir}\\${rel.replaceAll('/', '\\')}` : dir;
+    const aces = ['BEAST\\rydin:(I)(F)', 'BUILTIN\\Administrators:(I)(F)', 'NT AUTHORITY\\Authenticated Users:(I)(M)', 'BUILTIN\\Users:(I)(RX)'];
+    aces.push(rel ? 'Mandatory Label\\Medium Mandatory Level:(I)(NW)' : 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)');
+    if (own[rel]) aces.push(own[rel]);
+    out.push(`${p} ${aces[0]}`, ...aces.slice(1).map((a) => `${' '.repeat(p.length + 1)}${a}`), '');
+  }
+  return `${out.join('\r\n')}\r\nSuccessfully processed ${out.filter((l) => l === '').length} files; Failed processing 0 files\r\n`;
+}
+
+function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVersion?: string; icaclsFails?: boolean; own?: Record<string, string>; readOut?: string } = {}) {
   const said: string[] = [];
   const ran: string[] = [];
   const d: AgentNodeDeps = {
@@ -37,6 +55,12 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
     pin: pinOf(o.pinVersion ?? AGENT_NODE.version),
     exec: async (cmd, args) => {
       ran.push(cmd);
+      if (cmd === 'icacls' && args.includes('/T')) {
+        // The labels `own` names are on the node there; the fresh copy that replaces it inherits alone.
+        const own = o.own;
+        o.own = undefined;
+        return { code: 0, stdout: o.readOut ?? icaclsTree(args[0], own), stderr: '' };
+      }
       if (cmd === 'icacls') return o.icaclsFails ? { code: 5, stdout: '', stderr: 'Access is denied.' } : { code: 0, stdout: '', stderr: '' };
       if (cmd === 'tar') {
         if (o.tarFails) return { code: 1, stdout: '', stderr: 'bad zip' };
@@ -171,7 +195,13 @@ test('w5839: a staging folder a run left behind is swept, and never stops the ne
     const f = fake(zip);
     fs.mkdirSync(path.join(root, 'tools', `node-${AGENT_NODE.version}.part`, 'x'), { recursive: true });
     fs.mkdirSync(path.join(root, 'tools', `node-${AGENT_NODE.version}-123.part`), { recursive: true });
-    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    // Another rollout's stage of the last minute is left to it (w5866's review), and goes once it is an hour old.
+    const now = Date.now();
+    const theirs = `node-${AGENT_NODE.version}-${now - 60_000}.part`;
+    fs.mkdirSync(path.join(root, 'tools', theirs));
+    assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now }), 'installed');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json', theirs].sort());
+    assert.equal(await ensureAgentNode(root, { ...f.d, now: () => now + 2 * 60 * 60_000 }), 'current');
     assert.deepEqual(fs.readdirSync(path.join(root, 'tools')).sort(), ['node', 'node.json']);
   });
 });
@@ -233,6 +263,60 @@ test('w5839: treeDigest does not depend on the order of the record, and changes 
   assert.equal(treeDigest({ a: '1', b: '2' }), treeDigest({ b: '2', a: '1' }));
   assert.notEqual(treeDigest({ a: '1', b: '2' }), treeDigest({ a: '1', b: '2', c: '3' }));
   assert.notEqual(treeDigest({ a: '1', b: '2' }), treeDigest({ a: '1', b: '3' }));
+});
+
+test("w5839: a pinned copy whose files carry a Low label or an access entry of their own is put there again (w5866's review)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    for (const own of [
+      { 'node_modules/npm/index.js': 'Mandatory Label\\Low Mandatory Level:(NW)' },
+      { 'node.exe': 'Mandatory Label\\Untrusted Mandatory Level:(NW)' },
+      { 'node_modules/npm': 'Everyone:(OI)(CI)(M)' },
+      { '': 'Everyone:(OI)(CI)(M)' },
+    ] as Record<string, string>[]) {
+      const root = tmp();
+      assert.equal(await ensureAgentNode(root, fake(zip).d), 'installed');
+      // The same bytes and a record that matches them: only the labels differ.
+      const f = fake(zip, { own });
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', JSON.stringify(own));
+      assert.ok(f.said.at(-1)!.startsWith('Agent node: node reinstalled (its labels let a Low worker write it: '), f.said.at(-1)!);
+      assert.ok(f.said.at(-1)!.includes(Object.values(own)[0]!), f.said.at(-1)!);
+      assert.equal(await ensureAgentNode(root, f.d), 'current');
+      assert.match(f.said.at(-1)!, /^Agent node: node verified: .*no Low label/);
+    }
+  });
+});
+
+test('w5839: icacls output that cannot be read, or that names a failure, counts against the folder; with no node yet the line says so', async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    assert.equal(await ensureAgentNode(root, fake(zip).d), 'installed');
+    const one = `${agentNodeDir(root)} BEAST\\rydin:(I)(F)\r\n${' '.repeat(agentNodeDir(root).length + 1)}BUILTIN\\Users:(I)(RX)\r\n\r\n`;
+    for (const readOut of ['', 'something else\r\n', `${one}Successfully processed 1 files; Failed processing 1 files\r\n`, `${one.replace('(I)(RX)', 'RX')}Successfully processed 1 files; Failed processing 0 files\r\n`]) {
+      const f = fake(zip, { readOut });
+      assert.equal(await ensureAgentNode(root, f.d), 'installed', readOut);
+      assert.match(f.said.at(-1)!, /its labels let a Low worker write it/);
+    }
+  });
+  // No node at all and the download is not the pinned one: the line does not say a node stays.
+  const bad = fake(Buffer.from('not the pinned zip'));
+  assert.equal(await ensureAgentNode(tmp(), bad.d), 'failed');
+  assert.match(bad.said.at(-1)!, /has no node yet; the next rollout tries again\.$/);
+});
+
+test("w5839: labelProblem reads icacls's layout: paths and accounts with spaces, the folder's own Medium label, a Low one", () => {
+  const dir = 'F:\\ffw\\tools\\node';
+  const e = (p: string, ...aces: string[]) => [`${p} ${aces[0]}`, ...aces.slice(1).map((a) => `${' '.repeat(p.length + 1)}${a}`), ''].join('\r\n');
+  const sum = (n: number) => `Successfully processed ${n} files; Failed processing 0 files\r\n`;
+  const top = e(dir, 'BEAST\\rydin:(I)(OI)(CI)(F)', 'NT AUTHORITY\\Authenticated Users:(I)(M)', 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)');
+  const file = (p: string, label = 'Mandatory Label\\Medium Mandatory Level:(I)(NW)') => e(`${dir}\\${p}`, 'NT AUTHORITY\\SYSTEM:(I)(F)', 'BUILTIN\\Users:(I)(RX)', label);
+  assert.equal(labelProblem([top, file('a b\\c d.txt'), sum(2)].join('\r\n'), dir), undefined);
+  assert.equal(labelProblem([top, file('a b\\c d.txt', 'Mandatory Label\\Low Mandatory Level:(NW)'), sum(2)].join('\r\n'), dir), `${dir}\\a b\\c d.txt is labelled Mandatory Label\\Low Mandatory Level:(NW)`);
+  // Only the folder itself may hold a label of its own: a file's explicit Medium one is still an entry of its own.
+  assert.match(labelProblem([top, file('x.js', 'Mandatory Label\\Medium Mandatory Level:(NW)'), sum(2)].join('\r\n'), dir)!, /x\.js holds an access entry of its own/);
+  assert.match(labelProblem([file('x.js'), sum(1)].join('\r\n'), 'F:\\other')!, /outside/);
+  assert.equal(labelProblem(sum(0), dir), 'icacls named nothing');
 });
 
 test('not Windows: nothing to place, and nothing goes on PATH; Windows: the folder once node.exe is there (w1742)', async () => {
