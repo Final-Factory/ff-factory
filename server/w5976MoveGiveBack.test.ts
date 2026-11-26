@@ -319,3 +319,22 @@ test('w6047 (finding 5, "warn"): a pre-empt whose move does not start hands the 
   assert.equal(w.status, 'queued');
   assert.match(w.handedBack?.message ?? '', /one more thing/, "the message rides the request's hand-off");
 });
+
+test('w6047 (the w6088 review): a hand-back placed on a next worker before the failed start returns: the held message reaches that worker', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  x.startMoved = async (info, w) => {
+    agents.orchestrators.handBack(w, info, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+    // The dispatcher places the handed-back request meanwhile (its handover read handedBack now, with no message yet).
+    const n: SessionInfo = { id: 'next1', kind: 'worker', title: 'w5869: FF Factory fix', status: 'stopped', permissionMode: 'default', createdAt: OLD, lastActivityAt: OLD, turns: 0, costUsd: 0, pendingPermissions: [], machineId: 'lothdesktop', machineSandbox: 'slot2' };
+    store.putSession(n);
+    agents.orchestrators.linkWorker(w.id, n, 'started worker next1 in lothdesktop/slot2');
+    throw new Error('no agent seat there now');
+  };
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const reached = sent.some((m) => m.id === 'next1' && /go on/.test(m.text)) || sessions.queued().some((m) => m.id === 'next1' && /go on/.test(m.text));
+  assert.ok(reached, '"go on" reaches next1, the worker the hand-back went to');
+});

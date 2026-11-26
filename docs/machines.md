@@ -2787,8 +2787,9 @@ LothDesktop and Beast, not just when BEAST is full").
       reported as kept. Under the w5976 give-back: `MoveGuard.startedOn` clears only a cap refusal, never "a moved session
       did not start there", and a later cap refusal there does not replace it (both last `REFUSED_FOR_MS`); `moveUndone`
       leaves a hand-back made while the start ran (a pause, a stop_agent move_to: another `how` or `to`) as it is, and when
-      every request was handed back so, the message the move held goes into that hand-off's `message`
-      (`Orchestrators.carryInHandBack`), not back to the old worker; and a timed-leg pre-empt shares its move entry with
+      every request was handed back so, the message the move held goes to the request's next worker when the dispatcher
+      placed it on one already while the start ran (`forwardToHeirs`: that worker read its hand-off at its start, the
+      w6088 review), else into that hand-off's `message` (`Orchestrators.carryInHandBack`), never back to the old worker; and a timed-leg pre-empt shares its move entry with
       `roomMove`, so a message that comes during any move goes with it (to the new worker on a start, `forwardLate`; back
       to the old one on a give-back; in the hand-off on a hand-back), and its log says which happened. Tests: the w6047
       ones in `server/w5950MovedAwayEnforce.test.ts` and `server/w5976MoveGiveBack.test.ts`.

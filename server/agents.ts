@@ -4850,9 +4850,19 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       // w6047 (the w6056 review, 2): every request was handed back meanwhile (a pause, a stop_agent move_to), and that stands:
       // the message the move held goes in that hand-off, for the request's next worker, never to this worker, which holds none.
       const text = texts.length ? texts.join('\n\n---\n\n') : q ? movedText(q) : '';
-      const w = text ? reqs.find((x) => x.handedBack?.session === info.id) : undefined;
+      // The w6088 review: a request the dispatcher placed on a next worker while the start ran read its hand-off already, so
+      // that worker gets the message as a forwarded one (as forwardLate does); only a request with no next worker yet carries
+      // it in its hand-off, which its next worker reads when it starts.
+      const back = reqs.filter((x) => x.handedBack?.session === info.id);
+      const placed = back.filter((x) => !!this.heirOf(x, info));
+      let told: string[] = [];
+      if (text && placed.length) {
+        const lq: QueuedSend = { uuid: `w6047-back-${info.id}-${Date.now()}`, id: info.id, text, from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), ...(q?.resumeOf ? { resumeOf: q.resumeOf } : {}), at: new Date().toISOString(), why: 'held by its move, whose requests were handed back meanwhile (w6047)' };
+        told = this.forwardToHeirs(info, placed, lq);
+      }
+      const w = text ? (back.find((x) => !placed.includes(x)) ?? (told.length ? undefined : back[0])) : undefined;
       if (w) this.orchestrators.carryInHandBack(w, info.id, text);
-      else if (text) console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off (w6047)`);
+      else if (text && !told.length) console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off (w6047)`);
       console.warn(`room move: starting ${reqs.map((x) => x.id).join(', ')} on ${to} failed (${err}); handed back meanwhile, so not given back to worker ${info.id} (w6047)`);
       this.store.append(info.id, { kind: 'system', text: `Its move did not start (${why}), but its requests were handed back meanwhile, and that stands (w6047).` });
       this.orchestrators.retireWhenFree(info.id);
