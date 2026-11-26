@@ -986,7 +986,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     deny-only, SeChangeNotify the only privilege). Start the probe with the worker's token: `LOWRUN` in
     `server/toolsLabelsWin.test.ts` removes every privilege but SeChangeNotify, makes Administrators deny-only and sets
     the Low label. Reuse it (w5717).
-  - **A virtual disk in a Low tools child is said, not moved** (w5948, warn-only). BEAST's `tools\wsl-ffu-sniper\ext4.vhdx` is the
+  - **A virtual disk in a Low tools child is said, or with `toolsDiskLock` on kept Medium** (w5948 warn, w5959 enforce). BEAST's `tools\wsl-ffu-sniper\ext4.vhdx` is the
     disk of the `ffu-sniper` WSL distro, imported 2026-11-06 for FFU's SteamOS build (ffu `docs/steamos.md`, "Setting up a
     container host on Windows"). A Low worker cannot start WSL (Wsl/E_ACCESSDENIED, measured, w5870) but can rewrite the
     disk while the distro is stopped, and a Medium `wsl -d` then runs it with the user's drives and WSL interop at Medium.
@@ -995,7 +995,24 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     `wsl --manage ffu-sniper --move <root>\wsl\ffu-sniper` with the distro stopped, then a relabel: a move within one volume
     is a rename, so `ext4.vhdx` keeps the Low label it inherited, and `<root>\wsl` is not in WORKER_CHILDREN, so nothing
     relabels it later. Run `icacls <root>\wsl\ffu-sniper\ext4.vhdx /setintegritylevel M` (or `/reset`) and check that
-    `icacls` no longer shows `Mandatory Label\Low` (w5958's review).
+    `icacls` no longer shows `Mandatory Label\Low` (w5958's review). BEAST's disk was moved so on 2026-11-26 (w6010): it is
+    now `F:\ffw\wsl\ffu-sniper\ext4.vhdx`, labelled Medium.
+  - **The enforce switch, daemon.json `toolsDiskLock`** (w5959, Windows only; `toolsDiskPlan` in `machine/lowIntegrity.ts`):
+    - Absent or `"warn"` (the default): the WARNING above, nothing else. It now also names the switch.
+    - `"on"`: at start, each tools child that holds a `.vhd` or `.vhdx` leaves the Low list and is kept Medium like
+      `MEDIUM_TOOLS` (lowTargets `toolsKeepMedium`). labelLow raises the child with `(OI)(CI)medium` after `tools`, then each
+      disk in it that still reads Low (one Low on its own) with a file label. The daemon logs `WARNING worker integrity: kept
+      <child> Medium (daemon.json "toolsDiskLock": "on", w5959)`. **Workers can then write nothing in that child**, not just
+      the disk: move the disk out to give the child back.
+    - Why this and not refusing to start the distro: the daemon starts no WSL distro or VM (a person or a Medium agent runs
+      `wsl -d`), so it has no start to refuse; the label it already sets at every start is what keeps a Low worker out.
+    - Set and set back with `ops_worker` `machine_update` `tools_disk_lock` (`warn` or `on`), which writes daemon.json and
+      restarts the daemon (installer flags `--tools-disk-lock`, `-ToolsDiskLock`). **Recovery needs nobody at the machine**:
+      `tools_disk_lock warn` and the restart it makes label the child Low again (labelLow gives a child of the Medium `tools`
+      its own Low label). A disk that got its own Medium file label keeps it; workers had no business writing it.
+    - Ships off: no machine has it on. Turning it on per machine is lothsahn's step.
+    - Tests: `server/lowIntegrity.test.ts` "w5959" (BEAST's tools layout with `wsl-ffu-sniper\ext4.vhdx` as the fixture),
+      `scripts/worker-install.test.ts`, `scripts/worker/linkJob.test.ts`, `server/opsWorker.test.ts`.
   - **The daemon relabels at start, which takes a minute or two.** A probe right after a deploy reads the old labels. On
     LothDesktop on 2026-11-25, `worker integrity: kept V:\ffw\tools Medium` came about a minute after the new daemon
     started, at 17:36:17Z. A probe just before it still saw `tools` Low and `tools\node` deletable. Probe after that
