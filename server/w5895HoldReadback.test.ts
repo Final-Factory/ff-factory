@@ -217,3 +217,56 @@ test('w5895: a hold of an unknown machine is refused and leaves no ask behind', 
   const st = await env.call(env.dispatcher().info, 'system_status', {});
   assert.doesNotMatch(st.text, /ASKED, NOT SET/);
 });
+
+// w5943's review of #1307 at c72eeb05: a hold that landed some other way than hold_machine work_id=<the asking request>
+// left that request's ask unset; once the hold was lifted the line came back and the guard let the dispatcher hold the
+// machine again. The incident itself went this way: w5814's ask stayed NOT SET while config placement.hold held LothDesktop.
+async function askedOutside(t: Parameters<typeof twoComputers>[0]) {
+  const env = await heldScene(t);
+  asTurn(env.chat(LOTH), 'system');
+  const r = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'hold' }, words: WORDS });
+  assert.ok(!r.isError, r.text);
+  assert.ok(!env.store.work.get('w5814')!.holdAsk?.set);
+  return env;
+}
+async function noReHold(env: Awaited<ReturnType<typeof heldScene>>) {
+  assert.ok(env.store.work.get('w5814')!.holdAsk?.set, 'the ask on w5814 is set by the hold that landed another way');
+  asTurn(env.dispatcher(), 'system');
+  const st = await env.call(env.dispatcher().info, 'system_status', {});
+  assert.doesNotMatch(st.text, /ASKED, NOT SET/);
+  const again = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', work_id: 'w5814' });
+  assert.ok(again.isError, `no re-hold for the spent ask: ${again.text}`);
+  assert.equal(env.store.machines.get('pc')!.drain, undefined);
+}
+
+test('w5895: a hold set in the person\'s own turn on another request, then lifted, spends the first request\'s ask too', async (t) => {
+  const env = await askedOutside(t);
+  const loth = env.chat(LOTH);
+  asTurn(loth, 'human');
+  const h = await env.call(loth.info, 'update_work', { id: 'w5475', hold: { machine: 'pc', action: 'hold' }, words: WORDS });
+  assert.ok(!h.isError, h.text);
+  const l = await env.call(loth.info, 'update_work', { id: 'w5475', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop' });
+  assert.ok(!l.isError, l.text);
+  await noReHold(env);
+});
+
+test('w5895: a hold_machine without work_id, then lifted, spends the asking request\'s ask', async (t) => {
+  const env = await askedOutside(t);
+  asTurn(env.dispatcher(), 'human');
+  for (const action of ['hold', 'lift'] as const) {
+    const r = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action, words: WORDS, who: 'Lothsahn' });
+    assert.ok(!r.isError, r.text);
+  }
+  await noReHold(env);
+});
+
+test('w5895: a hold set through config placement.hold, then removed, spends the asking request\'s ask', async (t) => {
+  const env = await askedOutside(t);
+  asTurn(env.dispatcher(), 'human');
+  const on = await env.call(env.dispatcher().info, 'set_app_config', { key: 'placement.hold', value: { pc: { why: 'lothsahn: hold it' } }, user_asked: true });
+  assert.ok(!on.isError, on.text);
+  assert.equal(env.store.work.get('w5814')!.holdAsk?.set?.by, 'config placement.hold');
+  const off = await env.call(env.dispatcher().info, 'set_app_config', { key: 'placement.hold', value: null, user_asked: true });
+  assert.ok(!off.isError, off.text);
+  await noReHold(env);
+});

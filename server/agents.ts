@@ -3988,12 +3988,23 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       console.log(`[machines] ${m.id} drained by ${by}: ${d.who}: "${d.words}"${d.until ? ` until ${d.until}` : ''}${d.except ? `, except ${d.except.join(', ')}` : ''}, resumes ${d.resumes} (w5878, w5895)`);
       said = `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${running.length} worker(s) running there finish${d.resumes === 'running' ? ', and the others there should not resume (warn-only for now: their resumes are logged, not held, w5895)' : ', and the others there resume as before'}.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;
     }
-    const w = workId ? this.store.work.get(workId.trim().toLowerCase()) : undefined;
-    if (w?.holdAsk && placeId(w.holdAsk.machine) === m.id && w.holdAsk.action === a.action && !w.holdAsk.set) {
-      w.holdAsk = { ...w.holdAsk, set: { at: now.toISOString(), by } };
+    this.markHoldAsksSet(m.id, a.action, by, workId);
+    return `${said}\nRead back live: ${this.holdReadbackOf(m.id)}`;
+  }
+
+  /**
+   * w5895: a hold or lift of `machine` landed (hold_machine, update_work hold, or config placement.hold): every open
+   * request's unset ask for that machine and action is now set, not only `workId`'s. An ask left unset by a hold that came
+   * another way would come back as HOLD ASKED, NOT SET once the hold is lifted, and the guard would let the dispatcher
+   * hold the machine again (w5943's review of #1307 at c72eeb05).
+   */
+  markHoldAsksSet(machine: string, action: 'hold' | 'lift', by: string, workId?: string): void {
+    const at = (this.orchestrators?.now() ?? new Date()).toISOString();
+    for (const w of this.store.work.values()) {
+      if (!isOpen(w) || !w.holdAsk || w.holdAsk.set || w.holdAsk.action !== action || placeId(w.holdAsk.machine) !== placeId(machine)) continue;
+      w.holdAsk = { ...w.holdAsk, set: { at, by: workId && w.id !== workId.trim().toLowerCase() ? `${by} (through ${workId})` : by } };
       this.store.putWork(w);
     }
-    return `${said}\nRead back live: ${this.holdReadbackOf(m.id)}`;
   }
 
   /**
@@ -7653,6 +7664,8 @@ ${w.repo ?? ''}
             // w5895: a hold or exception change reads each machine it names back live: held or not, and who resumes there.
             if (key === 'placement.hold') {
               const named = new Set([before, after].flatMap((v) => (v && typeof v === 'object' ? Object.keys(v) : [])).map((k) => placeId(k)));
+              const has = (v: unknown, id: string) => !!v && typeof v === 'object' && Object.keys(v).some((k) => placeId(k) === id);
+              for (const id of named) if (has(before, id) !== has(after, id)) this.markHoldAsksSet(id, has(after, id) ? 'hold' : 'lift', 'config placement.hold');
               const back = [...named].filter((id) => this.store.machines.has(id)).map((id) => this.holdReadbackOf(id));
               return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server; read back live:\n${back.join('\n') || '(no machine named)'}`;
             }
