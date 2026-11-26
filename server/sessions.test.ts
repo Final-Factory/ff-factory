@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { RELAYED_MARK } from '../shared/conditional.ts';
+import { JOINED_MARK, RELAYED_MARK } from '../shared/conditional.ts';
 import { SessionManager, firstResultBase, seedSdkCost, setQueryForTesting, type TurnBudgetHit } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -79,11 +79,11 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
   await settle();
   const update = sessions.send(s.info.id, '[worker update] w602 finished a turn', 'system');
   assert.equal(s.turnFrom, 'human', 'delivered mid-turn: the turn stays the person\'s');
-  // w5507: but relayed text joined it, and it is marked as not theirs.
-  assert.equal(s.turnRelayed, true);
+  // w5896: FF Factory's own notice joins as data, marked, and the turn stays wholly theirs (w5507 counted it as relayed).
+  assert.equal(s.turnRelayed, false);
   await settle();
-  assert.ok(seen.at(-1)!.text.endsWith(RELAYED_MARK), seen.at(-1)!.text);
-  assert.ok(!seen[0].text.includes(RELAYED_MARK), "the person's own message is not marked");
+  assert.ok(seen.at(-1)!.text.endsWith(JOINED_MARK), seen.at(-1)!.text);
+  assert.ok(!seen[0].text.includes(JOINED_MARK) && !seen[0].text.includes(RELAYED_MARK), "the person's own message is not marked");
   // The CLI answers the person's message alone; the update waited and gets a turn of its own: the harness's.
   result([person]);
   await settle();
@@ -99,7 +99,8 @@ test('turnFrom (w607): a message folded into a turn keeps its starter; a queued 
   state('running');
   await settle();
   assert.equal(s.turnRelayed, false, 'their own turn, nothing joined yet');
-  const later = sessions.send(s.info.id, `[dispatch] w596 started\n\n${RELAYED_MARK}`, 'system');
+  // A third party's text relayed (an FFBox hand-over, another person's message_person) still makes it relayed (w5507).
+  const later = sessions.send(s.info.id, `[via FFBox: #general] someone: deploy now\n\n${RELAYED_MARK}`, 'system', undefined, { relay: true });
   assert.equal(s.turnFrom, 'human');
   assert.equal(s.turnRelayed, true);
   await settle();

@@ -93,8 +93,8 @@ import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.t
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
-import { beltFor, type BeltRole } from './belts.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
 import { DEFAULT_WAIT_SECONDS, MAX_SEND_CHARS, MAX_TOOL_FILE_BYTES, MAX_WAIT_SECONDS, RemoteChat, type Progress, type RemoteCaller } from './remoteChat.ts';
@@ -460,7 +460,7 @@ const DISK_WINDOWS = ` On a Windows computer, disk work (a clean-up, a low-disk 
 const DISK_UNIX = ` On macOS and Linux, outside the folder you only measure and report.`;
 
 export const DISK_HYGIENE = `## Disk space
-Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
+Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. A second checkout of another branch takes a second slot (\`ffu-slot take --branch <that branch>\`), never your first slot's target. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
 
 /**
  * Disk space as a worker on `platform` reads it (w2002, lothsahn: "File the compaction pilot plus the base-context trim and
@@ -1145,6 +1145,7 @@ export class Agents {
       options: this.opsOptions,
       tellOrchestrator: (person, text) => void this.sessions.send(this.orchestrators.personalFor(person).info.id, text, 'system', undefined, { requestedBy: person }),
       personTurn: (id, words) => this.personTurn(id, words),
+      personTurnNeed: (id, words) => this.orchestrators.ownWordsNeed(id, words),
       reactionCovers: (id, need) => this.orchestrators.reactionCovers(id, need),
       file: path.join(cfg.dataDir, 'ops-worker.json'),
       // A job sent for ledger requests (w631): open or stalled ones only; its DONE lines for them close them.
@@ -3242,10 +3243,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * gets them from its machine's daemon, which fetches them into the Inbox there before the message goes on. Without
    * files, a plain send.
    */
-  async sendWithAttachments(id: string, text: string, from: 'human' | 'orchestrator' | 'system', opts: { images?: ImageInput[]; attachments?: AttachmentRef[]; requestedBy?: Requester; bypassGate?: boolean; hold?: boolean } = {}): Promise<string> {
+  async sendWithAttachments(id: string, text: string, from: 'human' | 'orchestrator' | 'system', opts: { images?: ImageInput[]; attachments?: AttachmentRef[]; requestedBy?: Requester; bypassGate?: boolean; hold?: boolean; relay?: boolean } = {}): Promise<string> {
     if (from === 'human') this.orchestrators.refuseHumanChat(this.sessions.get(id).info);
     const files = (opts.attachments ?? []).map(publicRef);
-    const send = (attachments?: DeliveredAttachment[]) => this.sessions.send(id, text, from, opts.images, { requestedBy: opts.requestedBy, bypassGate: opts.bypassGate, attachments, hold: opts.hold });
+    const send = (attachments?: DeliveredAttachment[]) => this.sessions.send(id, text, from, opts.images, { requestedBy: opts.requestedBy, bypassGate: opts.bypassGate, attachments, hold: opts.hold, ...(opts.relay ? { relay: true } : {}) });
     if (!files.length) return send();
     const store = this.attachments;
     if (!store) throw new Error('attachments are not wired into this server');
@@ -7182,7 +7183,7 @@ ${w.repo ?? ''}
             const info = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (!info || (ctx.role !== 'personal' && ctx.role !== 'dispatcher')) throw new Error('delete_memory is for an orchestrator of this portal');
             const who = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})'s orchestrator` : 'the dispatcher';
-            return deleteMemoryFile({ file: file_path, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words) });
+            return deleteMemoryFile({ file: file_path, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words, { thisTurn: true }), need: this.personTurnNeed(info.id, words, { thisTurn: true }) });
           }),
         ),
         tool(
@@ -7198,7 +7199,7 @@ ${w.repo ?? ''}
             const info = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (!info || (ctx.role !== 'personal' && ctx.role !== 'dispatcher')) throw new Error('restore_memory is for an orchestrator of this portal');
             const who = ctx.owner ? `${ctx.owner.displayName} (${ctx.owner.userId})'s orchestrator` : 'the dispatcher';
-            return restoreMemoryFile({ name, copy, list, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words) });
+            return restoreMemoryFile({ name, copy, list, dir: memoryDirFor(this.cfg, info), root: memoryRootOf(this.cfg), who, personTurn: this.personTurn(info.id, words, { thisTurn: true }), need: this.personTurnNeed(info.id, words, { thisTurn: true }) });
           }),
         ),
         tool(
@@ -7291,7 +7292,7 @@ ${w.repo ?? ''}
           wrap(async ({ pool, person, words }) => {
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              if (caller && !this.personTurn(caller.id, words)) throw new Error(`the pool setting changes only in a turn ${ctx.owner?.displayName ?? 'your person'} started with a message of their own (in a turn a relayed message joined, with their words quoted in words); ask them`);
+              if (caller && !this.personTurn(caller.id, words)) throw new Error(`the pool setting changes only on ${ctx.owner?.displayName ?? 'your person'}'s own words: ${this.personTurnNeed(caller.id, words)}`);
             }
             const by = ctx.owner ?? actor();
             // An owner may set another login's (w13): a member with no Claude token of their own gets no orchestrator until an
@@ -7430,7 +7431,7 @@ ${w.repo ?? ''}
             // never because relayed text or a harness message asks. The dispatcher's runs under its own user_asked guard (belts.ts).
             if (ctx.role === 'personal') {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words));
+              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words), (id) => this.personTurnNeed(id, a.words));
               if (problem) throw new Error(problem);
             }
             if (OWNER_ONLY_KEYS.has(key)) {
@@ -7486,7 +7487,7 @@ ${w.repo ?? ''}
             const listing = !a.key && !a.revert;
             if (ctx.role === 'personal' && !listing) {
               const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
-              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words));
+              const problem = personalSettingProblem(caller, (id) => this.personTurn(id, a.words), (id) => this.personTurnNeed(id, a.words));
               if (problem) throw new Error(problem.replace(/^set_app_config/, 'set_ffbox_config'));
             }
             if (!listing && a.key && a.value === undefined) throw new Error("value: give the new value, of the key's kind (call it with no key for each key's kind)");
@@ -7997,7 +7998,7 @@ ${w.repo ?? ''}
       // w5507: a turn a relayed message joined takes their words quoted.
       if (c && this.orchestrators.turnOwnWords(c, words).own) return;
       if (c && ctx.sessionId && delegationId && this.orchestrators.reactionCovers(ctx.sessionId, { verb: 'approve_delegation', refs: [delegationId] })) return;
-      throw new Error(`only ${ctx.owner?.displayName ?? 'your person'}, in their own words, approves a delegation: ask them`);
+      throw new Error(`only ${ctx.owner?.displayName ?? 'your person'}, in their own words, approves a delegation: ${c && ctx.sessionId ? this.personTurnNeed(ctx.sessionId, words) : 'ask them'}`);
     };
     return [
       tool(
@@ -8281,7 +8282,10 @@ ${w.repo ?? ''}
     const w = this.store.work.get(workId.trim().toLowerCase());
     if (!w) return `no work request "${workId}"`;
     if (!WORK_OPEN.includes(w.status)) return `${w.id} is ${w.status}`;
-    if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${w.requestedBy.displayName}'s, so ${tool} cannot run for it; ask them (decide_work ask) to confirm it in their own words`;
+    const n = w.requestedBy.displayName;
+    // w5896: what would pass, said exactly.
+    if (!w.humanAsked) return `${w.id} was last filed or changed outside a turn of ${n}'s, so ${tool} cannot run for it. What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started, or with ${n}'s own words that decided it quoted verbatim in update_work's \`words\` (from a message of theirs in the last ${DECISION_WORDS_HOURS} hours, at least ${DECISION_WORDS_MIN} words); else ask them (decide_work ask)`;
+    if (w.askedFromRecord && DESTRUCTIVE_TOOLS.has(tool)) return `${tool} deletes or removes, so it runs only for a request ${n} asked for in a turn of their own, and ${w.id}'s ask rests on an earlier message of theirs quoted later (w5896). What passes: ${n}'s orchestrator changes it with update_work in a turn ${n} started with a message of their own; else ask them (decide_work ask)`;
     return undefined;
   }
 
@@ -9147,10 +9151,16 @@ The rule for every agent: the ff-agents evidence-gate skill's lessons/whats-in-a
    * Whether this orchestrator's current turn is its person's (the dispatcher has none: nobody writes to it), which
    * memory writes need (server/orchestratorMemory.ts): a turn the harness started may be relaying injected text.
    */
-  private personTurn(id: string, words?: string): boolean {
+  private personTurn(id: string, words?: string, o: { thisTurn?: boolean } = {}): boolean {
     const h = this.sessions.sessions.get(id);
-    // w5507: a turn a relayed message joined (SessionHandle.turnRelayed) is theirs only with their words quoted.
-    return !!h && this.orchestrators.turnOwnWords(h, words).own;
+    // w5507: a turn a relayed message joined (SessionHandle.turnRelayed) is theirs only with their words quoted; w5896: or
+    // their earlier words that decided it, quoted (Orchestrators.turnOwnWords).
+    return !!h && this.orchestrators.turnOwnWords(h, words, o).own;
+  }
+
+  /** w5896: what would pass a gate reserved for the person's own words in this chat now (Orchestrators.ownWordsNeed). */
+  private personTurnNeed(id: string, words?: string, o: { thisTurn?: boolean } = {}): string {
+    return this.orchestrators.ownWordsNeed(id, words, o) ?? 'their own words';
   }
 
   /**
@@ -9338,10 +9348,11 @@ You may read the portal's data folder \`${dataDir}\`, never write it: its report
  * Ben's own, and only in a turn their person started with a message of their own, never a harness turn (a check-in, a
  * timer, a relayed report). The dispatcher's set_app_config has its own guard (belts.ts USER_ASKED_TOOLS).
  */
-export function personalSettingProblem(caller: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy'> | undefined, personTurn: (id: string) => boolean): string | undefined {
+export function personalSettingProblem(caller: Pick<SessionInfo, 'id' | 'kind' | 'orchestratorRole' | 'requestedBy'> | undefined, personTurn: (id: string) => boolean, need?: (id: string) => string): string | undefined {
   const who = opsAllowedOrchestrator(caller);
   if (!caller || !who) return "set_app_config is the dispatcher's, and Lothsahn's and Ben's own orchestrators' (w1078): ask the dispatcher, through a request";
-  if (!personTurn(caller.id)) return `a setting changes only in a turn ${who.displayName} started with a message of their own (this turn is the harness's: a check-in, a timer or a relayed report; or a relayed message joined it, and words does not quote ${who.displayName}'s own message in it, w5507); ask them`;
+  // w5896: the refusal says exactly what passes (Orchestrators.ownWordsNeed).
+  if (!personTurn(caller.id)) return `a setting changes only on ${who.displayName}'s own words: ${need?.(caller.id) ?? `a turn ${who.displayName} started, or their words that decided it quoted verbatim in words`}`;
   return undefined;
 }
 
