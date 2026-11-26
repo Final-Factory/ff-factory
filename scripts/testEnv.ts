@@ -25,6 +25,7 @@ delete process.env.FF_DAEMON_TOKEN;
 // stays: scripts/ownerAckEval.ts runs on this shell's Claude login.
 export const KEPT_FF_ENV = new Set([
   'FF_CLI_SCRUB',
+  'FF_MEASURE_INTEGRITY',
   'FF_TIMING_TESTS',
   'FF_NETWORK_TESTS',
   'FF_TEST_FILE_TIMES',
