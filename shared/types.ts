@@ -1137,6 +1137,8 @@ export interface WorkerFenceReport {
   since?: string;
 }
 
+import type { RunnerHoldReport } from './runnerHold.ts';
+
 export interface Machine {
   /** Short name, e.g. "m5"; also the MCP/label id. Lower-case (MACHINE_ID). */
   id: string;
@@ -1190,6 +1192,11 @@ export interface Machine {
    * with the probe's error. A failed fence holds its sandbox workers, and placement counts the machine busy.
    */
   fence?: WorkerFenceReport;
+  /**
+   * w5916: what a person's hold (placement.hold, a drain) does to its CI runners, as its daemon last said: which are
+   * stopped, which still run a job. Absent with no hold. Shown beside the hold (runnerHoldText).
+   */
+  runnerHold?: RunnerHoldReport;
   /**
    * Its daemon was sent to another portal URL (relocate_machines, w466): this portal does not redeploy it while it is
    * away (that would pull it back). Cleared when it says hello here again.

@@ -126,6 +126,7 @@ import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { pageSessions, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
+import { drainOf, drainHold } from './machineDrain.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
 // process starts anything that could inherit it.
@@ -426,6 +427,11 @@ machines.fenceAlert = (_machineId, title, text) => {
 machines.linkRefusedAlert = (_machineId, title, text) => {
   notifier.host(title, text);
   machines.report?.(text);
+};
+// w5916: a person's hold on a machine (a drain, or config placement.hold) drains its CI runners (machine/loadRunners.ts)
+machines.runnerHoldFor = (id) => {
+  const d = drainOf(store.machines.get(id));
+  return d ? drainHold(d) : cfg.placement?.hold?.[id] || undefined;
 };
 machines.cleanupFor = (id) => (store.machines.get(id)?.local ? { everyMinutes: 0, softFreeGB: 0 } : machineCleanupSettings(cfg, id));
 // The activity pause (w1574, docs/machines.md "Pausing a machine"): config machines.activityPause, per machine, off by default.
