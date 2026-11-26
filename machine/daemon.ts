@@ -20,7 +20,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -1434,17 +1434,22 @@ export class Daemon {
   /**
    * w6044 stage 3: the released ffu slots' first step alone, at low, while a pass that is not low runs (CleanupRunner
    * firstAlone). That pass's own first step ran with the 7-day idle rule, and it runs on for an hour or more (BEAST, 2026-11-26).
-   * Report-only for now: it plans and says what it would take, and removes nothing (the stale-output mode dry-run).
+   * It removes with the stale-output mode on (stage 3b), and what it freed goes in the clean-up history (cleanup-log.jsonl).
    */
   private async ffuFirstAlone(trigger: string) {
     const guard = this.cleanupGuard();
-    await firstAlonePass({
-      mode: staleOutputSettings(this.cleanupSettings.staleOutput).mode,
+    const mode = staleOutputSettings(this.cleanupSettings.staleOutput).mode;
+    const startedAt = new Date().toISOString();
+    const run = await firstAlonePass({
+      mode,
       root: this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined,
       guard,
-      first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}, report-only)`),
+      first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}${mode === 'on' ? '' : ', report-only'})`),
       busyNow: this.cleanupBusyNow(),
     });
+    // The w6142 review: what the step alone frees shows in the clean-up history, not only in its log line.
+    if (run && run.removed.length > 0)
+      appendCleanupLog(appDirOfConfig(this.cfg), { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) });
   }
 
   /**
@@ -1945,13 +1950,17 @@ export class Daemon {
     };
     let shimModes: ShimModeGuard | undefined;
     try {
-      // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
-      // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
+      // w5838, w6101: on Windows the shims sit in <root>/tools-medium/shims, labelled Medium (lowIntegrity.ts lowTargets),
+      // not in the mailbox's bin, which Low workers write: every agent's PATH starts there, Medium ones included. The old
+      // <root>/tools/shims is written too while agents started before the move have it on their PATH (windowsShims).
       // w6074 E: a worker's chmod there (Landlock does not refuse one) must not make the daemon fall back to warn.
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) readyShimDir(enforcedShimDir(this.cfg.root));
       // w6080: off and warn write into the mailbox's bin; the link an earlier on start left there goes first.
       else if (process.platform !== 'win32') unlinkShimBinLink(oldBin);
-      this.slotBin = shims(writeShims(process.platform === 'win32' && this.cfg.root ? toolsShimsDir(this.cfg.root) : shimDirFor(pf, this.slotMailbox, this.cfg.root)));
+      if (process.platform === 'win32' && this.cfg.root) {
+        const root = this.cfg.root;
+        this.slotBin = windowsShims(root, { write: (d) => void shims(writeShims(d)), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, toolsShimsDir(root)) : []), log });
+      } else this.slotBin = shims(writeShims(shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
       if (pf === 'on' && process.platform !== 'win32' && this.cfg.root) {
