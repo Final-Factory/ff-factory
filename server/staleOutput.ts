@@ -305,9 +305,11 @@ export async function cleanupPass(o: {
   /**
    * The released ffu slots' cargo targets, planned first, before every slower step (w6044: on BEAST, 2026-11-26, three released
    * targets held 190.6 GB while the passes were cut off in their regular step, before the ffu rule ran in the stale or cap
-   * step). Report-only for now: the plan is said (report) and nothing of it is removed here; the later step still takes them.
+   * step). With the mode on, the plan is removed at once, before own and regular are planned (busyNow re-checks each item
+   * right before its rename); in dry-run mode it is only said. report gets the fenced plan, the time to plan it, and the
+   * removal (absent when nothing was removed); a report that throws costs the pass nothing.
    */
-  first?: { plan(): Promise<StalePlan>; report?(items: CleanupItem[], ms: number): void };
+  first?: { plan(): Promise<StalePlan>; report?(items: CleanupItem[], ms: number, run?: CleanupRun): void };
   /** FF Factory's own leftovers (server/ownLeftovers.ts, w626): the caller passes them only while free space is low. */
   own?: { plan(): Promise<OwnLeftoverPlan>; run(plan: OwnLeftoverPlan): Promise<CleanupRun> };
   /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
@@ -349,12 +351,30 @@ export async function cleanupPass(o: {
     }
   };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
-  // w6044: the released ffu slots' targets first, report-only (a later change removes them here).
+  // What a step's removal has tried so far: own's removal keeps clear of it (withoutOverlap).
+  const attempted: CleanupItem[] = [];
+  // The first step's items: removed before own was planned, so an own item inside one is dropped outright (withoutOverlap
+  // would keep own's and drop the first item, which is gone already).
+  const firstTaken: CleanupItem[] = [];
+  // w6044: the released ffu slots' targets first, removed at once with the mode on, before any slower step can cut the pass off.
   const first = o.first;
   if (first && o.mode !== 'off' && !o.opts.dryRun) {
     const t0 = Date.now();
     const fp = await timed('ffu first', () => first.plan().catch(() => ({ items: [], listed: [] }) as StalePlan));
-    first.report?.(o.root ? fenceToRoot(fp.items, o.root).inside : fp.items, Date.now() - t0);
+    const items = o.root ? fenceToRoot(fp.items, o.root).inside : fp.items;
+    const ms = Date.now() - t0;
+    let run: CleanupRun | undefined;
+    if (o.mode === 'on' && items.length) {
+      attempted.push(...items);
+      firstTaken.push(...items);
+      run = await timed('ffu firstRemove', () => runCleanup(items, o.guard, o.busyNow).catch((e) => ({ removed: [], failed: items.map((i) => ({ path: i.path, why: (e as Error).message })), bytes: 0 }) as CleanupRun));
+      add(run);
+    }
+    try {
+      first.report?.(items, ms, run);
+    } catch {
+      // the log line only
+    }
   }
   // A failure there must not cost the regular pass: nothing of it is removed then.
   const ownPlan = o.own;
@@ -364,7 +384,6 @@ export async function cleanupPass(o: {
   const dry = !!o.opts.dryRun;
   // Each step's plan removed at once, not after every step is planned (w5795): LothDesktop's low passes planned for about
   // 55 min, its daemon restarted about hourly, and four passes in a row were cut off having removed nothing.
-  const attempted: CleanupItem[] = [];
   const removeNow = async (name: string, items: CleanupItem[]) => {
     if (dry || !items.length) return;
     const { first } = withoutOverlap(items, own);
@@ -392,7 +411,7 @@ export async function cleanupPass(o: {
   const held = (plan.held ?? []).filter((h) => onDrive(h.path)).sort((a, b) => b.bytes - a.bytes);
   const kept = { ...(held.length ? { held } : {}), phasesMs };
   if (dry) return { removed: [], failed: [], bytes: 0, planned: await timed('size', () => sizePlan([...regular, ...plan.items, ...own.items])), listed, ...kept };
-  own.items = withoutOverlap(attempted, own).own;
+  own.items = withoutOverlap(attempted, own).own.filter((i) => !firstTaken.some((t) => within(i.path, t.path)));
   if (ownPlan && own.items.length) add(await timed('ownRemove', () => ownPlan.run(own).catch((e) => ({ removed: [], failed: [{ path: '(own leftovers)', why: (e as Error).message }], bytes: 0 }) as CleanupRun)));
   return { ...r, ...(o.mode === 'dry-run' && plan.items.length ? { planned: await sizePlan(plan.items) } : {}), listed, ...kept };
 }
