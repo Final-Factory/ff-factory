@@ -388,6 +388,10 @@ jobs means Idle:
     what is above it;
   - a process with a listener, a job or a host below it, and what is above that: an orphaned `cmd.exe /c run.cmd`
     starts the listener again after a runner update, and would hand it Idle (the w6222 review of step 1).
+  - a runner's shell (a cmd.exe or conhost.exe whose command line names run.cmd, run-helper.cmd or a runner's folder),
+    even between two listeners when nothing below it is fenced (the w6225 review of step 2);
+  - Unity's helpers: its licensing client (a batch Unity leaves it running and every editor asks it), Unity Hub, and
+    anything run from a Unity Editor install.
   A tree with a member whose environment could not be read is left alone; a failed read is tried again after 5 ticks.
   Each newly found one is named once in a `ci first: N more of the agents' tools' process(es) run above Idle ... with
   the process that started them gone, found by their session's environment` line (with how many orphan trees and

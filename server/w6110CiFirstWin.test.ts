@@ -880,20 +880,57 @@ test("w6222 review: a CI job step's orphan is not an agent tool, whatever sessio
     ...ORPHANS,
     { pid: 94, ppid: 87, cmd: 'bash.exe' }, // an agent's shell, its parent gone
     { pid: 91, ppid: 94, cmd: 'node.exe test-server.js' }, // a job step's process (the runner's env), somehow below it
-    { pid: 95, ppid: 91, cmd: 'python.exe' },
-    { pid: 96, ppid: 88, cmd: 'node.exe stray.js' }, // started by job step 88, which ended
+    { pid: 85, ppid: 91, cmd: 'python.exe' },
+    { pid: 86, ppid: 88, cmd: 'node.exe stray.js' }, // started by job step 88, which ended
   ];
   const ci = { session: 'aaaa1111', root: ROOT, ci: true };
   const r = rig({
     procs,
     mode: 'enforce',
-    env: { ...ORPHAN_ENV, 94: { session: 'aaaa1111', root: ROOT }, 91: ci, 95: { session: 'aaaa1111', root: ROOT }, 96: ci },
+    env: { ...ORPHAN_ENV, 94: { session: 'aaaa1111', root: ROOT }, 91: ci, 85: { session: 'aaaa1111', root: ROOT }, 86: ci },
     root: ROOT,
-    prio: [...NORMAL_ORPHANS, ...[91, 94, 95, 96].map((p): [number, number] => [p, P.PRIORITY_NORMAL])],
+    prio: [...NORMAL_ORPHANS, ...[91, 94, 85, 86].map((p): [number, number] => [p, P.PRIORITY_NORMAL])],
   });
   const res = await r.cf.tick();
-  assert.equal(res?.orphans, 2, "only 41 and 42; 91 and 96 are the job's, 95 below one, 94 above one");
-  for (const pid of [91, 94, 95, 96]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+  assert.equal(res?.orphans, 2, "only 41 and 42; 91 and 86 are the job's, 85 below one, 94 above one");
+  for (const pid of [91, 94, 85, 86]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+});
+
+test("w6225 review: a runner's run.cmd wrapper is not lowered while its listener is between runs (a relaunch, exit 2 to 4)", async () => {
+  // Runner 1's listener exited and run.cmd starts the next under the same cmd.exe, while runner 2's job (10/11/12) runs.
+  const R1 = 'V:\\ffw\\ffu-runners\\ffu-lothdesktop-1';
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: `cmd.exe /c "${R1}\\run.cmd"` }]; // 89, the agent's shell that started it, is gone
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'the next listener (and its jobs) would start at the lowered priority');
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL, 'the real orphaned tool is still lowered');
+});
+
+test("w6225 review: a runner's conhost.exe naming only its folder is not lowered either", async () => {
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: '\\??\\C:\\Windows\\system32\\conhost.exe 0x4 V:/ffw/ffu-runners/ffu-lothdesktop-1' }];
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL);
+});
+
+test("w6225 review: Unity's licensing client, left running after an agent's batch Unity ended, is not lowered", async () => {
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: '"C:\\Program Files\\Unity\\Hub\\Editor\\6000.0.58f2\\Editor\\Data\\Resources\\Licensing\\Client\\Unity.Licensing.Client.exe" --namedPipe Unity-LicenseClient-lothsahn' }];
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'every Unity editor on the machine talks to it');
+});
+
+test('w6225 review: Unity Hub and a tool run from a Unity Editor install are not lowered, nor what they started', async () => {
+  const procs = [
+    ...ORPHANS,
+    { pid: 90, ppid: 89, cmd: '"C:\\Program Files\\Unity Hub\\Unity Hub.exe" --silent' },
+    { pid: 91, ppid: 90, cmd: 'node.exe hub-helper.js' },
+    { pid: 92, ppid: 88, cmd: 'C:/Program Files/Unity/Hub/Editor/6000.0.58f2/Editor/Data/Tools/Bee/bee_backend.exe' },
+  ];
+  const s = { session: 'aaaa1111', root: ROOT };
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: s, 91: s, 92: s }, root: ROOT, prio: [...NORMAL_ORPHANS, ...[90, 91, 92].map((p): [number, number] => [p, P.PRIORITY_NORMAL])] });
+  await r.cf.tick();
+  for (const pid of [90, 91, 92]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
 });
 
 test('w6217: without an environment reader (not a real daemon) no orphan is looked for', async () => {

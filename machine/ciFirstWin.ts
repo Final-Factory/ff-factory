@@ -235,6 +235,30 @@ export function writeLowered(root: string, l: Lowered) {
 }
 
 const isUnity = (p: WinProc) => /^unity(\.exe)?$/i.test(p.name ?? '') || /(^|[\\/"])unity\.exe"?(\s|$)/i.test(p.cmd);
+/**
+ * w6225 review: never an agent's tool, whatever session its environment carries.
+ * - Unity's helpers: its licensing client (a batch Unity leaves it running, and every editor on the machine asks it),
+ *   Unity Hub, and anything run from a Unity Editor install.
+ * - A runner's shell: a cmd.exe or conhost.exe whose command line names run.cmd, run-helper.cmd or a runner's folder.
+ *   Between two listeners (a self-update or a relaunch, exit 2 to 4) run.cmd has no listener below it to fence it, and
+ *   the next listener and its jobs would start at its priority.
+ */
+const isUnityAux = (p: WinProc) => {
+  const c = p.cmd.replace(/\//g, '\\');
+  return (
+    /^unity\.licensing\.client(\.exe)?$|^unity hub(\.exe)?$/i.test(p.name ?? '') ||
+    /unity\.licensing\.client\.exe|\\unity hub\\|\\unity hub\.exe|\\editor\\data\\/i.test(c)
+  );
+};
+const isRunnerShell = (p: WinProc, runnerRoots: string[]) => {
+  if (!/^(cmd|conhost)(\.exe)?$/i.test(imageOf(p))) return false;
+  const c = p.cmd.replace(/\//g, '\\').toLowerCase();
+  return (
+    /(^|[\\"\s])run(-helper)?\.cmd\b/.test(c) ||
+    /\\ffu-runners\\/.test(c) ||
+    runnerRoots.some((r) => r && c.includes(r.replace(/\//g, '\\').toLowerCase().replace(/\\+$/, '')))
+  );
+};
 const imageOf = (p: WinProc | undefined) => p?.name || (p?.cmd ?? '?').trim().replace(/^"/, '').split(/["\s]/)[0].split(/[\\/]/).pop() || '?';
 /** A process listing can be this old when it is answered (machine/sandboxes.ts realPoolDeps caches it for 5 s). */
 export const LIST_MAX_AGE_MS = 5_000;
@@ -436,7 +460,9 @@ export class WinCiFirst {
    *   the runner's environment, and so whatever FF_SESSION_ID a runner started from a worker's shell inherited), what it
    *   started, or what is above it;
    * - a process above a fenced one (a listener, a job, a host): the `cmd.exe /c run.cmd` an agent's shell left, which
-   *   starts the listener again after a runner update, would hand it the lowered priority (w6222 review).
+   *   starts the listener again after a runner update, would hand it the lowered priority (w6222 review);
+   * - a runner's shell (a cmd.exe or conhost.exe naming run.cmd or a runner's folder), even between two listeners, and
+   *   Unity's helpers (its licensing client, Unity Hub, anything from an Editor install) (w6225 review).
    * Each process's environment is read once (cached by pid@start); a failed read is tried again after ENV_RETRY_TICKS
    * ticks, and a tree with a member not read is left alone meanwhile.
    * Returns pid -> its host, and how many roots and processes the orphan trees held.
@@ -446,6 +472,7 @@ export class WinCiFirst {
     fence: Set<number>,
     started: Map<number, number>,
     hosts: { session: string; pid: number }[],
+    runnerRoots: string[] = [],
   ): Promise<{ tools: Map<number, number>; roots: number; members: number }> {
     const out = new Map<number, number>();
     if (!this.d.envOf || !hosts.length) return { tools: out, roots: 0, members: 0 };
@@ -495,7 +522,7 @@ export class WinCiFirst {
       const st = started.get(p.pid);
       if (fence.has(p.pid) && memberSet.has(p.ppid) && ps !== undefined && st !== undefined && ps <= st + 1_000) block(p.ppid);
     }
-    for (const pid of members) if (this.envSeen.get(key(pid)) === CI_ENV) block(pid);
+    for (const pid of members) if (this.envSeen.get(key(pid)) === CI_ENV || isRunnerShell(procOf.get(pid)!, runnerRoots)) block(pid);
     for (const root of roots) {
       const tree = [root, ...(trees.get(root) ?? [])];
       if (tree.some((pid) => !this.envSeen.has(key(pid)))) continue;
@@ -504,7 +531,7 @@ export class WinCiFirst {
       for (const pid of tree) {
         const p = procOf.get(pid)!;
         const above = pid === root ? undefined : mark.get(p.ppid);
-        if (above === 'no' || isUnity(p) || this.envSeen.get(key(pid)) === CI_ENV) {
+        if (above === 'no' || isUnity(p) || isUnityAux(p) || isRunnerShell(p, runnerRoots) || this.envSeen.get(key(pid)) === CI_ENV) {
           mark.set(pid, 'no');
           continue;
         }
@@ -637,7 +664,10 @@ export class WinCiFirst {
       }
     }
     // w6217: orphaned tools (their starter gone) are found by their session's environment and go with the rest
-    const orphanFind = await this.orphanTools(procs, new Set([...stop, ...roots, ...[...trees.values()].flat()]), started, real);
+    const orphanFind = await this.orphanTools(procs, new Set([...stop, ...roots, ...[...trees.values()].flat()]), started, real, [
+      ...census.listeners.map((l) => l.root),
+      ...census.workers.map((w) => w.root),
+    ]);
     const orphaned = orphanFind.tools;
     const orphanAbove = [...orphaned.keys()].filter((pid) => {
       const p = this.d.priorityOf(pid);
