@@ -205,6 +205,16 @@ before redeploying by hand.
   mid-turn only, and a message that finds them full waits in the portal's queue instead of being refused; the daemon's
   own start check counts the same way, and idle finished workers are stopped by the portal's reaper
   ([orchestrators.md](orchestrators.md#agent-limits-and-idle-workers), w384).
+- **Count census** (w5972, warn only). The two counts can disagree. On 2026-11-26 placement counted beast at "2 of 6"
+  while its daemon counted six agent hosts it had adopted at start, some of them stale copies of moved requests. The
+  daemon's agent-cap refusals now name the agents they counted (`; counted: 11a84ee9 (slot1, running), d732483b (slot3,
+  running, no process)`, `describeCounted` in `server/agentCensus.ts`). Its `stats` (every 15 s) carry `agents`, the list
+  its `runningIn` counts. The portal compares that list with its own count of the machine (sessions reported mid-turn,
+  plus turns sent but not yet reported) by session id (`CensusWatch`, `noteCensus` in `server/machines.ts`). A
+  difference that outlasts 60 s and two reports is logged as one `agent count:` warning naming each id counted on only
+  one side and what the portal holds of it. The warning repeats when the set changes and every 30 minutes, and one
+  line follows when the counts agree again. Nothing is stopped, dropped or placed by it: making placement use the
+  daemon's count is a separate stage.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
