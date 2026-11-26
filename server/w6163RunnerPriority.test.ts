@@ -69,7 +69,8 @@ function rig(mode: RunnerPriorityMode, o: { cls?: Record<number, number>; tasks?
     },
     tasks: async (roots, fix) => {
       taskCalls.push({ roots, fix });
-      return o.tasks ? o.tasks(roots, fix) : roots.map((root) => ({ root, task: `\\${root.split('/').pop()}`, before: 7, after: fix ? 4 : 7 }));
+      // the script answers with backslashes, as on the machine
+      return o.tasks ? o.tasks(roots, fix) : roots.map((root) => ({ root: root.replace(/\//g, '\\'), task: `\\${root.split('/').pop()}`, before: 7, after: fix ? 4 : 7 }));
     },
     now: () => state.now,
     log: (l) => lines.push(l),
@@ -118,13 +119,37 @@ test('w6163: enforce sets the tasks to 4 and raises the listener and its parents
   assert.equal(lines.length, n, 'nothing new is said');
 });
 
-test('w6163: a listener whose class reads low again after a raise (run.cmd relaunched it) is raised again', async () => {
-  const { rp, raises, cls } = rig('enforce');
+test('w6163: a relaunched listener (a new pid) is raised at once; one that reads low again after a raise, after RAISE_RETRY_MS', async () => {
+  const { rp, raises, cls, state } = rig('enforce');
   await rp.tick();
   cls[11] = P.PRIORITY_BELOW_NORMAL;
   await rp.tick();
+  assert.equal(raises.length, 2, 'the same pid low again: backed off, not raised every minute');
+  state.now += RAISE_RETRY_MS;
+  await rp.tick();
   assert.equal(raises.length, 3);
   assert.deepEqual(raises[2], { pids: [11, 103, 102, 101], fix: true });
+  PROCS.push({ pid: 15, ppid: 1, cmd: `"${R1}\\bin\\Runner.Listener.exe" run`, name: 'Runner.Listener.exe' });
+  try {
+    cls[15] = P.PRIORITY_BELOW_NORMAL;
+    state.census = { ...state.census, listeners: [{ pid: 15, root: R1, busy: false }, ...state.census.listeners.slice(1)] };
+    await rp.tick();
+    assert.deepEqual(raises.at(-1), { pids: [15], fix: true }, 'run.cmd relaunched it: a new pid, raised in the same minute');
+  } finally {
+    PROCS.pop();
+  }
+});
+
+test('w6163: a link the script could not open ends the chain this time (its start is unknown), and is the failure said', async () => {
+  const { rp, lines, raises } = rig('warn', {
+    // 103 cannot be opened: the script stops there, so 102 and 101 get no row
+    raise: (pids) => pids.slice(0, 2).map((pid) => (pid === 103 ? { pid, before: {}, after: {}, error: 'OpenProcess failed: error 5' } : { pid, before: LOW, after: LOW })),
+  });
+  await rp.tick();
+  const said = lines.find((l) => l.includes("could not read ffu-lothdesktop-1's listener")) ?? '';
+  assert.ok(said.includes('pid 103: OpenProcess failed') && !said.includes('pid 102') && !said.includes('pid 101'), lines.join('\n'));
+  assert.ok(raises[0].pids.includes(102), 'the next tick re-derives the whole chain: nothing after it is dropped for good');
+  assert.match(processPriorityScript([11, 103], true), /\[FFRunnerPrio\]::Last -eq 0\) \{ break \}/);
 });
 
 test('w6163: warn (BEAST, and lothdesktop in the first step) sets nothing, reads each listener once and says what it read', async () => {
@@ -268,6 +293,9 @@ test("w6163: a busy runner's task is set at the first tick it is between jobs, n
   await rp.tick();
   assert.equal(taskCalls.length, 2, 'still busy: not looked at again');
   state.census = { ...state.census, listeners: state.census.listeners.map((l) => ({ ...l, busy: false })) };
+  await rp.tick();
+  assert.equal(taskCalls.length, 2, 'a Runner.Worker of its folder still runs (hostGuard counts it busy): still waits');
+  state.census = { ...state.census, workers: [] };
   await rp.tick();
   assert.deepEqual(taskCalls.slice(2), [{ roots: [R1, R2], fix: true }]);
   await rp.tick();

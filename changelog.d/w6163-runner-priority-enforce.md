@@ -4,7 +4,7 @@
   Step 1's warn lines there showed both tasks at 7 and both listeners at BelowNormal.
   - A "parent" that started after its child (a reused pid) is left alone.
   - A raise that fails is tried again after 30 minutes.
-  - BEAST stays log-only in code (Ben's hold on its system settings).
+  - BEAST stays log-only in code, and `runner_priority enforce` is refused for it (Ben's hold on its system settings).
   - `ops_worker machine_update runner_priority off|warn|enforce` sets daemon.json `runnerPriority` remotely; warn is the
     recovery.
   - runnerRestartScript now accepts only a whitelisted runner folder path, as the step-1 review asked.

@@ -1078,6 +1078,8 @@ export class OpsWorker {
     // w6163: the ffu CI runners' scheduled tasks and listeners at Normal priority (daemon.json `runnerPriority`), Windows only: the priorities it sets are Windows'.
     if (o.runnerPriority !== undefined && o.runnerPriority !== 'off' && o.runnerPriority !== 'warn' && o.runnerPriority !== 'enforce') throw new Error('runner_priority: off, warn or enforce');
     if (o.runnerPriority !== undefined && m.platform !== 'win32') throw new Error(`runner_priority: Windows only, and ${m.id} is not a Windows PC`);
+    // Ben's standing hold on BEAST's system settings (w6163): its runners are only read; lifting it is a code change he approves
+    if (o.runnerPriority === 'enforce' && m.id.toLowerCase() === 'beast') throw new Error("runner_priority enforce: not on BEAST (Ben's hold on its system settings); off or warn only");
     // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
     // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
     // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the

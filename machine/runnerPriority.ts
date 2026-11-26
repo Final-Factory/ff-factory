@@ -132,6 +132,8 @@ const winPath = (r: string) => r.replace(/\//g, '\\').replace(/\\+$/, '');
  */
 export const scriptableRoot = (r: string) => /^[a-z]:\\[A-Za-z0-9 _.\\-]+$/i.test(winPath(r));
 const isFfu = (root: string) => /^ffu-/i.test(folderName(root));
+/** One key for a runner folder, however it is written (the census's slashes, the task script's backslashes, any case). */
+const rootKey = (root: string) => winPath(root).toLowerCase();
 
 /** The PowerShell that reads (and with fix, sets) the scheduled task of each runner folder; it prints a JSON array of TaskRow. */
 export function runnerTaskScript(roots: string[], fix: boolean): string {
@@ -225,7 +227,7 @@ export function processPriorityScript(pids: number[], fix: boolean): string {
     `'@`,
     // in chain order (the listener, then each parent): each is checked against the creation time of the one before it
     `$prev = [long]0`,
-    `$out = foreach ($p in @(${pids.join(', ')})) { $line = [FFRunnerPrio]::One($p, $${fix ? 'true' : 'false'}, $prev); $line; if ($line.Contains('${REUSED_PID}')) { break }; $prev = [FFRunnerPrio]::Last }`,
+    `$out = foreach ($p in @(${pids.join(', ')})) { $line = [FFRunnerPrio]::One($p, $${fix ? 'true' : 'false'}, $prev); $line; if ($line.Contains('${REUSED_PID}') -or [FFRunnerPrio]::Last -eq 0) { break }; $prev = [FFRunnerPrio]::Last }`,
     `[Console]::Out.Write(($out -join "\`n"))`,
   ].join('\n');
 }
@@ -277,10 +279,15 @@ export class RunnerPriority {
   /** A tick still running (a slow PowerShell): the next one is skipped, not run beside it. */
   private ticking = false;
   /** Each listener's chain as the process script last cut it (a reused pid ends it), so a stranger is not looked at again. */
-  private readonly chains = new Map<number, number[]>();
-  /** In enforce: a listener whose raise failed or did not hold, and when it may be raised again (RAISE_RETRY_MS). */
-  private readonly retryAt = new Map<number, number>();
-  /** In enforce: runner folders whose task is above TASK_PRIORITY but was left while their runner ran a job. */
+  private readonly cutAt = new Map<number, number>();
+  /**
+   * In enforce: when each listener may be raised again, and whether then whatever its class reads (its raise failed or did
+   * not hold) or only if its class reads low again (something lowered it after a raise that held).
+   */
+  private readonly nextRaise = new Map<number, { at: number; always: boolean }>();
+  /** No process is read before this: the script threw (it compiles C# each run), so it runs once per RAISE_RETRY_MS then. */
+  private procsRetryAt = 0;
+  /** In enforce: runner folders (key) whose task is above TASK_PRIORITY but was left while their runner ran a job. */
   private readonly taskPending = new Set<string>();
 
   constructor(d: RunnerPriorityDeps) {
@@ -301,30 +308,36 @@ export class RunnerPriority {
   private async tickOnce(): Promise<void> {
     const enforce = this.mode === 'enforce';
     const procs = await this.d.procs();
-    const listeners = this.d.census(procs).listeners.filter((l) => isFfu(l.root));
+    const census = this.d.census(procs);
+    const listeners = census.listeners.filter((l) => isFfu(l.root));
     const roots: string[] = [];
-    for (const r of new Map(listeners.map((l) => [l.root.toLowerCase(), l.root])).values()) {
+    for (const r of new Map(listeners.map((l) => [rootKey(l.root), l.root])).values()) {
       if (scriptableRoot(r)) roots.push(r);
       else if (!this.badRootSaid.has(r)) {
         this.badRootSaid.add(r);
         this.d.log(`runner priority: ${r} is not a folder its scheduled task can be looked up by; left alone`);
       }
     }
-    // a runner running a job: its task is set once it is between jobs (Set-ScheduledTask leaves a running instance alone, but
-    // nothing here acts on a runner mid-job that can wait a minute)
-    const busy = new Set(listeners.filter((l) => l.busy).map((l) => l.root.toLowerCase()));
+    // a runner running a job (a worker under it, as hostGuard counts it): its task is set once it is between jobs. A task's
+    // change leaves a running instance alone (Microsoft's docs), so this is care, not what keeps a job safe.
+    const busy = new Set(listeners.filter((l) => l.busy || census.workers.some((w) => rootKey(w.root) === rootKey(l.root))).map((l) => rootKey(l.root)));
     const now = this.d.now();
-    const due = now - this.tasksReadAt >= TASK_EVERY_MS || roots.some((r) => !this.rootsRead.has(r.toLowerCase()));
+    const due = now - this.tasksReadAt >= TASK_EVERY_MS || roots.some((r) => !this.rootsRead.has(rootKey(r)));
     const pendingFree = enforce && [...this.taskPending].some((r) => !busy.has(r));
     if (roots.length && (due || pendingFree)) await this.lookAtTasks(roots, enforce, busy);
     const live = new Set(listeners.map((l) => l.pid));
-    for (const m of [this.listenerSaid, this.chains, this.retryAt]) for (const pid of m.keys()) if (!live.has(pid)) m.delete(pid);
+    for (const m of [this.listenerSaid, this.cutAt, this.nextRaise]) for (const pid of m.keys()) if (!live.has(pid)) m.delete(pid);
+    if (now < this.procsRetryAt) return;
     const NORMAL = os.constants.priority.PRIORITY_NORMAL;
     for (const l of listeners) {
-      let chain = this.chains.get(l.pid) ?? listenerChain(l.pid, procs);
+      // the chain from the listing each tick, cut where the script once found a stranger
+      let chain = listenerChain(l.pid, procs);
+      const c = this.cutAt.get(l.pid);
+      if (c !== undefined && chain.includes(c)) chain = chain.slice(0, chain.indexOf(c));
       const classLow = chain.some((p) => (this.d.priorityOf(p) ?? NORMAL) > NORMAL);
-      const mayRetry = (this.retryAt.get(l.pid) ?? 0) <= now;
-      if (this.listenerSaid.has(l.pid) && !(enforce && classLow && mayRetry)) continue;
+      const n = this.nextRaise.get(l.pid);
+      const again = enforce && !!n && n.at <= now && (n.always || classLow);
+      if (this.listenerSaid.has(l.pid) && !again) continue;
       let rows: ProcRow[];
       try {
         rows = await this.d.raise(chain, enforce);
@@ -333,13 +346,20 @@ export class RunnerPriority {
       } catch (e) {
         if (!this.procsFailing) this.d.log(`runner priority: could not read the runners' process priorities: ${(e as Error).message.slice(0, 200)}`);
         this.procsFailing = true;
+        this.procsRetryAt = now + RAISE_RETRY_MS;
         return;
       }
-      // a "parent" that started after its child is a stranger with a reused pid: the chain ends before it
+      // a "parent" that started after its child is a stranger with a reused pid: the chain ends before it, from now on
       const cut = rows.find((r) => r.error?.startsWith(REUSED_PID));
-      if (cut && chain.indexOf(cut.pid) > 0) chain = chain.slice(0, chain.indexOf(cut.pid));
+      if (cut && chain.indexOf(cut.pid) > 0) {
+        this.cutAt.set(l.pid, cut.pid);
+        chain = chain.slice(0, chain.indexOf(cut.pid));
+      }
+      // the script stops after a link whose start it could not read (it cannot tell the next from a stranger): the links
+      // after it are left this time, and the unread link is the failure said
+      const stop = chain.findIndex((p) => !rows.some((r) => r.pid === p));
+      if (stop > 0 && rows.some((r) => r.pid === chain[stop - 1] && r.error)) chain = chain.slice(0, stop);
       rows = rows.filter((r) => chain.includes(r.pid));
-      this.chains.set(l.pid, chain);
       const name = folderName(l.root);
       const low = rows.filter((r) => prioLow(r.before));
       // a pid the script printed no full row for was not read: a failure, never "Normal"
@@ -359,15 +379,15 @@ export class RunnerPriority {
       else said = `runner priority: raised ${name}'s listener (pid ${l.pid}) from ${prioText(lead?.before ?? {})} to ${prioText(lead?.after ?? {})}, and its ${parents} parent(s), so the jobs it starts from now on run at Normal (w6163)`;
       if (this.listenerSaid.get(l.pid) !== said) this.d.log(said);
       this.listenerSaid.set(l.pid, said);
-      if (enforce && (failed.length || stillLow.length)) this.retryAt.set(l.pid, now + RAISE_RETRY_MS);
-      else this.retryAt.delete(l.pid);
+      if (enforce) this.nextRaise.set(l.pid, { at: now + RAISE_RETRY_MS, always: failed.length > 0 || stillLow.length > 0 });
     }
   }
 
   private async lookAtTasks(roots: string[], enforce: boolean, busy: Set<string>) {
     this.tasksReadAt = this.d.now();
-    for (const r of roots) this.rootsRead.add(r.toLowerCase());
-    const isBusy = (r: string) => busy.has(r.toLowerCase());
+    for (const r of roots) this.rootsRead.add(rootKey(r));
+    // the script answers each folder with backslashes, the census with slashes: one key for both
+    const isBusy = (r: string) => busy.has(rootKey(r));
     const fixable = enforce ? roots.filter((r) => !isBusy(r)) : [];
     const readOnly = roots.filter((r) => !fixable.includes(r));
     let rows: TaskRow[];
@@ -378,13 +398,15 @@ export class RunnerPriority {
     } catch (e) {
       if (!this.tasksFailing) this.d.log(`runner priority: could not read the runners' scheduled tasks: ${(e as Error).message.slice(0, 200)}`);
       this.tasksFailing = true;
+      // looked at again at the next hour's read, not every minute while a runner waits
+      this.taskPending.clear();
       return;
     }
     this.taskPending.clear();
     for (const r of rows) {
       const name = folderName(r.root);
       const waits = enforce && isBusy(r.root) && !!r.task && r.after !== undefined && r.after > TASK_PRIORITY;
-      if (waits) this.taskPending.add(r.root.toLowerCase());
+      if (waits) this.taskPending.add(rootKey(r.root));
       let said: string;
       if (waits) said = `runner priority: ${name}'s scheduled task ${r.task} runs at priority ${r.after} (${taskPriorityName(r.after)}); it is set to ${TASK_PRIORITY} once its runner is between jobs (w6163)`;
       else if (!r.task) said = `runner priority: ${name} has no scheduled task (it starts from run.cmd or the Startup folder, at the priority of what starts it)`;
@@ -392,8 +414,8 @@ export class RunnerPriority {
       else if (r.before !== r.after) said = `runner priority: set ${name}'s scheduled task ${r.task} from priority ${r.before} (${taskPriorityName(r.before)}) to ${r.after} (${taskPriorityName(r.after)}), so a start through it runs its jobs at ${taskPriorityName(r.after)} (w6163)`;
       else if (r.after !== undefined && r.after <= TASK_PRIORITY) said = `runner priority: ${name}'s scheduled task ${r.task} runs at priority ${r.after} (${taskPriorityName(r.after)})`;
       else said = `runner priority: ${name}'s scheduled task ${r.task} runs at priority ${r.after} (${taskPriorityName(r.after)}), so a start through it runs its jobs at ${taskPriorityName(r.after)}${enforce ? '' : '; this machine only reports it'} (w6163)`;
-      if (this.taskSaid.get(r.root.toLowerCase()) !== said) this.d.log(said);
-      this.taskSaid.set(r.root.toLowerCase(), said);
+      if (this.taskSaid.get(rootKey(r.root)) !== said) this.d.log(said);
+      this.taskSaid.set(rootKey(r.root), said);
     }
   }
 }
