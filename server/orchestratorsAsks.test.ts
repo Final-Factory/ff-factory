@@ -923,7 +923,7 @@ test("w3606: an owner moves the question waiting on the other owner to themselve
   loth.lastFrom = 'system';
   const refused = await call(loth.info, 'update_work', { id: 'w1', question_for: 'lothsahn' });
   assert.equal(refused.isError, true);
-  assert.match(refused.text, /moves its question only in a turn Lothsahn started with their own words/);
+  assert.match(refused.text, /moves its question only on Lothsahn's own words/);
   assert.deepEqual(tab(BEN), ['w1']);
   says('Take that question off Ben, it is mine now.');
   const r = await call(loth.info, 'update_work', { id: 'w1', question_for: 'lothsahn', note: 'Lothsahn takes it' });
@@ -944,7 +944,7 @@ test("w3606: an owner changes the other owner's priority in their own words; out
   const { ben, loth, says, w, call, heard } = await crossOwnerQuestion(t);
   loth.lastFrom = 'system';
   const refused = await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' });
-  assert.match(refused.text, /changes its priority only in a turn Lothsahn started with their own words/);
+  assert.match(refused.text, /changes its priority only on Lothsahn's own words/);
   assert.equal(w().priority, 'normal');
   says('Please make w1 urgent');
   const r = await call(loth.info, 'update_work', { id: 'w1', priority: 'urgent' });
