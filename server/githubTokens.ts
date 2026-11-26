@@ -453,6 +453,8 @@ export class GithubTokens {
             // An empty repository has no commit to ask about (409): its statuses are not counted against the token.
             'commit-statuses': contents === 'read' ? await status(`repos/${repo}/commits/HEAD/status`, 'denied') : 'error',
             discussions: await r.graphql(`query{repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){discussions(first:1){totalCount}}}`),
+            // w5928: the repository's own runner list (Administration: read), only where a requirement names the repository.
+            ...(onlyOn('administration', repo) ? { administration: await status(`repos/${repo}/actions/runners?per_page=1`, 'denied') } : {}),
           },
         });
       }
@@ -615,6 +617,9 @@ export function inGithubOrg(repos: readonly string[]): boolean {
   return repos.some((r) => r.split('/')[0].toLowerCase() === GITHUB_ORG.toLowerCase());
 }
 
+/** Whether `repo` needs permission `id` (w5928: one that names its repositories is asked of those alone). */
+const onlyOn = (id: string, repo: string) => GITHUB_REQUIRED_PERMISSIONS.some((p) => p.id === id && (!p.repos || p.repos.some((x) => x.toLowerCase() === repo.toLowerCase())));
+
 export function githubProblems(h: GithubTokenHealth, repos: readonly string[], now: number): string[] {
   if (!h.checkedAt || h.disabled) return [];
   const out: string[] = [];
@@ -634,10 +639,14 @@ export function githubProblems(h: GithubTokenHealth, repos: readonly string[], n
     else if (r.access.metadata === 'denied') out.push(`${r.repo}: refused (403)`);
   }
   const reachable = probed.filter((r) => r.access.metadata === 'read');
-  for (const p of GITHUB_REQUIRED_PERMISSIONS.filter((x) => x.scope === 'repository' && x.probe && x.id !== 'metadata' && x.id !== 'artifact-metadata')) {
+  for (const p of GITHUB_REQUIRED_PERMISSIONS.filter((x) => x.scope === 'repository' && x.probe && x.id !== 'metadata' && x.id !== 'artifact-metadata' && !x.repos)) {
     const refused = reachable.filter((r) => r.access[p.id] === 'denied').map((r) => r.repo.split('/')[1]);
     if (!refused.length) continue;
     out.push(`${p.label}: read refused ${refused.length === reachable.length ? 'on every repository' : `on ${refused.join(', ')}`}`);
+  }
+  // w5928: a permission only some repositories need is named with its level and repository, as the token page asks for it.
+  for (const p of GITHUB_REQUIRED_PERMISSIONS.filter((x) => x.scope === 'repository' && x.probe && x.repos)) {
+    for (const r of reachable.filter((x) => x.access[p.id] === 'denied')) out.push(`${p.label}: ${p.access === 'write' ? 'Read and write' : 'Read-only'} on ${r.repo} (read refused)`);
   }
   return out;
 }
