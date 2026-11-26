@@ -407,10 +407,17 @@ export function ownerLabelTargets(o: { platform: NodeJS.Platform; home: string; 
  * what it prints): 'keyring' (Windows Credential Manager, which a Low process reads as the owner does: the folder's label
  * does not reach it), 'file' (the folder's hosts.yml, which the label closes), or undefined (no login, or not said).
  */
+const GH_LOGIN_LINE = /(?:Logged|Failed to log|Timeout trying to log) in to github\.com/i;
+/** A status line gh printed after it checked the token with GitHub ("✓ Logged in"), not one it could only read from storage. */
+const GH_CHECKED = /Logged in to github\.com/i;
+const GH_UNCHECKED = /(?:Failed to log|Timeout trying to log) in to github\.com/i;
+
 export function ghLoginStorage(statusOut: string): 'keyring' | 'file' | undefined {
   // gh prints "X Failed to log in to github.com account <user> (<where>)" when it cannot check the token (an invalid token,
-  // measured with gh 2.102.0 by w5849; a network outage is likely the same): the login is still stored there, so read it too.
-  const line = statusOut.split(/\r?\n/).find((l) => /(Logged|Failed to log) in to github\.com/i.test(l));
+  // measured with gh 2.102.0 by w5849; a network outage is likely the same), and "X Timeout trying to log in to github.com
+  // account <user> (<where>)" when the check times out (measured with gh 2.46.0 by w5859): the login is still stored there,
+  // so read both too.
+  const line = statusOut.split(/\r?\n/).find((l) => GH_LOGIN_LINE.test(l));
   if (!line) return undefined;
   return /\(keyring\)/i.test(line) ? 'keyring' : 'file';
 }
@@ -469,7 +476,7 @@ export const realGhRun: GhRun = (args, o = {}) =>
   });
 
 /** The github.com accounts `gh auth status` says are logged in. */
-export const ghLoginAccounts = (statusOut: string): string[] => [...statusOut.matchAll(/(?:Logged|Failed to log) in to github\.com account (\S+)/gi)].map((m) => m[1]);
+export const ghLoginAccounts = (statusOut: string): string[] => [...statusOut.matchAll(/(?:Logged|Failed to log|Timeout trying to log) in to github\.com account (\S+)/gi)].map((m) => m[1]);
 
 /** The Credential Manager targets go-keyring keeps a gh github.com login under (service `gh:github.com`, `<service>:<user>`). */
 export const ghKeyringTargets = (user: string): string[] => ['gh:github.com:', `gh:github.com:${user}`];
@@ -490,7 +497,8 @@ const ghStatusOf = async (gh: GhRun) => {
   const out = `${r.stdout}\n${r.stderr}`;
   // `none`: gh said plainly there is no login. A status with no login line and no such words (gh failed, timed out, or
   // printed something new) is unread, never "no login" (w5849's review of #1281: that misreading lost the way back).
-  return { storage: ghLoginStorage(out), accounts: ghLoginAccounts(out), none: /not logged in/i.test(out) };
+  // `checked`: gh verified the token with GitHub; a "Failed to log in" or "Timeout" line is a stored login it could not check.
+  return { storage: ghLoginStorage(out), accounts: ghLoginAccounts(out), none: /not logged in/i.test(out), checked: GH_CHECKED.test(out) && !GH_UNCHECKED.test(out) };
 };
 const ghTokenOf = async (gh: GhRun) => {
   const r = await gh(['auth', 'token', '--hostname', 'github.com']);
@@ -514,7 +522,12 @@ export async function ghLoginToFile(gh: GhRun, beforeMove?: () => void): Promise
       : { ok: false, moved: false, line: "gh auth status could not be read (no login line); the login, wherever it is, is not moved and the next start tries again" };
   if (before.accounts.length !== 1) return { ok: false, moved: false, line: `gh has ${before.accounts.length} github.com accounts (${before.accounts.join(', ')}); the move handles one, so the login stays in Credential Manager` };
   const user = before.accounts[0];
-  if (before.storage === 'file') return { ok: true, moved: false, line: `the gh login (${user}) is already in hosts.yml`, deleteFrom: ghKeyringTargets(user) };
+  // A Credential Manager entry is deleted only on a login gh checked (w5859's review of #1281): a file login gh could not
+  // check may be a dead token beside a live one in the keyring, so the entries stay and the next start tries again.
+  if (before.storage === 'file')
+    return before.checked
+      ? { ok: true, moved: false, line: `the gh login (${user}) is already in hosts.yml`, deleteFrom: ghKeyringTargets(user) }
+      : { ok: false, moved: false, line: `the gh login (${user}) is in hosts.yml but gh could not check it with GitHub; the Credential Manager entries are kept and the next start tries again` };
   const token = await ghTokenOf(gh);
   if (!token) return { ok: false, moved: false, line: 'gh auth token gave no token; the login stays in Credential Manager' };
   // The caller's note goes down before the move (w5849): a daemon that dies after the login call still knows to move it back.
