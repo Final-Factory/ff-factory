@@ -20,6 +20,7 @@ import {
   type WinCiFirstMode,
   type WinCiFirstSettings,
   type WinProc,
+  sameRoot,
 } from '../machine/ciFirstWin.ts';
 
 /**
@@ -52,6 +53,9 @@ interface RigOpts {
   hostStart?: Record<number, number>;
   noRecord?: boolean;
   onFacts?: (r: Rig) => void;
+  /** w6217: each process's FF_SESSION_ID and FF_WORKER_ROOT, by pid; given, the rig reads environments. */
+  env?: Record<number, { session?: string; root?: string }>;
+  root?: string;
 }
 type Rig = ReturnType<typeof rig>;
 
@@ -69,6 +73,8 @@ function rig(o: RigOpts = {}) {
   let held = false;
   let writeFail = false;
   let setFail = false;
+  let envFail = false;
+  const envAsked: number[][] = [];
   let record: Lowered = o.record ?? {};
   let api: Rig | undefined;
   const set: [number, number][] = [];
@@ -92,6 +98,14 @@ function rig(o: RigOpts = {}) {
       return pids.filter((p) => procs.some((x) => x.pid === p)).map((p): ProcFact => ({ pid: p, startedAt: started.get(p), cpuMs: cpuMs.get(p) ?? 0 }));
     },
     machineBusyMs: () => busy,
+    envOf: o.env
+      ? async (pids) => {
+          if (envFail) throw new Error('reading the environments timed out');
+          envAsked.push(pids);
+          return new Map(pids.flatMap((p) => (o.env![p] ? [[p, o.env![p]] as const] : [])));
+        }
+      : undefined,
+    root: o.root,
     self: DAEMON,
     mode: o.mode,
     held: () => held,
@@ -118,6 +132,8 @@ function rig(o: RigOpts = {}) {
     cf: new WinCiFirst(d),
     setWriteFail: (f: boolean) => void (writeFail = f),
     setSetFail: (f: boolean) => void (setFail = f),
+    setEnvFail: (f: boolean) => void (envFail = f),
+    envAsked,
     now: () => now,
     set,
     record: () => record,
@@ -707,4 +723,99 @@ test("Idle: a tool at BelowNormal is lowered to Idle and raised back to BelowNor
   await r.cf.tick();
   assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
   assert.equal(r.prio.get(25), P.PRIORITY_LOW, 'a Unity run is lowerBuild\'s to set, not ours');
+});
+
+/**
+ * w6217: a tool whose starter exited (a `cargo test` under a `bash /tmp/bugchecks.sh` whose parent was gone, 2026-11-26
+ * 21:54 UTC) is outside every walk from a host. Its tree is found by its environment's FF_SESSION_ID; step one only counts it.
+ */
+const ROOT = 'V:\\ffw';
+const ORPHANS: WinProc[] = [
+  ...BASE,
+  { pid: 40, ppid: 99, cmd: 'bash.exe /tmp/bugchecks.sh' }, // 99 is gone; Git Bash shows no environment
+  { pid: 41, ppid: 40, cmd: 'cargo.exe test' },
+  { pid: 42, ppid: 41, cmd: 'rustc.exe' },
+  { pid: 50, ppid: 98, cmd: 'Unity.exe -batchmode' }, // an orphaned Unity: never a tool, nor what it started
+  { pid: 51, ppid: 50, cmd: 'bee_backend.exe' },
+  { pid: 60, ppid: 97, cmd: 'python.exe other.py' }, // another FF Factory's worker (another root)
+  { pid: 70, ppid: 96, cmd: 'python.exe old.py' }, // a session that is not live here
+  { pid: 80, ppid: 95, cmd: 'svchost.exe' }, // no FF environment at all
+];
+const ORPHAN_ENV = {
+  41: { session: 'aaaa1111', root: 'v:/ffw/' },
+  42: { session: 'aaaa1111', root: ROOT },
+  50: { session: 'bbbb2222', root: ROOT },
+  51: { session: 'bbbb2222', root: ROOT },
+  60: { session: 'bbbb2222', root: 'F:\\ffw' },
+  70: { session: 'dead0000', root: ROOT },
+};
+const NORMAL_ORPHANS: [number, number][] = [40, 41, 42, 50, 51, 60, 70, 80].map((p) => [p, P.PRIORITY_NORMAL]);
+
+test("w6217: sameRoot is leftovers.ts's on Windows: no case, either slash, an unknown either side is the same", () => {
+  assert.equal(sameRoot('V:\\ffw', 'v:/ffw/'), true);
+  assert.equal(sameRoot('F:\\ffw', 'V:\\ffw'), false);
+  assert.equal(sameRoot(undefined, 'V:\\ffw'), true);
+  assert.equal(sameRoot('V:\\ffw', undefined), true);
+});
+
+test("w6217: an orphaned tool tree is counted by its session's environment (the shell above it is not), and nothing is lowered", async () => {
+  for (const mode of ['warn', 'enforce'] as const) {
+    const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode });
+    const res = await r.cf.tick();
+    // 41 and 42 are aaaa1111's; 40 (no env), the Unity tree, another root's 60, the dead session's 70 and 80 are not
+    assert.equal(res?.orphans, 2, mode);
+    const said = r.lines.filter((l) => /process that started them gone/.test(l));
+    assert.equal(said.length, 1, mode);
+    assert.match(said[0], /2 more of the agents' tools' process\(es\) run above BelowNormal .*2 such now; not lowered yet \(w6217\): 41 cargo\.exe \(aaaa1111\), 42 rustc\.exe \(aaaa1111\)/);
+    assert.match(r.lines.find((l) => /CI job\(s\) running/.test(l))!, /; 2 orphaned tool process\(es\) above BelowNormal, not lowered yet \(w6217\)/);
+    for (const pid of [40, 41, 42, 50, 51, 60, 70, 80]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${mode} ${pid}`);
+    assert.ok(!r.set.some(([pid]) => pid >= 40), mode);
+    // the hosts', the job's and the daemon's own trees are never orphan roots: their environments are not read
+    assert.ok(!r.envAsked.flat().some((p) => [10, 11, 12, 20, 21, 22, 23, 30, 31].includes(p)), mode);
+  }
+});
+
+test('w6217: each environment is read once; a new orphan is named once; one gone is forgotten', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS });
+  await r.cf.tick();
+  const n = r.envAsked.length;
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.envAsked.length, n, 'nothing new: nothing read');
+  assert.equal(r.lines.filter((l) => /process that started them gone/.test(l)).length, 1, 'not said again');
+  r.advance(60_000);
+  r.setProcs([...ORPHANS, { pid: 43, ppid: 41, cmd: 'rustc.exe' }]);
+  r.started.set(43, 1_100_000);
+  r.prio.set(43, P.PRIORITY_NORMAL);
+  const res = await r.cf.tick();
+  assert.deepEqual(r.envAsked.at(-1), [43]);
+  assert.equal(res?.orphans, 3);
+  assert.match(r.lines.filter((l) => /process that started them gone/.test(l)).at(-1)!, /1 more .*3 such now.*: 43 rustc\.exe \(aaaa1111\)$/);
+  // one at Idle already is not counted
+  r.advance(60_000);
+  r.prio.set(43, P.PRIORITY_LOW);
+  assert.equal((await r.cf.tick())?.orphans, 2);
+});
+
+test("w6217: a failed environment read is said once, the walk goes on, and the next read is said", async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS });
+  r.setEnvFail(true);
+  const first = await r.cf.tick();
+  assert.equal(first?.jobs, 1);
+  assert.equal(first?.above, 1, "the hosts' own walk is untouched");
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.lines.filter((l) => /could not read the processes' environments: reading the environments timed out/.test(l)).length, 1);
+  r.setEnvFail(false);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.ok(r.lines.some((l) => /environments read again/.test(l)));
+  assert.equal(res?.orphans, 2);
+});
+
+test('w6217: without an environment reader (not a real daemon) no orphan is looked for', async () => {
+  const r = rig({ procs: ORPHANS, root: ROOT, prio: NORMAL_ORPHANS });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 0);
+  assert.ok(!r.lines.some((l) => /orphaned|started them gone/.test(l)));
 });
