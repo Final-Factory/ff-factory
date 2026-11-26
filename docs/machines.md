@@ -1934,6 +1934,17 @@ LothDesktop and Beast, not just when BEAST is full").
     `machines.githubFromVault` is on: such a machine counts as able for them (`GithubTokens.entryFor`), and the brief names
     the vault entry instead. Its Workflows permission (required of every vault token, 13.2) cannot be probed without
     writing, so the brief says what to do if GitHub refuses the push anyway.
+  - **A login GitHub refuses (401)** (w5932): gh 2.102.0 answers an invalid, expired or revoked token with exit 0,
+    `"state":"error"`, an empty login and an error naming "401 Unauthorized" in its JSON form, and "Failed to log in … The
+    token in keyring is invalid." in its text form (measured on BEAST with a made-up token). Both read as "GitHub refused
+    the token (HTTP 401 …)" (`REFUSED_401`, `ghLoginRefused`), and a connected machine with such a reading gets a
+    `WARNING: gh login (w5932)` line in system_status (`ghLoginStatusLines`) and an owners' banner (`ghLoginBanner`, kind
+    `gh-login`). **A 401 over ssh is not a bad login**: on 2026-11-26 the ops worker's `ssh beast 'gh api …'` got
+    "Requires authentication (HTTP 401)" ("The token in default is invalid", the same on 2026-11-08) while beast's daemon
+    read `bryding (gist, read:org, repo, workflow)` at 05:14Z and 06:19Z and a worker's `gh api user` there answered 200.
+    A Windows ssh session with key sign-in cannot read Credential Manager (a Mac's ssh cannot read the login Keychain), so
+    gh sends no token at all; GitHub's "Bad credentials" is the sign of a token that is really refused. Check a machine's
+    gh from its daemon's reading (list_machines) or a worker there, never over ssh.
   - **Fixing a machine:** on it, as its user, `gh auth refresh -h github.com -s workflow` (a browser sign-in); the daemon
     sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
     `server/orchestrators*.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,

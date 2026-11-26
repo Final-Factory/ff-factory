@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine, parseGhStatusJson, parseGhStatusText, sanitizeGhLogin, scopeList, type GhLogin } from '../shared/ghLogin.ts';
+import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginBanner, ghLoginLabel, ghLoginRefused, ghLoginStatusLines, ghMachineLine, REFUSED_401, parseGhStatusJson, parseGhStatusText, sanitizeGhLogin, scopeList, type GhLogin } from '../shared/ghLogin.ts';
 import { GhLoginWatch, READ_EVERY_MS, ghHostsFile, readGhLogin } from '../machine/ghLogin.ts';
 import { capacityLines, pickComputer, placementHint, workflowLine, type Computer } from './placement.ts';
 import type { RunResult } from './proc.ts';
@@ -214,4 +214,63 @@ test('w1463: readGhLogin says when gh is missing, and the hosts file follows gh\
   assert.equal(ghHostsFile({ XDG_CONFIG_HOME: '/x' }, 'darwin', '/h'), path.join('/x', 'gh', 'hosts.yml'));
   assert.equal(ghHostsFile({ AppData: 'C:\\Users\\a\\AppData\\Roaming' }, 'win32', 'C:\\Users\\a'), path.join('C:\\Users\\a\\AppData\\Roaming', 'GitHub CLI', 'hosts.yml'));
   assert.equal(ghHostsFile({}, 'linux', '/h'), path.join('/h', '.config', 'gh', 'hosts.yml'));
+});
+
+/** What gh 2.102.0 printed for an invalid token (measured by w5932 on BEAST with a made-up GH_TOKEN): exit 0 with --json. */
+const REFUSED_JSON = '{"hosts":{"github.com":[{"state":"error","error":"non-200 OK status code: 401 Unauthorized body: \\"{\\r\\n  \\\\\\"message\\\\\\": \\\\\\"Bad credentials\\\\\\"}\\"","active":true,"host":"github.com","login":"","tokenSource":"GH_TOKEN","gitProtocol":"https"}]}}';
+/** The text form of a refused keyring login (gh 2.102.0, as the ops worker's ssh session to BEAST printed it on 2026-11-26). */
+const REFUSED_TEXT = 'github.com\n  X Failed to log in to github.com account bryding (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n  - To re-authenticate, run: gh auth login -h github.com\n  - To forget about this account, run: gh auth logout -h github.com -u bryding\n';
+
+test('w5932: a 401 from gh auth status is a refused login, in the JSON and the text form', () => {
+  const j = parseGhStatusJson(REFUSED_JSON, NOW)!;
+  assert.equal(j.ok, false);
+  assert.equal(j.error, REFUSED_401);
+  assert.equal(ghLoginRefused(j), true);
+  const t = parseGhStatusText(REFUSED_TEXT, NOW);
+  assert.equal(t.ok, false);
+  assert.equal(t.account, 'bryding');
+  assert.equal(t.error, REFUSED_401, 'its "run: gh auth login" hint is not "not logged in"');
+  assert.equal(ghLoginRefused(t), true);
+  // Not logged in, gh missing, a timeout: no refusal.
+  assert.equal(ghLoginRefused(parseGhStatusText('You are not logged into any GitHub hosts. To log in, run: gh auth login', NOW)), false);
+  assert.equal(ghLoginRefused({ checkedAt: NOW.toISOString(), ok: false, error: 'GitHub did not answer gh in time' }), false);
+  assert.equal(ghLoginRefused(parseGhStatusJson(BEAST_JSON, NOW)), false);
+  // The portal keeps it through sanitizeGhLogin.
+  assert.equal(ghLoginRefused(sanitizeGhLogin(t)), true);
+});
+
+test('w5932: a refused gh login is a system_status WARNING and a banner for the connected machine, never a token', () => {
+  const bad = parseGhStatusText(REFUSED_TEXT, NOW);
+  const good = parseGhStatusJson(BEAST_JSON, NOW)!;
+  const ms = [
+    { id: 'beast', online: true, gh: bad },
+    { id: 'biscuit', online: true, gh: good },
+    { id: 'm3', online: false, gh: bad },
+    { id: 'm5', online: true },
+  ];
+  const lines = ghLoginStatusLines(ms);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^WARNING: gh login \(w5932\): beast's own gh login \(bryding\): GitHub refused the token \(HTTP 401/);
+  assert.match(lines[0], /12:00Z/);
+  assert.match(lines[0], /gh auth login/);
+  const b = ghLoginBanner(ms)!;
+  assert.match(b, /beast \(bryding\)/);
+  assert.doesNotMatch(b, /biscuit|m3|m5/);
+  assert.equal(ghLoginBanner(ms.filter((m) => m.id !== 'beast')), undefined);
+  assert.deepEqual(ghLoginStatusLines([{ id: 'beast', online: true, gh: good }]), []);
+  for (const s of [...lines, b]) for (const tok of TOKENS) assert.ok(!s.includes(tok));
+});
+
+test("w5932: the daemon's watch reads a refused login and sends it at once", async () => {
+  const sent: GhLogin[] = [];
+  let out = BEAST_JSON;
+  const run = async (): Promise<RunResult> => ({ code: 0, stdout: out, stderr: '' }) as RunResult;
+  let t = NOW.getTime();
+  const w = new GhLoginWatch({ run, look: () => 'x', now: () => new Date(t), send: (g) => sent.push(g), log: () => {} });
+  await w.tick();
+  assert.equal(sent.at(-1)!.ok, true);
+  out = REFUSED_JSON;
+  t += READ_EVERY_MS;
+  await w.tick();
+  assert.equal(ghLoginRefused(sent.at(-1)), true, 'a 401 is not kept back as a blip');
 });
