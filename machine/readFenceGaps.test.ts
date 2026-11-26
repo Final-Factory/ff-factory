@@ -282,7 +282,9 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
       setLabels: async (l: readonly LabelTarget[]) => (await labelNoReadUp(l, exec, say, { systemDrive: () => false })) && (await relabelInside(l, 'close', exec, say, { systemDrive: () => false })),
       openLabels: async (l: readonly LabelTarget[]) => !!(await openNoReadUp(l, exec, say, { systemDrive: () => false })) && (await relabelInside(l, 'open', exec, say, { systemDrive: () => false })) };
     // The child must run Low (S-1-16-4096), or every path reads and the probe means nothing.
-    const who = spawnSync(node, ['-e', "process.stdout.write(require('child_process').execSync('whoami /groups').toString())"], { encoding: 'utf8', windowsHide: true });
+    // System32's whoami by full path: Git's own whoami on PATH cannot start at Low (msys, 0xC0000022).
+    const whoExe = path.join(process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows', 'System32', 'whoami.exe');
+    const who = spawnSync(node, ['-e', `process.stdout.write(require('child_process').execFileSync(${JSON.stringify(whoExe)}, ['/groups']).toString())`], { encoding: 'utf8', windowsHide: true });
     assert.match(who.stdout ?? '', /S-1-16-4096\b/, `the Low copy of node is not Low: ${(who.stdout ?? '').split(/\r?\n/).filter((l) => /Mandatory/i.test(l)).join(' | ')} ${who.stderr ?? ''}`);
     // What the mirror's labels are once set, for the failure message (icacls names each path's mandatory label).
     const w = await probeReadFenceWin({ ...deps, mode: 'warn', setLabels: async (l: readonly LabelTarget[]) => {
