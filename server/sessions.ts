@@ -24,6 +24,7 @@ import { CliTranscriptTail, cliTranscriptPath, rebuildMeterAsync } from './cliTr
 import { refreshKeptToolsAsync, sdkToolsNow } from './keptTools.ts';
 import { tempSizeHook } from './tempSizeHook.ts';
 import { capNotesHook } from './workerCapNotes.ts';
+import { ffuSlotBuildHook } from './ffuSlotBuildHook.ts';
 
 /** A session is mid-turn: working, starting or waiting for a permission answer. Only these count toward the agent limits (w384). */
 export const MID_TURN: ReadonlySet<SessionInfo['status']> = new Set(['running', 'starting', 'waiting_permission']);
@@ -839,7 +840,11 @@ export class AgentSession implements SessionHandle {
     if (this.info.kind === 'worker' && this.tempDir && /^ffa-/i.test(path.basename(this.tempDir))) {
       const watch = tempSizeHook(this.tempDir, ({ total, biggest, step }) => this.events.emit('tempSize', this, { total, biggest, step }));
       // w5554: and hears when its host ended its tools at a cap (machine/workerCaps.ts, server/workerCapNotes.ts).
-      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch, capNotesHook()] }] };
+      // w5885: and is told to wait for an ffu slot when it builds ffu without one (server/ffuSlotBuildHook.ts, warn-only).
+      const env = options.env as Record<string, string | undefined> | undefined;
+      const root = env?.FF_WORKER_ROOT;
+      const slotNote = root ? [ffuSlotBuildHook({ root, session: env?.FF_SESSION_ID || this.info.id })] : [];
+      options.hooks = { ...options.hooks, PostToolUse: [...(options.hooks?.PostToolUse ?? []), { hooks: [watch, capNotesHook(), ...slotNote] }] };
     }
     this.costBase = this.info.costUsd;
     // The conversation goes on in a new process (w1484): its history stays in its categories when its tally was kept, or is rebuilt

@@ -138,6 +138,11 @@ The `ffu-slot` shim (`machine/ffuSlots.ts`) is written by the machine daemon int
 `ff-pr`, which is first on every worker's PATH. Its default is 4 slots per machine (`FFU_SLOTS_DEFAULT_MAX`, a guess),
 so 4 × the 16 GB cap is 64 GB at most.
 
+**A cargo build outside a slot is noted** (w5885, warn-only, `server/ffuSlotBuildHook.ts`): when a worker that holds no slot
+runs `cargo build`, `test`, `check`, `clippy`, `run`, `bench` or `nextest` outside `ffu-sandboxes`, its next step carries a
+note to take a slot or wait for one, at most once per 30 min. A machine with no `ffu-sandboxes` folder is left alone. A
+refusal would come in a later, separate change, by lothsahn's lockout rule (warn first).
+
 ## Clean-up (`server/installLeftovers.ts`, rule `ffu-slot-target`)
 
 The clean-up only ever deletes in a slot's `target`. It never touches the checkout, which may hold work, or the shared
