@@ -12,6 +12,8 @@ process.env.FF_CLI_SCRUB ??= 'off';
 // w6003: an in-process test daemon on Windows never runs whoami.exe to measure its agents' level (it would read the test
 // runner's own token, which differs by machine); machine/agentIntegrity.test.ts covers the measurement.
 process.env.FF_MEASURE_INTEGRITY ??= 'off';
+// w6099: the tests' checkouts push to bare repositories in a temp folder; server/remoteGuard.ts lets them through only here.
+(globalThis as { ffTestLocalRemotes?: boolean }).ffTestLocalRemotes = true;
 // w5545: a test's unity-slot or bench ticket never asks the worker's real daemon (its token would file a real request).
 delete process.env.FF_DAEMON_RPC;
 delete process.env.FF_DAEMON_TOKEN;

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { REMOTE_GUARD, allowedRemote, guardRemote, guardRemoteSync, redact, remoteProblem } from './remoteGuard.ts';
 import { saveWork } from './saveWork.ts';
+import { switchBranch } from './switchBranch.ts';
 import { run } from './proc.ts';
 
 // w6099 (w6091's review of #1367, follow-up A): a worker can point a sandbox's origin at a bare repository it planted on
@@ -13,6 +14,8 @@ import { run } from './proc.ts';
 
 const hasGit = spawnSync('git', ['--version']).status === 0;
 const slash = (p: string) => p.replace(/\\/g, '/');
+// The tests' preload lets every other test push to a bare repository in a temp folder (scripts/testEnv.ts); not these.
+(globalThis as { ffTestLocalRemotes?: boolean }).ffTestLocalRemotes = false;
 
 test('w6099: only GitHub over https or ssh is a remote the daemon uses', () => {
   for (const u of ['https://github.com/Final-Factory/ff-factory.git', 'https://github.com/Final-Factory/ffu', 'git@github.com:Final-Factory/FinalFactory.git', 'ssh://git@github.com/Final-Factory/ffu.git', 'https://x-access-token:FAKE@github.com/o/r.git'])
@@ -21,7 +24,7 @@ test('w6099: only GitHub over https or ssh is a remote the daemon uses', () => {
     assert.equal(allowedRemote(u), false, u);
 });
 
-test('w6099: a fetch or push URL that is not GitHub is named, with no user name or password in the message', () => {
+test('w6099: a fetch or push URL that is not GitHub is named, with no user name, password or query in the message', () => {
   const gh = 'https://github.com/o/r.git\n';
   assert.equal(remoteProblem('origin', gh, gh), undefined);
   assert.equal(remoteProblem('origin', `${gh}git@github.com:o/r.git\n`, gh), undefined, 'several GitHub URLs are fine');
@@ -31,24 +34,29 @@ test('w6099: a fetch or push URL that is not GitHub is named, with no user name 
   assert.match(tok, /https:\/\/evil\.example\/r\.git/);
   assert.doesNotMatch(tok, /FAKESECRET|user:/, 'no credential in the message');
   assert.equal(redact('https://a:b@github.com/o/r'), 'https://github.com/o/r');
-  assert.match(remoteProblem('origin', undefined, gh)!, /could not read origin's URL/);
+  // w6112's review, finding A: the scp form, a second @ and a query string carried a token past the first redact.
+  assert.equal(redact('x-access-token:FAKESECRET@evil.example:o/r.git'), 'evil.example:o/r.git');
+  assert.equal(redact('https://a@FAKESECRET@evil.example/r.git'), 'https://evil.example/r.git');
+  assert.equal(redact('https://evil.example/r.git?access_token=FAKESECRET#FAKESECRET'), 'https://evil.example/r.git');
+  assert.equal(redact('F:/ffw/planted.git'), 'F:/ffw/planted.git');
+  assert.equal(redact('file:///F:/ffw/planted.git'), 'file:///F:/ffw/planted.git');
+  // Finding C: each message names the fix, and a checkout with no origin is told to add one.
+  assert.match(remoteProblem('origin', undefined, gh)!, /could not read origin's URL .*git remote -v.*git remote set-url origin/);
+  assert.match(remoteProblem('origin', undefined, undefined, undefined, 'upstream\n')!, /no remote named origin, so git would take "origin" for a folder in it .*git remote add origin/);
+  assert.equal(remoteProblem('origin', gh, gh, undefined, 'origin\nupstream\n'), undefined);
   assert.match(remoteProblem('origin', '', '')!, /no URL/);
 });
 
-test('w6099: warn-only for now: a problem is logged and the call goes on; the sync check agrees', async (t) => {
-  assert.equal(REMOTE_GUARD, 'warn', 'enforcing is its own PR (lockout rule)');
-  const warned: string[] = [];
-  t.mock.method(console, 'warn', (m: string) => warned.push(m));
-  const planted = (a: string[]) => (a.includes('--push') ? 'F:/ffw/planted.git\n' : 'https://github.com/o/r.git\n');
-  assert.equal(await guardRemote(async (a) => planted(a), 'a push in X'), undefined);
-  assert.equal(guardRemoteSync(planted, 'a push in Y'), undefined);
-  assert.equal(warned.length, 2);
-  assert.match(warned[0], /^remote guard \(w6099, warn-only\): would refuse a push in X: origin points at F:\/ffw\/planted\.git/);
-  assert.equal(await guardRemote(async () => 'https://github.com/o/r.git\n', 'a push in Z'), undefined);
-  assert.equal(warned.length, 2, 'a GitHub origin logs nothing');
+test('w6099: enforced: a planted URL is refused, the sync check agrees, and a GitHub origin passes', async () => {
+  assert.equal(REMOTE_GUARD, 'enforce', '#1371 shipped it warn-only first (lockout rule)');
+  const planted = (a: string[]) => (a.length === 1 ? 'origin\n' : a.includes('--push') ? 'F:/ffw/planted.git\n' : 'https://github.com/o/r.git\n');
+  assert.match((await guardRemote(async (a) => planted(a), 'a push in X'))!, /^refused by FF Factory: origin points at F:\/ffw\/planted\.git/);
+  assert.match(guardRemoteSync(planted, 'a push in Y')!, /^refused by FF Factory: origin points at F:\/ffw\/planted\.git/);
+  assert.equal(await guardRemote(async (a) => (a.length === 1 ? 'origin\n' : 'https://github.com/o/r.git\n'), 'a push in Z'), undefined);
+  assert.match(guardRemoteSync(() => undefined, 'a push in W')!, /could not read origin's URL/);
 });
 
-test('w6099: a sandbox whose origin is a planted bare repository with a hook: the save is logged as one the guard would refuse', { skip: !hasGit }, async (t) => {
+test('w6099: a sandbox whose origin is a planted bare repository with a hook: the save commits and refuses the push, the switch refuses, and the hook never runs', { skip: !hasGit }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'remoteguard-'));
   try {
     const marker = slash(path.join(root, 'ran.txt'));
@@ -74,12 +82,28 @@ test('w6099: a sandbox whose origin is a planted bare repository with a hook: th
     assert.match(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '', /pre-receive/, 'the planted hook ran from a fenced push');
     fs.rmSync(marker, { force: true });
 
-    const warned: string[] = [];
-    t.mock.method(console, 'warn', (m: string) => warned.push(m));
+    const head = git(work, 'rev-parse', 'HEAD').trim();
     fs.writeFileSync(path.join(work, 'a.txt'), 'two\n');
-    await saveWork({ dir: work, branch: 'w1-feature', message: 'save' });
-    assert.equal(warned.length, 1, warned.join('\n'));
-    assert.match(warned[0], new RegExp(`would refuse the save's push in .*work: origin points at ${slash(planted).replace(/[.]/g, '\\.')}`));
+    const saved = await saveWork({ dir: work, branch: 'w1-feature', message: 'save' });
+    assert.equal(saved.pushed, false);
+    assert.match(saved.notes.join('\n'), new RegExp(`not pushed \\(refused by FF Factory: origin points at ${slash(planted).replace(/[.]/g, '\\.')}`));
+    assert.notEqual(git(work, 'rev-parse', 'HEAD').trim(), head, 'the work is committed here');
+    assert.equal(git(work, 'status', '--porcelain'), '', 'and nothing is left uncommitted');
+    await assert.rejects(switchBranch({ dir: work, branch: 'w2-other', createFrom: 'HEAD' }), /refused by FF Factory: origin points at .*; nothing was switched/);
+    assert.equal(git(work, 'rev-parse', '--abbrev-ref', 'HEAD').trim(), 'w1-feature');
+    assert.equal(fs.existsSync(marker), false, 'the planted hook never ran');
+    assert.equal(spawnSync('git', ['--git-dir', planted, 'rev-parse', '--verify', '--quiet', 'refs/heads/w1-feature']).status, 1, 'nothing reached the planted repository');
+
+    // Recovery needs nobody at the machine: the worker sets origin back, and the guard lets it through.
+    const check = () =>
+      guardRemote(async (a) => {
+        const g = await run('git', ['-C', work, ...a]);
+        return g.code === 0 ? g.stdout : undefined;
+      }, 'x');
+    git(work, 'remote', 'remove', 'origin');
+    assert.match((await check())!, /no remote named origin/, 'with no origin it is refused too, and told to add one');
+    git(work, 'remote', 'add', 'origin', 'https://github.com/Final-Factory/example.git');
+    assert.equal(await check(), undefined);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

@@ -528,6 +528,12 @@ function ensureRepo(d: FfuSlotDeps, remote: string): void {
     must(d.git(['clone', '--bare', '--quiet', remote, repo]), 'git clone');
     must(d.git(['config', 'remote.origin.fetch', '+refs/heads/*:refs/remotes/origin/*'], repo), 'git config');
   }
+  // w6099 (w6112's review): workers write the shared clone's config, and this fetch runs on every take.
+  const no = guardRemoteSync((a) => {
+    const g = d.git(a, repo);
+    return g.code === 0 ? g.out : undefined;
+  }, `the shared clone's fetch in ${fwd(repo)}`);
+  if (no) throw new Error(`the shared clone was not fetched: ${no}`);
   must(d.git(['fetch', '--prune', '--quiet', 'origin'], repo), 'git fetch');
   d.git(['worktree', 'prune'], repo);
   // w6038: the slots' own git runs FF Factory's slot hooks. --local: gitSpawnSync's command-scope core.hooksPath would answer.
