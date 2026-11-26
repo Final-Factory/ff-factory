@@ -2084,7 +2084,8 @@ export class SessionManager {
       // Removed only once delivered (w496: a worker's brief was dropped when LothDesktop's daemon was outdated):
       // tried again on the next pass, given up only after QUEUE_HOLD_MS, or POOL_HOLD_MS while only its pool holds it (w1129).
       const why = (e as Error).message;
-      const pool = s.info.kind === 'worker' && poolHeld(e);
+      // w5921: the dispatcher waits for its pool's reset like a worker (a weekly reset can be days away), but parks nothing.
+      const pool = (s.info.kind === 'worker' || (s.info.kind === 'orchestrator' && s.info.orchestratorRole === 'dispatcher')) && poolHeld(e);
       if (pool !== (q.on === 'pool')) {
         q.on = pool ? 'pool' : 'machine';
         this.saveQueue();
@@ -2097,7 +2098,7 @@ export class SessionManager {
       }
       held.add(q.id);
       // w2231: its pool held the start: its requests go Blocked on the pool's usage limit and its sandbox is released.
-      if (pool && this.parkOnPool(s, e)) return false;
+      if (pool && s.info.kind === 'worker' && this.parkOnPool(s, e)) return false;
       if (q.lastError !== why) {
         q.lastError = why;
         this.saveQueue();

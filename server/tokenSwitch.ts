@@ -172,21 +172,26 @@ export interface DispatcherAccount {
 /**
  * w5921: why the dispatcher's process on `account` restarts on another token before its next turn, else undefined (lothsahn,
  * 2026-11-26: "The dispatcher should obey its pool config... If it's out of quota it should pick another sub within that
- * pool. It shouldn't use a different pool"). Pinned, it moves only onto that token (a pin the vault lacks: it stays, its
- * start would fail). On a pool, onto that pool when it runs on another's, or off a token that is out when that pool has one
- * with room; only that one pool is read. `owner`: whose pool `account` is in; `label`: its name and last four.
+ * pool. It shouldn't use a different pool"). `out` false: its config names another token or pool than the one it runs on (a
+ * pin it is not on; a pool not this token's owner's), applied at once (Agents.applyAccountConfig). `out` true: on its pool,
+ * its token is used up or retired, or at the stop line (`atStop`, vault.pool.dispatcherStopPercent), and that pool has a token
+ * it may move to (`room`, the caller's one rule, shared with the stop line: review of #1312); it moves at its next message
+ * or turn's end. A pin the vault lacks: it stays (its start would fail). Only that one pool is read.
  */
-export function dispatcherMove(c: DispatcherAccount, pools: Iterable<readonly [string, readonly PoolTokenView[]]>, account: string, on: { label?: string; owner?: string }): string | undefined {
+export function dispatcherMove(c: DispatcherAccount, pools: Iterable<readonly [string, readonly PoolTokenView[]]>, account: string, on: { label?: string; owner?: string; room: boolean; atStop?: boolean }): { why: string; out: boolean } | undefined {
   const label = on.label ?? 'a token no longer in the vault';
   if (c.pinned) {
     if (!c.pinned.key || c.pinned.key === account) return undefined;
-    return `its process runs on vault token ${label} and claudeAccounts.dispatcher pins vault token ${c.pinned.label ?? c.pinned.name} now, so it restarts there before this turn (w5921)`;
+    return { why: `its process runs on vault token ${label} and claudeAccounts.dispatcher pins vault token ${c.pinned.label ?? c.pinned.name} now, so it restarts there (w5921)`, out: false };
   }
   if (!on.owner || on.owner.trim().toLowerCase() !== c.pool.trim().toLowerCase()) {
-    return `its process runs on vault token ${label}${on.owner ? ` (${on.owner}'s pool)` : ''} and ${c.named ? `claudeAccounts.dispatcher names ${c.pool}'s pool` : `it runs on the system payer's pool, ${c.pool}'s by their pool setting`} now, so it restarts on a token of that pool before this turn (w5921)`;
+    return { why: `its process runs on vault token ${label}${on.owner ? ` (${on.owner}'s pool)` : ''} and ${c.named ? `claudeAccounts.dispatcher names ${c.pool}'s pool` : `it runs on the system payer's pool, ${c.pool}'s by their pool setting`} now, so it restarts on a token of that pool (w5921)`, out: false };
   }
+  if (!on.room) return undefined;
   const out = orchestratorOut(pools, account, c.pool);
-  return out ? `its process runs on ${out}, so it restarts on a token with room in ${c.pool}'s pool before this turn (w5921; never another pool)` : undefined;
+  if (out) return { why: `its process runs on ${out}, so it restarts on a token with room in ${c.pool}'s pool (w5921; never another pool)`, out: true };
+  if (on.atStop) return { why: `its process runs on vault token ${label}, at the dispatcher's stop line, so it restarts on a token with room in ${c.pool}'s pool (w5921; never another pool)`, out: true };
+  return undefined;
 }
 
 /** w5921: why the dispatcher waits when no token it may run on has room, with the first of `tokens` (its pool's) to reset. */

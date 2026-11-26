@@ -734,7 +734,13 @@ export class Agents {
    * token or pool than the one it runs on, or its token is out and its own pool has a better one. Never another pool. Wired
    * by index.ts.
    */
-  dispatcherAccountMove?: (account: string) => string | undefined;
+  dispatcherAccountMove?: (account: string) => { why: string; out: boolean } | undefined;
+  /** w5921: why the dispatcher would wait if it started now (its pin out, or no token of its pool with room), else undefined. */
+  dispatcherHeldWhy?: () => string | undefined;
+  /** w5921: a line to the operators' orchestrators (those that exist): the owners and everyone with a Claude pool. */
+  operatorAlert?: (line: string) => void;
+  /** w5921 (review of #1312): the token the dispatcher was last moved off because it was out, and when: a restart that lands on it again is not moved again for 30 min (a sticky capped token). */
+  private dispatcherOff?: { account: string; at: number };
   /** An idle agent's process stops to restart on another account (accountMove): where it ran and why, for the switch log (w1745). */
   accountMoving?: (info: SessionInfo, why: string) => void;
   /** Who owns the vault token `account` (a session's credential key, "token:<fingerprint>"), for the pool setting's move (w1717); wired by index.ts. */
@@ -3798,7 +3804,19 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const owner = this.orchestrators.ownerOf(i);
     // w5921: the dispatcher follows its own config (a pinned token, one person's pool, or the payer's), and moves within its
     // pool off a token that is out; index.ts reads the vault for it.
-    if (!owner && i.orchestratorRole === 'dispatcher' && this.dispatcherAccountMove) return this.dispatcherAccountMove(i.account);
+    if (!owner && i.orchestratorRole === 'dispatcher' && this.dispatcherAccountMove) {
+      const move = this.dispatcherAccountMove(i.account);
+      if (!move?.out) return move?.why;
+      // Off a token that is out: once. Its restart may land on the same token (the pool's pick keeps a sticky capped one when
+      // nothing else passes its caps): not moved again for 30 min, so no restart loop (review of #1312).
+      const now = Date.now();
+      const off = this.dispatcherOff;
+      if (!off || off.account !== i.account || now - off.at > 30 * 60_000) {
+        this.dispatcherOff = { account: i.account, at: now };
+        return move.why;
+      }
+      return now - off.at < 2 * 60_000 ? move.why : undefined;
+    }
     const person = owner?.userId ?? (dispatcherOwnAccount(this.cfg) ? undefined : this.identity.systemPayer().userId);
     if (!person) return undefined;
     const pool = this.poolOf(person);
@@ -3811,39 +3829,35 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return `its process runs on ${on}'s Claude pool and ${person}'s pool setting names ${isSamePerson(pool, person) ? 'their own' : `${pool}'s`} now, so it restarts there before this message (w1717)`;
   }
 
-  /** w5921: the last config move sent to each orchestrator (by session id): one line per reason in 10 minutes, never a loop. */
-  private readonly configMoved = new Map<string, { why: string; at: number }>();
-
   /**
    * w5921 (lothsahn, 2026-11-26: "Changing that config should take effect immediately. If it requires a restart the dispatcher
    * should be restarted."): each live orchestrator whose process runs on another token or pool than its config names now is
-   * restarted between turns. The dispatcher: claudeAccounts.dispatcher (a pinned token, one person's pool, or the system
-   * payer's pool by their setting), or its token out while its own pool has one with room. A person's orchestrator: their pool
-   * setting (w1717); its token running out is w1745's, at its turn's end. An idle one is sent one line, and the send stops its
-   * process and starts it again on the right token first (moveFor), its conversation kept. One mid-turn finishes its turn on
-   * the token it started on (a turn is never killed); the next call after it ends moves it: index.ts calls this every 30 s,
-   * and at once after set_app_config claudeAccounts.dispatcher and set_pool. The ids sent.
+   * stopped between turns, so its next message starts it on the right one (orchestratorEnv), its conversation kept. The
+   * dispatcher: claudeAccounts.dispatcher (a pinned token, one person's pool, or the system payer's pool by their setting); a
+   * person's orchestrator: their pool setting (w1717). Only config moves: a token that ran out is w1745's, at its turn's end
+   * and its next message. No message is sent, so no turn is spent (review of #1312). One mid-turn, or with a background task,
+   * finishes on the token it started on (a turn is never killed); the next call after it moves it: index.ts calls this every
+   * 30 s, and at once after set_app_config claudeAccounts.dispatcher and set_pool. A dispatcher moved into a pool with no room
+   * waits, and the operators are told with its first reset. The ids stopped.
    */
   applyAccountConfig(cause: string): string[] {
-    const sent: string[] = [];
-    const now = Date.now();
+    const moved: string[] = [];
     for (const h of this.sessions.sessions.values()) {
       const i = h.info;
-      if (i.kind !== 'orchestrator' || !h.live || isMidTurn(i) || !i.account) continue;
+      if (i.kind !== 'orchestrator' || !h.live || isMidTurn(i) || i.backgroundTasks || !i.account) continue;
       const dispatcher = i.orchestratorRole === 'dispatcher' && !this.orchestrators.ownerOf(i);
-      const why = dispatcher ? this.orchestratorPoolMove(h) : this.personPoolMove(h);
-      if (!why) {
-        this.configMoved.delete(i.id);
-        continue;
-      }
-      const last = this.configMoved.get(i.id);
-      if (last && last.why === why && now - last.at < 10 * 60_000) continue;
-      this.configMoved.set(i.id, { why, at: now });
-      console.log(`token move (w5921): ${dispatcher ? 'the dispatcher' : `orchestrator ${i.id}`} restarts between turns: ${why} (${cause})`);
-      sent.push(i.id);
-      void this.sessions.send(i.id, `[token move] FF Factory restarted your Claude process on another token before this message, because ${why}. Your conversation is as you left it (w5921, docs/vault.md "When a token runs out"). Nothing to do for this line: carry on with what you have; if nothing is in hand, reply in one line.`, 'system');
+      const move = dispatcher ? this.dispatcherAccountMove?.(i.account) : undefined;
+      const why = dispatcher ? (move && !move.out ? move.why : undefined) : this.personPoolMove(h);
+      if (!why) continue;
+      const who = dispatcher ? 'the dispatcher' : `orchestrator ${i.id}`;
+      console.log(`token move (w5921): ${who} restarts between turns: ${why} (${cause})`);
+      this.store.append(i.id, { kind: 'system', text: `Stopped by FF Factory between turns to apply its account config: ${why}. Its history is kept: its next message starts it on the new token (w5921).` });
+      h.stop(false);
+      moved.push(i.id);
+      const held = dispatcher ? this.dispatcherHeldWhy?.() : undefined;
+      if (held) this.operatorAlert?.(`[token alert] The dispatcher was stopped to apply its account config (${cause}): ${why}. It cannot start yet: ${held}. Nothing to do unless that wait is wrong: \`set_app_config claudeAccounts.dispatcher\` with another pin or pool (or null) applies at once (w5921).`);
     }
-    return sent;
+    return moved;
   }
 
   /** A person's orchestrator whose process runs on another pool than their pool setting names now (w1717), else undefined. */
@@ -7515,7 +7529,14 @@ ${w.repo ?? ''}
             if (key.startsWith('machines.activityPause.')) this.machines.pushActivityConfig(machine);
             if (key === 'usagePollMinutes') this.usagePollChanged?.();
             // w5921: the dispatcher restarts on the token or pool it names now, between turns (never mid-turn).
-            if (key === 'claudeAccounts.dispatcher') this.applyAccountConfig('config claudeAccounts.dispatcher changed');
+            if (key === 'claudeAccounts.dispatcher') {
+              const moved = this.applyAccountConfig('config claudeAccounts.dispatcher changed');
+              const id = this.orchestrators.dispatcherId;
+              const busy = id ? this.sessions.sessions.get(id) : undefined;
+              const now = moved.length ? 'the dispatcher was stopped between turns and its next message starts it there' : busy?.live && isMidTurn(busy.info) ? 'the dispatcher is mid-turn: it restarts there within 30 s of that turn ending (never mid-turn)' : 'the dispatcher already runs there, or starts there at its next message';
+              const held = this.dispatcherHeldWhy?.();
+              return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied at once: ${now} (w5921).${held ? ` WARNING: it cannot start on it now: ${held}; the operators were told.` : ''}`;
+            }
             // w4468: a hold lifted or a reservation changed (placement.hold, holdExcept, minPriority) re-places Queued work now.
             if (key.startsWith('placement.')) this.orchestrators?.capacityMayHaveFreed(`config ${key} changed`);
             if (key === 'live.enabled') await this.liveHub?.switched(after === true);
@@ -7526,7 +7547,6 @@ ${w.repo ?? ''}
             if (key.startsWith('vault.unattributed.')) return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server: work nobody asked for by name of that kind (docs/vault.md section 10) takes ${after ?? 'the default (lothsahn)'}'s Claude pool and GitHub token from its next run or process start, with no restart.`;
             if (key.startsWith('vault.pool.')) return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}${key.endsWith('Percent') ? ' (percent)' : ''}. The token pool's limits are one set for everyone; the next process start on any Claude token reads it, with no restart. system_status shows each pool's state.`;
             if (key === 'providers.ffbox.token') return `${key}: ${after === 'not set' ? 'removed' : 'set'}. Its SHA-256 only is kept, in the secrets folder (config providers.ffbox.tokenSha256File names the file; config.json never holds it); the connector's next connection must use it. The value is never shown.`;
-            if (key === 'claudeAccounts.dispatcher') return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json. The dispatcher switches at its next process start. system_status shows which token each kind of agent runs on.`;
             return `${key}: ${JSON.stringify(before ?? null)} → ${JSON.stringify(after ?? null)}. Written to config.json and applied to the running server${key === 'ownerName' ? ' (prompts of sessions started from now on)' : ''}.`;
           }),
         ),

@@ -3197,11 +3197,9 @@ function dispatcherToken(): { key: string; name: string; owner?: string } | unde
   const pool = dispatcherPoolPerson(cfg);
   if (pool !== undefined) {
     const on = dispatcherAccount();
-    const list = poolTokensOf(pool);
-    const mine = list.find((t) => `token:${t.entry.fingerprint}` === on);
+    const mine = poolTokensOf(pool).find((t) => `token:${t.entry.fingerprint}` === on);
     if (!on || !mine) return undefined;
-    const room = list.some((t) => t !== mine && !usage.outOf(`token:${t.entry.fingerprint}`) && !stopMeters(usage.usageOf(`token:${t.entry.fingerprint}`), poolLimits(cfg)).length && t.view.state !== 'exhausted');
-    return room ? undefined : { key: on, name: `${mine.entry.name} …${mine.entry.last4}`, owner: pool };
+    return dispatcherRoomIn(pool, on) ? undefined : { key: on, name: `${mine.entry.name} …${mine.entry.last4}`, owner: pool };
   }
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? vault.claudeByName(pinned) : undefined;
@@ -3249,16 +3247,31 @@ const tokenLabel = (account: string) => {
 const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why, ...(t.view.capped ? { capped: true } : {}) }))] as const);
 agents.orchestratorTokenOut = (account, pool) => orchestratorOut(poolViews(), account, pool);
 /**
- * w5921: why the dispatcher's process on `account` restarts on another token before its next turn, else undefined. Its config
- * decides (lothsahn, 2026-11-26: "The dispatcher should obey its pool config... If it's out of quota it should pick another
- * sub within that pool. It shouldn't use a different pool"): pinned ("vault:<name>"), it moves only onto that token; on
- * "pool:<login>", or unset (the system payer's pool, by their pool setting, w1717), onto a token of that pool when it runs on
- * another pool's, or off a token that is out when that pool has one with room. Only that one pool is read.
+ * w5921: a token of `pool` other than `except` the dispatcher may move to now: not used up, retired, capped or held, not marked
+ * out, and below the dispatcher's stop line. The one rule for a move off a token that is out and for the stop line (review of
+ * #1312: a capped or held token counted as room there and moved nothing, so the stop never fired and nothing moved).
  */
-function dispatcherMoveWhy(account: string): string | undefined {
-  return dispatcherMove(dispatcherAccountCfg(), poolViews(), account, { label: tokenLabel(account), owner: agents.tokenOwner?.(account) });
+function dispatcherRoomIn(pool: string, except?: string) {
+  return poolTokensOf(pool).find((t) => {
+    const k = `token:${t.entry.fingerprint}`;
+    return k !== except && !usage.outOf(k) && !['exhausted', 'retired', 'held'].includes(t.view.state) && !t.view.capped && !stopMeters(usage.usageOf(k), poolLimits(cfg)).length;
+  });
+}
+/** w5921: whether the dispatcher would start on a token now, as its config names it (a pin that is not out, or room in its pool). */
+function dispatcherHasRoom(): boolean {
+  const c = dispatcherAccountCfg();
+  if (c.pinned) return !!c.pinned.key && !usage.outOf(c.pinned.key) && !agents.tokenUnusable?.(c.pinned.key);
+  return !!dispatcherRoomIn(c.pool);
+}
+/** w5921: why the dispatcher's process on `account` restarts on another token, else undefined (dispatcherMove). */
+function dispatcherMoveWhy(account: string): { why: string; out: boolean } | undefined {
+  const c = dispatcherAccountCfg();
+  const room = !c.pinned && !!dispatcherRoomIn(c.pool, account);
+  return dispatcherMove(c, poolViews(), account, { label: tokenLabel(account), owner: agents.tokenOwner?.(account), room, atStop: room && stopMeters(usage.usageOf(account), poolLimits(cfg)).length > 0 });
 }
 agents.dispatcherAccountMove = dispatcherMoveWhy;
+agents.dispatcherHeldWhy = () => (dispatcherHasRoom() ? undefined : dispatcherWaitWhy());
+agents.operatorAlert = (line) => agents.orchestrators.toPeople(identity.list().filter((u) => u.role === 'owner' || vault.hasClaudeFor(u.userId)), line, true);
 /** What claudeAccounts.dispatcher names now, as dispatcherMove reads it. */
 function dispatcherAccountCfg(): DispatcherAccount {
   const pinned = pinnedDispatcherEntry(cfg);
@@ -3286,7 +3299,8 @@ const tokenSwitch = new TokenSwitch({
     if (s.kind === 'standing') return true;
     if (s.kind !== 'orchestrator') return limitsClearFor(s);
     // w5921: the dispatcher's pool (its config's) has a token it would be better on.
-    if (agents.orchestrators.isDispatcher(s)) return !!s.account && !!dispatcherMoveWhy(s.account);
+    // A config move into a pool with no room is no resume (it waits; the config change alerted, review of #1312).
+    if (agents.orchestrators.isDispatcher(s)) return !!s.account && !!dispatcherMoveWhy(s.account) && dispatcherHasRoom();
     const person = agents.orchestrators.ownerOf(s)?.userId;
     return !!person && !!s.account && !!orchestratorOut(poolViews(), s.account, agents.poolOf(person));
   },

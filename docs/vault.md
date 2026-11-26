@@ -355,9 +355,13 @@ code and covered by `server/tokenSwitch.test.ts`:
   If it requires a restart the dispatcher should be restarted."). `Agents.applyAccountConfig` runs right after
   `set_app_config claudeAccounts.dispatcher`, at the end of `set_pool`, and every 30 s (`server/index.ts`): each live, idle
   orchestrator whose process runs on another token or pool than its config names now (the dispatcher: its pin, its pool, or its
-  token out while its pool has room; a person's orchestrator: their pool setting, w1717) is sent one `[token move]` line, and
-  that send stops its process and starts it again on the right token first (`SessionManager.moveFor`), its conversation kept.
-  One mid-turn finishes its turn on the token it started on (a turn is never killed) and moves at the first check after.
+  a person's orchestrator: their pool setting, w1717) is stopped, with a system line in its history and no message (no turn
+  spent); its next message starts it on the right token, its conversation kept. One mid-turn, or with a background task,
+  finishes on the token it started on (a turn is never killed) and moves at the first check after. A token that ran out is not
+  a config move: the dispatcher leaves it at its next message or turn's end (w1745), once; a restart that lands on the same
+  token again (the pool's pick keeps a sticky capped one when nothing else passes its caps) is not moved again for 30 min, so
+  it never loops. A dispatcher moved into a pool with no room waits (its queued messages are kept as long as a worker's), and
+  the operators' orchestrators get a `[token alert]` with the first reset; `set_app_config` says so in its answer too.
 - **An agent the limit stopped is resumed at once** (`TokenSwitch.turnEnded`, 3 seconds after its turn ends): when the pool
   its work runs on can serve it (`limitsClearFor`, the rule the ledger cleanup uses: its person's pool, or the pool their
   setting names, w1717) it gets `[token switch] Your last turn stopped because vault-ben-1 …nQAA ran out ... Carry on where you
@@ -640,9 +644,11 @@ config check refuses the value for the orchestrator. What it changes, each point
   **the reserve** is kept on the token it runs on now (`reservedCredentials` with `VaultContext.dispatcherOn`), so it moves with
   the dispatcher and the person's workers prefer the pool's other tokens, as with a pin; reserving the whole pool would hold every
   worker of that person whenever any token neared its buffer. **`dispatcherStopPercent`** (`dispatcherToken` in
-  `server/index.ts`) reads the token it is on only once no other token of that pool is below the stop line: before then the
-  dispatcher moves to that token at its next turn, so stopping the person's workers would protect nothing. The stop fires
-  only when the whole pool is out.
+  `server/index.ts`) reads the token it is on only once no other token of that pool has room (`dispatcherRoomIn`: not used
+  up, retired, capped or held, not marked out, below the stop line): before then the dispatcher at its stop line moves to that
+  token at its next message or turn's end (`dispatcherMove` with `atStop`), so stopping the person's workers would protect
+  nothing. The stop fires only when no token of the pool has room. One rule serves both, so a token at the line always either
+  moves or stops (review of #1312: a capped token counted as room for the stop and not for the move, so neither happened).
 - **If the vault cannot give the token** (entry removed or disabled, key missing or wrong) the dispatcher does not start
   (w1078; before, it ran on the token file or the host token): `pinnedDispatcherEnv` throws `PoolHeldError` with "the dispatcher
   is pinned to vault token <name> (claudeAccounts.dispatcher), but the vault has no usable Claude entry of that name, so it
