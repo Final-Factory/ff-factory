@@ -1,0 +1,1 @@
+- w5924: a game worker resuming elsewhere, or a worker taking an agent seat, is never placed in a light agent folder (on beast, 81ec4f0a was sent to beast/agent2 and its branch switch failed there), and the reclaim pass leaves light folders alone.
