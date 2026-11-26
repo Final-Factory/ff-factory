@@ -83,6 +83,13 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   runner now drops those status files before the check (`dropPlayerStatus`), and any other extra file is still refused.
 - Pair runs' players are started by workers (`player_slots.py launch`), so they already run inside the worker's fence;
   the daemon starts no pair player (`server/pairRuns.ts` spawns nothing).
+- **A pre-w5297 player** (0.50 and older) never reads `FF_GAME_DATA_DIR` and writes the owner's own data folder, which is
+  Medium on Windows, so a Low worker cannot run it (w5944, w5966, w6002). Each Windows daemon measures the level its sandbox
+  agents run at (`machine/agentIntegrity.ts`: `whoami.exe /groups` in the agent Git bash with the Low fence on, from the
+  daemon with it off) and sends it with its fence (`agentIntegrity`, in the daemon log as "sandbox agents measured at").
+  Such a pair run goes on Windows only where Medium or above was measured: never by the fence setting, and never where
+  nothing was measured (`shared/capacity.ts` `legacyUnfitWhy`, enforced at `request_pair`, placement and `start_agent`, w6003).
+  With every Windows computer fenced, none fits, and `request_pair` says so and files nothing.
 
 ## How it works
 

@@ -72,7 +72,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, fitOf, legacyFit, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
 import { runnerHoldText } from '../shared/runnerHold.ts';
@@ -121,7 +121,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, fetchPlayerNote, legacyUnfitWhy, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { SymbolOwners } from './symbolOwners.ts';
 import { SteamJobs, branchOf, describeJob, parseAsk, readClaim, refuseUpload } from './steamUpload.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
@@ -1119,6 +1119,7 @@ export class Agents {
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
+      legacyFit: (w) => legacyFit(this.places(), w),
       heldFor: (m, w) => this.heldFor(m, w),
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       timedSmall: () => {
@@ -6069,6 +6070,13 @@ A report is for a person who asked for one, and people want very few. File one w
       if (m?.platform === 'darwin' && i > 0) {
         throw new Error(`${leg}: ${l.machine} is a Mac, and a Mac refuses a multiplayer client (w665): in a pair run a Mac only hosts (leg 1, sandbox; w2282). Nothing was started.`);
       }
+      // w6003: the dispatcher started w6002's leg on lothdesktop/slot5 by name, and this path never asked placement's rule, so a
+      // pre-w5297 player's leg ran where sandbox agents measure Low. Each leg is checked against the measured level here too.
+      if (w.pair?.legacyData) {
+        const c = this.places().find((p) => p.id === placeId(l.machine));
+        const legacy = legacyUnfitWhy(w.pair, l.machine, c ? fitOf(c) : undefined);
+        if (legacy) throw new Error(`${leg}: ${legacy}. ${legacyFit(this.places(), { pair: w.pair }).line.replace(/^./, (c) => c.toUpperCase())}. Nothing was started.`);
+      }
       // w2459: w2458's client leg went on biscuit, which has no Steam client, and died at its Steam check.
       const noSteam = w.pair?.steam ? steamLacks(l.machine, m?.steam) : undefined;
       if (noSteam) throw new Error(`${leg}: ${noSteam}, and ${w.id} needs Steam (${w.pair!.steam}): its legs go only on computers signed in to Steam (${fitNow()}). Nothing was started.`);
@@ -6643,6 +6651,9 @@ A report is for a person who asked for one, and people want very few. File one w
         ...(m.fence?.state === 'failed' ? { fenceFailed: m.fence.why ?? 'no reason given' } : {}),
         // w5965: a pair run of a pre-w5297 player goes only where the fence is off.
         ...(m.fence ? { fence: m.fence.state } : {}),
+        // w6003: and on Windows only where its sandbox agents were measured at Medium.
+        ...(m.fence?.agentIntegrity ? { agentIntegrity: m.fence.agentIntegrity } : {}),
+        ...(m.fence?.agentIntegrityWhy ? { agentIntegrityWhy: m.fence.agentIntegrityWhy } : {}),
         live: mine.filter((s) => s.live).length,
         midTurn: mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),

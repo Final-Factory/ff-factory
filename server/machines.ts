@@ -34,7 +34,7 @@ import { sanitizeSteamClient, steamLabel } from '../shared/steam.ts';
 import { desktopLabel, sanitizeDesktop } from '../shared/desktop.ts';
 import { HOST_LOGIN, accountKeyOf, machineLogin, type AccountIdentity } from './usage.ts';
 import type { AttachmentStore } from './attachments.ts';
-import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary, WorkerFenceReport } from '../shared/types.ts';
+import type { BenchPriority, BenchWarning, BusyJob, NoTimedRuns, TimedAskMark, DeliveredAttachment, EffortLevel, ImageInput, Machine, MachineGuardSettings, MachinePause, MachinePlatform, MachineSandbox, MachineStats, PermissionMode, PersonPlayReport, PlanUsage, Requester, SandboxPoolSettings, SessionInfo, CleanupSummary, WorkerFenceReport, AgentIntegrity } from '../shared/types.ts';
 import { DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT, WORK_OPEN } from '../shared/types.ts';
 import { pageStats } from './ffuSlotsView.ts';
 import type { StaleContext } from './staleOutput.ts';
@@ -3767,6 +3767,7 @@ export function daemonBehind(h: { daemon?: string }, portalHead: string | undefi
 }
 
 const FENCE_STATES = new Set<WorkerFenceReport['state']>(['off', 'setting_up', 'on', 'failed']);
+const INTEGRITY_LEVELS = new Set<AgentIntegrity>(['untrusted', 'low', 'medium', 'high', 'system']);
 const FENCE_KINDS = new Set<NonNullable<WorkerFenceReport['kind']>>(['seatbelt', 'landlock', 'low']);
 
 /** A daemon's worker_fence report, checked field by field (w5555); undefined when it is not one. */
@@ -3778,5 +3779,9 @@ export function fenceReportOf(raw: unknown): WorkerFenceReport | undefined {
   if (FENCE_KINDS.has(r.kind as NonNullable<WorkerFenceReport['kind']>)) out.kind = r.kind as WorkerFenceReport['kind'];
   if (typeof r.why === 'string' && r.why) out.why = r.why.slice(0, 600);
   if (typeof r.since === 'string' && !Number.isNaN(Date.parse(r.since))) out.since = r.since;
+  // w6003: the level a Windows sandbox agent was measured at; an unknown word is no level.
+  if (INTEGRITY_LEVELS.has(r.agentIntegrity as AgentIntegrity)) out.agentIntegrity = r.agentIntegrity as AgentIntegrity;
+  if (typeof r.agentIntegrityWhy === 'string' && r.agentIntegrityWhy) out.agentIntegrityWhy = r.agentIntegrityWhy.slice(0, 300);
+  if (typeof r.agentIntegrityAt === 'string' && !Number.isNaN(Date.parse(r.agentIntegrityAt))) out.agentIntegrityAt = r.agentIntegrityAt;
   return out;
 }

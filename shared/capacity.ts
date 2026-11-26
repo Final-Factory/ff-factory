@@ -10,7 +10,7 @@
 // the game's needs only an agent slot, not a free game sandbox, an editor or RAM for Unity. needsOf says which a request is.
 import { desktopLacks, needsWindow, pairDrivesMenus, windowLacks, type DesktopSession } from './desktop.ts';
 import { steamAccountText, steamLacks, steamSignedIn, type SteamClient } from './steam.ts';
-import type { PairPlayer, PlayerCacheReport, WorkItem, WorkPair } from './types.ts';
+import type { AgentIntegrity, PairPlayer, PlayerCacheReport, WorkItem, WorkPair } from './types.ts';
 
 /**
  * Words that say a request waits for room: "a free sandbox", "all in use", "no free slot", "waiting for an editor",
@@ -367,6 +367,10 @@ export interface RoomFit {
   playerCache?: PlayerCacheReport;
   /** w5965: its worker fence's state (Machine.fence); absent: not reported. A pair run of a pre-w5297 player goes only where it is off. */
   fence?: 'off' | 'setting_up' | 'on' | 'failed';
+  /** w6003: the integrity level its Windows sandbox agents were measured at (Machine.fence.agentIntegrity); absent: not measured. */
+  agentIntegrity?: AgentIntegrity;
+  /** Why it could not be measured. */
+  agentIntegrityWhy?: string;
 }
 
 /** The player cache's build target for a platform (scripts/nightly/player_cache.py TARGETS), or undefined. */
@@ -434,6 +438,29 @@ export function cargoShortOf(freeBytes: number | undefined): string | undefined 
 }
 
 /**
+ * Why a computer cannot take a leg of a pair run of a pre-w5297 player (WorkPair.legacyData), or undefined. That player
+ * writes the owner's own data folder, which is Medium on Windows (w5944, w5966), so on Windows a leg goes only where a
+ * sandbox agent was MEASURED at Medium or above (WorkerFenceReport.agentIntegrity, machine/agentIntegrity.ts, w6003):
+ * not by the fence setting, since w6002 went on lothdesktop/slot5 and its worker measured itself at Low. An unmeasured
+ * level is refused. On a Mac the fence must be off; Linux has no pre-1.0 multiplayer build. `f` undefined: nothing
+ * reported, refused.
+ */
+export function legacyUnfitWhy(pair: Pick<WorkPair, 'legacyData'>, id: string, f: RoomFit | undefined): string | undefined {
+  const old = `this pair run's player predates w5297 (${pair.legacyData})`;
+  if (!f) return `${id} has reported nothing placement reads (platform, worker fence), and ${old}: it goes only where a sandbox agent was measured at Medium integrity (w6003)`;
+  if (f.platform === 'linux') return `${id} is on Linux, and ${old}: pre-1.0 has no Linux multiplayer build (w5965)`;
+  if (f.platform === 'win32') {
+    const lvl = f.agentIntegrity;
+    if (lvl === 'medium' || lvl === 'high' || lvl === 'system') return undefined;
+    const seen = lvl ? `its sandbox agents were measured at ${lvl[0].toUpperCase()}${lvl.slice(1)} integrity${lvl === 'low' ? ' (S-1-16-4096)' : ''}` : `its sandbox agents' integrity level has not been measured${f.agentIntegrityWhy ? ` (${f.agentIntegrityWhy})` : ' (its daemon predates w6003 or has not reported)'}`;
+    return `${id}: ${seen}, and ${old}: it writes the owner's own data folder, which only a Medium agent can write (w5944, w6003)`;
+  }
+  if (!f.platform && !f.fence) return `${id} has not reported its platform or worker fence, and ${old}: it goes only where a sandbox agent was measured at Medium integrity (w6003)`;
+  if (f.fence && f.fence !== 'off') return `${id}'s worker fence is ${f.fence === 'setting_up' ? 'setting up' : f.fence}, and ${old}: it writes the owner's own data folder, which a fenced worker cannot write (w5944, w5965); it goes on a computer whose fence is off`;
+  return undefined;
+}
+
+/**
  * Why computer `id` cannot take `w` although it has room (w1944), or undefined when it can: timed work on a computer that
  * takes no timed runs (m5, w1861/w1872) or on another platform than the one its words name (w1628), and an MP scenario on a
  * Mac (needsMpPeers). w1944 (2026-10-23 22:13 UTC): list_work flagged w1941 and w1942, two urgent MP scenario fixes, "Queued
@@ -444,18 +471,16 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   // w2041: a retry of a pair run never goes back to a computer an earlier leg failed on.
   if (w.pair?.avoid?.includes(id)) return `${id} is where an earlier leg of this pair run failed (${w.pair.retryOf ?? 'its first run'}): a retry goes on other computers (w2041)`;
   const f = fit?.[id];
+  // w6003: unknown facts fit, except for a pre-w5297 pair run, which goes only where Medium was measured.
+  if (w.pair?.legacyData) {
+    const why = legacyUnfitWhy(w.pair, id, f);
+    if (why) return why;
+  }
   if (!f) return undefined;
   // w4621: every leg of a pair run runs a game player (or an FFU client), which a no-players computer (the m3) never runs.
   if (w.pair && f.noPlayers) return `${id} runs no game players (${f.noPlayers}), and every leg of a pair run runs one`;
   // w5965: a player from before w5297 (the 0.50 line) writes the owner's own data folder, which a fenced worker cannot
   // write (Windows: LocalLow, labelled Medium; SHGetKnownFolderPath ignores a child's USERPROFILE, so it cannot be moved).
-  if (w.pair?.legacyData) {
-    if (f.platform === 'linux') return `${id} is on Linux, and this pair run's player predates w5297 (${w.pair.legacyData}): pre-1.0 has no Linux multiplayer build (w5965)`;
-    // w5988: on Windows the fence is the integrity level (workerIntegrity "low"), so one nobody reported is an unknown
-    // level, not Medium: w5966 was placed on beast/slot5 at Low. Elsewhere an unreported fence still fits.
-    if (!f.fence && f.platform === 'win32') return `${id} has not reported its worker fence, so its workers' integrity level is unknown, and this pair run's player predates w5297 (${w.pair.legacyData}): it runs only where workers are at Medium (fence off) (w5988)`;
-    if (f.fence && f.fence !== 'off') return `${id}'s worker fence is ${f.fence === 'setting_up' ? 'setting up' : f.fence}, and this pair run's player predates w5297 (${w.pair.legacyData}): it writes the owner's own data folder, which a fenced worker cannot write (w5944, w5965); it goes on a computer whose fence is off`;
-  }
   // w3396: an FFU worker's cargo target grows to many GB; a drive under the line takes none until the clean-up frees it.
   if (f.cargoShort && isCargoRepo(w.repo)) return `${id}: ${f.cargoShort}`;
   // w2459: a pair run that needs Steam (lobbies, a Steam host or join) goes only where Steam is signed in.
@@ -501,7 +526,7 @@ export const LEGACY_INTEGRITY_CHECK =
   '`Medium Mandatory Level` runs it; at `Low Mandatory Level` (S-1-16-4096) run nothing, and report that this computer was the wrong one (w5988).';
 
 /** w5965: what pairText says of a pair run whose player predates w5297 (WorkPair.legacyData). */
-export const PAIR_LEGACY = 'only on computers whose worker fence is off, never Linux (its player predates w5297 and writes the owner\'s own data folder)';
+export const PAIR_LEGACY = 'only on Windows computers whose sandbox agents were measured at Medium integrity (or a Mac whose fence is off), never Linux (its player predates w5297 and writes the owner\'s own data folder)';
 
 /**
  * w5965: whether a pair run's words say its player predates w5297: a pre-1.0 build, the 0.50 line (0.50.x.y), or the words

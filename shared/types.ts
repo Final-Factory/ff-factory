@@ -1178,7 +1178,19 @@ export interface WorkerFenceReport {
   why?: string;
   /** When it reached this state (ISO). */
   since?: string;
+  /**
+   * Windows (w6003): the integrity level a sandbox agent's own commands were measured at (machine/agentIntegrity.ts:
+   * whoami.exe /groups by the agent's route), read from the level and not the fence setting. Absent: not measured.
+   */
+  agentIntegrity?: AgentIntegrity;
+  /** Why it could not be measured, when it was tried and gave no level. */
+  agentIntegrityWhy?: string;
+  /** When it was measured (ISO). */
+  agentIntegrityAt?: string;
 }
+
+/** A Windows integrity level (its Mandatory Label), lower-cased: Low is S-1-16-4096, Medium S-1-16-8192. */
+export type AgentIntegrity = 'untrusted' | 'low' | 'medium' | 'high' | 'system';
 
 import type { RunnerHoldReport } from './runnerHold.ts';
 
