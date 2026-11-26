@@ -7,12 +7,19 @@
  * process below Medium integrity that holds a file, a folder or a file section under the node's folder or its record's
  * folder, or has one mapped, and ends them.
  *
+ * Which handles count (w5886's review): before the node is trusted, only access that can change the files (a File handle
+ * with write, append, attribute, extended-attribute, delete, DACL or owner rights, a Section with map-write, a view mapped
+ * writable). A Low worker running the node from `tools\node`, or with its working folder there, holds read handles only,
+ * since the Medium label refuses Low any other open, and it is never ended on a node that verifies. Once a swap was refused
+ * (the node there is already untrusted), any handle or view counts, since any open file or folder blocks the rename.
+ *
  * Read with one PowerShell (Windows PowerShell 5.1's C#, no administrator rights): for each process below Medium, its own
  * handles (NtQueryInformationProcess, ProcessHandleInformation; the system-wide table needs SeDebugPrivilege on Windows 11
  * and was refused, measured on BEAST), each File handle's path
  * (GetFileType first, so a pipe never hangs GetFinalPathNameByHandle), each file Section's file (a read-only view mapped
  * here, GetMappedFileName on it) and each mapped view in its memory (VirtualQueryEx, MEM_MAPPED). A process below
- * Medium whose handles or memory cannot be read counts as a holder.
+ * Medium whose handles or memory cannot be read is counted (`unread=`) and never ended: Windows' own sandboxed services
+ * are such (DefenderAiPlatformHost on the CI runner, w5839), and one that hides this way is outside what this defends.
  */
 
 export interface Holder {
@@ -63,7 +70,7 @@ public static class FfHolders {
   }
 
   // A process's own handles (ProcessHandleInformation, Windows 8 on): each entry's handle and object type index
-  // (PROCESS_HANDLE_TABLE_ENTRY_INFO, 40 bytes on x64). The system-wide table is refused below SeDebugPrivilege.
+  // and granted access (PROCESS_HANDLE_TABLE_ENTRY_INFO, 40 bytes on x64: handle 0, access 24, type 28). The system-wide table is refused below SeDebugPrivilege.
   static List<long[]> Handles(IntPtr ph) {
     int len = 1 << 16; IntPtr b;
     while (true) {
@@ -74,7 +81,7 @@ public static class FfHolders {
     }
     try {
       long n = Marshal.ReadInt64(b); var l = new List<long[]>((int)n); IntPtr e = b + 16;
-      for (long i = 0; i < n; i++, e += 40) l.Add(new long[] { Marshal.ReadInt64(e, 0), Marshal.ReadInt32(e, 28) });
+      for (long i = 0; i < n; i++, e += 40) l.Add(new long[] { Marshal.ReadInt64(e, 0), Marshal.ReadInt32(e, 28), (uint)Marshal.ReadInt32(e, 24) });
       return l;
     } finally { Marshal.FreeHGlobal(b); }
   }
@@ -91,7 +98,11 @@ public static class FfHolders {
     return false;
   }
 
-  public static string[] Find(string[] dirs, int[] skip) {
+  // File rights that change a file or folder: write, append, write EA, delete child, write attributes, delete, DACL, owner.
+  const long FileWrite = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000;
+  static bool WritableView(int prot) { return (prot & (0x04 | 0x40)) != 0; }
+
+  public static string[] Find(string[] dirs, int[] skip, bool writesOnly) {
     if (IntPtr.Size != 8) throw new Exception("needs a 64-bit PowerShell");
     var dos = new List<string>(); var dev = new List<string>();
     foreach (var d0 in dirs) {
@@ -114,14 +125,15 @@ public static class FfHolders {
       int id = p.Id; if (id == me || Array.IndexOf(skip, id) >= 0) continue;
       int rid = Rid(id); if (rid >= 0 && rid < 0x2000) low.Add(id);
     }
-    var hit = new Dictionary<long, string>(); var procs = new Dictionary<long, IntPtr>(); long handles = 0;
+    var hit = new Dictionary<long, string>(); var procs = new Dictionary<long, IntPtr>(); long handles = 0; var unread = new HashSet<long>();
     Func<long, IntPtr> open = pid => { IntPtr h; if (!procs.TryGetValue(pid, out h)) { h = OpenProcess(0x40 | 0x400 | 0x10, false, (int)pid); procs[pid] = h; } return h; };
     foreach (var pid in low) {
       IntPtr ph = open(pid); var hs = ph == IntPtr.Zero ? null : Handles(ph);
-      if (hs == null) { if (!Gone(pid)) hit[pid] = "(its handles could not be read)"; continue; }
+      if (hs == null) { if (!Gone(pid)) unread.Add(pid); continue; }
       handles += hs.Count;
       foreach (var e in hs) {
         int t = (int)e[1]; if (t != fileT && t != secT) continue;
+        if (writesOnly && (t == fileT ? (e[2] & FileWrite) == 0 : (e[2] & 0x2) == 0)) continue;
         IntPtr dup; if (!DuplicateHandle(ph, new IntPtr(e[0]), self, out dup, 0, false, 2)) continue;
         try {
           var sb = new StringBuilder(32768);
@@ -141,10 +153,11 @@ public static class FfHolders {
     int ms = Marshal.SizeOf(typeof(MBI));
     foreach (var pid in low) {
       if (hit.ContainsKey(pid)) continue;
-      IntPtr ph = open(pid); if (ph == IntPtr.Zero) { if (!Gone(pid)) hit[pid] = "(its memory could not be read)"; continue; }
+      if (unread.Contains(pid)) continue;
+      IntPtr ph = open(pid); if (ph == IntPtr.Zero) { if (!Gone(pid)) unread.Add(pid); continue; }
       long a = 0; MBI m;
       while (VirtualQueryEx(ph, new IntPtr(a), out m, ms) == ms) {
-        if (m.Type == 0x40000 && m.State == 0x1000) {
+        if (m.Type == 0x40000 && m.State == 0x1000 && (!writesOnly || WritableView(m.Protect) || WritableView(m.AllocProtect))) {
           var sb = new StringBuilder(32768);
           if (GetMappedFileNameW(ph, m.Base, sb, 32768) > 0 && Under(sb.ToString(), dev)) { hit[pid] = sb.ToString(); break; }
         }
@@ -153,7 +166,7 @@ public static class FfHolders {
     }
     foreach (var h in procs.Values) if (h != IntPtr.Zero) CloseHandle(h);
     var o = new List<string>();
-    o.Add("read low=" + low.Count + " handles=" + handles);
+    o.Add("read low=" + low.Count + " handles=" + handles + " unread=" + unread.Count);
     foreach (var kv in hit) {
       string name = "?"; try { name = Process.GetProcessById((int)kv.Key).ProcessName; } catch { }
       o.Add("holder " + kv.Key + " " + name.Replace(' ', '_') + " " + kv.Value);
@@ -165,20 +178,23 @@ public static class FfHolders {
 
 const q = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
-/** The PowerShell that prints "read low=<n> handles=<n>", then "holder <pid> <name> <path>" for each process below Medium that holds anything under `dirs`, leaving out `skip`. */
-export function holdersScript(dirs: string[], skip: number[]): string {
+/**
+ * The PowerShell that prints "read low=<n> handles=<n> unread=<n>", then "holder <pid> <name> <path>" for each process
+ * below Medium that holds anything under `dirs` (with `writesOnly`, only access that can change it), leaving out `skip`.
+ */
+export function holdersScript(dirs: string[], skip: number[], writesOnly = true): string {
   return `$ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 ${CS}
 '@
-foreach ($l in [FfHolders]::Find([string[]]@(${dirs.map(q).join(', ')}), [int[]]@(${[...skip, '$PID'].join(', ')}))) { $l }
+foreach ($l in [FfHolders]::Find([string[]]@(${dirs.map(q).join(', ')}), [int[]]@(${[...skip, '$PID'].join(', ')}), $${writesOnly})) { $l }
 `;
 }
 
 /** The holders the script printed; undefined when it did not finish its read (no "read" line). */
 export function parseHolders(out: string): Holder[] | undefined {
   const lines = out.split(/\r?\n/);
-  if (!lines.some((l) => /^read low=\d+ handles=\d+$/.test(l.trim()))) return undefined;
+  if (!lines.some((l) => /^read low=\d+ handles=\d+ unread=\d+$/.test(l.trim()))) return undefined;
   return lines.flatMap((l) => {
     const m = /^holder (\d+) (\S+) (.+)$/.exec(l.trim());
     return m ? [{ pid: Number(m[1]), name: m[2], path: m[3] }] : [];

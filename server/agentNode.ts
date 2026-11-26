@@ -50,7 +50,7 @@ export interface AgentNodeDeps {
   /** Tests: the digests to expect instead of the pinned ones. */
   pin?: { exeSha256: string; treeSha256: string };
   /** The processes below Medium that hold anything under these folders (agentNodeHolders.ts by default); throws when it cannot tell. */
-  holders?: (dirs: string[]) => Promise<Holder[]>;
+  holders?: (dirs: string[], o: { writesOnly: boolean }) => Promise<Holder[]>;
   /** Ends a process (process.kill by default). */
   kill?: (pid: number) => void;
   /** Tests: how long to wait between tries of a rename refused while the holders end (2 s). */
@@ -116,8 +116,11 @@ export const folderId = (p: string): string => {
 type Pin = { exeSha256: string; treeSha256: string };
 const sha = (file: string) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
-/** Every file under `dir` by its path inside it ('/'-joined): its SHA-256, or 'link' for a link or junction. */
-export function treeHashes(dir: string): Record<string, string> {
+/**
+ * Every file under `dir` by its path inside it ('/'-joined): its SHA-256, or 'link' for a link or junction. A file with
+ * more than one hard link is put in `linked` too: a handle opened through its other name has a path outside the folder.
+ */
+export function treeHashes(dir: string, linked?: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   const walk = (at: string, rel: string): void => {
     for (const e of fs.readdirSync(at, { withFileTypes: true })) {
@@ -125,7 +128,10 @@ export function treeHashes(dir: string): Record<string, string> {
       const r = rel ? `${rel}/${e.name}` : e.name;
       if (e.isSymbolicLink()) out[r] = 'link';
       else if (e.isDirectory()) walk(p, r);
-      else out[r] = sha(p);
+      else {
+        out[r] = sha(p);
+        if (linked && fs.statSync(p).nlink > 1) linked.push(r);
+      }
     }
   };
   walk(dir, '');
@@ -192,12 +198,18 @@ function stampCheck(stampFile: string, dir: string, pin: Pin): { ok: true; files
   }
   if (s.folder !== id) return { ok: false, why: `its record is of another folder (${s.folder ?? 'none named'}, not ${id})` };
   let now: Record<string, string>;
+  const linked: string[] = [];
   try {
-    now = treeHashes(dir);
+    now = treeHashes(dir, linked);
   } catch (e) {
     return { ok: false, why: `its files could not be read (${(e as Error).message})` };
   }
   const diff = treeDiff(s.files, now);
+  // A second name for a file (a hard link a Low worker made while an old daemon had it writable) lets a handle opened
+  // through that name write the file with a path the holder read never matches (w5886's review). The pinned download
+  // has one name per file, so any second one means a fresh copy, whose files nobody else names.
+  if (!diff && linked.length)
+    return { ok: false, why: `${linked.length} of its files ${linked.length === 1 ? 'has' : 'have'} another hard link (${linked.sort().slice(0, 3).join(', ')}${linked.length > 3 ? ', ...' : ''})` };
   return diff ? { ok: false, why: `its files are not the recorded ones: ${diff}` } : { ok: true, files: Object.keys(now).length };
 }
 
@@ -253,9 +265,9 @@ async function labelCheck(dir: string, d: AgentNodeDeps): Promise<string | undef
   return p && `its labels let a Low worker write it: ${p}`;
 }
 
-async function readHolders(dirs: string[], d: AgentNodeDeps): Promise<Holder[]> {
-  if (d.holders) return d.holders(dirs);
-  const script = Buffer.from(holdersScript(dirs, [process.pid]), 'utf16le').toString('base64');
+async function readHolders(dirs: string[], writesOnly: boolean, d: AgentNodeDeps): Promise<Holder[]> {
+  if (d.holders) return d.holders(dirs, { writesOnly });
+  const script = Buffer.from(holdersScript(dirs, [process.pid], writesOnly), 'utf16le').toString('base64');
   const r = await d.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', script], { timeoutMs: 5 * 60_000 });
   const got = r.code === 0 ? parseHolders(r.stdout) : undefined;
   if (!got) throw new Error(`the read of the processes holding them failed (${r.code}: ${(r.stderr || r.stdout).replace(/\s+/g, ' ').trim().slice(-200)})`);
@@ -263,24 +275,30 @@ async function readHolders(dirs: string[], d: AgentNodeDeps): Promise<Holder[]> 
 }
 
 /**
- * Ends every process below Medium that holds the node's folder or its record's folder open (w5882's review): a write
- * handle a Low worker took while an old daemon had `tools` Low outlives the relabel, so it could write node.exe after the
- * check; and a file or folder held open stops the swap. The WARNING that names them is said before they are ended, and
- * the processes are never Medium ones (no agent's node, no editor). Answers why the node cannot be trusted this run, or
- * nothing when no Low process held either folder.
+ * Ends every process below Medium that holds the node's folder or its record's folder (w5882's review). With
+ * `writesOnly` (the check before the node is trusted), only access that can change them counts: a write handle a Low
+ * worker took while an old daemon had `tools` Low outlives the relabel, so it could write node.exe after the check, while a
+ * Low worker that runs this node or works in its folder holds read handles only and is left alone (w5886's review).
+ * Without it (a swap the folder refused), any handle or view counts, since any file or folder held open stops the rename.
+ * The WARNING that names them is said before they are ended, and the processes are never Medium ones (no agent's node, no
+ * editor). Answers why the node cannot be trusted this run, or nothing when no Low process held either folder.
  */
-async function endLowHolders(dirs: string[], d: AgentNodeDeps): Promise<string | undefined> {
+async function endLowHolders(dirs: string[], writesOnly: boolean, d: AgentNodeDeps): Promise<string | undefined> {
   const there = dirs.filter((x) => fs.existsSync(x));
   if (!there.length) return undefined;
   let held: Holder[];
   try {
-    held = await readHolders(there, d);
+    held = await readHolders(there, writesOnly, d);
   } catch (e) {
     return `could not tell which processes hold it open: ${(e as Error).message}`;
   }
   if (!held.length) return undefined;
   const list = held.map((h) => `${h.name} (${h.pid}) ${h.path}`).join('; ');
-  d.say(`WARNING: Agent node: processes below Medium integrity hold the node's folders open, so they could write it or keep it in place: ${list}; ending them.`);
+  d.say(
+    writesOnly
+      ? `WARNING: Agent node: processes below Medium integrity hold write access to the node's folders, so they could change it after the check: ${list}; ending them.`
+      : `WARNING: Agent node: processes below Medium integrity hold the node's folder open, so the swap cannot pass: ${list}; ending them.`,
+  );
   const left: string[] = [];
   for (const h of held) {
     try {
@@ -289,7 +307,7 @@ async function endLowHolders(dirs: string[], d: AgentNodeDeps): Promise<string |
       left.push(`${h.pid} (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})`);
     }
   }
-  return `Low processes held it open: ${held.map((h) => `${h.name} (${h.pid})`).join(', ')}${left.length ? `; could not end ${left.join(', ')}` : ''}`;
+  return `${writesOnly ? 'Low processes held write access to it' : 'Low processes held it open'}: ${held.map((h) => `${h.name} (${h.pid})`).join(', ')}${left.length ? `; could not end ${left.join(', ')}` : ''}`;
 }
 
 /** How long a stage folder is taken to be another rollout's, still running (an unpack takes seconds: 1.8 s measured). */
@@ -375,9 +393,11 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     }
     remove(aside);
   }
-  // Then the processes below Medium that hold either folder open (w5882's review): a handle outlives a relabel, so a
-  // folder some Low process holds is never trusted, whatever its labels and hashes say. They are ended, and the node swapped.
-  const held = notAFolder(dir) ? undefined : await endLowHolders([dir, medium], d);
+  // Then the processes below Medium with write access to either folder (w5882's review): a handle outlives a relabel, so
+  // a folder some Low process can still write is never trusted, whatever its labels and hashes say. They are ended, and
+  // the node swapped. A Low process with read handles only (running this node, working in its folder) is left alone
+  // (w5886's review).
+  const held = notAFolder(dir) ? undefined : await endLowHolders([dir, medium], true, d);
   // The labels next: once nothing Low can write the files, what is hashed next stays what runs.
   const lab = !homeBad && !held && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
   const st = homeBad
@@ -388,7 +408,7 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
         ? { ok: false as const, why: lab }
         : stampCheck(stampFile, dir, pin);
   if (st.ok) {
-    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, no Low label or access entry of their own lets a Low worker write them, and no process below Medium holds them open).`);
+    d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, no Low label or access entry of their own lets a Low worker write them, and no process below Medium holds write access to them).`);
     return 'current';
   }
   const why = st.why;
@@ -434,7 +454,7 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
         } catch (e) {
           busy = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
           if (attempt === 2) break;
-          const ended = await endLowHolders([dir], d);
+          const ended = await endLowHolders([dir], false, d);
           if (ended?.startsWith('could not tell')) busy += `; ${ended}`;
           await new Promise((res) => setTimeout(res, d.retryMs ?? 2000));
         }

@@ -50,6 +50,8 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
   // Each kill with the number of lines said before it: the WARNING comes first.
   const killed: { pid: number; saidBefore: number }[] = [];
   const reads: string[][] = [];
+  // Per read: whether only write access counted (the check before trust) or any handle (a refused swap).
+  const modes: boolean[] = [];
   const ran: string[] = [];
   const tarInto: string[] = [];
   const d: AgentNodeDeps = {
@@ -60,8 +62,9 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
     pin: pinOf(o.pinVersion ?? AGENT_NODE.version),
     retryMs: 0,
     // The Low holders: the next of `held` per read, none once it is used up.
-    holders: async (dirs) => {
+    holders: async (dirs, m) => {
       reads.push(dirs);
+      modes.push(m.writesOnly);
       const next = o.held?.shift();
       if (next instanceof Error) throw next;
       return next ?? [];
@@ -94,7 +97,7 @@ function fake(zipBytes: Buffer, o: { tarFails?: boolean; version?: string; pinVe
       return fs.existsSync(cmd) ? { code: 0, stdout: `${fs.readFileSync(cmd, 'utf8')}\n`, stderr: '' } : { code: 1, stdout: '', stderr: 'no such file' };
     },
   };
-  return { d, said, ran, tarInto, o, killed, reads };
+  return { d, said, ran, tarInto, o, killed, reads, modes };
 }
 
 /** A download whose SHA-256 is the pinned one, as far as the code can tell: the pin replaced for the test. */
@@ -434,13 +437,14 @@ test("w5839: a Low process holding the recorded node open, with labels and hashe
       assert.equal(await ensureAgentNode(root, f.d), 'installed');
       assert.equal(await ensureAgentNode(root, f.d), 'current');
       assert.deepEqual(f.reads.at(-1), [agentNodeDir(root), agentNodeHome(root)], 'both folders are read');
+      assert.equal(f.modes.at(-1), true, 'only write access counts before the node is trusted');
       // Two rollbacks gave it a write handle on the real folder; the relabel since left labels, hashes and identity right.
       const at = where === 'node' ? agentNodeExe(root) : agentNodeStamp(root);
       f.o.held = [[{ pid: 4242, name: 'powershell', path: at }]];
       assert.equal(await ensureAgentNode(root, f.d), 'installed', where);
-      assert.match(f.said.at(-2)!, new RegExp(`^WARNING: Agent node: processes below Medium integrity hold the node's folders open.*powershell \\(4242\\) ${at.replaceAll('\\', '\\\\')}; ending them\\.$`));
+      assert.match(f.said.at(-2)!, new RegExp(`^WARNING: Agent node: processes below Medium integrity hold write access to the node's folders.*powershell \\(4242\\) ${at.replaceAll('\\', '\\\\')}; ending them\\.$`));
       assert.deepEqual(f.killed, [{ pid: 4242, saidBefore: f.said.length - 1 }], 'ended after the WARNING said so');
-      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(Low processes held it open: powershell \(4242\)\)/);
+      assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(Low processes held write access to it: powershell \(4242\)\)/);
       assert.equal(await ensureAgentNode(root, f.d), 'current');
     }
   });
@@ -476,7 +480,8 @@ test("w5839: a planted node a Low process holds open is swapped once the holder 
       if (open) fs.closeSync(fd);
     }
     assert.deepEqual(f.killed.map((k) => k.pid), [777]);
-    assert.match(f.said.at(-2)!, /^WARNING: Agent node: processes below Medium integrity hold .*claude \(777\)/);
+    assert.deepEqual(f.modes, [true, false], 'any handle counts once the swap was refused');
+    assert.match(f.said.at(-2)!, /^WARNING: Agent node: processes below Medium integrity hold the node's folder open, so the swap cannot pass: .*claude \(777\)/);
     assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(no record of its install/);
     assert.equal(fs.readFileSync(agentNodeExe(root), 'utf8'), AGENT_NODE.version);
   });
@@ -503,42 +508,74 @@ test("w5839: a planted node held open by no process below Medium stays, nothing 
 });
 
 test('w5839: the holder read prints its count line and each holder; a run cut short reads as unknown', () => {
-  assert.deepEqual(parseHolders('read low=3 handles=900\r\nholder 4242 powershell F:\\ffw\\tools\\node\\node.exe\r\nholder 77 ? (its handles could not be read)\r\n'), [
+  assert.deepEqual(parseHolders('read low=3 handles=900 unread=1\r\nholder 4242 powershell F:\\ffw\\tools\\node\\node.exe\r\n'), [
     { pid: 4242, name: 'powershell', path: 'F:\\ffw\\tools\\node\\node.exe' },
-    { pid: 77, name: '?', path: '(its handles could not be read)' },
   ]);
-  assert.deepEqual(parseHolders('read low=0 handles=0\r\n'), []);
+  assert.deepEqual(parseHolders('read low=0 handles=0 unread=0\r\n'), []);
+  assert.equal(parseHolders('read low=0 handles=0\r\n'), undefined, 'an older script');
   assert.equal(parseHolders('holder 4242 powershell F:\\x'), undefined);
   const sc = holdersScript(["F:\\ffw\\it's\\tools\\node"], [12]);
-  assert.match(sc, /\[FfHolders\]::Find\(\[string\[\]\]@\('F:\\ffw\\it''s\\tools\\node'\), \[int\[\]\]@\(12, \$PID\)\)/);
+  assert.match(sc, /\[FfHolders\]::Find\(\[string\[\]\]@\('F:\\ffw\\it''s\\tools\\node'\), \[int\[\]\]@\(12, \$PID\), \$true\)\)/);
+  assert.match(holdersScript(['F:\\x'], [], false), /\$PID\), \$false\)\)/);
 });
 
-test("w5839: the holder read, run, finds a process below Medium that holds a file or the folder, and names nothing else", { skip: process.platform !== 'win32' && 'needs Windows PowerShell' }, async () => {
+test("w5839: the holder read, run: before trust it names only a Low process that can write there; once a swap was refused, any that holds a file or the folder (w5886's review)", { skip: process.platform !== 'win32' && 'needs Windows PowerShell' }, async () => {
   const dir = tmp();
   fs.writeFileSync(path.join(dir, 'f.js'), 'x');
-  const read = () => {
-    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(holdersScript([dir], [process.pid]), 'utf16le').toString('base64')], { encoding: 'utf8', maxBuffer: 1 << 26 });
+  fs.writeFileSync(path.join(dir, 'g.js'), 'y');
+  // g.js labelled Low, as files were while an old daemon had `tools` Low, so a Low process may open it for writing.
+  assert.equal(spawnSync('icacls', [path.join(dir, 'g.js'), '/setintegritylevel', 'low'], { encoding: 'utf8' }).status, 0);
+  const read = (writesOnly: boolean) => {
+    const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(holdersScript([dir], [process.pid], writesOnly), 'utf16le').toString('base64')], { encoding: 'utf8', maxBuffer: 1 << 26 });
     return parseHolders(r.stdout ?? '');
   };
-  const before = read();
-  assert.ok(before, 'the read finishes');
-  assert.deepEqual(before, []);
-  // A process started from an exe labelled Low runs Low, whatever starts it (machine/lowIntegrity.ts, tools\low): a
-  // copy of this node, labelled Low, holds the file open as a Low worker would.
+  // Nothing of ours yet; a process whose handles cannot be read (Windows' own sandboxed services, as on the CI runner)
+  // is never named.
+  assert.deepEqual(read(false), [], 'the read finishes and names nothing');
+  // A process started from an exe labelled Low runs Low, whatever starts it (machine/lowIntegrity.ts, tools\low).
   const exe = path.join(dir, 'lownode', 'node.exe');
   fs.mkdirSync(path.dirname(exe));
   fs.copyFileSync(process.execPath, exe);
   assert.equal(spawnSync('icacls', [exe, '/setintegritylevel', 'low'], { encoding: 'utf8' }).status, 0);
   const { spawn } = await import('node:child_process');
-  const c = spawn(exe, ['-e', `require('fs').openSync(${JSON.stringify(path.join(dir, 'f.js'))}, 'r'); setTimeout(() => {}, 60000)`], { stdio: 'ignore' });
+  const hold = (file: string, flags: string) => spawn(exe, ['-e', `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}'); setTimeout(() => {}, 60000)`], { cwd: dir, stdio: 'ignore' });
+  // A legitimate Low worker: its working folder there and a file open for reading.
+  const reader = hold('f.js', 'r');
   try {
     await new Promise((res) => setTimeout(res, 3000));
-    const seen = read();
-    assert.deepEqual(seen?.map((h) => h.pid), [c.pid]);
-    assert.ok(seen![0].path.startsWith(dir), seen![0].path);
+    assert.deepEqual(read(true), [], 'a reader is never ended on a check');
+    const any = read(false);
+    assert.deepEqual(any?.map((h) => h.pid), [reader.pid], 'once a swap was refused it is');
+    assert.ok(any![0].path.startsWith(dir), any![0].path);
+    const writer = hold('g.js', 'r+');
+    try {
+      await new Promise((res) => setTimeout(res, 3000));
+      const w = read(true);
+      assert.deepEqual(w?.map((h) => h.pid), [writer.pid], 'a writer is named on a check');
+      assert.equal(w![0].path, path.join(dir, 'g.js'));
+    } finally {
+      writer.kill();
+    }
   } finally {
-    c.kill();
+    reader.kill();
   }
+});
+
+test("w5839: a file of the node with another hard link is never trusted: a handle opened through that name is not under the folder (w5886's review, M2)", async () => {
+  const zip = Buffer.from('a zip');
+  await pinned(zip, async () => {
+    const root = tmp();
+    const f = fake(zip);
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.equal(await ensureAgentNode(root, f.d), 'current');
+    const other = path.join(root, 'elsewhere');
+    fs.mkdirSync(other);
+    fs.linkSync(agentNodeExe(root), path.join(other, 'n.exe'));
+    assert.equal(await ensureAgentNode(root, f.d), 'installed');
+    assert.match(f.said.at(-1)!, /^Agent node: node reinstalled \(1 of its files has another hard link \(node\.exe\)\)/);
+    assert.equal(fs.statSync(agentNodeExe(root)).nlink, 1, 'the fresh copy has one name');
+    assert.equal(await ensureAgentNode(root, f.d), 'current');
+  });
 });
 
 test('not Windows: nothing to place, and nothing goes on PATH; Windows: the folder once node.exe is there (w1742)', async () => {

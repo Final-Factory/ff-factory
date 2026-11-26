@@ -817,10 +817,17 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     anything under `tools
 ode` or `daemongent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
     list, `NtQueryInformationProcess` class 51, its file and section handles and its mapped views; the system-wide handle
-    table is refused to a Low session, 0xC0000022, measured). It says a WARNING naming them, ends them, and swaps the
-    node; one it cannot read counts as a holder, and a failed read means a fresh copy. The read covers 110 to 122 Low
+    table is refused to a Low session, 0xC0000022, measured). Only access that can change the files counts there: a
+    File handle with write, append, attribute, EA, delete, DACL or owner rights, a Section with map-write, a view mapped
+    writable (w5886's review). A Low worker that runs this node or works in its folder holds read handles only, since the
+    Medium label refuses it any other open, and is left alone (measured: a Low node with its working folder in
+    `tools\node` and npm's `index.js` open, and the node verified). It says a WARNING naming the writers, ends them, and
+    swaps the node; a process whose handles it cannot read is never ended (Windows' own sandboxed services are such:
+    DefenderAiPlatformHost on the CI runner), and a failed read means a fresh copy. A file with a second hard link is
+    never trusted either: a handle opened through that name has a path outside the folder (w5886's review; the pinned
+    download has one name per file, and BEAST's live copy has none with two, measured). The read covers 110 to 122 Low
     processes and about 30k handles in 3 to 6 s on BEAST (measured). A rename refused because a file in the folder is
-    held open is tried three times, the Low holders ended between tries; a folder only a Medium process holds is never
+    held open is tried three times, every Low process holding anything in it (reads too) ended between tries; a folder only a Medium process holds is never
     forced, and the node there stays with a WARNING. A node.exe that runs does not block the rename (measured). Each run stages in
     `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
     may be another rollout's, still unpacking). The rollout log says
