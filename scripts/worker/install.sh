@@ -21,7 +21,7 @@
 # --transcript-lock on|off (Linux, w5702) lets each locked worker write only its own conversation's transcript;
 # --store-lock off|warn|on (w5614) makes the main clone read-only to fenced workers once every sandbox is a slot repo;
 # --editor-tmpdir on|off (macOS and Linux, w5833) gives each sandbox's Unity editor its own temp folder under the root;
-# --path-fence off|warn (macOS and Linux, w5863) sets the watch of the unity-slot shims folder on every agent's PATH (off stops it);
+# --path-fence on|off|warn (macOS and Linux, w5863) sets the watch of the unity-slot shims folder on every agent's PATH (off stops it);
 # --medium-agent-folders warn|on (w5862, w5869) moves Medium agents' temp root and cargo home to <root>/tmp-medium and <root>/cache-medium/cargo (on) or only logs the exposure (warn);
 # --daemon-tmpdir on|off (w6000) points the daemon's own TMPDIR at <root>/tmp-daemon (on, the default) or keeps the system temp (off, the recovery);
 # --daemon-ref REF (default: the pinned --ref, else the commit the portal runs).
@@ -59,7 +59,7 @@ while [ $# -gt 0 ]; do
     --transcript-lock) case "${2:-}" in on|off) TLOCK=$2 ;; *) echo "--transcript-lock is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --store-lock) case "${2:-}" in off|warn|on) SLOCK=$2 ;; *) echo "--store-lock is off, warn or on, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --editor-tmpdir) case "${2:-}" in on|off) ETMP=$2 ;; *) echo "--editor-tmpdir is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
-    --path-fence) case "${2:-}" in off|warn) PFENCE=$2 ;; *) echo "--path-fence is off or warn, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
+    --path-fence) case "${2:-}" in on|off|warn) PFENCE=$2 ;; *) echo "--path-fence is on, warn or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --daemon-tmpdir) case "${2:-}" in on|off) DTMP=$2 ;; *) echo "--daemon-tmpdir is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --medium-agent-folders) case "${2:-}" in warn|on) MFOLDERS=$2 ;; *) echo "--medium-agent-folders is warn or on, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;

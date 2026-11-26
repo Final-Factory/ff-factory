@@ -1958,8 +1958,8 @@ export interface UpdateFlags {
   storeLock?: 'off' | 'warn' | 'on';
   /** The editor temp folder (w5833), macOS and Linux only: written as daemon.json's `editorTmpdir`; unset carries daemon.json's (absent: off). */
   editorTmpdir?: 'on' | 'off';
-  /** The path fence (w5863), macOS and Linux only: written as daemon.json's `pathFence`; unset carries daemon.json's (absent: warn). */
-  pathFence?: 'off' | 'warn';
+  /** The path fence (w5863), macOS and Linux only: written as daemon.json's `pathFence`; unset carries daemon.json's (absent: on). */
+  pathFence?: 'off' | 'warn' | 'on';
   /** Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md), every OS: written as daemon.json's `mediumAgentFolders`; unset carries daemon.json's. */
   mediumAgentFolders?: 'warn' | 'on';
   /** The daemon's own temp folder (w6000, machine/daemonTemp.ts), every OS: written as daemon.json's `daemonTmpdir`; unset carries daemon.json's (absent: on). */
@@ -2059,15 +2059,15 @@ export function applyEditorTmpdir(config: Record<string, unknown>, setting: 'on'
   return { ...config, editorTmpdir: setting };
 }
 
-/** `--path-fence off|warn` (w5863): anything else is refused, never guessed at. Exported for tests. */
-export function pathFenceFlag(v: string | undefined): 'off' | 'warn' | undefined {
+/** `--path-fence on|warn|off` (w5863, w5899): anything else is refused, never guessed at. Exported for tests. */
+export function pathFenceFlag(v: string | undefined): 'off' | 'warn' | 'on' | undefined {
   if (v === undefined) return undefined;
-  if (v !== 'off' && v !== 'warn') throw new Error(`--path-fence is off or warn, not "${v}"`);
+  if (v !== 'off' && v !== 'warn' && v !== 'on') throw new Error(`--path-fence is on, warn or off, not "${v}"`);
   return v;
 }
 
 /** daemon.json with the path fence's mode set, "warn" written as "warn" (w5863); macOS and Linux only: the shims folder is on their PATH. Exported for tests. */
-export function applyPathFence(config: Record<string, unknown>, setting: 'off' | 'warn' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+export function applyPathFence(config: Record<string, unknown>, setting: 'off' | 'warn' | 'on' | undefined, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
   if (!setting) return config;
   if (platform === 'win32') throw new Error(`--path-fence: macOS and Linux only, not ${platform}`);
   return { ...config, pathFence: setting };
@@ -2985,8 +2985,7 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
              repo, daemon.json storeLock; default: as daemon.json has it; docs/machines.md "Slot repos")
             [--editor-tmpdir on|off] (w5833, macOS and Linux: each sandbox's Unity editor gets its own TMPDIR under <root>/tmp, daemon.json
              editorTmpdir; default: as daemon.json has it, off if it has none)
-            [--path-fence off|warn] (w5863, macOS and Linux: warn logs each write to the unity-slot shims folder on every agent's PATH
-             that the daemon did not make, off stops the watch, daemon.json pathFence; default: as daemon.json has it, warn if it has none)
+            [--path-fence on|warn|off] (w5863, w5899, macOS and Linux: on moves the unity-slot shims folder on every agent's PATH to <root>/tools-medium/shims, which fenced workers cannot write; warn leaves it in the mailbox and logs each write the daemon did not make; off leaves it unwatched, the recovery; daemon.json pathFence; default: as daemon.json has it, on if it has none)
             [--medium-agent-folders warn|on] (w5862, w5869, every OS: on moves Medium agents' temp root and cargo home to <root>/tmp-medium
              and <root>/cache-medium/cargo, warn only logs the exposure, daemon.json mediumAgentFolders; default: as daemon.json has it;
              docs/worker-root.md)

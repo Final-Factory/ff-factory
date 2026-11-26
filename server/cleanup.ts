@@ -10,6 +10,7 @@ import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 import { renameAway } from './renameAway.ts';
 import { clearDeadMounts } from './deadMounts.ts';
+import { isLink } from './fsLink.ts';
 import { daemonTempDir, systemTempDir, systemTempEnv } from '../machine/daemonTemp.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
@@ -625,6 +626,14 @@ export async function touchedSince(p: string, cutoffMs: number, budget = 200_000
 }
 
 /**
+ * A folder's entries, less its links: a walk never goes through one into what it leads to. Their own folder entry says so:
+ * lstat calls a junction a Low-integrity process made (each BEAST worker's) a plain folder (w5915, measured).
+ */
+async function childrenNotLinks(dir: string): Promise<string[]> {
+  return (await fs.promises.readdir(dir, { withFileTypes: true })).filter((d) => !d.isSymbolicLink()).map((d) => path.join(dir, d.name));
+}
+
+/**
  * touchedSince with its reason: 'changed' (something changed after the cutoff, or is unreadable), 'too-big' (more than
  * `budget` entries and none of those changed: unknown), or undefined (nothing changed). w1575: a stopped session's folder of
  * 12 game clones (about 630,000 entries, 139 GB on beast) answered "changed recently" this way and was kept, unlisted, for good.
@@ -644,7 +653,7 @@ export async function touchedWhy(p: string, cutoffMs: number, budget = 200_000):
     if (++seen > budget) return 'too-big';
     if (!st.isDirectory()) continue;
     try {
-      for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+      for (const n of await childrenNotLinks(cur)) stack.push(n);
     } catch {
       return 'changed'; // unreadable inside: not ours to judge
     }
@@ -665,7 +674,7 @@ export async function sizeOf(p: string, budget = 2_000_000, links?: Set<string>)
     const cur = stack.pop()!;
     try {
       const st = await fs.promises.lstat(cur);
-      if (st.isDirectory()) for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+      if (st.isDirectory()) for (const n of await childrenNotLinks(cur)) stack.push(n);
       else if (links && st.nlink > 1) {
         const big = await fs.promises.lstat(cur, { bigint: true });
         const key = `${big.dev}:${big.ino}`;
@@ -711,7 +720,7 @@ export async function freeableBytes(roots: string[], o: { inTotal?: boolean[]; b
       try {
         const st = await fs.promises.lstat(cur, { bigint: true });
         if (st.isDirectory()) {
-          for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+          for (const n of await childrenNotLinks(cur)) stack.push(n);
           continue;
         }
         const size = Number(st.size);
@@ -819,7 +828,7 @@ export async function staleUnityLibraries(roots: string[], minDays: number, now 
     const lib = path.join(dir, 'Library');
     if (fs.existsSync(path.join(dir, 'ProjectSettings', 'ProjectVersion.txt'))) {
       const st = await fs.promises.lstat(lib).catch(() => undefined);
-      if (!st?.isDirectory() || fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile'))) return;
+      if (!st?.isDirectory() || isLink(lib) || fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile'))) return;
       let newest = Math.max(st.mtimeMs, await mtime(path.join(dir, 'Temp')), await mtime(path.join(dir, 'Logs')), await mtime(path.join(dir, 'UserSettings')));
       for (const n of await fs.promises.readdir(lib).catch(() => [] as string[])) newest = Math.max(newest, await mtime(path.join(lib, n)));
       const days = Math.floor((now - newest) / 86_400_000);
