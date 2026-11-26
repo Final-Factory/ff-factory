@@ -636,14 +636,44 @@ test('w6044: the ffu-slots scope takes a released slot whole on a low pass, at o
   const t3 = target(root, 'slot3', 2); // released, a program runs from it
   target(root, 'slot4', 0); // released, written within the settle time
   target(root, 'slot5', 2); // its holder stopped for good
+  target(root, 'slot6', 8 * 24); // released, idle 8 days
   fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot2', holder: 'live0002' }, { id: 'slot5', holder: 'gone0005' }] }));
   const inUse = [path.join(root, 'tmp', 'ffa-live0002')];
   const procs: ProcLite[] = [{ pid: 43, ppid: 1, cmd: `${t3}/debug/deps/golden-1234 --test-threads 4` } as ProcLite];
   const low = await plan(root, { low: true, inUse, procs, scope: 'ffu-slots' });
-  assert.deepEqual(ffuItems(root, low), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target']);
+  assert.deepEqual(ffuItems(root, low), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target', 'ffu-sandboxes/slot6/target']);
   assert.ok(low.items.every((i) => /taken first in the pass \(w6044\)/.test(i.why)));
   assert.ok(!low.items.some((i) => /slot2/.test(i.path)), 'a held slot is never taken in the first step, not even its incremental cache');
-  // The hourly pass: a released target over the cap is judged as the cap rule judges it, a held one not at all.
+  assert.deepEqual(low.items.map((i) => i.ffuSlot), [{ id: 'slot1', mark: '@' }, { id: 'slot5', mark: 'gone0005@' }, { id: 'slot6', mark: '@' }], 'the slot mark rides the item for the re-check');
+  // Any other pass: only a released target idle ffuSlotIdleDays, whole; over the cap or not, its sweep and trims stay with the
+  // cap step (review of #1353: the first step planned them twice in one pass), and a held one is not looked at.
   const hourly = await plan(root, { inUse, procs, scope: 'ffu-slots', settings: { ffuSlotTargetCapGB: 3000 / 1024 ** 3 } });
-  assert.deepEqual(ffuItems(root, hourly), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target/debug/incremental']);
+  assert.deepEqual(ffuItems(root, hourly), ['ffu-sandboxes/slot6/target']);
+  assert.match(hourly.items[0].why, /nothing in it was written for 7 days; taken first in the pass \(w6044\)/);
+});
+
+// w6044 stage 2: the first step removes at once, so the re-check right before the rename sees a slot taken since the plan, or a
+// build or a program started in it, and keeps the target.
+test('w6044: ffuSlotBusyNow keeps a target whose slot was taken, or that a build or a program started in, since the plan', async (t) => {
+  const { ffuSlotBusyNow } = await import('./installLeftovers.ts');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6044b-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  const t1 = target(root, 'slot1', 2);
+  const state = path.join(root, 'ffu-sandboxes', 'slots.json');
+  fs.writeFileSync(state, JSON.stringify({ slots: [{ id: 'slot1' }] }));
+  const it = { path: t1, rule: 'ffu-slot-target', why: 'test', ffuSlot: { id: 'slot1', mark: '@' } };
+  let procs: ProcLite[] | undefined = [];
+  const check = ffuSlotBusyNow(root, async () => procs, () => NOW);
+  assert.equal(await check(it), undefined, 'unchanged: it goes');
+  assert.equal(await check({ path: t1, rule: 'ffu-runner-work', why: 'x' }), undefined, 'another item passes');
+  procs = [{ pid: 7, ppid: 1, cmd: `${t1}/debug/deps/golden-1 --test-threads 4` } as ProcLite];
+  assert.match((await check(it)) ?? '', /a program runs from it since the plan/);
+  procs = [{ pid: 8, ppid: 1, cmd: `cargo build --manifest-path ${path.join(root, 'ffu-sandboxes', 'slot1', 'ffu', 'Cargo.toml')}` } as ProcLite];
+  assert.match((await check(it)) ?? '', /a build started in it since the plan/);
+  procs = undefined;
+  assert.match((await check(it)) ?? '', /process list could not be read/);
+  procs = [];
+  fs.writeFileSync(state, JSON.stringify({ slots: [{ id: 'slot1', holder: 'new00001', takenAt: '2026-11-26T12:00:00Z' }] }));
+  assert.match((await check(it)) ?? '', /ffu slot1 was taken since the plan/);
+  assert.match((await ffuSlotBusyNow(undefined, async () => [])(it)) ?? '', /no install root/);
 });

@@ -226,29 +226,53 @@ test('describeCutOff says what a cut-off pass had removed by then (w5795)', () =
 
 // w6044: BEAST, 2026-11-26: the 09:10Z low pass was cut off 4 min into its regular step having removed nothing, while three
 // released ffu slot targets held 190.6 GB that the ffu rule (in the later stale or cap step) would have taken. The released
-// targets are now planned first, before the regular step; report-only, so the plan is said and nothing of it goes here.
-test('cleanupPass plans the released ffu targets first, before the regular step, and removes nothing of them (report-only, w6044)', async () => {
+// targets are now planned and removed first, before the regular step (stage 1, #1353, only said them).
+test('cleanupPass removes the released ffu targets first, before the regular step (w6044)', async () => {
   const { cleanupPass } = await import('./staleOutput.ts');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-ffufirst-'));
   try {
-    const t = path.join(root, 'ffu-sandboxes', 'slot1', 'target');
-    fs.mkdirSync(t, { recursive: true });
+    const mk = (slot: string) => {
+      const t = path.join(root, 'ffu-sandboxes', slot, 'target');
+      fs.mkdirSync(path.join(t, 'debug'), { recursive: true });
+      fs.writeFileSync(path.join(t, 'debug', 'x.rlib'), Buffer.alloc(100));
+      return t;
+    };
+    const t1 = mk('slot1');
+    const t2 = mk('slot2');
     const steps: string[] = [];
-    const reported: { paths: string[]; ms: number }[] = [];
+    const reported: { paths: string[]; removed?: number; failed?: number }[] = [];
+    let regularSaw: boolean | undefined;
+    const outside = path.join(os.tmpdir(), 'outside-w6044');
     const r = await cleanupPass({
       opts: { stale: false, dryRun: false, step: (n: string) => void steps.push(n) },
       guard: { keep: [], inUse: [], home: path.join(root, 'nobody') },
       mode: 'on',
-      regular: async () => [],
+      regular: async () => ((regularSaw = fs.existsSync(t1)), []),
       stale: async () => ({ items: [], listed: [] }),
-      first: { plan: async () => ({ items: [{ path: t, rule: 'ffu-slot-target', why: 'test' }, { path: path.join(os.tmpdir(), 'outside'), rule: 'ffu-slot-target', why: 'test' }], listed: [] }), report: (items, ms) => void reported.push({ paths: items.map((i) => i.path), ms }) },
+      first: {
+        plan: async () => ({ items: [t1, t2, outside].map((p) => ({ path: p, rule: 'ffu-slot-target', why: 'test' })), listed: [] }),
+        report: (items, _ms, run) => {
+          reported.push({ paths: items.map((i) => i.path), removed: run?.removed.length, failed: run?.failed.length });
+          throw new Error('a report that throws costs the pass nothing');
+        },
+      },
+      busyNow: async (it) => (it.path === t2 ? 'taken since the plan' : undefined),
       root,
     });
-    assert.equal(steps[0], 'ffu first');
-    assert.equal(steps[1], 'regular');
-    assert.deepEqual(reported.map((x) => x.paths), [[t]], 'said once, fenced to the install folder');
-    assert.ok(fs.existsSync(t), 'report-only: the target stays');
-    assert.equal(r.removed.length, 0);
+    assert.deepEqual(steps.slice(0, 3), ['ffu first', 'ffu firstRemove', 'regular']);
+    assert.equal(regularSaw, false, 'gone before the regular step is planned');
+    assert.deepEqual(reported, [{ paths: [t1, t2], removed: 1, failed: 1 }], 'said once, fenced to the install folder, with the removal');
+    assert.ok(!fs.existsSync(t1) && fs.existsSync(t2), 'the re-check keeps the slot taken since the plan');
+    assert.deepEqual(r.removed.map((x) => x.path), [t1]);
+    assert.ok(r.bytes >= 100);
+    // A plan that fails costs the pass nothing; dry-run mode says the plan and removes nothing.
+    const t3 = mk('slot3');
+    const said: (number | undefined)[] = [];
+    const f = await cleanupPass({ opts: { stale: false, dryRun: false }, guard: { keep: [], inUse: [], home: root }, mode: 'on', regular: async () => [], stale: async () => ({ items: [], listed: [] }), first: { plan: async () => Promise.reject(new Error('boom')) }, root });
+    assert.equal(f.removed.length, 0);
+    await cleanupPass({ opts: { stale: false, dryRun: false }, guard: { keep: [], inUse: [], home: root }, mode: 'dry-run', regular: async () => [], stale: async () => ({ items: [], listed: [] }), first: { plan: async () => ({ items: [{ path: t3, rule: 'ffu-slot-target', why: 'test' }], listed: [] }), report: (_i, _ms, run) => void said.push(run?.removed.length) }, root });
+    assert.deepEqual(said, [undefined]);
+    assert.ok(fs.existsSync(t3), 'dry-run mode: said, not removed');
     const off: string[] = [];
     await cleanupPass({ opts: { stale: false, dryRun: true }, guard: { keep: [], inUse: [], home: root }, mode: 'on', regular: async () => [], stale: async () => ({ items: [], listed: [] }), first: { plan: async () => (off.push('dry'), { items: [], listed: [] }) } });
     await cleanupPass({ opts: { stale: false, dryRun: false }, guard: { keep: [], inUse: [], home: root }, mode: 'off', regular: async () => [], stale: async () => ({ items: [], listed: [] }), first: { plan: async () => (off.push('off'), { items: [], listed: [] }) } });
