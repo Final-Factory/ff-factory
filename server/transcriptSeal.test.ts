@@ -8,7 +8,7 @@ import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 import { SEAL_DAYS, TranscriptHasher, checkSeal, pidGone, rehashFrom, sealStore } from './transcriptSeal.ts';
-import { stopThreadForTests, threadGenForTests } from './transcriptThreadClient.ts';
+import { ThreadGone, askThread, pendingForTests, stopThreadForTests, threadGenForTests } from './transcriptThreadClient.ts';
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
@@ -256,25 +256,46 @@ test('w5888: the seal check, its checkpoints and the rehash give the same hashes
   assert.equal((await checkSeal(file, sealed)).ok, false, 'an edit before the seal still fails the check');
 });
 
-test('w5888: a transcript thread that dies drops its hashes: their hasher seals nothing more, the rehash gives up, and the next check starts a new thread', async (t) => {
+test('w5888: a transcript thread that dies loses nothing: its hasher and the rehash go on on the event loop, an edit made meanwhile still shows, and the next check starts a new thread', async (t) => {
   const dir = tmp(t, 'thread-gone');
   const file = path.join(dir, 's.jsonl');
   let body = '';
   for (let n = 0; body.length < 5000; n++) body += line(n);
   fs.writeFileSync(file, body);
+  const rewrite = (at: number) => {
+    const fd = fs.openSync(file, 'r+');
+    fs.writeSync(fd, Buffer.from('XXXX'), 0, 4, at);
+    fs.closeSync(fd);
+  };
   try {
+    // review of #1342 (w6007): the thread dies right after the tool refresh's rewrite; the rehash and the seal after it still hold
     const check = await checkSeal(file, undefined, 1000);
     assert.ok(check.ok);
     const first = threadGenForTests();
+    rewrite(3500);
     await stopThreadForTests();
+    const again = (await rehashFrom(file, check.checkpoints, 3500))!;
+    assert.ok(again, 'hashed again on the event loop');
+    assert.equal(again.hashedBytes, fs.statSync(file).size);
+    const sealed = (await again.hasher.seal(false))!;
+    assert.equal(sealed.sha256, sha(file));
     fs.appendFileSync(file, line(9999));
-    assert.equal(await check.hasher.seal(false), undefined, 'nothing is sealed from a hash that is gone');
-    assert.ok(check.hasher.broken);
-    assert.equal(await rehashFrom(file, check.checkpoints, 3500), undefined);
-    const again = await checkSeal(file, undefined, 1000);
-    assert.ok(again.ok);
+    const resumed = await checkSeal(file, sealed);
+    assert.ok(resumed.ok && resumed.sealed, `the next resume passes: ${JSON.stringify(resumed)}`);
     assert.ok(threadGenForTests() > first, 'a new thread');
-    assert.equal((await again.hasher.seal(false))!.sha256, sha(file));
+    // the thread dies between turn ends: the next seal rebuilds the hash on the event loop
+    await stopThreadForTests();
+    fs.appendFileSync(file, line(10000));
+    assert.equal((await resumed.hasher.seal(false))!.sha256, sha(file));
+    assert.ok(!resumed.hasher.broken);
+    // an outside edit to the part already hashed, while the thread was gone, is not sealed over
+    const later = await checkSeal(file, undefined, 1000);
+    assert.ok(later.ok);
+    await stopThreadForTests();
+    rewrite(100);
+    fs.appendFileSync(file, line(10001));
+    assert.equal(await later.hasher.seal(false), undefined, 'bytes it had hashed changed: nothing is sealed');
+    assert.ok(later.hasher.broken);
   } finally {
     await stopThreadForTests(true);
   }
@@ -291,6 +312,18 @@ test('w5888: a check whose thread dies part way finishes on the event loop with 
     const check = await pending;
     assert.ok(check.ok);
     assert.equal((await check.hasher.seal(false))!.sha256, sha(file));
+  } finally {
+    await stopThreadForTests(true);
+  }
+});
+
+test('w5888: an ask the thread cannot be sent fails as ThreadGone at once and leaves nothing pending', async () => {
+  try {
+    const bad = new Map([['x', { description: '', input_schema: () => 1 }]]);
+    await assert.rejects(askThread({ op: 'scan', file: 'none', now: bad }), ThreadGone);
+    assert.equal(pendingForTests(), 0);
+    assert.ok((await askThread<{ ref: number }>({ op: 'new' })).ok.ref > 0, 'the thread still answers');
+    assert.equal(pendingForTests(), 0);
   } finally {
     await stopThreadForTests(true);
   }

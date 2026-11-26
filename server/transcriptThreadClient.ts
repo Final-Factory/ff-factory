@@ -68,16 +68,25 @@ export function askThread<T>(req: TranscriptAsk, of?: number): Promise<{ gen: nu
   const id = nextId++;
   const mine = gen;
   return new Promise<{ gen: number; ok: T }>((resolve, reject) => {
+    try {
+      w.postMessage({ ...req, id });
+    } catch (e) {
+      reject(new ThreadGone(`could not send to transcript thread ${mine}: ${(e as Error).message}`)); // nothing left pending
+      return;
+    }
     pending.set(id, { resolve: (ok) => resolve({ gen: mine, ok: ok as T }), reject });
     w.ref();
-    w.postMessage({ ...req, id });
   });
 }
 
 /** Lets the thread drop hashes nobody refers to any more; nothing when their thread is gone. */
 export function freeInThread(of: number, refs: number[]): void {
   if (of !== gen || !worker || refs.length === 0) return;
-  worker.postMessage({ op: 'free', refs });
+  try {
+    worker.postMessage({ op: 'free', refs });
+  } catch {
+    // a thread that cannot take it is going: what it held goes with it
+  }
 }
 
 /** Tests: stop the thread as a crash would, and (with `reset`) forget past failures. */
@@ -91,4 +100,9 @@ export async function stopThreadForTests(reset = false): Promise<void> {
 /** Tests: the generation of the thread that runs now, 0 before the first. */
 export function threadGenForTests(): number {
   return worker ? gen : 0;
+}
+
+/** Tests: how many asks wait for an answer. */
+export function pendingForTests(): number {
+  return pending.size;
 }

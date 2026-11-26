@@ -6,3 +6,6 @@
   reference) and scans 64 MB at a time instead of reading the whole file into the portal's heap. A thread that fails
   or exits is logged (`transcript thread N: ... (w5888)`) and the work it held runs on the event loop as before; after
   three failed threads the process stops starting them, and `FFF_TRANSCRIPT_THREAD=off` keeps it all on the event loop.
+  A hash lost with its thread is rebuilt on the event loop from the file's start and goes on only if those bytes still
+  give the digest it had, and the seal is written again right after the tool refresh's rewrite is re-hashed, so a
+  thread that dies never leaves a conversation that will not resume (review of #1342, w6007).

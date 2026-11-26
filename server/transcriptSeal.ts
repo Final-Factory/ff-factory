@@ -177,7 +177,8 @@ async function newHash(): Promise<RunningHash> {
 /**
  * The running hash of one transcript, as its process appends to it. It hashes only bytes past those it has seen, so an edit
  * to the part already hashed changes nothing here and shows at the next resume. One read at a time. Its hash's thread gone
- * (w5888) is as the file shrinking: it seals nothing more, and the next resume checks against the last seal it wrote.
+ * (w5888): it hashes the bytes it had seen again on the event loop and goes on there if they still give the digest it had
+ * (`sha`); if they do not, or it has none, it is as the file shrinking: it seals nothing more.
  */
 export class TranscriptHasher {
   private hash: RunningHash | undefined;
@@ -186,10 +187,13 @@ export class TranscriptHasher {
   broken = false;
   readonly file: string;
   size: number;
-  constructor(file: string, size = 0, hash?: RunningHash) {
+  /** The digest of the file's first `size` bytes, when known: a hash lost with its thread is rebuilt against it (w5888). */
+  private sha: string | undefined;
+  constructor(file: string, size = 0, hash?: RunningHash, sha?: string) {
     this.file = file;
     this.size = size;
     this.hash = hash;
+    this.sha = sha;
   }
 
   /** Hashes what was appended since, then the seal; undefined when the file is missing or shrank (nothing is sealed then). */
@@ -207,22 +211,41 @@ export class TranscriptHasher {
         return undefined;
       }
       try {
-        if (!this.hash && this.size > 0) throw new ThreadGone('no running hash for the bytes already seen');
-        const next = await (this.hash ?? (await newHash())).copy();
-        if (!(await next.feed(this.file, this.size, len))) {
+        return await this.sealTo(len, final, now);
+      } catch (e) {
+        if (!(e instanceof ThreadGone)) throw e;
+        if (!(await this.rebuildOnLoop())) {
           this.broken = true;
+          console.log(`transcript seal: ${this.file}: its running hash went with its thread and its first ${this.size} bytes no longer give the digest it had, so it seals nothing more (w5888)`);
           return undefined;
         }
-        this.hash = next;
-        this.size = len;
-        return { v: 1 as const, size: len, sha256: await next.hex(), at: now().toISOString(), final };
-      } catch (e) {
-        if (e instanceof ThreadGone) this.broken = true;
-        throw e;
+        return await this.sealTo(len, final, now);
       }
     });
     this.chain = run.catch(() => undefined);
     return run.catch(() => undefined);
+  }
+
+  private async sealTo(len: number, final: boolean, now: () => Date): Promise<TranscriptSeal | undefined> {
+    if (!this.hash && this.size > 0) throw new ThreadGone('no running hash for the bytes already seen');
+    const next = await (this.hash ?? (await newHash())).copy();
+    if (!(await next.feed(this.file, this.size, len))) {
+      this.broken = true;
+      return undefined;
+    }
+    const sha = await next.hex();
+    this.hash = next;
+    this.size = len;
+    this.sha = sha;
+    return { v: 1, size: len, sha256: sha, at: now().toISOString(), final };
+  }
+
+  /** w5888: its hash again on the event loop, from the file's start; false when those bytes changed or their digest is unknown. */
+  private async rebuildOnLoop(): Promise<boolean> {
+    const h = new LoopHash();
+    if (this.size > 0 && (this.sha === undefined || !(await h.feed(this.file, 0, this.size)) || (await h.hex()) !== this.sha)) return false;
+    this.hash = h;
+    return true;
   }
 }
 
@@ -257,13 +280,13 @@ async function checkSealWith(hash: RunningHash, file: string, seal: TranscriptSe
   const checkpoints: HashCheckpoint[] = [{ at: 0, hash: await hash.copy() }];
   if (!seal) {
     if (!(await hash.feed(file, 0, len, checkpoints, every))) return { ok: false, why: 'its transcript shrank while it was read' };
-    return { ok: true, hasher: new TranscriptHasher(file, len, hash), sealed: false, tail: 0, checkpoints };
+    return { ok: true, hasher: new TranscriptHasher(file, len, hash, await hash.hex()), sealed: false, tail: 0, checkpoints };
   }
   if (len < seal.size) return { ok: false, why: `its transcript is ${len} bytes, shorter than the ${seal.size} sealed at ${seal.at}` };
   if (!(await hash.feed(file, 0, seal.size, checkpoints, every)) || (await hash.hex()) !== seal.sha256) return { ok: false, why: `its first ${seal.size} bytes changed since they were sealed at ${seal.at}` };
   if (seal.final && len > seal.size) return { ok: false, why: `${len - seal.size} bytes were added to it after its process had ended (sealed at ${seal.at})` };
   if (!(await hash.feed(file, seal.size, len, checkpoints, every))) return { ok: false, why: 'its transcript shrank while it was read' };
-  return { ok: true, hasher: new TranscriptHasher(file, len, hash), sealed: true, tail: len - seal.size, checkpoints };
+  return { ok: true, hasher: new TranscriptHasher(file, len, hash, await hash.hex()), sealed: true, tail: len - seal.size, checkpoints };
 }
 
 /**
@@ -271,7 +294,7 @@ async function checkSealWith(hash: RunningHash, file: string, seal: TranscriptSe
  * hashed again only from the last checkpoint at or before `from` instead of from the file's start: on 2026-11-26 the dispatcher's
  * 1.48 GB transcript took about 31 s to check and the full second pass most of another 43 s, while a person's orchestrator
  * waited behind it to launch. Checkpoints taken past `from` hash bytes that changed, so they go. Undefined when the file
- * shrank meanwhile, or the checkpoints' thread is gone (w5888).
+ * shrank meanwhile. Checkpoints whose thread is gone: hashed again on the event loop from the start (w5888).
  */
 export async function rehashFrom(file: string, checkpoints: HashCheckpoint[], from: number): Promise<{ hasher: TranscriptHasher; hashedBytes: number } | undefined> {
   let cp: HashCheckpoint | undefined;
@@ -286,10 +309,13 @@ export async function rehashFrom(file: string, checkpoints: HashCheckpoint[], fr
     const at = cp?.at ?? 0;
     const hash = cp ? await cp.hash.copy() : await newHash();
     if (!(await hash.feed(file, at, len))) return undefined;
-    return { hasher: new TranscriptHasher(file, len, hash), hashedBytes: len - at };
+    return { hasher: new TranscriptHasher(file, len, hash, await hash.hex()), hashedBytes: len - at };
   } catch (e) {
-    if (e instanceof ThreadGone) return undefined;
-    throw e;
+    if (!(e instanceof ThreadGone)) throw e;
+    // w5888: the checkpoints went with their thread: hash it all again on the event loop
+    const hash = new LoopHash();
+    if (!(await hash.feed(file, 0, len))) return undefined;
+    return { hasher: new TranscriptHasher(file, len, hash, await hash.hex()), hashedBytes: len };
   }
 }
 
