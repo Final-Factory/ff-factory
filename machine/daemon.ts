@@ -1401,17 +1401,22 @@ export class Daemon {
   /**
    * w6044 stage 3: the released ffu slots' first step alone, at low, while a pass that is not low runs (CleanupRunner
    * firstAlone). That pass's own first step ran with the 7-day idle rule, and it runs on for an hour or more (BEAST, 2026-11-26).
-   * Report-only for now: it plans and says what it would take, and removes nothing (the stale-output mode dry-run).
+   * It removes with the stale-output mode on (stage 3b), and what it freed goes in the clean-up history (cleanup-log.jsonl).
    */
   private async ffuFirstAlone(trigger: string) {
     const guard = this.cleanupGuard();
-    await firstAlonePass({
-      mode: staleOutputSettings(this.cleanupSettings.staleOutput).mode,
+    const mode = staleOutputSettings(this.cleanupSettings.staleOutput).mode;
+    const startedAt = new Date().toISOString();
+    const run = await firstAlonePass({
+      mode,
       root: this.cfg.root ? [this.cfg.root, ...(this.cfg.extraRoots ?? [])] : undefined,
       guard,
-      first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}, report-only)`),
+      first: this.ffuFirstStep(true, guard, `, alone during a pass that is not low (${trigger}${mode === 'on' ? '' : ', report-only'})`),
       busyNow: this.cleanupBusyNow(),
     });
+    // The w6142 review: what the step alone frees shows in the clean-up history, not only in its log line.
+    if (run && run.removed.length > 0)
+      appendCleanupLog(appDirOfConfig(this.cfg), { at: new Date().toISOString(), trigger, ffuFirstAlone: true, startedAt, removed: run.removed.length, freedBytes: run.bytes, items: run.removed.map((r) => r.path) });
   }
 
   /**
