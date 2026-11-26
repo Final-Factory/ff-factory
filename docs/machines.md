@@ -1190,6 +1190,18 @@ the process does. The legacy `unity-mcp-port.json` stays the sandbox editor's. T
 `<sandbox>_clone_<n>@<hash>`, and the guard lets a worker pin its own sandbox's clones (`server/guard.ts`) and no
 other. No fence changed.
 
+**A clone editor's home on a fenced Mac** (w5961, found in w5806): a second editor a worker opens itself under
+`unity-slot run` inherits the worker's Seatbelt profile but not the fenced editor's environment, so with the real home
+Unity is refused its window layout in `~/Library/Preferences/Unity/Editor-5.x` and stops on a hidden "Moving file failed"
+modal with no MCP bridge (measured on m5: the log ends at `[LAYOUT] About to save layout` and `Curl error 23`, 10+
+minutes; HOME alone did not help, Foundation's home follows `CFFIXED_USER_HOME`). Now `slotEnv` gives a sandbox agent on
+a Mac with the worker fence on `FF_UNITY_EDITOR_HOME` (`<root>/home`, the home `macEditorFenceFor` gives the daemon's own
+fenced editors), and `unity-slot run` sets `HOME` and `CFFIXED_USER_HOME` to it when its command is the Unity editor
+binary without `-batchmode` (`editorHomeEnv`, `machine/unitySlots.ts`). A script keeps the person's home (git, gh); a
+script that opens an editor itself can pass `FF_UNITY_EDITOR_HOME` on. A batch run keeps it too: under a moved home with
+no licensing client running, Unity starts its own there and quits unlicensed. No fence changed; `<root>/home` is already
+writable to every worker.
+
 **Protocol 5.** The `welcome` carries the pool settings; `sandbox` messages (create, delete, log), a `sandbox` field
 on `switch` and `unity`, and the daemon's `sandboxes` snapshots, `sandbox_result` and `sandbox_event` (the disk guard,
 an idle editor stopped). A protocol-4 daemon would ignore the `sandbox` field and act on the main clone, so the
@@ -1863,6 +1875,32 @@ LothDesktop and Beast, not just when BEAST is full").
     - New placement on a held computer was never refused, only noted ("… is held …"), so `start_agent` for w1785 there
       needs no exception.
     - Tests: the w1863 cases in `server/resumeRules.test.ts` and `server/appConfig.test.ts`.
+  - **A hold drains the computer's CI runners (w5916).** lothsahn, 2026-11-26: "Make it so a portal hold shuts down CI
+    workers when they finish." A person's hold (`placement.hold`, or a drain, "A person's drain" above) goes to the
+    computer's daemon (`runner_hold`, at each connect, when it changes and every 10 minutes: `MachineManager.syncRunnerHolds`).
+    The daemon's CI load gate (`machine/loadRunners.ts` `LoadGate.setHold`) then suspends each self-hosted runner's listener
+    once it is idle and settled, the game runners and the `ffu-<machine>-N` runners alike, by the same steps as the CPU gate
+    (w3305: NtSuspendProcess on Windows, SIGSTOP elsewhere; a fresh listing after the suspend resumes one that took a job in
+    that instant). A listener running a job finishes it and is suspended after. An operations runner (`ff-ops-runner`) is never
+    held, so deploys still land. Nothing on GitHub changes: no runner is deregistered, and no configuration or token is touched.
+    - **Shown beside the hold.** `list_machines` has a `CI runners (w5916): ...` line, `list_sandboxes` adds `; CI ...` to the
+      machine's header, and the machine page has a CI chip: "runners draining (1 busy: ffu-lothdesktop-2; 2 stopped)", then
+      "runners stopped by hold (actions-runner, ffu-lothdesktop-1, ffu-lothdesktop-2)". From the daemon's `runner_hold` report.
+    - **A restart keeps them stopped.** The hold and the suspended pids are kept in `<root>/tmp/ci-load-gate.json`, each pid
+      written before its suspend, so a daemon that dies between the two still resumes it. A restarted daemon keeps them
+      suspended until the portal speaks; a restarted portal sends the hold again at the connect.
+    - **The lift always brings them back, with nobody at the machine.** The portal sends `why: null` at once (a config change,
+      `hold_machine` lift), and at every connect, so a hold lifted while the link was down lifts when it comes back. Each
+      suspended listener is resumed. If the portal is gone for good, the daemon lets a hold it has not heard repeated for 12 h
+      lapse (`HOLD_LAPSE_MS`). A Dev Drive grow while held (it ends every process on the drive, w3721) leaves its runners in
+      `startOnLift`; the lift starts them (`runnerRestartScript`), and one that fails is tried again at each look.
+    - **A hold of weeks costs no registration.** GitHub removes a non-ephemeral runner it has not seen connect for 14 days
+      ([changelog 2022-08-03](https://github.blog/changelog/2022-08-03-github-actions-remove-offline-self-hosted-runners)), so a
+      listener suspended 7 days (`RECONNECT_AFTER_MS`) is resumed for 10 minutes to reconnect; it may take a job then and is
+      suspended again after it.
+    - **A timed run's pause is left to it.** A listener the bench paused (w3112) counts as stopped and is not touched; a turn's
+      end never continues one the hold suspended. Tests: `server/w5916RunnerHold.test.ts`; the real suspend, crash and lift on
+      a fake `Runner.Listener.exe`: the PR's evidence.
 - **A computer can be reserved for higher work** (w1643, lothsahn, 2026-10-20: "Instead of a single setting, let's make
   the setting the minimum priority work that can go to a machine. If normal (all work), if high, high and urgent, if
   urgent, urgent only"). `placement.minPriority`, set with `set_app_config` and kept across restarts, names each computer's

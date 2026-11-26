@@ -641,3 +641,30 @@ test("w5906: the daemon's own ports: an idle agent with a pending check-in or a 
   assert.equal(await ports.stopIdle!('slot2'), true, 'one already gone is not stopped again');
   assert.equal(free.stops, 1);
 });
+
+test('w5916: listeners a Dev Drive grow ended while the machine is held are left for the hold to start on its lift', async () => {
+  const { w, fx, ports: base } = world();
+  const deferred: string[][] = [];
+  const ports: MachineGuardPorts = { ...base, deferRunners: (roots) => (deferred.push(roots), true) };
+  w.sessions = [];
+  w.sandboxes = [];
+  let state: Record<string, unknown> = { letter: 'F', maxGB: 80, wantGB: 112 };
+  let runners = [{ root: 'F:/ffsb/ffu-runners/ffu-1', busy: false }];
+  const restarted: string[] = [];
+  const fx2: MachineGuardEffects = {
+    ...fx,
+    readJson: () => state,
+    runners: async () => runners,
+    restartRunner: async (root) => (restarted.push(root), 'started'),
+    runHelper: async (a) => {
+      state = { letter: 'F', maxGB: 112 };
+      runners = [];
+      return { action: a, ok: true, at: new Date(w.now).toISOString(), detail: 'grew F: from 80 to 112 GB' };
+    },
+  };
+  const g = new MachineGuard({ ...SETTINGS, hostDiskPaths: ['C:/', 'D:/'], devDriveVhdx: 'D:/work/ffw/devdrive.vhdx', devDriveMaxGB: 80 }, String.raw`F:\ffsb`, fx2, ports);
+  await g.tick();
+  assert.deepEqual(deferred, [['F:/ffsb/ffu-runners/ffu-1']]);
+  assert.deepEqual(restarted, [], 'not started while held');
+  assert.ok(w.reports.includes('Dev Drive: CI runners wait for the hold'), w.reports.join(', '));
+});

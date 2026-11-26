@@ -117,6 +117,8 @@ interface Persisted {
   metrics?: ProviderMetrics;
   /** The self-updater's last pass, as last pushed. */
   updater?: ProviderUpdater;
+  /** FFBox's outside watch on this portal (w5892), as last pushed. */
+  outsideWatch?: ProviderOutsideWatch;
   /** status.dev_requests, from the last status answer (devRequestsFrom). */
   devRequests?: ProviderDevRequests;
   capacity?: ProviderCapacity;
@@ -125,6 +127,25 @@ interface Persisted {
   intake: ProviderIntakeEvent[];
   /** Dev requests (server/devRequests.ts): refs answered, their log, and FF Factory's replies waiting for dev_received. */
   dev?: DevState;
+}
+
+/** FFBox's outside watch on this portal (w5892): outside_watch_status as FFBox sent it, with when it came. */
+export interface ProviderOutsideWatch {
+  at: string;
+  intervalSecs: number;
+  failures: number;
+  state: 'up' | 'down' | 'idle';
+  checks: number;
+  alerts: number;
+  pings: boolean;
+  healthUrl?: string;
+  topicTag?: string;
+  checkedAt?: string;
+  okAt?: string;
+  failingSince?: string;
+  announcedAt?: string;
+  lastAlert?: { at: string; title: string; ok: boolean };
+  receivedAt: string;
 }
 
 interface Link {
@@ -149,6 +170,8 @@ interface Link {
   reportsSent?: Map<string, string>;
   /** report_obsolete messages sent on this link (w853), by report id: the facts sent, so each goes once per link. */
   obsoleteSent?: Map<string, string>;
+  /** The outside_watch topic sent on this link (w5892), JSON of the topic or null: each value goes once per link. */
+  outsideWatchSent?: string;
   /** Set when the portal closes the link: the code and reason it sent, and the line people see for a parse failure. */
   closedBy?: { code: number; reason: string; detail?: string };
 }
@@ -549,6 +572,37 @@ export class ProviderManager {
     return !!this.link?.hello;
   }
 
+  /** The outside watch's topic for FFBox (w5892): a string while FFBox is the watcher, null when it is not, undefined until told. */
+  private outsideWatchTopic: string | null | undefined;
+
+  /** Whether the connected connector takes outside_watch (its hello lists it). */
+  get takesOutsideWatch() {
+    return this.online && !!this.data.accepts?.includes('outside_watch');
+  }
+
+  /** FFBox's outside watch, as it last reported it (w5892). */
+  get outsideWatch(): ProviderOutsideWatch | undefined {
+    return this.data.outsideWatch;
+  }
+
+  /**
+   * The outside watchdog's ntfy topic while FFBox watches this portal, or null when another machine does or the watch is
+   * off (w5892). Sent now when it changed and the connector takes it, and on every new link.
+   */
+  setOutsideWatch(topic: string | null) {
+    this.outsideWatchTopic = topic;
+    this.pushOutsideWatch();
+  }
+
+  private pushOutsideWatch() {
+    const link = this.link;
+    if (this.outsideWatchTopic === undefined || !link?.hello || link.ws.readyState !== link.ws.OPEN || !this.data.accepts?.includes('outside_watch')) return;
+    const sent = JSON.stringify(this.outsideWatchTopic);
+    if (link.outsideWatchSent === sent) return;
+    this.send(link, { type: 'outside_watch', topic: this.outsideWatchTopic });
+    link.outsideWatchSent = sent;
+  }
+
   // ---------------------------------------------------------------- state
 
   private load(): Persisted {
@@ -946,6 +1000,7 @@ export class ProviderManager {
     console.log(`provider ${this.id}: connector ${h.connector.version} (commit ${h.connector.commit?.slice(0, 7) ?? 'unknown'}) connected from ${link.ip}, token ${link.tokenFingerprint}…`);
     // FF Factory's own dev replies FFBox has not confirmed go again on every new link.
     this.hook(() => this.dev?.onConnect());
+    this.pushOutsideWatch();
     this.pollStatus(link);
     this.changed();
   }
@@ -1046,6 +1101,29 @@ export class ProviderManager {
         };
         const h = updaterHealth(this.data.updater, this.now());
         if (h && h.state !== was) console.log(`provider ${this.id}: ${h.line}`);
+        return this.changed();
+      }
+      case 'outside_watch_status': {
+        const o = msg.outside_watch;
+        const was = this.data.outsideWatch?.state;
+        this.data.outsideWatch = {
+          at: o.at,
+          intervalSecs: o.interval_secs,
+          failures: o.failures,
+          state: o.state,
+          checks: o.checks,
+          alerts: o.alerts,
+          pings: o.pings,
+          ...(o.health_url ? { healthUrl: o.health_url } : {}),
+          ...(o.topic_tag ? { topicTag: o.topic_tag } : {}),
+          ...(o.checked_at ? { checkedAt: o.checked_at } : {}),
+          ...(o.ok_at ? { okAt: o.ok_at } : {}),
+          ...(o.failing_since ? { failingSince: o.failing_since } : {}),
+          ...(o.announced_at ? { announcedAt: o.announced_at } : {}),
+          ...(o.last_alert ? { lastAlert: { at: o.last_alert.at, title: cleanText(o.last_alert.title, 200), ok: o.last_alert.ok } } : {}),
+          receivedAt: at,
+        };
+        if (o.state !== was) console.log(`provider ${this.id}: outside watch ${o.state} (${o.checks} checks, ${o.alerts} alerts)`);
         return this.changed();
       }
       case 'query_result': {

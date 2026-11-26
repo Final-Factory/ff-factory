@@ -67,9 +67,22 @@ ffu-slot release                             # once the work is pushed (a stoppe
 ffu-slot list                                # every slot, its branch, and why it is or is not free
 ffu-slot take --wait 9 --branch my-branch    # no slot free: wait up to 9 min for one (w5885)
 ffu-slot sweep                               # free every slot a worker may take now, saving its holder's work first
+eval "$(ffu-slot take --branch other-branch)" # a second checkout: its own slot and target beside the first (w5885)
+eval "$(ffu-slot where --branch my-branch)"  # back to the slot on my-branch; plain `where` gives the one used last
+ffu-slot release --branch other-branch       # give one back; plain `release` gives back every slot of yours with no work
 ```
 
-`take` keeps the slot you already hold. Otherwise it picks a free slot: first one last used on your branch, then the
+**One slot per branch** (w5885, lothsahn's note of 2026-11-26: "A worker with two checkouts may lease a second ffu slot,
+one slot per checkout and per branch, when one is free. The worker's own hold never counts as 'another worker's'"). w5475's
+worker held slot4 for its map branch; its Report a Bug branch could not build in slot4's target (two checkouts in one target
+overwrite each other's crates) nor in its temp folder (w4258's guard), so it waited on its own slot while three slots sat
+free. Now `take --branch <b>` on a branch none of your slots is on leases another free slot, up to `FFU_SLOTS_PER_WORKER`
+(2, a guess: the case it came from, and low so one worker never takes a machine's four). With none free, or at that cap, a
+slot of yours with no work switches to the branch, as before; when all of yours have work, take exits 4 naming your slots
+as yours and the others by their real holders. The guards (`server/ffuTargetGuard.ts`, `server/strayWrite.ts`) open every
+slot you hold. Test: `server/ffuSlots.test.ts`, "one worker, two branches".
+
+`take` keeps the slot you already hold on that branch (with no `--branch`, the one you used last). Otherwise it picks a free slot: first one last used on your branch, then the
 one used most recently (the warmest target), a slot with no work to save before one whose holder's work must be rescued.
 It makes a new slot (a cold target) only when no slot is free. Exit 4 means no slot can be had now: all
 `FF_FFU_SLOTS_MAX` slots are held, or the drive has under 40 GB free. Exit 3 is any other failure.
@@ -133,6 +146,11 @@ than `cd` into a slot path it remembers: `take` keeps the slot it holds, or give
 The `ffu-slot` shim (`machine/ffuSlots.ts`) is written by the machine daemon into the same folder as `ff-leftovers` and
 `ff-pr`, which is first on every worker's PATH. Its default is 4 slots per machine (`FFU_SLOTS_DEFAULT_MAX`, a guess),
 so 4 × the 16 GB cap is 64 GB at most.
+
+**A cargo build outside a slot is noted** (w5885, warn-only, `server/ffuSlotBuildHook.ts`): when a worker that holds no slot
+runs `cargo build`, `test`, `check`, `clippy`, `run`, `bench` or `nextest` outside `ffu-sandboxes`, its next step carries a
+note to take a slot or wait for one, at most once per 30 min. A machine with no `ffu-sandboxes` folder is left alone. A
+refusal would come in a later, separate change, by lothsahn's lockout rule (warn first).
 
 ## Clean-up (`server/installLeftovers.ts`, rule `ffu-slot-target`)
 

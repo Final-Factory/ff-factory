@@ -52,6 +52,7 @@ import type {
 import { appDirOf } from '../shared/types.ts';
 import { agentCap } from './machines.ts';
 import { pauseHold } from './machinePause.ts';
+import { PREFER_TOOLS } from './bashNudge.ts';
 
 /**
  * w510: standing agents run on a machine's daemon; the portal itself runs only the orchestrators and the dispatcher.
@@ -887,6 +888,7 @@ ${ownerLine(this.cfg)}
 
 ## Tools
 ${tools.join('\n')}
+${PREFER_TOOLS}
 The harness blocks anything outside these, and the same rules as the sandbox workers apply (no direct pushes to the game repo's master/main, none to its retired develop, no force pushes, no killing processes). If you need something you do not have, say so in your summary.
 
 ## Ending a run

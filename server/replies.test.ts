@@ -223,9 +223,10 @@ test('w866 reaction: the orchestrator\'s input carries the emoji and the message
   await until('the turn ends', () => sessions.get(id).info.status === 'idle');
   // Its turn is the harness's: the gates that need the person's own turn refuse, as they do for a timer.
   assert.equal(loth.turnFrom, 'system');
-  const refused = await call(loth.info, 'update_work', { id: 'w811', close: 'cancelled', note: 'dup', when: { pr_merged: 'Final-Factory/FinalFactory#1400' }, words: 'Close w811 as a duplicate once 1314 is merged' });
+  // (w5896: his own earlier words quoted would carry the decision; without them the click alone does not.)
+  const refused = await call(loth.info, 'update_work', { id: 'w811', close: 'cancelled', note: 'dup', when: { pr_merged: 'Final-Factory/FinalFactory#1400' } });
   assert.equal(refused.isError, true);
-  assert.match(refused.text, /recorded only in a turn Lothsahn started with a message of their own/);
+  assert.match(refused.text, /recorded only on Lothsahn's own words/);
   // The person's budgets do not start again for a click (personWrote), and a click on a relayed line works the same.
   const before2 = input.length;
   o.react(id, update.seq, '❓', true, LOTH);
@@ -291,7 +292,7 @@ test('w1039: a 👍 on "shall I approve w5?" approves w5 as Ben\'s own words, on
   assert.equal(env.ben.turnFrom, 'system', 'still the harness\'s turn: the click is scoped, not a typed turn');
   const w6 = await env.call(env.ben.info, 'update_work', { id: 'w6', approve: true });
   assert.equal(w6.isError, true, 'the sentence names w5 and approve; w6 is in another sentence');
-  assert.match(w6.text, /this turn is not theirs/);
+  assert.match(w6.text, /this turn is the harness's/);
   assert.match(w6.text, /👍 on #\d+ covers only the action and the requests one sentence/);
   assert.equal(env.store.work.get('w6')?.approval?.state, 'pending');
   const ok = await env.call(env.ben.info, 'update_work', { id: 'w5', approve: true });

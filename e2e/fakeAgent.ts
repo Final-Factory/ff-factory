@@ -5,6 +5,9 @@
  * blocks, tool calls, a result), chosen by a tag in the message:
  *
  *   "#perm"        asks canUseTool for a Bash call, then reports whether it was allowed
+ *                  (w5914: FF Factory's nudge toward another route is answered as a worker would: the same call again, its
+ *                  description "No other route: ..." ("#noreason": with no reason), or "#comply": "Took another route.")
+ *   "#permidle"    a background subagent asks for a Bash call (nudged, then insisting) and the turn ends while it waits (w5914)
  *   "#permcmd [why: <reason>] <command>"  the same for that Bash command (to the end of the line, ⏎ for a newline), with Claude Code's decisionReason when given: "Allowed: ran it." or "Denied: it asked." (w913, w1097)
  *   "#long"        a reply of 60 paragraphs (for scrolling and jump-to-latest)
  *   "#screenshot"  a tool result carrying a PNG (an inline image)
@@ -41,6 +44,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { NUDGE_MARK } from '../server/bashNudge.ts';
+
+/** w5914: FF Factory's first answer to a shell command, a deny that asks for another route. */
+const isNudge = (d: PermissionResult): d is { behavior: 'deny'; message: string } => d.behavior === 'deny' && d.message.startsWith(NUDGE_MARK);
+/** The description a worker gives the same command asked again: a reason, or ("#noreason") none. */
+const noRouteWords = (w: string) => (/#noreason\b/i.test(w) ? 'A command' : 'No other route: the fake agent needs this exact command');
 
 /** A 16x16 red PNG. */
 export const RED_PNG =
@@ -190,20 +199,53 @@ export function fakeQuery(fake: FakeOptions = {}) {
           const m = /#permcmd[ \t]+(?:\[why: ([^\]]*)\][ \t]*)?([^\n]*)/i.exec(words);
           const input = { command: (m?.[2] ?? '').replaceAll('⏎', '\n'), description: 'A command' };
           yield toolUse(toolId, 'Bash', input);
-          const decision: PermissionResult = (options?.canUseTool
-            ? await options.canUseTool('Bash', input, { signal: abort.signal, toolUseID: toolId, ...(m?.[1] ? { decisionReason: m[1] } : {}) } as never)
-            : { behavior: 'allow', updatedInput: input }) ?? { behavior: 'deny', message: 'no answer' };
+          const ctx = { signal: abort.signal, toolUseID: toolId, ...(m?.[1] ? { decisionReason: m[1] } : {}) };
+          let decision: PermissionResult = (options?.canUseTool ? await options.canUseTool('Bash', input, ctx as never) : { behavior: 'allow', updatedInput: input }) ?? { behavior: 'deny', message: 'no answer' };
+          if (isNudge(decision)) {
+            yield toolResult(toolId, decision.message, true);
+            if (/#comply\b/i.test(words)) {
+              yield text('Took another route.');
+              yield result(uuid, true, 'another route');
+              yield state('idle');
+              continue;
+            }
+            const again = { ...input, description: noRouteWords(words) };
+            yield toolUse(`${toolId}b`, 'Bash', again);
+            decision = (await options!.canUseTool!('Bash', again, { ...ctx, toolUseID: `${toolId}b` } as never)) ?? { behavior: 'deny', message: 'no answer' };
+          }
           yield toolResult(toolId, decision.behavior === 'allow' ? 'done' : 'denied', decision.behavior !== 'allow');
           yield text(decision.behavior === 'allow' ? 'Allowed: ran it.' : 'Denied: it asked.');
           yield result(uuid, true, decision.behavior);
+        } else if (/#permidle\b/i.test(words) && options?.canUseTool) {
+          // w5914 (w5869's stuck card): a background subagent's shell command still waits for a person when the turn ends.
+          const ask = options.canUseTool;
+          const input = { command: 'rm -rf build', description: 'No other route: a subagent needs this exact command' };
+          const sub = { signal: abort.signal, agentID: 'sub-1' };
+          void ask('Bash', input, { ...sub, toolUseID: `tool-${++msgId}` } as never).then((d) =>
+            d?.behavior === 'deny' && isNudge(d) ? ask('Bash', input, { ...sub, toolUseID: `tool-${++msgId}` } as never) : d,
+          );
+          await sleep(step * 20);
+          yield text('Left a subagent working.');
+          yield result(uuid, true, 'left a subagent working');
         } else if (/#perm\b/i.test(words)) {
           const toolId = `tool-${++msgId}`;
           const input = { command: 'rm -rf build', description: 'Clean the build folder' };
           yield toolUse(toolId, 'Bash', input);
-          yield state('requires_action');
-          const decision: PermissionResult = (options?.canUseTool
+          let decision: PermissionResult = (options?.canUseTool
             ? await options.canUseTool('Bash', input, { signal: abort.signal, toolUseID: toolId } as never)
             : { behavior: 'allow', updatedInput: input }) ?? { behavior: 'deny', message: 'no answer' };
+          if (isNudge(decision)) {
+            yield toolResult(toolId, decision.message, true);
+            if (/#comply\b/i.test(words)) {
+              yield text('Took another route.');
+              yield result(uuid, true, 'another route');
+              yield state('idle');
+              continue;
+            }
+            yield toolUse(`${toolId}b`, 'Bash', { ...input, description: noRouteWords(words) });
+            yield state('requires_action');
+            decision = (await options!.canUseTool!('Bash', { ...input, description: noRouteWords(words) }, { signal: abort.signal, toolUseID: `${toolId}b` } as never)) ?? { behavior: 'deny', message: 'no answer' };
+          } else yield state('requires_action');
           yield state('running');
           if (decision.behavior === 'allow') {
             yield toolResult(toolId, 'removed build/');
