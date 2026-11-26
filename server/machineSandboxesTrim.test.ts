@@ -748,8 +748,10 @@ for (const how of ['hangs', 'throws'] as const) {
       // A hang: it ends only when the pool aborts it, as a killed git process would.
       return new Promise((res) => o?.signal?.addEventListener('abort', () => res({ code: 1, stdout: '', stderr: 'killed' })));
     };
+    await p.tick();
+    const before = { worktree: isWorktree(dir), blocker: (p as unknown as { convertBlocker: (r: unknown) => string | undefined; recs: Map<string, unknown> }).convertBlocker((p as unknown as { recs: Map<string, unknown> }).recs.get('sb1')) };
     const res = await p.switch('sb1', 'sandbox/placed', 'origin/master');
-    assert.ok(reached, 'the planted step ran');
+    assert.ok(reached, `the planted step ran: ${JSON.stringify({ before, now: { worktree: isWorktree(dir), slot: isSlotRepo(dir) }, events })}`);
     assert.equal(res.to, 'sandbox/placed', 'the placement went on');
     assert.ok(isWorktree(dir), 'still a whole worktree');
     assert.equal(fs.existsSync(path.join(dir, '.git.new')), false, 'no half-made git folder left');
