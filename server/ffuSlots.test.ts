@@ -17,8 +17,11 @@ import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
 const NOW = Date.now();
 const HOUR = 3_600_000;
 
+/** The tests' own git is no worker's: no FF_SESSION_ID, so the slot hooks (w6038) check nothing. */
+const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'FF_SESSION_ID'));
+
 function git(args: string[], cwd?: string) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 }
