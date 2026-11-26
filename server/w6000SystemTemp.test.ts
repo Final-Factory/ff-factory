@@ -169,11 +169,9 @@ const CENSUS: Record<string, [number, string]> = {
   'server/ownLeftovers.ts': [1, 'a comment'],
   'server/rootFence.ts': [1, 'a comment of the guard\'s path rules'],
   'server/tempDelete.ts': [1, 'a comment of the guard\'s delete rules'],
-  'server/tmpWriteFence.ts': [1, 'the warn-only /tmp write fence (w6008) names the system temp folders it warns on'],
   'server/testHistoryCi.ts': [2, 'the portal\'s test history download: its data folder, os.tmpdir() only when that is missing (portal VM)'],
   'server/testMachine.ts': [4, 'test kit: the test run\'s TMPDIR'],
   'server/testPorts.ts': [1, 'test kit: port lock files in the test run\'s TMPDIR'],
-  'server/tmpWriteFence.ts': [1, 'a comment of the /tmp write fence\'s argument parsing (w6008)'],
 };
 
 /**
