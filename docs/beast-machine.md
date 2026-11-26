@@ -164,3 +164,29 @@ Details in [machines.md](machines.md), "Moving the portal".
   try the mount again. The recovery self-test (`host_recovery selftest`) was removed with it.
 - After an unclean portal stop, the portal waits up to 15 minutes for the local machine's sandbox drive before it
   resumes that machine's agents (`Agents.sandboxRootBack`).
+
+## Slow process starts (w5997, 2026-11-26)
+
+On 2026-11-26 one process start on BEAST took 0.1 to 10 s (`cmd /c exit 0`: p50 2.0 s, p90 6.3 s at one moment), and
+`server/ffuSlots.test.ts` ran 1218 to 1360 s before PR #1337 and 619 s after it (LothDesktop: 89 s and 56 s). The time
+was not in the kernel's create call (a suspended `cmd.exe` p50 13 to 17 ms) but in the new process's start-up, and it
+followed none of CPU, disk queue, paging, free memory or the process count.
+
+What the machine held then: about 40,700 process objects against 55 to 200 running processes. 39,640 of them were
+`wsl.exe` processes that had exited and were still held open, one started every ~36 s since the boot of 2026-11-14,
+with 19.6 GB of paged pool (7.9 GB of it `Toke`, tokens) and 8 GB of non-paged pool. The holder is a process a worker
+cannot see (no visible process holds more than 2,000 handles). The fix and the proof need an admin: find the holder
+(Process Explorer, `handle.exe`), end the leak (`wsl --shutdown`, a restart of the WSL service, or a reboot), then time
+starts again.
+
+How a worker checks this without admin, on any Windows machine:
+
+- `(Get-Counter '\Objects\Processes').CounterSamples[0].CookedValue` against `(Get-Process).Count`: thousands more
+  objects than processes is a leak of exited processes.
+- `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` over every pid (multiples of 4) finds them: an exit code other than
+  259 (still active) is an exited process, and `NtQueryInformationProcess` class 27 (image file name) and class 0
+  (the parent pid) still answer for it.
+- `NtQuerySystemInformation` class 22 (pool tags) reads the kernel pool by tag without admin.
+- Not available without admin: Defender's exclusions (`Get-MpPreference` answers "Must be an administrator"), MsMpEng
+  itself (hidden from `Get-Process` and its counters), WPR ("Failed to enable the policy to profile system
+  performance").

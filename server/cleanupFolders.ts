@@ -4,7 +4,7 @@ import { gitExecFile } from './safeGit.ts';
 import { freeableBytes, localWorkWhy, norm, unpushedWorkWhy, OUTSIDE_ROOT_WHY, within } from './cleanup.ts';
 import { requestIdsIn, CONTEXT_MAX_AGE_HOURS } from './staleOutput.ts';
 import type { SessionOwner } from './resumable.ts';
-import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite, runnerJobWhy, RUNNER_KEPT, type ProcLite } from './installLeftovers.ts';
+import { finishedBulkIn, INSTALL_LEFTOVER_DEFAULTS, isCargoTarget, newestTopWrite, newestWrite, runnerJobWhy, runnerWorkRoute, RUNNER_KEPT, type ProcLite } from './installLeftovers.ts';
 import { idleJitEntries, LIBRARY_CACHES, projectOpen, staleCacheEntries, type StaleEntry } from './cacheTrim.ts';
 import { PLAYER_CACHE_ENTRY } from '../machine/playerCache.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
@@ -160,6 +160,8 @@ export interface SlotContext {
   hosts?: string[];
   /** The same processes with their pids (w5235): an FFU runner's Runner.Worker and listener are found by pid and parent. */
   procList?: ProcLite[];
+  /** The platform a runner job folder's row is written for (w5929: on Windows it says how the daemon takes it); tests give their own. */
+  platform?: NodeJS.Platform;
   /** A runner's newest listener _diag log tail (machine/benchRunners.ts readListenerLog); tests give their own. */
   runnerLog?: (runner: string) => string | undefined;
 }
@@ -483,7 +485,7 @@ export async function judgeRunnerWorkPath(p: string, f: CleanupFacts, now: numbe
   const newest = await newestTopWrite(entry);
   if (newest > now - settle * 60_000) return row('keep', `${what}: written ${agoMin(now - newest)} ago, within the ${settle} min settle time (a job may have just ended or begun)`);
   const inside = norm(p) === norm(entry) ? '' : `inside ${what}: `;
-  return row('delete', `${inside}${what}, no job running on the runner (no Runner.Worker, no process from its _work, its listener not handed a job) and nothing in it written for ${settle} min; the next job checks out and builds again (rule ffu-runner-work, w3502)`);
+  return row('delete', `${inside}${what}, no job running on the runner (no Runner.Worker, no process from its _work, its listener not handed a job) and nothing in it written for ${settle} min; the next job checks out and builds again (rule ffu-runner-work, w3502)${(ctx.platform ?? process.platform) === 'win32' ? `. A fenced worker cannot delete it on Windows (the runners' Medium integrity label): ${runnerWorkRoute()}` : ''}`);
 }
 
 /**
