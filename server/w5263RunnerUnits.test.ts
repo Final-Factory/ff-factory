@@ -69,6 +69,51 @@ test("a listener's log is busy from the job it took after its last idle word, th
   assert.equal(busySince(undefined), undefined);
 });
 
+/**
+ * w6001: ffu-biscuit-4's own lines (_diag/Runner_20261126-084924-utc.log, biscuit, 2026-11-26), shortened: its stack traces
+ * and the session id are cut. After the job completed it logged one more GET ...?status=Busy poll, cancelled as it went back
+ * to status=Online; read as busy, (d) skipped the listener and (b) restarted it as stuck about 10 minutes later.
+ */
+const COMPLETED_TAIL = [
+  '[2026-11-26 09:28:55Z INFO BrokerMessageListener] Acknowledging runner request \'2f85a2bd-7c64-5dc6-ab51-c1c09108b9b3\'.',
+  '[2026-11-26 09:28:56Z INFO JobDispatcher] Job request 0 for plan 2dd02758-c40e-4921-bfd5-30984a0588db job 2f85a2bd-7c64-5dc6-ab51-c1c09108b9b3 received.',
+  '[2026-11-26 09:28:56Z INFO BrokerMessageListener] Received job status event. JobState: Busy',
+  '[2026-11-26 09:28:56Z INFO Terminal] WRITE LINE: 2026-11-26 09:28:56Z: Running job: check',
+  '[2026-11-26 09:34:57Z INFO JobDispatcher] Successfully renew job 2f85a2bd-7c64-5dc6-ab51-c1c09108b9b3, job is valid till 11/26/2026 9:44:57 AM',
+  '[2026-11-26 09:35:31Z INFO ProcessInvokerWrapper] Finished process 2602614 with exit code 100, and elapsed time 00:06:35.0076438.',
+  '[2026-11-26 09:35:31Z INFO JobDispatcher] Worker finished for job 2f85a2bd-7c64-5dc6-ab51-c1c09108b9b3. Code: 100',
+  '[2026-11-26 09:35:31Z INFO JobDispatcher] finish job request for job 2f85a2bd-7c64-5dc6-ab51-c1c09108b9b3 with result: Succeeded',
+  '[2026-11-26 09:35:31Z INFO Terminal] WRITE LINE: 2026-11-26 09:35:31Z: Job check completed with result: Succeeded',
+  '[2026-11-26 09:35:31Z INFO JobDispatcher] Stop renew job request for job 2f85a2bd-7c64-5dc6-ab51-c1c09108b9b3.',
+  '[2026-11-26 09:35:31Z INFO JobNotification] Entering JobCompleted Notification',
+  '[2026-11-26 09:35:31Z INFO BrokerMessageListener] Received job status event. JobState: Online',
+  '[2026-11-26 09:35:31Z WARN GitHubActionsService] GET request to https://broker.actions.githubusercontent.com/message?sessionId=d21d1ad1&status=Busy&runnerVersion=2.338.2&os=Linux&architecture=X64&disableUpdate=false has been cancelled.',
+  '[2026-11-26 09:35:31Z ERR  BrokerServer] Catch exception during request',
+  '[2026-11-26 09:35:31Z ERR  BrokerServer] System.Threading.Tasks.TaskCanceledException: The operation was canceled.',
+  '[2026-11-26 09:35:31Z WARN BrokerServer] Back off 12.705 seconds before next retry. 4 attempt left.',
+  '[2026-11-26 09:35:31Z INFO BrokerMessageListener] Get messages has been cancelled using local token source. Continue to get messages with new status.',
+  '[2026-11-26 09:39:52Z INFO GitHubActionsService] AAD Correlation ID for this token request: Unknown',
+  '[2026-11-26 09:46:23Z WARN GitHubActionsService] GET request to https://broker.actions.githubusercontent.com/message?sessionId=d21d1ad1&status=Online&runnerVersion=2.338.2&os=Linux&architecture=X64&disableUpdate=false timed out after 100 seconds.',
+  '[2026-11-26 09:46:23Z ERR  BrokerServer] System.TimeoutException: The HTTP request timed out after 00:01:40.',
+  '',
+].join('\n');
+/** The same listener while its job ran (cut before "Worker finished"), and handed a new job after the one that completed. */
+const RUNNING_TAIL = `${COMPLETED_TAIL.split('\n').slice(0, 5).join('\n')}\n`;
+const NEXT_JOB_TAIL = `${COMPLETED_TAIL}[2026-11-26 09:50:02Z INFO BrokerMessageListener] Acknowledging runner request '7a1c'.\n[2026-11-26 09:50:03Z INFO JobDispatcher] Job request 0 for plan 5e2b job 7a1c received.\n[2026-11-26 09:50:03Z INFO Terminal] WRITE LINE: 2026-11-26 09:50:03Z: Running job: check\n`;
+
+test('w6001: the cancelled status=Busy poll after a completed job is idle; a running or newly handed job is busy', () => {
+  assert.equal(busySince(COMPLETED_TAIL), undefined);
+  assert.equal(busySince(RUNNING_TAIL), at('2026-11-26T09:28:55Z'));
+  assert.equal(busySince(NEXT_JOB_TAIL), at('2026-11-26T09:50:02Z'));
+  // a Busy poll after the completed line that was not cancelled is idle too: no job line follows the idle word
+  const uncancelled = COMPLETED_TAIL.split('\n').filter((l) => !l.includes('cancelled using local token source')).join('\n');
+  assert.equal(busySince(uncancelled), undefined);
+  // a tail that is all Busy polls (the job's lines rolled out of the 64 KB) still counts from its oldest uncancelled one
+  const polls = COMPLETED_TAIL.split('\n').slice(12, 17).join('\n');
+  assert.equal(busySince(polls), undefined);
+  assert.equal(busySince(polls.split('\n').slice(0, 4).join('\n')), at('2026-11-26T09:35:31Z'));
+});
+
 test('systemctl show is read for its state and result', () => {
   assert.deepEqual(parseShow('ActiveState=failed\nResult=start-limit-hit\n'), { activeState: 'failed', result: 'start-limit-hit' });
 });

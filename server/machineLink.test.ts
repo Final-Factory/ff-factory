@@ -537,10 +537,10 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   const f2 = await downloadBundle(whole.url, 'tok', b, path.join(dir, 'c'), fetch, { stallMs: 300 });
   assert.equal(createHash('sha256').update(fs.readFileSync(f2)).digest('hex'), b.sha256);
 
-  // Every try stalls: it gives up with the reason, the part file gone.
+  // Every try stalls: it gives up with the reason, and keeps what it got for the next call (w5898).
   const never = await bundleServer(t, body, () => 'stall');
   await assert.rejects(downloadBundle(never.url, 'tok', b, path.join(dir, 'd'), fetch, { stallMs: 200, attempts: 2 }), /the bundle's download stalled \(no byte in 0 s\) at \d+ of 200000 bytes, after 2 attempt\(s\)/);
-  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), []);
+  assert.deepEqual(fs.readdirSync(path.join(dir, 'd')), [`${b.sha256.slice(0, 16)}.bundle.part`]);
 
   // A refusal is not retried.
   const refused = await bundleServer(t, body, () => 404);
@@ -548,6 +548,77 @@ test('w1641: a bundle download that stalls or is cut resumes where it stopped, e
   assert.equal(refused.seen.length, 1);
 
   assert.equal(fetchError(Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT' }) })), 'terminated (UND_ERR_BODY_TIMEOUT: Body Timeout Error)');
+});
+
+test('w5898: a cut download keeps its part and the next call resumes it; a bad part falls back to a full download from 0', async (t) => {
+  const body = Buffer.from(Array.from({ length: 200_000 }, (_, i) => (i * 13) % 251));
+  const b = { sha256: createHash('sha256').update(body).digest('hex'), size: body.length };
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffdl-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const name = `${b.sha256.slice(0, 16)}.bundle.part`;
+
+  // beast's case: one call runs out (here: its one attempt stalls at half); the next call asks only for the rest.
+  const d1 = path.join(dir, 'resume');
+  const first = await bundleServer(t, body, () => 'stall');
+  const lines: string[] = [];
+  await assert.rejects(downloadBundle(first.url, 'tok', b, d1, fetch, { stallMs: 200, attempts: 1, log: (l) => lines.push(l) }), /stalled/);
+  assert.equal(fs.statSync(path.join(d1, name)).size, 100_000, 'the bytes of the cut attempt stay');
+  assert.match(lines.at(-1) ?? '', /kept the 100000 of 200000 bytes of the bundle in .*\.bundle\.part; the next attempt resumes from there/);
+  const second = await bundleServer(t, body, () => 'serve');
+  lines.length = 0;
+  const file = await downloadBundle(second.url, 'tok', b, d1, fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.deepEqual(second.seen, ['bytes=100000-'], 'the second call asks only for the rest');
+  assert.ok(fs.readFileSync(file).equals(body));
+  assert.match(lines[0] ?? '', /resuming the bundle's download from the 100000 of 200000 bytes an earlier attempt kept/);
+  assert.deepEqual(fs.readdirSync(d1), [path.basename(file)], 'the part became the bundle');
+
+  // A kept part whose bytes are wrong: the whole file's SHA-256 refuses it, the part goes, and it downloads again from 0.
+  const d2 = path.join(dir, 'bad');
+  fs.mkdirSync(d2);
+  fs.writeFileSync(path.join(d2, name), Buffer.alloc(100_000, 0xff));
+  const bad = await bundleServer(t, body, () => 'serve');
+  lines.length = 0;
+  const f2 = await downloadBundle(bad.url, 'tok', b, d2, fetch, { stallMs: 5000, log: (l) => lines.push(l) });
+  assert.deepEqual(bad.seen, ['bytes=100000-', undefined], 'a resume, then the whole bundle from 0');
+  assert.ok(fs.readFileSync(f2).equals(body));
+  assert.ok(lines.some((l) => /did not match what the portal said .*the kept part is deleted and the download starts again from 0/.test(l)), lines.join('\n'));
+  assert.deepEqual(fs.readdirSync(d2), [path.basename(f2)]);
+
+  // A part as long as the bundle or longer, or a folder in its place: removed, and a plain download from 0.
+  for (const [sub, make] of [
+    ['long', (f: string) => fs.writeFileSync(f, Buffer.alloc(200_001))],
+    ['full', (f: string) => fs.writeFileSync(f, body)],
+    ['empty', (f: string) => fs.writeFileSync(f, '')],
+    ['folder', (f: string) => fs.mkdirSync(f)],
+  ] as const) {
+    const d = path.join(dir, sub);
+    fs.mkdirSync(d);
+    make(path.join(d, name));
+    const s = await bundleServer(t, body, () => 'serve');
+    const f = await downloadBundle(s.url, 'tok', b, d, fetch, { stallMs: 5000 });
+    assert.deepEqual(s.seen, [undefined], `${sub}: from 0`);
+    assert.ok(fs.readFileSync(f).equals(body), sub);
+  }
+
+  // A portal that will not serve the kept range (416): from 0 on the next try, not a refusal.
+  const d4 = path.join(dir, 'range');
+  fs.mkdirSync(d4);
+  fs.writeFileSync(path.join(d4, name), body.subarray(0, 100_000));
+  const r416 = await bundleServer(t, body, (n) => (n === 1 ? 416 : 'serve'));
+  const f4 = await downloadBundle(r416.url, 'tok', b, d4, fetch, { stallMs: 5000 });
+  assert.deepEqual(r416.seen, ['bytes=100000-', undefined]);
+  assert.ok(fs.readFileSync(f4).equals(body));
+
+  // A refusal keeps nothing; parts of other bundles beyond the newest one go.
+  const d5 = path.join(dir, 'refused');
+  fs.mkdirSync(d5);
+  fs.writeFileSync(path.join(d5, name), body.subarray(0, 100_000));
+  fs.writeFileSync(path.join(d5, 'aaaaaaaaaaaaaaaa.bundle.part'), 'old');
+  fs.utimesSync(path.join(d5, 'aaaaaaaaaaaaaaaa.bundle.part'), new Date(1_000_000), new Date(1_000_000));
+  fs.writeFileSync(path.join(d5, 'bbbbbbbbbbbbbbbb.bundle.part'), 'newer');
+  const refused = await bundleServer(t, body, () => 404);
+  await assert.rejects(downloadBundle(refused.url, 'tok', b, d5, fetch, { stallMs: 5000 }), /the portal answered 404/);
+  assert.deepEqual(fs.readdirSync(d5), ['bbbbbbbbbbbbbbbb.bundle.part']);
 });
 
 test('w5938: a stall check that comes late (the daemon blocked its own loop) is not a stall; the bytes that came meanwhile are read', async (t) => {
