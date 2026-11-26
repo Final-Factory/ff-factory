@@ -73,7 +73,8 @@ function rig(o: RigOpts = {}) {
   let api: Rig | undefined;
   const set: [number, number][] = [];
   const d: WinCiFirstDeps = {
-    settings: o.settings === null ? undefined : (o.settings ?? LOTHDESKTOP_CI_FIRST),
+    // the logic is the same at any level; these cases are written at BelowNormal (LothDesktop's own is Idle, tested above)
+    settings: o.settings === null ? undefined : (o.settings ?? { ...LOTHDESKTOP_CI_FIRST, priority: P.PRIORITY_BELOW_NORMAL }),
     procs: async () => {
       if (fail) throw new Error('Get-CimInstance timed out');
       return procs;
@@ -138,10 +139,11 @@ function rig(o: RigOpts = {}) {
   return out;
 }
 
-test('lothdesktop is the one Windows CI-first machine, BelowNormal', () => {
+test('lothdesktop is the one Windows CI-first machine, Idle (its runners run their jobs at BelowNormal)', () => {
   assert.equal(WIN_CI_FIRST.lothdesktop, LOTHDESKTOP_CI_FIRST);
   assert.deepEqual(Object.keys(WIN_CI_FIRST), ['lothdesktop']);
-  assert.equal(LOTHDESKTOP_CI_FIRST.priority, P.PRIORITY_BELOW_NORMAL);
+  assert.equal(LOTHDESKTOP_CI_FIRST.priority, P.PRIORITY_LOW);
+  assert.equal(priorityName(P.PRIORITY_LOW), 'Idle');
   assert.equal(priorityName(P.PRIORITY_NORMAL), 'Normal');
   assert.equal(priorityName(P.PRIORITY_BELOW_NORMAL), 'BelowNormal');
   assert.equal(priorityName(P.PRIORITY_LOW), 'Idle');

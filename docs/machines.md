@@ -1320,7 +1320,7 @@ older daemon ignores it and keeps making worktrees.
   and is the way back.
 - **CI jobs go first on a Windows CI-first machine** (w6110; docs/self-recovery.md "CI jobs go first on LothDesktop"):
   `ops_worker` `machine_update` `win_ci_first` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `winCiFirst`;
-  the daemon restarts with it. `enforce` lowers agents' tools to BelowNormal while a CI job runs; `warn` (unset) only logs
+  the daemon restarts with it. `enforce` lowers agents' tools to Idle while a CI job runs (the jobs themselves run BelowNormal); `warn` (unset) only logs
   what they use and raises back anything lowered, the way back.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.

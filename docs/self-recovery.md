@@ -307,16 +307,20 @@ tools' processes run above BelowNormal. Editors the daemon starts are not under 
 `belowNormal` setting runs them BelowNormal where it is on); batch builds go to Idle.
 
 With `winCiFirst` `enforce` (set by `ops_worker machine_update win_ci_first enforce`, Windows only; read at the daemon's
-start) the same tick lowers those tools' processes to BelowNormal while a job runs, and what they start inherits it:
+start) the same tick lowers those tools' processes to Idle while a job runs, and what they start inherits it. Idle, not
+BelowNormal: the runners run their jobs at BelowNormal themselves (the daemon restarts a runner with its scheduled task,
+whose default priority 7 is BelowNormal; measured 2026-11-26, both workers at BelowNormal), so on the morning of
+2026-11-26 Normal-priority busy loops beside them did not share the CPU with the jobs but went ahead of them. Below the
+jobs means Idle:
 - **What is lowered**: an agent's tools only, what its claude starts (shells, cargo, rustc, python, players). The host and
   its direct children (claude) keep their priority, so the agent's own loop and its heartbeat are not starved. No Unity
-  editor or what it started is lowered (one a lowered tool starts later inherits BelowNormal), nor the daemon, another
+  editor or what it started is lowered (one a lowered tool starts later inherits Idle), nor the daemon, another
   host or a runner's tree. Windows reuses pids, so each tick reads every candidate's start time: a process started after
   the listing could have been taken is left alone, and a host whose pid started after the host wrote its own record is no
   host (a job's process that got it stays the job's). Between that read and the lowering a pid could still change hands
-  (milliseconds, against a listing at most 6 s old); that gap is accepted: the worst case is one process at BelowNormal
+  (milliseconds, against a listing at most 6 s old); that gap is accepted: the worst case is one process at Idle
   until the job ends.
-- **The hang watch** (w3673) reads exactly those tools' CPU; a silent agent with a tool at BelowNormal beside a job at the
+- **The hang watch** (w3673) reads exactly those tools' CPU; a silent agent with a tool at Idle beside a job at the
   last tick is kept and looked at again (`toolsLowered`), since starved tools say little about a hang.
 - **Only with a record**: what a tick is about to lower is written to `<root>/tmp/ci-first-lowered.json` first; if that
   write fails nothing is lowered (said once per streak), so nothing is ever lowered that a restart could not undo. No
@@ -328,7 +332,7 @@ start) the same tick lowers those tools' processes to BelowNormal while a job ru
 - **Raised back**: once no CI job runs; while a bench or a person's play turn holds the machine (nothing is lowered then,
   so a timed run measures what it always did); and by a daemon started with `warn` or `off` while the record holds
   anything. Each recorded process still running with the same start time goes back to the priority it had, and so does
-  what it started since it was lowered that still runs at BelowNormal, even once it ended (Windows gives an orphan no new
+  what it started since it was lowered that still runs at Idle, even once it ended (Windows gives an orphan no new
   parent, so its parent pid still names the recorded one); a pid Windows gave to another process, and what that one
   started, are left alone. A raised entry stays in the record (`raisedAt`, the time the raise was done) for one more
   raise, which catches what it started before that the first raise's listing could not show yet (and only that: what it

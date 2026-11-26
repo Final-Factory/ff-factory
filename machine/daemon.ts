@@ -296,7 +296,7 @@ export interface DaemonConfig {
   /**
    * w6110: CI jobs go first on a Windows CI-first machine (machine/ciFirstWin.ts, WIN_CI_FIRST: lothdesktop): "warn" (the default
    * when unset) only logs what the agents' processes take beside a CI job; "enforce" lowers the processes agents' tools start to
-   * BelowNormal while a job runs, recorded in <root>/tmp/ci-first-lowered.json and raised back when it is off or warn again; "off"
+   * Idle while a job runs, recorded in <root>/tmp/ci-first-lowered.json and raised back when it is off or warn again; "off"
    * stops it. Set remotely by `ops_worker machine_update win_ci_first`, read at the daemon's start; "warn" is the recovery.
    */
   winCiFirst?: 'off' | 'warn' | 'enforce';

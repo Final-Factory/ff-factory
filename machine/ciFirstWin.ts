@@ -18,7 +18,7 @@
 // daemon.json `winCiFirst` picks what it does (read at the daemon's start; `ops_worker machine_update win_ci_first`):
 // - "warn" (unset): nothing is set. While a CI job runs the tick logs how many cores the machine, the jobs and each
 //   agent's processes used over the last tick, and how many of the agents' tools' processes run above `priority`.
-// - "enforce": while a CI job runs, those processes go to `priority` (BelowNormal), and what they start inherits it. Only
+// - "enforce": while a CI job runs, those processes go to `priority` (Idle), and what they start inherits it. Only
 //   an agent's tools are lowered (what its claude starts: shells, cargo, python): the host and its direct children
 //   (claude) keep their priority, so the agent's loop, its heartbeat and the hang watch's CPU reading are not starved
 //   (and Windows' balance-set manager still boosts a starved thread now and then). No Unity editor, or what one started,
@@ -43,8 +43,11 @@ export interface WinCiFirstSettings {
   warnEveryMs: number;
 }
 
+// Idle, not BelowNormal: LothDesktop's runners run their jobs at BelowNormal themselves (the daemon restarts a runner
+// with Start-ScheduledTask, whose default task priority 7 is BelowNormal, and a job's processes inherit it; measured
+// 2026-11-26 17:46Z, both workers at BelowNormal). BelowNormal would only put the agents' tools level with the jobs.
 export const LOTHDESKTOP_CI_FIRST: WinCiFirstSettings = {
-  priority: os.constants.priority.PRIORITY_BELOW_NORMAL,
+  priority: os.constants.priority.PRIORITY_LOW,
   warnCores: 4,
   warnEveryMs: 5 * 60_000,
 };
@@ -481,7 +484,7 @@ export class WinCiFirst {
     // What enforcing lowers: an agent's tools (what its claude starts), not the host or its own direct children (claude
     // keeps its priority, so its loop and heartbeat are not starved), and no Unity editor or what one started (editors keep
     // the pool's own priority; batch builds go to Idle by lowerBuild already). An editor a lowered tool starts later
-    // inherits BelowNormal, as the pool's belowNormal setting runs it anyway.
+    // inherits the lowered priority, as it inherits the pool's belowNormal setting.
     const tools = new Map<number, number>(); // pid -> its host
     for (const [root, pids] of trees) {
       const unity = new Set<number>();
@@ -527,6 +530,7 @@ export class WinCiFirst {
           } else {
             lowerFailed++;
             if (!before[c.k]) delete this.lowered[c.k];
+            else this.lowered[c.k] = before[c.k];
           }
         }
         if (lowerFailed) this.save();
