@@ -291,6 +291,31 @@ export function withoutOverlap<A extends { path: string }, B extends { path: str
   return { first: kept, own: own.items.filter((i) => !kept.some((r) => within(i.path, r.path))) };
 }
 
+/**
+ * w6044 stage 3: the released ffu slots' first step alone, at low, while a pass that is not low runs (CleanupRunner firstAlone;
+ * the daemon's ffuFirstAlone). Mode off: nothing, so recovery needs nobody at the machine. Stage 3a is report-only: it plans
+ * and says what it would take, and removes nothing, whatever the mode.
+ */
+export async function firstAlonePass(o: {
+  mode: StaleOutputSettings['mode'];
+  root?: string[];
+  guard: CleanupGuard;
+  first: NonNullable<Parameters<typeof cleanupPass>[0]['first']>;
+  busyNow?: (it: CleanupItem) => Promise<string | undefined>;
+}): Promise<CleanupRun | undefined> {
+  if (o.mode === 'off' || !o.root?.[0]) return undefined;
+  return cleanupPass({
+    opts: { stale: false, dryRun: false },
+    guard: o.guard,
+    mode: 'dry-run',
+    regular: async () => [],
+    stale: async () => ({ items: [], listed: [] }),
+    first: o.first,
+    busyNow: o.busyNow,
+    root: o.root,
+  });
+}
+
 export async function cleanupPass(o: {
   opts: PassOptions;
   guard: CleanupGuard;
