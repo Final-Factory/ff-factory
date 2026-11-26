@@ -111,9 +111,10 @@ import { tailscaleWhois } from './machineJoin.ts';
 import { JOIN_PATHS, WINDOWS_INSTALLER_NAME, machineJoinHttp, windowsInstaller } from './machineJoinHttp.ts';
 import { bundleServedLine, updateBundleFor } from './machineLink.ts';
 import { issueMachineToken } from './machineTokens.ts';
-import { originOf, tailnetDeviceAddress, tailnetOnly } from './remoteChat.ts';
+import { originOf, tailnetDeviceAddress, tailnetOnly, tailnetAddress as tailnetIp } from './remoteChat.ts';
 import { OWNER_DEVICE_APPROVAL_DEFAULT } from './devices.ts';
-import { clientAddress, configureClientAddress } from './clientAddress.ts';
+import { clientAddress, configureClientAddress, directAddress } from './clientAddress.ts';
+import { MID_TRANSFER_CHECK_MS, TailscalePathProbe, slowBundleReason, slowRunningReason } from './tailscalePath.ts';
 import { checkMachineLink, isMachineLinkPath, machineLinkMode } from './machineLinkGate.ts';
 import { MAX_DICTATION_SECONDS, MAX_TTS_CHARS, buildVoicePrompt, wavSeconds, type LiveStats, type SpeakRequest, type TranscribeRequest, type VocabularySource } from '../shared/voice.ts';
 import type { AccountUsage, AppState, CreateSandboxRequest, HostStatus, Machine, TokenWarning, PermissionDecisionRequest, Requester, ServerEvent, SessionInfo, SessionKind, StandingAgentInput, StartSessionRequest, SystemStats, LiveKnobRequest, PoolPerson, TranscriptEvent, WorkItem } from '../shared/types.ts';
@@ -392,6 +393,8 @@ function joinHttpScript(kind: keyof typeof JOIN_FILES): string | undefined {
     return undefined;
   }
 }
+/** w5897: the Tailscale path of a slow or cut update bundle, one journal line per probe. */
+const tailscalePath = new TailscalePathProbe(runProc);
 const joinWhois = async (addr: string) => tailscaleWhois((await import('./proc.ts')).run, addr);
 const joinHttp = machineJoinHttp({
   codes: machines.joins,
@@ -2532,7 +2535,21 @@ const server = http.createServer(async (req, res) => {
       const t0 = Date.now();
       const start = parseRange(req.headers.range, updateBundle.size);
       const sent = sendStream(req, res, new StreamReply('application/octet-stream', updateBundle.file, updateBundle.size, 'attachment; filename="ff-factory.bundle"'));
-      res.on('close', () => console.log(bundleServedLine(updateBundle.machineId, { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished })));
+      // w5897: a cut or slow bundle also logs the Tailscale path to that machine (server/tailscalePath.ts), read-only.
+      const peerAddr = directAddress(req);
+      const tailnetPeer = tailnetIp(peerAddr) ? peerAddr : undefined;
+      const midCheck = setTimeout(() => {
+        const why = slowRunningReason(sent(), Date.now() - t0, updateBundle.size);
+        if (why) void tailscalePath.probe(updateBundle.machineId, why, tailnetPeer);
+      }, MID_TRANSFER_CHECK_MS);
+      midCheck.unref();
+      res.on('close', () => {
+        clearTimeout(midCheck);
+        const served = { start: start && start !== 'unsatisfiable' ? start.start : 0, sent: sent(), size: updateBundle.size, ms: Date.now() - t0, finished: res.writableFinished };
+        console.log(bundleServedLine(updateBundle.machineId, served));
+        const why = slowBundleReason(served);
+        if (why) void tailscalePath.probe(updateBundle.machineId, why, tailnetPeer);
+      });
       return;
     }
     // A machine's daemon sending a file its agent published as an attachment (docs/attachments.md, "Agents' files"): its

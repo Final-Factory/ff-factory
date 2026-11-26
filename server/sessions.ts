@@ -2145,6 +2145,25 @@ export class SessionManager {
     return q.uuid;
   }
 
+  /**
+   * w5976: a message a room move took (roomMove answered true, so the drain dropped it) goes back to its own session when the
+   * move's fresh session did not start: queued again with its first time and its gate resume, ahead of any later message to
+   * it, and held as before until its computer has room. Answers false when it was queued already.
+   */
+  putBack(q: QueuedSend, why: string): boolean {
+    if (this.queue.some((x) => x.uuid === q.uuid)) return false;
+    const back: QueuedSend = { ...q, why, on: 'capacity' };
+    delete back.capRefusedAt;
+    delete back.lastError;
+    const at = this.queue.findIndex((x) => x.id === q.id);
+    if (at < 0) this.queue.push(back);
+    else this.queue.splice(at, 0, back);
+    this.saveQueue();
+    this.store.append(q.id, { kind: 'system', text: `Its message waits for it again: ${why} (w5976).` });
+    console.log(`sessions: put a message back for ${q.id}: ${why} (w5976)`);
+    return true;
+  }
+
   /** A resume that does not go (w1128): said in its transcript and the server log. */
   private notDelivered(id: string, why: string) {
     this.store.append(id, { kind: 'system', text: `A resume was not delivered: ${why}.` });

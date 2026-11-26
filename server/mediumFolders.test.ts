@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { Daemon, type Probes } from '../machine/daemon.ts';
 import { MEDIUM_CHILDREN, lowTargets, openChildren } from '../machine/lowIntegrity.ts';
-import { mediumCargoHomeDir, mediumTempRoot, planMediumFolders, workerWritable } from '../machine/mediumFolders.ts';
+import { MEDIUM_AGENT_VAR, mediumCargoHomeDir, mediumTempRoot, planMediumFolders, workerWritable } from '../machine/mediumFolders.ts';
 import { LOCKED_CHILDREN } from '../machine/writeLock.ts';
 import { DEFAULT_CLEANUP, cleanupRules, hostCleanupEnv, sessionTempDir, sessionTempEnv } from './cleanup.ts';
 import { READ_ONLY_IN_ROOT } from './workerFence.ts';
@@ -178,5 +178,31 @@ for (const mode of ['on', 'warn'] as const) {
       assert.equal(medium.CARGO_HOME, undefined);
       assert.ok(!fs.existsSync(mediumTempRoot(root)), 'warn makes nothing');
     }
+  });
+}
+
+// w5946 F5: ffu-slot refuses a Medium agent ("on") only once its own temp folder (mediumAgentFolders) is outside the workers' too.
+for (const [mode, folders, said] of [['on', undefined, 'warn'], ['on', 'on', 'on'], ['warn', 'on', 'warn']] as const) {
+  test(`w5870: a launch's env with mediumAgentCaches "${mode}" and mediumAgentFolders ${folders ?? 'unset'}: Medium agents ${mode === 'on' ? 'get cache-medium' : 'keep the workers\' caches'} and ffu-slot says "${said}", a sandbox agent gets neither`, (t) => {
+    const root = install(t);
+    const tempDir = path.join(root, 'tmp');
+    const d = new Daemon(
+      { portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: path.join(root, 'repo'), appDir: path.join(root, 'daemon'), root, tempDir, maxEventsFile: null, workerIntegrity: 'low', writeLock: true, workerFence: 'seatbelt', mediumAgentCaches: mode, ...(folders ? { mediumAgentFolders: folders } : {}) },
+      () => {
+        throw new Error('no sessions here');
+      },
+      PROBES,
+    );
+    t.after(() => d.shutdown());
+    const i = d as unknown as Inside;
+    const medium = i.agentTempEnv('med-1', false);
+    const sandbox = i.agentTempEnv('sb-1', true);
+    assert.equal(medium[MEDIUM_AGENT_VAR], said);
+    assert.equal(sandbox[MEDIUM_AGENT_VAR], undefined);
+    assert.equal(sandbox.DOTNET_CLI_HOME, undefined, 'a sandbox agent inherits the workers\' caches');
+    if (mode === 'on') {
+      assert.equal(medium.DOTNET_CLI_HOME, path.join(root, 'cache-medium', 'dotnet'));
+      assert.ok(!workerWritable(medium.PIP_CACHE_DIR, root, [tempDir]));
+    } else assert.equal(medium.DOTNET_CLI_HOME, undefined);
   });
 }

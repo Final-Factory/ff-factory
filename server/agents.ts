@@ -77,7 +77,7 @@ import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } fr
 import { drainOf, newDrain, drainHolds } from './machineDrain.ts';
 import { runnerHoldText } from '../shared/runnerHold.ts';
 import { PAUSED_STATE, needsAwayText } from '../shared/availability.ts';
-import { movedAwayVerdict, type HeirFacts, type MovedAwayFacts } from './movedAwayEnforce.ts';
+import { movedAwayMode, movedAwayVerdict, type HeirFacts, type MovedAwayFacts } from './movedAwayEnforce.ts';
 import { MOVE_AFTER_MS, MoveGuard, NONE_MARK, ROOM_WAIT, briefOf, holdMoves, homeWait, moveDecision, movedPrompt, stayLine, warmWait, type MoveFacts } from './resumeMove.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import { sandboxUseText, unitySlotsLine } from '../shared/fleet.ts';
@@ -96,7 +96,7 @@ import { REPORT_KINDS, questionFor, type ReportSummary } from '../shared/types.t
 import { INBOX_DIR, MAX_ATTACHMENTS, attachmentLine, fmtBytes, playerAttachmentOf, publishedAttachmentText } from '../shared/attachments.ts';
 import { MACHINE_ACCOUNT, SECRET_KEYS, dispatcherOwnAccount, dispatcherPoolPerson, machineRunEnv, maskSecret, pinnedDispatcherEnv, poolRunEnv, redactSecrets } from './secrets.ts';
 import { Identity, forLine } from './identity.ts';
-import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
+import { crossOwnerLine, DECISION_WORDS_HOURS, DECISION_WORDS_MIN, INVESTIGATE_AT, loopGuards, moveBeforeOf, type MoveBefore, Orchestrators, OWNER_LOOP_MESSAGES_PER_HOUR, PERSON_MESSAGE_CHARS, timerFilings, unpushedText } from './orchestrators.ts';
 import { beltFor, DESTRUCTIVE_TOOLS, type BeltRole } from './belts.ts';
 import { TurnModels } from './turnModel.ts';
 import { deferredToolsLine, sdkExtras, toolsOf } from './toolManifest.ts';
@@ -465,7 +465,7 @@ const DISK_WINDOWS = ` On a Windows computer, disk work (a clean-up, a low-disk 
 const DISK_UNIX = ` On macOS and Linux, outside the folder you only measure and report.`;
 
 export const DISK_HYGIENE = `## Disk space
-Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. A second checkout of another branch takes a second slot (\`ffu-slot take --branch <that branch>\`), never your first slot's target. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
+Disk space on this computer is shared and runs out: then new agents and editors wait. Your TMP, TEMP and TMPDIR are a temp folder of your own (ffa-<session>): put everything you make there (clones of other repos, logs, builds, recordings, tour output, screenshot sets, scratch), not in your home folder, the worktree, a shared scratch folder or /tmp (Git Bash's /tmp is not your folder; $TMPDIR is). Never a full clone of the game repo there (its LFS files and a Library copy took 43 GB): a player of another commit is built in your sandbox, one commit at a time, and a scripts-only clone is \`--sparse\` with GIT_LFS_SKIP_SMUDGE=1; the harness refuses the rest. The Write tool takes its absolute path: \`echo $TMPDIR\` before your first Write there, never a probe file at a guessed path (a Write that would make a new file outside your sandbox and temp folder is refused). Delete the big things you made once you are done with them, and before DONE or a long wait: a clone, a cargo target you will not build in again, a player build, recordings, repeat or tour output, a runaway log, each with a plain \`rm -rf "$TMPDIR/<name>"\` written out (it asks nobody). Check with \`du -sh "$TMPDIR"\` and \`du -sm "$TMPDIR"/* | sort -rn | head\`; FF Factory warns you when it passes 15 GB. Small files may stay. An ffu (Rust) checkout is an ffu slot, not a clone in your temp folder: \`eval "$(ffu-slot take --branch <your branch>)"\` gives you one with a warm cargo target (FFU_DIR, CARGO_TARGET_DIR; ffu-build-test); never delete a slot's target, and \`ffu-slot release\` once your work is pushed. A second checkout of another branch takes a second slot (\`ffu-slot take --branch <that branch>\`), never your first slot's target. No slot free (exit 4): wait for one (\`ffu-slot take --wait 9 --branch <your branch>\`, or a wake_me check-in, then take again); never build ffu in your temp folder or a clone of your own, unless \`ffu-slot take\` refuses you as an agent outside the worker fences (exit 5): then build as its message says. Mid-task, never delete in your temp folder to reuse a folder for the next test leg; give every leg a new one, \`$TMPDIR/<leg>-<timestamp>\` (\`OUT="$TMPDIR/f1920-$(date +%H%M%S)"\`), and point your report at the newest. The harness removes it: your temp folder a few minutes after no request waits for you any more (it closed, or moved to another worker; a wait for CI or a person, a stop or a pause keeps it whole), your git clones six hours after that (unless one holds work nothing else has), its rebuildable caches (player builds, Library, node_modules, digested profiler captures) once you are stopped and nothing in it was written for 24 h, or for 15 minutes while the disk is low (a resumed worker rebuilds them), the build and capture output of your sandbox when it is released, player slots nobody holds, old nightly output and stopped sessions' folders. That sweep comes only after you, so it is no reason to leave GBs behind. Never \`player_slots.py prune\`; publish the proofs your report links (publish_review, specs/<NNN>/proofs) before you end or delete them, since the rest goes. To delete (done with it, or the disk short in the middle of your task), use a plain \`rm -rf "$TMPDIR/<name>"\` (or Remove-Item with a path under $env:TEMP): a delete whose every path is written out under $TMPDIR is answered by the session itself with no approval, alone or inside a longer command, and so is a path through a folder you named once at the start of the command (\`K="$TMPDIR/keep"; ...; rm -f "$K"/*.png\`); anything else (the folder itself, /tmp, .., ~, \`xargs rm\`, a variable after $TMPDIR such as \`$TMPDIR/$S\`) still asks a person, so do not send one. Delete only inside this machine's worker install folder (its root: D:/work/ffw, F:/ffw or ~/ffw; "FF_WORKER_ROOT" in your environment; your sandbox, your temp folder and the player slots are inside it), except your own save copy in the game's saves folder (\`read_rules saves\`).${DISK_WINDOWS}${DISK_UNIX} Never ask a person for a go to free disk space: if the disk is still short, say so in your report. Never delete a person's own files (documents, their own projects and saves) or another agent's work in progress. A request of yours to clear space or measure the disk: \`read_rules cleanup\` before you delete anything.`;
 
 /**
  * Disk space as a worker on `platform` reads it (w2002, lothsahn: "File the compaction pilot plus the base-context trim and
@@ -4576,7 +4576,14 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const primary = reqs.find((w) => w.id === q?.resumeOf?.work) ?? reqs.find((w) => w.status !== 'queued') ?? reqs[0];
     const stage = view ? `Its Live view ran on ${from} (materials ${JSON.stringify(view.materials)}, fps ${view.fps}, width ${view.width}): stage it again in your sandbox's editor and tell the person it streams again from ${to}. ` : '';
     const back = (w: WorkItem, note: string, msg?: string) => this.orchestrators?.handBack(w, info, { machine: info.machineId!, sandbox: info.machineSandbox!, ...(branch ? { branch } : {}), why: reason, note, how, ...(saved ? { saved } : {}), ...(msg ? { message: msg } : {}), to });
-    for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+    // w5976, config movedAwayWorkers "on": the other requests are handed back only once the fresh session started, and a start
+    // that fails gives every request back to this worker (giveBack below). Otherwise they go at once, as before.
+    const undo = movedAwayMode(this.cfg.movedAwayWorkers) === 'on';
+    const before = new Map(reqs.map((w) => [w.id, moveBeforeOf(w, info.id)]));
+    const others = () => {
+      for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+    };
+    if (!undo) others();
     if (primary) {
       const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
       try {
@@ -4588,13 +4595,40 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         // w2544: "moved from lothlaptop (offline 6 min) to lothdesktop/slot2", on its log and its live state.
         if (entry.away) this.orchestrators.awayMoved(primary.id, `moved from ${entry.away} to ${started.split(' as ')[0]}`);
         this.machines.report?.(`[machines] ${primary.id} moved from ${from} to ${started}: ${hold} (w2046).`);
+        if (undo) others();
       } catch (e) {
         const err = (e as Error).message;
+        if (undo) return this.giveBack(info, reqs, before, to, err, q, entry.texts);
         console.warn(`room move: starting ${primary.id} on ${to} failed (${err}); handed back to the dispatcher, Queued for ${to}`);
         back(primary, `FF Factory could not start its new session on ${to} itself (${err}). ${note}`, message);
       }
-    }
+    } else if (undo) others();
     this.orchestrators?.retireWhenFree(info.id);
+  }
+
+  /**
+   * w5976, config movedAwayWorkers "on": a room move whose fresh session did not start on `to` gives its requests back to the
+   * worker it was to leave (Orchestrators.moveUndone), instead of leaving the request Queued with no worker while that worker
+   * kept its movedAway mark. Its sandbox stays released (its work was saved), so it resumes when a sandbox frees on its own
+   * computer, with the message the move took (SessionManager.putBack); `to` is no move target for REFUSED_FOR_MS, so the next
+   * drain does not try the same start again, and the worker is not retired.
+   */
+  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[]) {
+    const why = `its new session on ${to} did not start (${err})`;
+    console.warn(`room move: starting ${reqs.map((w) => w.id).join(', ')} on ${to} failed (${err}); given back to worker ${info.id} on ${info.machineId}/${info.machineSandbox} (w5976)`);
+    this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
+    for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why);
+    delete info.movedAway;
+    this.store.putSession(info);
+    this.store.append(info.id, { kind: 'system', text: `Its work stays with it: ${why}. Its sandbox stays released; it resumes when one frees on ${info.machineId} (w5976).` });
+    if (q) {
+      // One message goes back as it was, with its attachments (w5995). Several joined ones carry each one's attachment ids as
+      // text (movedText), so the joined message carries none of its own.
+      const back: QueuedSend = texts.length > 1 ? { ...q, text: texts.join('\n\n---\n\n') } : q;
+      if (back !== q) delete back.attachments;
+      this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
+    }
+    this.machines.report?.(`[machines] ${reqs.map((w) => w.id).join(', ')} stayed with worker ${info.id} on ${info.machineId}/${info.machineSandbox}: ${why} (w5976).`);
   }
 
   /** The fresh session of a moved request (w2046), in a free sandbox on `to`; answers where it started. Throws when it cannot. */

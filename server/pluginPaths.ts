@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { MARKETPLACE, readableToolsCheckout } from './agentTools.ts';
+import { MARKETPLACE, readableToolsCheckout, toolsCheckout } from './agentTools.ts';
 
 /**
  * Where a worker finds the ff-agents plugin's scripts without searching the disk (w2012, lothsahn: "Stop messing with my
@@ -23,6 +23,11 @@ export interface PluginPathDeps {
   home: string;
   /** The worker install folder, for the fallback checkout. */
   root?: string;
+  /**
+   * w5870: the agent runs outside the worker fences (not in a sandbox; Medium on Windows): its fallback is only FF Factory's
+   * checkout in <root>/tools-medium, never the old <root>/tools one, which workers write (it would run their scripts).
+   */
+  medium?: boolean;
   readFile?: (p: string) => string;
   exists?: (p: string) => boolean;
 }
@@ -44,11 +49,12 @@ export function pluginEnv(d: PluginPathDeps): Record<string, string> {
   if (plugin && !exists(path.join(plugin, 'skills'))) plugin = undefined;
   if (!plugin && d.root) {
     // w5597: FF Factory's checkout in <root>/tools-medium, else the old one in <root>/tools until a publish has made it.
-    const co = readableToolsCheckout(d.root, path.join('plugins', 'ff-agents', 'skills'), exists);
+    const rel = path.join('plugins', 'ff-agents', 'skills');
+    const co = d.medium ? (exists(path.join(toolsCheckout(d.root), rel)) ? toolsCheckout(d.root) : undefined) : readableToolsCheckout(d.root, rel, exists);
     if (co) plugin = path.join(co, 'plugins', 'ff-agents');
   }
   return plugin ? { FF_AGENTS_PLUGIN: plugin, FF_SKILLS: path.join(plugin, 'skills') } : {};
 }
 
 /** pluginEnv on this machine. */
-export const localPluginEnv = (env: NodeJS.ProcessEnv, root?: string) => pluginEnv({ env, home: os.homedir(), ...(root ? { root } : {}) });
+export const localPluginEnv = (env: NodeJS.ProcessEnv, root?: string, medium = false) => pluginEnv({ env, home: os.homedir(), medium, ...(root ? { root } : {}) });
