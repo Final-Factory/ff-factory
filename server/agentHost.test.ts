@@ -168,9 +168,11 @@ test('w605: a host that died with its agent is not taken back; the portal resume
   const conversation = s.info.sdkSessionId;
   assert.ok(conversation);
   const pid = hostPid(id);
-  // The machine loses both (a crash, a power cut).
-  process.kill(pid, 'SIGKILL');
+  // The machine loses both (a crash, a power cut). The daemon first: a daemon still up when its host dies tells the portal
+  // so itself ("its agent host stopped unexpectedly", agentHost.ts), which on a loaded machine it did before its own kill
+  // landed (BEAST, w5915). The host runs on without its daemon (the test above), so this order loses both all the same.
   await kill(d1);
+  process.kill(pid, 'SIGKILL');
   await until('the host gone', () => !pidAlive(pid));
   const goneAt = Date.now();
   daemon();

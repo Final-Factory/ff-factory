@@ -866,7 +866,15 @@ const standIn = (t: { after: (fn: () => unknown) => void }) => {
   t.after(() => void p.kill('SIGKILL'));
   return p;
 };
-const linuxCommand = (pid: number) => processCommand(pid);
+// The stand-in's real command line, read once per pid: on Windows each read is a PowerShell CIM query (about 0.45 s idle
+// on BEAST), and the daemon's 5 min cache of it lapses about 20 times in a test's watched hours on the fake clock; under
+// a full run's load one of those reads failed (w5915). A failed read is not kept, so the next look reads it again.
+const readOnce = new Map<number, string>();
+const linuxCommand = async (pid: number) => {
+  const c = readOnce.get(pid) ?? (await processCommand(pid));
+  if (c) readOnce.set(pid, c);
+  return c;
+};
 
 test('w5938: a staged job past 10 min is ended by the tick once watched 5 min: failed with the reason in update-job.log and the daemon log, reported, and taken off the machine', async (t) => {
   const x = overdueFixture(t, { phase: 'staged', createdAt: ago(JOB_LIMIT.stagedMs + 60_000) });
