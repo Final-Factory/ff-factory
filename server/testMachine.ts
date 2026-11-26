@@ -3,6 +3,7 @@
 // the scripted fake SDK a test installs with setQueryForTesting (e2e/fakeAgent.ts) answers them as it answers host ones.
 // Test-only: no production code imports it. Nothing here touches the real home folder: the daemon's folder, Unity slots,
 // agents' temp folders and its clean-up settings are all inside the machine's own temp root, and its clean-up never runs.
+import './testLocalRemotes.ts'; // w6099: these checkouts' origins are bare repositories in a temp folder
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
