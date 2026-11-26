@@ -141,10 +141,10 @@ test('w5833: the editor temp folder goes through to the installer update as name
 });
 
 test('w5863: the path fence goes through to the installer update as named; an unnamed one and a value off the wire are not passed', () => {
-  for (const m of ['off', 'warn'] as const) assert.deepEqual(updateFlagsOf('/src', { pathFence: m }), { source: '/src', pathFence: m });
+  for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { pathFence: m }), { source: '/src', pathFence: m });
   assert.deepEqual(updateFlagsOf('/src', { workerFence: 'on', pathFence: 'off' }), { source: '/src', workerFence: 'on', pathFence: 'off' });
   assert.deepEqual(updateFlagsOf('/src', {}), { source: '/src' }, 'unset: carried');
-  assert.deepEqual(updateFlagsOf('/src', { pathFence: 'on' as never }), { source: '/src' });
+  assert.deepEqual(updateFlagsOf('/src', { pathFence: 'enforce' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { pathFence: '' as never }), { source: '/src' });
 });
 

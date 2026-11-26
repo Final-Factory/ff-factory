@@ -605,7 +605,8 @@ export class HostedSession implements SessionHandle {
     }
     fs.mkdirSync(f.dir, { recursive: true });
     const spec = this.deps.spec();
-    fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}), ...(spec.writeLock ? { transcriptsHeld: holdsTranscripts(spec.writeLock, spec.writeLockTranscripts) } : {}) }));
+    const pathKey = Object.keys(spec.env ?? {}).find((k) => k.toUpperCase() === 'PATH');
+    fs.writeFileSync(f.place, JSON.stringify({ cwd: spec.cwd, ...(spec.sandbox ? { sandbox: spec.sandbox } : {}), ...(spec.writeLock ? { transcriptsHeld: holdsTranscripts(spec.writeLock, spec.writeLockTranscripts) } : {}), path: (pathKey && spec.env?.[pathKey]) || '' }));
     this.creds = credsOf(spec.env);
     fs.writeFileSync(f.creds, this.creds);
     fs.writeFileSync(f.offset, '0');
@@ -1046,9 +1047,24 @@ async function workerCapsFor(dir: string, env: Record<string, string | undefined
 /**
  * A host folder's place (its folder and sandbox), for the agent limits and the attachments' Inbox. `transcriptsHeld`
  * (w5702), set for a locked run: whether its lock lets it write in `<root>/transcripts` (the whole folder, or its own
- * conversation's rules), so moving the transcripts there leaves it its own. Missing on a host older than w5702.
+ * conversation's rules), so moving the transcripts there leaves it its own. Missing on a host older than w5702. `path`
+ * (w5899): the PATH its agent started with ('' for none), so moving the shims waits for those that still name the old
+ * folder. Missing on a host older than w5899.
  */
-export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string; transcriptsHeld?: boolean }>(hostFiles(dir).place);
+export const hostPlace = (dir: string) => readJson<{ cwd: string; sandbox?: string; transcriptsHeld?: boolean; path?: string }>(hostFiles(dir).place);
+
+/**
+ * w5899, w5872's review: the running agents, fenced or not, whose PATH names `dir` (the old shims folder), by session id.
+ * No mark: a host older than w5899, which may, so it counts.
+ */
+export const hostsWithPathDir = (hostsRoot: string, dir: string) =>
+  hostFolders(hostsRoot)
+    .filter((h) => h.record && pidAlive(h.record.pid))
+    .filter((h) => {
+      const p = hostPlace(h.dir)?.path;
+      return p === undefined || p.split(path.delimiter).some((d) => d && path.resolve(d) === path.resolve(dir));
+    })
+    .map((h) => h.sessionId);
 
 /**
  * w5702, w5718's review: the running sandbox agents a transcripts move would cut off from their own transcript, by

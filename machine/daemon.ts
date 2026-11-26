@@ -33,9 +33,9 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { pathFenceLine, pathFenceMode, watchShimBin } from './pathFence.ts';
+import { enforcedShimDir, guardOldShimBin, pathFenceLine, pathFenceMode, shimDirFor, watchShimBin } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
@@ -286,11 +286,12 @@ export interface DaemonConfig {
    */
   daemonTmpdir?: 'on' | 'off';
   /**
-   * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
-   * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
-   * watch, the recovery. macOS and Linux only; set remotely by `ops_worker machine_update path_fence`.
+   * w5863, w5899: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "on" (the default
+   * when unset) puts the unity-slot shims on every agent's PATH in <root>/tools-medium/shims, which fenced workers cannot
+   * write; "warn" leaves them in the mailbox's bin and logs each write there the daemon did not make; "off" leaves them there
+   * unwatched, the recovery. macOS and Linux only; set remotely by `ops_worker machine_update path_fence`.
    */
-  pathFence?: 'off' | 'warn';
+  pathFence?: 'off' | 'warn' | 'on';
   /**
    * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
    * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
@@ -1839,33 +1840,54 @@ export class Daemon {
     void this.probeReadFence();
     this.startRpc();
     // Unity slots (w469): the counts every 15 s, and every 5 s while a launch waits or holds one.
+    // w5863, w5899: the path fence (machine/pathFence.ts): on (the default), the shims sit in <root>/tools-medium/shims,
+    // which fenced workers cannot write; warn and off leave them in the mailbox's bin, which they can.
+    let pf = pathFenceMode(this.cfg.pathFence);
+    const oldBin = path.join(this.slotMailbox, 'bin');
+    const shims = (bin: string) => {
+      // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
+      installLeftoversShim(bin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
+      // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
+      installPrShim(bin);
+      // w5836: python where a macOS or Linux machine has only python3, for the documented `python "$FF_SKILLS/…"` commands.
+      installPythonShim(bin);
+      // ffu-slot (w3764): a worker's ffu checkout with a warm cargo target, leased from <install>/ffu-sandboxes.
+      installFfuSlotShim(bin, cleanupFactsFile(appDirOfConfig(this.cfg)), FFU_SLOTS_DEFAULT_MAX);
+      return bin;
+    };
     try {
       // w5838: on Windows the shims sit in <root>/tools/shims, labelled Medium (lowIntegrity.ts MEDIUM_TOOLS), not in the
       // mailbox's bin, which Low workers write: every agent's PATH starts here, Medium ones included.
-      this.slotBin = process.platform === 'win32' && this.cfg.root ? writeShims(toolsShimsDir(this.cfg.root)) : installShims(this.slotMailbox);
-      // w5838 review: the old shims, in a folder Low workers write, go, so no stale PATH or copied command line runs them.
-      if (this.slotBin !== path.join(this.slotMailbox, 'bin')) {
-        try {
-          removeEntry(path.join(this.slotMailbox, 'bin'));
-        } catch (e) {
-          log(`unity slots: could not remove the old shim folder ${path.join(this.slotMailbox, 'bin')}: ${(e as Error).message}`);
-        }
-      }
-      // ff-leftovers (w1197): a worker lists and ends what it started before DONE or a stop.
-      installLeftoversShim(this.slotBin, undefined, undefined, undefined, cleanupFactsFile(appDirOfConfig(this.cfg)));
-      // ff-pr (w1478): a worker's push, PR, landed check and merge on green, one command each.
-      installPrShim(this.slotBin);
-      // w5836: python where a macOS or Linux machine has only python3, for the documented `python "$FF_SKILLS/…"` commands.
-      installPythonShim(this.slotBin);
-      // ffu-slot (w3764): a worker's ffu checkout with a warm cargo target, leased from <install>/ffu-sandboxes.
-      installFfuSlotShim(this.slotBin, cleanupFactsFile(appDirOfConfig(this.cfg)), FFU_SLOTS_DEFAULT_MAX);
+      this.slotBin = shims(writeShims(process.platform === 'win32' && this.cfg.root ? toolsShimsDir(this.cfg.root) : shimDirFor(pf, this.slotMailbox, this.cfg.root)));
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
+      // w5899: a shims folder the daemon cannot write leaves agents without unity-slot; the mailbox's is the fallback.
+      if (pf === 'on') {
+        pf = 'warn';
+        try {
+          this.slotBin = shims(installShims(this.slotMailbox));
+          log(`path fence: could not write ${this.cfg.root ? enforcedShimDir(this.cfg.root) : 'the shims folder'}; the shims stay in ${oldBin}, watched as in warn`);
+        } catch (e2) {
+          log(`unity slots: could not write the unity-slot commands in ${oldBin} either: ${(e2 as Error).message}`);
+        }
+      }
     }
-    // w5863: the path fence, warn-only: log each write to the shims folder the daemon did not make (machine/pathFence.ts).
-    const pf = pathFenceMode(this.cfg.pathFence);
-    if (process.platform !== 'win32') log(pathFenceLine(pf, this.slotBin, this.cfg.root));
-    if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
+    if (process.platform === 'win32') {
+      // w5838 review: the old shims, in a folder Low workers write, go, so no stale PATH or copied command line runs them.
+      if (this.slotBin && this.slotBin !== oldBin) {
+        try {
+          removeEntry(oldBin);
+        } catch (e) {
+          log(`unity slots: could not remove the old shim folder ${oldBin}: ${(e as Error).message}`);
+        }
+      }
+    } else {
+      log(pathFenceLine(pf, this.slotBin, this.cfg.root));
+      // w5899, w5872's review: agents started before the move keep the old bin first on their PATH; it holds only the
+      // daemon's shims until they have ended, then goes.
+      if (pf === 'on' && this.slotBin && this.slotBin !== oldBin) guardOldShimBin(oldBin, { restore: () => void shims(installShims(this.slotMailbox)), waits: () => (this.hosted ? hostsWithPathDir(this.hostsRoot, oldBin) : []), log });
+      if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
+    }
     // GitHub Apps (w1519): the gh shim and git helper a run the portal named apps for gets (machine/ghApp.ts).
     try {
       const p = ghAppPaths(appDirOfConfig(this.cfg));
@@ -4210,7 +4232,7 @@ export class Daemon {
           waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
           if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked });
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked, dropped: (f, why) => log(`write lock: left out the extra writable folder ${f}: ${why} (w5899)`) });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg), this.cfg.root);
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.
