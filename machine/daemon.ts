@@ -1175,7 +1175,8 @@ export class Daemon {
       mode: cfg.winCiFirst,
       held: () => !!(this.timedHolderHere() ?? this.personHolder()),
       setPriority: (pid, priority) => setPriorityOf(pid, priority),
-      record: { read: () => (cfg.root ? readLowered(cfg.root) : {}), write: (l) => cfg.root && writeLowered(cfg.root, l) },
+      // no worker root, no record: enforce then lowers nothing (nothing a restart could undo)
+      record: cfg.root ? { read: () => readLowered(cfg.root!), write: (l) => writeLowered(cfg.root!, l) } : undefined,
       now: () => Date.now(),
       log: (line) => log(line),
     });
@@ -1925,6 +1926,22 @@ export class Daemon {
       this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', tick), 60_000));
       // what an earlier daemon lowered is raised back (or kept, in enforce) soon after the start, not a minute later
       if (Object.keys(this.winCiFirst.loweredNow()).length) setTimeout(tick, 10_000).unref();
+      // a bench or a person's turn that begins (or ends) is acted on within 5 s, not at the next minute's tick
+      if (this.winCiFirst.mode === 'enforce') {
+        let wasHeld = false;
+        this.timers.push(
+          setInterval(
+            loopLabel('timer winCiFirst.held', () => {
+              const held = !!(this.timedHolderHere() ?? this.personHolder());
+              if (held !== wasHeld) {
+                wasHeld = held;
+                tick();
+              }
+            }),
+            5_000,
+          ),
+        );
+      }
     }
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));

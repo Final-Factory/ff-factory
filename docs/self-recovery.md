@@ -313,11 +313,16 @@ start) the same tick lowers those tools' processes to BelowNormal while a job ru
   editor or what it started is lowered (one a lowered tool starts later inherits BelowNormal), nor the daemon, another
   host or a runner's tree. Windows reuses pids, so each tick reads every candidate's start time: a process started after
   the listing could have been taken is left alone, and a host whose pid started after the host wrote its own record is no
-  host (a job's process that got it stays the job's).
-- **The hang watch** (w3673) reads exactly those tools' CPU; a silent agent whose tools run lowered is kept and looked at
-  again (`toolsLowered`), since starved tools say little about a hang.
+  host (a job's process that got it stays the job's). Between that read and the lowering a pid could still change hands
+  (milliseconds, against a listing at most 6 s old); that gap is accepted: the worst case is one process at BelowNormal
+  until the job ends.
+- **The hang watch** (w3673) reads exactly those tools' CPU; a silent agent with a tool at BelowNormal beside a job at the
+  last tick is kept and looked at again (`toolsLowered`), since starved tools say little about a hang.
 - **Only with a record**: if `<root>/tmp/ci-first-lowered.json` cannot be written, that tick's lowering is put back at
-  once, so nothing is lowered that a restart could not undo.
+  once, so nothing is lowered that a restart could not undo; while it stays unwritable each tick tries the write first
+  and lowers nothing. No worker root, no record: enforce lowers nothing.
+- **Turns are acted on within 5 s**: a bench or a person's turn that begins or ends ticks at once (a 5 s check), not at
+  the next minute's tick.
 - **The record**: each lowered process, by pid and start time, with the priority it had, in
   `<root>/tmp/ci-first-lowered.json`; each lowering is a `ci first: lowered N ...` line naming the pids and images.
 - **Raised back**: once no CI job runs; while a bench or a person's play turn holds the machine (nothing is lowered then,
@@ -325,7 +330,10 @@ start) the same tick lowers those tools' processes to BelowNormal while a job ru
   anything. Each recorded process still running with the same start time goes back to the priority it had, and so does
   what it started since it was lowered that still runs at BelowNormal, even once it ended (Windows gives an orphan no new
   parent, so its parent pid still names the recorded one); a pid Windows gave to another process, and what that one
-  started, are left alone. A raise that fails is tried again for 3 ticks, then given up with a line in the log.
+  started, are left alone. A raised entry stays in the record (marked `raisedAt`) for one more raise, which catches what
+  it started in the seconds before the first (the listing could not show it yet). A raise that fails is tried again for 3
+  ticks, then given up with a line in the log. An entry whose process ended and left nothing running under its pid is
+  dropped.
 - **Recovery**: `ops_worker machine_update win_ci_first warn` (or `off`, which also stops the logging); the daemon restarts
   with it and raises everything back, needing nobody at the machine.
 

@@ -117,6 +117,7 @@ function rig(o: RigOpts = {}) {
     cf: new WinCiFirst(d),
     setWriteFail: (f: boolean) => void (writeFail = f),
     setSetFail: (f: boolean) => void (setFail = f),
+    now: () => now,
     set,
     record: () => record,
     setHeld: (h: boolean) => void (held = h),
@@ -375,7 +376,7 @@ test("enforce: a bench or a person's turn raises what was lowered (and what it s
   assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
   assert.equal(r.prio.get(25), P.PRIORITY_NORMAL);
   assert.equal(r.prio.get(26), P.PRIORITY_BELOW_NORMAL, 'BelowNormal of its own before 22 was lowered: left alone');
-  assert.deepEqual(r.record(), {});
+  assert.ok(Object.values(r.record()).every((l) => l.raisedAt !== undefined), 'kept one more raise, marked raised');
   assert.equal(res?.lowered, 0);
   r.advance(60_000);
   await r.cf.tick();
@@ -398,7 +399,9 @@ test('enforce: once no CI job runs, what was lowered goes back', async () => {
   assert.equal(res?.jobs, 0);
   assert.equal(res?.raised, 1);
   assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
-  assert.deepEqual(r.record(), {});
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.deepEqual(r.record(), {}, 'dropped at the next raise, whose cutoff is past the first');
 });
 
 test('a daemon started with warn or off raises what the record holds; a reused pid (another start time) is left alone', async () => {
@@ -413,9 +416,12 @@ test('a daemon started with warn or off raises what the record holds; a reused p
     assert.equal(res?.raised, 1, mode);
     assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
     assert.equal(r.prio.get(31), P.PRIORITY_BELOW_NORMAL);
-    assert.deepEqual(r.record(), {});
-    assert.match(r.lines[0], new RegExp(`raised 1 process\\(es\\) back to the priority they had \\(winCiFirst is ${mode}; 2 were recorded as lowered, 1 of them still run\\)`));
+    assert.match(r.lines[0], new RegExp(`raised 1 process\\(es\\) back to the priority they had \\(winCiFirst is ${mode}; 2 were recorded as lowered, 1 of the recorded still run\\)`));
     if (mode === 'off') assert.equal(r.lines.length, 1, 'off: nothing else is read or said');
+    r.advance(60_000);
+    await r.cf.tick();
+    assert.deepEqual(r.record(), {}, mode);
+    assert.equal(r.lines.filter((l) => /raised/.test(l)).length, 1, 'the second look says nothing when it raises nothing');
   }
 });
 
@@ -479,7 +485,6 @@ test('raise: what a lowered tool started stays BelowNormal after it ends (Window
   assert.equal(res?.raised, 2);
   assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
   assert.equal(r.prio.get(28), P.PRIORITY_NORMAL);
-  assert.deepEqual(r.record(), {});
 });
 
 test("raise: a child of a recorded pid's new holder (started after it) is that process's, and is not raised", async () => {
@@ -536,4 +541,45 @@ test('raise: one that fails is tried again, then given up with a line in the log
   assert.match(r.lines.join('\n'), /gave up raising process 22 back after 3 tries/);
   assert.deepEqual(r.cf.loweredNow(), {});
   assert.equal(r.cf.toolsLowered(20), false);
+});
+
+// ---- the re-review's cases ----
+
+test('raise: what a lowered tool started in the seconds before the raise (not yet in the listing) is raised at the next look', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  r.setHeld(true);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.raised, 1);
+  // 22 started 27 three seconds before that raise, inheriting BelowNormal; the listing then was older than that
+  r.setProcs([...BASE, { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.started.set(27, r.now() - 3_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.raised, 1);
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
+  assert.deepEqual(r.record(), {});
+});
+
+test('toolsLowered: only while a tool of that host runs lowered beside a job, not once it ended', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.cf.toolsLowered(20), true);
+  r.setProcs(BASE.filter((p) => p.pid !== 22));
+  r.started.delete(22);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.cf.toolsLowered(20), false);
+  assert.deepEqual(r.record(), {}, 'an ended entry that left nothing running is pruned');
+});
+
+test('enforce: a record that stays unwritable lowers nothing tick after tick (no lower and put back each minute)', async () => {
+  const r = rig({ mode: 'enforce' });
+  r.setWriteFail(true);
+  for (let i = 0; i < 3; i++) {
+    await r.cf.tick();
+    r.advance(60_000);
+  }
+  assert.equal(r.set.filter(([pid, pr]) => pid === 22 && pr === P.PRIORITY_BELOW_NORMAL).length, 1, 'lowered once, put back, then left alone');
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
 });
