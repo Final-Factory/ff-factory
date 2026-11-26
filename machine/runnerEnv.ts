@@ -534,21 +534,22 @@ export function runnerEnvOps(o: RunnerEnvOpsInput): RunnerEnvOps {
       },
     };
   }
-  const envFile = (r: EnvRunner) => path.win32.join(r.root, '.env');
+  // the native path module: these run only in a Windows daemon (and its tests run on every OS)
+  const envFile = (r: EnvRunner) => path.join(r.root, '.env');
   const ps = (script: string) => o.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
   return {
     ...common,
     runners: async (c) => {
       if (!workerRoot) return [];
-      const roots = c.listeners.map((l) => l.root.replace(/\//g, '\\'));
-      const base = path.win32.join(workerRoot, 'ffu-runners');
+      const roots = c.listeners.map((l) => path.normalize(l.root));
+      const base = path.join(workerRoot, 'ffu-runners');
       try {
-        for (const d of fs.readdirSync(base)) if (fs.existsSync(path.win32.join(base, d, '.runner'))) roots.push(path.win32.join(base, d));
+        for (const d of fs.readdirSync(base)) if (fs.existsSync(path.join(base, d, '.runner'))) roots.push(path.join(base, d));
       } catch {
         // no ffu-runners folder here
       }
       const out: EnvRunner[] = [];
-      for (const root of roots) if (!out.some((x) => sameRoot(x.root, root, platform))) out.push({ name: path.win32.basename(root), root });
+      for (const root of roots) if (!out.some((x) => sameRoot(x.root, root, platform))) out.push({ name: path.basename(root), root });
       return out;
     },
     configured: async (r) => {
@@ -573,7 +574,7 @@ export function runnerEnvOps(o: RunnerEnvOpsInput): RunnerEnvOps {
       return started > fs.statSync(envFile(r)).mtimeMs;
     },
     // config.cmd --runasservice leaves .service: RunnerService.exe runs that listener, not run.cmd's loop
-    unrestartable: async (r) => (fs.existsSync(path.win32.join(r.root, '.service')) ? 'it runs as a Windows service, which takes .env at its next start' : undefined),
+    unrestartable: async (r) => (fs.existsSync(path.join(r.root, '.service')) ? 'it runs as a Windows service, which takes .env at its next start' : undefined),
     restart: async (_r, pid) => {
       await ps(winRelaunchScript(pid));
     },

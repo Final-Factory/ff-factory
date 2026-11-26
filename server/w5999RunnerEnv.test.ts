@@ -127,8 +127,8 @@ test('keepOriginal: copies a file once and never over an earlier copy', () => {
   }
 });
 
-// Windows paths (backslashes, drive letters, case-insensitive) resolve only on Windows (review of #1346)
-test('runnerEnvOps on Windows: finds ffu-runners, writes .env keeping its original, skips a service runner', { skip: process.platform !== 'win32' && 'Windows paths' }, async () => {
+// runs on every OS: the census names the folder in another case (and with forward slashes) only where that resolves
+test('runnerEnvOps on Windows: finds ffu-runners, writes .env keeping its original, skips a service runner', async () => {
   const ffw = fs.mkdtempSync(path.join(os.tmpdir(), 'w5999-'));
   try {
     const r1 = path.join(ffw, 'ffu-runners', 'ffu-x-1');
@@ -137,11 +137,12 @@ test('runnerEnvOps on Windows: finds ffu-runners, writes .env keeping its origin
     fs.writeFileSync(path.join(r1, '.env'), 'PATH=a\r\n');
     fs.mkdirSync(path.join(ffw, 'ffu-runners', 'not-a-runner'));
     const ops = runnerEnvOps({ platform: 'win32', workerRoot: ffw, home: ffw, uid: 0, exec: async () => '' });
-    const census: RunnerCensus = { listeners: [{ pid: 9, root: r1.replace(/\\/g, '/').toUpperCase(), busy: false }], workers: [], leftovers: [] };
+    const census: RunnerCensus = { listeners: [{ pid: 9, root: process.platform === 'win32' ? r1.replace(/\\/g, '/').toUpperCase() : r1, busy: false }], workers: [], leftovers: [] };
     const rs = await ops.runners(census);
     assert.equal(rs.length, 1, JSON.stringify(rs));
     const r = rs.find((x) => x.name.toLowerCase() === 'ffu-x-1')!;
-    const want = wantedEnv(ops.tempDir(r)!, 'win32');
+    // ops.tempDir makes a Windows path (runnerEnvTempDir, tested above), which resolves only on Windows
+    const want = wantedEnv(path.join(r1, '_tmp'), 'win32');
     assert.ok(!hasEnv((await ops.configured(r))!, want, 'win32'));
     await ops.configure(r, want);
     assert.ok(hasEnv((await ops.configured(r))!, want, 'win32'));
