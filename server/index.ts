@@ -33,6 +33,8 @@ import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
+import { RouteRequests } from './routeRequests.ts';
+import { intakeSettings } from './intakeRules.ts';
 import { FfuPostMergeWatch } from './ffuPostMerge.ts';
 import { TestHistory, localRunKey, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
@@ -1173,6 +1175,9 @@ runWaitsMigration({
 blockerWatch.start();
 // A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
 const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
+// w5914: a worker's "no other route" for a shell command files a request to build that route, and the waiting cards are
+// denied with the route once it deploys (server/routeRequests.ts, docs/bash-nudge.md).
+const routeRequests = new RouteRequests({ store, sessions, orchestrators: agents.orchestrators, systemPayer: () => identity.systemPayer(), lookbackDays: () => intakeSettings(cfg).lookbackDays, portalSha: () => appVersion().sha }).start();
 // ffu's post-merge revert verdicts to the reverted PR's request (w4930).
 const ffuPostMerge = new FfuPostMergeWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 const testHistoryCi = new TestHistoryCi({ cfg, history: testHistory, identity, log: (line) => console.log(line) }).start();

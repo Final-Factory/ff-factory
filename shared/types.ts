@@ -147,6 +147,11 @@ export interface PendingPermission {
   input: unknown;
   /** Why it is being asked (blocked path, etc.), when the SDK says. */
   reason?: string;
+  /**
+   * w5914: a shell command the worker asked again after FF Factory's nudge toward another route (server/bashNudge.ts):
+   * its "no other route" reason when it gave one, and the route key its route request is filed and de-duplicated by.
+   */
+  noRoute?: { reason?: string; key: string };
   createdAt: string;
 }
 
@@ -2541,6 +2546,13 @@ export interface WorkItem {
   findings?: WorkFinding[];
   /** w3706: its final outcome, written by every close (Store.putWork): the close note and the last worker report. */
   finalOutcome?: { at: string; status: WorkStatus; text: string };
+  /**
+   * w5914: a route request FF Factory filed itself (server/routeRequests.ts, docs/bash-nudge.md) because a worker answered
+   * the shell nudge with "no other route". `key` dedups the need; `waiters` are the workers whose card waits on it;
+   * `doneSha` is the portal's commit when it was first seen done, and `landed` when a later portal commit runs (the route
+   * deployed), with `line` the route the waiting workers are told to use; `told` the sessions already told once.
+   */
+  route?: WorkRoute;
   /** Questions the dispatcher asked about it (at most 3). */
   asks: number;
   /**
@@ -3204,8 +3216,30 @@ export interface WorkFfboxDev {
  * itself (nightly-run, w864; docs/intake.md, "The nightly run"), or a red master batch the game repo's CI found after
  * merges (master-batch, w1180; docs/intake.md, "Master batch reds").
  */
-export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch';
-export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch'];
+export type WorkSourceKind = 'discord-bug' | 'discord-request' | 'ffbox-branch' | 'ffbox-diagnosis' | 'ffbox-request' | 'ffbox-dev' | 'release' | 'nightly' | 'nightly-run' | 'nightly-review' | 'master-batch' | 'harness-route';
+export const WORK_SOURCE_KINDS: readonly WorkSourceKind[] = ['discord-bug', 'discord-request', 'ffbox-branch', 'ffbox-diagnosis', 'ffbox-request', 'ffbox-dev', 'release', 'nightly', 'nightly-run', 'nightly-review', 'master-batch', 'harness-route'];
+
+/** w5914: one worker whose shell approval card waits on a route request (WorkItem.route). */
+export interface RouteWaiter {
+  session: string;
+  requestId: string;
+  command: string;
+  reason?: string;
+  /** The worker's open requests when it asked. */
+  works: string[];
+  at: string;
+}
+
+/** w5914: the route request's own record (WorkItem.route). */
+export interface WorkRoute {
+  key: string;
+  triage: 'go' | 'approval';
+  waiters: RouteWaiter[];
+  doneSha?: string;
+  landed?: string;
+  line?: string;
+  told?: string[];
+}
 
 export interface WorkSource {
   kind: WorkSourceKind;
