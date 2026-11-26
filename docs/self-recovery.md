@@ -299,8 +299,20 @@ space on C: is what made Windows drop it.
 ## 4. Watched from outside (the outside watchdog)
 
 Everything above runs on BEAST, so none of it can report a power cut or a machine that booted with nobody
-logged in. A Mac watches it instead: the daemon of the watching machine (`m5` by default) checks BEAST every
-60 s, independent of it (`machine/outsideWatch.ts`).
+logged in. Another computer watches it instead, every 60 s and independent of it.
+
+**FFBox watches, since w5892** (lothsahn: "run 3 on ffbox"): while FFBox's link is set up (`providers.ffbox.enabled`)
+it is the default watcher (`watcherOf`, `server/outsideWatch.ts`), ahead of m5, which was offline from 2026-11-25. The
+portal sends it the topic over the connector (`outside_watch`, docs/ffbox-connector-contract.md, "The outside watch");
+a thread in FFBox's ffwatch (`scripts/outside_watch.py` in Final-Factory/ffbox, switch `fff.outside_watch.enabled`)
+checks `<fff.url>/api/health`, sends one low-priority "Outside watchdog on FFBox" test alert per new topic, and after 3
+misses in a row "FF Factory portal down", then "FF Factory portal back". It reports back (`outside_watch_status`), and
+`system_status` shows its last check and the test alert. **No ping, no "up, portal down" and no Wake-on-LAN** from
+FFBox: it is not on the tailnet and not on BEAST's LAN, so only the HTTPS check is made. Every machine's daemon is told
+it does not watch, which deletes its copy (m5's goes when it next connects). `"outsideWatch": { "machine": "m5" }` puts
+the watch back on m5, with what follows.
+
+The machine watch (m5's daemon until w5892, `machine/outsideWatch.ts`):
 
 - **Checks:** `GET <publicUrl>/api/health` (no login; up when it answers `{ ok: true }`) and a ping of the
   health URL's host (`tailscale ping`, else plain `ping`).
