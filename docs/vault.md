@@ -1195,6 +1195,7 @@ it to `shared/githubRequirements.ts` and this table in a pull request, and says 
 | Resource owner | **Final-Factory** | every required repository is the organization's |
 | Repository access | **All repositories**, or select the list below | |
 | Actions (repository) | **Read and write** | read runs, jobs and logs; re-run a failed job (`POST …/actions/runs/{id}/rerun`, write). Probe: `GET /repos/{repo}/actions/runs` |
+| Administration (repository) | **Read-only** | ffu only, for its repo-level self-hosted runners: ffu's CI wait lists them (`server/blockerWatch.ts` `awayNow`; w5928, measured 2026-11-25: 403 with `X-Accepted-Github-Permissions: administration=read` without it). Probe: `GET /repos/Final-Factory/ffu/actions/runners` |
 | Artifact metadata (repository) | **Read-only** | artifact storage and deployment records. Probe: `GET /orgs/Final-Factory/artifacts/{digest}/metadata/storage-records` with a made-up digest: 404 counts as allowed, 403 as refused *(measured with a token that may read: 404)* |
 | Commit statuses (repository) | **Read and write** | the status part of a PR's checks (`GET …/commits/{ref}/status`). Probe: that, on `HEAD` |
 | Contents (repository) | **Read and write** | `git push`; merging a PR (`PUT …/pulls/{n}/merge` is listed under Contents, write). Probe: `GET /repos/{repo}/commits` |
