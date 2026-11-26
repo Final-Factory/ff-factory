@@ -19,7 +19,7 @@ import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
 import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, NO_READ_UP, type Exec, lowCopy, ownerGameDataLock, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServers } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -89,8 +89,8 @@ import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBrok
 import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim } from './ffuSlots.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
-import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
 import { prepareInbox } from '../server/attachments.ts';
@@ -126,6 +126,7 @@ import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type Gh
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
+import { planMediumFolders, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
@@ -179,6 +180,12 @@ export interface DaemonConfig {
    * at Low integrity, after the root's folders are labelled Low (machine/lowIntegrity.ts). Off when unset; Windows only.
    */
   workerIntegrity?: 'low';
+  /**
+   * w5862: Medium agents' (any launch that is not a sandbox's) own temp root and cargo home, out of the folders workers
+   * write (machine/mediumFolders.ts). Absent or "warn": only a WARNING at start names the exposed folders; "on": Medium
+   * agents get <root>/tmp-medium and <root>/cache-medium/cargo, keeping today's folders with a WARNING when they cannot.
+   */
+  mediumAgentFolders?: MediumFoldersMode;
   /**
    * Paths outside the worker root that Low workers may write, labelled Low with the root (w5377): the person's decision,
    * never a default (lothsahn: "under no circumstances should workers write outside of ffw"). A path that is a file now is
@@ -902,6 +909,7 @@ export class Daemon {
       ready: () => this.welcomed,
       slotRoots,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      mediumTempRoot: () => this.mediumFolders().tempRoot,
       leases: () => readLeases(slotRoots()),
       protectedPaths: () => [cfg.repoPath, appDirOfConfig(cfg), ...(this.currentPool()?.protectedPaths ?? [])],
       places: () => this.pool.list().map((sb) => ({ id: sb.id, path: sb.path })),
@@ -1122,9 +1130,10 @@ export class Daemon {
     this.sweeper = new SessionSweeper({
       root: cfg.root,
       tempRoot: () => agentTempRoot(cfg.tempDir),
+      mediumTempRoot: () => this.mediumFolders().tempRoot,
       ready: () => this.welcomed,
       sessions: () => [...this.entries.values()].map((e) => ({ id: e.s.info.id, live: e.s.live, resumable: this.resumable.has(e.s.info.id) })),
-      dirOf: (id) => sessionTempDir(agentTempRoot(cfg.tempDir), id),
+      dirOf: (id) => this.sessionTemp(id),
       guard: () => this.cleanupGuard(),
       procs: () => this.procs(),
       self: () => [process.pid, process.ppid],
@@ -1182,7 +1191,7 @@ export class Daemon {
               await planInstallLeftovers({
                 root: this.cfg.root,
                 sandboxes: this.pool.list().map((x) => x.path),
-                tempRoots: [agentTempRoot(this.cfg.tempDir)],
+                tempRoots: this.agentTempRoots(),
                 guard,
                 ctx: this.staleCtx,
                 procs: await this.procs().catch(() => undefined),
@@ -1203,7 +1212,7 @@ export class Daemon {
             planInstallLeftovers({
               root: this.cfg.root,
               sandboxes: [],
-              tempRoots: [agentTempRoot(this.cfg.tempDir)],
+              tempRoots: this.agentTempRoots(),
               guard,
               ctx: this.staleCtx,
               procs: await this.procs().catch(() => undefined),
@@ -1314,6 +1323,50 @@ export class Daemon {
   }
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
+  private mediumMemo?: MediumFolders;
+  /** w5862: Medium agents' own temp root and cargo home (machine/mediumFolders.ts), decided and logged once. */
+  mediumFolders(): MediumFolders {
+    if (!this.mediumMemo) {
+      const c = this.cfg;
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()] });
+      for (const line of this.mediumMemo.lines) log(line);
+    }
+    return this.mediumMemo;
+  }
+
+  /** The agents' temp roots: the one every agent had, and Medium agents' own once w5862's switch is on. */
+  private agentTempRoots(): string[] {
+    const m = this.mediumFolders().tempRoot;
+    return [agentTempRoot(this.cfg.tempDir), ...(m ? [m] : [])];
+  }
+
+  /** The temp folder a session uses: a Medium one's in Medium agents' temp root once w5862's switch made it. */
+  private sessionTemp(id: string): string {
+    const m = this.mediumFolders().tempRoot;
+    if (m) {
+      const d = sessionTempDir(m, id);
+      const spec = this.entries.get(id)?.spec;
+      if (spec ? !spec.sandbox : fs.existsSync(d)) return d;
+    }
+    return sessionTempDir(agentTempRoot(this.cfg.tempDir), id);
+  }
+
+  /** Every temp folder a session may have (w5862): what guards and grants name, so a session's is covered either way. */
+  private sessionTemps(id: string): string[] {
+    return this.agentTempRoots().map((t) => sessionTempDir(t, id));
+  }
+
+  /**
+   * A new agent's TMP, TEMP and TMPDIR (cleanup.ts sessionTempEnv) and, for a Medium agent once w5862's switch is on, its
+   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root.
+   */
+  private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
+    const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
+    const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
+    if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
+    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}) };
+  }
+
   private sandboxRoot(): string | undefined {
     return this.currentPool()?.root;
   }
@@ -1340,13 +1393,13 @@ export class Daemon {
     return {
       keep: [c.repoPath, this.sandboxRoot(), appDirOfConfig(c), this.voice?.v.toolsDir, c.unityEditorRoot, c.unityPath, this.maxEventsFile && path.dirname(this.maxEventsFile), ...(this.currentPool()?.protectedPaths ?? [])].filter((x): x is string => !!x),
       inUse: [
-        ...[...this.entries.values()].filter((e) => e.s.live).map((e) => sessionTempDir(agentTempRoot(c.tempDir), e.s.info.id)),
+        ...[...this.entries.values()].filter((e) => e.s.live).flatMap((e) => this.sessionTemps(e.s.info.id)),
         // Every bash of this user uses it as /tmp, whichever session's folder it was.
-        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), agentTempRoot(c.tempDir)])].filter((x): x is string => !!x),
+        ...[keepGitBashTmp(this.bashTmp, [os.tmpdir(), ...this.agentTempRoots()])].filter((x): x is string => !!x),
       ],
       home: HOME,
       // Before the portal's welcome nobody knows which stopped workers a request waits for (w1379): every worker folder stays.
-      resumable: this.welcomed ? [...this.resumable].map((id) => sessionTempDir(agentTempRoot(c.tempDir), id)) : [agentTempRoot(c.tempDir)],
+      resumable: this.welcomed ? [...this.resumable].flatMap((id) => this.sessionTemps(id)) : this.agentTempRoots(),
     };
   }
 
@@ -1357,7 +1410,7 @@ export class Daemon {
   private finishedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
     const owners = this.owners;
-    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).map((id) => sessionTempDir(agentTempRoot(this.cfg.tempDir), id));
+    return [...this.resumable].filter((id) => !owners[id] && !this.sessionLive(id)).flatMap((id) => this.sessionTemps(id));
   }
 
   /**
@@ -1367,17 +1420,19 @@ export class Daemon {
    */
   private closedSessionDirs(): string[] {
     if (!this.welcomed || !this.owners) return [];
-    const t = agentTempRoot(this.cfg.tempDir);
-    let names: string[];
-    try {
-      names = fs.readdirSync(t);
-    } catch {
-      return [];
-    }
-    return names
-      .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
-      .filter((id): id is string => !!id && this.sessionClosed(id))
-      .map((id) => sessionTempDir(t, id));
+    // w5862: and Medium agents' own temp root, once that switch is on.
+    return this.agentTempRoots().flatMap((t) => {
+      let names: string[];
+      try {
+        names = fs.readdirSync(t);
+      } catch {
+        return [];
+      }
+      return names
+        .map((n) => /^ffa-([\w-]+)$/i.exec(n)?.[1])
+        .filter((id): id is string => !!id && this.sessionClosed(id))
+        .map((id) => sessionTempDir(t, id));
+    });
   }
 
   /** Worker `id` is stopped, not resumable, and on no request that has not closed (w3656); false before the portal's welcome. */
@@ -1576,7 +1631,7 @@ export class Daemon {
       this.cliScrub = new CliScrubber({
         root: cliProjectsDir(),
         // w5305: the legacy ~/.claude's transcripts too, while agents started before the move (or on the stored login) write there
-        extraRoots: () => [...cliTempFolders(agentTempRoot(this.cfg.tempDir)), ...legacyProjectsDirs(process.env)],
+        extraRoots: () => [...this.agentTempRoots().flatMap((t) => cliTempFolders(t)), ...legacyProjectsDirs(process.env)],
         log: (line) => log(line),
         // the portal keeps it beside the clean-up passes (portal_logs cleanup, this machine): paths and counts only
         report: (r: CliScrubReport) => this.out({ type: 'cleanup_log', entry: { ...r } }),
@@ -3055,7 +3110,7 @@ export class Daemon {
       if (hasFile && typeof rest.text === 'string' && rest.text.trim()) throw new Error('give text or file, not both');
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const roots = [folder, sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId)];
+      const roots = [folder, ...this.sessionTemps(sessionId)];
       const text = hasFile ? await postTextFromFile(folder, file, skip, roots) : rest.text;
       // Images go to FFBox in parts before the post, so the call waits longer (POST_IMAGE_UPLOAD in server/ffboxPost.ts).
       if (!hasImages) return call('post_as_max', 90_000)({ ...rest, text });
@@ -3077,7 +3132,7 @@ export class Daemon {
     all.timed_run = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      const temp = this.sessionTemp(sessionId);
       return timedRunFromMachine({ portalUrl: this.cfg.portalUrl, token: this.cfg.token, roots: [folder, temp, ...(this.cfg.root ? [this.cfg.root] : [])], saveRoots: [folder, temp], cwd: folder, tempDir: temp, args, key: sessionId, rpc: (a) => call('timed_run', 900_000)(a), log: (line) => log(line) });
     };
     // publish_attachment (docs/attachments.md, "Agents' files"): the portal opens an upload for this machine; the file
@@ -3085,7 +3140,7 @@ export class Daemon {
     all.publish_attachment = async (args) => {
       const folder = this.entries.get(sessionId)?.spec?.cwd;
       if (!folder) throw new Error('this session has no working folder on this machine yet');
-      const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), sessionId);
+      const temp = this.sessionTemp(sessionId);
       const roots = [folder, temp];
       // w4613: a player from this computer's shared player cache, packed into the session's temp folder and sent up.
       if (args.player !== undefined && args.player !== '') {
@@ -3168,7 +3223,7 @@ export class Daemon {
     const groups = spec.sandbox && this.shellGroupsOn ? shellGroupEnv(this.slotMailbox, { ...process.env, ...spec.env }) : {};
     // w5565: a sandbox agent keeps the workers' uv cache; the daemon's own (Medium) one is read-only to it. w5693: and its uv tool folder.
     const uv = spec.sandbox ? sandboxUvEnv({ ...process.env, ...spec.env }, this.cfg.root) : {};
-    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...sessionTempEnv(agentTempRoot(this.cfg.tempDir), info.id), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
+    return { ...spec, ...lock, stdioMcp: this.stdioMcpFor(spec), claudeExecutable, ...(fence ? { fence } : {}), ...(low?.transcripts ? { transcriptLabels: true } : {}), env: { ...withoutMaxEvents(spec.env, !!spec.sandbox), ...ghMachine, ...uv, ...this.agentTempEnv(info.id, !!spec.sandbox), ...(maxFile ? { FF_MAX_EVENTS: maxFile } : {}), ...slot, ...this.rpcEnv(info.id, spec.sandbox), ...app, ...(fence ? fenceEnv(fence) : {}), ...lowVars, ...ghOwn, ...groups } };
   }
 
   private ghMemo?: { at: number; token?: string };
@@ -3552,11 +3607,14 @@ export class Daemon {
       if (!exe) return loud("gh is not on the daemon's PATH");
       const copy = await lowCopy(root, exe, exec, say);
       if (!copy) return loud('no Low copy of gh to test with');
-      const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, gh), GH_TOKEN: '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
+      // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
+      // the daemon read one, which is the only route left once the owner's gh folder carries No-Read-Up; else the folder.
+      const token = this.machineGh().GH_TOKEN;
+      const env = { ...process.env, ...lowEnv(root, undefined, 'PATH', process.env.PATH, token ? undefined : gh), GH_TOKEN: token ?? '', GITHUB_TOKEN: '', GH_NO_UPDATE_NOTIFIER: '1', GH_PROMPT_DISABLED: '1' };
       const r = await run(copy, ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 60_000, env });
-      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token/i.test(l));
+      const said = `${r.stdout}\n${r.stderr}`.split(/\r?\n/).filter((l) => l.trim() && !/token:/i.test(l));
       if (r.code !== 0) return loud(`gh auth status at Low exited ${r.code}: ${said.slice(0, 3).join(' / ').trim().slice(0, 300)}`);
-      log(`worker integrity: gh authenticates for Low workers (${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
+      log(`worker integrity: gh authenticates for Low workers (${token ? "the machine login's token as GH_TOKEN" : 'the login folder'}: ${said.find((l) => /Logged in/i.test(l))?.trim() ?? 'gh auth status ok'})`);
     } catch (e) {
       loud((e as Error).message);
     }
@@ -3639,7 +3697,14 @@ export class Daemon {
       // on mode (the most closed case: the gh login's folder closed), so a passing probe has run every rule on mode adds.
       const owner = ownerReadDenied({ platform: process.platform, home: os.homedir(), env: process.env, hasToken: true });
       const t = readFenceProbeTargets({ root, appDir, secrets: this.secretsDirs, tokenFile: this.cfg.tokenFile, allowBack: FENCE_READ_ALLOW, owner });
-      log(sayOwnerRules(mode, process.platform, owner));
+      // w5749: on Windows the owner's secrets are closed by labels on this machine's system drive, where lothsahn allowed it.
+      if (process.platform === 'win32') {
+        // The plan first: gh is asked where its login is only on a machine with a plan (w5849's review of #1278), so on every
+        // other Windows machine nothing on the system drive is looked at.
+        const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+        const st = plan.label.length || plan.left.length ? await run(trustedGh(), ['auth', 'status', '--hostname', 'github.com'], { timeoutMs: 30_000, env: machineGhStatusEnv() }).catch(() => undefined) : undefined;
+        log(sayOwnerLabels(mode, plan, st ? ghLoginStorage(`${st.stdout}\n${st.stderr}`) : undefined));
+      } else log(sayOwnerRules(mode, process.platform, owner));
       const fence = this.workerFence;
       const lock = this.writeLock;
       const ownerFence = fence && { ...fence, secretsDirs: this.secretsDirs, readOff: false, readDenied: [...(fence.readDenied ?? []), ...owner], ...(owner.length ? { ownerSecrets: { mach: KEYCHAIN_MACH_SERVICES } } : {}) };
@@ -3742,6 +3807,43 @@ export class Daemon {
   }
 
   /**
+   * w5749 (lothsahn, 2026-11-25: "Yes: label those folders on C: and move gh's login out of Credential Manager"; "Do only
+   * that on C:. Keep a tested way back"): on a machine in OWNER_LABEL_ON_SYSTEM_DRIVE, in on mode the gh login moves from
+   * Credential Manager into its folder's hosts.yml (ghLoginToFile, checked before the entries are deleted) and the gh folder
+   * and ~/.ssh get No-Read-Up, with no grant (labelNoReadUp grant false). In off and warn, the way back: the labels come off
+   * (unlabelNoReadUp: no explicit label, as before) and, when the note says the daemon moved it, the login goes back into
+   * Credential Manager. Other machines: nothing, and nothing on their system drive is looked at.
+   */
+  private async applyOwnerLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+    const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
+    if (!plan.label.length) return;
+    const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
+    const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
+    if (mode === 'on') {
+      // The note is written before gh's login call (w5849's review of #1281), so a daemon that dies mid-move still moves it
+      // back in warn or off; a note left by a move that did not happen is harmless (the way back finds the login in the keyring).
+      const writeNote = () => fs.writeFileSync(note, JSON.stringify({ movedAt: new Date().toISOString(), why: 'w5749: the read fence moved the gh login out of Credential Manager; off or warn moves it back' }));
+      const m = await ghLoginToFile(realGhRun, writeNote);
+      tell(m.line);
+      if (m.ok && m.deleteFrom?.length) {
+        const d = await deleteGenericCreds(m.deleteFrom, exec);
+        tell(`Credential Manager: ${d.deleted.length ? `deleted ${d.deleted.join(', ')}` : 'no gh entry left'}${d.failed.length ? `; could NOT delete ${d.failed.join(', ')}, which a Low worker can still read` : ''}`);
+      }
+      const ok = await labelNoReadUp(plan.label, exec, say, { systemDrive: () => false, grant: false, what: "No-Read-Up on the owner's gh folder and ~\\.ssh, w5749" });
+      const st = await realGhRun(['auth', 'status', '--hostname', 'github.com']);
+      log(sayOwnerLabels('on', plan, ghLoginStorage(`${st.stdout}\n${st.stderr}`)) + (ok ? '' : ' (not every label could be set: the lines above say which)'));
+      return;
+    }
+    const off = await unlabelNoReadUp(plan.label.map((t) => t.path), exec, say);
+    tell(off === undefined ? 'not every read label could be taken off (the line above says which)' : off.length ? `read labels taken off ${off.join(', ')}` : "no read label on the owner's folders");
+    if (fs.existsSync(note)) {
+      const b = await ghLoginToKeyring(realGhRun);
+      tell(b.line);
+      if (b.ok) fs.rmSync(note, { force: true });
+    }
+  }
+
+  /**
    * Windows: in on mode the No-Read-Up labels on the closed paths, with what workers read given back; in off and warn modes
    * any No-Read-Up label a closed path still carries (an earlier on, or a reverted build) is replaced by the plain No-Write-Up
    * one, so a switch or a revert leaves no read label behind (lockout review B1). A path without NR is not touched: setting
@@ -3749,6 +3851,8 @@ export class Daemon {
    */
   private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     if (!this.cfg.root) return;
+    // w5749: the owner's secrets on the system drive (LothDesktop only), apart: their failure is said and leaves the rest.
+    await this.applyOwnerLabels(mode, exec, say).catch((e) => say(`worker integrity: owner secrets: ${(e as Error).message}`));
     const appDir = appDirOfConfig(this.cfg);
     // w5731: a portal switch to on labels steam even on a machine whose start ran before it existed.
     ensureDaemonOnlyDirs(this.cfg.root);
@@ -4216,7 +4320,7 @@ export class Daemon {
         const sb = msg.sandbox ? this.pool.pathOf(msg.sandbox) : undefined;
         void runSteamJob(msg, {
           root: this.cfg.root,
-          allowedRoots: [...(sb ? [sb] : []), sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.session)],
+          allowedRoots: [...(sb ? [sb] : []), ...this.sessionTemps(msg.session)],
           python: pythonExe(process.env),
           gitEnv: githubNetEnv(msg.githubToken),
           send: (m) => this.send(m),
@@ -4487,7 +4591,7 @@ export class Daemon {
         // /tmp is looked up again first: it moves to the first bash's TMP whenever the user's MSYS processes all ended, and a
         // value up to 5 minutes old removed a folder that had just become /tmp (w3559: every bash on LothDesktop, ffu's CI
         // runners included, lost /tmp at 2026-11-08 03:30Z until the 5-minute check made it again at 03:34Z).
-        const temp = sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId);
+        const temp = this.sessionTemp(msg.sessionId);
         const same = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
         void this.ensureBashTmp()
           .catch(() => undefined)
@@ -4507,7 +4611,7 @@ export class Daemon {
         // Only the sandboxes and the standing agents' folders (and, for one session's image, its own temp folder): inline
         // images, nothing else. Not the main clone (w536): no agent works there.
         const roots = [path.join(appDirOfConfig(this.cfg), 'agents'), ...this.pool.paths()];
-        if (msg.op === 'read' && msg.sessionId) roots.push(sessionTempDir(agentTempRoot(this.cfg.tempDir), msg.sessionId));
+        if (msg.op === 'read' && msg.sessionId) roots.push(...this.sessionTemps(msg.sessionId));
         try {
           if (msg.op === 'read') {
             const img = readImage(msg.path, roots);
@@ -4647,6 +4751,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // w5545: what the daemon starts itself (nightly builds, timed runs, ops) asks for slots and tickets as the daemon.
   Object.assign(process.env, d.rpcEnv(`daemon-${cfg.id}`));
   d.start();
+  // w5862: says at start where Medium agents' temp root and cargo home are exposed to workers, or moves them (mediumAgentFolders).
+  const medium = d.mediumFolders();
+  if (medium.cargoHome && fs.existsSync(path.join(HOME, '.cargo'))) void seedCargoHome(path.join(HOME, '.cargo'), medium.cargoHome).then((m) => log(m));
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
   const quit = () => {
     log('shutting down: agents in agent hosts run on for the next daemon; any others stop');
