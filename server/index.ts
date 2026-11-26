@@ -3337,6 +3337,7 @@ function dispatcherMoveWhy(account: string): { why: string; out: boolean } | und
   return dispatcherMove(c, poolViews(), account, { label: tokenLabel(account), owner: agents.tokenOwner?.(account), room, atStop: room && stopMeters(usage.usageOf(account), poolLimits(cfg)).length > 0 });
 }
 agents.dispatcherAccountMove = dispatcherMoveWhy;
+agents.tokenLabel = tokenLabel;
 agents.dispatcherHeldWhy = () => (dispatcherHasRoom() ? undefined : dispatcherWaitWhy());
 agents.operatorAlert = (line) => agents.orchestrators.toPeople(identity.list().filter((u) => u.role === 'owner' || vault.hasClaudeFor(u.userId)), line, true);
 /** What claudeAccounts.dispatcher names now, as dispatcherMove reads it. */
