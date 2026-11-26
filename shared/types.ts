@@ -1109,6 +1109,22 @@ export interface MachinePause {
   at?: string;
 }
 
+/** A person's drain of a machine (w5878, Machine.drain): who asked, in their own words, and who set it. */
+export interface MachineDrain {
+  /** The person's own words, quoted: "Hold new work on LothDesktop and let the running workers finish". */
+  words: string;
+  /** The person who said them. */
+  who: string;
+  /** Who set it: "dispatcher", or a person's orchestrator. */
+  by: string;
+  /** When it was set (ISO). */
+  at: string;
+  /** When it lifts by itself (ISO); absent: until hold_machine lift. */
+  until?: string;
+  /** Requests whose new workers may still go there (lowercase ids), as placement.holdExcept. */
+  except?: string[];
+}
+
 /** A machine's worker write fence as its daemon reports it (w5555, machine/fenceGate.ts). */
 export interface WorkerFenceReport {
   /** off: this OS's fence key is absent (switched off on purpose); setting_up: workers wait; on; failed: workers are held. */
@@ -1156,6 +1172,12 @@ export interface Machine {
    * hand their requests back. Absent: a daemon before w1532 (never paused).
    */
   pause?: MachinePause;
+  /**
+   * A drain a person asked for in their own words and the dispatcher or their orchestrator set with hold_machine (w5878):
+   * no new work, no move and no pair leg goes there, while the workers already there run on and finish. Kept by the portal
+   * (not config, not the daemon); lifted with hold_machine lift, or by itself at `until`. server/machineDrain.ts.
+   */
+  drain?: MachineDrain;
   /**
    * daemon.json settings its redeploys over ssh write, kept from when it was the portal's own host (convert_machine,
    * w466): the MCP-for-Unity server and the idle-editor stop it had from the portal's config.
@@ -2086,11 +2108,6 @@ export interface CleanupSummary {
   phasesMs?: Record<string, number>;
   /** The whole pass, in ms. */
   passMs?: number;
-  /**
-   * A low pass's quick plan, made first (w5795, report-only): what the cargo-target cap with the low-space rules alone would
-   * remove at once, and how long planning it took. Nothing of it is removed apart from the full pass yet.
-   */
-  quick?: { items: number; bytes: number; ms: number; top?: { path: string; bytes: number; rule: string }[] };
 }
 
 export interface DrainStatus {
