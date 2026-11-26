@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { rootEnv } from '../machine/daemon.ts';
 import { editorLaunchEnv, sandboxEditorEnv } from '../machine/sandboxes.ts';
@@ -55,7 +56,7 @@ test('w5833: a sandbox editor on macOS and Linux gets TMPDIR in the root only wi
 });
 
 test('w5833 (review F1): the editor makes its TMPDIR at each start, and starts with the system temp when it cannot', () => {
-  const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'w5833-f1-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w5833-f1-'));
   const lines: string[] = [];
   const t = path.join(dir, 'tmp', 'editor-slot1');
   const env = { A: '1', TMPDIR: t };
