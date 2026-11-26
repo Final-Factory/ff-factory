@@ -217,6 +217,15 @@ The rule runs on every hourly pass (the daemon's `cargo-cap` scope), not only on
 #1148 deployed, LothDesktop's 05:34 UTC hourly pass on 2026-11-25 never looked at slot2 to slot4 (25 to 35 GB each, 11 to
 21 GB of it idle `debug/incremental`), because the rule ran only in the full plan (`server/installLeftovers.ts`,
 `ffuSlotTargets`).
+
+**Released targets first (w6044).** A pass plans the released slots' targets before every slower step (the `ffu-slots`
+scope, `cleanupPass`'s `first` step in `server/staleOutput.ts`): a slot no running or resumable worker holds and nothing
+runs from. On a low pass a settled one goes whole with no sweep or size walk; on the hourly pass the cap rule above judges
+it. A held slot is never touched in that step. Why: on BEAST, 2026-11-26, three released targets held 190.6 GB (49.2, 57.7
+and 83.6 GB) while no pass had finished since 2026-11-25 04:09Z; the 09:10Z low pass was cut off 4 min into its `regular`
+step, before the ffu rule ran in its `stale` step. Stage 1 is report-only: the daemon logs `clean-up: ffu slots first
+(report-only, w6044): N item(s) planned in S s: ...` and the later step still removes them. Stage 2 removes them there.
+
 The sweep and the trims that go with one pass are one clean-up item. Before w5503 the incremental trim, an item inside the
 swept target, was dropped from the plan, so a slot swept on every pass kept its cache. Measured on LothDesktop at
 2026-11-25 04:40 UTC, before w5499 reached it: the slot targets were 4.1, 19.2, 32.1 and 25.6 GB. Of that, 0, 6.5, 19.9
