@@ -345,6 +345,13 @@ export interface Config {
    */
   movedAwayWorkers?: 'off' | 'warn' | 'on';
   /**
+   * w6050 (server/tmpWriteFence.ts): a worker's shell write into /tmp, /var/tmp, /private/tmp, /var/folders or a Windows
+   * system temp folder outside its own folders. "on" (unset) refuses it in the PreToolUse guard; "warn" only notes it after
+   * it ran (the w6008 stage: the recovery switch). Read when a worker's process starts, so a change reaches each worker at its
+   * next turn.
+   */
+  tmpWriteFence?: 'warn' | 'on';
+  /**
    * The address machines (docs/machines.md) reach this portal at, e.g. the Tailscale Funnel URL
    * "https://<host>.<tailnet>.ts.net". Optional: add_machine can be given it instead.
    */

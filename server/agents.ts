@@ -858,6 +858,7 @@ export class Agents {
     sessions.codeMove = (s) => this.codeMove(s);
     // w1376: a computer on hold (config placement.hold) resumes nobody, not even the workers it already has.
     sessions.machineHold = (s) => this.machineHold(s);
+    sessions.drainOrphan = (s) => this.drainOrphan(s);
     // w1532, w2443: a machine paused from its tray app stops what runs there (server/machinePause.ts): workers mid-turn are
     // told to push and stop, interrupted, then stopped; their requests wait Blocked on the pause and resume on the unpause.
     this.pauses = new MachinePauses({
@@ -3937,10 +3938,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w1863: a hold that names requests it lets through resumes their workers (lothsahn: "stop all work on LothDesktop
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
     const mine = [...this.store.work.values()].filter((w) => isOpen(w) && w.sessionIds.includes(i.id)).map((w) => w.id);
-    const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i);
-    // w5895: a drain set to let only its running workers finish ("and none resume") would hold this resume. WARN-ONLY under
-    // lothsahn's lockout rule (warn and enforce in separate PRs): logged once per worker and drain, and the resume goes on.
-    if (!why && i.kind === 'worker') this.warnDrainResume(i, mine);
+    // w5895, w5937: a drain set to let only its running workers finish ("and none resume") holds the resume of any other
+    // worker there that no exception lets through, until hold_machine lift, update_work hold lift or resumes 'all'.
+    const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i) ?? (i.kind === 'worker' ? this.drainResumeHold(i, mine) : undefined);
     // w3715: a worker whose own work holds a bench ticket there goes on through any hold until it lets go (lothsahn: "make
     // sure stuff holding locks can continue doing stuff"): its messages, wakes and bench warnings reach it, so it can finish
     // and release. Not a pause: that ends its processes, and with them the ticket (machine/pauseStop.ts).
@@ -3948,16 +3948,31 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return why;
   }
 
-  /** w5895: the resumes a 'running' drain would hold, logged once each (warn-only; the enforcing step is a later PR). */
-  private readonly drainResumeWarned = new Set<string>();
-  private warnDrainResume(i: SessionInfo, mine: readonly string[]): void {
+  /**
+   * w5937 (w6058): a worker with no open request whose message only the 'running' drain holds: the message is dropped (and
+   * said), since its request closing would never release it. Any other hold keeps it waiting as before.
+   */
+  private drainOrphan(s: SessionHandle): string | undefined {
+    const i = s.info;
+    if (i.kind !== 'worker' || !i.machineId || isMidTurn(i)) return undefined;
+    if ([...this.store.work.values()].some((w) => isOpen(w) && w.sessionIds.includes(i.id))) return undefined;
+    const why = this.machineHold(s);
+    if (!why || why !== this.drainResumeHold(i, [])) return undefined;
+    return `${i.machineId} is drained to let only its running workers finish, and worker ${i.id} has no open request left, so its held message is dropped (w5937)`;
+  }
+
+  /** w5937: why a 'running' drain holds this worker's resume (drainWouldHold), logged once per worker and drain. */
+  private readonly drainResumeLogged = new Set<string>();
+  private drainResumeHold(i: SessionInfo, mine: readonly string[]): string | undefined {
     const d = drainOf(this.store.machines.get(i.machineId ?? ''), this.orchestrators?.now().getTime() ?? Date.now());
     const would = drainWouldHold(d, { id: i.id, works: [...mine] });
-    if (!d || !would) return;
+    if (!d || !would) return undefined;
     const key = `${i.id}@${d.at}`;
-    if (this.drainResumeWarned.has(key)) return;
-    this.drainResumeWarned.add(key);
-    console.log(`[machines] ${i.machineId} drain: worker ${i.id}${mine.length ? ` (${mine.join(', ')})` : ''} resumes there, which ${would}; warn-only: it would be held once enforced (w5895)`);
+    if (!this.drainResumeLogged.has(key)) {
+      this.drainResumeLogged.add(key);
+      console.log(`[machines] ${i.machineId} drain: worker ${i.id}${mine.length ? ` (${mine.join(', ')})` : ''} resume held, as ${would} (w5937)`);
+    }
+    return `${i.machineId} is drained: ${would}, so this worker's resume waits until hold_machine lift, update_work hold {action: lift}, or a hold with resumes 'all' (w5937)`;
   }
 
   /** w5895: the workers on machine `id` the read-back names: live ones, and stopped ones with open requests. */
@@ -4004,13 +4019,17 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
         said = config ? `${m.id}: ${lifted}, but${config}` : `${m.id} takes new work again (${lifted}).`;
       }
     } else {
-      const running = this.heldWorkers(m.id).filter((s) => s.midTurn).map((s) => s.id);
+      // A drain set again (to add an except or hours) keeps the workers the drain in force already lets finish: a worker
+      // running at the first drain and between turns now would otherwise be dropped and its resume held (w6055 F1).
+      const was = drainOf(m, now.getTime());
+      const kept = was?.resumes === 'running' ? (was.running ?? []) : [];
+      const running = [...new Set([...kept, ...this.heldWorkers(m.id).filter((s) => s.midTurn).map((s) => s.id)])];
       const d = newDrain({ words: a.words, who: a.who, hours: a.hours, except: a.except, resumes: a.resumes, running }, by, now);
       if (typeof d === 'string') throw new Error(d);
       mm.update(m.id, { drain: d });
       mm.syncRunnerHolds(m.id); // w5916: its CI runners drain
       console.log(`[machines] ${m.id} drained by ${by}: ${d.who}: "${d.words}"${d.until ? ` until ${d.until}` : ''}${d.except ? `, except ${d.except.join(', ')}` : ''}, resumes ${d.resumes} (w5878, w5895)`);
-      said = `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${running.length} worker(s) running there finish${d.resumes === 'running' ? ', and the others there should not resume (warn-only for now: their resumes are logged, not held, w5895)' : ', and the others there resume as before'}.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;
+      said = `${m.id} is drained: no new work, move or pair leg goes there${d.except ? ` (except ${d.except.join(', ')})` : ''}; the ${running.length} worker(s) running there finish${d.resumes === 'running' ? ', and the others there do not resume until it is lifted or set again with resumes all (w5937)' : ', and the others there resume as before'}.${d.until ? ` It lifts by itself at ${d.until.slice(0, 16)}Z.` : ' hold_machine lift ends it.'}`;
     }
     this.markHoldAsksSet(m.id, a.action, by, workId);
     return `${said}\nRead back live: ${this.holdReadbackOf(m.id)}`;
@@ -6082,6 +6101,8 @@ A report is for a person who asked for one, and people want very few. File one w
         denyToolPrefixes: ['mcp__ffsb__'],
         // w896: a worker deletes only inside the machine's worker install folder (server/rootFence.ts).
         ...(m.root ? { workerRoot: m.root } : {}),
+        // w6050: a shell write into a system temp folder is refused (config tmpWriteFence "warn" is the recovery switch).
+        tmpWriteFence: this.cfg.tmpWriteFence ?? 'on',
         // w3670: it reads the daemon's logs and other non-secret files in that protected folder (server/daemonReads.ts).
         daemonReads: { dir: appDirOf(m), ...(m.root ? { root: m.root } : {}) },
         // w936: a request of this worker's was granted work in the machine's main clone (an older daemon ignores it).
@@ -8471,7 +8492,7 @@ ${w.repo ?? ''}
           who: z.string().optional().describe('hold: the person who said them (their name).'),
           hours: z.number().min(1).max(168).optional().describe('hold: lift it by itself after this many hours; absent: until lift.'),
           except: z.array(z.string()).max(10).optional().describe('hold: requests (w123) whose new workers may still go there, as the person said.'),
-          resumes: z.enum(['running', 'all']).optional().describe("hold: running (default, w5895): only the workers mid-turn now finish and none of the others there resume (\"let the running workers finish\"; warn-only for now); all: every worker already there resumes and finishes."),
+          resumes: z.enum(['running', 'all']).optional().describe("hold: running (default, w5895): only the workers mid-turn now finish and none of the others there resume until the lift (\"let the running workers finish\"); all: every worker already there resumes and finishes."),
           work_id: z.string().optional().describe('The request (w12) whose person asked for it; its hold ask (update_work hold) is then marked set.'),
         },
         wrap(async ({ machine, action, words, who, hours, except, resumes, work_id }) => this.holdMachine({ machine, action, words, who, hours, except, resumes }, ctx.role === 'dispatcher' ? 'the dispatcher' : `${ctx.owner?.displayName ?? 'a person'}'s orchestrator`, work_id)),
