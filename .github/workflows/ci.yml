@@ -48,7 +48,7 @@ jobs:
         run: |
           #!/usr/bin/env bash
           # Temporary (w6117): the cached set's dpkg -i, then the second pass, on a real runner.
-          set -u
+          set +e -u
           u=http://azure.archive.ubuntu.com/ubuntu/pool/main/a/alsa-lib
           d=$(mktemp -d); old=$d/old; new=$d/new; mkdir -p $old $new
           for v in 1.1 1.2; do
