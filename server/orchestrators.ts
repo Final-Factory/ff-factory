@@ -2771,13 +2771,24 @@ It is for your part of the work, not an answer to another worker's question.`;
     const said = (words ?? '').trim();
     if (h.action === 'hold' && said.length < 8) throw new Error(`hold: pass ${owner.displayName}'s own words asking for it, quoted, in words`);
     const machine = h.machine.trim().toLowerCase();
+    // Checked before the ask is written, so an unknown machine leaves no ghost NOT SET line behind (w5940's review).
+    if (!this.machineIds().map(placeId).includes(placeId(machine))) throw new Error(`hold: ${h.machine} is no computer FF Factory knows (${this.machineIds().join(', ')})`);
+    const was = w.holdAsk;
     const at = this.now().toISOString();
     w.holdAsk = { machine, action: h.action, words: clip(said || `lift ${machine}`, 300), who: owner.displayName, at, ...(h.except?.length ? { except: h.except } : {}), ...(h.hours ? { hours: h.hours } : {}), ...(h.resumes ? { resumes: h.resumes } : {}) };
     const own = this.turnOwnWords(chat, words).own;
     if (own && this.d.holdMachine) {
       // Set by the shared path, which marks w.holdAsk set: it reads the request from the store, so it is put first.
       this.store.putWork(w);
-      const back = this.d.holdMachine({ ...h, machine, words: said, who: owner.displayName }, `${owner.displayName}'s orchestrator`, w.id);
+      let back: string;
+      try {
+        back = this.d.holdMachine({ ...h, machine, words: said, who: owner.displayName }, `${owner.displayName}'s orchestrator`, w.id);
+      } catch (e) {
+        // A refused hold leaves no ask behind either: the request is as it was.
+        w.holdAsk = was;
+        this.store.putWork(w);
+        throw e;
+      }
       const now = this.store.work.get(w.id);
       if (now?.holdAsk) w.holdAsk = now.holdAsk;
       console.log(`ledger: ${w.id} hold ask (${h.action} ${machine}) set in ${owner.displayName}'s own turn (w5895)`);

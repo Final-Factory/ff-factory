@@ -3919,13 +3919,15 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
 
   /**
    * w5895: the open requests whose person asked for a hold or lift of a machine that is not in force: the hold not there, or
-   * the lift not done. Shown in system_status and list_machines with who still has to set it.
+   * the lift not done. Shown in system_status and list_machines with who still has to set it. An ask once set is done: a
+   * later lift, or the hold's hours running out, must not bring the line back and ask the dispatcher to hold it again
+   * (w5940's review of #1307 at ae282369).
    */
   unsetHoldAsks(machine?: string): string[] {
     const prefs = this.placement();
     const held = (id: string) => Object.keys(prefs.hold ?? {}).some((k) => placeId(k) === placeId(id));
     return [...this.store.work.values()]
-      .filter((w) => isOpen(w) && w.holdAsk && (!machine || placeId(w.holdAsk.machine) === placeId(machine)))
+      .filter((w) => isOpen(w) && w.holdAsk && !w.holdAsk.set && (!machine || placeId(w.holdAsk.machine) === placeId(machine)))
       .filter((w) => (w.holdAsk!.action === 'hold' ? !held(w.holdAsk!.machine) : !!drainOf(this.store.machines.get(placeId(w.holdAsk!.machine)), this.orchestrators?.now().getTime() ?? Date.now())))
       .map((w) => {
         const h = w.holdAsk!;

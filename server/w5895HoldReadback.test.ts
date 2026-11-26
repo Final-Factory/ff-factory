@@ -148,3 +148,64 @@ test('w5895: a worker line that needs a hold set by the orchestrator routes as a
   assert.ok(!orchestratorAskIn('w1: still open: blocked on CI on #12'));
   assert.match(orchestratorStepText({ id: 'w5814', title: 'x' }, 'abc', 'It needs the hold set by the orchestrator', 'Lothsahn'), /update_work hold \{machine, action\} on w5814/);
 });
+
+// w5940's review of #1307 at ae282369: an ask once set stayed counted as unset after a lift or its hours running out, so
+// "HOLD ASKED, NOT SET" came back and its work_id let the dispatcher hold the machine again.
+async function setByDispatcher(t: Parameters<typeof twoComputers>[0], hours?: number) {
+  const env = await heldScene(t);
+  asTurn(env.chat(LOTH), 'system');
+  const r = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'hold' }, words: WORDS });
+  assert.ok(!r.isError, r.text);
+  const set = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', work_id: 'w5814', ...(hours ? { hours } : {}) });
+  assert.ok(!set.isError, set.text);
+  assert.ok(env.store.work.get('w5814')!.holdAsk?.set);
+  return env;
+}
+
+test('w5895: a hold that was set and then lifted does not come back as HOLD ASKED, NOT SET, and its work_id no longer gets a re-hold through the guard', async (t) => {
+  const env = await setByDispatcher(t);
+  const lift = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift' });
+  assert.ok(!lift.isError, lift.text);
+  assert.equal(env.store.machines.get('pc')!.drain, undefined);
+  const st = await env.call(env.dispatcher().info, 'system_status', {});
+  assert.doesNotMatch(st.text, /ASKED, NOT SET/);
+  const lm = await env.call(env.dispatcher().info, 'list_machines', {});
+  assert.doesNotMatch(lm.text, /ASKED, NOT SET/);
+  const again = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', work_id: 'w5814' });
+  assert.ok(again.isError, `the spent ask lets no re-hold through: ${again.text}`);
+  assert.equal(env.store.machines.get('pc')!.drain, undefined);
+});
+
+test('w5895: a hold whose hours ran out does not come back as HOLD ASKED, NOT SET', async (t) => {
+  const env = await setByDispatcher(t, 2);
+  const m = env.store.machines.get('pc')!;
+  assert.ok(m.drain?.until, 'the drain has an end');
+  m.drain = { ...m.drain!, until: new Date(Date.now() - 60_000).toISOString() };
+  const st = await env.call(env.dispatcher().info, 'system_status', {});
+  assert.doesNotMatch(st.text, /HELD \(drained/);
+  assert.doesNotMatch(st.text, /ASKED, NOT SET/);
+});
+
+test('w5895: a lift asked outside the person\'s turn shows LIFT ASKED, NOT SET until the dispatcher lifts it, then not again', async (t) => {
+  const env = await setByDispatcher(t);
+  const r = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'lift' }, words: 'Lift the hold on LothDesktop now' });
+  assert.ok(!r.isError, r.text);
+  assert.match(r.text, /LIFT ASKED, NOT SET/);
+  const before = await env.call(env.dispatcher().info, 'system_status', {});
+  assert.match(before.text, /LIFT ASKED, NOT SET: w5814/);
+  const lift = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
+  assert.ok(!lift.isError, lift.text);
+  const after = await env.call(env.dispatcher().info, 'system_status', {});
+  assert.doesNotMatch(after.text, /ASKED, NOT SET/);
+});
+
+test('w5895: a hold of an unknown machine is refused and leaves no ask behind', async (t) => {
+  const env = await heldScene(t);
+  asTurn(env.chat(LOTH), 'system');
+  const r = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'nosuchpc', action: 'hold' }, words: WORDS });
+  assert.ok(r.isError, r.text);
+  assert.match(r.text, /no computer FF Factory knows/);
+  assert.equal(env.store.work.get('w5814')!.holdAsk, undefined);
+  const st = await env.call(env.dispatcher().info, 'system_status', {});
+  assert.doesNotMatch(st.text, /ASKED, NOT SET/);
+});
