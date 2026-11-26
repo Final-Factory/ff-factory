@@ -91,8 +91,11 @@ export interface TokenSwitchDeps {
    * and what was done. Absent: nobody is told (tests that need no alert).
    */
   alert?: (s: SessionInfo, line: string) => void;
-  /** w5921: what config says the dispatcher runs on ("vault token vault-ben-3 …abcd (claudeAccounts.dispatcher)"), for its alert. */
-  dispatcherConfigured?: () => string | undefined;
+  /**
+   * w5921: why the dispatcher waits when no token it may run on has room: "it is pinned to vault token …" or "every token of
+   * ben's pool is out …; the first to reset is …, at …". Absent: the orchestrators' own words.
+   */
+  dispatcherWait?: () => string | undefined;
   /** w5921: the dispatcher's session id now: a reset dispatcher is a new session, and the old one's limit is not its own. */
   dispatcherId?: () => string | undefined;
   /** w5921: when the token's out mark ends (UsageTracker.outOf, epoch ms), the one time system_status shows; undefined: not out. */
@@ -153,6 +156,51 @@ export function orchestratorOut(pools: Iterable<readonly [string, readonly PoolT
   const leaving = hit.state === 'exhausted' || !!hit.capped;
   const better = (t: PoolTokenView) => t.key !== account && t.state !== 'exhausted' && !t.capped && (leaving || t.state !== 'retired');
   return mine.some(better) ? `vault token ${hit.label} (${hit.why})` : undefined;
+}
+
+/**
+ * What the dispatcher's config names for its Claude account (w5891, w5921): a pinned vault token (`pinned`: its name, and
+ * its key once the vault has it), else one pool (`pool`: "pool:<login>" when `named`, else the system payer's by their pool
+ * setting).
+ */
+export interface DispatcherAccount {
+  pinned?: { name: string; key?: string; label?: string };
+  pool: string;
+  named: boolean;
+}
+
+/**
+ * w5921: why the dispatcher's process on `account` restarts on another token before its next turn, else undefined (lothsahn,
+ * 2026-11-26: "The dispatcher should obey its pool config... If it's out of quota it should pick another sub within that
+ * pool. It shouldn't use a different pool"). `out` false: its config names another token or pool than the one it runs on (a
+ * pin it is not on; a pool not this token's owner's), applied at once (Agents.applyAccountConfig). `out` true: on its pool,
+ * its token is used up or retired, or at the stop line (`atStop`, vault.pool.dispatcherStopPercent), and that pool has a token
+ * it may move to (`room`, the caller's one rule, shared with the stop line: review of #1312); it moves at its next message
+ * or turn's end. A pin the vault lacks: it stays (its start would fail). Only that one pool is read.
+ */
+export function dispatcherMove(c: DispatcherAccount, pools: Iterable<readonly [string, readonly PoolTokenView[]]>, account: string, on: { label?: string; owner?: string; room: boolean; atStop?: boolean }): { why: string; out: boolean } | undefined {
+  const label = on.label ?? 'a token no longer in the vault';
+  if (c.pinned) {
+    if (!c.pinned.key || c.pinned.key === account) return undefined;
+    return { why: `its process runs on vault token ${label} and claudeAccounts.dispatcher pins vault token ${c.pinned.label ?? c.pinned.name} now, so it restarts there (w5921)`, out: false };
+  }
+  if (!on.owner || on.owner.trim().toLowerCase() !== c.pool.trim().toLowerCase()) {
+    return { why: `its process runs on vault token ${label}${on.owner ? ` (${on.owner}'s pool)` : ''} and ${c.named ? `claudeAccounts.dispatcher names ${c.pool}'s pool` : `it runs on the system payer's pool, ${c.pool}'s by their pool setting`} now, so it restarts on a token of that pool (w5921)`, out: false };
+  }
+  if (!on.room) return undefined;
+  const out = orchestratorOut(pools, account, c.pool);
+  if (out) return { why: `its process runs on ${out}, so it restarts on a token with room in ${c.pool}'s pool (w5921; never another pool)`, out: true };
+  if (on.atStop) return { why: `its process runs on vault token ${label}, at the dispatcher's stop line, so it restarts on a token with room in ${c.pool}'s pool (w5921; never another pool)`, out: true };
+  return undefined;
+}
+
+/** w5921: why the dispatcher waits when no token it may run on has room, with the first of `tokens` (its pool's) to reset. */
+export function dispatcherWait(c: DispatcherAccount, tokens: readonly { label: string; until?: number }[], now: number): string {
+  if (c.pinned) return `it is pinned to vault token ${c.pinned.label ?? c.pinned.name} (claudeAccounts.dispatcher), so it waits for that token's reset; a pinned dispatcher never moves to another token ("pool:<login>" lets it use any token of that pool, w5891)`;
+  let first: { at: number; label: string } | undefined;
+  for (const t of tokens) if (t.until !== undefined && Number.isFinite(t.until) && t.until > now && (!first || t.until < first.at)) first = { at: t.until, label: t.label };
+  const when = first ? `; the first to reset is ${first.label}, at ${hhmm(first.at)}` : '';
+  return `every token of ${c.pool}'s pool (${c.named ? 'claudeAccounts.dispatcher' : "the system payer's"}) is out, so it waits and never runs on another pool${when}`;
 }
 
 const hhmm = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + 'Z';
@@ -226,12 +274,10 @@ export class TokenSwitch {
       return;
     }
     const who = `${s.kind} ${s.id}`;
-    if (s.kind === 'ops' || (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher')) {
-      this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out; ${s.kind === 'ops' ? 'the ops worker starts a fresh process for every job, on a token with room' : 'the dispatcher stays on its own token'}, so it is not resumed`);
-      if (streak) {
-        const conf = this.d.dispatcherConfigured?.();
-        this.alertStreak(s, streak, `nothing yet: the dispatcher does not switch tokens by itself (w5921's next change does); it stays on ${label} and every turn it takes ends at once until ${hhmm(streak.until)}${conf ? `. Its config names ${conf}, which it moves to only when its process restarts` : ''}`);
-      }
+    // w5921: the dispatcher moves like a person's orchestrator, within the pool its config names (serves), and never to
+    // another; pinned to one token, it waits for that token's reset (dispatcherWait).
+    if (s.kind === 'ops') {
+      this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out; the ops worker starts a fresh process for every job, on a token with room, so it is not resumed`);
       return;
     }
     const why = `${label} ran out (${limitLine ? `"${line}"` : 'Claude refused it'})`;
@@ -254,7 +300,8 @@ export class TokenSwitch {
       this.d.log(`token switch (w1745): ${who} stopped on ${label} again after its resume: its process is still there (${s.backgroundTasks ? 'a background task keeps it' : 'it did not restart'}), so it is not resumed at once; it moves at its next message once nothing keeps the process, or is resumed again in ${RETRY_STUCK_MS / 60_000} min`);
       return;
     }
-    const reason = 'no token in its pool has room';
+    const dispatcher = s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher';
+    const reason = (dispatcher ? this.d.dispatcherWait?.() : undefined) ?? 'no token in its pool has room';
     if (s.kind === 'worker') {
       const blocked = this.d.hold(s, label, `${label} ran out and ${reason}`);
       this.d.log(`token switch (w1745): ${who} stopped on ${label}, which is out, and ${reason}: ${blocked.length ? `${blocked.join(', ')} blocked on its usage limit, resumed when a token of the pool has room` : 'nothing to block'}`);

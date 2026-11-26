@@ -6,7 +6,7 @@
 // (migrateConfig), keeping the file as it was in the secrets folder, and scrubs config.json's saved versions.
 import fs from 'node:fs';
 import path from 'node:path';
-import { ROOT, currentAccounts, pinnedVaultEntry, type Config } from './config.ts';
+import { ROOT, currentAccounts, dispatcherPoolOf, pinnedVaultEntry, type Config } from './config.ts';
 import { writeFileDurable } from './durable.ts';
 import { redactSecrets } from './secrets.ts';
 
@@ -143,7 +143,7 @@ export function stripConfig(raw: Record<string, unknown>): Stripped {
     const was = isObj(out.claudeAccounts) ? out.claudeAccounts : {};
     const a = currentAccounts(was) as Record<string, unknown>;
     const next: Record<string, unknown> = { ...a, orchestrator: 'vault' };
-    if (next.dispatcher !== undefined && pinnedVaultEntry(next.dispatcher as string) === undefined) delete next.dispatcher;
+    if (next.dispatcher !== undefined && pinnedVaultEntry(next.dispatcher as string) === undefined && dispatcherPoolOf(next.dispatcher as string) === undefined) delete next.dispatcher;
     for (const k of Object.keys(was)) if (!(k in next) || (k === 'orchestrator' && was[k] !== 'vault')) changes.push(`claudeAccounts.${k} ("${String(was[k])}"${k in next ? ' -> "vault"' : ''})`);
     if (!isObj(out.claudeAccounts)) changes.push('claudeAccounts.orchestrator ("vault", written out)');
     if (JSON.stringify(next) !== JSON.stringify(out.claudeAccounts)) out.claudeAccounts = next;

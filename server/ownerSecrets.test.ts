@@ -336,7 +336,7 @@ test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and wh
 });
 
 /** A fake gh for the w5749 move: keeps where the login is and its token, and answers status, token and login as gh does. */
-function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: string[]; loginFails?: boolean; loginLies?: boolean; status?: 'unread' | 'failed' }) {
+function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: string[]; loginFails?: boolean; loginLies?: boolean; status?: 'unread' | 'failed' | 'timeout' }) {
   const st = { storage: start.storage, token: start.token ?? 'gho_abcdefghijklmnopqrstuvwxyz0123', users: start.users ?? ['lothsahn'] };
   const calls: string[][] = [];
   const gh: GhRun = async (args, o = {}) => {
@@ -345,6 +345,7 @@ function fakeGh(start: { storage?: 'keyring' | 'file'; token?: string; users?: s
       // w5849: gh that cannot answer (unread), or cannot check the token (failed: an invalid token, a network outage).
       if (start.status === 'unread') return { code: 1, stdout: '', stderr: 'error connecting to api.github.com' };
       if (start.status === 'failed' && st.storage) return { code: 1, stdout: '', stderr: `github.com\n  X Failed to log in to github.com account ${st.users[0]} (${st.storage === 'keyring' ? 'keyring' : 'C:\\U\\hosts.yml'})` };
+      if (start.status === 'timeout' && st.storage) return { code: 1, stdout: '', stderr: `github.com\n  X Timeout trying to log in to github.com account ${st.users[0]} (${st.storage === 'keyring' ? 'keyring' : 'C:\\U\\hosts.yml'})` };
       if (!st.storage) return { code: 1, stdout: '', stderr: 'You are not logged into any GitHub hosts.' };
       const where = st.storage === 'keyring' ? 'keyring' : 'C:\\Users\\o\\AppData\\Roaming\\GitHub CLI\\hosts.yml';
       return { code: 0, stdout: `github.com\n${st.users.map((u) => `  ✓ Logged in to github.com account ${u} (${where})\n  - Token: gho_****`).join('\n')}`, stderr: '' };
@@ -432,4 +433,19 @@ test('w5849 review of #1281: the caller is told before the login call, so its no
   let told = false;
   await ghLoginToFile(fakeGh({ storage: 'file' }).gh, () => { told = true; });
   assert.equal(told, false, 'a login already in hosts.yml (no move) writes no note');
+});
+
+test('w5859 review of #1281: a file login gh could not check keeps the Credential Manager entries; a timeout is a stored login', async () => {
+  for (const status of ['failed', 'timeout'] as const) {
+    const m = await ghLoginToFile(fakeGh({ storage: 'file', status }).gh);
+    assert.deepEqual([m.ok, m.moved, m.deleteFrom], [false, false, undefined], status);
+    assert.match(m.line, /could not check it/);
+  }
+  const checked = await ghLoginToFile(fakeGh({ storage: 'file' }).gh);
+  assert.deepEqual([checked.ok, checked.deleteFrom], [true, ghKeyringTargets('lothsahn')]);
+  const t = '  X Timeout trying to log in to github.com account lothsahn (keyring)';
+  assert.equal(ghLoginStorage(t), 'keyring');
+  assert.deepEqual(ghLoginAccounts(t), ['lothsahn']);
+  const back = await ghLoginToKeyring(fakeGh({ storage: 'file', status: 'timeout' }).gh);
+  assert.deepEqual([back.ok, back.moved], [true, true], 'the way back still finds a login gh timed out on');
 });

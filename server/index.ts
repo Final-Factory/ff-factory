@@ -33,6 +33,8 @@ import { run as runProc } from './proc.ts';
 import { portalPrEvidence } from '../machine/evidenceGate.ts';
 import { BlockerWatch, ghCompileVerdict, ghEvidenceRefusal, ghPrHealth } from './blockerWatch.ts';
 import { MasterBatchWatch } from './masterBatch.ts';
+import { RouteRequests } from './routeRequests.ts';
+import { intakeSettings } from './intakeRules.ts';
 import { FfuPostMergeWatch } from './ffuPostMerge.ts';
 import { TestHistory, localRunKey, localRunTags, parseLocalRecord, queryTestHistory, type QueryArgs } from './testHistory.ts';
 import { TestHistoryCi, testHistorySettings } from './testHistoryCi.ts';
@@ -76,8 +78,8 @@ import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf
 import { deleteLogin, serveLoginDeletes } from './loginDelete.ts';
 import { describeMemoryGit, versionMemory } from './memoryGit.ts';
 import { DispatcherStop, stopMeters } from './dispatcherStop.ts';
-import { TokenSwitch, orchestratorOut, type RateLimitInfo } from './tokenSwitch.ts';
-import { accountSetupLines, addSecretEnv, addSecretValues, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
+import { TokenSwitch, dispatcherMove, dispatcherWait, orchestratorOut, type DispatcherAccount, type RateLimitInfo } from './tokenSwitch.ts';
+import { accountSetupLines, addSecretEnv, addSecretValues, dispatcherPoolPerson, reserveLines, reserveWarnings, hostRoleOf, liveOnAccount, pinnedDispatcherEntry, reservedCredentials, shownRoles } from './secrets.ts';
 import { scrubAtStart } from './scrubSecrets.ts';
 import { CliScrubber } from './cliScrub.ts';
 import { cliProjectsDir } from './cliTranscript.ts';
@@ -1173,6 +1175,9 @@ runWaitsMigration({
 blockerWatch.start();
 // A red master batch of the game repo goes back to the culprit PR's request as an urgent revert request (w1180, docs/intake.md).
 const masterBatch = new MasterBatchWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
+// w5914: a worker's "no other route" for a shell command files a request to build that route, and the waiting cards are
+// denied with the route once it deploys (server/routeRequests.ts, docs/bash-nudge.md).
+const routeRequests = new RouteRequests({ store, sessions, orchestrators: agents.orchestrators, systemPayer: () => identity.systemPayer(), lookbackDays: () => intakeSettings(cfg).lookbackDays, portalSha: () => appVersion().sha }).start();
 // ffu's post-merge revert verdicts to the reverted PR's request (w4930).
 const ffuPostMerge = new FfuPostMergeWatch({ cfg, store, identity, orchestrators: agents.orchestrators }).start();
 const testHistoryCi = new TestHistoryCi({ cfg, history: testHistory, identity, log: (line) => console.log(line) }).start();
@@ -2998,6 +3003,7 @@ setVaultContext({
   reservedFor,
   payer: () => identity.systemPayer().userId,
   poolOf: (person) => agents.poolOf(person),
+  dispatcherOn: () => dispatcherAccount(),
   githubUsable: github.usable,
   onGithubUse: (e, what) => github.noteUse(e, what),
   onGithubMissing: (person, machineId, what) => {
@@ -3210,8 +3216,28 @@ function refreshTokenWarnings() {
 }
 setInterval(refreshTokenWarnings, 20_000).unref();
 setTimeout(refreshTokenWarnings, 8_000).unref();
-/** The dispatcher's pinned vault token, for its stop line (w1109): its meters' key, its name and whose pool it is in. */
+/** The credential key the dispatcher's process runs on (or last ran on), for its reserve on a pool (w5891). */
+function dispatcherAccount(): string | undefined {
+  const id = agents.orchestrators.dispatcherId;
+  return id ? store.sessions.get(id)?.account : undefined;
+}
+/** The enabled tokens of `person`'s own Claude pool as the gate reads them now (case-insensitive). */
+function poolTokensOf(person: string) {
+  return [...gatePoolsRaw()].find(([who]) => who.toLowerCase() === person.toLowerCase())?.[1] ?? [];
+}
+/**
+ * The dispatcher's vault token for its stop line (w1109): its meters' key, its name and whose pool it is in. Pinned: that
+ * token. On a pool (w5891): the token it runs on, only once no other token of that pool has room below the stop line,
+ * because before then it moves to one (w5921) and its workers need not stop: the stop fires only when the whole pool is out.
+ */
 function dispatcherToken(): { key: string; name: string; owner?: string } | undefined {
+  const pool = dispatcherPoolPerson(cfg);
+  if (pool !== undefined) {
+    const on = dispatcherAccount();
+    const mine = poolTokensOf(pool).find((t) => `token:${t.entry.fingerprint}` === on);
+    if (!on || !mine) return undefined;
+    return dispatcherRoomIn(pool, on) ? undefined : { key: on, name: `${mine.entry.name} …${mine.entry.last4}`, owner: pool };
+  }
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? vault.claudeByName(pinned) : undefined;
   return got ? { key: `token:${got.entry.fingerprint}`, name: `${got.entry.name} …${got.entry.last4}`, ...(got.entry.owner ? { owner: got.entry.owner } : {}) } : undefined;
@@ -3257,6 +3283,48 @@ const tokenLabel = (account: string) => {
 };
 const poolViews = () => [...gatePoolsRaw()].map(([person, list]) => [person, list.map((t) => ({ key: `token:${t.entry.fingerprint}`, label: `${t.entry.name} …${t.entry.last4}`, state: t.view.state, why: t.view.why, ...(t.view.capped ? { capped: true } : {}) }))] as const);
 agents.orchestratorTokenOut = (account, pool) => orchestratorOut(poolViews(), account, pool);
+/**
+ * w5921: a token of `pool` other than `except` the dispatcher may move to now: not used up, retired, capped or held, not marked
+ * out, and below the dispatcher's stop line. The one rule for a move off a token that is out and for the stop line (review of
+ * #1312: a capped or held token counted as room there and moved nothing, so the stop never fired and nothing moved).
+ */
+function dispatcherRoomIn(pool: string, except?: string) {
+  return poolTokensOf(pool).find((t) => {
+    const k = `token:${t.entry.fingerprint}`;
+    return k !== except && !usage.outOf(k) && !['exhausted', 'retired', 'held'].includes(t.view.state) && !t.view.capped && !stopMeters(usage.usageOf(k), poolLimits(cfg)).length;
+  });
+}
+/** w5921: whether the dispatcher would start on a token now, as its config names it (a pin that is not out, or room in its pool). */
+function dispatcherHasRoom(): boolean {
+  const c = dispatcherAccountCfg();
+  if (c.pinned) return !!c.pinned.key && !usage.outOf(c.pinned.key) && !agents.tokenUnusable?.(c.pinned.key);
+  return !!dispatcherRoomIn(c.pool);
+}
+/** w5921: why the dispatcher's process on `account` restarts on another token, else undefined (dispatcherMove). */
+function dispatcherMoveWhy(account: string): { why: string; out: boolean } | undefined {
+  const c = dispatcherAccountCfg();
+  const room = !c.pinned && !!dispatcherRoomIn(c.pool, account);
+  return dispatcherMove(c, poolViews(), account, { label: tokenLabel(account), owner: agents.tokenOwner?.(account), room, atStop: room && stopMeters(usage.usageOf(account), poolLimits(cfg)).length > 0 });
+}
+agents.dispatcherAccountMove = dispatcherMoveWhy;
+agents.dispatcherHeldWhy = () => (dispatcherHasRoom() ? undefined : dispatcherWaitWhy());
+agents.operatorAlert = (line) => agents.orchestrators.toPeople(identity.list().filter((u) => u.role === 'owner' || vault.hasClaudeFor(u.userId)), line, true);
+/** What claudeAccounts.dispatcher names now, as dispatcherMove reads it. */
+function dispatcherAccountCfg(): DispatcherAccount {
+  const pinned = pinnedDispatcherEntry(cfg);
+  if (pinned !== undefined) {
+    const got = vault.claudeByName(pinned);
+    return { pinned: { name: pinned, key: got ? `token:${got.entry.fingerprint}` : undefined, label: got ? `${got.entry.name} …${got.entry.last4}` : undefined }, pool: '', named: false };
+  }
+  const named = dispatcherPoolPerson(cfg);
+  return { pool: named ?? agents.poolOf(identity.systemPayer().userId), named: named !== undefined };
+}
+/** w5921: why the dispatcher waits when no token it may run on has room, with the first reset. */
+function dispatcherWaitWhy(): string {
+  const c = dispatcherAccountCfg();
+  const tokens = c.pinned ? [] : poolTokensOf(c.pool).map((t) => ({ label: `${t.entry.name} …${t.entry.last4}`, until: usage.outOf(`token:${t.entry.fingerprint}`)?.until ?? (t.view.until ? Date.parse(t.view.until) : undefined) }));
+  return dispatcherWait(c, tokens, Date.now());
+}
 const tokenSwitch = new TokenSwitch({
   file: path.join(cfg.dataDir, 'token-switches.json'),
   label: tokenLabel,
@@ -3267,6 +3335,9 @@ const tokenSwitch = new TokenSwitch({
     // A standing agent's new run picks its token at its start, and waits for its pool when no token has room (w1126).
     if (s.kind === 'standing') return true;
     if (s.kind !== 'orchestrator') return limitsClearFor(s);
+    // w5921: the dispatcher's pool (its config's) has a token it would be better on.
+    // A config move into a pool with no room is no resume (it waits; the config change alerted, review of #1312).
+    if (agents.orchestrators.isDispatcher(s)) return !!s.account && !!dispatcherMoveWhy(s.account) && dispatcherHasRoom();
     const person = agents.orchestrators.ownerOf(s)?.userId;
     return !!person && !!s.account && !!orchestratorOut(poolViews(), s.account, agents.poolOf(person));
   },
@@ -3291,16 +3362,14 @@ const tokenSwitch = new TokenSwitch({
   },
   dispatcherId: () => agents.orchestrators.dispatcherId,
   outUntil: (account) => usage.outOf(account)?.until,
-  dispatcherConfigured: () => {
-    const pinned = pinnedDispatcherEntry(cfg);
-    if (pinned === undefined) return `the system payer's pool (${identity.systemPayer().userId}'s; claudeAccounts.dispatcher unset)`;
-    const got = vault.claudeByName(pinned);
-    return `vault token ${got ? `${got.entry.name} …${got.entry.last4}` : pinned} (claudeAccounts.dispatcher)`;
-  },
+  dispatcherWait: dispatcherWaitWhy,
 });
 agents.accountMoving = (info, why) => tokenSwitch.moving(info, why);
 // w5921: the ledger says why a request sits undecided when the dispatcher is rate-limited, and does not offer it again then.
 agents.orchestrators.dispatcherLimited = () => tokenSwitch.dispatcherLimited();
+// w5921: a config change, a vault change or a token that ran out moves an idle dispatcher (and a person's orchestrator whose
+// pool setting changed) at once; one mid-turn moves at the first check after its turn ends. Not in a dry run.
+if (!isDryRun) setInterval(() => agents.applyAccountConfig('the 30-second check'), 30_000).unref();
 if (!isDryRun) {
   sessions.events.on('rateLimit', (s: { info: SessionInfo }, info: RateLimitInfo) => tokenSwitch.rateLimit(s.info, info));
   // A machine's session reports its last result beside the turn's end: read it a moment later, from the store.
