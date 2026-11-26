@@ -111,7 +111,7 @@ import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runn
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
 import { WIN_CI_FIRST, WinCiFirst, machineBusyMs, readLowered, writeLowered } from './ciFirstWin.ts';
-import { RUNNER_PRIORITY_ENFORCE, RunnerPriority, parseTaskRows, runnerTaskScript } from './runnerPriority.ts';
+import { RunnerPriority, parseProcRows, parseTaskRows, processPriorityScript, runnerPriorityMode, runnerTaskScript } from './runnerPriority.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -303,8 +303,8 @@ export interface DaemonConfig {
   winCiFirst?: 'off' | 'warn' | 'enforce';
   /**
    * w6163: a Windows machine's CI runners' scheduled tasks and listeners go to Normal priority (machine/runnerPriority.ts).
-   * Unset: "enforce" on the machines RUNNER_PRIORITY_ENFORCE lists (lothdesktop), "warn" (only logs) everywhere else, BEAST
-   * included; "off" stops it. Read at the daemon's start.
+   * Unset: "enforce" on the machines RUNNER_PRIORITY_ENFORCE lists (none in the first, warn-only step), "warn" (only logs)
+   * everywhere else, BEAST included; "off" stops it. Read at the daemon's start.
    */
   runnerPriority?: 'off' | 'warn' | 'enforce';
   /**
@@ -1192,21 +1192,12 @@ export class Daemon {
     // w6163: the CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): lothdesktop sets them,
     // every other Windows machine (BEAST: Ben's hold on its system settings) only logs them
     this.runnerPriority = new RunnerPriority({
-      mode: !real || process.platform !== 'win32' ? 'off' : (cfg.runnerPriority ?? (RUNNER_PRIORITY_ENFORCE.has(cfg.id.toLowerCase()) ? 'enforce' : 'warn')),
-      census: async () => runnerCensus(await pd.procs()),
+      mode: runnerPriorityMode(cfg.id, process.platform, real, cfg.runnerPriority),
+      procs: () => pd.procs(),
+      census: (procs) => runnerCensus(procs),
       priorityOf: (pid) => priorityOf(pid),
-      setPriority: (pid, priority) => setPriorityOf(pid, priority),
-      tasks: (roots, fix) =>
-        new Promise((resolve, reject) =>
-          execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerTaskScript(roots, fix)], { timeout: 60_000 }, (e, out, err) => {
-            if (e) return reject(new Error((String(err) || String(out) || e.message).trim()));
-            try {
-              resolve(parseTaskRows(String(out)));
-            } catch (pe) {
-              reject(pe as Error);
-            }
-          }),
-        ),
+      raise: async (pids, fix) => parseProcRows(await runnerPowerShell(processPriorityScript(pids, fix))),
+      tasks: async (roots, fix) => parseTaskRows(await runnerPowerShell(runnerTaskScript(roots, fix))),
       now: () => Date.now(),
       log: (line) => log(line),
     });
@@ -5382,4 +5373,11 @@ export function reconnectDelayMs(downForMs: number, attempt: number, rand = Math
 async function winSuspend(pid: number, resume: boolean): Promise<string | undefined> {
   const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', winSuspendScript(pid, resume)], { timeoutMs: 60_000 });
   return r.code !== 0 ? `powershell exited ${r.code}: ${r.stderr.trim().slice(0, 200)}` : r.stdout.trim() || undefined;
+}
+
+/** w6163: one of machine/runnerPriority.ts's PowerShell scripts; its standard output, or an error with what it said. */
+async function runnerPowerShell(script: string): Promise<string> {
+  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
+  if (r.code !== 0) throw new Error(`powershell exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
+  return r.stdout;
 }
