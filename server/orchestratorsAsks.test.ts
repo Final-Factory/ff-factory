@@ -642,6 +642,44 @@ test('w3328: disk_cleanup marks a request a disk clean-up of a machine, from req
   assert.equal(spec3().diskCleanup, undefined);
 });
 
+test("w5929: a disk clean-up request's worker runs machine_cleanup on its own machine, in the background, and hears the result; any other worker is refused", async (t) => {
+  const { store, machines, dispatcher, chat, call, heard } = await setupOnMachine(t);
+  const ben = chat(BEN);
+  const m = store.machines.get('pc')!;
+  const startOn = async (id: string) => {
+    const r = await call(dispatcher().info, 'start_agent', { sandbox: 'pc/alpha', prompt: 'go', title: `${id}: job`, work_id: id, override_duplicate: 'separate test request', extra_agent: true });
+    assert.equal(r.isError, false, r.text);
+    const info = store.sessions.get(/Started agent (\w+)/.exec(r.text)![1])!;
+    assert.ok(machines.hooks!.specFor(info, m).mcp!.tools.some((x) => x.name === 'machine_cleanup'), 'a worker is offered the tool');
+    return { info, tool: (a: Record<string, unknown>) => machines.hooks!.handlersFor(info, m)!.machine_cleanup!(a) };
+  };
+  const asked: { id: string; dryRun?: boolean }[] = [];
+  let finish!: (r: unknown) => void;
+  t.mock.method(machines, 'cleanupNow', (id: string, o: { dryRun?: boolean }) => {
+    asked.push({ id, ...o });
+    return new Promise((resolve) => (finish = resolve));
+  });
+
+  // An ordinary request's worker: refused, and told how the runner folder goes instead.
+  await call(ben.info, 'request_work', { title: 'Something else', brief: 'Not a clean-up.', needs: 'agent' });
+  const plain = await startOn('w1');
+  await assert.rejects(plain.tool({}), /machine_cleanup is for a disk clean-up request of pc.*for the dispatcher's machine_cleanup on pc/);
+  assert.equal(asked.length, 0);
+
+  // A disk clean-up of pc: the pass starts on pc, the call answers at once, the result comes as a message.
+  await call(ben.info, 'request_work', { title: 'pc V: clean-up', brief: 'Free disk space on pc.', needs: 'agent', disk_cleanup: 'pc' });
+  const w = await startOn('w2');
+  assert.match(String(await w.tool({})), /The clean-up pass on pc is running .*\[clean-up\] message/);
+  assert.deepEqual(asked, [{ id: 'pc', dryRun: false }]);
+  assert.match(String(await w.tool({ dry_run: true })), /still running/, 'one pass at a time per machine');
+  assert.equal(asked.length, 1);
+  finish({ at: new Date().toISOString(), trigger: 'asked', removed: 1, freedBytes: 15 * 2 ** 30, items: [{ path: 'V:/ffw/ffu-runners/r1/_work/ffu', bytes: 15 * 2 ** 30, rule: 'ffu-runner-work', why: 'no job running' }] });
+  await until('the worker hears the result', () => heard(w.info.id, '[clean-up]').length === 1);
+  assert.match(heard(w.info.id, '[clean-up]')[0]!.text, /The clean-up pass you started on pc finished/);
+  assert.match(String(await w.tool({ dry_run: true })), /The dry-run clean-up pass on pc is running/, 'free again once it finished');
+  assert.deepEqual(asked.at(-1), { id: 'pc', dryRun: true });
+});
+
 test('w3338: a worker that paused for low disk is Blocked on disk space on its machine and resumed only once that disk is back above its warning line plus the margin; blocked_on disk does the same; a clean-up request is never gated on it', async (t) => {
   const { store, agents, o, dispatcher, call, machines } = await setupOnMachine(t);
   agentsRoom(agents, ['pc']);
