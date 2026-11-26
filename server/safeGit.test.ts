@@ -40,6 +40,8 @@ function sources(): string[] {
  */
 const NOT_GIT: Record<string, string> = {
   'machine/daemon.ts|runnerEnvCmd': 'plutil, launchctl and powershell.exe for the macOS and Windows CI runners (machine/runnerEnv.ts, w5999)',
+  'server/spawnThread.ts|m.cmd': 'whatever its callers start (run() fences git before, server/proc.ts; w6077)',
+  'server/spawnThread.ts|cmd': 'whatever its callers start, on the main thread when the spawn thread is off (run() fences git before; w6077)',
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
   'machine/lowIntegrity.ts|cmd': 'icacls (LowCopies execSync, w5838)',
