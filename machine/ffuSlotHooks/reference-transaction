@@ -1,0 +1,24 @@
+#!/bin/sh
+# FF Factory (w6038): refuse a ref update in an ffu slot another session holds, or on a branch ffu-slot did not record for
+# it (slot-guard.sh). Commit, merge, cherry-pick, rebase, reset, stash, branch and tag all update refs through here; a
+# fetch's remote-tracking refs, a checkout's HEAD switch (a symref) and a ref set to the commit it is on are let through.
+[ "$1" = prepared ] || exit 0
+[ -n "${FF_SESSION_ID:-}" ] || exit 0
+case "$PWD" in
+  */ffu-sandboxes/slot*/ffu) ;;
+  *) exit 0 ;;
+esac
+_rt_write=
+while read -r _rt_old _rt_new _rt_ref; do
+  case $_rt_new in ref:*) continue ;; esac
+  # The same commit again (merge --abort, reset --merge to HEAD) moves nothing.
+  [ "$_rt_old" = "$_rt_new" ] && continue
+  case $_rt_ref in
+    refs/remotes/*) ;;
+    HEAD | refs/*) _rt_write=$_rt_ref ;;
+  esac
+done
+[ -n "$_rt_write" ] || exit 0
+. "${0%/*}/slot-guard.sh"
+ffu_slot_guard "git updating $_rt_write" || exit 1
+exit 0

@@ -459,6 +459,30 @@ Measured with the generated profile unless noted:
   (guess: `~/Library/Accessibility/*.sqlite`, which editors hold open), refused without effect.
 - Batch player build: see the w5333 PR.
 
+## Shell writes into the system temp folders (w6008, warn-only)
+
+lothsahn (w5823): "under no circumstances should workers write outside of ffw". The OS fences refuse a write into `/tmp`, but
+a shell redirect still leaves the empty file behind: w5834's hour diff of biscuit's `/tmp` (2026-11-26, 08:49-09:52 UTC) found
+`/tmp/bq_head.ts`, 0 bytes, from the w5973 worker's `git show HEAD:machine/benchQueue.ts > /tmp/bq_head.ts`, which printed
+Permission denied. No worker may delete it, so it stays.
+
+`server/tmpWriteFence.ts` reads a Bash or PowerShell command's text for writes into a system temp folder: `/tmp`, `/var/tmp`,
+`/private/tmp`, `/var/folders` (every OS; Git Bash's `/tmp` on Windows too), `C:\Users\<u>\AppData\Local\Temp` and
+`C:\Windows\Temp`. A write is a redirect (`>`, `>>`, `2>`, `&>`, `*>`), a write verb (tee, Tee-Object, Out-File, Set-Content,
+New-Item, touch, mkdir), the destination of cp / Copy-Item / rsync / robocopy and both ends of a move, a delete, `mktemp` given
+a folder or template there, an output flag (`-o` of curl and sort, `--output`, `-OutFile`, `-logFile`, `dd of=`, `unzip -d`,
+`tar -C` on extract, `tar -cf`, ffmpeg's output) and `git clone` / `git worktree add` into one, after a `cd` there, or inside
+`bash -c` and `powershell -Command`. A path inside the install folder, the worker's own temp folder or its sandbox is never
+one, whatever variable spells it (`$TMPDIR`, `%TEMP%` and `$env:TEMP` resolve through the worker's env, which points them
+inside ffw). Bare `mktemp` uses `$TMPDIR` and passes. Like the rest of the guard it reads text: a script, a python `open()` or
+an unknown variable is not seen.
+
+**Warn-only for now** (lothsahn's lockout rule): a PostToolUse hook (`tmpWriteHook`, wired in server/sessions.ts) tells the
+worker what it wrote and where its own temp folder is, and the daemon log gets one line per command,
+`tmp write fence (w6008, warn): <session> <tool>: <path> (<how>)`. Nothing is refused, so nothing can lock a worker out, and
+reverting the PR is the whole recovery. The enforcing change, a separate and independently reviewed PR, adds
+`checkSystemTempWrite` to the PreToolUse guard (server/guard.ts) once those log lines show no false refusal.
+
 ## Known limits
 
 - **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748; lothsahn: "Leave it until Ubuntu's

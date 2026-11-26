@@ -115,6 +115,8 @@ export interface FfuSlotDeps {
   facts?: CleanupFacts;
   /** w5870: MEDIUM_AGENT_VAR, set only for a Medium agent: "warn" or "on". */
   medium?: string;
+  /** w6038: the folder the slots' core.hooksPath names; default FFU_SLOT_HOOKS. */
+  hooks?: string;
   /** Read cleanup-facts.json again (`take --wait` polls with it); absent: the facts stay as given. */
   readFacts?: () => CleanupFacts | undefined;
   now: () => number;
@@ -169,6 +171,85 @@ function writeSlotState(root: string, s: FfuSlotState): void {
   const f = stateFile(root);
   fs.writeFileSync(`${f}.tmp`, `${JSON.stringify(s, null, 2)}\n`);
   fs.renameSync(`${f}.tmp`, f);
+  writeHolderFiles(root, s);
+}
+
+/**
+ * w6038: the hooks every slot's checkout runs (ffuSlotHooks/: reference-transaction, pre-push, pre-rebase), in FF Factory's
+ * own code, which no worker writes. `take` points the shared clone's core.hooksPath here, so a worker's own git in a slot
+ * refuses a write when its session does not hold the slot, or when the checkout is on a branch other than the one recorded.
+ * FF Factory's git (gitSpawnSync, ff-pr) runs with core.hooksPath on server/gitHooks and never meets them: take, the rescue
+ * and the daemon's reads stay as they were, and ff-pr checks the same with slotWriteRefusal.
+ */
+export const FFU_SLOT_HOOKS = path.join(import.meta.dirname, 'ffuSlotHooks');
+
+/** w6038: `<slot>/holder`, what the hooks read (shell builtins only, no JSON): `holder <session>` and `branch <branch>` lines. */
+export const slotHolderFile = (root: string, id: string) => path.join(slotDir(root, id), 'holder');
+
+export function holderText(s: FfuSlot): string {
+  return `# Written by FF Factory's ffu-slot with slots.json (w6038): who may run a git write in this slot's checkout.\nholder ${s.holder ?? ''}\nbranch ${s.branch ?? ''}\n`;
+}
+
+function writeHolderFiles(root: string, st: FfuSlotState): void {
+  for (const s of st.slots) {
+    if (!fs.existsSync(slotDir(root, s.id))) continue;
+    const f = slotHolderFile(root, s.id);
+    const text = holderText(s);
+    try {
+      if (fs.existsSync(f) && fs.readFileSync(f, 'utf8') === text) continue;
+      fs.writeFileSync(`${f}.tmp`, text);
+      fs.renameSync(`${f}.tmp`, f);
+    } catch {
+      // best effort: with no holder file the hooks let every write through, as before w6038
+    }
+  }
+}
+
+/** w6038: parse a holder file; undefined when it cannot be read. */
+export function readHolderFile(file: string): { holder: string; branch: string } | undefined {
+  let text: string;
+  try {
+    text = fs.readFileSync(file, 'utf8');
+  } catch {
+    return undefined;
+  }
+  const v = (k: string) => new RegExp(`^${k}[ \\t]*(.*?)\\s*$`, 'm').exec(text)?.[1] ?? '';
+  return { holder: v('holder'), branch: v('branch') };
+}
+
+/** w6038: the branch a checkout is on, read from its HEAD file (no git runs); '' when detached or unreadable. */
+export function checkoutBranch(checkout: string): string {
+  try {
+    let gd = path.join(checkout, '.git');
+    if (fs.statSync(gd).isFile()) gd = path.resolve(checkout, /^gitdir:\s*(.+?)\s*$/m.exec(fs.readFileSync(gd, 'utf8'))?.[1] ?? '.git');
+    return /^ref: refs\/heads\/(.+?)\s*$/m.exec(fs.readFileSync(path.join(gd, 'HEAD'), 'utf8'))?.[1] ?? '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * w6038: why `what` (a git write) may not run in `cwd` for `session`, as the slot hooks say it (ffuSlotHooks/slot-guard.sh),
+ * or undefined: not in a slot's checkout, no session, no holder file, or the session holds the slot and is on its branch
+ * (or detached). For ff-pr, whose git runs with FF Factory's hooks and not the slot's.
+ */
+export function slotWriteRefusal(cwd: string, session: string | undefined, what: string): string | undefined {
+  if (!session) return undefined;
+  const m = /^(.*\/ffu-sandboxes\/(slot\d+))\/ffu(?:\/|$)/.exec(fwd(path.resolve(cwd)));
+  if (!m) return undefined;
+  const rec = readHolderFile(path.join(m[1], 'holder'));
+  if (!rec) return undefined;
+  const checkout = `${m[1]}/ffu`;
+  const on = rec.branch || 'origin/main, detached';
+  const fix = `Take your own slot and work there: eval "$(ffu-slot take --branch <your branch>)" (ffu-slot where --branch <b> names the one you hold) (w6038).`;
+  if (rec.holder !== session) {
+    return rec.holder
+      ? `ffu-slot: refused: ${what} in ffu slot ${m[2]} (${checkout}), which session ${rec.holder} holds on branch ${on}; you are session ${session}. That is another worker's checkout. ${fix}`
+      : `ffu-slot: refused: ${what} in ffu slot ${m[2]} (${checkout}), which no session holds (released; last on branch ${on}); you are session ${session}. ${fix}`;
+  }
+  const cur = rec.branch ? checkoutBranch(checkout) : '';
+  if (cur && cur !== rec.branch) return `ffu-slot: refused: ${what} on branch ${cur} in ffu slot ${m[2]} (${checkout}): your session ${session} holds this slot for branch ${rec.branch}, and ffu-slot recorded no other. Go back with git switch ${rec.branch}, or take a slot for ${cur}: eval "$(ffu-slot take --branch ${cur})" (w6038).`;
+  return undefined;
 }
 
 /** The lock every change to the slots takes: a folder made atomically, taken over when older than LOCK_STALE_MS. */
@@ -363,6 +444,9 @@ function ensureRepo(d: FfuSlotDeps, remote: string): void {
   }
   must(d.git(['fetch', '--prune', '--quiet', 'origin'], repo), 'git fetch');
   d.git(['worktree', 'prune'], repo);
+  // w6038: the slots' own git runs FF Factory's slot hooks. --local: gitSpawnSync's command-scope core.hooksPath would answer.
+  const hooks = fwd(d.hooks ?? FFU_SLOT_HOOKS);
+  if (d.git(['config', '--local', '--get', 'core.hooksPath'], repo).out.trim() !== hooks) must(d.git(['config', '--local', 'core.hooksPath', hooks], repo), 'git config');
 }
 
 /**

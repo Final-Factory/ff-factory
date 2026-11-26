@@ -28,8 +28,11 @@ import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
 const NOW = Date.now();
 const HOUR = 3_600_000;
 
+/** The tests' own git is no worker's: no FF_SESSION_ID, so the slot hooks (w6038) check nothing. */
+const GIT_ENV = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'FF_SESSION_ID'));
+
 function git(args: string[], cwd?: string) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: GIT_ENV });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return r.stdout.trim();
 }
@@ -181,7 +184,7 @@ function target(root: string, slot: string, ageH: number, incBytes = 10, depsByt
   return t;
 }
 
-async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' } = {}) {
+async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' | 'ffu-slots' } = {}) {
   const guard: CleanupGuard = { keep: [path.join(root, 'sandboxes')], inUse: o.inUse ?? [], home: path.join(root, 'home') };
   return planInstallLeftovers({
     root,
@@ -621,4 +624,26 @@ test("w5885: one worker, two branches: each checkout gets its own slot and targe
   // release with no argument gives back every slot without work, and keeps (and names) the one with work.
   assert.throws(() => releaseSlot(e), /slot1: .*uncommitted.*a slot with work stays yours/);
   assert.deepEqual(releaseSlot(f).sort(), ['slot2', 'slot3']);
+});
+
+// w6044: the first step of a pass (scope 'ffu-slots') takes released slots only: BEAST's released slot1, slot3 and slot4
+// targets (49.2, 57.7 and 83.6 GB) waited behind slower steps that a restart cut off, while held slot2 must stay warm.
+test('w6044: the ffu-slots scope takes a released slot whole on a low pass, at once; a held, running or recent one is left to the later step', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6044-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  target(root, 'slot1', 2, 2000, 5000); // released, settled
+  target(root, 'slot2', 2, 2000, 5000); // held by a running worker
+  const t3 = target(root, 'slot3', 2); // released, a program runs from it
+  target(root, 'slot4', 0); // released, written within the settle time
+  target(root, 'slot5', 2); // its holder stopped for good
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot2', holder: 'live0002' }, { id: 'slot5', holder: 'gone0005' }] }));
+  const inUse = [path.join(root, 'tmp', 'ffa-live0002')];
+  const procs: ProcLite[] = [{ pid: 43, ppid: 1, cmd: `${t3}/debug/deps/golden-1234 --test-threads 4` } as ProcLite];
+  const low = await plan(root, { low: true, inUse, procs, scope: 'ffu-slots' });
+  assert.deepEqual(ffuItems(root, low), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target']);
+  assert.ok(low.items.every((i) => /taken first in the pass \(w6044\)/.test(i.why)));
+  assert.ok(!low.items.some((i) => /slot2/.test(i.path)), 'a held slot is never taken in the first step, not even its incremental cache');
+  // The hourly pass: a released target over the cap is judged as the cap rule judges it, a held one not at all.
+  const hourly = await plan(root, { inUse, procs, scope: 'ffu-slots', settings: { ffuSlotTargetCapGB: 3000 / 1024 ** 3 } });
+  assert.deepEqual(ffuItems(root, hourly), ['ffu-sandboxes/slot1/target', 'ffu-sandboxes/slot5/target/debug/incremental']);
 });

@@ -1,0 +1,6 @@
+#!/bin/sh
+# FF Factory (w6038): refuse a push from an ffu slot another session holds, or from a branch ffu-slot did not record for
+# it (slot-guard.sh). No git-lfs here: ffu has no LFS files.
+. "${0%/*}/slot-guard.sh"
+ffu_slot_guard "git push" || exit 1
+exit 0
