@@ -7,6 +7,7 @@ import { DEFAULT_HANG, bridgeInfo, bridgePing, editorVerdict, restartAllowed, ty
 import { closeWindow, decide, decideClose, describeDialog, findClosable, findDialogs, listWindows, mainWindow, parsePsJson, pressButton, sceneFilesUnchanged, type Dialog } from '../server/watchdog.ts';
 import { ensureBurstPrefOn, realBurstPrefDeps } from './burstPref.ts';
 import { scoped } from './linuxScope.ts';
+import { fencedEditorEnv, fencedEditorEnvWarning } from './editorEnv.ts';
 import { editorTempEnv } from './sharedCaches.ts';
 import { SANDBOX_EXEC, seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
 import { accessibilityStep, axPrompt, axTrusted, closeMacWindow, listMacDialogs, macPermissionProblem, nodeBinary, pressMacButton, sessionAway, sessionState, tccAccessibility, type SessionState } from './macDialogs.ts';
@@ -618,7 +619,7 @@ export function winLaunchScript(bin: string, args: string[], cwd: string): strin
 }
 
 /** The real machine: ps, signals and a detached launch on a Mac (and Linux, without App Nap); CIM, taskkill and Start-Process on Windows. */
-export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
+export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string) => void = () => undefined): UnityDeps {
   const base: UnityDeps = { ...realDepsMac(), burstPrefOn: () => ensureBurstPrefOn(realBurstPrefDeps(platform)) };
   if (platform === 'linux') {
     const { noAppNap: _n, launchFenced: _f, ...linux } = base;
@@ -659,6 +660,8 @@ export function realDeps(platform: UnityPlatform = 'darwin'): UnityDeps {
       const temp = editorTempEnv(process.env, 'win32');
       if (temp.TEMP) fs.mkdirSync(temp.TEMP, { recursive: true });
       for (const k of ['APPDATA', 'LOCALAPPDATA', 'UNITY_MCP_STATUS_DIR']) if (fence.env[k]) fs.mkdirSync(fence.env[k], { recursive: true });
+      // w5864, warn-only: the editor still gets the daemon's whole environment; the log names what the minimal one would leave out.
+      log(fencedEditorEnvWarning(cwd, fencedEditorEnv(process.env, temp, fence.env, env)));
       const r = await run(fence.launcher, ['-e', FENCED_LAUNCH_SCRIPT, bin, cwd, JSON.stringify(args)], { timeoutMs: 60_000, env: { ...process.env, ...temp, ...fence.env, ...env } });
       const pid = Number(r.stdout.trim().split(/\s+/).pop());
       if (r.code !== 0 || !Number.isFinite(pid) || pid <= 0) throw new Error(`could not start ${bin} at Low integrity: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
