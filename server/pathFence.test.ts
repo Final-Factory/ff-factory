@@ -191,10 +191,9 @@ test('w5899: an agent host counts for the old shims folder while it runs with it
     if (place) fs.writeFileSync(path.join(hosts, id, 'place.json'), JSON.stringify(place));
   };
   try {
-    // The PATH a host recorded is split on path.delimiter (';' on Windows, where a resolved path holds a ':' too).
-    host('old-path', { cwd: '/w', path: ['/x', bin, '/usr/bin'].join(path.delimiter) });
+    host('old-path', { cwd: '/w', path: `/x${path.delimiter}${bin}${path.delimiter}/usr/bin` });
     host('no-mark', { cwd: '/w' });
-    host('moved', { cwd: '/w', path: ['/r/tools-medium/shims', '/usr/bin'].join(path.delimiter) });
+    host('moved', { cwd: '/w', path: `/r/tools-medium/shims${path.delimiter}/usr/bin` });
     host('unfenced', { cwd: '/w', path: `${bin}/` });
     host('ended', { cwd: '/w', path: bin }, 2 ** 22 + 12345);
     assert.deepEqual(hostsWithPathDir(hosts, bin).sort(), ['no-mark', 'old-path', 'unfenced']);
@@ -231,8 +230,7 @@ function guardRoot() {
   return { root, bin, target, lines, opts, runs, only };
 }
 
-// The old shims folder's guard runs only where the path fence does (pathFenceMode is off on Windows, and the daemon
-// removes the old folder there itself); its folder modes are POSIX ones (fchmod of a folder is EPERM on Windows).
+// w6175: guardOldShimBin uses POSIX folder modes and fs.watch, and the path fence is off on Windows (pathFenceMode).
 const notWin = { skip: process.platform === 'win32' && 'the path fence is off on Windows' };
 
 test('w5899: with no agent started before the move, the old shims folder goes at once', notWin, () => {
@@ -248,7 +246,6 @@ test('w5899: with no agent started before the move, the old shims folder goes at
   }
 });
 
-// fs.watch on Windows differs, and the path fence never runs there (pathFenceMode is off on Windows).
 test('w5899, w5872 review: while agents started before the move run, the old shims folder runs only the daemon\'s shims, then goes', notWin, async () => {
   const g = guardRoot();
   let waits = ['s1'];
