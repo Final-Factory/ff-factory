@@ -527,31 +527,43 @@ test("w5839: the holder read, run: before trust it names only a Low process that
   assert.equal(spawnSync('icacls', [path.join(dir, 'g.js'), '/setintegritylevel', 'low'], { encoding: 'utf8' }).status, 0);
   const read = (writesOnly: boolean) => {
     const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(holdersScript([dir], [process.pid], writesOnly), 'utf16le').toString('base64')], { encoding: 'utf8', maxBuffer: 1 << 26 });
+    last = `${r.stdout ?? ''}${r.stderr ?? ''}`.trim().slice(0, 2000);
     return parseHolders(r.stdout ?? '');
   };
+  let last = '';
   // Nothing of ours yet; a process whose handles cannot be read (Windows' own sandboxed services, as on the CI runner)
   // is never named.
-  assert.deepEqual(read(false), [], 'the read finishes and names nothing');
+  assert.deepEqual(read(false), [], `the read finishes and names nothing: ${last}`);
   // A process started from an exe labelled Low runs Low, whatever starts it (machine/lowIntegrity.ts, tools\low).
   const exe = path.join(dir, 'lownode', 'node.exe');
   fs.mkdirSync(path.dirname(exe));
   fs.copyFileSync(process.execPath, exe);
   assert.equal(spawnSync('icacls', [exe, '/setintegritylevel', 'low'], { encoding: 'utf8' }).status, 0);
   const { spawn } = await import('node:child_process');
-  const hold = (file: string, flags: string) => spawn(exe, ['-e', `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}'); setTimeout(() => {}, 60000)`], { cwd: dir, stdio: 'ignore' });
+  // Started, and answered only once its file is open: a fresh copy of node.exe can take seconds to start on the CI runner
+  // while it is scanned, and a fixed wait read the folder before the reader held it (w5839, CI at 5d3003b0).
+  const hold = async (file: string, flags: string) => {
+    const p = spawn(exe, ['-e', `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}'); console.log('ready'); setTimeout(() => {}, 120000)`], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+    let err = '';
+    p.stderr!.on('data', (b) => (err += b));
+    await new Promise<void>((res, rej) => {
+      const t = setTimeout(() => rej(new Error(`the Low node did not open ${file} in 60 s: ${err}`)), 60000);
+      p.stdout!.on('data', (b) => String(b).includes('ready') && (clearTimeout(t), res()));
+      p.on('exit', (c) => (clearTimeout(t), rej(new Error(`the Low node exited ${c}: ${err}`))));
+    });
+    return p;
+  };
   // A legitimate Low worker: its working folder there and a file open for reading.
-  const reader = hold('f.js', 'r');
+  const reader = await hold('f.js', 'r');
   try {
-    await new Promise((res) => setTimeout(res, 3000));
-    assert.deepEqual(read(true), [], 'a reader is never ended on a check');
+    assert.deepEqual(read(true), [], `a reader is never ended on a check: ${last}`);
     const any = read(false);
-    assert.deepEqual(any?.map((h) => h.pid), [reader.pid], 'once a swap was refused it is');
+    assert.deepEqual(any?.map((h) => h.pid), [reader.pid], `once a swap was refused it is: ${last}`);
     assert.ok(any![0].path.startsWith(dir), any![0].path);
-    const writer = hold('g.js', 'r+');
+    const writer = await hold('g.js', 'r+');
     try {
-      await new Promise((res) => setTimeout(res, 3000));
       const w = read(true);
-      assert.deepEqual(w?.map((h) => h.pid), [writer.pid], 'a writer is named on a check');
+      assert.deepEqual(w?.map((h) => h.pid), [writer.pid], `a writer is named on a check: ${last}`);
       assert.equal(w![0].path, path.join(dir, 'g.js'));
     } finally {
       writer.kill();
