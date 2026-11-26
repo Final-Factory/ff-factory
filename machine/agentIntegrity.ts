@@ -43,7 +43,7 @@ export async function measureAgentIntegrity(argv: string[], exec: Exec): Promise
     const r = await exec(argv[0], argv.slice(1), { timeoutMs: 30_000 });
     const level = integrityOf(r.stdout);
     if (level) return { level };
-    return { why: `${path.basename(argv[0])} exit ${r.code}: no Mandatory Label line${r.stderr.trim() ? ` (${r.stderr.trim().slice(0, 200)})` : ''}` };
+    return { why: `${path.win32.basename(argv[0])} exit ${r.code}: no Mandatory Label line${r.stderr.trim() ? ` (${r.stderr.trim().slice(0, 200)})` : ''}` };
   } catch (e) {
     return { why: (e as Error).message.slice(0, 200) };
   }
