@@ -820,7 +820,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - **The programs the daemon runs from the root stay out of workers' reach** (w5838). Before, `tools\low` and
     `tools\unity-low` were labelled Low, so a Low worker could replace a copy or turn a junction, and the next sandbox agent
     ran its program with that agent's vault tokens, a probe with the daemon's whole environment, an editor through it.
-    - `tools\low`, `tools\unity-low` and `tools\shims` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`; `tools-medium\shims` too, w6101): a worker
+    - `tools\low` and `tools\unity-low` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`), and so are `tools-medium\shims` and, while it is there, the old `tools\shims` (w6101, `OLD_TOOLS_SHIMS`): a worker
       cannot add, rename or delete a file in them, so neither a copy nor a DLL beside it can be planted.
     - Each copy is locked in one call before it takes its name (w5904, `lockCopyScript`): SetNamedSecurityInfoW sets its
       read-only access list (read and run for the account and OWNER RIGHTS, Full for SYSTEM and Administrators, nothing
@@ -845,7 +845,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       entry, measured by w5877) or an open write handle. One that still runs, and so cannot be removed, leaves the new
       copy the next name (`<base>-<size>-<mtime>-<n>`). `isReadOnlyCopy` wants every entry but SYSTEM's and
       Administrators' to be read and run only.
-    - If labelLow cannot keep `tools\low`, `tools\unity-low` or `tools\shims` Medium, the log says `WARNING` and the fence
+    - If labelLow cannot keep `tools\low`, `tools\unity-low` or a shims folder Medium, the log says `WARNING` and the fence
       stays on; `tools\low` is then swept before every run of a copy (`LowCopies.folderCheck`).
     - Whatever was planted while the folders were still Low goes at the daemon's start, each with a `WARNING`: in
       `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `claude|node|gh-<size>-<mtime>[-<n>].exe`), so no DLL beside a copy
@@ -861,12 +861,15 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       `machine/pathFence.ts`, `windowsShimsDir` and `windowsShims` in `machine/lowIntegrity.ts`). `tools-medium` is never
       labelled Low, but a rollout before w5539 labelled it Low and nothing undid that, so `lowTargets` keeps it and its
       `shims` Medium (labelLow relabels one that reads Low): a Low worker can neither rename the folder away nor plant a
-      command in it. At each start the daemon logs `WARNING` for every file there it does not write (`strayShimFiles`,
-      `WINDOWS_SHIM_FILES`) and leaves it (warn first, lothsahn's lockout rule). A failed write there falls back to
-      `tools\shims`, which is Medium too, with a `WARNING`, so recovery needs nobody at the machine.
-    - `<root>\tools\shims` is still written, and kept Medium (`MEDIUM_TOOLS`), for agent hosts started before the move,
-      which keep it first on their `PATH`; the start line says how many hosts have it (`hostsWithPathDir`). Its removal,
-      once none has, and taking `shims` out of `MEDIUM_TOOLS` come in their own change.
+      command in it. At each start, and again once the fence has labelled, every file there the daemon does not write
+      (`strayShimFiles`, `WINDOWS_SHIM_FILES`) is moved to `<root>\tools-medium\quarantine\shims-<time>-<pid>` with a
+      `WARNING` (`quarantineStrayShims`; nothing is deleted, so a person can look at it). A failed write there falls back
+      to `tools\shims`, which is Medium too, with a `WARNING`, so recovery needs nobody at the machine. Warn first came in
+      ff-factory #1391, enforce in its own change (lothsahn's lockout rule).
+    - `<root>\tools\shims` is written only while an agent host started before the move keeps it first on its `PATH`
+      (`hostsWithPathDir`; the start line names them), and kept Medium while it is there (`OLD_TOOLS_SHIMS`, no longer in
+      `MEDIUM_TOOLS`). Once none has it, `dropOldToolsShims` removes it, looked at each minute; `tools` is Medium, so no Low
+      worker makes it again.
 - A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).
