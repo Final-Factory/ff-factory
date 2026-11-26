@@ -432,3 +432,32 @@ test('w6047 (the w6118 review): two requests handed back, one placed: each reque
   assert.match(b.handedBack?.message ?? '', /^go on$/);
   assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0, 'not also put back for the old worker');
 });
+
+for (const mode of ['on', 'warn'] as const) {
+  for (const start of ['late failure', 'success'] as const) {
+    test(`w6047 (the w6124 review, "${mode}"): a hand-back made during the move's waits stands; the move never starts (it would end in a ${start})`, async (t) => {
+      const { store, sessions, agents, worker, request, queued, roomMove, settled, starts } = await setup(t, mode);
+      const tried: string[] = [];
+      if (start === 'late failure') failing(agents, 'late', tried);
+      (agents as unknown as { liveHub: unknown }).liveHub = {
+        endFor: async () => {
+          agents.orchestrators.handBack(store.work.get('w5869')!, store.sessions.get('5449aaaa')!, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+          return undefined;
+        },
+        running: () => false,
+      };
+      const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+      request(['5449aaaa']);
+      assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+      await settled('5449aaaa');
+      const w = store.work.get('w5869')!;
+      assert.deepEqual([...tried, ...starts], [], 'no fresh session was started');
+      assert.match(w.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
+      assert.equal(w.status, 'queued');
+      assert.ok(!w.sessionIds.includes('5449aaaa') || w.movedOff?.['5449aaaa'], 'the old worker is not given the request back');
+      assert.match(w.handedBack?.message ?? '', /^go on$/, 'the held message goes with the hand-back, once');
+      assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0, 'not put back for the old worker');
+      assert.deepEqual(agents.moveGuard.refusals(Date.now()), {}, 'the target is no worse a move target for it');
+    });
+  }
+}

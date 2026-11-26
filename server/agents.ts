@@ -4831,9 +4831,26 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // that fails gives every request back to this worker (giveBack below). Otherwise they go at once, as before.
     const undo = movedAwayMode(this.cfg.movedAwayWorkers) === 'on';
     const before = new Map(reqs.map((w) => [w.id, { ...moveBeforeOf(w, info.id), handedBack: began.get(w.id) }]));
+    // w6047 (the w6124 review): a request handed back during the stop, Live view and save waits above (a pause, a stop_agent
+    // move_to) keeps that hand-back: the move hands it back no second time and never starts it, since the start would write
+    // the move's own hand-back over it, and a failed one would then give the request back to this worker.
+    const meanwhile = new Set(reqs.filter((w) => w.handedBack !== began.get(w.id)).map((w) => w.id));
     const others = () => {
-      for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
+      for (const w of reqs) if (w !== primary && !meanwhile.has(w.id)) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
     };
+    if (primary && meanwhile.has(primary.id)) {
+      const err = `${primary.id} was handed back during its move (${primary.handedBack?.how ?? 'no hand-back'})`;
+      console.warn(`room move: ${err}; not started on ${to} (w6047)`);
+      if (undo) {
+        this.giveBack(info, reqs, before, to, err, q ?? entry.first, entry.texts, { how, to }, false);
+        return 'given back';
+      }
+      others();
+      this.deliverHeld(info, reqs, q ?? entry.first, entry.texts);
+      this.store.append(info.id, { kind: 'system', text: `Its move to ${to} did not start: ${err}, and that stands (w6047).` });
+      this.orchestrators?.retireWhenFree(info.id);
+      return 'handed back';
+    }
     if (!undo) others();
     if (primary) {
       const note = `${stage}${primary.outcome ? `Its last report: ${primary.outcome}` : 'No report yet.'}`;
@@ -4877,52 +4894,61 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /**
+   * w6047: the message a move held, when every request it had was handed back meanwhile and that stands (giveBack's
+   * hand-backs made during the move): to a next worker placed meanwhile, else into a standing hand-off, never to this worker.
+   */
+  private deliverHeld(info: SessionInfo, reqs: WorkItem[], q: QueuedSend | undefined, texts: string[]) {
+    // w6047 (the w6056 review, 2): every request was handed back meanwhile (a pause, a stop_agent move_to), and that stands:
+    // the message the move held goes in that hand-off, for the request's next worker, never to this worker, which holds none.
+    const text = texts.length ? texts.join('\n\n---\n\n') : q ? movedText(q) : '';
+    // The w6088 review: a request the dispatcher placed on a next worker while the start ran read its hand-off already, so
+    // that worker gets the message as a forwarded one (as forwardLate does); only a request with no next worker yet carries
+    // it in its hand-off, which its next worker reads when it starts.
+    // The w6104 review: an older worker still listed (heirOf's fallback) is not a next worker, and the message never goes
+    // to it. The w6118 review: a next worker is one linked at or after the hand-back that stands (linkWorker stamps the
+    // link on every send), so one already on the request and sent it again counts, and so does one placed before the
+    // move took its MoveBefore; the newest such link wins.
+    const back = reqs.filter((x) => x.handedBack?.session === info.id);
+    const nextOf = (x: WorkItem): SessionInfo | undefined => {
+      const since = x.handedBack?.at;
+      if (!since) return undefined;
+      const id = x.sessionIds
+        .filter((sid) => sid !== info.id && (x.links?.[sid]?.at ?? '') >= since)
+        .sort((p, r) => (x.links![p]!.at < x.links![r]!.at ? -1 : x.links![p]!.at > x.links![r]!.at ? 1 : 0))
+        .at(-1);
+      const n = id ? this.store.sessions.get(id) : undefined;
+      return n?.kind === 'worker' ? n : undefined;
+    };
+    const placed = back.filter((x) => !!nextOf(x));
+    let told: string[] = [];
+    if (text && placed.length) {
+      const lq: QueuedSend = { uuid: `w6047-back-${info.id}-${Date.now()}`, id: info.id, text, from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), ...(q?.resumeOf ? { resumeOf: q.resumeOf } : {}), at: new Date().toISOString(), why: 'held by its move, whose requests were handed back meanwhile (w6047)' };
+      told = this.forwardToHeirs(info, placed, lq, nextOf);
+    }
+    const w = text ? (back.find((x) => !placed.includes(x)) ?? (told.length ? undefined : back[0])) : undefined;
+    if (w) this.orchestrators.carryInHandBack(w, info.id, text);
+    else if (text && !told.length) console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off (w6047)`);
+  }
+
+  /**
    * w5976, config movedAwayWorkers "on": a room move whose fresh session did not start on `to` gives its requests back to the
    * worker it was to leave (Orchestrators.moveUndone), instead of leaving the request Queued with no worker while that worker
    * kept its movedAway mark. Its sandbox stays released (its work was saved), so it resumes when a sandbox frees on its own
    * computer, with the message the move took (SessionManager.putBack); `to` is no move target for REFUSED_FOR_MS, so the next
    * drain does not try the same start again, and the worker is not retired.
    */
-  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[], move: { how: string; to: string }) {
+  private giveBack(info: SessionInfo, reqs: WorkItem[], before: Map<string, MoveBefore>, to: string, err: string, q: QueuedSend | undefined, texts: string[], move: { how: string; to: string }, refuse = true) {
     const why = `its new session on ${to} did not start (${err})`;
     console.warn(`room move: starting ${reqs.map((w) => w.id).join(', ')} on ${to} failed (${err}); given back to worker ${info.id} on ${info.machineId}/${info.machineSandbox} (w5976)`);
-    this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
+    // w6047 (the w6124 review): a move stopped by a hand-back made during its waits is no fault of `to`, which stays a target.
+    if (refuse) this.moveGuard.noteRefusal(to, err, Date.now(), `a moved session did not start there`);
     for (const w of reqs) this.orchestrators.moveUndone(w, info, before.get(w.id)!, why, move);
     // With this worker after it: given back, or never taken off (a start that failed before the move took it).
     const given = reqs.filter((w) => w.sessionIds.includes(info.id) && !w.movedOff?.[info.id] && w.handedBack?.session !== info.id);
     delete info.movedAway;
     this.store.putSession(info);
     if (!given.length) {
-      // w6047 (the w6056 review, 2): every request was handed back meanwhile (a pause, a stop_agent move_to), and that stands:
-      // the message the move held goes in that hand-off, for the request's next worker, never to this worker, which holds none.
-      const text = texts.length ? texts.join('\n\n---\n\n') : q ? movedText(q) : '';
-      // The w6088 review: a request the dispatcher placed on a next worker while the start ran read its hand-off already, so
-      // that worker gets the message as a forwarded one (as forwardLate does); only a request with no next worker yet carries
-      // it in its hand-off, which its next worker reads when it starts.
-      // The w6104 review: an older worker still listed (heirOf's fallback) is not a next worker, and the message never goes
-      // to it. The w6118 review: a next worker is one linked at or after the hand-back that stands (linkWorker stamps the
-      // link on every send), so one already on the request and sent it again counts, and so does one placed before the
-      // move took its MoveBefore; the newest such link wins.
-      const back = reqs.filter((x) => x.handedBack?.session === info.id);
-      const nextOf = (x: WorkItem): SessionInfo | undefined => {
-        const since = x.handedBack?.at;
-        if (!since) return undefined;
-        const id = x.sessionIds
-          .filter((sid) => sid !== info.id && (x.links?.[sid]?.at ?? '') >= since)
-          .sort((p, r) => (x.links![p]!.at < x.links![r]!.at ? -1 : x.links![p]!.at > x.links![r]!.at ? 1 : 0))
-          .at(-1);
-        const n = id ? this.store.sessions.get(id) : undefined;
-        return n?.kind === 'worker' ? n : undefined;
-      };
-      const placed = back.filter((x) => !!nextOf(x));
-      let told: string[] = [];
-      if (text && placed.length) {
-        const lq: QueuedSend = { uuid: `w6047-back-${info.id}-${Date.now()}`, id: info.id, text, from: q?.from ?? 'system', ...(q?.requestedBy ? { requestedBy: q.requestedBy } : {}), ...(q?.resumeOf ? { resumeOf: q.resumeOf } : {}), at: new Date().toISOString(), why: 'held by its move, whose requests were handed back meanwhile (w6047)' };
-        told = this.forwardToHeirs(info, placed, lq, nextOf);
-      }
-      const w = text ? (back.find((x) => !placed.includes(x)) ?? (told.length ? undefined : back[0])) : undefined;
-      if (w) this.orchestrators.carryInHandBack(w, info.id, text);
-      else if (text && !told.length) console.warn(`room move: the message held by worker ${info.id}'s move went to no hand-off (w6047)`);
+      this.deliverHeld(info, reqs, q, texts);
       console.warn(`room move: starting ${reqs.map((x) => x.id).join(', ')} on ${to} failed (${err}); handed back meanwhile, so not given back to worker ${info.id} (w6047)`);
       this.store.append(info.id, { kind: 'system', text: `Its move did not start (${why}), but its requests were handed back meanwhile, and that stands (w6047).` });
       this.orchestrators.retireWhenFree(info.id);
