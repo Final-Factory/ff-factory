@@ -19,7 +19,8 @@ test('w5863: the path fence is warn when unset on macOS and Linux, off only when
     assert.equal(pathFenceMode('on', p), 'warn', `${p}: no enforce in this stage`);
   }
   assert.equal(pathFenceMode(undefined, 'win32'), 'off', 'Windows: its shims are in <root>/tools/shims (w5838)');
-  assert.match(pathFenceLine('warn', '/r/unity-slots/bin', '/r'), /warn only; nothing is refused.*\/r\/tools-medium\/shims/);
+  // The folder is path.join's: a Windows run of this test (where the fence never runs) gets \r\tools-medium\shims.
+  assert.match(pathFenceLine('warn', '/r/unity-slots/bin', '/r'), /warn only; nothing is refused.*[\\/]r[\\/]tools-medium[\\/]shims/);
   assert.match(pathFenceLine('off', '/r/unity-slots/bin', '/r'), /off/);
 });
 
@@ -36,7 +37,8 @@ test('w5863: the enforced shims folder is one both fences already keep read-only
   const sb = seatbeltProfile(f);
   const deny = sb.lastIndexOf('(deny file-write*');
   assert.ok(deny > sb.indexOf('(allow file-write*'), 'the deny comes after the allows (later rules win)');
-  assert.ok(sb.slice(deny).includes(`(subpath "${path.posix.join(root, 'tools-medium')}")`), 'tools-medium is in the deny block');
+  // JSON.stringify quotes as the profile's lit() does: on Windows the resolved root has backslashes, which it doubles.
+  assert.ok(sb.slice(deny).includes(`(subpath ${JSON.stringify(path.posix.join(root, 'tools-medium'))})`), 'tools-medium is in the deny block');
 });
 
 const waitFor = async (cond: () => boolean, ms = 5000) => {
@@ -45,7 +47,9 @@ const waitFor = async (cond: () => boolean, ms = 5000) => {
   return cond();
 };
 
-test('w5863: the warn watch logs a write to the shims folder, once per name per hour, and the folder being replaced', async () => {
+// w5915: not on Windows, where the watch never runs (pathFenceMode is always off there, machine/daemon.ts starts it only on
+// warn): a write in the folder also changes the folder in its parent's watch on Windows, so the folder itself is logged too.
+test('w5863: the warn watch logs a write to the shims folder, once per name per hour, and the folder being replaced', { skip: process.platform === 'win32' && 'the watch never runs on Windows (pathFenceMode is off there)' }, async () => {
   const mailbox = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-pathfence-'));
   const bin = path.join(mailbox, 'bin');
   fs.mkdirSync(bin);
