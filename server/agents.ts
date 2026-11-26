@@ -72,7 +72,7 @@ import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
 import { TIMER_LIMITS, Timers, scheduleText, type TimerView } from './timers.ts';
-import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, exceptOf, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
+import { EVEN_MARGIN, RAM_BUSY_PCT, benchText, buildOf, busyReasons, capacityLines, classRank, forPriority, hasRoom, exceptOf, holdReason, liveOf, loadText, lowestPriority, minOf, pairCanFinish, pairNoPlacement, pickComputer, fitOf, legacyFit, placeId, pinnedWork, placementHint, reservedReason, roomEnough, roomForWork, roomNow, timedFacts, timedKindOf, timedPinRefusal, voiceVram, type Computer, type FirstKind, type NeedKind, type PlacementPrefs, type RoomNow, type TimedKind } from './placement.ts';
 import { MachinePauses, PAUSE_TICK_MS, pauseHold, pauseHolds, type HandBack } from './machinePause.ts';
 import { drainOf, newDrain, drainHolds, drainWouldHold, holdReadback, type HeldWorker } from './machineDrain.ts';
 import { runnerHoldText } from '../shared/runnerHold.ts';
@@ -121,7 +121,7 @@ import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shar
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
 import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { cachedPlayerNote, fetchPlayerNote, legacyUnfitWhy, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { SymbolOwners } from './symbolOwners.ts';
 import { SteamJobs, branchOf, describeJob, parseAsk, readClaim, refuseUpload } from './steamUpload.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
@@ -1122,6 +1122,7 @@ export class Agents {
       recentCommits: () => this.recentCommits,
       room: () => this.roomNow(),
       roomFacts: () => this.roomFacts(),
+      legacyFit: (w) => legacyFit(this.places(), w),
       heldFor: (m, w) => this.heldFor(m, w),
       timedFacts: (t) => timedFacts(this.places(), this.placement(), t),
       timedSmall: () => {
@@ -6228,6 +6229,13 @@ A report is for a person who asked for one, and people want very few. File one w
       if (m?.platform === 'darwin' && i > 0) {
         throw new Error(`${leg}: ${l.machine} is a Mac, and a Mac refuses a multiplayer client (w665): in a pair run a Mac only hosts (leg 1, sandbox; w2282). Nothing was started.`);
       }
+      // w6003: the dispatcher started w6002's leg on lothdesktop/slot5 by name, and this path never asked placement's rule, so a
+      // pre-w5297 player's leg ran where sandbox agents measure Low. Each leg is checked against the measured level here too.
+      if (w.pair?.legacyData) {
+        const c = this.places().find((p) => p.id === placeId(l.machine));
+        const legacy = legacyUnfitWhy(w.pair, l.machine, c ? fitOf(c) : undefined);
+        if (legacy) throw new Error(`${leg}: ${legacy}. ${legacyFit(this.places(), { pair: w.pair }).line.replace(/^./, (c) => c.toUpperCase())}. Nothing was started.`);
+      }
       // w2459: w2458's client leg went on biscuit, which has no Steam client, and died at its Steam check.
       const noSteam = w.pair?.steam ? steamLacks(l.machine, m?.steam) : undefined;
       if (noSteam) throw new Error(`${leg}: ${noSteam}, and ${w.id} needs Steam (${w.pair!.steam}): its legs go only on computers signed in to Steam (${fitNow()}). Nothing was started.`);
@@ -6802,6 +6810,9 @@ A report is for a person who asked for one, and people want very few. File one w
         ...(m.fence?.state === 'failed' ? { fenceFailed: m.fence.why ?? 'no reason given' } : {}),
         // w5965: a pair run of a pre-w5297 player goes only where the fence is off.
         ...(m.fence ? { fence: m.fence.state } : {}),
+        // w6003: and on Windows only where its sandbox agents were measured at Medium.
+        ...(m.fence?.agentIntegrity ? { agentIntegrity: m.fence.agentIntegrity } : {}),
+        ...(m.fence?.agentIntegrityWhy ? { agentIntegrityWhy: m.fence.agentIntegrityWhy } : {}),
         live: mine.filter((s) => s.live).length,
         midTurn: mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),
@@ -7686,9 +7697,10 @@ ${w.repo ?? ''}
             store_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the store lock (w5614, docs/machines.md \"Slot repos\"): on makes the machine's main clone read-only to fenced workers once every sandbox is a slot repo (held off, and said why, until then); warn refuses nothing and logs each write to the main clone the daemon did not make; off (the recovery switch) opens it again. Takes effect at the daemon restart the update makes. Unset leaves it as it is."),
             editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
             path_fence: z.enum(['off', 'warn']).optional().describe("action machine_update: w5863: the path fence on macOS and Linux: warn (the default) refuses nothing and logs each write to the unity-slot shims folder (first on every agent's PATH) that the daemon did not make; off stops the watch (the recovery switch). Takes effect at the daemon's next start. Unset leaves it as it is."),
+            daemon_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w6000: the daemon's own temp folder, every OS: on (the default) points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps the system temp folder (the recovery). Takes effect at the daemon's next start."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -7696,7 +7708,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
