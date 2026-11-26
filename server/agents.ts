@@ -4790,6 +4790,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   private async moveForRoom(info: SessionInfo, reqs: WorkItem[], to: string, why: string, hold: string, entry: { texts: string[]; first?: QueuedSend; how?: string; lead?: string; reason?: string; away?: string }, q?: QueuedSend): Promise<'moved' | 'given back' | 'handed back' | 'nothing'> {
     const from = `${info.machineId}/${info.machineSandbox}`;
+    // w6047 (the w6118 review, 2): each request's hand-back as the move began, before the stop and the sandbox save below
+    // wait; a hand-back made during those waits is then not this move's (moveUndone keeps it, MoveBefore.handedBack).
+    const began = new Map(reqs.map((w) => [w.id, w.handedBack]));
     const reason = entry.reason ?? `${hold}, and ${to} has room (w2046)`;
     const how = entry.how ?? 'moved by FF Factory: its computer was full (w2046)';
     const h = this.sessions.sessions.get(info.id);
@@ -4827,7 +4830,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w5976, config movedAwayWorkers "on": the other requests are handed back only once the fresh session started, and a start
     // that fails gives every request back to this worker (giveBack below). Otherwise they go at once, as before.
     const undo = movedAwayMode(this.cfg.movedAwayWorkers) === 'on';
-    const before = new Map(reqs.map((w) => [w.id, moveBeforeOf(w, info.id)]));
+    const before = new Map(reqs.map((w) => [w.id, { ...moveBeforeOf(w, info.id), handedBack: began.get(w.id) }]));
     const others = () => {
       for (const w of reqs) if (w !== primary) back(w, `${stage}${w.outcome ? `Its last report: ${w.outcome}` : 'No report yet.'}`);
     };
@@ -4896,12 +4899,18 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       // The w6088 review: a request the dispatcher placed on a next worker while the start ran read its hand-off already, so
       // that worker gets the message as a forwarded one (as forwardLate does); only a request with no next worker yet carries
       // it in its hand-off, which its next worker reads when it starts.
-      // The w6104 review: only a worker linked after the move began is a next worker; an older one still listed (heirOf's
-      // fallback) is not, and the message never goes to it.
+      // The w6104 review: an older worker still listed (heirOf's fallback) is not a next worker, and the message never goes
+      // to it. The w6118 review: a next worker is one linked at or after the hand-back that stands (linkWorker stamps the
+      // link on every send), so one already on the request and sent it again counts, and so does one placed before the
+      // move took its MoveBefore; the newest such link wins.
       const back = reqs.filter((x) => x.handedBack?.session === info.id);
       const nextOf = (x: WorkItem): SessionInfo | undefined => {
-        const was = new Set(before.get(x.id)?.sessionIds ?? x.sessionIds);
-        const id = x.sessionIds.filter((sid) => sid !== info.id && !was.has(sid)).at(-1);
+        const since = x.handedBack?.at;
+        if (!since) return undefined;
+        const id = x.sessionIds
+          .filter((sid) => sid !== info.id && (x.links?.[sid]?.at ?? '') >= since)
+          .sort((p, r) => (x.links![p]!.at < x.links![r]!.at ? -1 : x.links![p]!.at > x.links![r]!.at ? 1 : 0))
+          .at(-1);
         const n = id ? this.store.sessions.get(id) : undefined;
         return n?.kind === 'worker' ? n : undefined;
       };

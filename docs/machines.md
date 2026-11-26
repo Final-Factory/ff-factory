@@ -2788,8 +2788,8 @@ LothDesktop and Beast, not just when BEAST is full").
       did not start there", and a later cap refusal there does not replace it (both last `REFUSED_FOR_MS`); `moveUndone`
       leaves a hand-back made while the start ran (a pause, a stop_agent move_to: another `how` or `to`) as it is, and when
       every request was handed back so, the message the move held goes to the request's next worker when the dispatcher
-      placed it on one already while the start ran (one linked after the move began, never an older worker still listed;
-      `forwardToHeirs`: that worker read its hand-off at its start, the w6088 and w6104 reviews), else into that hand-off's `message` (`Orchestrators.carryInHandBack`), never back to the old worker; and a timed-leg pre-empt shares its move entry with
+      placed it on one already while the start ran (one whose link is at or after the hand-back that stands, a re-send to a worker already on it included, never an older worker still listed;
+      `forwardToHeirs`: that worker read its hand-off at its start, the w6088, w6104 and w6118 reviews; the hand-back compared is the one from when the move began, before its stop and save waits), else into that hand-off's `message` (`Orchestrators.carryInHandBack`), never back to the old worker; and a timed-leg pre-empt shares its move entry with
       `roomMove`, so a message that comes during any move goes with it (to the new worker on a start, `forwardLate`; back
       to the old one on a give-back; in the hand-off on a hand-back), and its log says which happened. Tests: the w6047
       ones in `server/w5950MovedAwayEnforce.test.ts` and `server/w5976MoveGiveBack.test.ts`.

@@ -356,3 +356,79 @@ test('w6047 (the w6104 review): every request handed back, no next worker yet, a
   assert.equal(sent.filter((m) => m.id === 'old0aaaa').length, 0, 'not forwarded to the older, stale worker');
   assert.match(w.handedBack?.message ?? '', /go on/, "the message rides the pause's hand-off for the next worker");
 });
+
+const nextW = (id: string, m: string): SessionInfo => ({ id, kind: 'worker', title: 'w5869: FF Factory fix', status: 'stopped', permissionMode: 'default', createdAt: OLD, lastActivityAt: OLD, turns: 0, costUsd: 0, pendingPermissions: [], machineId: m, machineSandbox: 'slot2' });
+
+test('w6047 (the w6118 review, 1): dispatcher re-links an OLDER worker already on the request while the start runs: "go on" reaches it', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  x.startMoved = async (info, w) => {
+    agents.orchestrators.handBack(w, info, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+    // The dispatcher sends the handed-back request to old0aaaa, "already on it" (agents.ts send path -> linkWorker).
+    agents.orchestrators.linkWorker(w.id, store.sessions.get('old0aaaa')!, 'sent to old0aaaa, already on it');
+    throw new Error('no agent seat there now');
+  };
+  worker('old0aaaa', { machineId: 'm5', machineSandbox: 'slot3', turns: 4 });
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['old0aaaa', '5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const w = store.work.get('w5869')!;
+  const reached = sent.some((m) => m.id === 'old0aaaa' && /go on/.test(m.text)) || sessions.queued().some((m) => m.id === 'old0aaaa' && /go on/.test(m.text));
+  assert.ok(reached, '"go on" reaches old0aaaa, the worker the request was re-sent to');
+});
+
+test('w6047 (the w6118 review, 2): hand-back and next worker placed BEFORE MoveBefore is taken (during the stop/save awaits): "go on" reaches next1', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  (agents as unknown as { liveHub: unknown }).liveHub = {
+    endFor: async () => {
+      const w = store.work.get('w5869')!;
+      agents.orchestrators.handBack(w, store.sessions.get('5449aaaa')!, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+      const n = nextW('next1', 'lothdesktop');
+      store.putSession(n);
+      agents.orchestrators.linkWorker(w.id, n, 'started worker next1 in lothdesktop/slot2');
+      return undefined;
+    },
+    running: () => false,
+  };
+  x.startMoved = async () => {
+    throw new Error('no agent seat there now');
+  };
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const w = store.work.get('w5869')!;
+  const reached = sent.some((m) => m.id === 'next1' && /go on/.test(m.text)) || sessions.queued().some((m) => m.id === 'next1' && /go on/.test(m.text));
+  assert.ok(reached, '"go on" reaches next1');
+  // The hand-back made during the waits stands (MoveBefore.handedBack is the one from when the move began): the old worker
+  // is not linked again beside next1, so it is retired, not left holding the request.
+  assert.deepEqual(w.sessionIds, ['next1']);
+});
+
+test('w6047 (the w6118 review): two requests handed back, one placed: each request gets the message once, none twice', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  let first = true;
+  x.startMoved = async (info, w) => {
+    if (first) {
+      first = false;
+      for (const id of ['w5869', 'w5870']) agents.orchestrators.handBack(store.work.get(id)!, info, { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' });
+      const n = nextW('next1', 'lothdesktop');
+      store.putSession(n);
+      agents.orchestrators.linkWorker('w5869', n, 'started worker next1');
+    }
+    throw new Error('no agent seat there now');
+  };
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['5449aaaa'], 'w5869');
+  request(['5449aaaa'], 'w5870');
+  assert.equal(roomMove(s, queued('5449aaaa', 'go on', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const a = store.work.get('w5869')!, b = store.work.get('w5870')!;
+  assert.equal(sent.filter((m) => m.id === 'next1').length, 1);
+  assert.equal(a.handedBack?.message, undefined);
+  assert.match(b.handedBack?.message ?? '', /^go on$/);
+  assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0, 'not also put back for the old worker');
+});
