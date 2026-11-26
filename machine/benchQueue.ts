@@ -108,6 +108,32 @@ export function benchLockPath(root: string | undefined, env: NodeJS.ProcessEnv =
   return r ? path.join(r, 'daemon', 'bench.lock') : undefined;
 }
 
+/**
+ * w5834 (lothsahn: "under no circumstances should workers write outside of ffw"): a ticket's status file goes in
+ * <root>/tmp/bench-status, not the OS temp folder (biscuit's /tmp held the daemon's 19-byte ff-bench-<pid>-<hex> files of
+ * tickets it never released). A folder that cannot be made falls back to the OS temp folder and says why, so a ticket, and
+ * the editor or run waiting on it, is never refused for it: the reason is only warned, never returned as a ticket's `why`
+ * (unity-slot run reads any `why` as a refusal).
+ */
+export function benchStatusDir(root: string | undefined, mkdir: (p: string) => void = (p) => void fs.mkdirSync(p, { recursive: true })): { dir: string; why?: string } {
+  if (!root) return { dir: os.tmpdir(), why: 'no worker root: the bench status file goes to the OS temp folder' };
+  const dir = path.join(root, 'tmp', 'bench-status');
+  try {
+    mkdir(dir);
+    return { dir };
+  } catch (e) {
+    return { dir: os.tmpdir(), why: `could not make ${dir} (${(e as Error).message}): the bench status file goes to the OS temp folder` };
+  }
+}
+
+/** A ticket's status folder: the caller's, else benchStatusDir's (its fallback warned). */
+function statusDirFor(tempDir: string | undefined, root: string | undefined): string {
+  if (tempDir) return tempDir;
+  const st = benchStatusDir(root);
+  if (st.why) console.warn(`bench queue (w5834): ${st.why}`);
+  return st.dir;
+}
+
 /** The python the queue runs under: FF_PYTHON, else python on Windows and python3 elsewhere (the game repo's choice). */
 export const pythonExe = (env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform) =>
   env.FF_PYTHON || (platform === 'win32' ? 'python' : 'python3');
@@ -121,7 +147,7 @@ export interface BenchTicketOptions {
   maxMin?: number;
   python?: string;
   env?: NodeJS.ProcessEnv;
-  /** Where its status file goes (default the OS temp folder). */
+  /** Where its status file goes (benchTicketFor: benchStatusDir, inside the worker root; else the OS temp folder). */
   tempDir?: string;
   /** An exclusive ticket's reason (bench_queue.py --reason, w1832/w1948): 'timing' for a timed run. */
   reason?: 'timing' | 'machine';
@@ -273,12 +299,13 @@ export function benchTicketFor(o: Omit<BenchTicketOptions, 'script' | 'lock'> & 
   if (!script) return { why: 'no scripts/bench/bench_queue.py in this checkout (a branch from before w1615) or in any sandbox here' };
   const lock = benchLockPath(root, env);
   if (!lock) return { why: 'no worker root to keep the bench queue under' };
+  const oo = { ...o, tempDir: statusDirFor(o.tempDir, root) };
   if (o.place !== undefined) {
     const s = placeScript(script, o.checkouts, root);
-    if (!s) return { ticket: new BenchTicket({ ...o, place: undefined, script, lock }).take(), why: 'no queue script here takes --place yet (w4624): queued without its earlier place' };
-    return { ticket: new BenchTicket({ ...o, script: s, lock }).take() };
+    if (!s) return { ticket: new BenchTicket({ ...oo, place: undefined, script, lock }).take(), why: 'no queue script here takes --place yet (w4624): queued without its earlier place' };
+    return { ticket: new BenchTicket({ ...oo, script: s, lock }).take() };
   }
-  return { ticket: new BenchTicket({ ...o, script, lock }).take() };
+  return { ticket: new BenchTicket({ ...oo, script, lock }).take() };
 }
 
 /** What a launch needs of a ticket: the helper's state, a wait for it, and a release. */
@@ -527,7 +554,7 @@ function trustedBenchTicket(o: Omit<BenchTicketOptions, 'script' | 'lock'> & { r
   const tr = trustedBenchRun(t, root, env);
   if ('why' in tr) return { why: tr.why };
   const { script } = tr;
-  const run = { ...o, ...tr, lock };
+  const run = { ...o, ...tr, lock, tempDir: statusDirFor(o.tempDir, root) };
   if (o.place !== undefined && !supportsPlace(script)) return { ticket: new BenchTicket({ ...run, place: undefined }).take(), why: 'the trusted queue script takes no --place: queued without its earlier place' };
   return { ticket: new BenchTicket(run).take() };
 }
