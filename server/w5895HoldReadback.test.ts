@@ -75,7 +75,10 @@ test('w5895: hold words outside the person\'s turn are recorded NOT SET, named i
   assert.match(before.text, /HOLD ASKED, NOT SET: w5814: Lothsahn asked .* to hold pc .*the dispatcher sets it with hold_machine/);
   const lm = await env.call(env.dispatcher().info, 'list_machines', {});
   assert.match(lm.text, /HOLD ASKED, NOT SET: w5814/);
-  // The dispatcher's guard lets the recorded ask through, though humanAsked is false (C1: every try was refused).
+  // The dispatcher's guard lets the recorded ask through, though humanAsked is false (C1: every try was refused). Its own
+  // turn is pinned to the harness's: its turn source starts 'human' and flips only when a notice reaches it, so unpinned
+  // the guard could pass by dispatcherHeardPerson and the test prove nothing (CI on #1307, Linux, 2026-11-26).
+  asTurn(env.dispatcher(), 'system');
   const set = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', work_id: 'w5814' });
   assert.ok(!set.isError, set.text);
   assert.match(set.text, /Read back live: .*HELD/);
@@ -156,6 +159,7 @@ async function setByDispatcher(t: Parameters<typeof twoComputers>[0], hours?: nu
   asTurn(env.chat(LOTH), 'system');
   const r = await env.call(env.chat(LOTH).info, 'update_work', { id: 'w5814', hold: { machine: 'pc', action: 'hold' }, words: WORDS });
   assert.ok(!r.isError, r.text);
+  asTurn(env.dispatcher(), 'system');
   const set = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'hold', words: WORDS, who: 'Lothsahn', work_id: 'w5814', ...(hours ? { hours } : {}) });
   assert.ok(!set.isError, set.text);
   assert.ok(env.store.work.get('w5814')!.holdAsk?.set);
@@ -164,9 +168,12 @@ async function setByDispatcher(t: Parameters<typeof twoComputers>[0], hours?: nu
 
 test('w5895: a hold that was set and then lifted does not come back as HOLD ASKED, NOT SET, and its work_id no longer gets a re-hold through the guard', async (t) => {
   const env = await setByDispatcher(t);
+  // A person tells the dispatcher to lift it, in their own turn there.
+  asTurn(env.dispatcher(), 'human');
   const lift = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift' });
   assert.ok(!lift.isError, lift.text);
   assert.equal(env.store.machines.get('pc')!.drain, undefined);
+  asTurn(env.dispatcher(), 'system');
   const st = await env.call(env.dispatcher().info, 'system_status', {});
   assert.doesNotMatch(st.text, /ASKED, NOT SET/);
   const lm = await env.call(env.dispatcher().info, 'list_machines', {});
@@ -193,6 +200,7 @@ test('w5895: a lift asked outside the person\'s turn shows LIFT ASKED, NOT SET u
   assert.match(r.text, /LIFT ASKED, NOT SET/);
   const before = await env.call(env.dispatcher().info, 'system_status', {});
   assert.match(before.text, /LIFT ASKED, NOT SET: w5814/);
+  asTurn(env.dispatcher(), 'system');
   const lift = await env.call(env.dispatcher().info, 'hold_machine', { machine: 'pc', action: 'lift', work_id: 'w5814' });
   assert.ok(!lift.isError, lift.text);
   const after = await env.call(env.dispatcher().info, 'system_status', {});
