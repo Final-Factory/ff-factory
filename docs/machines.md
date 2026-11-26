@@ -777,6 +777,24 @@ keep their requests and their shells run on.
   and `machines.personPlay.who` (a name), each with an optional `machine`; sent to the daemon with the bench priorities each
   minute. Tests: `server/personPlay.test.ts`.
 
+## A person's drain (w5878)
+
+A person who asks to hold new work off a computer and let the workers there finish (lothsahn on w5814, "Hold new work on
+LothDesktop and let the running workers finish") gets a **drain**: the dispatcher calls
+`hold_machine` (dispatcher only, a user-asked tool: `belts.ts` `USER_ASKED_TOOLS`; `server/machineDrain.ts`, kept as `Machine.drain` and across a re-register) with their words quoted, who
+said them, and optionally `hours` (it lifts by itself) and `except` (requests that may still go there).
+
+- `Agents.placement()` merges it into `placement.hold` beside a coming build's and a person's game's holds, so every path
+  that reads holds skips the computer: `start_agent` (`awayProblem`), the w2046 room move, the agent-cap move and the
+  cross-machine re-placement (`moveDecision` through `holdReason`), priority reclaims, pair legs (`startPairLegs`, which refuses a leg on a drained computer; a config hold, a build or a person's game there is not checked for pair legs, as before), the
+  Capacity block's HELD line and Queued reasons.
+- `placement(false)` leaves it out, so `machineHold` never holds the resumes of the workers already there: they finish.
+- Work pinned to the computer (`machinePin`, `pin_words`) still starts there (`awayProblem`) and its pair legs too; an automatic move to it (`moveDecision`) waits for the lift. Timed runs read
+  `placement(false)` and are not held by it.
+- Recovery needs nobody at the computer: `hold_machine lift`, or `hours`. Before it, such a hold lived only in the
+  dispatcher's notes, and the w2046 moves put w5838, w5857, w5863 and w5834 on LothDesktop between 17:54 and 19:12
+  (-07:00) on 2026-11-25, each logging "first with room in placement.prefer" with no hold named.
+
 ## Offline and paused computers take no work
 
 One rule, in `shared/availability.ts` and `server/machineAway.ts`, holds on every path that picks or plans a computer:
@@ -2000,6 +2018,25 @@ LothDesktop and Beast, not just when BEAST is full").
     timed work" counts it as that computer's queued timed work (`pickTimed`) and lists every held leg, with "has ROOM:
     start it now" where its computer has room.
   - Tests: the two w1863 cases in `server/orchestrators*.test.ts`.
+- **A held leg keeps its place in the queue** (w5860, lothsahn's rule from w4620: every queue is strict priority, then oldest
+  first). On 2026-11-26 w5833 (high) had a leg Queued for biscuit from 23:50Z while freed biscuit places went to later work of
+  the same priority (w5855 at 00:04Z, w5859): no placement path read `WorkItem.legs`.
+  - `Agents.legHoldProblem(machine, w, takes)`: a computer's next free sandbox (when the legs ahead are game work and as
+    many free sandboxes are left as they need) or its next agent slot is held for the legs of other open requests that are
+    ahead of `w` (higher priority, or the same priority and filed earlier, by `createdAt`). Higher work, the leg's own
+    request and older work pass. It lapses `LEG_HOLD_MS` (30 minutes, a judgment) after that computer's room began
+    (`roomFacts().since`), as the pair and timed holds do, so a leg nobody starts never keeps a computer idle.
+  - Read by `start_agent` (refused for the dispatcher, with the leg to start first or drop), by `heldFor` (the room/WRONG
+    flag, room moves, timed starts) and by `reclaimPressure` (a priority reclaim does not take a slot a leg ahead waits for).
+  - The leg is not started by itself: its request usually has a worker running elsewhere, so a second one is the
+    dispatcher's call (`start_agent` with `work_id`, `override_duplicate` when that worker still runs).
+  - Moves (w2046, the agent-cap move, resume into another sandbox): a request's legs pin it like `queuedFor.needs` and
+    `decide_work pin` do (`moveFacts` `pinned`; at 00:23Z the agent-cap move took w5857, Queued for beast or biscuit to
+    keep it off lothdesktop, to lothdesktop/slot1), and `moveDecision` now skips a computer in `held` for work of either
+    kind, not only game work.
+  - A machine hold reaches placement and every move only through config `placement.hold` (`holdReason`): lothsahn's
+    "Hold new work on LothDesktop" on w5814 was never set there, so nothing read it.
+  - Tests: `server/w5860LegHold.test.ts`.
 - **Pair runs are placed as one unit** (w1945, lothsahn, 2026-10-23: "Can we make the dispatcher smart enough so it queues
   work properly that requires running together across multiple machines and doesn't waste slots?"). That evening w665's
   worker d558ba14 held m3's only sandbox (so m3 took no work, and 15 requests read "WRONG: m3 has room") while the

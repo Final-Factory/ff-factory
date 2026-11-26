@@ -32,6 +32,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
+import { pathFenceLine, pathFenceMode, watchShimBin } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
@@ -253,6 +254,18 @@ export interface DaemonConfig {
    * Off when unset; set remotely by `ops_worker machine_update transcript_lock`, and `worker_fence off` lifts it with the lock.
    */
   transcriptLock?: 'on' | 'off';
+  /**
+   * w5833: "on" gives each sandbox Unity editor on macOS and Linux its own TMPDIR, `<root>/tmp/editor-<sandbox>`, in place of
+   * the system temp (machine/sharedCaches.ts editorTmpdirEnv). Off when unset; set remotely by `ops_worker machine_update
+   * editor_tmpdir`, read at the daemon's start, and off is the recovery. Windows editors have `<root>/tmp/unity` always.
+   */
+  editorTmpdir?: 'on' | 'off';
+  /**
+   * w5863: the path fence (machine/pathFence.ts, docs/worker-fence.md "The agents' PATH folders"): "warn" (the default when
+   * unset) refuses nothing and logs each write to the unity-slot shims folder that the daemon did not make; "off" stops the
+   * watch, the recovery. macOS and Linux only; set remotely by `ops_worker machine_update path_fence`.
+   */
+  pathFence?: 'off' | 'warn';
   /**
    * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
    * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
@@ -729,7 +742,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root);
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on');
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -1140,7 +1153,8 @@ export class Daemon {
         await this.ensureBashTmp();
         // w5795: the daemon's own steps said too, the last steps done carried (cleanupPass reports its own).
         let lastDone: Record<string, number> = {};
-        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d) => ((lastDone = d), opts.step!(n, d)) } : opts;
+        let lastSoFar: Parameters<NonNullable<typeof opts.step>>[2];
+        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d, s) => ((lastDone = d), (lastSoFar = s), opts.step!(n, d, s)) } : opts;
         passOpts.step?.('stray temp', {});
         await this.sweepStrayTemp(opts.dryRun);
         const guard = this.cleanupGuard();
@@ -1164,7 +1178,7 @@ export class Daemon {
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
           stale: async () => {
             const output = await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard });
-            passOpts.step?.('stale (install leftovers)', lastDone);
+            passOpts.step?.('stale (install leftovers)', lastDone, lastSoFar);
             return mergePlans(
               output,
               await planInstallLeftovers({
@@ -1225,8 +1239,7 @@ export class Daemon {
       },
       done: (summary, notice) => {
         const mins = summary.passMs !== undefined ? ` in ${(summary.passMs / 60_000).toFixed(1)} min` : '';
-        const q = summary.quick ? `; a quick plan first would have freed ${(summary.quick.bytes / 2 ** 30).toFixed(1)} GB (${summary.quick.items} item(s), planned in ${(summary.quick.ms / 1000).toFixed(0)} s)` : '';
-        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${mins}${q}${notice ? `; ${notice}` : ''}`);
+        log(`clean-up (${summary.trigger}): ${summary.removed} item(s), ${((summary.freedBytes ?? 0) / 2 ** 30).toFixed(1)} GB${mins}${notice ? `; ${notice}` : ''}`);
         this.out({ type: 'cleanup', summary, notice });
       },
       // w5795: a pass a restart cuts off said at the next start, and every start said, so the log shows passes lost to restarts.
@@ -1235,23 +1248,6 @@ export class Daemon {
       cutOff: (text, m) => {
         log(text);
         appendCleanupLog(appDirOfConfig(cfg), { at: new Date().toISOString(), trigger: m.trigger, cutOff: true, startedAt: new Date(m.startedAt).toISOString(), removed: 0, freedBytes: 0 });
-      },
-      // w5795, report-only: what the cargo-target cap with the low-space rules would free at once, before the full plan.
-      quick: async () => {
-        if (!this.cfg.root || staleOutputSettings(this.cleanupSettings.staleOutput).mode !== 'on') return [];
-        const plan = await planInstallLeftovers({
-          root: this.cfg.root,
-          sandboxes: [],
-          tempRoots: [agentTempRoot(this.cfg.tempDir)],
-          guard: this.cleanupGuard(),
-          ctx: this.staleCtx,
-          procs: await this.procs().catch(() => undefined),
-          self: [process.pid, process.ppid],
-          scope: 'cargo-cap',
-          low: true,
-          closed: this.closedSessionDirs(),
-        });
-        return sizePlan(fenceToRoot(plan.items, [this.cfg.root, ...(this.cfg.extraRoots ?? [])]).inside);
       },
     });
   }
@@ -1664,6 +1660,10 @@ export class Daemon {
     } catch (e) {
       log(`unity slots: could not write the unity-slot commands: ${(e as Error).message}`);
     }
+    // w5863: the path fence, warn-only: log each write to the shims folder the daemon did not make (machine/pathFence.ts).
+    const pf = pathFenceMode(this.cfg.pathFence);
+    if (process.platform !== 'win32') log(pathFenceLine(pf, this.slotBin, this.cfg.root));
+    if (pf === 'warn' && this.slotBin) watchShimBin(this.slotBin, (l) => log(l));
     // GitHub Apps (w1519): the gh shim and git helper a run the portal named apps for gets (machine/ghApp.ts).
     try {
       const p = ghAppPaths(appDirOfConfig(this.cfg));

@@ -1145,7 +1145,14 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
         if (!Number.isFinite(at) || typeof m.trigger !== 'string') return undefined;
         const stepAt = Date.parse(m.stepAt);
         const done = m.done && typeof m.done === 'object' ? Object.fromEntries(Object.entries(m.done).filter(([, v]) => typeof v === 'number')) as Record<string, number> : undefined;
-        return { startedAt: at, trigger: m.trigger, ...(typeof m.step === 'string' && Number.isFinite(stepAt) ? { step: m.step, stepAt } : {}), ...(done && Object.keys(done).length ? { done } : {}) };
+        const soFar = m.soFar && typeof m.soFar.removed === 'number' && typeof m.soFar.bytes === 'number' ? { removed: m.soFar.removed, bytes: m.soFar.bytes } : undefined;
+        return {
+          startedAt: at,
+          trigger: m.trigger,
+          ...(typeof m.step === 'string' && Number.isFinite(stepAt) ? { step: m.step, stepAt } : {}),
+          ...(done && Object.keys(done).length ? { done } : {}),
+          ...(soFar ? { soFar } : {}),
+        };
       } catch {
         return undefined;
       }
@@ -1161,6 +1168,7 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
             pid: process.pid,
             ...(m.step && m.stepAt !== undefined ? { step: m.step, stepAt: new Date(m.stepAt).toISOString() } : {}),
             ...(m.done ? { done: m.done } : {}),
+            ...(m.soFar ? { soFar: m.soFar } : {}),
           }),
         );
       } catch {
@@ -1181,11 +1189,19 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
 export interface PassMarker {
   startedAt: number;
   trigger: string;
-  /** The step in flight (cleanupPass's phase names, `quick`, or the daemon's own) and when it began. */
+  /** The step in flight (cleanupPass's phase names, or the daemon's own) and when it began. */
   step?: string;
   stepAt?: number;
   /** The steps done so far, in ms. */
   done?: Record<string, number>;
+  /** What the pass had removed by then (w5795: each step's plan goes as soon as it is planned). */
+  soFar?: PassSoFar;
+}
+
+/** What a pass has removed so far: items and bytes. */
+export interface PassSoFar {
+  removed: number;
+  bytes: number;
 }
 
 const minutes = (ms: number) => Math.max(0, Math.round(ms / 60_000));
@@ -1195,7 +1211,10 @@ export function describeCutOff(m: PassMarker, now: number): string {
   const min = minutes(now - m.startedAt);
   const step = m.step && m.stepAt !== undefined ? `, in its ${m.step} step (${minutes(now - m.stepAt)} min in it)` : '';
   const done = m.done && Object.keys(m.done).length ? `; steps done before: ${Object.entries(m.done).map(([k, v]) => `${k} ${minutes(v)} min`).join(', ')}` : '';
-  return `clean-up: the previous ${m.trigger} pass, started ${new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')}Z, was cut off ${min} min later${step}, before it finished: nothing it had planned was removed${done} (w5795)`;
+  const gone = m.soFar?.removed
+    ? `it had removed ${m.soFar.removed} item${m.soFar.removed === 1 ? '' : 's'} (${(m.soFar.bytes / 2 ** 30).toFixed(1)} GB) by then`
+    : 'it had removed nothing by then';
+  return `clean-up: the previous ${m.trigger} pass, started ${new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')}Z, was cut off ${min} min later${step}, before it finished: ${gone}${done} (w5795)`;
 }
 
 // ---------------------------------------------------------------- the runner
@@ -1252,7 +1271,7 @@ export interface PassOptions {
    * A step of the pass begins (w5795): its name and the steps done so far, in ms. The runner keeps them in the pass marker,
    * so a pass a restart cuts off says which step held it.
    */
-  step?(name: string, done: Record<string, number>): void;
+  step?(name: string, done: Record<string, number>, soFar?: PassSoFar): void;
 }
 
 /**
@@ -1344,11 +1363,6 @@ export interface CleanupRunnerDeps {
   started?(trigger: CleanupSummary['trigger'], low: boolean): void;
   /** The words for a pass this start found cut off (describeCutOff), said once at construction. */
   cutOff?(text: string, m: PassMarker): void;
-  /**
-   * A low pass's quick plan (w5795, report-only for now): what the cargo-target cap with the low-space rules alone would
-   * remove, measured. Planned and timed first; the summary carries it; nothing of it is removed apart from the full pass.
-   */
-  quick?(): Promise<{ path: string; bytes: number; rule: string }[]>;
 }
 
 /** When to run a pass, and what to say about it. Shared by the host guard and the machine daemons. */
@@ -1462,15 +1476,13 @@ export class CleanupRunner {
         this.d.marker?.save({ startedAt, trigger });
       }
       // Each step said in the marker, with the steps done (w5795): a pass cut off mid-plan then names the step that held it.
-      const step = dryRun || !this.d.marker ? undefined : (name: string, done: Record<string, number>) => this.d.marker?.save({ startedAt, trigger, step: name, stepAt: this.now(), done });
-      let quick: CleanupSummary['quick'];
-      if (low && !dryRun && this.d.quick) {
-        step?.('quick', {});
-        const q0 = Date.now();
-        const q = await this.d.quick().catch(() => undefined);
-        if (q) quick = { items: q.length, bytes: q.reduce((n, x) => n + x.bytes, 0), ms: Date.now() - q0, top: [...q].sort((a, b) => b.bytes - a.bytes).slice(0, 5) };
-      }
-      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}), ...(step ? { step: (name, done) => step(name, { ...(quick ? { quick: quick.ms } : {}), ...done }) } : {}) });
+      const step =
+        dryRun || !this.d.marker
+          ? undefined
+          : (name: string, done: Record<string, number>, soFar?: PassSoFar) => this.d.marker?.save({ startedAt, trigger, step: name, stepAt: this.now(), done, ...(soFar?.removed ? { soFar } : {}) });
+      // No report-only quick plan first any more (w5795): on LothDesktop it took 21 min of a low pass before anything was
+      // removed, and no pass that ran it ever finished to report it. Each step of the pass removes its own plan at once.
+      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}), ...(step ? { step } : {}) });
       const passMs = Date.now() - t0;
       const vols = await this.volumes();
       const after = vols.free;
@@ -1496,7 +1508,6 @@ export class CleanupRunner {
         ...(r.media ? { media: r.media } : {}),
         ...(r.phasesMs ? { phasesMs: r.phasesMs } : {}),
         passMs,
-        ...(quick ? { quick } : {}),
       };
       if (dryRun) {
         this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });
