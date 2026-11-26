@@ -1094,9 +1094,9 @@ export class Daemon {
           workerRoot: cfg.root,
           home: os.homedir(),
           uid: process.getuid?.() ?? 0,
-          exec: (cmd, args) =>
+          exec: (runnerEnvCmd, args) =>
             new Promise((resolve, reject) =>
-              execFile(cmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${cmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
+              execFile(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
             ),
         }),
         held: (r) => {

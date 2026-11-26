@@ -127,7 +127,8 @@ test('keepOriginal: copies a file once and never over an earlier copy', () => {
   }
 });
 
-test('runnerEnvOps on Windows: finds ffu-runners, writes .env keeping its original, skips a service runner', async () => {
+// Windows paths (backslashes, drive letters, case-insensitive) resolve only on Windows (review of #1346)
+test('runnerEnvOps on Windows: finds ffu-runners, writes .env keeping its original, skips a service runner', { skip: process.platform !== 'win32' && 'Windows paths' }, async () => {
   const ffw = fs.mkdtempSync(path.join(os.tmpdir(), 'w5999-'));
   try {
     const r1 = path.join(ffw, 'ffu-runners', 'ffu-x-1');
@@ -330,6 +331,46 @@ test('RunnerEnv: a runner gone after its restart is started again after two look
   h.advance(RESTART_SETTLE_MS);
   await h.env.tick();
   assert.equal(h.state()!.restarting.length, 0);
+});
+
+test('RunnerEnv: a runner that exits 5 again after recovery started it is started again (the settle counts from that start)', async () => {
+  const h = harness({ current: false });
+  await h.env.tick();
+  await h.env.tick(); // restart at t0; census empty
+  const gone = { listeners: [], workers: [], leftovers: [] };
+  h.back(8); // the relaunched listener retries its session conflict...
+  h.advance(4 * 60_000);
+  await h.env.tick();
+  h.setCensus(gone); // ...and exits 5 at 4 minutes
+  h.advance(60_000);
+  await h.env.tick();
+  h.advance(60_000);
+  await h.env.tick(); // two looks: started
+  assert.equal(h.did.filter((d) => d === 'start').length, 1);
+  assert.ok(h.state()!.restarting[0].startedAt, 'the start is kept in the state file');
+  h.back(9); // the started one conflicts too...
+  h.advance(4 * 60_000);
+  await h.env.tick();
+  assert.equal(h.state()!.restarting.length, 1, 'not back for good 10 minutes after the first restart: 4 after its start');
+  h.setCensus(gone); // ...and exits 5 again
+  for (let i = 0; i < 6; i++) {
+    h.advance(60_000);
+    await h.env.tick();
+  }
+  assert.equal(h.did.filter((d) => d === 'start').length, 2, 'started again, 10 minutes after the last start');
+  h.back(10);
+  h.advance(RESTART_SETTLE_MS);
+  await h.env.tick();
+  assert.equal(h.state()!.restarting.length, 0);
+  // a new daemon run keeps the start time: it waits START_EVERY_MS from it, not from its own start
+  const h2 = harness({ current: false });
+  h2.setState({ restarting: [{ name: 'ffu-x-1', root: ROOT, at: 1_000_000 - 20 * 60_000, pid: 7, startedAt: 1_000_000 - 60_000 }], done: { 'ffu-x-1': TMP } });
+  h2.setCensus(gone);
+  for (let i = 0; i < 3; i++) {
+    h2.advance(60_000);
+    await h2.env.tick();
+  }
+  assert.ok(!h2.did.includes('start'), 'not within 10 minutes of the kept start');
 });
 
 test('RunnerEnv: recovery waits while a hold has the runners, and gives up after a day, said', async () => {

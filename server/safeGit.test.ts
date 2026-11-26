@@ -39,6 +39,7 @@ function sources(): string[] {
  * either fences git (calls gitFence or gitFenceSync in its file, as proc.ts, worker.ts and prFlow.ts do) or joins this list.
  */
 const NOT_GIT: Record<string, string> = {
+  'machine/daemon.ts|runnerEnvCmd': 'plutil, launchctl and powershell.exe for the macOS and Windows CI runners (machine/runnerEnv.ts, w5999)',
   'server/rerunGuard.ts|trustedGh(': 'gh (resolved from a trusted PATH, w5542)',
   'machine/ownerSecrets.ts|cmd': 'gh auth token (trustedGh, w5548)',
   'machine/ownerSecrets.ts|trustedGh(': 'gh auth status, token and login for the owner gh login move (realGhRun, w5749)',

@@ -55,6 +55,8 @@ export interface RestartEntry {
   plist?: string;
   at: number;
   pid: number;
+  /** The last time recovery started it again: the settle and first-look clocks count from it (a second exit 5). */
+  startedAt?: number;
 }
 
 export interface RunnerEnvState {
@@ -211,7 +213,6 @@ export class RunnerEnv {
   private last = new Map<string, number>();
   /** Looks in a row a restarted runner was not there. */
   private misses = new Map<string, number>();
-  private started = new Map<string, number>();
   /** Listener pids already seen with the wanted environment: not asked again. */
   private ok = new Set<number>();
 
@@ -263,16 +264,17 @@ export class RunnerEnv {
         this.sayOnce(`${e.name}/alive`, `${e.name}: could not tell whether it runs (${(err as Error).message})`);
         continue;
       }
+      const last = Math.max(e.at, e.startedAt ?? 0);
       if (alive) {
         this.misses.delete(e.name);
-        if (now - e.at >= RESTART_SETTLE_MS) {
+        if (now - last >= RESTART_SETTLE_MS) {
           s.restarting = s.restarting.filter((x) => x !== e);
           changed = true;
           this.d.log(`runner env: ${e.name} (${e.root}) is back after its restart for its temp folder (w5999)`);
         }
         continue;
       }
-      if (now - e.at < FIRST_LOOK_MS) continue;
+      if (now - last < FIRST_LOOK_MS) continue;
       const n = (this.misses.get(e.name) ?? 0) + 1;
       this.misses.set(e.name, n);
       if (n < 2 || this.d.held(r)) continue;
@@ -282,9 +284,10 @@ export class RunnerEnv {
         this.d.log(`runner env: ${e.name} (${e.root}) is still not running ${Math.round((now - e.at) / 3_600_000)} h after its restart for its temp folder: no longer started by this (w5999)`);
         continue;
       }
-      const t = this.started.get(e.name);
-      if (t !== undefined && now - t < START_EVERY_MS) continue;
-      this.started.set(e.name, now);
+      if (e.startedAt !== undefined && now - e.startedAt < START_EVERY_MS) continue;
+      e.startedAt = now;
+      this.misses.delete(e.name);
+      changed = true;
       try {
         const how = await this.d.start(r);
         this.d.log(`runner env: ${e.name} (${e.root}) was not running after its restart for its temp folder: started (${how}) (w5999)`);
