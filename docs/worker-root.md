@@ -168,10 +168,12 @@ BEAST `C:\Users\rydin\.ff-factory`, LothDesktop `D:\work\.ff-factory` (its `app_
   agents/<id>/                   standing agents assigned to this machine
   scratch/                       long-lived scratch (today's _scratch, ffsb-scratch, F:\tmp)
   tmp/ffa-<session>/             agents' TMP/TEMP/TMPDIR (temp_dir)
+  tmp-medium/ffa-<session>/      Medium agents' TMP/TEMP/TMPDIR with daemon.json "mediumAgentFolders": "on" (w5862): read-only to workers
   claude/                        CLAUDE_CONFIG_DIR: settings, plugins, projects (transcripts, memory), .claude.json
   claude-medium/                 the Medium agents' CLAUDE_CONFIG_DIR (standing agents, w5543): read-only to workers
   cache-medium/uv/               the daemon's and Medium agents' UV_CACHE_DIR (the Unity MCP server's uvx, w5565): read-only to workers
   cache-medium/uv-tools/         the daemon's and Medium agents' UV_TOOL_DIR (w5693): read-only to workers
+  cache-medium/cargo/            Medium agents' CARGO_HOME with "mediumAgentFolders": "on" (w5862): read-only to workers
   cache/uv-tools/                sandbox agents' and editors' UV_TOOL_DIR (uvx's temp files, w5693, w5745)
   cache/uv-bin/                  sandbox agents' and editors' UV_TOOL_BIN_DIR (`uv tool install`'s commands, w5745)
   steam/                         steamcmd, its config and cached login, FFBox's release scripts: the daemon's alone (w5551, steam-upload.md)
@@ -490,6 +492,23 @@ is in `MEDIUM_ONLY_CHILDREN` (`server/claudeHome.ts`) with `claude-medium`, so a
 Measured on biscuit under `ff-landlock.py` (w5565): a fenced `uvx` with the Medium cache fails "Failed to initialize
 cache ... Permission denied (os error 13)" and a planted file is refused; the same run on `<root>/cache/uv` installs and runs.
 
+**Medium agents' temp folders and cargo home** (w5862, from w5838's planting audit). An agent outside a sandbox runs outside
+the fences (Windows: at Medium), but its TMP, TEMP and TMPDIR were `<temp root>/ffa-<session>` (`server/cleanup.ts`
+`sessionTempEnv`) and its CARGO_HOME the workers' `<root>/cache/cargo`, both folders workers write (Low on Windows; the
+config's temp folder is always a fence extra). A fenced worker could plant a script or DLL there, or a cargo `config.toml`
+(`runner`, `linker`) or a crate's build script, that the Medium agent then runs. `machine/mediumFolders.ts`
+`planMediumFolders` decides once at start, under daemon.json `mediumAgentFolders`:
+- absent or `"warn"` (today, lothsahn's warn-only-first rule): nothing moves; `logs/daemon.log` carries one line
+  `WARNING medium agent folders: Medium agents' TMP/TEMP root ... and CARGO_HOME ... are in folders workers write; ...`.
+- `"on"`: Medium agents get `<root>/tmp-medium/ffa-<session>` and `<root>/cache-medium/cargo` (`Daemon.agentTempEnv` in
+  `runSpec`; seeded from the person's `~/.cargo` config, never from `cache/cargo`); sandbox agents keep theirs.
+  `tmp-medium` is in `MEDIUM_ONLY_CHILDREN`, so all three fences keep it from workers. Clean-up, the session sweep,
+  `ff-leftovers` and the agents' read grants find a session's folder in either root (`Daemon.sessionTemps`).
+- A folder that cannot be made, or one a worker could still write, keeps today's with a `WARNING medium agent folders:
+  could not make ...` line, so the switch never stops an agent and needs nobody at the machine. No fence, no change.
+Still Low-writable and not covered: an ffu slot's `CARGO_TARGET_DIR` and checkout, and the children of `tools`.
+Tests: `server/mediumFolders.test.ts` (every path the Medium env names lies outside `lowTargets` and `openChildren`).
+
 **uv's tool folder, split the same way** (w5693). `uvx` takes a temp file in uv's tool folder (`UV_TOOL_DIR`, default
 `~/.local/share/uv/tools`; `%APPDATA%\uv\tools` on Windows) on every run. No fence lets a worker write the person's home, so
 on m5 every Seatbelt-fenced sandbox agent's Unity MCP server exited at start (UnityMCP CONNECTION_CLOSED; by hand: "Could
@@ -708,7 +727,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - It labels Low only the root's folders workers write (`machine/lowIntegrity.ts` `WORKER_CHILDREN`, `lowTargets`,
     `labelLow`; w5539), plus the root child that holds a configured temp or sandboxes folder. Every other child stays
     Medium, labelled `(OI)(CI)medium` where an earlier rollout made it Low: `daemon`, `secrets`, the daemon's own
-    folder and the Medium-only `claude-medium` (w5543), `cache-medium` (w5565) and `tools-medium` (w5597) are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
+    folder and the Medium-only `claude-medium` (w5543), `cache-medium` (w5565), `tools-medium` (w5597) and `tmp-medium` (w5862) are never labelled, and the CI runners' `ffu-runners` (w5440), BEAST's `instances`, `demos` and instance
     portals, and any folder added later are kept Medium. `repo`, the bare store every sandbox is a worktree of (worker.ts cloneRepo),
     is labelled whole; a `repo` with a working tree gets only its `.git` (lothsahn's "option 1", w5377: the existing
     shared store, labelled and otherwise unchanged). The root itself stays Medium. Outside the root it labels the extra

@@ -111,7 +111,8 @@ The profile (`seatbeltProfile`): `(allow default)`, `(deny file-write*)`, then a
 and then takes write back from `<CLAUDE_CONFIG_DIR>/projects` but the process's own conversation (`<id>.jsonl` in any
 project folder and its `<id>/` folder; w5563, docs/transcript-seal.md), and from `<root>/daemon`, `<root>/secrets`,
 `<root>/claude-medium` (the Medium agents' Claude folder, w5543), `<root>/cache-medium` (their uv cache, w5565),
-`<root>/tools-medium` (FF Factory's final-factory-agents checkout the agent tools publish takes forward, w5597) and
+`<root>/tools-medium` (FF Factory's final-factory-agents checkout the agent tools publish takes forward, w5597),
+`<root>/tmp-medium` (Medium agents' temp folders, w5862) and
 `<root>/root.json` (later rules win). The main clone
 `<root>/repo` stays writable: each sandbox is a git worktree of it, and git keeps the worktree's index, objects and refs
 there. With `repo` read-only (the first version of #1115), a fenced commit in a sandbox failed: "Unable to create
