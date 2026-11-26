@@ -394,6 +394,8 @@ export interface OrchestratorsDeps {
    * Capacity block and the page read (server/placement.ts roomNow). Without it, `room` is the game room and nothing is held.
    */
   roomFacts?: () => RoomNow;
+  /** w6003: which computers fit a pre-w5297 pair run by their agents' measured integrity (server/placement.ts legacyFit). */
+  legacyFit?: (w: { pair: Pick<WorkPair, 'legacyData' | 'legs'> }) => { fits: string[]; short: boolean; line: string };
   /** The computers that take no timed runs, and those that take timed work of kind `t`, best first (w1872, placement.ts timedFacts). */
   timedFacts?: (t: TimedKind) => TimedFacts;
   /**
@@ -5242,6 +5244,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const openPrs = (w.prs ?? []).filter((x) => x.state === 'open');
     const pr = normPr(a.pr) ?? prIn(what) ?? prIn(brief) ?? (openPrs.length === 1 ? `${openPrs[0].repo}#${openPrs[0].number}` : undefined);
     const open = [...this.store.work.values()].find((x) => x.pair?.for === w.id && isOpen(x));
+    // w6003: a pair run of a pre-w5297 player is filed only when enough computers measured Medium (or a Mac fence off):
+    // w6002 was filed and its leg ran at Low. Otherwise nothing is filed, and the refusal names each computer and why.
+    if (legacyData && !open) {
+      const lf = this.d.legacyFit?.({ pair: { legacyData, legs } });
+      if (lf?.short) throw new Error(`Nothing filed: ${lf.line}. Ask again once a computer measures Medium (its daemon log says "sandbox agents measured at" at each start).`);
+    }
     const spent = open && this.pairSpent(open, a.retry === true);
     // w2057: w665's PR #2340 had a pair run (w1936, filed by hand) that passed while its worker waited, and a second one was
     // queued after it. Without an open run of its own, a filing joins the open run of the same pull request, and is answered

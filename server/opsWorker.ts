@@ -768,6 +768,7 @@ export function workerUpdateFlags(
   editorTmpdir?: 'on' | 'off',
   pathFence?: 'off' | 'warn',
   mediumAgentFolders?: 'warn' | 'on',
+  daemonTmpdir?: 'on' | 'off',
 ): string[] {
   const win = platform === 'win32';
   return (
@@ -784,8 +785,9 @@ export function workerUpdateFlags(
           workerCaps && `-WorkerCaps ${workerCaps}`,
           storeLock && `-StoreLock ${storeLock}`,
           mediumAgentFolders && `-MediumAgentFolders ${mediumAgentFolders}`,
+          daemonTmpdir && `-DaemonTmpdir ${daemonTmpdir}`,
         ]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`, daemonTmpdir && `--daemon-tmpdir ${daemonTmpdir}`]
   ).filter((f): f is string => !!f);
 }
 
@@ -1023,7 +1025,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn'; mediumAgentFolders?: 'warn' | 'on' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1059,6 +1061,8 @@ export class OpsWorker {
     if (o.pathFence !== undefined && m.platform === 'win32') throw new Error(`path_fence: macOS and Linux only, and ${m.id} is a Windows PC`);
     // w5862, w5869: Medium agents' own temp root and cargo home (daemon.json `mediumAgentFolders`), every OS.
     if (o.mediumAgentFolders !== undefined && o.mediumAgentFolders !== 'warn' && o.mediumAgentFolders !== 'on') throw new Error('medium_agent_folders: warn or on');
+    // w6000: the daemon's own temp folder (daemon.json `daemonTmpdir`), every OS.
+    if (o.daemonTmpdir !== undefined && o.daemonTmpdir !== 'on' && o.daemonTmpdir !== 'off') throw new Error('daemon_tmpdir: on or off');
     // w2474: the editor and agent limits a root install's daemon runs by are the portal record's: its welcome carries them
     // (server/machines.ts setRootSettings, machine/daemon.ts currentPool), and a hello never takes them back from
     // daemon.json (adoptLayout keeps the record's). The installer's flag alone wrote daemon.json and changed nothing the
@@ -1071,7 +1075,7 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir }).filter(([, v]) => v !== undefined && v !== false));
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1086,7 +1090,7 @@ export class OpsWorker {
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
