@@ -2064,7 +2064,11 @@ LothDesktop and Beast, not just when BEAST is full").
     read `bryding (gist, read:org, repo, workflow)` at 05:14Z and 06:19Z and a worker's `gh api user` there answered 200.
     A Windows ssh session with key sign-in cannot read Credential Manager (a Mac's ssh cannot read the login Keychain), so
     gh sends no token at all; GitHub's "Bad credentials" is the sign of a token that is really refused. Check a machine's
-    gh from its daemon's reading (list_machines) or a worker there, never over ssh.
+    gh from its daemon's reading (list_machines) or a worker there, never over ssh. "default" is gh's own name for that
+    case (gh's `TokenForUser` returns `TokenSourceDefault` when neither its keyring nor hosts.yml gave a token), so a
+    reading with that source says `REFUSED_NO_TOKEN` ("gh found no token it could read"), still a refused login with
+    its warning, never `REFUSED_401` (w5546). The ops worker's GitHub route skips the Windows PCs for this reason
+    (docs/ops-worker.md, "Where").
   - **Fixing a machine:** on it, as its user, `gh auth refresh -h github.com -s workflow` (a browser sign-in); the daemon
     sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
     `server/orchestrators*.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,

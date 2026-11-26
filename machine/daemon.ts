@@ -30,7 +30,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
@@ -110,6 +110,7 @@ import { applyDaemonTmpdir, systemTempDir } from './daemonTemp.ts';
 import { DROPIN_NAME, RunnerUnits, findRunnerUnits, runnerTempDir } from './runnerUnits.ts';
 import { RunnerEnv, runnerEnvOps, sameRoot } from './runnerEnv.ts';
 import { CI_FIRST, CiFirst, linuxReads, parseScopeList, parseScopeShow } from './ciFirst.ts';
+import { WIN_CI_FIRST, WinCiFirst, machineBusyMs } from './ciFirstWin.ts';
 import { cpuSampler, LOAD_GATES, LoadGate, readLoadGateFile, winSuspendScript, writeLoadGateFile } from './loadRunners.ts';
 import { askPlayerToQuit, BenchTurn, closedDetail, holderSandboxes, writeClosedFile, type Holder } from './benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personHolderText, personHoldText, personTicket, priorityOf, setPriorityOf, treeOf, type PersonPlaySettings } from './personPlay.ts';
@@ -656,6 +657,8 @@ export class Daemon {
   /** w5999: the macOS and Windows runners' temp folders inside the worker root (machine/runnerEnv.ts). */
   readonly runnerEnv?: RunnerEnv;
   readonly ciFirst: CiFirst;
+  /** w6110: the same on a Windows CI-first machine (WIN_CI_FIRST: lothdesktop), by priority class; warn only so far: it logs. */
+  readonly winCiFirst: WinCiFirst;
   /** w1829: what a worker's next message hears about its player a timed run's turn asked to quit. */
   private readonly benchPlayerNotes = new Map<string, string>();
   /** w1894: a person playing Final Factory here (machine/personPlay.ts): fed by the leftovers' look, it holds a turn. */
@@ -1149,6 +1152,19 @@ export class Daemon {
       setWeights: async (unit, cpu, io) => void (await userctl(['set-property', '--runtime', unit, `CPUWeight=${cpu}`, `IOWeight=${io}`])),
       ...linuxReads,
       census: async () => runnerCensus(await pd.procs()),
+      log: (line) => log(line),
+    });
+    // w6110: on Windows the agents' processes go below the CI runners' jobs by priority class (machine/ciFirstWin.ts)
+    this.winCiFirst = new WinCiFirst({
+      settings: real && process.platform === 'win32' ? WIN_CI_FIRST[cfg.id.toLowerCase()] : undefined,
+      procs: () => pd.procs(),
+      census: (procs) => runnerCensus(procs),
+      hosts: () => [...this.hostSessions].filter(([, h]) => h.live && h.hostPid).map(([session, h]) => ({ session, pid: h.hostPid! })),
+      priorityOf: (pid) => priorityOf(pid),
+      facts: (pids) => inspectProcs(machinePlatformOf(process.platform), pids),
+      machineBusyMs: () => machineBusyMs(),
+      self: process.pid,
+      now: () => Date.now(),
       log: (line) => log(line),
     });
     this.light = new LightFolders({ root: () => this.sandboxRoot(), onChange: () => this.reportSandboxes() });
@@ -1892,6 +1908,7 @@ export class Daemon {
     this.timers.push(setInterval(loopLabel('timer runnerUnits.tick', () => void this.runnerUnits.tick()), 60_000));
     if (this.runnerEnv) this.timers.push(setInterval(loopLabel('timer runnerEnv.tick', () => void this.runnerEnv?.tick()), 60_000));
     if (this.ciFirst.enabled) this.timers.push(setInterval(loopLabel('timer ciFirst.tick', () => void this.ciFirst.tick()), 60_000));
+    if (this.winCiFirst.enabled) this.timers.push(setInterval(loopLabel('timer winCiFirst.tick', () => void this.winCiFirst.tick().catch((e) => log(`ci first: the tick failed: ${(e as Error).message}`))), 60_000));
     // priorities.json: the portal's marks plus each editor start's session (w1962; w4620: nothing is raised, strict priority)
     this.timers.push(setInterval(loopLabel('timer benchPriorities', () => this.benchPriorities()), 5_000));
     void this.slotTick();
@@ -3958,11 +3975,7 @@ export class Daemon {
    */
   private watchLoginLabels(exec: Exec, say: (line: string) => void): void {
     if (this.loginRelabel || !this.loginFiles.closed.length) return;
-    this.loginRelabel = setInterval(loopLabel('timer loginRelabel', () => {
-      if (!this.cfg.root || readFenceMode(appDirOfConfig(this.cfg)) !== 'on') return;
-      const t = this.loginFiles.closed.filter((f) => fs.existsSync(f)).map((f) => ({ path: f, sddl: NO_READ_UP.file }));
-      if (t.length) void labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }).catch((e) => say(`worker integrity: login read labels: ${(e as Error).message}`));
-    }), 60_000);
+    this.loginRelabel = setInterval(loopLabel('timer loginRelabel', () => void this.relabelLoginsInTurn(exec, say)), 60_000);
     this.loginRelabel.unref();
   }
 
@@ -4194,8 +4207,15 @@ export class Daemon {
    */
   private async applyReadLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void, still: () => boolean = () => true): Promise<void> {
     if (!this.cfg.root) return;
+    // w6120: once the mode was seen changed, the pass stays stopped even if it is back (on, warn, on): the later switch has
+    // queued its own pass, which sets it whole.
+    let gone = false;
+    const wanted = () => {
+      if (!gone && !still()) gone = true;
+      return !gone;
+    };
     const stopped = () => {
-      if (still()) return false;
+      if (wanted()) return false;
       say(`worker integrity: the read fence's ${mode} labels stopped part way: the mode changed meanwhile, and the next pass sets the new one`);
       return true;
     };
@@ -4207,10 +4227,16 @@ export class Daemon {
     ensureDaemonOnlyDirs(this.cfg.root);
     const t = this.readLabelTargets(appDir);
     if (mode === 'on') {
-      if (!(await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
+      // w6120: the label run's own steps stop too (its grants and their retry, the walk inside), so a switch back to warn
+      // or off waits only for the label run or grant going at that moment, not for the whole pass.
+      const modeFile = readFenceModeFile(appDir);
+      const labelled = await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive, still: wanted, stopUnless: { file: modeFile, want: 'on', onStop: () => void (gone = true) } });
       if (stopped()) return;
+      if (!labelled) throw new Error('not every read label could be set; Low workers may still read there (the daemon log says which)');
       // w5968: a file an elevated process made inside keeps its own High label, which the folder's NR does not override.
-      if (!(await relabelInside(t, 'close', exec, say, { systemDrive: this.labelSystemDrive }))) throw new Error('not every explicitly labelled path inside the closed folders got No-Read-Up; Low workers may still read those (the daemon log says which)');
+      const inside = await relabelInside(t, 'close', exec, say, { systemDrive: this.labelSystemDrive, stopUnless: { file: modeFile, want: 'on', onStop: () => void (gone = true) } });
+      if (stopped()) return;
+      if (!inside) throw new Error('not every explicitly labelled path inside the closed folders got No-Read-Up; Low workers may still read those (the daemon log says which)');
       log('worker integrity: the read fence is on: No-Read-Up labels set');
       return;
     }
@@ -4221,6 +4247,29 @@ export class Daemon {
     log(`worker integrity: the read fence is ${mode}: ${opened.length ? `No-Read-Up labels taken off ${opened.join(', ')}` : 'no No-Read-Up label set'}`);
   }
 
+  /** Whether a login relabel tick waits in the pass queue (w6120): a slow pass makes later ticks skip, not pile up. */
+  private loginRelabelQueued = false;
+  /**
+   * w6120: the login watcher's tick (watchLoginLabels) in the same queue as the label passes. Before, a tick that read `on`
+   * just before a switch to off or warn could set No-Read-Up on a login file after that switch's pass had opened it, leaving
+   * it closed under off until the next on. In the queue it reads the mode only once the pass before it has finished, and
+   * stops before its label run when the mode changed meanwhile. It labels only files, never a folder, so it is quick.
+   */
+  private relabelLoginsInTurn(exec: Exec, say: (line: string) => void): Promise<void> {
+    if (this.loginRelabelQueued) return this.readLabelPass;
+    this.loginRelabelQueued = true;
+    const tick = this.readLabelPass.then(async () => {
+      this.loginRelabelQueued = false;
+      if (!this.cfg.root) return;
+      const appDir = appDirOfConfig(this.cfg);
+      if (readFenceMode(appDir) !== 'on') return;
+      const t = this.loginFiles.closed.filter((f) => fs.existsSync(f)).map((f) => ({ path: f, sddl: NO_READ_UP.file }));
+      if (t.length) await labelNoReadUp(t, exec, say, { systemDrive: this.labelSystemDrive, still: () => readFenceMode(appDir) === 'on', what: 'No-Read-Up on the Claude login files, w5559' });
+    }).catch((e) => say(`worker integrity: login read labels: ${(e as Error).message}`));
+    this.readLabelPass = tick;
+    return tick;
+  }
+
   /** The label pass running now, or the last one (w5980). */
   private readLabelPass: Promise<void> = Promise.resolve();
   /**
@@ -4229,7 +4278,10 @@ export class Daemon {
    * side, warn's opened what on had closed so far (15:56), and on's finished last (16:00), leaving the daemon's folder
    * closed under warn. So one switch's pass at a time: each waits for the one before, sets the mode the mode file says
    * when it starts, stops early when the file changes under it (applyReadLabels `still`), and runs again for the new mode,
-   * so the last switch always wins. (on's probe reverting its own labels and the login watcher still label outside it.)
+   * so the last switch always wins. The login watcher's tick runs in the same queue (relabelLoginsInTurn, w6120). on's
+   * probe taking its labels off again after a lockout verdict (readFenceWin.ts) stays outside it on purpose: it only
+   * opens, so beside any pass it can leave nothing closed that a mode does not want, and in the queue it would wait behind
+   * a slow pass while workers are locked out.
    */
   private applyReadLabelsInTurn(exec: Exec, say: (line: string) => void): Promise<void> {
     const appDir = appDirOfConfig(this.cfg);
