@@ -90,10 +90,10 @@ export function holdReadback(name: string, hold: string | undefined, except: rea
     }
   }
   if (drain) {
-    // A drain lets the workers already there resume (placement(false)); 'running' would hold the rest, once enforced.
+    // A drain lets the workers already there resume (placement(false)); 'running' holds the rest (Agents.machineHold, w5937).
     for (const s of workers.filter((x) => !x.midTurn && !x.works.some((w) => except.includes(w)))) {
       const would = drainWouldHold(drain, s);
-      lines.push(`  worker ${s.id}${s.works.length ? ` (${s.works.join(', ')})` : ''} ${s.stopped ? 'stopped' : 'between turns'}; ${nextResume(s)}${would ? ': the drain lets only its running workers finish, so this resume is AGAINST it (warn-only until enforced, w5895)' : ' (a drain lets its own workers resume)'}.`);
+      lines.push(`  worker ${s.id}${s.works.length ? ` (${s.works.join(', ')})` : ''} ${s.stopped ? 'stopped' : 'between turns'}; ${nextResume(s)}${would ? ': the drain lets only its running workers finish, so this resume is HELD until the lift or resumes all (w5937)' : ' (a drain lets its own workers resume)'}.`);
     }
   } else if (live.length) {
     lines.push(`  ${live.filter((s) => s.midTurn).length} worker(s) mid-turn there finish their turn; the others' resumes wait for the lift.`);
