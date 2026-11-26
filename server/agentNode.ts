@@ -384,19 +384,21 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     }
     remove(aside);
   }
-  // Then the processes below Medium with write access to either folder (w5882's review): a handle outlives a relabel, so
+  // The processes below Medium with write access to either folder (w5882's review): a handle outlives a relabel, so
   // a folder some Low process can still write is never trusted, whatever its labels and hashes say. They are named, not
   // ended (w5926's review), and the node swapped. A Low process with read handles only (running this node, working in its
   // folder) is not named (w5886's review).
-  const held = notAFolder(dir) ? undefined : await warnLowHolders([dir, medium], true, d);
-  // The labels next: once nothing Low can write the files, what is hashed next stays what runs.
-  const lab = !homeBad && !held && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
+  // The labels first, then the holders (w5951's review, N3): once the labels let no Low process open the files for writing,
+  // no new write handle can appear, so the holder read after them sees every one there will be, and what is hashed next
+  // stays what runs.
+  const lab = !homeBad && !notAFolder(dir) && fs.existsSync(path.join(dir, 'node.exe')) ? await labelCheck(dir, d) : undefined;
+  const held = homeBad || lab || notAFolder(dir) ? undefined : await warnLowHolders([dir, medium], true, d);
   const st = homeBad
     ? { ok: false as const, why: `its record's folder ${homeBad}` }
-    : held
-      ? { ok: false as const, why: held }
-      : lab
-        ? { ok: false as const, why: lab }
+    : lab
+      ? { ok: false as const, why: lab }
+      : held
+        ? { ok: false as const, why: held }
         : stampCheck(stampFile, dir, pin);
   if (st.ok) {
     d.say(`Agent node: node verified: ${AGENT_NODE.version} at ${dir} (node.exe and its ${st.files} files match the record of the pinned download, no Low label or access entry of their own lets a Low worker write them, and no process below Medium holds write access to them).`);

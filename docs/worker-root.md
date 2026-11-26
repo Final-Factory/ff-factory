@@ -844,11 +844,18 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     all, means a fresh pinned download swapped in at the same path, even when the files there match: a folder this run
     unpacked is labelled Medium on its own (before it is hashed) and is nobody else's. A handle outlives a relabel, so
     labels, hashes and identity can all be right while a Low process that survived two rollbacks still holds a write
-    handle on the real folder (w5882's review). So before the labels, each run reads which processes below Medium hold
+    handle on the real folder (w5882's review). So after the labels (once they refuse Low a new write open, w5951's
+    review), each run reads which processes below Medium hold
     anything under `tools\node` or `daemon\agent-node` (`server/agentNodeHolders.ts`: each Low process's own handle
     list, `NtQueryInformationProcess` class 51, its file and section handles and its mapped views; the system-wide handle
     table is refused to a Low session, 0xC0000022, measured), each folder resolved first to the final form Windows names an
-    open file by, so a short 8.3 name, a junction or a subst drive in the root still matches (w5926's review). Only access that can change the files counts there: a
+    open file by, so a short 8.3 name, a junction or a subst drive in the root still matches (w5926's review). A File
+    handle is matched by its file's identity, not its path (w5951's review): the volume serial and 128-bit file id
+    (`FILE_ID_INFO`) of every file and folder under the two folders are read first, and each handle's are compared, so a
+    handle opened through a second hard link deleted since (Windows then gives it no path) is still found. A write handle
+    the read cannot copy, or one on the node's volume whose file id cannot be read, is a holder, never skipped; so is a
+    writable file view whose name on that volume no longer opens. The C# goes gzipped into `-EncodedCommand`, which
+    passed Windows' 32,767-character command line as plain text. Only access that can change the files counts there: a
     File handle with write, append, attribute, EA, delete, DACL or owner rights, a Section with map-write, a view mapped
     writable (w5886's review). A Low worker that runs this node or works in its folder holds read handles only, since the
     Medium label refuses it any other open, and is left alone (measured: a Low node with its working folder in
@@ -860,7 +867,9 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     download has one name per file, and BEAST's live copy has none with two, measured). The read covers 110 to 122 Low
     processes and about 30k handles in 3 to 6 s on BEAST (measured). A rename refused because a file in the folder is
     held open is tried three times, the Low processes holding anything in it (reads too) named once in a WARNING and not
-    ended; a folder still held keeps its node, with a WARNING, until a later rollout finds it free (measured on BEAST: a Low
+    ended; a folder still held keeps its node, with a WARNING, until a later rollout finds it free, and until then
+    agents keep running that untrusted node, since `agentNodePathDir` puts `tools\node` on their PATH once node.exe is
+    there (w5951's review, N2: the warn-only stage never leaves a machine without node) (measured on BEAST: a Low
     writer on npm's `index.js` gave `busy` and kept running, and the run after it exited swapped the node). A node.exe that runs does not block the rename (measured). Each run stages in
     `daemon\agent-node\node-<version>-<ms>.part` and sweeps the ones an earlier run left once they are an hour old (a younger one
     may be another rollout's, still unpacking). The rollout log says

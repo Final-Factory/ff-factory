@@ -534,17 +534,19 @@ test("w5839: the holder read, run: before trust it names only a Low process that
   const { spawn } = await import('node:child_process');
   // Started, and answered only once its file is open: a fresh copy of node.exe can take seconds to start on the CI runner
   // while it is scanned, and a fixed wait read the folder before the reader held it (w5839, CI at 5d3003b0).
-  const hold = async (file: string, flags: string) => {
-    const p = spawn(exe, ['-e', `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}'); console.log('ready'); setTimeout(() => {}, 120000)`], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
+  const run = async (what: string, code: string) => {
+    const p = spawn(exe, ['-e', `${code}; console.log('ready'); setTimeout(() => {}, 120000)`], { cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     let err = '';
+    let out = '';
     p.stderr!.on('data', (b) => (err += b));
     await new Promise<void>((res, rej) => {
-      const t = setTimeout(() => rej(new Error(`the Low node did not open ${file} in 60 s: ${err}`)), 60000);
-      p.stdout!.on('data', (b) => String(b).includes('ready') && (clearTimeout(t), res()));
+      const t = setTimeout(() => rej(new Error(`the Low node did not ${what} in 60 s: ${err}`)), 60000);
+      p.stdout!.on('data', (b) => ((out += b), out.includes('ready') && (clearTimeout(t), res())));
       p.on('exit', (c) => (clearTimeout(t), rej(new Error(`the Low node exited ${c}: ${err}`))));
     });
-    return p;
+    return Object.assign(p, { out: () => out });
   };
+  const hold = (file: string, flags: string) => run(`open ${file}`, `require('fs').openSync(${JSON.stringify(path.join(dir, file))}, '${flags}')`);
   // A legitimate Low worker: its working folder there and a file open for reading.
   const reader = await hold('f.js', 'r');
   try {
@@ -557,14 +559,30 @@ test("w5839: the holder read, run: before trust it names only a Low process that
     fs.symlinkSync(dir, link, 'junction');
     assert.deepEqual(read(false, link)?.map((h) => h.pid), [reader.pid], `through a junction: ${last}`);
     assert.deepEqual(read(false, fs.realpathSync.native(dir))?.map((h) => h.pid), [reader.pid], `in its final form: ${last}`);
-    assert.ok(any![0].path.startsWith(dir), any![0].path);
+    // Named in the final long form, which os.tmpdir() need not be (w5951's review, N1: C:\Users\RUNNER~1 on the CI runner).
+    const real = fs.realpathSync.native(dir);
+    assert.ok(any![0].path.toLowerCase().startsWith(real.toLowerCase()), `${any![0].path} under ${real}`);
     const writer = await hold('g.js', 'r+');
     try {
       const w = read(true);
       assert.deepEqual(w?.map((h) => h.pid), [writer.pid], `a writer is named on a check: ${last}`);
-      assert.equal(w![0].path, path.join(dir, 'g.js'));
+      assert.equal(w![0].path.toLowerCase(), path.join(real, 'g.js').toLowerCase());
     } finally {
       writer.kill();
+    }
+    // A write handle opened through a second hard link that was deleted since (w5951's review, B1): the file is back to one
+    // name, so the nlink check passes, and Windows gives no path for the handle. It is matched by its file id. Write-only
+    // too, so the id is read with no read right on the handle. The link's folder is labelled Low, as a Low worker's are.
+    const side = tmp();
+    assert.equal(spawnSync('icacls', [side, '/setintegritylevel', '(OI)(CI)low'], { encoding: 'utf8' }).status, 0);
+    const lk = JSON.stringify(path.join(side, 'x.js'));
+    const sneak = await run('open g.js through a deleted link', `const fs = require('fs'); fs.linkSync(${JSON.stringify(path.join(dir, 'g.js'))}, ${lk}); globalThis.fd = fs.openSync(${lk}, fs.constants.O_WRONLY); fs.unlinkSync(${lk}); console.log('nlink=' + fs.statSync(${JSON.stringify(path.join(dir, 'g.js'))}).nlink)`);
+    try {
+      assert.match(sneak.out(), /nlink=1/, 'the second name is gone');
+      assert.ok(!fs.existsSync(path.join(side, 'x.js')));
+      assert.deepEqual(read(true)?.map((h) => h.pid), [sneak.pid], `a writer through a deleted link is named on a check: ${last}`);
+    } finally {
+      sneak.kill();
     }
   } finally {
     reader.kill();
