@@ -26,7 +26,7 @@ export const GITHUB_REQUIRED_REPOS: readonly string[] = [
   'Final-Factory/ffu',
 ];
 
-export type GithubPermissionId = 'actions' | 'artifact-metadata' | 'commit-statuses' | 'contents' | 'discussions' | 'issues' | 'metadata' | 'pull-requests' | 'workflows' | 'self-hosted-runners';
+export type GithubPermissionId = 'actions' | 'administration' | 'artifact-metadata' | 'commit-statuses' | 'contents' | 'discussions' | 'issues' | 'metadata' | 'pull-requests' | 'workflows' | 'self-hosted-runners';
 
 export interface GithubPermission {
   id: GithubPermissionId;
@@ -40,11 +40,16 @@ export interface GithubPermission {
    * write half of a "write" permission is never probed: that would mean writing.
    */
   probe?: string;
+  /** Only these repositories need it (w5928: Administration on ffu alone); undefined, every required repository. */
+  repos?: readonly string[];
 }
 
 /** The permissions every token must have, in the order GitHub's token page lists them. */
 export const GITHUB_REQUIRED_PERMISSIONS: readonly GithubPermission[] = [
   { id: 'actions', label: 'Actions', scope: 'repository', access: 'write', probe: 'GET /repos/{repo}/actions/runs' },
+  // w5928: ffu's CI wait lists the repository's own self-hosted runners (server/blockerWatch.ts awayNow), which GitHub
+  // grants only with Administration: read (measured 2026-11-25: 403 with X-Accepted-Github-Permissions: administration=read).
+  { id: 'administration', label: 'Administration', scope: 'repository', access: 'read', repos: ['Final-Factory/ffu'], probe: 'GET /repos/{repo}/actions/runners (Final-Factory/ffu only)' },
   { id: 'artifact-metadata', label: 'Artifact metadata', scope: 'repository', access: 'read', probe: 'GET /orgs/{org}/artifacts/{digest}/metadata/storage-records (an unknown digest: 404 allowed, 403 refused)' },
   { id: 'commit-statuses', label: 'Commit statuses', scope: 'repository', access: 'write', probe: 'GET /repos/{repo}/commits/HEAD/status' },
   { id: 'contents', label: 'Contents', scope: 'repository', access: 'write', probe: 'GET /repos/{repo}/commits' },
