@@ -417,8 +417,9 @@ const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
  * w5838: a Low worker can write a Low-labelled file, so before this one could replace a copy and have the next agent, editor
  * or probe run its program with what the daemon passes in (another person's vault tokens, for an agent). Now:
  * - the folder is Medium (lowTargets, MEDIUM_TOOLS): a worker cannot add, rename or delete a file there, nor plant a DLL;
- * - each copy is read-only (readOnlyGrants), so a worker cannot rewrite it either; where icacls cannot do that, it says
- *   so and the copy is hashed in full before every run instead;
+ * - each copy is read-only, its access list and Low label set in one call on the `.part` while it is still Medium
+ *   (lockCopyScript, w5904), so a worker cannot rewrite it either; where that fails, icacls sets them in two calls
+ *   (readOnlyGrants) with a WARNING, and where that fails too the copy is hashed in full before every run instead;
  * - `check` before every run: the copy still has its source's bytes (a full hash every time, w5877), else it is made
  *   again from the source, with a WARNING in the log;
  * - a copy left by an earlier daemon run is never taken over (make).

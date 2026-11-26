@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -282,19 +282,35 @@ const markKey = (p: string) => {
   return `${p}#${st.ino}#${st.ctimeNs}`;
 };
 
-const icaclsSync = (o: { readOnlyFails?: boolean } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string> } => {
+// The one-call lock (lockCopyScript, w5904) is faked by path: what it locked, the `.part`, keeps it under the copy's name.
+const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string>; locked: Set<string>; events: string[] } => {
   const calls: string[][] = [];
   const low = new Set<string>();
   const ro = new Set<string>();
+  const locked = new Set<string>();
+  const events: string[] = [];
   return {
     calls,
     low,
     ro,
-    exec: (_cmd, args) => {
+    locked,
+    events,
+    exec: (cmd, args) => {
       calls.push(args);
+      if (cmd === 'powershell.exe') {
+        const script = Buffer.from(args[args.length - 1], 'base64').toString('utf16le');
+        const at = /\[FfLock\]::Set\('((?:[^']|'')*)'/.exec(script)![1].replace(/''/g, "'");
+        events.push(`lock ${at}`);
+        if (o.lockFails) return { code: 1, stdout: '', stderr: 'Add-Type failed' };
+        locked.add(at.replace(/\.part$/, ''));
+        return { code: 0, stdout: 'ok\r\n', stderr: '' };
+      }
       const [path0, ...rest] = args;
       const f = markKey(path0);
-      if (!rest.length) return { code: 0, stdout: `${path0} ${ro.has(f) ? 'OWNER RIGHTS:(RX)' : 'BUILTIN\\Users:(I)(RX)'}\n${low.has(f) ? 'Mandatory Label\\Low Mandatory Level:(NW)' : ''}`, stderr: '' };
+      const isRo = ro.has(f) || locked.has(path0);
+      const isLow = low.has(f) || locked.has(path0);
+      if (!rest.length) return { code: 0, stdout: `${path0} ${isRo ? 'OWNER RIGHTS:(RX)' : 'BUILTIN\\Users:(I)(RX)'}\n${isLow ? 'Mandatory Label\\Low Mandatory Level:(NW)' : ''}`, stderr: '' };
+      events.push(`${rest[0]} ${path0}`);
       if (rest[0] === '/setintegritylevel') {
         if (ro.has(f)) return { code: 5, stdout: '', stderr: 'Access is denied.' };
         low.add(f);
@@ -315,12 +331,9 @@ test('LowCopies names the copy by size and mtime, labels it Low and read-only, a
   const copies = new LowCopies(root, () => {}, f.exec, 'BEAST\\rydin');
   const first = copies.make(exe);
   assert.ok(first && fs.existsSync(first) && path.basename(first).startsWith('claude-2-'));
-  const id = markKey(first!);
-  assert.ok(f.low.has(id) && f.ro.has(id), 'labelled Low, then read-only');
-  assert.deepEqual(
-    f.calls.find((c) => c[0] === first && c[1] === '/inheritance:r'),
-    [first, ...readOnlyGrants('BEAST\\rydin')],
-  );
+  // w5904: the access list and the Low label in one call on the `.part`, before it has the copy's name; no icacls set.
+  assert.deepEqual(f.events, [`lock ${first}.part`]);
+  assert.ok(f.locked.has(first!));
   assert.equal(copies.check(first), first, 'an unchanged copy runs as it is');
   fs.writeFileSync(exe, 'v2 longer');
   const second = copies.make(exe)!;
@@ -334,10 +347,10 @@ test('w5838: a replaced Low copy is not run: check makes it again from its sourc
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
   const exe = path.join(root, 'claude.exe');
   fs.writeFileSync(exe, 'the real claude');
-  // Read-only applied (the stat key changes with the write) and refused (hashed in full every time): both catch it.
+  // Locked, and refused (the lock and icacls' grant both fail; hashed in full every time): both catch it.
   for (const readOnlyFails of [false, true]) {
     const said: string[] = [];
-    const copies = new LowCopies(root, (l) => void said.push(l), icaclsSync({ readOnlyFails }).exec, 'BEAST\\rydin');
+    const copies = new LowCopies(root, (l) => void said.push(l), icaclsSync({ readOnlyFails, lockFails: readOnlyFails }).exec, 'BEAST\\rydin');
     const copy = copies.make(exe)!;
     // A Low worker's program in its place (same size, so only the bytes tell).
     fs.writeFileSync(copy, 'the evil claude');
@@ -432,6 +445,35 @@ test('w5877: isReadOnlyCopy refuses an access list that still lets anyone but SY
   assert.ok(!isReadOnlyCopy('F:\\x\\c.exe OWNER RIGHTS:(RX)\n   Everyone:(F)\n   Mandatory Label\\Low Mandatory Level:(NW)'));
   assert.ok(!isReadOnlyCopy(ours.replace('BEAST\\rydin:(RX)', 'BEAST\\rydin:(RX,W)')));
   assert.ok(!isReadOnlyCopy(ours.replace('BEAST\\rydin:(RX)', 'BEAST\\rydin:(M)')));
+  // w5904's measured case: icacls prints `Rc` in mixed case, and WD is write data.
+  assert.ok(!isReadOnlyCopy(ours.replace('   OWNER RIGHTS:(RX)', '   Everyone:(Rc,WD,AD,WA)\n   OWNER RIGHTS:(RX)')));
+  // A line it cannot read is not read-only.
+  assert.ok(!isReadOnlyCopy(ours.replace('   OWNER RIGHTS:(RX)', '   OWNER RIGHTS:(RX)\n   S-1-1-0:[odd]')));
+});
+
+test('w5904: a copy is never labelled Low while it is writable: one lock on the .part, or icacls with a WARNING', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'claude.exe');
+    fs.writeFileSync(exe, 'the real claude');
+    const f = icaclsSync();
+    const copy = new LowCopies(root, () => {}, f.exec, 'BEAST\\rydin').make(exe)!;
+    assert.deepEqual(f.events, [`lock ${copy}.part`], 'no icacls label or grant once the lock took');
+    // The script sets the access list and the label together, without inherited entries.
+    const s = lockCopyScript("F:\\ffw\\tools\\low\\it's.exe.part");
+    assert.match(s, /SetNamedSecurityInfoW\(path, 1, 0x80000014,/);
+    assert.ok(s.includes('D:P(A;;0x1200a9;;;OW)(A;;0x1200a9;;;$sid)(A;;FA;;;SY)(A;;FA;;;BA)S:(ML;;NW;;;LW)'), s);
+    assert.ok(s.includes("'F:\\ffw\\tools\\low\\it''s.exe.part'"), s);
+    // Where the one call fails: icacls in two calls, said as a WARNING.
+    const g = icaclsSync({ lockFails: true });
+    const said: string[] = [];
+    fs.writeFileSync(exe, 'the real claude, v2');
+    const c2 = new LowCopies(root, (l) => void said.push(l), g.exec, 'BEAST\\rydin').make(exe)!;
+    assert.deepEqual(g.events, [`lock ${c2}.part`, `/setintegritylevel ${c2}`, `/inheritance:r ${c2}`]);
+    assert.ok(said.some((l) => /WARNING: could not lock the Low copy .* in one call/.test(l)), said.join('\n'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('w5877: a copy left by an earlier daemon run is never taken over, even with its source\'s bytes', () => {
@@ -447,7 +489,7 @@ test('w5877: a copy left by an earlier daemon run is never taken over, even with
   assert.equal(fs.readFileSync(again, 'utf8'), 'the real claude');
   const after = fs.statSync(again, { bigint: true });
   assert.ok(after.ino !== before.ino || after.birthtimeNs !== before.birthtimeNs, 'a new file, not the old one');
-  assert.ok(f.calls.some((c) => c[0] === again && c[1] === '/inheritance:r'), 'locked by this run');
+  assert.deepEqual(f.events, [`lock ${again}.part`], 'locked by this run');
   assert.ok(said.some((l) => /earlier daemon run; made again, never taken over/.test(l)), said.join('\n'));
 });
 

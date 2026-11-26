@@ -752,10 +752,15 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     ran its program with that agent's vault tokens, a probe with the daemon's whole environment, an editor through it.
     - `tools\low`, `tools\unity-low` and `tools\shims` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`): a worker
       cannot add, rename or delete a file in them, so neither a copy nor a DLL beside it can be planted.
-    - Each copy is labelled Low and then made read-only (`readOnlyGrants`: read and run for the account and OWNER RIGHTS,
-      Full for SYSTEM and Administrators). Measured on BEAST from a Low process: the copy runs; a write, an append, a new
-      grant and a new label are refused. Where icacls cannot set that, the log says so and the copy is hashed in full
-      before every run instead.
+    - Each copy is locked in one call before it takes its name (w5904, `lockCopyScript`): SetNamedSecurityInfoW sets its
+      read-only access list (read and run for the account and OWNER RIGHTS, Full for SYSTEM and Administrators, nothing
+      inherited) and its Low label together on the `.part`, which is still Medium, so no Low worker ever sees it labelled
+      Low and writable (icacls sets them in two calls, and a write handle or an `Everyone` entry a worker added between
+      them survived the second, measured by w5904). Measured on BEAST: the locked copy runs; a write, an append and a new
+      grant are refused; the daemon still removes it; the first lock of a daemon run takes about 7 s (PowerShell compiles
+      its helper). Where the lock fails, icacls sets them in two calls (`readOnlyGrants`) with a `WARNING`; where that
+      fails too, the log says so and the copy is hashed in full before every run instead. `isReadOnlyCopy` reads rights
+      in any case (`Rc`) and takes a line it cannot read as not read-only.
     - `LowCopies.check` runs before every sandbox agent (`runSpec`) and every fenced editor start (`editorFence`): the copy
       still has its source's bytes (a full SHA-256 every time, about 250 ms for claude.exe; its stat is no proof, since
       whoever can write a file can put its times back, w5877), else it is made again from the source and the
