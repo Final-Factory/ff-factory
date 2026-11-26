@@ -1189,7 +1189,7 @@ export function passMarkerFile(dir: string): NonNullable<CleanupRunnerDeps['mark
 export interface PassMarker {
   startedAt: number;
   trigger: string;
-  /** The step in flight (cleanupPass's phase names, `quick`, or the daemon's own) and when it began. */
+  /** The step in flight (cleanupPass's phase names, or the daemon's own) and when it began. */
   step?: string;
   stepAt?: number;
   /** The steps done so far, in ms. */
@@ -1363,11 +1363,6 @@ export interface CleanupRunnerDeps {
   started?(trigger: CleanupSummary['trigger'], low: boolean): void;
   /** The words for a pass this start found cut off (describeCutOff), said once at construction. */
   cutOff?(text: string, m: PassMarker): void;
-  /**
-   * A low pass's quick plan (w5795, report-only for now): what the cargo-target cap with the low-space rules alone would
-   * remove, measured. Planned and timed first; the summary carries it; nothing of it is removed apart from the full pass.
-   */
-  quick?(): Promise<{ path: string; bytes: number; rule: string }[]>;
 }
 
 /** When to run a pass, and what to say about it. Shared by the host guard and the machine daemons. */
@@ -1485,14 +1480,9 @@ export class CleanupRunner {
         dryRun || !this.d.marker
           ? undefined
           : (name: string, done: Record<string, number>, soFar?: PassSoFar) => this.d.marker?.save({ startedAt, trigger, step: name, stepAt: this.now(), done, ...(soFar?.removed ? { soFar } : {}) });
-      let quick: CleanupSummary['quick'];
-      if (low && !dryRun && this.d.quick) {
-        step?.('quick', {});
-        const q0 = Date.now();
-        const q = await this.d.quick().catch(() => undefined);
-        if (q) quick = { items: q.length, bytes: q.reduce((n, x) => n + x.bytes, 0), ms: Date.now() - q0, top: [...q].sort((a, b) => b.bytes - a.bytes).slice(0, 5) };
-      }
-      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}), ...(step ? { step: (name, done, soFar) => step(name, { ...(quick ? { quick: quick.ms } : {}), ...done }, soFar) } : {}) });
+      // No report-only quick plan first any more (w5795): on LothDesktop it took 21 min of a low pass before anything was
+      // removed, and no pass that ran it ever finished to report it. Each step of the pass removes its own plan at once.
+      const r = await this.d.pass(low, { stale: withStale, dryRun, ...(critical ? { critical } : {}), ...(step ? { step } : {}) });
       const passMs = Date.now() - t0;
       const vols = await this.volumes();
       const after = vols.free;
@@ -1518,7 +1508,6 @@ export class CleanupRunner {
         ...(r.media ? { media: r.media } : {}),
         ...(r.phasesMs ? { phasesMs: r.phasesMs } : {}),
         passMs,
-        ...(quick ? { quick } : {}),
       };
       if (dryRun) {
         this.d.log({ ...summary, freeBeforeBytes: before, plannedAll: r.planned, listedAll: r.listed, heldAll: r.held });

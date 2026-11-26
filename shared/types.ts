@@ -2086,11 +2086,6 @@ export interface CleanupSummary {
   phasesMs?: Record<string, number>;
   /** The whole pass, in ms. */
   passMs?: number;
-  /**
-   * A low pass's quick plan, made first (w5795, report-only): what the cargo-target cap with the low-space rules alone would
-   * remove at once, and how long planning it took. Nothing of it is removed apart from the full pass yet.
-   */
-  quick?: { items: number; bytes: number; ms: number; top?: { path: string; bytes: number; rule: string }[] };
 }
 
 export interface DrainStatus {
