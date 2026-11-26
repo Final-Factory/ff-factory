@@ -451,6 +451,9 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   // write (Windows: LocalLow, labelled Medium; SHGetKnownFolderPath ignores a child's USERPROFILE, so it cannot be moved).
   if (w.pair?.legacyData) {
     if (f.platform === 'linux') return `${id} is on Linux, and this pair run's player predates w5297 (${w.pair.legacyData}): pre-1.0 has no Linux multiplayer build (w5965)`;
+    // w5988: on Windows the fence is the integrity level (workerIntegrity "low"), so one nobody reported is an unknown
+    // level, not Medium: w5966 was placed on beast/slot5 at Low. Elsewhere an unreported fence still fits.
+    if (!f.fence && f.platform === 'win32') return `${id} has not reported its worker fence, so its workers' integrity level is unknown, and this pair run's player predates w5297 (${w.pair.legacyData}): it runs only where workers are at Medium (fence off) (w5988)`;
     if (f.fence && f.fence !== 'off') return `${id}'s worker fence is ${f.fence === 'setting_up' ? 'setting up' : f.fence}, and this pair run's player predates w5297 (${w.pair.legacyData}): it writes the owner's own data folder, which a fenced worker cannot write (w5944, w5965); it goes on a computer whose fence is off`;
   }
   // w3396: an FFU worker's cargo target grows to many GB; a drive under the line takes none until the clean-up frees it.
@@ -485,6 +488,17 @@ export function unfitWhy(w: Pick<WorkItem, 'needs' | 'title' | 'brief' | 'notes'
   if (mp) return w.pair ? `${id} is a Mac, and each leg of this pair run starts ${mp}'s host and its client on its own computer: ${MAC_REFUSES_SCENARIO}` : `${id} is a Mac, which refuses the multiplayer client its MP scenario starts (w665)`;
   return undefined;
 }
+
+/**
+ * w5988: what the brief of a pair run whose player predates w5297 says about checking the level. Git Bash's `whoami` is
+ * coreutils (no /groups), and Git Bash rewrites a bare `/groups` into a path (`V:/ffw/tools/git/groups`, measured on
+ * lothdesktop 2026-11-26), so the check names Windows' own whoami.exe and turns that rewrite off.
+ */
+export const LEGACY_INTEGRITY_CHECK =
+  "Its player predates w5297 and writes the owner's own data folder, which a Low-integrity worker cannot write (w5944, w5966): " +
+  "on Windows, first check your level with `MSYS2_ARG_CONV_EXCL='*' \"$SYSTEMROOT/System32/whoami.exe\" /groups | grep \"Mandatory Level\"` " +
+  "(Git Bash's own `whoami` is coreutils and has no /groups, and without MSYS2_ARG_CONV_EXCL Git Bash turns /groups into a path). " +
+  '`Medium Mandatory Level` runs it; at `Low Mandatory Level` (S-1-16-4096) run nothing, and report that this computer was the wrong one (w5988).';
 
 /** w5965: what pairText says of a pair run whose player predates w5297 (WorkPair.legacyData). */
 export const PAIR_LEGACY = 'only on computers whose worker fence is off, never Linux (its player predates w5297 and writes the owner\'s own data folder)';

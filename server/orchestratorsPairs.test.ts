@@ -30,7 +30,7 @@ import { ANSWER_EXCERPT_CHARS, answeredText, answerExcerpt, splitReply, splitSen
 import { forYouId, splitForYou } from '../shared/forYou.ts';
 import { blockerName, gatesOf, type PrHealth } from '../shared/blockers.ts';
 import { answersText } from '../shared/questionCard.ts';
-import { cargoShortOf, fetchPlayerNote, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy, LEGACY_READ, mentionsLegacyPlayer, pairRoom } from '../shared/capacity.ts';
+import { cargoShortOf, fetchPlayerNote, isCargoRepo, needsTimed, PAIR_HOLD_MS, TIMED_HOLD_MS, pairText, unfitWhy, LEGACY_READ, LEGACY_INTEGRITY_CHECK, mentionsLegacyPlayer, pairRoom } from '../shared/capacity.ts';
 import { pickReclaim, type Pressure } from './priorityReclaim.ts';
 import { STEAM_READ } from '../shared/steam.ts';
 import { benchLockIn, type BenchState, type BusyJob, type Machine, type MachineStats, type Requester, type SessionInfo, type TranscriptEvent, type UserInfo, type WorkBlocker, type WorkItem } from '../shared/types.ts';
@@ -833,6 +833,9 @@ test('w5965: request_pair marks a pair run of a pre-w5297 player from its words 
   const p = store.work.get(/^Filed (w\d+)/.exec(out)![1])!;
   assert.equal(p.pair?.legacyData, LEGACY_READ);
   assert.match(out, /only on computers whose worker fence is off, never Linux \(its player predates w5297/);
+  // w5988: its brief says how to check the level, with Windows' whoami.exe (Git Bash's is coreutils).
+  assert.ok(p.brief.includes(LEGACY_INTEGRITY_CHECK), p.brief);
+  assert.match(LEGACY_INTEGRITY_CHECK, /MSYS2_ARG_CONV_EXCL='\*' "\$SYSTEMROOT\/System32\/whoami\.exe" \/groups/);
   const said = await startedFor(env, 'w5945');
   const out2 = String(await said.h.request_pair!({ what: 'MP-activity-fingerprint at ac80d7b0', brief: 'Run it.', legacy_data: 'ac80d7b0 is 0.50.0.47' }));
   assert.equal(store.work.get(/^Filed (w\d+)/.exec(out2)![1])!.pair?.legacyData, 'ac80d7b0 is 0.50.0.47');
@@ -848,7 +851,9 @@ test('w5965: a pair run of a pre-w5297 player goes only on a computer whose work
   assert.match(unfitWhy(w, 'wait', fit) ?? '', /worker fence is setting up/);
   assert.match(unfitWhy(w, 'lin', fit) ?? '', /^lin is on Linux.*pre-1\.0 has no Linux multiplayer build/);
   assert.equal(unfitWhy(w, 'beast', fit), undefined);
-  assert.equal(unfitWhy(w, 'lothlaptop', fit), undefined, 'a fence nobody reported fits, as every unknown fact does');
+  // w5988: on Windows the fence is the integrity level, so an unreported one is not Medium; a Mac's still fits.
+  assert.match(unfitWhy(w, 'lothlaptop', fit) ?? '', /^lothlaptop has not reported its worker fence, so its workers' integrity level is unknown.*\(w5988\)/);
+  assert.doesNotMatch(unfitWhy(w, 'mac', { ...fit, mac: { platform: 'darwin' } }) ?? '', /fence|integrity/, 'a Mac whose fence nobody reported is not refused for it, as no unknown fact is');
   // A pair run of a current player is untouched by the fence.
   assert.equal(unfitWhy({ ...w, pair: { legs: 1 } }, 'lothdesktop', fit), undefined);
   assert.match(pairText(w.pair), /, only on computers whose worker fence is off, never Linux/);
