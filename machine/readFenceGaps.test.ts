@@ -10,6 +10,7 @@ import path from 'node:path';
 import { DAEMON_READ_ALLOW, FENCE_FILE_WRITERS, FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { generationPath, readJsonDurable, writeFileDurable, writeJsonDurable } from '../server/durable.ts';
 import { appendCleanupLog } from '../server/cleanup.ts';
+import { removePrivileges } from '../server/winPrivileges.fixtures.ts';
 import { seatbeltProfile, type WorkerFence } from '../server/workerFence.ts';
 import { readLockArgs } from './writeLock.ts';
 import { ensureReadBackDirs, readFenceProbeTargets } from './readFence.ts';
@@ -286,16 +287,16 @@ test('w5957 N7 (Windows): a Low child is refused a No-Read-Up folder and reads a
     const whoExe = path.join(process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows', 'System32', 'whoami.exe');
     const who = spawnSync(node, ['-e', `process.stdout.write(require('child_process').execFileSync(${JSON.stringify(whoExe)}, ['/groups']).toString())`], { encoding: 'utf8', windowsHide: true });
     assert.match(who.stdout ?? '', /S-1-16-4096\b/, `the Low copy of node is not Low: ${(who.stdout ?? '').split(/\r?\n/).filter((l) => /Mandatory/i.test(l)).join(' | ')} ${who.stderr ?? ''}`);
-    // node opens every file with FILE_FLAG_BACKUP_SEMANTICS (libuv), so a child holding SeBackupPrivilege enabled reads
-    // past any label: an elevated runner's token may. A Medium daemon's Low workers hold no such privilege, so there the
-    // probe means what it says; here it cannot, and the leg stops with what it saw.
+    // node opens every file with FILE_FLAG_BACKUP_SEMANTICS (libuv), so a child holding SeBackupPrivilege or
+    // SeRestorePrivilege enabled passes any label: the elevated CI runner's token does (measured at #1324's 3aed8cd7), a
+    // Medium daemon's Low workers hold neither. Remove both from this process, as transcriptLabels.test.ts does (w5703), so
+    // the Low child has a worker's token, and check the child: a privilege left would make every refusal here pass.
+    const removed = removePrivileges(process.pid, ['SeBackupPrivilege', 'SeRestorePrivilege'], d);
+    tc.diagnostic(`privileges: ${removed.split(/\s*\r?\n\s*/).join('; ')}`);
+    assert.match(removed, /^SeBackupPrivilege (removed|not held)\s+SeRestorePrivilege (removed|not held)$/, removed);
     const priv = spawnSync(node, ['-e', `process.stdout.write(require('child_process').execFileSync(${JSON.stringify(whoExe)}, ['/priv']).toString())`], { encoding: 'utf8', windowsHide: true });
-    const backup = (priv.stdout ?? '').split(/\r?\n/).find((l) => /^SeBackupPrivilege\b/.test(l.trim())) ?? '';
-    lines.push(`the Low child's backup privilege: ${backup.trim().replace(/\s+/g, ' ') || 'not held'}`);
-    if (/Enabled\s*$/i.test(backup.trim())) {
-      tc.skip(`the Low child holds SeBackupPrivilege enabled (${backup.trim().replace(/\s+/g, ' ')}), which reads past every label; a Medium daemon's workers do not`);
-      return;
-    }
+    const held = (priv.stdout ?? '').split(/\r?\n/).filter((l) => /^Se(Backup|Restore)Privilege\b/.test(l.trim())).map((l) => l.trim().replace(/\s+/g, ' '));
+    assert.deepEqual(held, [], `the Low child still holds: ${held.join('; ')}`);
     // What the mirror's labels are once set, for the failure message (icacls names each path's mandatory label).
     const w = await probeReadFenceWin({ ...deps, mode: 'warn', setLabels: async (l: readonly LabelTarget[]) => {
       const ok = await deps.setLabels(l);

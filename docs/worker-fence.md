@@ -224,8 +224,9 @@ skips at Low and runs on a Medium or elevated runner.
 the child opened it. The child holds SeBackupPrivilege **enabled** (`whoami /priv`, from the elevated runner's token), and
 node opens every file with `FILE_FLAG_BACKUP_SEMANTICS` (libuv), which with that privilege skips the access check, labels
 included. A Medium daemon's Low workers hold no SeBackupPrivilege (none in a fenced worker on LothDesktop, measured), so the
-probe means what it says there; the real-label leg in `machine/readFenceGaps.test.ts` stops on such a child and says why.
-The proof of the labels is the daemon's own `warn` probe on each machine.
+probe means what it says there. The real-label leg in `machine/readFenceGaps.test.ts` removes SeBackupPrivilege and
+SeRestorePrivilege from its own process first (`server/winPrivileges.fixtures.ts`, as w5703's transcript-lock leg does), checks
+the Low child holds neither, and so tests the labels on the runner; the daemon's own `warn` probe on each machine checks them there.
 
 **Explicit labels inside a closed folder** (w5968's review of #1324 suspected them on the CI runner; the backup privilege
 above was the cause there): a folder's label reaches only what inherits it, and a path's own explicit label wins, so a file a
