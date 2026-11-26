@@ -497,7 +497,7 @@ export function labelScript(t: readonly LabelTarget[]): string {
  * WRITE_OWNER gets the account's Full grant first (as labelLow, w5402) and is tried again. Returns whether every label not
  * skipped was set; never throws.
  */
-export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean } = {}): Promise<boolean> {
+export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean; grant?: boolean; what?: string } = {}): Promise<boolean> {
   const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
   const todo: LabelTarget[] = [];
   for (const x of t) {
@@ -528,7 +528,8 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
   let failed = await runOnce(todo);
   const account = o.account ?? currentAccount();
   const denied = [...failed].filter(([, c]) => c === '5').map(([i]) => todo[i]);
-  if (denied.length && account) {
+  // w5749: the owner's folders on the system drive get their label only (lothsahn's go), never a grant.
+  if (denied.length && account && o.grant !== false) {
     for (const x of denied) {
       const g = await exec('icacls', [x.path, '/grant', `${account}:${x.sddl.includes('OICI') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
       if (g.code === 0) say(`worker integrity: gave ${account} Full on ${x.path}, which setting its label needs (WRITE_OWNER)`);
@@ -543,7 +544,7 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
     failed = rest;
   }
   for (const [i, c] of failed) say(`worker integrity: could not set ${todo[i].sddl} on ${todo[i].path}: ${c}`);
-  say(`worker integrity: read labels set on ${todo.length - failed.size} of ${todo.length} paths (No-Read-Up on the daemon's folder, secrets and root.json; their worker reads given back)`);
+  say(`worker integrity: read labels set on ${todo.length - failed.size} of ${todo.length} paths (${o.what ?? "No-Read-Up on the daemon's folder, secrets and root.json; their worker reads given back"})`);
   return failed.size === 0;
 }
 
@@ -560,6 +561,61 @@ export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (
   }
   if (open.length && !(await labelNoReadUp(open, exec, say, o))) return undefined;
   return open.map((x) => x.path);
+}
+
+/** An empty label SACL: setting it takes a path's explicit label off, so it inherits its parent's again (w5749, measured). */
+export const NO_LABEL = 'S:';
+
+/**
+ * w5749: takes the owner's No-Read-Up labels off again (read fence off or warn, or the enforce stage reverted): each path
+ * that carries the explicit Medium NR label gets no explicit label at all, as before the fence labelled it (an owner's
+ * folder on the system drive had none). A path without that label is not touched. Measured on V: (2026-11-25): after
+ * `S:` icacls shows only the label inherited from the parent, on the folder and on the file inside. Returns the paths it
+ * took the label off, or undefined when one could not be.
+ */
+export async function unlabelNoReadUp(paths: readonly string[], exec: Exec, say: (line: string) => void): Promise<string[] | undefined> {
+  const todo: string[] = [];
+  for (const p of paths) {
+    const now = await exec('icacls', [p], { timeoutMs: 60_000 });
+    if (now.code === 0 && hasLabel(now.stdout, NO_READ_UP.dir)) todo.push(p);
+  }
+  if (!todo.length) return [];
+  const script = labelScript(todo.map((p) => ({ path: p, sddl: NO_LABEL })));
+  const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
+  const ok = new Set(r.stdout.split(/\r?\n/).flatMap((l) => (/^ok (\d+)$/.exec(l.trim()) ? [Number(/^ok (\d+)$/.exec(l.trim())![1])] : [])));
+  const failed = todo.filter((_, i) => !ok.has(i));
+  for (const p of failed) say(`worker integrity: could not take the read label off ${p}: ${(r.stderr || r.stdout).trim().slice(-200)}`);
+  return failed.length ? undefined : todo;
+}
+
+/** The PowerShell that deletes each generic Credential Manager entry and prints `ok <i>`, `gone <i>` or `err <i> <code>`. Exported for tests. */
+export function credDeleteScript(targets: readonly string[]): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public static class FfCred {',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool CredDeleteW(string target, uint type, uint flags);',
+    '  public static uint Del(string t) { return CredDeleteW(t, 1, 0) ? 0u : (uint)Marshal.GetLastWin32Error(); }',
+    '}',
+    '"@',
+    ...targets.map((t, i) => `$r = [FfCred]::Del(${psq(t)}); if ($r -eq 0) { 'ok ${i}' } elseif ($r -eq 1168) { 'gone ${i}' } else { 'err ${i} ' + $r }`),
+  ].join('\n');
+}
+
+/**
+ * w5749: deletes generic Credential Manager entries (the gh login's, once it is in hosts.yml). A missing entry (1168,
+ * ERROR_NOT_FOUND) counts as done. Returns the targets it could not delete.
+ */
+export async function deleteGenericCreds(targets: readonly string[], exec: Exec): Promise<{ deleted: string[]; failed: string[] }> {
+  if (!targets.length) return { deleted: [], failed: [] };
+  const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(credDeleteScript(targets), 'utf16le').toString('base64')], { timeoutMs: 60_000 });
+  const said = new Map<number, string>();
+  for (const l of r.stdout.split(/\r?\n/)) {
+    const m = /^(ok|gone|err) (\d+)/.exec(l.trim());
+    if (m) said.set(Number(m[2]), m[1]);
+  }
+  return { deleted: targets.filter((_, i) => said.get(i) === 'ok'), failed: targets.filter((_, i) => !['ok', 'gone'].includes(said.get(i) ?? '')) };
 }
 
 /** Whether icacls says this path carries a Medium mandatory label. Exported for tests. */

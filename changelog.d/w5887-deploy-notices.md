@@ -1,0 +1,1 @@
+- **Deploy notices** (w5887): a portal deploy or restart puts a line in every active orchestrator's chat before it goes down ("Portal update starting: deploying <sha> (<pull requests>). I'll be unresponsive for about N minutes", N the median of the measured recent downtimes) and the next server posts the done line with how long it took ([docs/restart.md](../docs/restart.md)).

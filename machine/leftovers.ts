@@ -185,6 +185,8 @@ export interface LeftoverDeps {
   slotRoots(): string[];
   /** The workers' temp root, <install>/tmp. */
   tempRoot(): string | undefined;
+  /** Medium agents' own temp root (w5862, machine/mediumFolders.ts), once daemon.json `mediumAgentFolders` is "on". */
+  mediumTempRoot?(): string | undefined;
   leases(): PlayerLease[];
   /** A process that names one of these is never touched: the main clone, the daemon's own folder. */
   protectedPaths(): string[];
@@ -702,8 +704,9 @@ export class LeftoverReaper {
         c = { p, kind, session: e.session, sandbox: e.sandbox, via: 'env', slot };
       } else {
         const lease = slot ? leases.find((l) => l.slot === slot && Number(l.pid) === p.pid && String(l.host ?? '').toLowerCase() === d.host.toLowerCase()) : undefined;
-        const fromPath = tempSessionOf(p.cmd, d.tempRoot(), d.platform);
-        const fromArg = fromPath || kind === 'unity-worker' ? undefined : tempSessionInArgs(p.cmd, d.tempRoot(), d.platform);
+        const mediumTemp = d.mediumTempRoot?.();
+        const fromPath = tempSessionOf(p.cmd, d.tempRoot(), d.platform) ?? tempSessionOf(p.cmd, mediumTemp, d.platform);
+        const fromArg = fromPath || kind === 'unity-worker' ? undefined : (tempSessionInArgs(p.cmd, d.tempRoot(), d.platform) ?? tempSessionInArgs(p.cmd, mediumTemp, d.platform));
         if (lease?.session) c = { p, kind, session: lease.session, sandbox: leaseSandbox(lease.sandbox) ?? slotSandbox(slot), via: 'lease', slot };
         else if (fromPath) c = { p, kind, session: fromPath, via: 'path', slot };
         else if (fromArg) c = { p, kind, session: fromArg, via: 'arg', slot };
