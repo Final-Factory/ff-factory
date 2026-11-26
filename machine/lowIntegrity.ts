@@ -275,6 +275,37 @@ export async function lowRunners(root: string, exec: Exec, o: { list?: (dir: str
   return low;
 }
 
+/** A virtual disk's file name: a WSL distro's `ext4.vhdx`, a Hyper-V or Docker disk. */
+const DISK_IMAGE = /\.vhdx?$/i;
+
+/**
+ * The virtual disks that sit in a folder workers write (w5948): each `<root>/tools/<child>/*.vhdx` (or `.vhd`) whose child
+ * the fence labels Low (lowTargets: every tools child but node). The daemon says each one loudly after labelling and
+ * changes nothing (warn-only, lothsahn's lockout rule). BEAST's `tools/wsl-ffu-sniper/ext4.vhdx` is the disk of the
+ * `ffu-sniper` WSL distro (imported 2026-11-06 for FFU's SteamOS build, ffu docs/steamos.md "Setting up a container host on
+ * Windows"). A Low worker cannot start WSL (`wsl.exe` answers Wsl/E_ACCESSDENIED at Low, measured on BEAST, w5870), but it can
+ * rewrite the disk while the distro is stopped, and the next `wsl -d` by a Medium process runs what it planted as root in
+ * the distro, which reaches the user's drives (/mnt/<drive>) and starts Windows programs at Medium (WSL interop). The
+ * fix is to move the disk out of the workers' reach, into a root child no worker fence opens (one not in WORKER_CHILDREN
+ * stays Medium): `wsl --manage <distro> --move <root>\wsl\<distro>`, the distro stopped. A move within one volume is a
+ * rename, so the disk keeps the Low label it inherited and nothing relabels `<root>\wsl` later: after the move,
+ * `icacls <root>\wsl\<distro>\ext4.vhdx /setintegritylevel M` (or `/reset`) and check that icacls no longer shows
+ * `Mandatory Label\Low` (w5958's review). Exported for tests.
+ */
+export function lowDiskImages(root: string, toolsChildren: { name: string; dir: boolean }[] | undefined, list: (dir: string) => string[] = (d) => { try { return fs.readdirSync(d); } catch { return []; } }): string[] {
+  const found: string[] = [];
+  for (const c of toolsChildren ?? []) {
+    if (!c.dir || c.name.toLowerCase() === 'node') continue;
+    const dir = path.join(root, 'tools', c.name);
+    for (const f of list(dir)) if (DISK_IMAGE.test(f)) found.push(path.join(dir, f));
+  }
+  return found;
+}
+
+/** The warning the daemon logs for one disk lowDiskImages finds (w5948). Exported for tests. */
+export const lowDiskImageWarning = (disk: string, root: string) =>
+  `WARNING worker integrity: the virtual disk ${disk} is in a folder workers write (labelled Low): a Low worker can rewrite it while its VM or WSL distro is stopped, and the next start by a Medium process runs what it planted at Medium (w5948). Nothing was changed: move it into a folder no worker writes, e.g. \`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\` with the distro stopped (\`wsl --list -v\` names the distro), then relabel the moved disk, which keeps its Low label (a move on one volume is a rename): \`icacls ${path.join(root, 'wsl', '<distro>', 'ext4.vhdx')} /setintegritylevel M\`, and check icacls no longer shows Mandatory Label\\Low.`;
+
 /** The account the daemon runs as, as icacls names it (DOMAIN\\user), or undefined off Windows. */
 export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | undefined =>
   env.USERNAME ? (env.USERDOMAIN ? `${env.USERDOMAIN}\\${env.USERNAME}` : env.USERNAME) : undefined;
