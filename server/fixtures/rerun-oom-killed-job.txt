@@ -1,0 +1,42 @@
+2026-11-26T16:39:24.5350741Z ##[group]Run mkdir -p lavapipe-captures && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-render -- --nocapture && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-client ffu -- --nocapture packs capture_check && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-ui gate
+2026-11-26T16:39:24.5352569Z [36;1mmkdir -p lavapipe-captures && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-render -- --nocapture && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-client ffu -- --nocapture packs capture_check && ./tools/check_temp_leaks.sh ./tools/run_built_tests.sh ffu-ui gate[0m
+2026-11-26T16:39:24.5381039Z shell: /usr/bin/bash -e {0}
+2026-11-26T16:39:24.5381325Z env:
+2026-11-26T16:39:24.5381524Z   CARGO_TERM_COLOR: always
+2026-11-26T16:39:24.5381744Z   CARGO_INCREMENTAL: 0
+2026-11-26T16:39:24.5381969Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+2026-11-26T16:39:24.5382242Z   MSBUILDDISABLENODEREUSE: 1
+2026-11-26T16:39:24.5382790Z   CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--compress-debug-sections=zlib
+2026-11-26T16:39:24.5383295Z   TMPDIR: /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-2/_work/_temp
+2026-11-26T16:39:24.5383632Z   FFU_REQUIRE_GPU: 1
+2026-11-26T16:39:24.5383848Z   FFU_FALLBACK_ADAPTER: 1
+2026-11-26T16:39:24.5384241Z   FFU_CAPTURE_DIR: /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-2/_work/ffu/ffu/lavapipe-captures
+2026-11-26T16:39:24.5384653Z ##[endgroup]
+2026-11-26T16:39:25.7811742Z      Running ffu_render (/home/ben-ryding/ffw/ffu-runners/ffu-biscuit-2/_work/ffu/ffu/target/debug/deps/ffu_render-70883a5049d42942) in /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-2/_work/ffu/ffu/crates/ffu-render
+2026-11-26T16:39:25.8050136Z 
+2026-11-26T16:40:06.5096778Z 
+2026-11-26T16:40:06.5097568Z running 28 tests
+2026-11-26T16:40:06.5184307Z test capture_check::tests::a_solid_patch_counts_and_a_thin_line_does_not ... ok
+2026-11-26T16:40:06.5784890Z test packs::tests::every_kind_with_a_model_in_the_pack_draws_it ... ok
+2026-11-26T16:40:06.7023251Z test packs::tests::a_pack_folder_maps_crafters_to_the_crafter_model_and_nothing_else ... ok
+2026-11-26T16:40:06.7174006Z test packs::tests::crafters_leave_the_quads_for_their_mesh_and_the_rest_stay_quads ... ok
+2026-11-26T16:40:07.4504848Z test packs::tests::a_tier_without_a_model_keeps_its_tile ... ok
+2026-11-26T16:40:08.6897646Z ./tools/run_built_tests.sh: line 51: 344007 Killed                     ( cd "$dir" && "$exe" "$@" )
+2026-11-26T16:40:08.8463902Z temp leak check: the command left 1 entries in its temp folder /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-2/_work/_temp/ffu-leak-check.PqjBFN:
+2026-11-26T16:40:08.8625219Z   ffu-client-pack-capture-check-Pz42Ka
+2026-11-26T16:40:08.8640831Z Make each scratch folder or file with ffu_testdir::tempdir or ffu_testdir::builder(), so it goes when its test ends.
+2026-11-26T16:40:08.9691807Z ##[error]Process completed with exit code 1.
+2026-11-26T16:40:09.1345177Z ##[group]Run actions/upload-artifact@v4
+2026-11-26T16:40:27.2030132Z ##[group]Run tools/ci-runners/runner_health.sh "$(dirname "$(dirname "$RUNNER_WORKSPACE")")"
+2026-11-26T16:40:27.2030785Z [36;1mtools/ci-runners/runner_health.sh "$(dirname "$(dirname "$RUNNER_WORKSPACE")")"[0m
+2026-11-26T16:40:27.2066659Z shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}
+2026-11-26T16:40:27.2067011Z env:
+2026-11-26T16:40:27.2067222Z   CARGO_TERM_COLOR: always
+2026-11-26T16:40:27.2067446Z   CARGO_INCREMENTAL: 0
+2026-11-26T16:40:27.2067675Z   CARGO_PROFILE_DEV_DEBUG: line-tables-only
+2026-11-26T16:40:27.2067953Z   MSBUILDDISABLENODEREUSE: 1
+2026-11-26T16:40:27.2068361Z   CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -C link-arg=-Wl,--compress-debug-sections=zlib
+2026-11-26T16:40:27.2068895Z   TMPDIR: /home/ben-ryding/ffw/ffu-runners/ffu-biscuit-2/_work/_temp
+2026-11-26T16:40:27.2069222Z ##[endgroup]
+2026-11-26T16:40:28.0704547Z runner health (ffu-biscuit-2): available 5611 MB of 27186 MB, swap free 5 MB of 8191 MB, /tmp (tmpfs) 1580 MB used
+2026-11-26T16:40:28.0802028Z ##[warning]swap is 100 % full: under memory pressure the kernel can then only drop file pages, the runner's own among them, and a starting worker can miss its job hand-off.

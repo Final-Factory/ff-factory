@@ -766,7 +766,7 @@ export function workerUpdateFlags(
   transcriptLock?: 'on' | 'off',
   storeLock?: 'off' | 'warn' | 'on',
   editorTmpdir?: 'on' | 'off',
-  pathFence?: 'off' | 'warn',
+  pathFence?: 'off' | 'warn' | 'on',
   mediumAgentFolders?: 'warn' | 'on',
   daemonTmpdir?: 'on' | 'off',
   toolsDiskLock?: 'warn' | 'on',
@@ -1027,7 +1027,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' | 'on'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1059,7 +1059,7 @@ export class OpsWorker {
     if (o.editorTmpdir !== undefined && o.editorTmpdir !== 'on' && o.editorTmpdir !== 'off') throw new Error('editor_tmpdir: on or off');
     if (o.editorTmpdir !== undefined && m.platform === 'win32') throw new Error(`editor_tmpdir: macOS and Linux only, and ${m.id} is a Windows PC`);
     // w5863: the path fence's switch (daemon.json `pathFence`), macOS and Linux only.
-    if (o.pathFence !== undefined && o.pathFence !== 'off' && o.pathFence !== 'warn') throw new Error('path_fence: off or warn');
+    if (o.pathFence !== undefined && o.pathFence !== 'off' && o.pathFence !== 'warn' && o.pathFence !== 'on') throw new Error('path_fence: on, warn or off');
     if (o.pathFence !== undefined && m.platform === 'win32') throw new Error(`path_fence: macOS and Linux only, and ${m.id} is a Windows PC`);
     // w5862, w5869: Medium agents' own temp root and cargo home (daemon.json `mediumAgentFolders`), every OS.
     if (o.mediumAgentFolders !== undefined && o.mediumAgentFolders !== 'warn' && o.mediumAgentFolders !== 'on') throw new Error('medium_agent_folders: warn or on');

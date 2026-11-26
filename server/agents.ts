@@ -2797,6 +2797,26 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     return cutOff;
   }
 
+  /** Starts and moves this began without waiting for them (w5278's hand-over, a room move): what settled() waits for. */
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private track<T>(p: Promise<T>): Promise<T> {
+    const seen = p.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.inFlight.add(seen);
+    void seen.finally(() => this.inFlight.delete(seen));
+    return p;
+  }
+
+  /**
+   * Once every start and move this began without waiting has finished, its worker linked or its failure said (w5915: a test
+   * waits for that, not for a time: on a loaded BEAST a hand-over's ~30 git processes outran a 5 s wait).
+   */
+  async settled(): Promise<void> {
+    while (this.inFlight.size) await Promise.all([...this.inFlight]);
+  }
+
   /**
    * Stop every timer this started (w3746): its ticks, the orchestrators' timers, the pending wakes (their file kept), the ops
    * worker's and the rollout's. A test calls it before it removes the data folder: a release pass that fired after the
@@ -4288,7 +4308,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
-    this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+    this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
     return true;
   }
 
@@ -4338,7 +4358,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       this.roomMoving.set(info.id, entry);
       const hold = `its check after ${on.machines.join(' or ')}'s update runs on ${d.move.to}`;
       console.log(`deploy move: worker ${info.id} on ${from} (${w.id}) moves to ${d.move.to}: ${on.why} (w5328); ${d.move.why}`);
-      this.unmemoized(() => void this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id)));
+      this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
       return true;
     }
     if ('none' in d) {
@@ -7566,7 +7586,7 @@ ${w.repo ?? ''}
               if (w) this.orchestrators.noteOnRequest(w.id, `its start_agent in ${at} did not start after the sandbox was prepared (w5278): ${why}`);
               this.notifyDispatcher(`[start failed] ${label} did not start in ${at}: ${why}. Nothing was started for it: start_agent it again (another free sandbox if this one is the problem).`, requestedBy);
             };
-            plan.pending.then(
+            this.track(plan.pending).then(
               (h) => {
                 if (w) this.agentStarting.delete(w.id);
                 try {
@@ -7778,7 +7798,7 @@ ${w.repo ?? ''}
             transcript_lock: z.enum(['on', 'off']).optional().describe("action machine_update, a Linux machine with the worker fence on: let each locked worker write only its own conversation's transcript (w5702, docs/transcript-seal.md): on moves <root>/claude/projects to <root>/transcripts behind a link and gives each claude rules for its own conversation; off opens the transcripts folder to workers again. Unset leaves it as it is. Off is the recovery switch, and worker_fence off lifts it with the whole lock."),
             store_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the store lock (w5614, docs/machines.md \"Slot repos\"): on makes the machine's main clone read-only to fenced workers once every sandbox is a slot repo (held off, and said why, until then); warn refuses nothing and logs each write to the main clone the daemon did not make; off (the recovery switch) opens it again. Takes effect at the daemon restart the update makes. Unset leaves it as it is."),
             editor_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w5833: a sandbox Unity editor's temp folder on macOS and Linux: on gives each one TMPDIR=<root>/tmp/editor-<sandbox> (Unity's own IPC sockets stay in /tmp, measured), off (the default) keeps the system temp. Takes effect at the daemon's next start; off is the recovery."),
-            path_fence: z.enum(['off', 'warn']).optional().describe("action machine_update: w5863: the path fence on macOS and Linux: warn (the default) refuses nothing and logs each write to the unity-slot shims folder (first on every agent's PATH) that the daemon did not make; off stops the watch (the recovery switch). Takes effect at the daemon's next start. Unset leaves it as it is."),
+            path_fence: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w5863/w5899: the path fence on macOS and Linux: on (the default) moves the unity-slot shims folder on every agent's PATH to <root>/tools-medium/shims, which fenced workers cannot write; warn leaves it in the Unity slots mailbox and logs each write the daemon did not make; off leaves it there unwatched, the recovery. Takes effect at the daemon's next start. Unset leaves it as it is."),
             daemon_tmpdir: z.enum(['on', 'off']).optional().describe("action machine_update: w6000: the daemon's own temp folder, every OS: on (the default) points the daemon's own TMPDIR, TEMP and TMP at <root>/tmp-daemon, off keeps the system temp folder (the recovery). Takes effect at the daemon's next start."),
             tools_disk_lock: z.enum(['warn', 'on']).optional().describe("action machine_update: w5959, Windows only: a virtual disk (a WSL distro's ext4.vhdx) in a Low <root>/tools child (docs/worker-root.md): on keeps that child Medium, so workers can no longer write there; warn (the default) only logs it (the recovery). Written as daemon.json toolsDiskLock; takes effect at the daemon's next start. Unset leaves it as it is."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
