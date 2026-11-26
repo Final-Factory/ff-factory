@@ -691,3 +691,20 @@ test('tick: one asked for while a tick runs runs once more after it (a turn that
   assert.equal(await inner, undefined, 'the inner call returns at once');
   assert.equal(r.prio.get(22), P.PRIORITY_NORMAL, 'the rerun saw the turn and raised');
 });
+
+// ---- at LothDesktop's own level, Idle ----
+
+test("Idle: a tool at BelowNormal is lowered to Idle and raised back to BelowNormal; a Unity batch run below a tool is not raised", async () => {
+  const procs = [...BASE, { pid: 25, ppid: 22, cmd: '"C:\\U\\Unity.exe" -batchmode -projectPath x' }];
+  const r = rig({ procs, mode: 'enforce', settings: LOTHDESKTOP_CI_FIRST, prio: [[22, P.PRIORITY_BELOW_NORMAL]] });
+  r.started.set(25, 1_010_000);
+  r.prio.set(25, P.PRIORITY_LOW); // the bench turn's lowerBuild put it at Idle
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_LOW);
+  assert.equal(r.cf.loweredNow()['22@122']?.prev, P.PRIORITY_BELOW_NORMAL);
+  r.setHeld(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(25), P.PRIORITY_LOW, 'a Unity run is lowerBuild\'s to set, not ours');
+});

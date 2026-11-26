@@ -317,6 +317,11 @@ export class WinCiFirst {
     const kids = new Map<number, number[]>();
     for (const p of procs) if (p.pid !== p.ppid) kids.set(p.ppid, [...(kids.get(p.ppid) ?? []), p.pid]);
     const recorded = new Set(rec.map((r) => r.k));
+    const procOf = new Map(procs.map((p) => [p.pid, p]));
+    const underUnity = (pid: number, top: number): boolean => {
+      for (let p = procOf.get(pid), i = 0; p && p.pid !== top && i < 64; p = procOf.get(p.ppid), i++) if (isUnity(p)) return true;
+      return false;
+    };
     const done = new Set<number>();
     let n = 0;
     let failed = 0;
@@ -363,6 +368,9 @@ export class WinCiFirst {
       for (const c of [...firsts, ...firsts.flatMap((x) => below.get(x) ?? [])]) {
         const f = byPid.get(c);
         if (done.has(c) || !f || recorded.has(keyOf(f)) || (f.startedAt ?? Infinity) > cutoff) continue;
+        // A Unity editor or batch run, and what it started, is never ours (never lowered): the bench turn's lowerBuild puts
+        // batch runs at Idle during a person's turn, and raising them here would undo that.
+        if (underUnity(c, r.pid)) continue;
         up(c, r.prev);
       }
     }

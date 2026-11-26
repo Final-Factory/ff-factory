@@ -303,7 +303,7 @@ CI job runs, each agent host's processes by walking down from the host's own pro
 (Windows reuses pids and does not reparent orphans). With daemon.json `winCiFirst` unset or `warn` it sets nothing. It logs a `ci first:` line when a job
 starts or ends, and at most every 5 min while the agents' processes use 4 cores or more: the cores the machine, the jobs,
 each agent and the rest (editors, orphans, processes that ended) used over the last tick, and how many of the agents'
-tools' processes run above BelowNormal. Editors the daemon starts are not under a host and count as the rest (the pool's
+tools' processes run above Idle. Editors the daemon starts are not under a host and count as the rest (the pool's
 `belowNormal` setting runs them BelowNormal where it is on); batch builds go to Idle.
 
 With `winCiFirst` `enforce` (set by `ops_worker machine_update win_ci_first enforce`, Windows only; read at the daemon's
