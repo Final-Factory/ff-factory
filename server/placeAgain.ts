@@ -22,7 +22,7 @@
  * moved worker resumes its own conversation (Claude Code finds a session by its id in any project folder: measured on
  * 2026-10-07 with the CLI 2.1.292 and the Agent SDK's 2.1.284) and its next message says where it is now.
  */
-import { isLight } from '../shared/sandboxKind.ts';
+import { gameSandboxes, isLight } from '../shared/sandboxKind.ts';
 import { agentState, holdsSandbox, HOLD_PLACE_MS, OVERDUE_MS, utcTime } from '../shared/agentState.ts';
 
 export { HOLD_PLACE_MS };
@@ -367,7 +367,8 @@ function usable(s: SessionInfo, sb: MachineSandbox, f: PlaceFacts, taken: Readon
  */
 export function placeFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f: PlaceFacts, taken: ReadonlyMap<string, string> = new Map(), failed: (sandbox: string) => boolean = () => false): { sandbox: MachineSandbox } | { wait: string } {
   const r = s.placeReleased!;
-  const sbs = m.sandboxes ?? [];
+  // w5924: a light agent folder has no game checkout to switch, so a game worker never resumes in one.
+  const sbs = gameSandboxes(m.sandboxes);
   const ok = (sb: MachineSandbox) => usable(s, sb, f, taken, failed);
   const own = sbs.find((x) => x.id === r.sandbox);
   if (own && ok(own)) return { sandbox: own };
@@ -387,7 +388,8 @@ export function placeFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f
  * b3327616 (w1097, ff-factory work) waited for a free lothdesktop sandbox on 2026-10-12 while 7 of its 10 seats were free.
  */
 export function seatFor(s: SessionInfo, m: Pick<Machine, 'id' | 'sandboxes'>, f: PlaceFacts, max: number): { sandbox: MachineSandbox } | { wait: string } {
-  const sbs = (m.sandboxes ?? []).filter((sb) => sb.status === 'ready' && !sb.lingering?.some((l) => l.sessionId !== s.id));
+  // w5924: a seat is in a game sandbox; a light folder is one worker's own (it resumes in its own one before this).
+  const sbs = gameSandboxes(m.sandboxes).filter((sb) => sb.status === 'ready' && !sb.lingering?.some((l) => l.sessionId !== s.id));
   const agents = (sb: MachineSandbox) => f.sessions.filter((o) => o.id !== s.id && o.machineSandbox === sb.id && occupies(o, f.live(o.id), f.now)).length;
   const own = sbs.find((x) => x.id === s.placeReleased!.sandbox);
   if (own && agents(own) < max) return { sandbox: own };
@@ -1046,7 +1048,8 @@ export class PlaceAgain {
       const m = this.d.machine(mid);
       if (!m || !this.d.online(mid)) continue;
       const f = this.facts(mid);
-      for (const sb of m.sandboxes ?? []) {
+      // w5924: a light agent folder frees no game sandbox, so reclaiming one gains queued work nothing.
+      for (const sb of gameSandboxes(m.sandboxes)) {
         const sessions = f.sessions.filter((s) => s.machineSandbox === sb.id && !s.placeReleased && occupies(s, f.live(s.id), now));
         if (!sessions.length) continue;
         const key = `${mid}/${sb.id}`;

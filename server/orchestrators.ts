@@ -58,7 +58,7 @@ import { readDiscordConfig } from './discordConfig.ts';
 import { LIMIT_END, doneIdsIn, doneProblem, legDoneIdsIn, learnedProblem, supersededIn, reportProblem, mergedMentionsIn, notDoneReason, pausedIn, reportVerdict, stillOpenIn, toolErrors, turnEvidence, turnTroubleOf, type TurnTrouble } from './ledgerRules.ts';
 import { findingTargets, recordFinding } from './findings.ts';
 import { aheadText, queuedNeeds, answerAfter, asksAPerson, dispatcherAskIn, HAND_UP_CARD_MS, HAND_UP_RESEND_MS, handUpPerson, handUpsPending, holdsOf, orchestratorAskIn, standingTargetOf, personWaitIn, questionShareKey, reportWaitKey, roomShares, servedBy, UNDECIDED_BOUND_MS, unfiledFollowUpsIn } from '../shared/workState.ts';
-import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, resolveNeeds, steamShortIn, warmText } from '../shared/capacity.ts';
+import { capacityBlockProblem, capacityWaitIn, macRefusedScenario, MAC_REFUSES_SCENARIO, needsOf, needsTimed, pairComputersReason, pairRoom, pairText, PAIR_MAX_LEGS, LEGACY_READ, mentionsLegacyPlayer, resolveNeeds, steamShortIn, warmText } from '../shared/capacity.ts';
 import { mentionsSteam, saysNoSteam, STEAM_NONE, STEAM_READ } from '../shared/steam.ts';
 import { mentionsMenus, MENUS_NONE, MENUS_READ, needsWindow, saysNone } from '../shared/desktop.ts';
 import type { HandBack } from './machinePause.ts';
@@ -5123,7 +5123,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -5142,6 +5142,9 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // w2648: its own menus field rules; its words are read only without one, and "none" is kept (noMenus) so nothing reads them later.
     const menusNone = !steam && saysNone(menusSaid);
     const menus = steam || menusNone ? undefined : menusSaid || (mentionsMenus(what, brief) ? MENUS_READ : undefined);
+    // w5965: a player from before w5297 goes only where the worker fence is off: said by the worker, or read from its words.
+    const legacySaid = String(a.legacy_data ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
+    const legacyData = saysNone(legacySaid) ? undefined : legacySaid || (mentionsLegacyPlayer(what, brief) ? LEGACY_READ : undefined);
     // w4618: 1 leg unless it names a reason to need computers at once; a leg count asked for outright stands (legsSaid).
     const splitSaid = String(a.split ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     const legs = a.legs ?? (pairComputersReason({ title: what, brief, pair: { crossOs, steam, timed: a.timed === true, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined } }) ? 2 : 1);
@@ -5204,7 +5207,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
-      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}) });
+      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5785,7 +5788,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return last && legs?.length ? { from: last.from, legs } : undefined;
   }
 
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer; legacyData?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
@@ -5804,6 +5807,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(x.pr ? { pr: x.pr } : {}),
       ...(x.commit ? { commit: x.commit } : {}),
       ...(x.player ? { player: x.player } : {}),
+      ...(x.legacyData ? { legacyData: x.legacyData } : {}),
     };
     const warm = this.warmLegsFor(w.id, x.avoid);
     if (warm) pair.warm = warm;
