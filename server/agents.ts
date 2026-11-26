@@ -4610,10 +4610,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     this.store.putSession(info);
     this.store.append(info.id, { kind: 'system', text: `Its work stays with it: ${why}. Its sandbox stays released; it resumes when one frees on ${info.machineId} (w5976).` });
     if (q) {
-      const text = texts.length > 1 || texts[0] !== q.text ? texts.join('\n\n---\n\n') : q.text;
-      // A joined text carries each message's attachment ids (movedText), so the joined one carries none of its own.
-      const back: QueuedSend = { ...q, text };
-      if (text !== q.text) delete back.attachments;
+      // One message goes back as it was, with its attachments (w5995). Several joined ones carry each one's attachment ids as
+      // text (movedText), so the joined message carries none of its own.
+      const back: QueuedSend = texts.length > 1 ? { ...q, text: texts.join('\n\n---\n\n') } : q;
+      if (back !== q) delete back.attachments;
       this.sessions.putBack(back, `${why}; it waits for a sandbox on ${info.machineId}`);
     }
     this.machines.report?.(`[machines] ${reqs.map((w) => w.id).join(', ')} stayed with worker ${info.id} on ${info.machineId}/${info.machineSandbox}: ${why} (w5976).`);

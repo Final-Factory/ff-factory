@@ -149,6 +149,23 @@ for (const how of ['early', 'late'] as const) {
   });
 }
 
+test('w5976 ("on"): a single message put back after a failed start keeps its attachments and its own text (w5995)', async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled } = await setup(t, 'on');
+  failing(agents, 'late', []);
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  request(['5449aaaa']);
+  const att = { id: 'att_abcdef123456', name: 'Player.log', size: 10, sha256: 'ab'.repeat(32), kind: 'Unity Player.log', mediaType: 'text/plain', path: 'Inbox/att_abcdef123456-Player.log' };
+  const q: QueuedSend = { ...queued('5449aaaa', 'look at this log', Date.now() - 60_000), attachments: [att] };
+  assert.equal(roomMove(s, q, BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  assert.equal(store.work.get('w5869')!.status, 'active');
+  const back = sessions.queued().filter((m) => m.id === '5449aaaa');
+  assert.equal(back.length, 1);
+  assert.equal(back[0]!.text, 'look at this log', 'its own text, not the attachment ids written into it');
+  assert.deepEqual(back[0]!.attachments, [att], 'its attachments go back with it');
+  assert.equal(back[0]!.at, q.at);
+});
+
 test('w5976 ("on"): the other requests are handed back only once the fresh session started; a failed start keeps them too', async (t) => {
   const { store, sessions, agents, worker, request, queued, roomMove, settled } = await setup(t, 'on');
   const tried: string[] = [];
