@@ -129,7 +129,7 @@ import { GhLoginWatch, LOOK_EVERY_MS as GH_LOOK_EVERY_MS, lookHostsFile, type Gh
 import { READ_EVERY_MS as STEAM_READ_EVERY_MS, SteamClientWatch, realSteamDeps, type SteamClientDeps } from './steamClient.ts';
 import { DaemonRpc, legacyRpcInfoFile, loadRpcKey, makeToken, rpcInfoFile, rpcKeyFile, RPC_ENV, TOKEN_ENV } from './daemonRpc.ts';
 import { BenchProxy } from './benchProxy.ts';
-import { planMediumFolders, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
+import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
 
@@ -189,6 +189,12 @@ export interface DaemonConfig {
    * agents get <root>/tmp-medium and <root>/cache-medium/cargo, keeping today's folders with a WARNING when they cannot.
    */
   mediumAgentFolders?: MediumFoldersMode;
+  /**
+   * w5870: Medium agents' own tool caches (npm, pip, NuGet, .NET, Playwright, Unity's), the user PATH and ffu slots
+   * (machine/mediumFolders.ts planMediumCaches). Absent or "warn": WARNINGs only; "on": Medium agents get <root>/cache-medium's
+   * caches, the user PATH loses its entries in folders workers write, and `ffu-slot take` refuses a Medium agent.
+   */
+  mediumAgentCaches?: MediumCachesMode;
   /**
    * Paths outside the worker root that Low workers may write, labelled Low with the root (w5377): the person's decision,
    * never a default (lothsahn: "under no circumstances should workers write outside of ffw"). A path that is a file now is
@@ -1376,14 +1382,37 @@ export class Daemon {
 
   /** The machine's sandbox root (the portal's pool settings, else daemon.json's), if it has sandboxes. */
   private mediumMemo?: MediumFolders;
+  /** Folders the fences open whole wherever they are (w5869, w5871's F3; mediumFolders.ts workerWritable's `opened`). */
+  private fenceOpened(): string[] {
+    const c = this.cfg;
+    return [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])];
+  }
   /** w5862: Medium agents' own temp root and cargo home (machine/mediumFolders.ts), decided and logged once. */
   mediumFolders(): MediumFolders {
     if (!this.mediumMemo) {
       const c = this.cfg;
-      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: [...(c.workerIntegrityAllow ?? []), ...(c.writeLockExtra ?? []), ...(c.root && c.transcriptLock !== 'on' ? [path.join(c.root, TRANSCRIPTS)] : [])] });
+      this.mediumMemo = planMediumFolders({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentFolders, tempRoot: agentTempRoot(c.tempDir), cargoHome: process.env.CARGO_HOME, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
       for (const line of this.mediumMemo.lines) log(line);
     }
     return this.mediumMemo;
+  }
+
+  private cachesMemo?: MediumCaches;
+  /** w5870: Medium agents' own tool caches (machine/mediumFolders.ts planMediumCaches), decided and logged once. */
+  mediumCaches(): MediumCaches {
+    if (!this.cachesMemo) {
+      const c = this.cfg;
+      this.cachesMemo = planMediumCaches({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened() });
+      for (const line of this.cachesMemo.lines) log(line);
+    }
+    return this.cachesMemo;
+  }
+
+  /** w5870: the user PATH's entries in folders workers write, warned of or taken off once at start (Windows). */
+  async checkUserPath(): Promise<void> {
+    const c = this.cfg;
+    const runPs = (script: string) => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeoutMs: 60_000 });
+    for (const line of await fixUserPath({ root: c.root, fenced: fenceWanted(c, process.platform), mode: c.mediumAgentCaches, extra: [...(c.extraRoots ?? []), c.tempDir, this.sandboxRoot()], opened: this.fenceOpened(), runPs })) log(line);
   }
 
   /** The agents' temp roots: the one every agent had, and Medium agents' own once w5862's switch is on. */
@@ -1411,13 +1440,16 @@ export class Daemon {
 
   /**
    * A new agent's TMP, TEMP and TMPDIR (cleanup.ts sessionTempEnv) and, for a Medium agent once w5862's switch is on, its
-   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root.
+   * own temp root and CARGO_HOME. A Medium temp folder that cannot be made falls back to the shared temp root. w5870: a
+   * Medium agent also gets its own tool caches once that switch is on, and MEDIUM_AGENT_VAR either way (ffu-slot reads it):
+   * "on" only once its own temp folder was made too, since ffu-slot then sends it to build there (w5946 F5).
    */
   private agentTempEnv(id: string, sandbox: boolean): Record<string, string> {
     const m: MediumFolders = sandbox ? { lines: [] } : this.mediumFolders();
     const own = m.tempRoot ? sessionTempEnv(m.tempRoot, id) : {};
     if (m.tempRoot && !own.TMP) log(`WARNING medium agent folders: could not make ${sessionTempDir(m.tempRoot, id)}; ${id} uses the shared temp root (w5862)`);
-    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}) };
+    const caches = sandbox || !this.cfg.root || !fenceWanted(this.cfg, process.platform) ? {} : { ...this.mediumCaches().env, [MEDIUM_AGENT_VAR]: this.cfg.mediumAgentCaches === 'on' && own.TMP ? 'on' : 'warn' };
+    return { ...(own.TMP ? own : sessionTempEnv(agentTempRoot(this.cfg.tempDir), id)), ...(m.cargoHome ? { CARGO_HOME: m.cargoHome } : {}), ...caches };
   }
 
   private sandboxRoot(): string | undefined {
@@ -4904,6 +4936,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
   // w5862: says at start where Medium agents' temp root and cargo home are exposed to workers, or moves them (mediumAgentFolders).
   const medium = d.mediumFolders();
   if (medium.cargoHome && fs.existsSync(path.join(HOME, '.cargo'))) void seedCargoHome(path.join(HOME, '.cargo'), medium.cargoHome).then((m) => log(m));
+  // w5870: the same for Medium agents' other tool caches, and the user PATH's entries in folders workers write (mediumAgentCaches).
+  d.mediumCaches();
+  void d.checkUserPath();
   log(`FF Factory daemon for machine ${cfg.id}, repo ${cfg.repoPath}, portal ${cfg.portalUrl}`);
   const quit = () => {
     log('shutting down: agents in agent hosts run on for the next daemon; any others stop');
