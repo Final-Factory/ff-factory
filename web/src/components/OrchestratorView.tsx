@@ -3,6 +3,7 @@ import type { SessionInfo } from '../../../shared/types';
 import { api } from '../api';
 import { attempt, openSession, reloadTranscript, toast, useStore } from '../store';
 import { Composer } from './Composer';
+import { IdLinksOn } from './IdLink';
 import { PeopleMessages } from './PeopleMessages';
 import { ModeSelect } from './SessionView';
 import { Transcript } from './Transcript';
@@ -82,16 +83,18 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
           {ctxChip}
           {!compact && <AttentionButton />}
         </header>
-        <Transcript
-          session={session}
-          size={compact ? 'normal' : 'large'}
-          readOnlyFor={owner.displayName}
-          empty={
-            <div className="panel-empty">
-              <p>{owner.displayName} has not written to their orchestrator yet.</p>
-            </div>
-          }
-        />
+        <IdLinksOn.Provider value>
+          <Transcript
+            session={session}
+            size={compact ? 'normal' : 'large'}
+            readOnlyFor={owner.displayName}
+            empty={
+              <div className="panel-empty">
+                <p>{owner.displayName} has not written to their orchestrator yet.</p>
+              </div>
+            }
+          />
+        </IdLinksOn.Provider>
         <p className="orch-readonly-note" data-testid="read-only-note">
           {owner.displayName}’s conversation · only {owner.displayName} writes here
         </p>
@@ -185,7 +188,10 @@ export const OrchestratorView = memo(function OrchestratorView({ session, compac
           )}
         </Menu>
       </header>
-      <Transcript session={session} size={compact ? 'normal' : 'large'} empty={empty} interactive />
+      {/* The ids its messages name open their page in the right panel (w6216, ./IdLink.tsx). */}
+      <IdLinksOn.Provider value>
+        <Transcript session={session} size={compact ? 'normal' : 'large'} empty={empty} interactive />
+      </IdLinksOn.Provider>
       <div className="orch-composer-wrap">
         {/* Messages from other people, unread until cleared here (w1546): right over the box, where you look to write. */}
         <PeopleMessages session={session} />

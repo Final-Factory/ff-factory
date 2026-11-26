@@ -3989,6 +3989,13 @@ alone (`personMessageView`, w3297). The orchestrator prompt's "How to work" says
 - The Dispatcher page has two tabs. Requests lists everyone's open requests, questions first, with the stalled and the closed ones behind
   links; a row opens to its brief, workers, pull requests, overlaps and log. Conversation is the dispatcher's log, read only. Where the
   composer would be, a line says nobody writes to the dispatcher and links "Talk to your orchestrator" (your own chat).
+- The ids an orchestrator names in its replies are links (w6216): a worker's session id (`b6c73b2b`, or the whole id),
+  a sandbox (`beast/agent4`), a machine (`BEAST`) and a request (`w6215`). A click opens its page in the right panel with
+  the chat beside it (a phone opens the page alone; Back returns to the chat). The renderer links them, not the
+  orchestrators, so past messages and every instance link with no brief change; only ids the page knows link, and an
+  8-character prefix two sessions share, an id in code, a link or a path stays text. Matcher: `shared/idLinks.ts`
+  (tests `server/idLinks.test.ts`); rendering: `web/src/components/IdLink.tsx`, switched on by `OrchestratorView.tsx`
+  for the orchestrators' chats only (e2e `e2e/idLinks.spec.ts`).
 - Decisions arrive in your chat as one-line notices ("Merged into w15: “Belts drop items…”") that open the request.
 - A message from another person arrives in your chat as an amber notice, open, with their name and text ("Lothsahn:
   Could you run the firewall script on BEAST?"); Open goes to their chat. Until you open your chat, the sidebar's
