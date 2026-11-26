@@ -345,6 +345,38 @@ if ($git -and $slug) {
 }
 
 /**
+ * The read fence's give-back label (machine/lowIntegrity.ts READ_BACK.dir, the default policy written out) on a folder,
+ * for app.new while it is staged (w5980). Under the read fence `on`, the daemon's folder carries No-Read-Up, and app.new,
+ * made inside it, inherits that; the rename to app keeps app.new's own descriptor, so Low workers were refused the new app
+ * (the gh shim: "Cannot find module ...\\machine\\ghApp.ts") until the restarted daemon's label pass gave it back, 4-8
+ * minutes later (measured on BEAST and LothDesktop, 2026-11-26). Set before tar unpacks, so every file inherits it as it
+ * is made. Harmless with the fence off: it is what a Medium folder has anyway. A failure is said, never fatal: the
+ * daemon's own pass still gives it back.
+ */
+export function readBackScript(folderVar: string): string {
+  return `try {
+  if (-not ('FfStageLabel' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System; using System.Runtime.InteropServices;
+public static class FfStageLabel {
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint rev, out IntPtr sd, IntPtr size);
+  [DllImport("advapi32.dll", SetLastError = true)] public static extern bool GetSecurityDescriptorSacl(IntPtr sd, out bool present, out IntPtr sacl, out bool defaulted);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] public static extern uint SetNamedSecurityInfoW(string path, int type, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("kernel32.dll")] public static extern IntPtr LocalFree(IntPtr p);
+  public static uint Set(string path, string sddl) {
+    IntPtr sd; if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, out sd, IntPtr.Zero)) return (uint)Marshal.GetLastWin32Error();
+    try { bool p, d; IntPtr sacl; if (!GetSecurityDescriptorSacl(sd, out p, out sacl, out d)) return (uint)Marshal.GetLastWin32Error();
+      return SetNamedSecurityInfoW(path, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl); } finally { LocalFree(sd); }
+  }
+}
+"@
+  }
+  $lr = [FfStageLabel]::Set(${folderVar}, 'S:(ML;OICI;NW;;;ME)')
+  if ($lr -ne 0) { Write-Output "read-back label on $(${folderVar}) not set ($lr): the daemon's start gives it back" }
+} catch { Write-Output "read-back label on $(${folderVar}) not set: $($_.Exception.Message)" }`;
+}
+
+/**
  * Unpack the code bundle (a .tar.gz) into app.new in the daemon's folder with Windows' own tar. The bundle is
  * `file`, copied there by scp (a path, or a name in the user's home, where scp puts it; deleted after), else
  * $FFData (base64). The deploy uses scp: on some PCs stdin through sshd stalls after ~200 KB (END_MARK above).
@@ -360,6 +392,7 @@ if (-not (Test-Path -LiteralPath $tgz)) { throw "the code bundle $tgz did not ar
 $new = Join-Path $F 'app.new'
 if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Recurse -Force }
 New-Item -ItemType Directory -Force $new, (Join-Path $F 'logs') | Out-Null
+${readBackScript('$new')}
 ${from}
 # System32's bsdtar, not a Git or MSYS tar on the PATH (those read C: as a remote host).
 $r = Invoke-Native (Join-Path $env:SystemRoot 'System32\\tar.exe') @('-xzf', $tgz, '-C', $new)

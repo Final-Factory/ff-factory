@@ -605,6 +605,11 @@ test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir,
   assert.equal(up.code, 0, up.stderr);
   assert.ok(fs.existsSync(path.join(appDir, 'app.new', 'machine', 'daemon.ts')));
   assert.ok(!fs.existsSync(tgz), 'the uploaded bundle is deleted after unpacking');
+  // w5980: app.new carries the read fence's give-back label of its own (inherited by what tar made), so the rename to app
+  // keeps it readable to Low workers under a No-Read-Up daemon folder.
+  const lab = execFileSync('icacls', [path.join(appDir, 'app.new')], { encoding: 'utf8' });
+  assert.match(lab, /Mandatory Label\\Medium Mandatory Level:\(OI\)\(CI\)\(NW\)/, lab);
+  assert.doesNotMatch(up.stdout, /read-back label .* not set/, up.stdout);
 
   const npm = await runPs(win.npmScript(p.node!, 'abc1234', appDir), { env, timeoutMs: 8 * 60_000 });
   assert.equal(npm.code, 0, npm.stderr || npm.stdout);
@@ -818,4 +823,13 @@ test('logs: the real supervisor block, run by PowerShell over many restarts, kee
   assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.err.log').length, 3, 'empty err logs are not archived');
   maintainLogs(dir, { platform: 'win32' });
   assert.equal(listArchives(dir).filter((x) => x.base === 'daemon.log' && x.gz).length, 5);
+});
+
+test('w5980: the staged app.new gets the read fence give-back label before tar unpacks into it', () => {
+  for (const s of [win.uploadScript(), win.uploadScript('D:\ff', '.ff-factory-upload-1.tgz')]) {
+    const label = s.indexOf("[FfStageLabel]::Set($new, 'S:(ML;OICI;NW;;;ME)')");
+    assert.ok(label > s.indexOf("New-Item -ItemType Directory -Force $new"), 'after app.new is made');
+    assert.ok(label < s.indexOf("'-xzf'"), 'before tar makes its files, so they inherit it');
+    assert.match(s, /^"@$/m, 'the here-string closes at column 0');
+  }
 });
