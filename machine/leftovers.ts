@@ -61,6 +61,7 @@ import { gamePlayers, isUnityBinary, slotsDir, splitArgs, unityProcesses } from 
 import { inspectProcs, type ProcFacts } from './unityReaper.ts';
 import { askDaemon, orDaemon, procsMailbox, type ProcsAsk, type ProcsWho } from './procsBroker.ts';
 import { readShellGroups, shellGroupsDir, withShellGroups, type ShellGroup } from './shellGroups.ts';
+import { isLink } from '../server/fsLink.ts';
 
 const MIN = 60_000;
 
@@ -196,7 +197,8 @@ export interface LeftoverDeps {
   self(): number[];
   host: string;
   /** Why the signal could not be sent, when the platform says (taskkill's own words); nothing when sent or already gone. */
-  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void;
+  /** w5973: may answer later (Windows' taskkill, off the daemon's loop); awaited. */
+  kill(pid: number, signal: 'SIGTERM' | 'SIGKILL'): string | void | Promise<string | void>;
   exists(p: string): boolean;
   remove(p: string): void;
   sleep(ms: number): Promise<void>;
@@ -827,13 +829,13 @@ export class LeftoverReaper {
       return n;
     };
     const order = [...items].sort((a, b) => depth(b.c.p.pid) - depth(a.c.p.pid));
-    for (const { c } of order) d.kill(c.p.pid, 'SIGTERM');
+    for (const { c } of order) await d.kill(c.p.pid, 'SIGTERM');
     await d.sleep(LEFTOVER.TERM_WAIT_MS);
     const after = await d.procs().catch(() => [] as Proc[]);
     const left = order.filter(({ c }) => after.some((p) => p.pid === c.p.pid && p.cmd === c.p.cmd));
     const refused = new Map<number, string>();
     for (const { c } of left) {
-      const why = d.kill(c.p.pid, 'SIGKILL');
+      const why = await d.kill(c.p.pid, 'SIGKILL');
       if (why) refused.set(c.p.pid, why);
     }
     // w1983: what SIGKILL did not end is said so, once, and left for an hour: LothDesktop's watch said "ended" gh pid 24280
@@ -1518,7 +1520,7 @@ export function removeFenceProblem(p: string, root: string, o: { home: string; d
   } catch {
     return 'no such file or folder';
   }
-  if (st.isSymbolicLink()) return 'a symbolic link or junction: remove deletes real folders only, never a link (its target could be anywhere)';
+  if (st.isSymbolicLink() || isLink(p)) return 'a symbolic link or junction: remove deletes real folders only, never a link (its target could be anywhere)';
   let real: string;
   try {
     real = fs.realpathSync.native(p);
@@ -1772,11 +1774,11 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   let killed = 0;
   let todo = mine;
   for (let round = 0; todo.length && round < 3; round++) {
-    for (const p of todo) send(p.pid, 'SIGTERM');
+    for (const p of todo) await send(p.pid, 'SIGTERM');
     await wait(LEFTOVER.TERM_WAIT_MS);
     const after = await read.procs();
     const left = todo.filter((p) => after.some((x) => x.pid === p.pid && x.cmd === p.cmd));
-    for (const p of left) send(p.pid, 'SIGKILL');
+    for (const p of left) await send(p.pid, 'SIGKILL');
     killed += left.length;
     await wait(500);
     for (const p of todo) if (!ended.some((x) => x.pid === p.pid && x.cmd === p.cmd)) ended.push(p);

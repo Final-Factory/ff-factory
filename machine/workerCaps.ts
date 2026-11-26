@@ -402,7 +402,10 @@ export async function startWorkerCaps(o: CapsOptions): Promise<() => Promise<voi
   const finals: Array<() => Promise<void> | void> = [];
 
   const ps = o.ps ?? ((): PsRow[] => parsePs(spawnSync('ps', PS_ARGS, { encoding: 'utf8', timeout: 10_000 }).stdout ?? ''));
-  const cgroup = o.cgroup ?? (platform === 'linux' ? ownCgroup() : undefined);
+  // This process's own scope is the host's only when the host is this process (w5973): workerCaps.test.ts's watch of a
+  // fake host, run by an agent on a Linux PC, took the agent's own ffw-agent scope and its temp stop SIGKILLed that
+  // agent's claude (cgroup.procs below), twice on biscuit on 2026-11-26.
+  const cgroup = o.cgroup ?? (platform === 'linux' && host === process.pid ? ownCgroup() : undefined);
   const scoped = !!cgroup && /\/ffw-agent-[^/]+\.scope$/.test(cgroup);
   // The job helper's answers a kill waits for ("pids", "killed"): each waiter takes the line it is for.
   const jobWaiters: Array<(line: string) => boolean> = [];

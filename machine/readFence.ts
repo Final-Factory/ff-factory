@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN } from '../server/claudeHome.ts';
+import { fenceRootReadBack } from '../server/daemonReads.ts';
 
 /**
  * The read fence's mode on this machine (w5546 lockout review, lothsahn's rule: "warn-only first, enforce only after measured
@@ -124,7 +125,7 @@ function filesIn(dir: string): string[] {
  * refuse a closed folder's own open; a closed folder with no files is then not probed.
  * `owner`: the owner-secret paths closed with them (w5747).
  */
-export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; exists?: (p: string) => boolean; linux?: boolean; owner?: readonly string[] }): { closed: string[]; open: string[] } {
+export function readFenceProbeTargets(o: { root: string; appDir: string; secrets: readonly string[]; tokenFile?: string; allowBack: readonly string[]; rootBack?: readonly string[]; exists?: (p: string) => boolean; linux?: boolean; owner?: readonly string[] }): { closed: string[]; open: string[] } {
   const exists = o.exists ?? ((p: string) => fs.existsSync(p));
   const linux = o.linux ?? process.platform === 'linux';
   const closed = [
@@ -137,7 +138,8 @@ export function readFenceProbeTargets(o: { root: string; appDir: string; secrets
     // w5747: the owner's secrets (ownerSecrets.ts ownerReadDenied), so a probe that passes has run the rules on mode adds.
     ...(o.owner ?? []),
   ];
-  const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
+  // w5957 (N6): rootBack, what is given back in the root's own daemon folder (daemonReads.ts fenceRootReadBack), absolute.
+  const open = [...o.allowBack.map((a) => path.join(o.appDir, a)), ...(o.rootBack ?? []), path.join(o.appDir, 'app', 'machine', 'ghApp.ts')];
   const uniq = (l: string[]) => [...new Set(l)].filter(exists);
   const asProbed = linux ? closed.flatMap((p) => (exists(p) && isDir(p) ? filesIn(p) : [p])) : closed;
   return { closed: uniq(asProbed), open: uniq(open) };
@@ -231,12 +233,13 @@ export function sayReadProbe(mode: ReadFenceMode, os: string, v: ReadProbeVerdic
  * set, so Landlock grants them (it skips a path that is not there) and on Windows they take their own read-back label
  * rather than inheriting the daemon folder's No-Read-Up when made later.
  */
-export const READ_BACK_DIRS = ['logs', 'rpc', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions'];
+export const READ_BACK_DIRS = ['logs', 'rpc', 'unity-mcp', 'unity-slots', 'update', 'gh-app/bin', 'gh-app/sessions'];
 
-export function ensureReadBackDirs(appDir: string): void {
-  for (const d of READ_BACK_DIRS) {
+/** w5957: `root` also makes the given-back folders in the root's own daemon folder (daemonReads.ts FENCE_ROOT_READ_ALLOW). */
+export function ensureReadBackDirs(appDir: string, root?: string): void {
+  for (const d of root ? [...READ_BACK_DIRS, ...fenceRootReadBack(root)] : READ_BACK_DIRS) {
     try {
-      fs.mkdirSync(path.join(appDir, d), { recursive: true, ...(d === 'gh-app/sessions' ? { mode: 0o700 } : {}) });
+      fs.mkdirSync(path.resolve(appDir, d), { recursive: true, ...(d === 'gh-app/sessions' ? { mode: 0o700 } : {}) });
     } catch {
       // A folder that cannot be made is not given back; nothing else depends on it here.
     }

@@ -9,6 +9,7 @@ import { checkArray, readJsonDurable, writeJsonDurable } from '../../server/dura
 import { saveWork, untrackedProblem, type SaveResult } from '../../server/saveWork.ts';
 import { armScriptReimport } from '../../machine/scriptReimport.ts';
 import { CLEANUP_SOFT_GB_DEFAULT, DISK_CRITICAL_GB_DEFAULT, DISK_WARN_GB_DEFAULT } from '../../shared/types.ts';
+import { isLink, linkTarget, removeLink } from '../../server/fsLink.ts';
 
 /** <root>/devdrive.json: what devdrive.ps1 and the helper keep about the drive (the letter is the one source of truth). */
 export interface DevDriveState {
@@ -172,13 +173,7 @@ const realDriveIo = {
     }
   },
   exists: (p: string) => fs.existsSync(p),
-  isLink: (p: string) => {
-    try {
-      return fs.lstatSync(p).isSymbolicLink();
-    } catch {
-      return false;
-    }
-  },
+  isLink: (p: string) => isLink(p),
 };
 
 export type DevDriveDecision = { action: 'ensure'; why: string } | { action: 'none'; why: string };
@@ -263,16 +258,16 @@ export function linkRootFolders(root: string, target: { sandboxes: string; seed:
     if (!st) {
       junction(to, link);
       out.push({ name, action: 'created', detail: `${link} -> ${to}` });
-    } else if (st.isSymbolicLink()) {
+    } else if (isLink(link)) {
       let now = '';
       try {
-        now = fs.readlinkSync(link);
+        now = linkTarget(link);
       } catch {
         // dangling or unreadable: replaced below
       }
       if (norm(now) === norm(to)) out.push({ name, action: 'kept', detail: `${link} -> ${to}` });
       else {
-        fs.rmSync(link, { force: true, recursive: false });
+        removeLink(link);
         junction(to, link);
         out.push({ name, action: 'retargeted', detail: `${link} -> ${to} (was ${now || 'a missing folder'})` });
       }
@@ -290,8 +285,8 @@ export function linkRootFolders(root: string, target: { sandboxes: string; seed:
 /** Take a junction away without touching what it points at (rmdir on a junction removes the link only). */
 export function unlinkRootFolder(link: string): boolean {
   try {
-    if (!fs.lstatSync(link).isSymbolicLink()) return false;
-    fs.rmSync(link, { force: true, recursive: false });
+    if (!isLink(link)) return false;
+    removeLink(link);
     return true;
   } catch {
     return false;

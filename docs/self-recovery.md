@@ -239,6 +239,38 @@ paused listener is in SIGSTOP, so it does not poll at all. After SIGCONT it open
 `status=Busy` only if it was already stuck before the pause. What the pause can do is hide a stuck listener for as long
 as a bench turn lasts. Rule (b) picks it up 10 minutes after the turn ends.
 
+### Runner temp folders on macOS and Windows (w5999)
+
+On Linux each runner unit's `ff-runner-tmpdir.conf` drop-in (w5834) puts its temp files inside the worker root. The
+daemon does the same on macOS and Windows (`machine/runnerEnv.ts`, ticked once a minute, a real daemon only), so no
+runner writes `clr-debug-pipe-*`, `dotnet-diagnostic-*` or a job's scratch into the system temp folder:
+
+- **macOS.** Each `~/Library/LaunchAgents/actions.runner.*.plist` that runs `<dir>/runsvc.sh` of a configured runner
+  gets `EnvironmentVariables.TMPDIR` (`<dir>/_tmp` inside the root, `<root>/runner-tmp/<dir name>` outside it, short
+  enough for macOS's 104-byte socket paths) and `DOTNET_EnableDiagnostics=0`, written with `plutil -replace`. The plist
+  is the only place that reaches .NET's pipes: they open when the runtime starts, before the listener reads `.env`. This
+  writes outside the root, in the runner service's own configuration. The original is kept once in
+  `<root>/tmp/runner-env/`.
+- **Windows.** Each runner (the census' listeners and `<root>\ffu-runners\*` holding `.runner`) gets `TEMP`, `TMP`,
+  `TMPDIR` and `DOTNET_EnableDiagnostics=0` in its `.env`, which Runner.Listener loads into its own environment at start
+  (`LoadAndSetEnv`) and its workers inherit. A runner on C: would be written there too, said in the log.
+
+A listener that started without it (macOS: `launchctl print`'s `environment` block lacks it; Windows: it started before
+`.env` last changed) is restarted **once**, and only while idle: no worker under it, its log not busy, not paused by a
+bench turn or the load gate, not an operations runner, not a Windows service (`.service`), its 15-minute cooldown over,
+and still idle in a fresh census just before. macOS restarts it with `launchctl bootout` and `bootstrap` (a plain
+SIGTERM to `runsvc.sh` would stop it for good). Windows ends the listener with exit code 2, which `run-helper.cmd`
+answers by launching a new one in the same scheduled task.
+
+Recovery needs nobody: the restart is written to `<root>/tmp/runner-env.json` first. A restarted runner with no
+listener on two looks a minute or more after its restart (a launchd job that did not load; a Windows listener that gave
+up on "A session for this runner already exists" after its 4 minutes of retries and exited 5) is started again:
+`launchctl kickstart` or `bootstrap`, or its scheduled task or `run.cmd` (`runnerRestartScript`). That is tried at most
+every 10 minutes, never while a hold has the machine's runners or the load gate keeps that runner for its lift, and for
+up to 24 hours, then said and dropped. One seen back 6 minutes after its restart is done, and is never restarted again
+for that temp folder, across daemon restarts too. Every action is a `runner env:` line in the daemon log; nothing here
+ever stops an agent from starting. Tests: `server/w5999RunnerEnv.test.ts`.
+
 ### CI jobs go first on biscuit (w5322)
 
 lothsahn, 2026-11-23: "Also make check runs urgent priority on biscuit by the framework so they go first." biscuit's ffu

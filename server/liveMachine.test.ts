@@ -35,8 +35,11 @@ test('live: the game channel file and its folder per OS', () => {
 });
 
 test('w5306: the session file is read in FF_GAME_DATA_DIR first, then in the old folder (a branch from before game PR #4237)', () => {
-  const env = { FF_GAME_DATA_DIR: '/ffw/gamedata/ ' };
-  assert.deepEqual(agentControlDirs(env, 'linux', '/home/b'), [path.join('/ffw/gamedata', 'AgentControl'), path.join('/home/b', '.config', 'unity3d', 'Never Games', 'finalfactory', 'AgentControl')]);
+  // w5915: an empty folder of its own: '/ffw/gamedata' is the real game data folder on a Windows worker (F:\ffw\gamedata on
+  // BEAST), and its sandboxes' folders were read in too (machine/gameData.ts sandboxGameDataDirs).
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'live-data-'));
+  const env = { FF_GAME_DATA_DIR: `${data} ` };
+  assert.deepEqual(agentControlDirs(env, 'linux', '/home/b'), [path.join(data, 'AgentControl'), path.join('/home/b', '.config', 'unity3d', 'Never Games', 'finalfactory', 'AgentControl')]);
   assert.deepEqual(agentControlDirs({}, 'linux', '/home/b'), [agentControlDir('linux', '/home/b')]);
   assert.deepEqual(agentControlDirs({ FF_GAME_DATA_DIR: '  ' }, 'win32', 'C:/Users/x'), [agentControlDir('win32', 'C:/Users/x')]);
   const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'live-new-'));

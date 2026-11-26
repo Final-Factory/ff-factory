@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN } from '../server/claudeHome.ts';
 import type { SpawnedProcess, SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
-import { FENCE_READ_ALLOW } from '../server/daemonReads.ts';
+import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { openChildren } from './lowIntegrity.ts';
 import { STORE_CHILD } from './storeLock.ts';
 import { sessionIdOf } from '../server/workerFence.ts';
@@ -70,7 +70,7 @@ export function readLockArgs(p: { root: string; appDir?: string; noRead?: string
   const root = path.resolve(p.root);
   const app = p.appDir ? path.resolve(p.appDir) : path.join(root, 'daemon');
   const closed = [...new Set([app, path.join(root, 'daemon'), path.join(root, 'secrets'), path.join(root, 'root.json'), ...DAEMON_ONLY_CHILDREN.map((c) => path.join(root, c)), ...(p.noRead ?? [])])];
-  const back = [...FENCE_READ_ALLOW.map((a) => path.join(app, a)), ...(p.read ?? [])];
+  const back = [...FENCE_READ_ALLOW.map((a) => path.join(app, a)), ...fenceRootReadBack(root), ...(p.read ?? [])];
   return [...closed.flatMap((c) => ['--no-read', c]), ...back.flatMap((b) => ['--read', b])];
 }
 
