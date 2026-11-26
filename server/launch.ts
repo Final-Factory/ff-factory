@@ -161,6 +161,8 @@ export interface LaunchSpec {
     publicIdentity?: { repos: string[]; name?: string; email?: string };
     /** The machine's worker install folder (w896): the guard refuses a delete outside it. An older daemon ignores it. */
     workerRoot?: string;
+    /** w6050: "on" refuses a shell write into a system temp folder (server/tmpWriteFence.ts); "warn" or absent (an older portal) only notes it. */
+    tmpWriteFence?: 'warn' | 'on';
     /**
      * w936: the machine's main clone, when a request this worker serves was granted work there (mainCloneAccess): the guard
      * then judges commands naming it one by one (server/mainCloneGuard.ts). An older daemon ignores it and refuses them all.
@@ -675,6 +677,7 @@ export function buildOptions(spec: LaunchSpec, handlers: Partial<Record<CatalogT
       denyToolPrefixes: g.denyToolPrefixes,
       publicIdentity: g.publicIdentity,
       workerRoot: g.workerRoot,
+      tmpWriteEnforce: g.tmpWriteFence === 'on',
       ...(g.daemonReads ? { daemonReads: g.daemonReads } : {}),
       mainClone: g.mainClone,
       ...(g.privacy ? { privacy: privacyContext(g, agentEnv) } : {}),

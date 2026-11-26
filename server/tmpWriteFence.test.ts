@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkSystemTempWrite, isSystemTemp, systemTempWrites, tmpWriteHook, tmpWriteMessage, type TmpWriteContext } from './tmpWriteFence.ts';
+import { sandboxGuard } from './guard.ts';
 
 // The three OSes' worker folders, as their daemons set them (FF_WORKER_ROOT, TMPDIR, the sandbox).
 const LINUX: TmpWriteContext = {
@@ -186,4 +187,90 @@ test('w6022 review: a parse that throws notes nothing and logs nothing (the hook
   const out = await hook({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'echo hi > /tmp/x' }, cwd: LINUX.cwd } as never, undefined, { signal: new AbortController().signal });
   assert.deepEqual(out, {});
   assert.deepEqual(lines, []);
+});
+
+test('w6040 re-review: the 20 parser mismatches of its probe', () => {
+  const sees = (cmd: string, ctx = LINUX) => assert.notEqual(paths(cmd, ctx).length, 0, cmd);
+  const passes = (cmd: string, ctx = LINUX) => assert.deepEqual(paths(cmd, ctx), [], cmd);
+  // cp -T is "no target folder", not -t: its destination is the last word
+  passes('cp -T /tmp/a ./b');
+  sees('cp -T ./a /tmp/b');
+  // a heredoc fed to a shell runs its body, whatever wraps the shell
+  for (const cmd of ["sudo bash <<'EOF'\ncp a /tmp/x\nEOF", "timeout 60 bash <<'EOF'\ncp a /tmp/x\nEOF", "cat <<'EOF' | bash\ncp a /tmp/x\nEOF"]) sees(cmd);
+  passes("cat <<'EOF' > notes.md\ncp a /tmp/x\nEOF");
+  // an unquoted heredoc runs its $(...) while the text is read
+  sees('cat <<EOF > notes.md\n$(cp a /tmp/x)\nEOF');
+  passes("cat <<'EOF' > notes.md\n$(cp a /tmp/x)\nEOF");
+  // git: worktree add -b, global -c, -C into a temp folder
+  sees('git worktree add -b topic /tmp/wt');
+  sees('git -c core.autocrlf=false clone https://x/y.git /tmp/y');
+  sees('git -C /tmp/y commit -m x');
+  passes('git -C /tmp/y log --oneline');
+  passes('git worktree add -b topic ../wt');
+  // in-place edits, find -delete, archives
+  sees('sed -i "s/a/b/" /tmp/conf');
+  sees("perl -pi -e 's/a/b/' /tmp/conf");
+  passes("sed 's/a/b/' /tmp/conf");
+  sees('find /tmp/old -name "*.log" -delete');
+  passes('find /tmp/old -name "*.log"');
+  sees('zip -r /tmp/out.zip .');
+  sees('7z a /tmp/out.7z .');
+  sees('7z x a.7z -o/tmp/out');
+  // tools' own output folders
+  sees('pip install --target /tmp/site x');
+  sees('pip3 install -t /tmp/site x');
+  sees('gh run download 123 -D /tmp/art');
+  sees('gh run download 123 --dir /tmp/art');
+  // pointing the temp variables at a system temp folder
+  sees('TMPDIR=/tmp npm ci');
+  sees('export TMPDIR=/tmp');
+  passes('TMPDIR="$TMPDIR/x" npm ci');
+  sees("$env:TEMP = 'C:\\Windows\\Temp'", WIN);
+  // PowerShell archives, transcripts and .NET file calls
+  sees("Compress-Archive -Path . -DestinationPath 'C:\\Windows\\Temp\\a.zip'", WIN);
+  sees("Expand-Archive a.zip -DestinationPath C:\\Users\\loth\\AppData\\Local\\Temp\\a", WIN);
+  sees('Start-Transcript C:\\Users\\loth\\AppData\\Local\\Temp\\t.txt', WIN);
+  sees("[IO.File]::WriteAllText('C:\\Windows\\Temp\\x.txt', 'hi')", WIN);
+  sees("[System.IO.Directory]::CreateDirectory('C:\\Windows\\Temp\\d')", WIN);
+  passes("[IO.File]::ReadAllText('C:\\Windows\\Temp\\x.txt')", WIN);
+  // macOS screencapture writes its file
+  sees('screencapture -x /tmp/shot.png', MAC);
+});
+
+test('w6050: the PreToolUse guard refuses a temp write when tmpWriteEnforce is on, and lets it run when it is not', async () => {
+  const run = async (g: ReturnType<typeof sandboxGuard>, command: string, tool = 'Bash') => {
+    const r = (await g({ hook_event_name: 'PreToolUse', tool_name: tool, tool_input: { command }, tool_use_id: 'x', session_id: 's', transcript_path: '', cwd: LINUX.cwd } as never, 'x', { signal: new AbortController().signal })) as {
+      hookSpecificOutput?: { permissionDecision?: string; permissionDecisionReason?: string };
+    };
+    return r.hookSpecificOutput;
+  };
+  const base = { sandboxId: 'slot3', sandboxPath: LINUX.sandbox!, protectedPaths: ['/home/biscuit/mainrepo'], workerRoot: LINUX.root, env: LINUX.env, home: LINUX.home };
+  const on = sandboxGuard({ ...base, tmpWriteEnforce: true });
+  const warn = sandboxGuard({ ...base, tmpWriteEnforce: false });
+  const denied = await run(on, 'git show HEAD:server/x.ts > /tmp/bq_head.ts');
+  assert.equal(denied?.permissionDecision, 'deny');
+  assert.equal(denied?.permissionDecisionReason, checkSystemTempWrite('git show HEAD:server/x.ts > /tmp/bq_head.ts', LINUX));
+  assert.equal((await run(on, 'Set-Content -Path /tmp/x.txt -Value hi', 'PowerShell'))?.permissionDecision, 'deny');
+  assert.equal((await run(warn, 'git show HEAD:server/x.ts > /tmp/bq_head.ts'))?.permissionDecision, undefined);
+  // the worker's own temp folder, reads of /tmp and text that only names /tmp all run
+  for (const cmd of ['git show HEAD:server/x.ts > "$TMPDIR/bq_head.ts"', 'cat /tmp/x', 'ls /tmp', 'echo "never write /tmp/x"', 'grep -rn /tmp server'])
+    assert.equal((await run(on, cmd))?.permissionDecision, undefined, cmd);
+});
+
+test("w6050: real temp writes from workers' transcripts (Nov 12-26) are all seen, and everyday reads of /tmp are not", () => {
+  for (const cmd of [
+    'git show HEAD:machine/benchQueue.ts > /tmp/bq_head.ts 2>/dev/null || true',
+    `for f in a b; do awk '/x/{p=1} p{print}' "$f"; done > /tmp/readers_dump.txt 2>/dev/null`,
+    "git diff --name-only a b -- 'Assets/Scripts/NetworkOperations' | sort > /tmp/x_changed.txt 2>/dev/null",
+    'git merge-tree --write-tree --merge-base=$c^1 origin/pre-1.0 $c > /tmp/mt_$c.txt; echo rc=$?',
+    "mkdir -p /tmp/mapw && cat > /tmp/mapw/ff1.py <<'EOF'\nimport re\nEOF",
+    'git diff main -- server/opsWorker.ts > /tmp/tl.diff 2>&1; wc -l /tmp/tl.diff',
+  ])
+    assert.notEqual(paths(cmd, LINUX).length, 0, cmd);
+  for (const cmd of [
+    'cat /tmp/x', 'ls -la /tmp', 'wc -l /tmp/tl.diff', 'diff /tmp/a b', 'tar -tzf /tmp/a.tgz', 'tar -czf "$TMPDIR/a.tgz" /tmp/src',
+    'cp /tmp/a "$TMPDIR/b"', 'find /tmp -name "*.log" -mtime +1', 'export PATH=/tmp/bin:$PATH', 'zip -sf /tmp/a.zip', 'git -C /tmp/y status',
+    'unzip -l /tmp/a.zip', '7z l /tmp/a.7z', 'echo hi > "$UNSET_VAR/x"',
+  ])
+    assert.deepEqual(paths(cmd, LINUX), [], cmd);
 });

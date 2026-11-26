@@ -459,29 +459,70 @@ Measured with the generated profile unless noted:
   (guess: `~/Library/Accessibility/*.sqlite`, which editors hold open), refused without effect.
 - Batch player build: see the w5333 PR.
 
-## Shell writes into the system temp folders (w6008, warn-only)
+## Shell writes into the system temp folders (w6008, refused since w6050)
 
 lothsahn (w5823): "under no circumstances should workers write outside of ffw". The OS fences refuse a write into `/tmp`, but
 a shell redirect still leaves the empty file behind: w5834's hour diff of biscuit's `/tmp` (2026-11-26, 08:49-09:52 UTC) found
 `/tmp/bq_head.ts`, 0 bytes, from the w5973 worker's `git show HEAD:machine/benchQueue.ts > /tmp/bq_head.ts`, which printed
 Permission denied. No worker may delete it, so it stays.
 
-`server/tmpWriteFence.ts` reads a Bash or PowerShell command's text for writes into a system temp folder: `/tmp`, `/var/tmp`,
-`/private/tmp`, `/var/folders` (every OS; Git Bash's `/tmp` on Windows too), `C:\Users\<u>\AppData\Local\Temp` and
-`C:\Windows\Temp`. A write is a redirect (`>`, `>>`, `2>`, `&>`, `*>`), a write verb (tee, Tee-Object, Out-File, Set-Content,
-New-Item, touch, mkdir), the destination of cp / Copy-Item / rsync / robocopy and both ends of a move, a delete, `mktemp` given
-a folder or template there, an output flag (`-o` of curl and sort, `--output`, `-OutFile`, `-logFile`, `dd of=`, `unzip -d`,
-`tar -C` on extract, `tar -cf`, ffmpeg's output) and `git clone` / `git worktree add` into one, after a `cd` there, or inside
-`bash -c` and `powershell -Command`. A path inside the install folder, the worker's own temp folder or its sandbox is never
-one, whatever variable spells it (`$TMPDIR`, `%TEMP%` and `$env:TEMP` resolve through the worker's env, which points them
-inside ffw). Bare `mktemp` uses `$TMPDIR` and passes. Like the rest of the guard it reads text: a script, a python `open()` or
-an unknown variable is not seen.
+**The guard refuses such a write** (w6050). The PreToolUse guard (server/guard.ts, `sandboxGuard`'s `tmpWriteEnforce`) runs
+`checkSystemTempWrite` on every Bash and PowerShell command before it runs. It refuses one that writes into a system temp
+folder outside the worker's own folders and names its own `$TMPDIR` (`tmpWriteMessage(..., 'refuse')`). The command does not run,
+so nothing is left behind.
 
-**Warn-only for now** (lothsahn's lockout rule): a PostToolUse hook (`tmpWriteHook`, wired in server/sessions.ts) tells the
-worker what it wrote and where its own temp folder is, and the daemon log gets one line per command,
-`tmp write fence (w6008, warn): <session> <tool>: <path> (<how>)`. Nothing is refused, so nothing can lock a worker out, and
-reverting the PR is the whole recovery. The enforcing change, a separate and independently reviewed PR, adds
-`checkSystemTempWrite` to the PreToolUse guard (server/guard.ts) once those log lines show no false refusal.
+`server/tmpWriteFence.ts` reads the command's text. The system temp folders are:
+- `/tmp`, `/var/tmp`, `/private/tmp` and `/var/folders`, on every OS (Git Bash's `/tmp` on Windows too);
+- `C:\Users\<u>\AppData\Local\Temp` and `C:\Windows\Temp` on Windows.
+
+On Windows, Git Bash mounts `/tmp` on the temp folder of whichever session started its first shell. That folder is inside ffw
+(`cygpath -w /tmp` gave `V:\ffw\tmp\ffa-93122ec3`, another session's folder, on lothdesktop). So the rule is "outside your own
+folders", not "outside ffw": a write there lands in another worker's folder and is refused too.
+
+These count as writes:
+- a redirect: `>`, `>>`, `2>`, `&>`, `*>`;
+- a write verb: tee, Tee-Object, Out-File, Set-Content, New-Item, touch, mkdir, Start-Transcript, screencapture;
+- the destination of cp, Copy-Item, rsync or robocopy (`cp -T` is not `-t`), and both ends of a move;
+- a delete, and `find ... -delete` on its roots;
+- an in-place edit: `sed -i`, `perl -pi`;
+- `mktemp` given a folder or template there;
+- an output flag: `-o` of curl and sort, `--output`, `-OutFile`, `-DestinationPath`, `-logFile`, `dd of=`, `unzip -d`,
+  `tar -C` on extract, `tar -cf`, ffmpeg's output, `pip --target` or `-t`, `gh run download -D` or `--dir`, a zip or
+  `7z a` archive and `7z -o`;
+- git writing into such a folder: `git clone` or `git worktree add` into one, `git init`, and `git -C <dir>` with a writing
+  subcommand (commit, add, checkout, fetch, and so on; not log, status or show);
+- `TMPDIR=`, `TEMP=` or `TMP=` set to one, as a prefix, by `export`, or by `$env:TEMP =`;
+- `[IO.File]::Write...`, `Copy`, `Move`, `Delete` and `[IO.Directory]::Create...` calls with a quoted path there.
+
+The reader follows a `cd` there, and reads inside `bash -c` and `powershell -Command`. A heredoc's body is text, unless
+the heredoc feeds a shell (`bash <<EOF`, `sudo bash`, `timeout 60 bash`, `cat <<EOF | bash`). An unquoted heredoc's
+`$(...)` runs, so it is read. An unset variable after a literal folder keeps the folder known (`> /tmp/mt_$c.txt`). One
+before any folder (`$X/out`) leaves nothing known, so it passes.
+
+A path inside the install folder, the worker's own temp folder or its sandbox is never a write here, whatever variable spells
+it (`$TMPDIR`, `%TEMP%` and `$env:TEMP` resolve through the worker's env, which points them inside ffw). Bare `mktemp` uses
+`$TMPDIR` and passes. Reads of a temp folder pass: cat, ls, grep, diff, `tar -t`, `unzip -l`, `zip -sf`, `git -C /tmp/x status`.
+Like the rest of the guard, it reads text: a script, a python `open()` or an unknown variable is not seen.
+
+**After it ran** (the w6008 warn stage, kept): a PostToolUse hook (`tmpWriteHook`, wired in server/sessions.ts) still notes
+what the guard did not refuse. That happens only in `warn` mode, or for a command the guard let through because its parse
+threw. The daemon log gets one line per command: `tmp write fence (w6008, warn): <session> <tool>: <path> (<how>)`.
+
+**The recovery switch, which needs nobody at the machine:** config `tmpWriteFence`, an owner's key (`set_app_config` or the
+portal's settings).
+- `"on"` (unset) refuses.
+- `"warn"` stops refusing, and only the after-the-run note stays.
+
+The portal sends the mode in each worker's launch spec, so a change reaches a worker when its process next starts: at its
+next turn. A daemon older than w6050 ignores the field and only warns. Three things keep a parser bug from locking a worker
+out:
+- a parse that throws lets the command run (`try`/`catch` around `checkSystemTempWrite` in the guard);
+- the refusal names the folder to use instead, so the worker can redo the command into `$TMPDIR`;
+- the fence refuses only writes into system temp folders, so every other command runs as before.
+
+Before the switch, w6050 replayed 13 real temp writes from workers' transcripts (2026-11-12 to 11-26) and 28 everyday
+commands that read a temp folder through the parser. All 13 writes were seen and none of the 28 reads was refused
+(server/tmpWriteFence.test.ts, "real temp writes").
 
 ## Known limits
 

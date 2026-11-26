@@ -185,7 +185,9 @@ import { OLDEST_DAEMON_PROTOCOL, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION } from
 // page then shows no ffu slots section).
 // w5972 (no bump): `agents` (the daemon's census of the agents it counts against its caps) on `stats`, optional; an older
 // portal drops it and an older daemon never sends it (the portal then warns of no count mismatch for that machine).
-const DECIDED = { protocol: 9, fingerprint: 'f61f67af9097125a' };
+// w6050 (no bump): `tmpWriteFence` ('warn' | 'on') on the launch spec's guard, optional; an older daemon ignores it (its
+// workers then only warn after the run), and an older portal never sends it (launch.ts then reads it as warn).
+const DECIDED = { protocol: 9, fingerprint: '726eb73391f0f973' };
 
 /** The messages (machineProtocol.ts from DaemonSandbox on) and the launch spec (launch.ts LaunchSpec), without comments or spaces. */
 function protocolSurface(root = path.join(import.meta.dirname, '..')): string {

@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { holdersScript, parseHolders, type Holder } from './agentNodeHolders.ts';
+import { currentAccount } from '../machine/lowIntegrity.ts';
 
 /**
  * The agents' node on a Windows worker root (w1742; lothsahn, 2026-10-22: "we're making random folders under the temp
@@ -53,6 +54,8 @@ export interface AgentNodeDeps {
   holders?: (dirs: string[], o: { writesOnly: boolean }) => Promise<Holder[]>;
   /** Tests: how long to wait between tries of a rename refused while the holders end (2 s). */
   retryMs?: number;
+  /** The account the daemon runs as, as icacls names it (currentAccount by default; tests pass their own). */
+  account?: string;
 }
 
 export type AgentNodeResult = 'current' | 'installed' | 'busy' | 'skipped' | 'failed';
@@ -451,6 +454,19 @@ export async function ensureAgentNode(root: string, d: AgentNodeDeps): Promise<A
     fs.mkdirSync(tools, { recursive: true });
     fs.mkdirSync(medium, { recursive: true });
     fs.mkdirSync(stage);
+    // Setting the label below needs WRITE_OWNER, which Modify lacks: where the account's write to the stage comes from a
+    // group's Modify (BEAST's F:\ffw inherits Authenticated Users:(M) from the drive, and the daemon's token is not
+    // elevated, so Administrators:(F) does not count) icacls answered "Access is denied" on every rollout and no node was
+    // put there (w6068). The ACL is the cause, not ReFS, the owner or the caller's integrity: on BEAST's F:, a folder with
+    // that ACL, owned by the daemon's account and labelled at the caller's own level, was denied, and labelled once the
+    // owner had granted itself Full (measured as in lowIntegrity.ts labelLow, w5402). The owner may always change the
+    // DACL, so the account gets Full on the stage before anything is unpacked into it: every entry of the node then holds
+    // it inherited, none of its own, which is what labelProblem asks of tools\node after the rename.
+    const account = d.account ?? currentAccount();
+    if (account) {
+      const g = await d.exec('icacls', [stage, '/grant', `${account}:(OI)(CI)F`], { timeoutMs: 60_000 });
+      if (g.code !== 0) throw new Error(`could not give ${account} Full on ${stage}, which labelling it Medium needs: ${(g.stderr || g.stdout).trim().slice(-200)}`);
+    }
     const bytes = await pinnedZip(medium, d);
     const zip = path.join(stage, AGENT_NODE.zip);
     fs.writeFileSync(zip, bytes);
