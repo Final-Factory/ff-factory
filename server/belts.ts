@@ -59,7 +59,7 @@ export const ALWAYS_LOADED: Readonly<Record<'dispatcher' | 'personal', ReadonlyS
  * The tools of a role. `guard` (dispatcher) is asked before a user_asked tool runs, with the work_id it was given;
  * it answers why not, or undefined. Those tools gain an optional work_id for it.
  */
-export function beltFor<T extends BeltTool>(role: BeltRole, all: readonly T[], guard?: (tool: string, workId: string | undefined) => string | undefined): T[] {
+export function beltFor<T extends BeltTool>(role: BeltRole, all: readonly T[], guard?: (tool: string, workId: string | undefined, args?: Record<string, unknown>) => string | undefined): T[] {
   if (role !== 'dispatcher') return all.filter((t) => hasTool(role, t.name));
   // A tool the manifest does not list yet is the dispatcher's alone (toolManifest.test.ts fails until it is listed).
   return all
@@ -70,7 +70,7 @@ export function beltFor<T extends BeltTool>(role: BeltRole, all: readonly T[], g
         ...t,
         schema: 'work_id' in t.schema ? t.schema : { ...t.schema, work_id: z.string().optional().describe('The request (w12) this serves, when a person asked for it through their orchestrator.') },
         handler: async (args: Record<string, unknown>) => {
-          const why = guard(t.name, typeof args.work_id === 'string' ? args.work_id : undefined);
+          const why = guard(t.name, typeof args.work_id === 'string' ? args.work_id : undefined, args);
           if (why) return { content: [{ type: 'text' as const, text: `ERROR: ${why}` }], isError: true };
           return t.handler(args);
         },

@@ -1049,6 +1049,23 @@ function splitHold(v: unknown): { hold?: Record<string, string>; except?: Record
   return { ...(Object.keys(hold).length ? { hold } : {}), ...(Object.keys(except).length ? { except } : {}) };
 }
 
+/**
+ * w5895: what the running server holds for `key` after set_app_config wrote `after`, read from the live config object (not
+ * the value passed in), and whether it matches. A secret's value is never read back. placement.hold is compared in the split
+ * form it is kept in (splitHold).
+ */
+export function readBackSetting(cfg: Config, key: SettableKey, after: unknown): { live: unknown; ok: boolean } {
+  if (SECRET_KEYS.has(key)) return { live: after, ok: true };
+  if (key === 'placement.hold') {
+    const want = splitHold(after);
+    const live = { hold: cfg.placement?.hold, except: cfg.placement?.holdExcept };
+    return { live: after === undefined ? undefined : live, ok: JSON.stringify(want.hold ?? {}) === JSON.stringify(live.hold ?? {}) && JSON.stringify(want.except ?? {}) === JSON.stringify(live.except ?? {}) };
+  }
+  const live = getPath(cfg, key);
+  // Removed (undefined): the server falls back to its default, which the config object may hold.
+  return { live, ok: after === undefined || JSON.stringify(live) === JSON.stringify(after) };
+}
+
 export function setAppConfig(file: string, cfg: Config, key: SettableKey, value: unknown, opts: { machine?: string; users?: readonly string[] } = {}): { before: unknown; after: unknown } {
   if (!SETTABLE_KEYS.includes(key)) throw new Error(`${key} cannot be changed by an agent; allowed: ${SETTABLE_KEYS.join(', ')}`);
   const perMachine = key === 'machines.githubFromVault' || key.startsWith('machines.activityPause.') || key.startsWith('machines.personPlay.') || (key.startsWith('machines.cleanup.') && key !== 'machines.cleanup.staleOutput');
