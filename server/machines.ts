@@ -12,6 +12,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
+import { CensusWatch, censusOf, type PortalCounted, type PortalSeen } from './agentCensus.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { AnsweredCalls } from './answeredCalls.ts';
@@ -1579,6 +1580,33 @@ export class MachineManager {
     return this.capFull(m);
   }
 
+  /** w5972: each machine's daemon's census against the portal's own count, warn only. */
+  private readonly census = new CensusWatch();
+
+  /**
+   * w5972: compare what `id`'s daemon counts against its agent limits (its stats' census) with what this portal counts there
+   * (runningIn: reported mid-turn, or a turn sent and not yet reported), and log a lasting difference by session id. Warn
+   * only (lothsahn's lockout rule): nothing is stopped, dropped or placed by it. A daemon before w5972 sends none.
+   */
+  private noteCensus(id: string, raw: unknown) {
+    const census = censusOf(raw);
+    if (!census) return;
+    const portal: PortalCounted[] = [...this.sessions.sessions.values()]
+      .filter((s) => s.info.machineId === id && (isMidTurn(s.info) || this.isStarting(s)))
+      .map((s) => ({ id: s.info.id, ...(s.info.machineSandbox ? { sandbox: s.info.machineSandbox } : {}), status: s.info.status, live: s.live, starting: !isMidTurn(s.info) }));
+    const seen = (sid: string): PortalSeen => {
+      const h = this.sessions.sessions.get(sid);
+      return h ? { ...(h.info.machineId ? { machine: h.info.machineId } : {}), status: h.info.status, live: h.live } : undefined;
+    };
+    const line = this.census.note(id, census, portal, seen, Date.now());
+    if (line) console.warn(`machine ${id}: ${line}`);
+  }
+
+  /** The census `id`'s daemon sent last, and when (w5972; for the enforce stage, read by nothing that acts yet). */
+  daemonCensus(id: string) {
+    return this.census.lastOf(id);
+  }
+
   /** Agents mid-turn on a machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */
   midTurnTotal(id: string) {
     return this.runningIn(id, '*') + this.runningIn(id, undefined);
@@ -2470,6 +2498,7 @@ export class MachineManager {
 
   private detach(id: string) {
     this.links.delete(id);
+    this.census.forget(id);
     this.hellos.delete(id);
     this.voices.delete(id);
     this.voiceDown.delete(id);
@@ -2929,6 +2958,7 @@ export class MachineManager {
         this.noteCpu(id, msg.stats.loadPct);
         emit({ type: 'machine_stats', id, stats: pageStats(stats) });
         if (Array.isArray(msg.benchWarnings) && msg.benchWarnings.length) this.onBenchWarnings?.(id, msg.benchWarnings);
+        this.noteCensus(id, msg.agents);
         return;
       }
       case 'usage':
