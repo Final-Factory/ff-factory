@@ -820,7 +820,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - **The programs the daemon runs from the root stay out of workers' reach** (w5838). Before, `tools\low` and
     `tools\unity-low` were labelled Low, so a Low worker could replace a copy or turn a junction, and the next sandbox agent
     ran its program with that agent's vault tokens, a probe with the daemon's whole environment, an editor through it.
-    - `tools\low`, `tools\unity-low` and `tools\shims` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`): a worker
+    - `tools\low`, `tools\unity-low` and `tools\shims` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`; `tools-medium\shims` too, w6101): a worker
       cannot add, rename or delete a file in them, so neither a copy nor a DLL beside it can be planted.
     - Each copy is locked in one call before it takes its name (w5904, `lockCopyScript`): SetNamedSecurityInfoW sets its
       read-only access list (read and run for the account and OWNER RIGHTS, Full for SYSTEM and Administrators, nothing
@@ -854,9 +854,19 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`).
     - A junction is made again unless it leads to its Unity (`junctionLeadsTo`) and carries no Low label of its own (w5877:
       a worker could have labelled it while the folder was Low, and turn it later).
-    - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to `<root>\tools\shims`,
-      not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included; the old `bin` is
-      removed.
+    - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to
+      `<root>\tools-medium\shims` (w6101; `<root>\tools\shims` from w5838), not the mailbox's `bin` (Low), because every
+      agent's `PATH` starts there, Medium agents included; the old `bin` is removed.
+    - **The one name for the shims folder is `<root>/tools-medium/shims`** on every OS (w6101; `enforcedShimDir` in
+      `machine/pathFence.ts`, `windowsShimsDir` and `windowsShims` in `machine/lowIntegrity.ts`). `tools-medium` is never
+      labelled Low, but a rollout before w5539 labelled it Low and nothing undid that, so `lowTargets` keeps it and its
+      `shims` Medium (labelLow relabels one that reads Low): a Low worker can neither rename the folder away nor plant a
+      command in it. At each start the daemon logs `WARNING` for every file there it does not write (`strayShimFiles`,
+      `WINDOWS_SHIM_FILES`) and leaves it (warn first, lothsahn's lockout rule). A failed write there falls back to
+      `tools\shims`, which is Medium too, with a `WARNING`, so recovery needs nobody at the machine.
+    - `<root>\tools\shims` is still written, and kept Medium (`MEDIUM_TOOLS`), for agent hosts started before the move,
+      which keep it first on their `PATH`; the start line says how many hosts have it (`hostsWithPathDir`). Its removal,
+      once none has, and taking `shims` out of `MEDIUM_TOOLS` come in their own change.
 - A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).

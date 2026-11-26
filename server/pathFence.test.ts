@@ -21,7 +21,7 @@ test('w5899: the path fence is on when unset on macOS and Linux, warn or off onl
     assert.equal(pathFenceMode('warn', p), 'warn', p);
     assert.equal(pathFenceMode('off', p), 'off', `${p}: the recovery switch`);
   }
-  assert.equal(pathFenceMode(undefined, 'win32'), 'off', 'Windows: its shims are in <root>/tools/shims (w5838)');
+  assert.equal(pathFenceMode(undefined, 'win32'), 'off', 'Windows: its shims are in <root>/tools-medium/shims (w6101)');
   const root = path.resolve('/r');
   const mailbox = path.join(root, 'unity-slots');
   assert.equal(shimDirFor('on', mailbox, root), path.join(root, 'tools-medium', 'shims'));
