@@ -585,6 +585,11 @@ Between owners (the `owner` role, `Orchestrators.isOwnerRole`; non-owners keep t
   `server/resumeMove.test.ts`.
 - **Limits stay per sender.** The follow-up count is per sender orchestrator and worker (`followUps`, keyed by the
   sender's chat): Lothsahn's three to Ben's worker use none of Ben's, and only Lothsahn writing starts his again.
+- **A worker's shell command reaches a person only after FF Factory asked it for another route** (w5914, lothsahn:
+  "Make this part of the FF harness, not just your rules for yourself"): the first ask of a Bash or PowerShell command is
+  denied with a nudge and no card; a card goes up only when the worker answers "No other route: <reason>", with that reason
+  on it, and a request to build the route is filed (low risk goes ahead; anything else waits for lothsahn). A message to
+  the worker, its turn ending, or the route deploying clears the card. Details: [bash-nudge.md](bash-nudge.md).
 - **An owner answers any worker's permission request, and it is recorded** (w891, Lothsahn: "I should be able to
   approve Ben's shell command requests and vice versa"). w876, Ben's disk clean-up worker, waited over 15 minutes for a Bash
   approval and Lothsahn saw nothing: the server never refused him (`POST /api/sessions/<id>/permission` ran no check on a

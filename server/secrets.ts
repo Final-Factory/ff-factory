@@ -1,4 +1,4 @@
-import { HOST_ROLES, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole } from './config.ts';
+import { HOST_ROLES, dispatcherPoolOf, pinnedVaultEntry, type ClaudeAccount, type Config, type HostRole } from './config.ts';
 import type { Requester, SessionInfo, SessionKind } from '../shared/types.ts';
 import { PoolHeldError, isSamePerson, vaultContext, type VaultContext, type VaultRole } from './vault.ts';
 import { githubFromVault } from './githubTokens.ts';
@@ -289,14 +289,17 @@ export const hostRole = (_kind: SessionKind): HostRole => 'orchestrator';
  */
 export function hostAccount(cfg: Pick<Config, 'claudeAccounts'>, role: HostRole): ClaudeAccount {
   const v = cfg.claudeAccounts?.[role];
-  return role === 'dispatcher' && pinnedVaultEntry(v) !== undefined ? v! : 'vault';
+  return role === 'dispatcher' && (pinnedVaultEntry(v) !== undefined || dispatcherPoolOf(v) !== undefined) ? v! : 'vault';
 }
+
+/** The person whose own pool the dispatcher runs on (claudeAccounts.dispatcher "pool:<login>", w5891), or undefined. */
+export const dispatcherPoolPerson = (cfg: Pick<Config, 'claudeAccounts'>): string | undefined => dispatcherPoolOf(hostAccount(cfg, 'dispatcher'));
 
 /** The vault entry the dispatcher is pinned to (claudeAccounts.dispatcher "vault:<name>", w996), or undefined. */
 export const pinnedDispatcherEntry = (cfg: Pick<Config, 'claudeAccounts'>): string | undefined => pinnedVaultEntry(hostAccount(cfg, 'dispatcher'));
 
-/** Whether the dispatcher has a token of its own (pinned, w996): else it runs on the system payer's pool. */
-export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => pinnedDispatcherEntry(cfg) !== undefined;
+/** Whether the dispatcher has an account of its own (pinned to a token, w996, or to one person's pool, w5891): else it runs on the system payer's pool. */
+export const dispatcherOwnAccount = (cfg: Pick<Config, 'claudeAccounts'>) => pinnedDispatcherEntry(cfg) !== undefined || dispatcherPoolPerson(cfg) !== undefined;
 
 /** The roles worth naming apart: the dispatcher only when it has a token of its own (else it is on a person's pool). */
 export const shownRoles = (cfg: Pick<Config, 'claudeAccounts'>): HostRole[] => HOST_ROLES.filter((r) => r !== 'dispatcher' || dispatcherOwnAccount(cfg));
@@ -436,17 +439,19 @@ export function machineRunEnv(
  * session start shows it. w1717: the pool is the one the person's pool setting names (their own unless they picked another's),
  * with the same rules there as on their own.
  */
-export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string | undefined; sessionId?: string }, ctx: VaultContext | undefined = vaultContext()): { env: Record<string, string | undefined>; account: string } {
+export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string | undefined; sessionId?: string; ownPool?: boolean }, ctx: VaultContext | undefined = vaultContext()): { env: Record<string, string | undefined>; account: string } {
   if (!ctx) throw new PoolHeldError(NO_VAULT);
-  const what = run.role === 'ops' ? 'the orchestration worker' : 'an orchestrator';
+  const what = run.ownPool ? 'the dispatcher (claudeAccounts.dispatcher names this pool)' : run.role === 'ops' ? 'the orchestration worker' : 'an orchestrator';
   if (!run.personId) throw new PoolHeldError(noTokenWhy(undefined, { problems: [] }, what));
-  const pool = ctx.poolOf?.(run.personId) ?? run.personId;
+  // w5891: the dispatcher on "pool:<login>" runs on that person's own pool, whatever their pool setting names: never another.
+  const pool = run.ownPool ? run.personId : (ctx.poolOf?.(run.personId) ?? run.personId);
   const other = !isSamePerson(pool, run.personId);
   const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
-  if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: poolAccount(s.claude, pool, other ? run.personId : undefined) };
+  if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: run.ownPool ? `vault token ${s.claude.entry.name} …${s.claude.entry.last4} (the dispatcher's, from ${pool}'s pool: claudeAccounts.dispatcher "pool:${pool}", docs/vault.md)` : poolAccount(s.claude, pool, other ? run.personId : undefined) };
   // Only a pool whose every token is used up gets here (pickPool's use-it-up for both roles): Claude would refuse them all.
   if (s.claudeHold) {
+    if (run.ownPool) throw new PoolHeldError(`${pool}'s Claude token pool, which claudeAccounts.dispatcher names, is used up, so the dispatcher waits for its first token to reset (w5921: never another pool): ${s.claudeHold.why}`, s.claudeHold.next);
     const stop = run.role === 'ops' ? ", so the orchestration worker cannot start until a token resets (Claude refuses a used-up token; the pool's limits never hold it, w1112)" : '';
     const forWhom = other ? ` (${run.personId}'s work runs on ${pool}'s pool: their pool setting, w1717)` : '';
     throw new PoolHeldError(`${pool}'s Claude token pool is used up${forWhom}${stop}: ${s.claudeHold.why}`, s.claudeHold.next);
@@ -473,7 +478,14 @@ export interface ReservedCredential {
  * The credentials with a reserve, worked out from config now (never a fixed token): the vault token the dispatcher is pinned
  * to (w996). Unpinned, the dispatcher runs on the system payer's pool, whose own limits hold it like anyone's: no reserve.
  */
-export function reservedCredentials(cfg: Pick<Config, 'claudeAccounts'>, ctx: Pick<VaultContext, 'vault'> | undefined = vaultContext()): ReservedCredential[] {
+export function reservedCredentials(cfg: Pick<Config, 'claudeAccounts'>, ctx: Pick<VaultContext, 'vault' | 'dispatcherOn'> | undefined = vaultContext()): ReservedCredential[] {
+  // w5891: on a pool the reserve is kept on the token the dispatcher runs on now, one of that pool's (it moves with it).
+  const pool = dispatcherPoolPerson(cfg);
+  if (pool !== undefined) {
+    const on = ctx?.dispatcherOn?.();
+    const e = on ? ctx?.vault.list().find((x) => x.kind === 'claude' && `token:${x.fingerprint}` === on && !!x.owner && x.owner.toLowerCase() === pool.toLowerCase()) : undefined;
+    return e ? [{ key: on!, what: `the dispatcher's vault token ${e.name} …${e.last4} (now; ${pool}'s pool)`, role: 'dispatcher', person: pool.toLowerCase() }] : [];
+  }
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? ctx?.vault.claudeByName(pinned) : undefined;
   return got ? [{ key: tokenKey(got.token), what: `the dispatcher's vault token ${got.entry.name} …${got.entry.last4}`, role: 'dispatcher', ...(got.entry.owner ? { person: got.entry.owner.toLowerCase() } : {}) }] : [];
@@ -530,8 +542,11 @@ export const MACHINE_ACCOUNT = "a vault token from the pool of the person the wo
 export function accountSetupLines(cfg: Pick<Config, 'claudeAccounts'>, payer: string | undefined, ctx: Pick<VaultContext, 'vault'> | undefined = vaultContext()): string[] {
   const pinned = pinnedDispatcherEntry(cfg);
   const got = pinned !== undefined ? ctx?.vault.claudeByName(pinned) : undefined;
+  const pool = dispatcherPoolPerson(cfg);
   const dispatcher =
-    pinned === undefined
+    pool !== undefined
+      ? `any token of ${pool}'s own pool with room (claudeAccounts.dispatcher "pool:${pool}", w5891; it moves within that pool when its token runs out, never to another pool, and its dispatcher reserve is kept on the token it is on)`
+      : pinned === undefined
       ? `the system payer's pool (${payer ?? 'nobody'}; claudeAccounts.dispatcher pins none)`
       : got
         ? `vault token ${got.entry.name} …${got.entry.last4} (pinned; its dispatcher reserve is kept there)`
