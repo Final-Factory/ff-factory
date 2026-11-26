@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, exec, main, manifestFor, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyEditorTmpdir, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -768,6 +768,35 @@ test('w5614: --store-lock takes off, warn or on and refuses anything else, befor
   const none = path.join(os.tmpdir(), `ffw-slock-none-${process.pid}`);
   await assert.rejects(main(['update', '--root', none, '--store-lock', 'maybe']), /--store-lock is off, warn or on, not "maybe"/);
   await assert.rejects(main(['update', '--root', none, '--store-lock']), /--store-lock is off, warn or on/);
+});
+
+test('w5833: worker update --editor-tmpdir writes on or off to daemon.json as editorTmpdir on macOS and Linux; unset carries it', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-etmp-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { editorTmpdir?: 'on' | 'off' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('editorTmpdir' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const p of ['linux', 'darwin'] as const) for (const m of ['on', 'off'] as const) assert.equal(written(BEAST_CONFIG, { editorTmpdir: m }, p).editorTmpdir, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, editorTmpdir: 'on' };
+  assert.equal(written(had, {}).editorTmpdir, 'on', 'unset carries it');
+  assert.equal(written(had, { editorTmpdir: 'off' }).editorTmpdir, 'off', 'the switch replaces it');
+  assert.deepEqual(written(had, { editorTmpdir: 'off' }).protectedPaths, BEAST_CONFIG.protectedPaths, 'the other settings are carried');
+  const cfg = { a: 1 };
+  assert.equal(applyEditorTmpdir(cfg, undefined, 'win32'), cfg, 'unset: the very config, on any platform');
+  assert.deepEqual(applyEditorTmpdir(cfg, 'on', 'darwin'), { a: 1, editorTmpdir: 'on' });
+  assert.throws(() => applyEditorTmpdir(cfg, 'on', 'win32'), /macOS and Linux only/);
+  assert.throws(() => applyEditorTmpdir(cfg, 'off', 'win32'), /macOS and Linux only/);
+  assert.throws(() => written(BEAST_CONFIG, { editorTmpdir: 'on' }, 'win32'), /macOS and Linux only/);
+});
+
+test('w5833: --editor-tmpdir takes on or off and refuses anything else, before the update touches anything', async () => {
+  assert.deepEqual(parseArgs(['update', '--root', '/r', '--editor-tmpdir', 'on']).opts, { root: '/r', 'editor-tmpdir': 'on' });
+  assert.equal(editorTmpdirFlag(undefined), undefined);
+  for (const m of ['on', 'off'] as const) assert.equal(editorTmpdirFlag(m), m);
+  for (const bad of ['ON', 'true', 'warn', '']) assert.throws(() => editorTmpdirFlag(bad), /--editor-tmpdir is on or off/);
+  const none = path.join(os.tmpdir(), `ffw-etmp-none-${process.pid}`);
+  await assert.rejects(main(['update', '--root', none, '--editor-tmpdir', 'maybe']), /--editor-tmpdir is on or off, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--editor-tmpdir']), /--editor-tmpdir is on or off/);
+  assert.equal(fs.existsSync(none), false);
 });
 
 test('w5377: --worker-fence takes on or off and refuses anything else, before the update touches anything', async () => {

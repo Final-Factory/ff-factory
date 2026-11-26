@@ -20,6 +20,7 @@
 # --worker-caps off|warn|enforce sets the worker memory, process and temp caps' mode (w5554);
 # --transcript-lock on|off (Linux, w5702) lets each locked worker write only its own conversation's transcript;
 # --store-lock off|warn|on (w5614) makes the main clone read-only to fenced workers once every sandbox is a slot repo;
+# --editor-tmpdir on|off (macOS and Linux, w5833) gives each sandbox's Unity editor its own temp folder under the root;
 # --daemon-ref REF (default: the pinned --ref, else the commit the portal runs).
 # --ref <full commit id> (w5516) pins the installer and the daemon code to that exact commit and refuses when it cannot check
 # it out; the portal's rollout fetches this script at its own verified commit and passes it:
@@ -54,6 +55,7 @@ while [ $# -gt 0 ]; do
     --worker-caps) case "${2:-}" in off|warn|enforce) WCAPS=$2 ;; *) echo "--worker-caps is off, warn or enforce, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --transcript-lock) case "${2:-}" in on|off) TLOCK=$2 ;; *) echo "--transcript-lock is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --store-lock) case "${2:-}" in off|warn|on) SLOCK=$2 ;; *) echo "--store-lock is off, warn or on, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
+    --editor-tmpdir) case "${2:-}" in on|off) ETMP=$2 ;; *) echo "--editor-tmpdir is on or off, not \"${2:-}\"" >&2; exit 2 ;; esac; shift 2 ;;
     --credential-file) CREDFILE=$2; shift 2 ;;
     --update) UPDATE=1; shift ;;
     --tools) TOOLS=1; shift ;;
@@ -167,6 +169,7 @@ if [ "$UPDATE" = 1 ]; then
   [ -z "${WCAPS:-}" ] || UARGS+=(--worker-caps "$WCAPS")
   [ -z "${TLOCK:-}" ] || UARGS+=(--transcript-lock "$TLOCK")
   [ -z "${SLOCK:-}" ] || UARGS+=(--store-lock "$SLOCK")
+  [ -z "${ETMP:-}" ] || UARGS+=(--editor-tmpdir "$ETMP")
   # A local checkout given with --source is the daemon code too: no download at all.
   [ -z "$SOURCE" ] || [ -n "$TEMP" ] || UARGS+=(--source "$SOURCE")
   "$NODE" "${FLAGS[@]}" "$SOURCE/scripts/worker/worker.ts" "${UARGS[@]}" </dev/null

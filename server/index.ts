@@ -123,6 +123,7 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
+import { pageSessions, stateSizes } from './pageState.ts';
 import { StallProfiler } from './stallProfile.ts';
 
 // The VM's vault key (w5506): the descriptor systemd opened for this service (OpenFile=), read and closed first, before this
@@ -1176,9 +1177,11 @@ function appState(user: string | undefined): AppState {
   const me = auth.userInfo(user);
   if (!me) throw new HttpError(401, 'login required');
   const mine = agents.orchestrators.personalFor(me);
+  const work = agents.orchestrators.forPage();
   return {
     app: appNow(),
-    sessions: [...store.sessions.values()],
+    // w5861: without the fields the page never reads (server/pageState.ts): the whole list had reached 18 MB.
+    sessions: pageSessions(store.sessions.values(), work, Date.now()),
     standingAgents: agents.standing.list(),
     delegations: [...store.delegations.values()],
     machines: machines.list().map(machineView),
@@ -1193,7 +1196,7 @@ function appState(user: string | undefined): AppState {
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
-    work: agents.orchestrators.forPage(),
+    work,
     reports: reports.all(),
     room: agents.roomNow(),
     ...agents.roomExtras(),
@@ -2608,6 +2611,16 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: PAGE_MAX_PAYLOAD, perMessageDeflate: { threshold: 16 * 1024, serverNoContextTakeover: true, clientNoContextTakeover: true } });
 /** Every page's socket, with the login it signed in as (notices meant for one person go to their pages only). */
 const clients = new Map<WebSocket, string>();
+/**
+ * w5861: a page whose first state (megabytes) is still on its way over a slow path cannot answer a ping queued behind it,
+ * and was dropped by the ping timeout before it ever got the state, again on each reconnect (lothsahn, 2026-11-25
+ * 16:16-16:20, eight drops at 15-27 s open). For this long after it opens, a missed pong does not end a page's socket
+ * (by time: the send's callback comes once the last bytes are in the kernel's buffer, still megabytes from the page).
+ */
+const FIRST_STATE_GRACE_MS = 60_000;
+const firstStateUntil = new WeakMap<WebSocket, number>();
+/** When the log last broke a page state down by field (stateSizes): at most once an hour. */
+let lastSizesAt = 0;
 /** The open pages, each with its login; a page whose login no longer exists is closed instead (w5533). */
 function* openPages(): Generator<[WebSocket, string]> {
   for (const [c, user] of clients) {
@@ -2696,9 +2709,18 @@ server.on('upgrade', (req, socket, head) => {
       clients.delete(ws);
     });
     const t0 = performance.now();
-    const first = JSON.stringify({ type: 'state', state: appState(user) } satisfies ServerEvent);
-    ws.send(first);
-    pageSockets.opened(ws, user, req, { ms: performance.now() - t0, bytes: first.length });
+    const state = appState(user);
+    const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
+    const built = performance.now() - t0;
+    firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
+    // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
+    // of it waits for the page to take what came before), so a slow open shows where its seconds went.
+    ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length });
+    if (Date.now() - lastSizesAt >= 3_600_000) {
+      lastSizesAt = Date.now();
+      setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));
+    }
   });
 });
 
@@ -2733,7 +2755,7 @@ function sendStream(req: http.IncomingMessage, res: http.ServerResponse, f: Stre
 const alive = new WeakSet<WebSocket>();
 setInterval(() => {
   for (const c of clients.keys()) {
-    if (!alive.has(c)) {
+    if (!alive.has(c) && (firstStateUntil.get(c) ?? 0) <= Date.now()) {
       clients.delete(c);
       pageSockets.serverClosing(c, 'ping-timeout');
       c.terminate();

@@ -254,6 +254,12 @@ export interface DaemonConfig {
    */
   transcriptLock?: 'on' | 'off';
   /**
+   * w5833: "on" gives each sandbox Unity editor on macOS and Linux its own TMPDIR, `<root>/tmp/editor-<sandbox>`, in place of
+   * the system temp (machine/sharedCaches.ts editorTmpdirEnv). Off when unset; set remotely by `ops_worker machine_update
+   * editor_tmpdir`, read at the daemon's start, and off is the recovery. Windows editors have `<root>/tmp/unity` always.
+   */
+  editorTmpdir?: 'on' | 'off';
+  /**
    * w5614: the store lock (machine/storeLock.ts, docs/machines.md "Slot repos"): "on" makes the main clone read-only to
    * fenced workers once every sandbox is a slot repo; "warn" refuses nothing and logs the writes it would refuse. Off when
    * unset; decided once per daemon process; set remotely by `ops_worker machine_update store_lock`.
@@ -727,7 +733,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root);
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on');
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -1138,7 +1144,8 @@ export class Daemon {
         await this.ensureBashTmp();
         // w5795: the daemon's own steps said too, the last steps done carried (cleanupPass reports its own).
         let lastDone: Record<string, number> = {};
-        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d) => ((lastDone = d), opts.step!(n, d)) } : opts;
+        let lastSoFar: Parameters<NonNullable<typeof opts.step>>[2];
+        const passOpts: typeof opts = opts.step ? { ...opts, step: (n, d, s) => ((lastDone = d), (lastSoFar = s), opts.step!(n, d, s)) } : opts;
         passOpts.step?.('stray temp', {});
         await this.sweepStrayTemp(opts.dryRun);
         const guard = this.cleanupGuard();
@@ -1162,7 +1169,7 @@ export class Daemon {
           // Plus the install folder's own leftovers (w899): build caches, the nightly lab, stopped sessions' temp, runaway task output.
           stale: async () => {
             const output = await planStaleOutput({ places: this.stalePlaces(), nightlyRoots: settings.nightlyRoots ?? defaultNightlyRoots(this.cfg.root), ctx: this.staleCtx, settings, guard });
-            passOpts.step?.('stale (install leftovers)', lastDone);
+            passOpts.step?.('stale (install leftovers)', lastDone, lastSoFar);
             return mergePlans(
               output,
               await planInstallLeftovers({
