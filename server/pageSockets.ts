@@ -88,6 +88,15 @@ export class PageSockets<S extends object> {
     this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms ${Math.round(state.bytes / 1024)}KB` : ''} (${this.open.size} open)`);
   }
 
+  /**
+   * The first state is all in the kernel's send buffer, `ms` after the open began (w5861). Logged only when slow: on a
+   * fast path it follows the open line within milliseconds and says nothing new.
+   */
+  sent(ws: S, ms: number) {
+    const o = this.open.get(ws);
+    if (o && ms >= 1000) this.log(`page socket first state sent: ${o.user} via ${o.via}, ${Math.round(ms)}ms after the open`);
+  }
+
   /** The server is about to end this socket itself (call before terminate/close), so its close line says so. */
   serverClosing(ws: S, by: 'ping-timeout') {
     const o = this.open.get(ws);
