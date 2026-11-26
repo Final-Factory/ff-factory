@@ -1,0 +1,1 @@
+- On LothDesktop, the CI-first check now also finds agents' tools whose starting process has exited (by the session in their environment) and counts them in its `ci first:` log lines while an ffu CI job runs; it does not lower them yet (w6217, `machine/ciFirstWin.ts`).

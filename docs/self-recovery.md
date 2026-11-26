@@ -374,6 +374,15 @@ jobs means Idle:
   started after its raise, or a priority it set itself since, is its own). A raise that fails is tried again for 3 ticks,
   then given up with a line in the log. An entry whose process was gone from the listing too, with nothing listed under
   its pid, is dropped.
+- **Orphaned tools** (w6217, counted, not lowered yet): a tool whose starter exited (Windows does not reparent it) is
+  outside every walk from a host; on 2026-11-26 from 21:54 UTC a `cargo test` under a `bash /tmp/bugchecks.sh` whose
+  parent was gone stayed at Normal beside both jobs for at least 9 minutes. Each tick also takes every listed process
+  outside the known trees whose parent is gone or started after it, walks its tree, and reads each member's environment
+  once (`readEnvs`, as the leftovers sweep does; cached by pid and start): a member with FF_SESSION_ID of a live host
+  here, under this daemon's FF_WORKER_ROOT, is that host's tool, and so is what is below it (a Git Bash shell shows no
+  environment, the cargo it starts does). No Unity process or what it started. Those above Idle are named once each in a
+  `ci first: N more of the agents' tools' process(es) run above Idle ... with the process that started them gone` line
+  and counted in the job lines (`orphaned tool process(es) above Idle, not lowered yet`); enforcing them is the next step.
 - **Recovery**: `ops_worker machine_update win_ci_first warn` (or `off`, which also stops the logging); the daemon restarts
   with it and raises everything back, needing nobody at the machine.
 
