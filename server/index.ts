@@ -9,7 +9,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { HOST_ROLES, FINAL_FACTORY_PRODUCT_NAME, brandName, configPath, loadConfig, productName, projectOf, projectView, machineActivityPause, machinePersonPlay, machineCleanupSettings, pruneRetiredConfig, publicIdentityOf, retiredKeysLine, ROOT } from './config.ts';
 import { migrateConfig, retireOldTokenFile, secretsDirOf } from './configMigration.ts';
 import { Store, bus, emit } from './store.ts';
-import { SessionManager, compactCommand, isMidTurn, seedSdkCost, snapshotOf } from './sessions.ts';
+import { SessionManager, compactCommand, isMidTurn, resumesAnswered, resumesUnanswered, seedSdkCost, snapshotOf } from './sessions.ts';
 import { BenchHolderWatch } from './benchHolders.ts';
 import { BenchStopError } from './benchStop.ts';
 import { TIMER_LIMITS } from './timers.ts';
@@ -274,6 +274,13 @@ setGithubTokens(github);
 github.start();
 // w3758: the portal's gh calls by caller, with the token's budget beside them, every 15 minutes (server/ghBudget.ts).
 startGhCallLog(ghRunner(undefined, 'the rate limit read'));
+// w5888: what a start can put off waits until the coordinators resumed after a restart have answered (their first turns waited
+// 2-5 min while these chores held the VM's two vCPUs, measured 2026-11-26), from 30 s after the start (the resumes are asked
+// for at 2 s) and never more than 5 min.
+const startedAt = Date.now();
+const afterResumes: Promise<void> = new Promise<void>((r) => setTimeout(r, 30_000).unref())
+  .then(() => resumesAnswered(5 * 60_000))
+  .then((all) => console.log(`start: ${all ? 'the resumed agents answered' : `${resumesUnanswered()} resumed agent(s) not answered yet`} ${((Date.now() - startedAt) / 1000).toFixed(0)} s after the start; the put-off chores run now (w5888)`));
 // Records and files written before their store redacted, or before a token shape was known (w1584): masked at start, once
 // per scrub version for the whole data folder (server/scrubSecrets.ts). Paths and counts only in the log.
 setTimeout(async () => {
@@ -282,8 +289,8 @@ setTimeout(async () => {
   if (held) console.log(`secrets: redacted ${held} secret(s) in the sessions and work items held`);
   void scrubAtStart(cfg.dataDir, (line) => console.log(`secrets: ${line}`));
   // The orchestrators' own Claude Code transcripts on this host (w1688), masked in place as they are written; the first pass
-  // looks through every one of them for the values known now.
-  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start();
+  // looks through every one of them for the values known now, once the resumes have answered (w5888).
+  if (process.env.FF_CLI_SCRUB !== 'off') new CliScrubber({ root: cliProjectsDir(), log: (line) => console.log(line) }).start({ backScanAfter: afterResumes });
 }, 5000);
 const sessions = new SessionManager(cfg, store);
 sessions.keepTranscript = (id) => {
@@ -794,8 +801,8 @@ const guardData = async () => {
 setTimeout(() => void guardData(), 3 * 60_000).unref();
 setInterval(() => void guardData(), dataGuardSettings(cfg).everyMinutes * 60_000).unref();
 // The transcript search index (w5111, server/searchIndex.ts) is built in its own thread a little after the start, so the first
-// search_transcripts does not wait for it.
-setTimeout(() => void warmSearchIndex(store.transcriptsDir).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`)), 30_000).unref();
+// search_transcripts does not wait for it; after the resumes (w5888: its thread took one of the two vCPUs for 65 s).
+void afterResumes.then(() => warmSearchIndex(store.transcriptsDir)).catch((e) => console.warn(`transcript search: index build failed: ${(e as Error).message}`));
 // Sessions that ran before the spend record existed are read from their transcripts once, then the record's repairs run once per
 // session (w859, w1209, w1160, w2007; docs/spend.md "Backfill", "Corrections to history"). server/spendJobs.ts: read off the main
 // thread and parsed in slices with a pause after each session, so a start never holds the loop (w2026).

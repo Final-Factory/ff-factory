@@ -51,6 +51,11 @@
   machine_update store_lock does: on makes the main clone read-only to the Low integrity workers once every sandbox is a
   slot repo (held off until then), warn refuses nothing and logs each write the daemon did not make, off opens it again.
   Left out: the install keeps what it has.
+.PARAMETER MediumAgentFolders
+  With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
+  temp root and cargo home in daemon.json (mediumAgentFolders), as ops_worker machine_update medium_agent_folders does:
+  on moves Medium agents (outside a sandbox) to <root>\tmp-medium and <root>\cache-medium\cargo, warn only logs the
+  exposure. Left out: the install keeps what it has.
 .PARAMETER PlayOnly
   A play-only computer (w1946, w2004): no game repo clone, no sandboxes and no Dev Drive; the daemon, its tray app and one
   player-slot pair as on any computer. join.ps1 passes it when the join code is a play-only one.
@@ -107,6 +112,7 @@ param(
     [ValidateSet('on', 'off')][string]$WorkerFence,
     [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
     [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
+    [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -274,6 +280,7 @@ if ($Update) {
     if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
     if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
     if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
+    if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }
