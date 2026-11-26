@@ -60,7 +60,39 @@ export const HOST_READ_ALLOW = ['devdrive.json', 'moved.json'];
  * (gh-app/bin; never gh-app/tokens.json, w5547) and the Unity MCP server's status files (unity-mcp, machine/unityMcp.ts).
  * root.json and its spare (root-backup.json) are closed since w5546 (lothsahn: "...and root.json").
  */
-export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW, 'gh-app/bin', 'unity-mcp', 'rpc'];
+export const FENCE_READ_ALLOW = [...DAEMON_READ_ALLOW.filter((p) => !p.startsWith('update/')), 'update', 'gh-app/bin', 'unity-mcp', 'rpc'];
+
+/**
+ * w5957 (N5): the files in FENCE_READ_ALLOW must keep their give-back when the daemon rewrites them. A Landlock grant is by
+ * inode and a Windows file made later takes its folder's No-Read-Up label, so each file there is written in place (the same
+ * inode and security descriptor), or it sits in a given-back folder instead: update/ is given back whole on the fences,
+ * since update/job.json and result.json are written by rename (machine/selfUpdate.ts writeJson), and its bundles hold code,
+ * no secret. How each file is written, checked by server/daemonReads.test.ts against the code:
+ */
+export const FENCE_FILE_WRITERS: Record<string, string> = {
+  'sandboxes.json': 'machine/sandboxes.ts writeJsonDurable inPlace',
+  'pause.json': 'machine/pause.ts writeFileDurable inPlace',
+  'person-play.json': 'machine/daemon.ts writeFileSync (truncates the same file)',
+  'cleanup.json': 'machine/daemon.ts writeFileSync',
+  'cleanup-facts.json': 'machine/daemon.ts writeInPlace',
+  'cleanup-log.jsonl': 'server/cleanup.ts appendCleanupLog (append; its roll copies to .1 and truncates in place)',
+  'cleanup-state.json': 'server/cleanup.ts writeFileSync',
+  'published.jsonl': 'server/published.ts appendFileSync / writeFileSync',
+  'outside-watch.json': 'machine/daemon.ts writeFileSync',
+  'firefox.json': 'machine/firefox.ts writeFileSync',
+  'run-daemon.ps1': 'server/machineDeployWin.ts WriteAllBytes (install only)',
+};
+
+/**
+ * w5957 (N6): what the fences give back in the install root's own closed daemon folder (<root>/daemon, the bench queue's
+ * home since w5545), relative to the root: the bench queue, whose person.json unity-slot run reads (machine/personPlay.ts
+ * personHoldReason) and whose tickets bench_queue.py reads. A folder, so files made in it later stay readable. Not
+ * bench.lock: it is made and removed on every exclusive turn, so no grant made at start covers it.
+ */
+export const FENCE_ROOT_READ_ALLOW = ['daemon/bench.queue'];
+
+/** FENCE_ROOT_READ_ALLOW as absolute paths under `root`. */
+export const fenceRootReadBack = (root: string, join: (...p: string[]) => string = path.join): string[] => FENCE_ROOT_READ_ALLOW.map((p) => join(root, ...p.split('/')));
 
 export interface DaemonReads {
   /** The daemon's folder (appDirOf). */

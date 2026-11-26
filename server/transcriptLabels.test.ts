@@ -9,6 +9,7 @@ import { PassThrough } from 'node:stream';
 import { deniesDeleteChild, explicitMedium, isLink, labelTree, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { Exec } from '../machine/lowIntegrity.ts';
+import { removePrivileges } from './winPrivileges.fixtures.ts';
 
 /**
  * w5703: the Windows half of "transcripts are read-only to workers". Everywhere: which files a claude argv owns, the label
@@ -368,36 +369,6 @@ process.stdin.on('end',()=>process.exit(0));`;
 /** A Low process cannot label anything Medium (a worker on a fenced machine): the Windows leg needs Medium or above (CI, the daemon). */
 const atLowItself = () => process.platform === 'win32' && /Low Mandatory Level/i.test(execFileSync(path.join(process.env.SystemRoot ?? 'C:\Windows', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8' }));
 
-/**
- * Removes privileges from a running process's token (PowerShell P/Invoke of AdjustTokenPrivileges, SE_PRIVILEGE_REMOVED);
- * answers one line per name: `removed`, or `not held`. A privilege not in the token is not an error.
- */
-const PRIV_PS = `param([int]$procId, [string]$names)
-Add-Type -TypeDefinition @"
-using System; using System.Runtime.InteropServices;
-public static class FfPriv {
-  [StructLayout(LayoutKind.Sequential, Pack = 4)] struct TP { public int Count; public long Luid; public int Attr; }
-  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
-  [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr h, uint access, out IntPtr token);
-  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValue(string sys, string name, out long luid);
-  [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool all, ref TP state, int len, IntPtr prev, IntPtr ret);
-  public static string Remove(int pid, string name) {
-    IntPtr h = OpenProcess(0x1000, false, pid); if (h == IntPtr.Zero) return "OpenProcess " + Marshal.GetLastWin32Error();
-    IntPtr t; if (!OpenProcessToken(h, 0x28, out t)) return "OpenProcessToken " + Marshal.GetLastWin32Error();
-    long luid; if (!LookupPrivilegeValue(null, name, out luid)) return "LookupPrivilegeValue " + Marshal.GetLastWin32Error();
-    TP tp = new TP(); tp.Count = 1; tp.Luid = luid; tp.Attr = 4;
-    if (!AdjustTokenPrivileges(t, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) return "AdjustTokenPrivileges " + Marshal.GetLastWin32Error();
-    return Marshal.GetLastWin32Error() == 1300 ? "not held" : "removed";
-  }
-}
-"@
-foreach ($n in $names.Split(',')) { "$n " + [FfPriv]::Remove($procId, $n) }
-`;
-function removePrivileges(pid: number, names: string[], dir: string): string {
-  const ps1 = path.join(dir, 'remove-privileges.ps1');
-  fs.writeFileSync(ps1, PRIV_PS);
-  return execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', ps1, String(pid), names.join(',')], { encoding: 'utf8' }).trim();
-}
 
 test('Windows: a Low process cannot touch another transcript under the lock, its own stays writable, and the spawner runs a new conversation', { skip: process.platform !== 'win32' ? 'Windows only' : atLowItself() ? 'this process runs at Low and cannot set a Medium label' : false }, async (t) => {
   const root = tmp();

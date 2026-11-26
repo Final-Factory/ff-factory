@@ -323,3 +323,25 @@ test('w5836: ghAvailableFields reads gh\'s field list only from an Unknown JSON 
   assert.deepEqual([...(ghAvailableFields('Unknown JSON field: "x"\nAvailable fields:\n  number\n  url\n') ?? [])], ['number', 'url']);
   assert.equal(ghAvailableFields('no pull requests found for branch "w1"'), undefined);
 });
+
+test("w6038: push and merge refuse in an ffu slot another session holds, naming its holder and branch; the holder's own run goes on", (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6038-pr-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const slot = path.join(dir, 'ffu-sandboxes', 'slot2');
+  const wt = path.join(slot, 'ffu');
+  fs.mkdirSync(path.join(wt, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(wt, '.git', 'HEAD'), 'ref: refs/heads/w1478-x\n');
+  fs.writeFileSync(path.join(slot, 'holder'), '# ffu-slot\nholder aaaa1111\nbranch w1478-x\n');
+  for (const cmd of ['push', 'merge']) {
+    const b = Object.assign(fake({ ...base, 'gh pr view': ok(pr()) }), { cwd: wt, env: { FF_SESSION_ID: 'bbbb2222' } });
+    assert.equal(prMain([cmd], b), 1, cmd);
+    assert.match(b.said, new RegExp(`^ffu-slot: refused: ff-pr ${cmd} in ffu slot slot2 .*which session aaaa1111 holds on branch w1478-x; you are session bbbb2222\\.`));
+    assert.deepEqual(b.ran, [], 'nothing ran: no merge of the base, no push');
+  }
+  const status = Object.assign(fake({ ...base, 'gh pr view': ok(pr()) }), { cwd: wt, env: { FF_SESSION_ID: 'bbbb2222' } });
+  prMain(['status'], status);
+  assert.ok(!/refused/.test(status.said), 'status only reads');
+  const a = Object.assign(fake({ ...base, 'gh pr view': ok(pr()) }), { cwd: wt, env: { FF_SESSION_ID: 'aaaa1111' } });
+  assert.equal(prMain(['push'], a), 0, a.said);
+  assert.ok(a.ran.includes('git push -u origin HEAD:refs/heads/w1478-x'));
+});

@@ -805,6 +805,21 @@ said them, and optionally `hours` (it lifts by itself) and `except` (requests th
   dispatcher's notes, and the w2046 moves put w5838, w5857, w5863 and w5834 on LothDesktop between 17:54 and 19:12
   (-07:00) on 2026-11-25, each logging "first with room in placement.prefer" with no hold named.
 
+### A person's hold reaches what sets it, and is read back (w5895)
+
+lothsahn answered w5814's card at 22:08 UTC on 2026-11-25 ("Hold new work on LothDesktop and let the running workers
+finish"); LothDesktop was held only at 03:47 the next day. Each cause and its fix:
+
+| Cause | Fix |
+|---|---|
+| The orchestrator recorded the words as a note outside lothsahn's own turn, so `humanAsked` was false and every `set_app_config` of the dispatcher's (22:08, 23:50, 01:54) was refused by the `USER_ASKED_TOOLS` guard. | `update_work hold {machine, action, except?}` with the person's words (`Orchestrators.holdAsked`): in their own turn it drains the machine at once (`Agents.holdMachine`, the same path as `hold_machine`); otherwise it is kept as `WorkItem.holdAsk`, the result says **HOLD ASKED, NOT SET**, and the dispatcher's notice names the `hold_machine` call. `userAskedProblem` lets `hold_machine` through for an unset ask of the same machine and action on that request, even after a later note cleared `humanAsked`. A lift ask also passes the guard; a lift with no ask keeps the old rule. |
+| The worker's "It needs the hold set by the orchestrator" (03:42) matched no `[orchestrator step]` route (w2870), and workers have no hold tool. | `orchestratorAskIn` (`shared/workState.ts`, `ORCHESTRATOR_HOLD`) routes such a line to the orchestrator, and `orchestratorStepText` tells it to use `update_work hold`. |
+| Nothing showed the decision as unset: system_status and list_machines showed LothDesktop NOT held. | `Agents.unsetHoldAsks`: a `HOLD ASKED, NOT SET: wNNN …` line in system_status and under the machine in list_machines, naming the `hold_machine` call, until the machine is held (by any route). |
+| Nothing read the state back after a change. | `hold_machine` and `update_work hold` end with `Read back live:` (`holdReadback` in `server/machineDrain.ts`, from `placement()` and the store). `set_app_config` re-reads the live config (`readBackSetting`, `server/appConfig.ts`) and fails loudly on a mismatch; `placement.hold` adds each named machine's read-back. The `hold_machine` and `update_work hold` descriptions say to check it before telling the person (the briefs are at their size caps). |
+| The 03:47 config hold excepted w5475, w5586, w5656 and w5796, whose workers were stopped; a config hold's `holdExcept` lets those requests' workers resume, so w5475's resumed at its check-in (04:39). | The read-back names each excepted request with no running worker there ("w5475: worker … stopped; will resume here at its check-in 04:39Z"). A drain now defaults to `resumes: 'running'`: it snapshots the workers mid-turn (`MachineDrain.running`), and only those and the excepted requests' workers should resume. **This is warn-only** (lothsahn's lockout rule: warn and enforce in separate PRs): `machineHold` logs `drain: worker … resumes there … warn-only: it would be held once enforced` once per worker and drain, and the read-back marks the resume AGAINST it. `resumes: 'all'` is w5878's behavior, and a drain set before w5895 counts as `'all'`. |
+
+Recovery needs nobody at the computer: `hold_machine lift`, `update_work hold {action: lift}`, or `hours`.
+
 ## Offline and paused computers take no work
 
 One rule, in `shared/availability.ts` and `server/machineAway.ts`, holds on every path that picks or plans a computer:
