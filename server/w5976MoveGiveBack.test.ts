@@ -519,3 +519,123 @@ for (const order of ['resume first', 'resume later'] as const) {
     assert.notEqual(back[0]!.resumeOf?.work, 'w5870', 'no resume of w5870 waits for the old worker');
   });
 }
+
+// w6047 (the w6159 review, 1): the other exits from a move route a sibling's resume to that sibling, as giveBack does.
+const pausedHb = { machine: 'biscuit', sandbox: 'slot1', why: 'paused by lothsahn', note: 'n', how: 'handed back: its computer is paused (w1532)' };
+
+for (const mode of ['on', 'warn'] as const) {
+  for (const when of ['during the waits', 'during the start'] as const) {
+    test(`w6047 (the w6159 review, 1, "${mode}"): a started move carries a person's message to the new worker, and a sibling's resume (absorbed ${when}) to that sibling's hand-back`, async (t) => {
+      const { store, agents, worker, request, queued, roomMove, settled, starts } = await setup(t, mode);
+      const x = agents as unknown as Internals;
+      const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+      const resume: QueuedSend = { ...queued('5449aaaa', 'w5870: its CI cleared', Date.now() - 50_000, 'system'), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+      (agents as unknown as { liveHub: unknown }).liveHub = {
+        endFor: async () => {
+          agents.orchestrators.handBack(store.work.get('w5870')!, store.sessions.get('5449aaaa')!, pausedHb);
+          if (when === 'during the waits') assert.equal(roomMove(s, resume, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+          return undefined;
+        },
+        running: () => false,
+      };
+      const handOff: (string | undefined)[] = [];
+      const start = x.startMoved;
+      x.startMoved = async (info, w, to, why, hold, branch, lead, hb) => {
+        handOff.push(hb.message);
+        if (when === 'during the start') assert.equal(roomMove(s, resume, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+        return start(info, w, to, why, hold, branch, lead, hb);
+      };
+      request(['5449aaaa'], 'w5869');
+      request(['5449aaaa'], 'w5870');
+      assert.equal(roomMove(s, queued('5449aaaa', 'lothsahn: also rename the w5869 flag', Date.now() - 60_000, 'human'), BISCUIT_FULL, Date.now()), true);
+      await settled('5449aaaa');
+      const b = store.work.get('w5870')!;
+      assert.equal(starts.length, 1, 'w5869 moved');
+      assert.match(handOff[0] ?? '', /^lothsahn: also rename the w5869 flag$/, "the new worker's hand-off carries the person's message, and only it");
+      assert.match(b.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
+      assert.match(b.handedBack?.message ?? '', /^w5870: its CI cleared$/, 'the resume goes with w5870, once');
+    });
+  }
+}
+
+test(`w6047 (the w6159 review, 1, "warn"): a failed start hands back the move's request with its own messages only; a sibling's resume goes with the sibling`, async (t) => {
+  const { store, agents, worker, request, queued, roomMove, settled } = await setup(t, 'warn');
+  const tried: string[] = [];
+  failing(agents, 'early', tried);
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const resume: QueuedSend = { ...queued('5449aaaa', 'w5870: its CI cleared', Date.now() - 50_000, 'system'), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+  (agents as unknown as { liveHub: unknown }).liveHub = {
+    endFor: async () => {
+      agents.orchestrators.handBack(store.work.get('w5870')!, store.sessions.get('5449aaaa')!, pausedHb);
+      assert.equal(roomMove(s, resume, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+      return undefined;
+    },
+    running: () => false,
+  };
+  request(['5449aaaa'], 'w5869');
+  request(['5449aaaa'], 'w5870');
+  assert.equal(roomMove(s, queued('5449aaaa', 'lothsahn: also rename the w5869 flag', Date.now() - 60_000, 'human'), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const a = store.work.get('w5869')!, b = store.work.get('w5870')!;
+  assert.equal(tried.length, 1, 'one start was tried');
+  assert.match(a.handedBack?.message ?? '', /^lothsahn: also rename the w5869 flag$/, "w5869's hand-back carries the person's message, and only it");
+  assert.match(b.handedBack?.message ?? '', /^w5870: its CI cleared$/, 'the resume goes with w5870, once');
+});
+
+test(`w6047 (the w6159 review, 1, "warn"): the move's own request handed back meanwhile carries its own resume; a sibling's resume goes with the sibling`, async (t) => {
+  const { store, agents, worker, request, queued, roomMove, settled, starts } = await setup(t, 'warn');
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const other: QueuedSend = { ...queued('5449aaaa', 'w5870: its CI cleared', Date.now() - 50_000, 'system'), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+  (agents as unknown as { liveHub: unknown }).liveHub = {
+    endFor: async () => {
+      agents.orchestrators.handBack(store.work.get('w5869')!, store.sessions.get('5449aaaa')!, pausedHb);
+      assert.equal(roomMove(s, other, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+      return undefined;
+    },
+    running: () => false,
+  };
+  request(['5449aaaa'], 'w5869');
+  request(['5449aaaa'], 'w5870');
+  const own: QueuedSend = { ...queued('5449aaaa', 'w5869: its CI cleared', Date.now() - 60_000, 'system'), resumeOf: { work: 'w5869', note: 'its CI cleared' } };
+  assert.equal(roomMove(s, own, BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const a = store.work.get('w5869')!, b = store.work.get('w5870')!;
+  assert.deepEqual(starts, [], 'no fresh session was started');
+  assert.match(a.handedBack?.how ?? '', /paused/, "the pause's hand-back stands");
+  assert.match(a.handedBack?.message ?? '', /^w5869: its CI cleared$/, 'w5869 carries its own resume, and only it');
+  assert.match(b.handedBack?.message ?? '', /^w5870: its CI cleared$/, 'the resume of w5870 goes with w5870');
+});
+
+test(`w6047 (the w6159 review, 2): a resume of a request handed back meanwhile and already on a next worker goes into no hand-off that worker read, nor to the old worker`, async (t) => {
+  const { store, sessions, agents, worker, request, queued, roomMove, settled, sent } = await setup(t, 'on');
+  const x = agents as unknown as Internals;
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: RELEASED });
+  const resume: QueuedSend = { ...queued('5449aaaa', 'w5870: its CI cleared', Date.now() - 50_000, 'system'), resumeOf: { work: 'w5870', note: 'its CI cleared' } };
+  (agents as unknown as { liveHub: unknown }).liveHub = {
+    endFor: async () => {
+      const b = store.work.get('w5870')!;
+      agents.orchestrators.handBack(b, store.sessions.get('5449aaaa')!, pausedHb);
+      const n = nextW('next1', 'lothdesktop');
+      store.putSession(n);
+      agents.orchestrators.linkWorker(b.id, n, 'started worker next1 in lothdesktop/slot2');
+      assert.equal(roomMove(s, resume, BISCUIT_FULL, Date.now()), true, 'absorbed into the move');
+      return undefined;
+    },
+    running: () => false,
+  };
+  const handOff: (string | undefined)[] = [];
+  const start = x.startMoved;
+  x.startMoved = async (info, w, to, why, hold, branch, lead, hb) => {
+    handOff.push(hb.message);
+    return start(info, w, to, why, hold, branch, lead, hb);
+  };
+  request(['5449aaaa'], 'w5869');
+  request(['5449aaaa'], 'w5870');
+  assert.equal(roomMove(s, queued('5449aaaa', 'lothsahn: also rename the w5869 flag', Date.now() - 60_000, 'human'), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  const b = store.work.get('w5870')!;
+  assert.match(handOff[0] ?? '', /^lothsahn: also rename the w5869 flag$/, "not in w5869's hand-off");
+  assert.doesNotMatch(b.handedBack?.message ?? '', /CI cleared/, 'not into the hand-off next1 read already');
+  assert.equal(sent.filter((m) => /CI cleared/.test(m.text)).length, 0, "not forwarded (a resume is the old worker's own wait, w5949)");
+  assert.equal(sessions.queued().filter((m) => m.id === '5449aaaa').length, 0, 'not put back for the old worker');
+});
