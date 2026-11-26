@@ -77,6 +77,13 @@ test('worker install: every missing prerequisite is named before anything change
   const four = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: ['slot1', 'slot2', 'slot3', 'slot4'] } };
   assert.match(bad({ portal: four }, { maxSandboxes: 3 }), /--max-sandboxes 3 is below the 4 sandboxes there \(slot1, slot2, slot3, slot4\): delete 1 first/);
   assert.deepEqual(preflightProblems({ ...GOOD, portal: four }, { ...OPTS, maxSandboxes: 4 }), [], 'as many as there are is fine (w576)');
+  // w5924: lothdesktop's update was refused, "--max-sandboxes 5 is below the 12 sandboxes there (slot1…slot5, agent1…agent7)".
+  const lights = ['agent1', 'agent2', 'agent3', 'agent4', 'agent5', 'agent6', 'agent7'];
+  const five = { ok: true as const, me: { id: 'lothdesktop', online: true, agents: [], sandboxes: ['slot1', 'slot2', 'slot3', 'slot4', 'slot5'], lights } };
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: five }, { ...OPTS, maxSandboxes: 5 }), [], 'light agent folders never count (w5924)');
+  const mixed = { ok: true as const, me: { ...five.me, sandboxes: [...five.me.sandboxes, ...lights] } };
+  assert.deepEqual(preflightProblems({ ...GOOD, portal: mixed }, { ...OPTS, maxSandboxes: 5 }), [], 'nor when a portal also lists them as sandboxes');
+  assert.match(bad({ portal: five }, { maxSandboxes: 4 }), /--max-sandboxes 4 is below the 5 sandboxes there \(slot1, slot2, slot3, slot4, slot5\): delete 1 first/);
   assert.equal(preflightProblems({ ...GOOD, elevated: true, git: [2, 1], gitLfs: false }, OPTS).length, 3, 'all of them at once');
 });
 

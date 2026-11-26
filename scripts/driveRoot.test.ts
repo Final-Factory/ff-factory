@@ -237,6 +237,14 @@ test('the reinstall’s check of the sandboxes: a commit no remote has, or an un
   const slotRisk = (await sandboxRisks(sandboxes)).find((r) => r.sandbox === 'slot4');
   assert.equal(slotRisk?.unpushed.length, 2, 'the side branch commit and the stash');
   assert.match(slotRisk!.unpushed.join('\n'), /\(stash, in this sandbox only\)/);
+  // w5924: a light agent folder holds no checkout; a clone a worker made in it with a commit no remote has is a risk.
+  const lightClone = path.join(sandboxes, 'agent-work', 'agent1', 'ff-factory');
+  git(base, 'clone', '-q', origin, lightClone);
+  fs.writeFileSync(path.join(lightClone, 'd.txt'), 'd');
+  git(lightClone, 'add', 'd.txt');
+  git(lightClone, '-c', 'user.name=t', '-c', 'user.email=t@e.invalid', 'commit', '-qm', 'light work');
+  const lightRisk = (await sandboxRisks(sandboxes)).find((r) => r.sandbox === 'agent-work/agent1/ff-factory');
+  assert.equal(lightRisk?.unpushed.length, 1, 'the commit in the light folder clone');
   fs.rmSync(base, { recursive: true, force: true });
 });
 
