@@ -41,8 +41,7 @@ env:
 # (Settings, Actions, General).
 jobs:
   checks:
-    # Not on a push to main (w925): see concurrency above.
-    if: github.event_name != 'push'
+    # A push to main runs only the typecheck steps (w6343): the web build below is skipped there.
     name: Typecheck, build (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -62,6 +61,7 @@ jobs:
       - name: Typecheck (web)
         run: npm --prefix web run typecheck
       - name: Build the web UI
+        if: github.event_name != 'push'
         run: npm --prefix web run build
 
   unit:
