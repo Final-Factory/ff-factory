@@ -92,10 +92,13 @@ function raise(pid: number): string {
   return r.stdout;
 }
 
+/** The MSYS bash itself: Git's bin\\bash.exe is a launcher that starts it as its child (seen on windows-latest, PR #1508). */
+const msysBash = () => path.join(path.dirname(path.dirname(bash)), 'usr', 'bin', 'bash.exe');
+
 test('w6542: a winpid naming the forked bash.exe raises its node.exe child, never the bash', { skip }, async () => {
   // what an early read named on windows-latest (PR #1508): a bash.exe whose child is the node.exe started in it. Here a
   // bash that does not exec its node (the `; :` after it), so node.exe stays its child as there.
-  const stub = spawn(bash, ['-c', `'${process.execPath.replace(/\\/g, '/')}' -e 'console.log(process.pid); setTimeout(() => {}, 30_000)'; :`], { windowsHide: true });
+  const stub = spawn(msysBash(), ['-c', `'${process.execPath.replace(/\\/g, '/')}' -e 'console.log(process.pid); setTimeout(() => {}, 30_000)'; :`], { windowsHide: true });
   let node = 0;
   try {
     node = await new Promise<number>((resolve, reject) => {
@@ -112,7 +115,7 @@ test('w6542: a winpid naming the forked bash.exe raises its node.exe child, neve
 });
 
 test('w6542: a winpid naming a process that is no node and starts none is not raised', { skip }, () => {
-  const other = spawn(bash, ['-c', 'sleep 20; :'], { windowsHide: true });
+  const other = spawn(msysBash(), ['-c', 'sleep 20; :'], { windowsHide: true });
   try {
     const out = raise(other.pid as number);
     assert.match(out, new RegExp(`^portal priority \\(w6221\\): not the portal: pid ${other.pid} is bash.exe, with no node.exe child\\r?\\n$`), out);
