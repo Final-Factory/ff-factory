@@ -771,6 +771,7 @@ export function workerUpdateFlags(
   daemonTmpdir?: 'on' | 'off',
   toolsDiskLock?: 'warn' | 'on',
   winCiFirst?: 'off' | 'warn' | 'enforce',
+  sharedLock?: 'off' | 'warn' | 'on',
   runnerPriority?: 'off' | 'warn' | 'enforce',
 ): string[] {
   const win = platform === 'win32';
@@ -791,9 +792,10 @@ export function workerUpdateFlags(
           daemonTmpdir && `-DaemonTmpdir ${daemonTmpdir}`,
           toolsDiskLock && `-ToolsDiskLock ${toolsDiskLock}`,
           winCiFirst && `-WinCiFirst ${winCiFirst}`,
+          sharedLock && `-SharedLock ${sharedLock}`,
           runnerPriority && `-RunnerPriority ${runnerPriority}`,
         ]
-      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`, daemonTmpdir && `--daemon-tmpdir ${daemonTmpdir}`]
+      : [nums.maxSandboxes !== undefined && `--max-sandboxes ${nums.maxSandboxes}`, nums.maxAgentsPerSandbox !== undefined && `--max-agents-per-sandbox ${nums.maxAgentsPerSandbox}`, nums.maxUnity !== undefined && `--max-unity ${nums.maxUnity}`, workerFence && `--worker-fence ${workerFence}`, workerCaps && `--worker-caps ${workerCaps}`, transcriptLock && `--transcript-lock ${transcriptLock}`, storeLock && `--store-lock ${storeLock}`, editorTmpdir && `--editor-tmpdir ${editorTmpdir}`, pathFence && `--path-fence ${pathFence}`, mediumAgentFolders && `--medium-agent-folders ${mediumAgentFolders}`, daemonTmpdir && `--daemon-tmpdir ${daemonTmpdir}`, sharedLock && `--shared-lock ${sharedLock}`]
   ).filter((f): f is string => !!f);
 }
 
@@ -1031,7 +1033,7 @@ export class OpsWorker {
    */
   machineInstall(
     caller: SessionInfo | undefined,
-    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' | 'on'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on'; winCiFirst?: 'off' | 'warn' | 'enforce'; runnerPriority?: 'off' | 'warn' | 'enforce' },
+    o: { machine: string; workId: string; maxSandboxes?: number; maxAgentsPerSandbox?: number; maxUnity?: number; devDrive?: boolean; moveToDevDrive?: boolean; devDriveMaxGB?: number; workerFence?: 'on' | 'off'; workerCaps?: 'off' | 'warn' | 'enforce'; transcriptLock?: 'on' | 'off'; storeLock?: 'off' | 'warn' | 'on'; editorTmpdir?: 'on' | 'off'; pathFence?: 'off' | 'warn' | 'on'; mediumAgentFolders?: 'warn' | 'on'; daemonTmpdir?: 'on' | 'off'; toolsDiskLock?: 'warn' | 'on'; winCiFirst?: 'off' | 'warn' | 'enforce'; sharedLock?: 'off' | 'warn' | 'on'; runnerPriority?: 'off' | 'warn' | 'enforce' },
   ): string {
     const person = opsAllowedOrchestrator(caller);
     if (!person || !caller) throw new Error(OPS_REFUSED);
@@ -1059,6 +1061,8 @@ export class OpsWorker {
     if (o.transcriptLock !== undefined && m.platform !== 'linux') throw new Error(`transcript_lock: Linux only (the macOS fence already does this; docs/transcript-seal.md), and ${m.id} is not a Linux PC`);
     // w5614: the store lock's mode (daemon.json `storeLock`), every OS.
     if (o.storeLock !== undefined && o.storeLock !== 'off' && o.storeLock !== 'warn' && o.storeLock !== 'on') throw new Error('store_lock: off, warn or on');
+    // w5615: the shared-cache lock's mode (daemon.json `sharedLock`), every OS.
+    if (o.sharedLock !== undefined && o.sharedLock !== 'off' && o.sharedLock !== 'warn' && o.sharedLock !== 'on') throw new Error('shared_lock: off, warn or on');
     // w5833: the editor temp folder's switch (daemon.json `editorTmpdir`), macOS and Linux only.
     if (o.editorTmpdir !== undefined && o.editorTmpdir !== 'on' && o.editorTmpdir !== 'off') throw new Error('editor_tmpdir: on or off');
     if (o.editorTmpdir !== undefined && m.platform === 'win32') throw new Error(`editor_tmpdir: macOS and Linux only, and ${m.id} is a Windows PC`);
@@ -1092,7 +1096,7 @@ export class OpsWorker {
       recorded = ` The portal's record of ${m.id} now says ${Object.entries(rec).map(([k, v]) => `${k} ${v}`).join(', ')} (what its daemon runs by; it has it already, and list_machines shows it).`;
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
-    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir, toolsDiskLock: o.toolsDiskLock, winCiFirst: o.winCiFirst, runnerPriority: o.runnerPriority }).filter(([, v]) => v !== undefined && v !== false));
+    const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir, toolsDiskLock: o.toolsDiskLock, winCiFirst: o.winCiFirst, sharedLock: o.sharedLock, runnerPriority: o.runnerPriority }).filter(([, v]) => v !== undefined && v !== false));
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1107,7 +1111,7 @@ export class OpsWorker {
     const why = this.d.linkProblem?.(m.id);
     if (why) throw new Error(`machine: ${why}. Nothing was run`);
     if (!SAFE_TARGET.test(m.target) || !SAFE_ROOT.test(m.root) || /\s/.test(m.root)) throw new Error(`machine: ${m.id}'s ssh target or root folder has characters this job will not pass to a shell`);
-    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir, o.toolsDiskLock, o.winCiFirst, o.runnerPriority).join(' ');
+    const extra = workerUpdateFlags(m.platform, nums, dev, o.workerFence, o.workerCaps, o.transcriptLock, o.storeLock, o.editorTmpdir, o.pathFence, o.mediumAgentFolders, o.daemonTmpdir, o.toolsDiskLock, o.winCiFirst, o.sharedLock, o.runnerPriority).join(' ');
     const commit = (this.d.portalCommit ?? portalCommit)();
     if (!commit) throw new Error('machine: the portal does not know its own full commit (git rev-parse HEAD in its release), so there is no verified commit to install; nothing was run');
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
