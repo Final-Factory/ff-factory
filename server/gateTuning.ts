@@ -20,7 +20,7 @@ import { dryRun } from './dryRun.ts';
 import { ghRunner } from './githubTokens.ts';
 import { autoApproveProblem, capProblem, cleanLine, intakeSettings } from './intakeRules.ts';
 import { testHistorySettings } from './testHistoryCi.ts';
-import type { TestHistory } from './testHistory.ts';
+import type { Row, TestHistory } from './testHistory.ts';
 import type { WorkSource, WorkTriage } from '../shared/types.ts';
 
 type Runner = (cmd: string, args: string[], opts?: { timeoutMs?: number }) => Promise<RunResult>;
@@ -109,9 +109,16 @@ export type PrHead = (repo: string, pr: number) => Promise<{ ref: string; sha: s
 const round1 = (n: number) => Math.round(n * 10) / 10;
 const CULPRIT = /PR #(\d+) \(([0-9a-f]{7,40})\)/;
 
+/**
+ * How the tuning reads the history: by default apart, in a worker on its own read-only connection (TestHistory.allApart).
+ * w6370: findProposals' query held the portal's loop 22.9 s on 2026-11-27 (09:17Z), when the main connection ran it.
+ */
+export type HistoryRead = (sql: string, ...args: (string | number | null)[]) => Promise<Row[]>;
+const apart = (h: TestHistory): HistoryRead => (sql, ...args) => h.allApart(sql, ...args);
+
 /** Every master-batch detect with a culprit PR, one per test class and PR, with what the culprit's gate did with it. */
-export async function findMisses(h: TestHistory, repo: string, prHead: PrHead, baselineId: number): Promise<Miss[]> {
-  const rows = h.all(
+export async function findMisses(h: TestHistory, repo: string, prHead: PrHead, baselineId: number, read: HistoryRead = apart(h)): Promise<Miss[]> {
+  const rows = await read(
     `SELECT f.id, t.class, f.reason, r.ci_run, r.finished FROM failures f JOIN tests t ON t.id = f.test_id JOIN runs r ON r.id = f.run_id
      WHERE f.label = 'detect' AND r.source = 'master-batch' AND t.performance = 0 ORDER BY f.id`,
   );
@@ -135,28 +142,28 @@ export async function findMisses(h: TestHistory, repo: string, prHead: PrHead, b
     if (!heads.has(miss.pr)) heads.set(miss.pr, await prHead(repo, miss.pr).catch(() => undefined));
     const head = heads.get(miss.pr);
     // The culprit's last gate run before the batch caught it, that kept its results (60 days).
-    const gate = h.all(
+    const gate = (await read(
       `SELECT r.id FROM runs r WHERE r.source = 'pr-gate' AND r.finished <= ? AND (r.pr = ? OR r.sha = ? OR r.branch = ?)
          AND EXISTS (SELECT 1 FROM results x WHERE x.run_id = r.id) ORDER BY r.finished DESC LIMIT 1`,
       miss.caught, miss.pr, head?.sha ?? '-', head?.ref ?? '-',
-    )[0];
+    ))[0];
     if (!gate) continue;
     miss.gateRun = Number(gate.id);
-    const ran = h.all(`SELECT count(*) AS n FROM results x JOIN tests t ON t.id = x.test_id WHERE x.run_id = ? AND t.class = ?`, miss.gateRun, miss.test)[0];
+    const ran = (await read(`SELECT count(*) AS n FROM results x JOIN tests t ON t.id = x.test_id WHERE x.run_id = ? AND t.class = ?`, miss.gateRun, miss.test))[0];
     miss.verdict = Number(ran?.n ?? 0) > 0 ? 'gate-ran-passed' : 'not-in-gate';
   }
   return [...byKey.values()];
 }
 
 /** The always-run gate checks that never failed there and caught nothing anywhere (OUT_RULE), most gate time first. */
-export function findProposals(h: TestHistory, now: number): { gateRuns: number; days: number; proposals: Proposal[] } {
+export async function findProposals(h: TestHistory, now: number, read: HistoryRead = apart(h)): Promise<{ gateRuns: number; days: number; proposals: Proposal[] }> {
   const since = new Date(now - OUT_RULE.windowDays * DAY).toISOString();
-  const g = h.all(`SELECT count(*) AS n, min(finished) AS first FROM runs WHERE source = 'pr-gate' AND finished >= ?`, since)[0]!;
+  const g = (await read(`SELECT count(*) AS n, min(finished) AS first FROM runs WHERE source = 'pr-gate' AND finished >= ?`, since))[0]!;
   const gateRuns = Number(g.n ?? 0);
   const days = g.first ? Math.max(1, (now - Date.parse(String(g.first))) / DAY) : 1;
   if (!gateRuns) return { gateRuns, days, proposals: [] };
   const detectSince = new Date(now - OUT_RULE.detectDays * DAY).toISOString();
-  const rows = h.all(
+  const rows = await read(
     // Runs are the distinct gate runs that ran the class (results has one row per run and test): test_days counts a
     // parameterized case once per repeat of its name, which made a class run in 105 of 873 gate runs read 3224 (w4928).
     `WITH r AS (SELECT t.class, count(DISTINCT x.run_id) AS runs FROM results x JOIN tests t ON t.id = x.test_id
@@ -307,7 +314,7 @@ export class GateTuningJob {
         filePending = !filed;
       }
       if (!filePending) h.setMeta('gate_tuning_handled', String(Math.max(handled, ...misses.map((m) => m.failureId))));
-      const out = findProposals(h, now);
+      const out = await findProposals(h, now);
       const moved = out.proposals.filter((p) => !p.crownJewel);
       const savedPerRunS = round1(moved.reduce((a, p) => a + p.perRunS, 0));
       const result: Omit<GateTuning, 'summary'> = {
