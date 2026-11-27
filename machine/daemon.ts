@@ -4143,7 +4143,7 @@ export class Daemon {
       if (this.cfg.editorFence !== true) log("editor fence: sandbox editors start unfenced (Landlock breaks GTK's sandboxed image loader, so a windowed editor aborts; editorFence true fences them)");
       else if (!agents || !root) log('editor fence: sandbox editors start unfenced (the Landlock write lock is off here)');
       else {
-        fence = linuxEditorFenceFor(this.lockRules(root, path.join(root, 'home'), !!this.lockMemo?.transcripts), root, this.cfg.editorFence === true ? 'enforce' : 'warn')!;
+        fence = linuxEditorFenceFor(this.lockRules(root, path.join(root, 'home'), !!this.lockMemo?.transcripts), root, 'enforce')!;
         const probe = probeFence(['python3', FF_LANDLOCK, ...fence.args, '--', '/bin/true']);
         if (probe.ok) {
           addMcpStatusDir(fence.env.UNITY_MCP_STATUS_DIR);
