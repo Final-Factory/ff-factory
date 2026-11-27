@@ -1175,13 +1175,14 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     client runs for this user ...)" (`licensingClient`, `linuxLicensingClientRunning`). Unity logs "LicensingClient has
     failed validation; ignoring" under the rules: Landlock refuses the editor `readlink /proc/<client pid>/exe` of a
     process outside its domain, and Unity then uses the client anyway ("Successfully resolved entitlement details").
-  - **Warn-only first** (lothsahn's lockout rule). Landlock has no report-only mode, so with `editorFence` unset the rules
-    get `--rw /` and lose `--deny-unix`: no write is refused, and warn proves the launch path (the scope, the moved home,
-    licensing, the bridge) only. Three things still apply in warn (w6354's review): signals are scoped to the editor's own
-    domain (ABI 6+), `no_new_privs` is set (ff-landlock.py), so a setuid helper the editor runs gets no extra rights, and
-    Landlock blocks `/proc/<pid>` reads of processes outside the domain (the licensing readlink below). A fenced launch
-    that throws falls back to an unfenced start in warn, with "unfenced (the fenced launch failed: ...)" in the start
-    message; enforced, the start fails with the reason, so a planted file cannot buy an unfenced editor.
+  - **No warn step any more** (w6371's review of #1448). The lockout rule asked for warn first; on Linux warn is still a
+    Landlock domain (`--rw /`, no `--deny-unix`), which aborts a windowed editor in GTK just as enforce does, so the
+    daemon offers only off (unset or `false`) and enforce (`true`). `linuxEditorFenceFor`'s warn mode and the warn
+    fallback in `MacUnity.start` (a fenced launch that throws starts unfenced, with "unfenced (the fenced launch
+    failed: ...)") stay for a future fence that GTK survives. Enforced, a fenced launch that throws fails the start
+    with the reason, so a planted file cannot buy an unfenced editor. Under `true`, Landlock also scopes signals to the
+    editor's domain (ABI 6+), sets `no_new_privs` and blocks `/proc/<pid>` reads outside it (the licensing readlink
+    below). The choice is read once per daemon run (`linuxEditorMemo`): a change takes a daemon restart.
   - **The moved home is a folder workers write**, so the daemon never writes there as itself: it makes only `<root>/home`
     (the root's child) and runs the seeding and the Burst check in a child under `ff-landlock.py --rw <root>/home`
     (`seedEditorHomeFenced`, `machine/editorHomeSeed.ts`). w6356's review showed why: with path checks alone, a folder
