@@ -941,7 +941,7 @@ test('w6217: without an environment reader (not a real daemon) no orphan is look
   assert.ok(!r.lines.some((l) => /orphaned|started them gone/.test(l)));
 });
 
-// w6596: game players beside a CI job (step 1: named, still lowered; step 2 keeps them, as Unity editors are kept)
+// w6596: game players beside a CI job keep their own priority, as Unity editors do
 test('w6596: isGamePlayer is the game player by its image or its command line, nothing that only names it', () => {
   assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: '', name: 'FinalFactory.exe' }), true);
   assert.equal(isGamePlayer({ pid: 1, ppid: 0, cmd: String.raw`"V:\ffw\players\p3\FinalFactory.exe" -batchmode -ffPeer 0` }), true);
@@ -958,34 +958,52 @@ const PLAYER_TREE: WinProc[] = [
   { pid: 25, ppid: 24, cmd: 'UnityCrashHandler64.exe --attach 24' },
 ];
 
-test("w6596: enforce, step 1: a game player in an agent's tree and what it started are named once and still lowered with the tools", async () => {
+test("w6596: enforce: a game player in an agent's tree and what it started keep their priority, named once; the other tools go as before", async () => {
   const r = rig({ procs: PLAYER_TREE, prio: [[24, P.PRIORITY_NORMAL], [25, P.PRIORITY_NORMAL]], mode: 'enforce' });
   const res = await r.cf.tick();
   assert.equal(res?.players, 2);
-  assert.equal(r.prio.get(24), P.PRIORITY_BELOW_NORMAL, 'step 1 changes nothing that is done');
-  assert.equal(r.prio.get(25), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(res?.above, 1, 'only 22: the players are not counted as tools');
+  assert.equal(r.prio.get(24), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(25), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
   const line = r.lines.find((l) => /game player process\(es\)/.test(l))!;
-  assert.match(line, /^ci first: 2 game player process\(es\) run above BelowNormal/);
-  assert.match(line, /lowered with the rest for now; step 2 of w6596 keeps game players/);
-  assert.match(line, /24 FinalFactory\.exe \(.*\) lowered/);
+  assert.match(line, /^ci first: kept 2 game player process\(es\) at their own priority beside the CI job\(s\), as Unity editors are, not lowered to BelowNormal/);
+  assert.match(line, /24 FinalFactory\.exe \(/);
   assert.match(line, /25 UnityCrashHandler64\.exe \(under player 24\)/);
-  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL, 'the other tools go as before');
+  assert.doesNotMatch(r.lines.find((l) => /^ci first: lowered/.test(l))!, /FinalFactory|UnityCrashHandler/);
   r.advance(60_000);
   await r.cf.tick();
+  assert.equal(r.prio.get(24), P.PRIORITY_NORMAL);
   assert.equal(r.lines.filter((l) => /game player process\(es\)/.test(l)).length, 1, 'named once');
 });
 
-test('w6596: warn: a broker player (its starter gone, found by its session environment) is named as a game player, nothing lowered', async () => {
-  const procs: WinProc[] = [...ORPHANS, { pid: 90, ppid: 94, cmd: String.raw`V:\ffw\players\p1\FinalFactory.exe -ffAutomationStatusFile x.status.json` }];
-  const r = rig({ procs, env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]], mode: 'warn' });
+const BROKER_PLAYER: WinProc = { pid: 90, ppid: 94, cmd: String.raw`V:\ffw\players\p1\FinalFactory.exe -ffAutomationStatusFile x.status.json` };
+
+test('w6596: enforce: a broker player (its starter gone, found by its session environment) keeps its priority; the orphaned tools are lowered', async () => {
+  const r = rig({ procs: [...ORPHANS, BROKER_PLAYER], env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]], mode: 'enforce' });
   const res = await r.cf.tick();
   assert.equal(res?.players, 1);
-  assert.equal(res?.orphans, 3, 'the player is one of the orphans too');
+  assert.equal(res?.orphans, 2, 'the player is not one of the orphaned tools');
   assert.equal(r.prio.get(90), P.PRIORITY_NORMAL);
-  const line = r.lines.find((l) => /game player process\(es\)/.test(l))!;
-  assert.match(line, /^ci first: 1 game player process\(es\) run above BelowNormal .*enforcing would lower them \(warn only\)/);
-  assert.match(line, /90 FinalFactory\.exe \(/);
-  assert.doesNotMatch(line, / lowered/);
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL);
+  assert.match(r.lines.find((l) => /game player process\(es\)/.test(l))!, /kept 1 game player .*: 90 FinalFactory\.exe \(/);
+  assert.doesNotMatch(r.lines.find((l) => /found by their session's environment/.test(l))!, /FinalFactory/);
+});
+
+test("w6596 (w6600 review): a tool whose parent pid now belongs to a player that started after it is no player's, and is lowered", async () => {
+  const tool: WinProc = { pid: 91, ppid: 90, cmd: 'python.exe hog.py' };
+  const r = rig({
+    procs: [...ORPHANS, BROKER_PLAYER, tool],
+    env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT }, 91: { session: 'aaaa1111', root: ROOT } },
+    root: ROOT,
+    prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL], [91, P.PRIORITY_NORMAL]],
+    mode: 'enforce',
+  });
+  r.started.set(90, 100 + 91 + 60_000); // the player got pid 90 a minute after 91's own parent, also 90, had started 91
+  r.advance(120_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'the player keeps its priority');
+  assert.equal(r.prio.get(91), P.PRIORITY_BELOW_NORMAL, 'the reused parent pid does not make 91 a player');
 });
 
 test('w6596: no game player, no line and no count', async () => {
