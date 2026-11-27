@@ -8923,7 +8923,7 @@ ${w.repo ?? ''}
     const lights = lightFolders(m.sandboxes);
     const lightPart = lights.length || this.machines.offersLight(m.id) ? `; light agent folders (w5924): ${lightUseText(lights.map((x) => this.lightBusy(x)), this.machines.offersLight(m.id))}` : '';
     const sandboxes = pool
-      ? `  sandboxes: ${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}${lightPart} in ${pool.root} (up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB${pool.librarySeed ? `; Library seed ${pool.librarySeed}${pool.librarySeedCopy === 'clone' ? ' (block clone)' : ''}` : ''}${pool.belowNormal ? '; editors below normal priority' : ''}${pool.slotRepos ? `; slot repos (${pool.slotRepos})` : ''}): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
+      ? `  sandboxes: ${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}${lightPart} in ${pool.root} (up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB${pool.librarySeed ? `; Library seed ${pool.librarySeed}${pool.librarySeedCopy === 'clone' ? ' (block clone)' : ''}` : ''}${pool.belowNormal ? '; editors below normal priority' : ''}${pool.slotRepos ? `; slot repos (${pool.slotRepos})` : ''}${pool.commitCheck === 'off' ? '; commit check off' : ''}): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
       : '  sandboxes: none (no sandbox_root)';
     // Its standing agents here; a sandbox's are under list_sandboxes.
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');
@@ -9102,6 +9102,7 @@ ${w.repo ?? ''}
           library_seed: z.string().optional().describe('Absolute path of a warm Library folder new sandboxes are seeded from first (else the main clone\'s, else a sandbox\'s). Omitted: kept; "": cleared.'),
           library_seed_copy: z.enum(['robocopy', 'clone']).optional().describe('How a Windows machine copies the seed: "clone" block-clones on a ReFS Dev Drive (seed and sandboxes on one volume), "robocopy" copies. Omitted: kept.'),
           slot_repos: z.enum(['new', 'all', 'off']).optional().describe('w5614: its NEW sandboxes are their own git repos borrowing the objects of the main clone (objects/info/alternates) instead of worktrees of it, so a commit of a worker writes nothing into the clone (docs/machines.md "Slot repos"). "new": new sandboxes only; "all": also each free, idle worktree sandbox, converted one at a time with its files untouched; "off": worktrees again for new ones (slot repos stay). Omitted: kept.'),
+          commit_check: z.enum(['warn', 'off']).optional().describe("w6411: its daemon's commit-charge check on Windows, before an editor start or a unity-slot grant (room in RAM plus page file for an editor, a reserve and each running CI job). \"warn\" (the default): it logs what it would refuse and refuses nothing; \"off\": no check. Takes effect at the portal's next welcome, with nobody at the machine. Omitted: kept."),
           unity_below_normal: z.boolean().optional().describe('Start its sandbox editors at below-normal priority, so a game played on that computer wins. Omitted: kept.'),
           play_only: z.string().max(300).optional().describe('Why this computer is play-only (w1946), quoting who asked: no workers, no standing agents, no sandbox; it only plays the game, running the timed A/B legs other computers build (timed_run) under its own exclusive bench ticket. With join_code it joins with the smallest limits (one player-slot pair). "" makes it an ordinary computer again. Omitted: kept.'),
           no_players: z.string().max(300).optional().describe('Why this computer runs no game players (w4621: no built player, no FFU client), quoting who asked: placement sends it no timed leg and no pair-run leg; its Unity editor, play mode included, still takes work. "" clears it (m3 has one by default: Ben\'s w3740 hold). Omitted: kept.'),
@@ -9175,6 +9176,7 @@ ${w.repo ?? ''}
             librarySeedCopy: a.library_seed_copy,
             unityBelowNormal: a.unity_below_normal,
             slotRepos: a.slot_repos,
+            commitCheck: a.commit_check,
             noTimedRuns: a.no_timed_runs,
             noPlayers: a.no_players,
             playOnly: a.play_only,
