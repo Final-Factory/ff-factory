@@ -620,6 +620,8 @@ export interface HostStats {
   memUsedBytes?: number;
   /** macOS memory pressure (kern.memorystatus_vm_pressure_level). */
   memPressure?: 'normal' | 'warn' | 'critical';
+  /** Windows' commit charge (w6411, server/system.ts WIN_COMMIT_SCRIPT): committed and limit bytes, read at `at` (epoch ms). */
+  commit?: { committedBytes: number; limitBytes: number; at: number };
   diskTotalBytes?: number;
   diskFreeBytes?: number;
   /**
@@ -1337,6 +1339,11 @@ export interface Machine {
    */
   slotRepos?: 'new' | 'all' | 'off';
   /**
+   * w6411 (machine/commitCharge.ts): its daemon's commit-charge check before an editor start or a unity-slot grant on
+   * Windows. Unset or 'warn': it logs what it would refuse and refuses nothing; 'off': no check, no log line.
+   */
+  commitCheck?: 'warn' | 'off';
+  /**
    * Why it takes no timed runs (w1861, add_machine no_timed_runs; server/machines.ts noTimedRunsOf): its bench queue refuses
    * a timing ticket and placement sends timed work elsewhere. Unset: the default (NO_TIMED_RUNS: m5); "" clears it.
    */
@@ -1467,6 +1474,8 @@ export interface SandboxPoolSettings {
   slotRepos?: 'new' | 'all';
   /** Protocol 6: folders clean-up never deletes (a live game), besides the clone, the sandboxes and the daemon's folder. */
   protectedPaths?: string[];
+  /** w6411: the commit-charge check (Machine.commitCheck): "off" turns it off; unset: warn-only. An older daemon ignores it. */
+  commitCheck?: 'warn' | 'off';
 }
 
 // ---- providers (docs/ffbox-integration.md): FFBox, reached through the connector it runs ----

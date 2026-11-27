@@ -222,6 +222,27 @@ async function gpuNow(memTotalBytes: number): Promise<ProbeResult<HostStats['gpu
   return { value: w.code === 0 ? parseWinGpu(w.stdout) : undefined, timedOut: w.timedOut };
 }
 
+/**
+ * Windows' commit charge (w6411): what processes have committed against RAM plus the page file, and that limit, in
+ * bytes, from Win32_PerfRawData_PerfOS_Memory (the counters \Memory\Committed Bytes and \Memory\Commit Limit). A
+ * computer can run out of commit while its RAM still shows room (BEAST, 2026-11-27, w6409: 127.8 GB committed of 127.8).
+ */
+export const WIN_COMMIT_SCRIPT = '$m = Get-CimInstance Win32_PerfRawData_PerfOS_Memory -Property CommittedBytes,CommitLimit; "$($m.CommittedBytes) $($m.CommitLimit)"';
+
+/** WIN_COMMIT_SCRIPT's line: committed and limit bytes, or undefined unless both are there and make sense. */
+export function parseWinCommit(out: string, at = Date.now()): HostStats['commit'] {
+  const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(out);
+  if (!m) return undefined;
+  const committedBytes = Number(m[1]);
+  const limitBytes = Number(m[2]);
+  return limitBytes > 0 && committedBytes <= limitBytes * 1.01 ? { committedBytes, limitBytes, at } : undefined;
+}
+
+async function winCommitNow(): Promise<ProbeResult<HostStats['commit']>> {
+  const r = await runOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN_COMMIT_SCRIPT], 15_000);
+  return { value: r.code === 0 ? parseWinCommit(r.stdout) : undefined, timedOut: r.timedOut };
+}
+
 type MacMemory = Pick<HostStats, 'memUsedBytes' | 'memPressure'> & { memFreeBytes?: number };
 
 async function macMemoryNow(): Promise<ProbeResult<MacMemory>> {
@@ -242,10 +263,23 @@ async function macMemoryNow(): Promise<ProbeResult<MacMemory>> {
 export const probes = {
   gpu: new CachedProbe('GPU', () => gpuNow(os.totalmem()), { everyMs: 4000, maxBackoffMs: 10 * 60_000 }),
   macMemory: new CachedProbe('memory', macMemoryNow, { everyMs: 4000, maxBackoffMs: 10 * 60_000 }),
+  // w6411: one PowerShell in 15 s (about half a second of it, measured on BEAST); its value says when it was read
+  winCommit: new CachedProbe('commit charge', winCommitNow, { everyMs: 15_000, maxBackoffMs: 10 * 60_000 }),
 };
 
-function memory(): Pick<HostStats, 'memTotalBytes' | 'memFreeBytes' | 'memUsedBytes' | 'memPressure'> {
+/** The last commit charge read on Windows, if it is under two minutes old (w6411); else undefined: the checks fall back to RAM. */
+export function commitNow(now = Date.now()): HostStats['commit'] {
+  if (process.platform !== 'win32') return undefined;
+  const c = probes.winCommit.get();
+  return c && now - c.at < 2 * 60_000 ? c : undefined;
+}
+
+function memory(): Pick<HostStats, 'memTotalBytes' | 'memFreeBytes' | 'memUsedBytes' | 'memPressure' | 'commit'> {
   const memTotalBytes = os.totalmem();
+  if (process.platform === 'win32') {
+    const commit = commitNow();
+    return { memTotalBytes, memFreeBytes: os.freemem(), ...(commit ? { commit } : {}) };
+  }
   if (process.platform !== 'darwin') return { memTotalBytes, memFreeBytes: os.freemem() };
   const m = probes.macMemory.get();
   return { memTotalBytes, memFreeBytes: m?.memFreeBytes ?? os.freemem(), memUsedBytes: m?.memUsedBytes, memPressure: m?.memPressure };

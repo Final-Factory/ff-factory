@@ -192,7 +192,7 @@ export class MachineGuard {
   }
 
   /** Why a new agent or editor in a sandbox must wait (the drive is gone or growing, disk space is low), or undefined. */
-  blockReason(kind: 'editor' | 'agent', o: { diskCleanup?: boolean } = {}): string | undefined {
+  blockReason(kind: 'editor' | 'agent', o: { diskCleanup?: boolean; commit?: string } = {}): string | undefined {
     if (this.growing) return `the Dev Drive is being grown to ${this.growing} GB (detached for a minute or two, w1918); try again in a few minutes`;
     return this.monitor.blockReason(kind, o);
   }
