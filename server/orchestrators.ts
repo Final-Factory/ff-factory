@@ -90,7 +90,7 @@ import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPerson
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
-import { dataDirClearedText, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, otherPlayerIn, type DataDirVerdict } from './gameDataDir.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
@@ -5397,11 +5397,16 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     let dataDirChecked: string | undefined;
     if (legacyData) {
       const v = a.data_dir;
-      if (v?.reads && commit && sameCommit(v.commit, commit)) {
+      // w6235: legacy_data about another player (a Steam 0.50 build, another sha) is not settled by this commit's file.
+      const other = commit && legacySaid && !saysNone(legacySaid) ? otherPlayerIn(legacySaid, commit) : undefined;
+      if (v?.reads && commit && sameCommit(v.commit, commit) && !other) {
         dataDirChecked = dataDirClearedText(v.commit);
         legacyData = undefined;
       } else {
-        const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)' : v && !v.reads ? v.why : `FF Factory did not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (w6189)`;
+        const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)'
+          : v && !v.reads ? v.why
+          : other ?? (v?.reads ? `FF Factory's check answered for ${v.commit.slice(0, 10)}, not ${commit.slice(0, 10)}, so ${commit.slice(0, 10)} was not checked for the FF_GAME_DATA_DIR backport (w6235)`
+          : `FF Factory did not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (w6189)`);
         legacyData = clip(`${legacyData}; ${why}`, 400);
       }
     }

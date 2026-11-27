@@ -992,6 +992,80 @@ test('w6189: start_agent decides a marked pair run per commit too: the backport 
   assert.ok(w.log.some((l) => /start_agent: its player at 20786882d8 reads FF_GAME_DATA_DIR/.test(l)), w.log.join('\n'));
 });
 
+// w6235 (w6192's review of PR #1402): nit 1, nothing failed with the sameCommit guard in filePair removed; and its
+// should-fix-later point, legacy_data about another player than `commit` (a Steam 0.50 build) was cleared by that commit's file.
+const W6235_OTHER = 'ac80d7b0bb00000000000000000000000000000b';
+test('w6235: request_pair keeps the mark when the verdict is for another commit, or legacy_data names another player', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w6236', by: LOTH }, { id: 'w6237', by: LOTH }]);
+  env.machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const ask = { what: 'MP determinism check of PR #4382 on pre-1.0', brief: 'Build the 0.50 line at the PR head and run the MP scenarios.', commit: '20786882d8' };
+  const before = store.work.size;
+  // A positive read, but of another commit than the pair's: the pair's own commit was never checked.
+  agents.gameDataDirAt = () => Promise.resolve({ reads: true, commit: W6235_OTHER });
+  const wrong = await startedFor(env, 'w6236');
+  await assert.rejects(
+    async () => wrong.h.request_pair!(ask),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(read from its words.*; FF Factory's check answered for ac80d7b0bb, not 20786882d8, so 20786882d8 was not checked/,
+  );
+  // The commit reads FF_GAME_DATA_DIR, but legacy_data says the host runs a Steam 0.50 build: that player was not checked.
+  agents.gameDataDirAt = fakeDataDir;
+  const steam = await startedFor(env, 'w6237');
+  await assert.rejects(
+    async () => steam.h.request_pair!({ ...ask, legacy_data: 'the host runs the Steam pre-1.0 0.50.0.47 build' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(the host runs the Steam pre-1\.0 0\.50\.0\.47 build; its legacy_data names build 0\.50\.0\.47, but FF Factory checked only 20786882d8/,
+  );
+  assert.equal(store.work.size, before, 'nothing filed');
+});
+
+test('w6235: start_agent keeps the mark when the verdict is for another commit, or the mark names another player', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, dispatcher, call, machines, agents } = env;
+  putRequests(store, [
+    { id: 'w6238', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+    { id: 'w6239', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'the client runs ac80d7b0bb, the Steam 0.50.0.47 build', commit: '20786882d8' } },
+  ]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  const start = (id: string) => call(dispatcher().info, 'start_agent', { work_id: id, prompt: 'Run the MP scenarios on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  for (const [id, dataDir] of [['w6238', () => Promise.resolve({ reads: true, commit: W6235_OTHER })], ['w6239', fakeDataDir]] as const) {
+    agents.gameDataDirAt = dataDir as (c: string) => Promise<DataDirVerdict>;
+    const r = await start(id);
+    assert.equal(r.isError, true, id);
+    assert.match(r.text, /leg 1 \(the host\) on pc\/alpha: pc: its sandbox agents were measured at Low integrity.*Nothing was started\./, id);
+    assert.ok(store.work.get(id)!.pair?.legacyData, id);
+    assert.equal(store.work.get(id)!.pair?.dataDirChecked, undefined, id);
+  }
+});
+
+test('w6235: the queue re-check clears a queued marked pair run whose commit reads FF_GAME_DATA_DIR, once per 10 minutes', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  const asked: string[] = [];
+  agents.gameDataDirAt = (c) => (asked.push(c), fakeDataDir(c));
+  putRequests(store, [
+    { id: 'w6240', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+    { id: 'w6241', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50', commit: 'ac80d7b0' } },
+    { id: 'w6242', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'the host runs the Steam 0.50.0.47 build', commit: '20786882d8' } },
+    { id: 'w6243', by: LOTH, status: 'done', pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } },
+  ]);
+  const t0 = Date.parse(T0);
+  assert.deepEqual(await agents.recheckLegacyPairs(t0), ['w6240']);
+  assert.equal(store.work.get('w6240')!.pair?.legacyData, undefined);
+  assert.match(store.work.get('w6240')!.pair?.dataDirChecked ?? '', /^its player at 20786882d8 reads FF_GAME_DATA_DIR/);
+  assert.ok(store.work.get('w6240')!.log.some((l) => /the queue re-check: its player at 20786882d8 reads FF_GAME_DATA_DIR/.test(l)));
+  assert.ok(store.work.get('w6241')!.pair?.legacyData, 'an older commit stays marked');
+  assert.ok(store.work.get('w6242')!.pair?.legacyData, 'words about another player stay marked, and GitHub is not asked');
+  assert.ok(store.work.get('w6243')!.pair?.legacyData, 'a closed run is left alone');
+  assert.deepEqual(asked, ['20786882d8', 'ac80d7b0']);
+  // Within 10 minutes the still-marked one is not read again; after them it is.
+  assert.deepEqual(await agents.recheckLegacyPairs(t0 + 60_000), []);
+  assert.equal(asked.length, 2);
+  await agents.recheckLegacyPairs(t0 + 11 * 60_000);
+  assert.deepEqual(asked, ['20786882d8', 'ac80d7b0', 'ac80d7b0']);
+});
+
 test('w5965: the words that mark a pre-w5297 player', () => {
   for (const t of ['MP-activity-fingerprint on pre-1.0', 'the 0.50 line at ac80d7b0', 'build 0.50.0.47', 'its player predates w5297']) assert.equal(mentionsLegacyPlayer(t), true, t);
   for (const t of ['a 0.50 s wait', 'MP-activity-fingerprint on master', 'pre-1.05 notes', 'version 10.50.1']) assert.equal(mentionsLegacyPlayer(t), false, t);
