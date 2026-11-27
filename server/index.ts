@@ -2778,15 +2778,20 @@ server.on('upgrade', (req, socket, head) => {
       console.warn('websocket error:', e.message);
       clients.delete(ws);
     });
+    // w6336: the page says when its first state is on screen (pageSockets.ready logs each phase); it sends nothing else.
+    ws.on('message', (data, isBinary) => {
+      if (!isBinary) pageSockets.ready(ws, data.toString());
+    });
     const t0 = performance.now();
     const state = appState(user, new URL(req.url ?? '/', 'http://x').searchParams.get('have'));
+    const t1 = performance.now();
     const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
     const built = performance.now() - t0;
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0) });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));

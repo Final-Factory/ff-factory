@@ -669,7 +669,7 @@ function logs(appDir: string) {
 // w1532: the tray app the daemon builds and starts on a Windows PC (machine/tray.ts, machine/tray/FFFactoryTray.cs). Built
 // with the C# compiler every Windows PC has, it says hello with its low-level input hooks, counts a key that SendInput
 // injected (an agent driving the game, a test) as injected and never as a person's, sends no `input` for it, and ends on quit.
-test('windows (real tray app): built with the in-box csc, it starts, counts a SendInput key as injected (never a person), and quits (w1532)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
+test('windows (real tray app): built with the in-box csc, it starts, counts a SendInput key as injected (never a person), keeps the foreground lock timeout at 0 (w6350), and quits (w1532)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
   const { buildTray, traySourceDir, trayInstance } = await import('../machine/tray.ts');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-tray-'));
   // One hook, the tray ended before its folder goes (w1758): Windows refuses to delete the exe of a running process, and a
@@ -805,6 +805,53 @@ $null = [Console]::In.ReadLine()
     const input = await next('input');
     assert.ok(input.kind === 'key' || input.kind === 'click', `the tray sent the person's input (${JSON.stringify(input)})`);
   } else t.diagnostic(`the tray's input hooks did not install here (${String(hello.hooks)}): the injected-key check is skipped`);
+  // w6350: the foreground lock guard. The live ForegroundLockTimeout is set to Windows' logon value (2147483647) the way a
+  // logon does, the state turns the guard on, and the tray must put 0 back by itself, then what the computer had is put back.
+  // On a CI runner the guard must win; elsewhere a refused set (error 5 from a Low process, as an agent's) is a diagnostic.
+  {
+    const since = (from: number, type: string, ok: (l: Record<string, unknown>) => boolean = () => true, ms = 15_000) => async () => {
+      const end = Date.now() + ms;
+      for (;;) {
+        const hit = lines.slice(from).find((l) => l.type === type && ok(l));
+        if (hit) return hit;
+        if (Date.now() > end) throw new Error(`no ${type} from the tray; it said: ${JSON.stringify(lines.slice(from))}`);
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    };
+    const flt = async (set?: number) => {
+      const from = lines.length;
+      tray.stdin.write(`${JSON.stringify(set === undefined ? { type: 'flt' } : { type: 'flt', set })}\n`);
+      return since(from, 'flt')();
+    };
+    const state = (fltGuard: boolean) => tray.stdin.write(`${JSON.stringify({ type: 'state', paused: false, why: 'x', schedule: 'none', work: 'x', settings: { schedule: { enabled: false, start: '22:00', end: '08:00', days: [0] }, activity: { enabled: false, idleMinutes: 90 } }, machine: 'test', fltGuard })}\n`);
+    const had = Number((await flt()).live);
+    t.diagnostic(`the live ForegroundLockTimeout here: ${had} ms`);
+    const armed = await flt(2147483647);
+    t.diagnostic(`set to 2147483647: ${JSON.stringify(armed)}`);
+    if (armed.set !== true || armed.live !== 2147483647) {
+      assert.ok(!process.env.CI, `a CI runner must let the tray set the live ForegroundLockTimeout: ${JSON.stringify(armed)}`);
+      t.diagnostic('the live value could not be set here (an agent at Low integrity): the guard leg is skipped');
+    } else {
+      const from = lines.length;
+      state(true);
+      const on = await since(from, 'flt_guard', (l) => l.on === true)();
+      t.diagnostic(`guard on: ${JSON.stringify(on)}`);
+      const fixed = await since(from, 'flt_guard', (l) => l.live === 0 || l.failing !== undefined, 60_000)();
+      t.diagnostic(`guard: ${JSON.stringify(fixed)}; its log: ${JSON.stringify(lines.slice(from).filter((l) => l.type === 'log').map((l) => l.text))}`);
+      assert.equal(fixed.live, 0, `the guard put 0 back: ${JSON.stringify(fixed)}`);
+      assert.equal((await flt()).live, 0, 'the live value read afterwards is 0');
+      const off = lines.length;
+      state(false);
+      await since(off, 'flt_guard', (l) => l.on === false)();
+      // Off, it no longer repairs: Windows' value set again stays.
+      if ((await flt(2147483647)).live === 2147483647) {
+        await new Promise((r) => setTimeout(r, 4_000));
+        assert.equal((await flt()).live, 2147483647, 'off, the guard leaves the live value alone');
+      }
+    }
+    const back = await flt(had);
+    t.diagnostic(`put back ${had}: ${JSON.stringify(back)}`);
+  }
   tray.stdin.write(`${JSON.stringify({ type: 'quit' })}\n`);
   const code = await new Promise<number | null>((r) => tray.on('exit', (c) => r(c)));
   assert.equal(code, 0);
