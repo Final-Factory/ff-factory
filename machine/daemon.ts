@@ -29,6 +29,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
+import { freezeWatchSettings, startFreezeWatch, type FreezeWatch } from './freezeWatch.ts';
 import { useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
@@ -387,6 +388,11 @@ export interface DaemonConfig {
   /** The sweep of a stopped session's temp folder (server/sessionSweep.ts, w913): graceMin, cloneKeepHours, quietMin. */
   sessionSweep?: Partial<{ graceMin: number; cloneKeepHours: number; quietMin: number }>;
   /**
+   * The freeze watch (machine/freezeWatch.ts, w6555): a thread that logs a main event loop frozen for `afterMin` minutes
+   * (default 3) while it is frozen, with the main thread's stack, and again every `repeatMin` (default 5). `false`: off.
+   */
+  freezeWatch?: Partial<{ afterMin: number; repeatMin: number }> | false;
+  /**
    * The MCP-for-Unity server agents here get as "UnityMCP", each confined to its own editor (machine/unityMcp.ts).
    * Default: the UnityMCP entry the machine's own Claude Code has in ~/.claude.json.
    */
@@ -690,6 +696,8 @@ export class Daemon {
   /** The daemon's own event-loop watch (w4926): a block is a line in daemon.log, beside what ran around it. */
   private loopWatch?: LoopWatch;
   private stallProfiler?: StallProfiler;
+  /** w6555: the thread that sees the loop frozen while it is frozen (the loop watch can say so only after). */
+  private freezeWatch?: FreezeWatch;
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
@@ -2327,6 +2335,15 @@ export class Daemon {
     if (this.cfg.root) void refreshTrustedBenchAsync({ appDir: appDirOfConfig(this.cfg), background: true }, this.cfg.root);
     this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
+    // w6555: BEAST's loop was held 891 s on 2026-11-27 (w6546) and its log said nothing until it ended; this thread says it during.
+    const fw = freezeWatchSettings(this.cfg.freezeWatch);
+    if (fw && process.env.FF_FREEZE_WATCH !== 'off') {
+      try {
+        this.freezeWatch = startFreezeWatch({ afterMs: fw.afterMin * 60_000, repeatMs: fw.repeatMin * 60_000, onError: (e) => log(`freeze watch: its thread failed: ${e.message}`) });
+      } catch (e) {
+        log(`freeze watch: not started: ${(e as Error).message}`);
+      }
+    }
     // w6077: a block LoopWatch can name only by "last ran" (code after an await, under no label) gets the functions that held
     // the loop from V8's sampling profiler, as the portal's do (server/stallProfile.ts); profiles in <app>/profiles, the newest few.
     if (this.cfg.root && process.env.FF_STALL_PROFILE !== 'off') {
@@ -2456,6 +2473,7 @@ export class Daemon {
     for (const t of this.timers) clearInterval(t);
     this.loopWatch?.stop();
     this.stallProfiler?.stop();
+    this.freezeWatch?.stop();
     this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
