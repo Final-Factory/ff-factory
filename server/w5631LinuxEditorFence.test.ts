@@ -213,3 +213,17 @@ test('w5631: the Linux editor fence is off unless daemon.json says editorFence t
   assert.match(body, /if \(this\.cfg\.editorFence !== true\) log\(/);
   assert.ok(body.indexOf('editorFence !== true') < body.indexOf('linuxEditorFenceFor('), 'decided before any rules are made');
 });
+
+test('w6371 (review of #1448): the daemon fences Linux editors, enforced, only with editorFence true and the write lock on', { skip: !landlockRuns() }, async () => {
+  const { Daemon } = await import('../machine/daemon.ts');
+  const pick = (Daemon.prototype as unknown as { linuxEditorFence(this: object): ReturnType<typeof linuxEditorFenceFor> }).linuxEditorFence;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w6371-'));
+  const self = (editorFence: boolean | undefined, writeLock: string[] | undefined) => ({ cfg: { editorFence, root }, writeLock, lockRules: () => ['--rw', root], lockMemo: undefined });
+  assert.equal(pick.call(self(undefined, ['--rw', root])), undefined, 'unset: unfenced');
+  assert.equal(pick.call(self(false, ['--rw', root])), undefined);
+  assert.equal(pick.call(self(true, undefined)), undefined, 'no write lock: unfenced');
+  const on = pick.call(self(true, ['--rw', root]));
+  assert.equal(on?.kind, 'landlock');
+  assert.equal(on?.warn, false, 'the only opt-in is enforce');
+  fs.rmSync(root, { recursive: true, force: true });
+});
