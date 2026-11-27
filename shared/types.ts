@@ -3133,7 +3133,7 @@ export interface WorkBlocker {
   ref?: string;
   /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */
   on?: 'done' | 'report';
-  /** lock: the request holding it, whose close or report frees it. */
+  /** lock: the request holding it, whose close or report frees it. pr set by the blocker watch (w5845, w6446): the request it was handed to, which works on the PR. */
   holder?: string;
   /** time: when it clears. lock: when to look again at the latest. */
   until?: string;
