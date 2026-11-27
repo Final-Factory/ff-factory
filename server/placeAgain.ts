@@ -22,6 +22,7 @@
  * moved worker resumes its own conversation (Claude Code finds a session by its id in any project folder: measured on
  * 2026-10-07 with the CLI 2.1.292 and the Agent SDK's 2.1.284) and its next message says where it is now.
  */
+import { newCost, timedCost, type Cost } from './placeCost.ts';
 import { gameSandboxes, isLight } from '../shared/sandboxKind.ts';
 import { agentState, holdsSandbox, HOLD_PLACE_MS, OVERDUE_MS, utcTime } from '../shared/agentState.ts';
 
@@ -730,6 +731,13 @@ export class PlaceAgain {
     const memo = this.claimsMemo?.get(machineId);
     if (memo) return memo;
     this.claimsMade++;
+    return timedCost(this.claimsCost, () => this.claimsWork(machineId));
+  }
+
+  /** w6428: time spent in claims() work, outermost calls only (the page's 'place' line). */
+  readonly claimsCost: Cost = newCost();
+
+  private claimsWork(machineId: string): Map<string, string> {
     const m = this.d.machine(machineId);
     const out = new Map<string, string>();
     if (!m) return out;
