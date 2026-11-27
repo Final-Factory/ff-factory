@@ -863,7 +863,18 @@ offscreen Metal renders run; on a locked Windows session GDI capture fails or is
   log in for a window (`screenUnlockAskProblem`); the worker hands the windowed step to a computer whose screen is
   unlocked.
 
-Tests: `server/w4868LockedScreen.test.ts`.
+- **Linux reads its lock too** (w6311: w6282's windowed pair leg went on biscuit behind a locked GNOME desktop and drew
+  no frames). The daemon asks GNOME first, `gdbus call --session --dest org.gnome.ScreenSaver --object-path
+  /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive` (`(true,)` is locked) on the user's bus
+  (`/run/user/<uid>/bus` when its environment names none), else `loginctl` for the user's graphical session
+  (`show-user <uid> -p Display`), whose `LockedHint` or `IdleHint` `yes` counts as locked; neither answering is
+  `via: "none"`, which counts as locked for work that draws a window only (`readLinuxDesktop`, `machine/steamClient.ts`).
+  The daemon log line reads `steam client: ...; screen: locked (gnome, warn-only)`. While `LINUX_LOCK_ENFORCED`
+  (`shared/desktop.ts`) is false, a Linux reading changes no placement: `start_agent` logs `would not place: <machine>
+  screen locked` to the portal log where it would refuse. Recovery needs nobody: the reading is taken again every 2
+  minutes, so an unlocked desktop takes windowed work at the next one.
+
+Tests: `server/w4868LockedScreen.test.ts`, `server/w6311LinuxLock.test.ts`.
 
 ## Closing Firefox to free RAM
 
