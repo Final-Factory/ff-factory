@@ -13,7 +13,7 @@ import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { Store } from './store.ts';
 import type { SessionInfo } from '../shared/types.ts';
 
-function scene(t: { after: (f: () => void) => void }) {
+function scene(t: { after: (f: () => void | Promise<void>) => void }) {
   const launches: { options: Options; got: string[] }[] = [];
   setQueryForTesting((({ prompt, options }: { prompt: AsyncIterable<{ message: { content: unknown } }>; options: Options }) => {
     const l = { options, got: [] as string[] };
@@ -29,8 +29,12 @@ function scene(t: { after: (f: () => void) => void }) {
   t.after(() => setQueryForTesting(fakeQuery() as never));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-lazy-launch-'));
   const store = new Store(dir);
-  t.after(() => {
+  // A background save of the store (flushSoon, w2044) may still be writing into dir: wait for it, or the rm meets a file
+  // made mid-way (ENOTEMPTY on Linux CI, #1431's run 45945676364).
+  t.after(async () => {
+    await store.saved();
     store.flush();
+    await store.saved();
     fs.rmSync(dir, { recursive: true, force: true });
   });
   const info: SessionInfo = { id: 'sess-3855', kind: 'worker', title: 't', status: 'idle', permissionMode: 'bypassPermissions', createdAt: 'x', lastActivityAt: 'x', turns: 0, costUsd: 0, pendingPermissions: [], sdkSessionId: 'conv-3855' };

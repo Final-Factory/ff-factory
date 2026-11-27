@@ -595,11 +595,78 @@ export function sharedLockedFolders(root: string): string[] {
 
 /** Whether `p` is one of the shared-lock folders or inside one (w6314: the daemon's clean-up there is its own write). */
 export function inSharedLocked(root: string, p: string): boolean {
-  const r = path.resolve(p);
-  return sharedLockedFolders(root).some((f) => {
-    const rel = path.relative(path.resolve(f), r);
-    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-  });
+  return sharedLockedFolders(root).some((f) => inFolder(f, p));
+}
+
+/**
+ * Runs `f` as the daemon's write to those of `paths` in the shared-lock folders, only those (w6314, review w6316: a uv
+ * prune or warm of the shared seed, a clean-up batch's locked items); with none of them locked, plainly.
+ */
+export function asDaemonWrite<T>(writes: DaemonWrites, root: string | undefined, paths: string[], f: () => Promise<T>): Promise<T> {
+  const locked = root ? paths.filter((p) => inSharedLocked(root, p)) : [];
+  return locked.length ? writes.run(locked, f) : f();
+}
+
+/** Whether `p` is `folder` or inside it. */
+export function inFolder(folder: string, p: string): boolean {
+  const rel = path.relative(path.resolve(folder), path.resolve(p));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/**
+ * The daemon's own writes in the shared-lock folders, per folder (w6314, review w6316 finding 3): a write marks only the
+ * folders it touches, while it runs and for the grace after it ends (macOS reports its events late, w6274), so a worker's
+ * write to another locked folder meanwhile is still logged.
+ */
+export class DaemonWrites {
+  private readonly active = new Map<string, number>();
+  private readonly ended = new Map<string, number>();
+  private readonly o: { graceMs?: number; now?: () => number };
+  constructor(o: { graceMs?: number; now?: () => number } = {}) {
+    this.o = o;
+  }
+  private now() {
+    return (this.o.now ?? Date.now)();
+  }
+  /** Marks `folders` as being written; the answer ends the mark (once). */
+  begin(folders: string[]): () => void {
+    const fs0 = [...new Set(folders.map((f) => path.resolve(f)))];
+    for (const f of fs0) this.active.set(f, (this.active.get(f) ?? 0) + 1);
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      const t = this.now();
+      for (const f of fs0) {
+        const n = (this.active.get(f) ?? 1) - 1;
+        if (n > 0) this.active.set(f, n);
+        else this.active.delete(f);
+        this.ended.set(f, t);
+      }
+    };
+  }
+  async run<T>(folders: string[], f: () => T | Promise<T>): Promise<T> {
+    const end = this.begin(folders);
+    try {
+      return await f();
+    } finally {
+      end();
+    }
+  }
+  /**
+   * Whether a change to `file` is the daemon's: it is inside a folder being written or written within the grace, or it
+   * is a folder above one (a watch that names the folder it watches, or FSEvents coalescing to a parent).
+   */
+  owns(file: string, t = this.now()): boolean {
+    const grace = this.o.graceMs ?? DAEMON_GRACE_MS;
+    const hit = (f: string) => inFolder(f, file) || inFolder(file, f);
+    for (const f of this.active.keys()) if (hit(f)) return true;
+    for (const [f, at] of this.ended) {
+      if (t - at >= grace) this.ended.delete(f);
+      else if (hit(f)) return true;
+    }
+    return false;
+  }
 }
 
 /** The log line for the setting at daemon start. */
@@ -665,6 +732,8 @@ export interface SharedWatchOptions {
   daemonBusy?: () => boolean;
   /** When the daemon's last write in these folders ended (ms); events within graceMs of it are its own. */
   lastDaemonWrite?: () => number;
+  /** A change to this file is the daemon's own, per folder (DaemonWrites.owns; w6314). */
+  daemonOwns?: (file: string, t: number) => boolean;
   graceMs?: number;
   now?: () => number;
 }
@@ -694,6 +763,7 @@ export function sharedEventHandler(
     )
       return;
     const file = path.join(dir, n);
+    if (o.daemonOwns?.(file, t)) return;
     if (n) {
       try {
         const st = fs.lstatSync(file);
