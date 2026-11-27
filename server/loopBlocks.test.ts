@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { joinedPieces, stringifyPrettyPieces, stringifyPrettySliced, textPieces, writeFileDurableAsync } from './durable.ts';
 import { setup, setupOnMachine, putRequests, startedFor, until, LOTH } from './orchestratorsTestKit.ts';
-import type { BenchPriority } from '../shared/types.ts';
+import type { BenchPriority, SessionInfo } from '../shared/types.ts';
 
 const pretty = (v: unknown) => JSON.stringify(v, null, 2);
 
@@ -297,4 +297,28 @@ test('w6428: a page build\'s placement (pageRead) works out each sandbox\'s FREE
   agents.sandboxFree('pc', sbs[0]);
   agents.sandboxFree('pc', sbs[0]);
   assert.equal(agents.freeMade - f0, 2);
+});
+
+test('w6428: page builds keep each worker\'s requests until a request is saved or dropped', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha'] });
+  const { agents, store } = env;
+  const at = new Date().toISOString();
+  const info = { id: 'k1', kind: 'worker', title: 'w6001: a worker', status: 'stopped', permissionMode: 'default', createdAt: at, lastActivityAt: at, turns: 1, costUsd: 0, pendingPermissions: [] } as unknown as SessionInfo;
+  const put = (id: string, status: string) => store.putWork({ id, title: id, brief: '', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], status, createdAt: at, updatedAt: at, sessionIds: ['k1'], overlaps: [], asks: 0, log: [] } as never);
+  const ids = () => agents.pageRead(() => (agents as unknown as { workIdsOf: (s: SessionInfo) => string[] }).workIdsOf(info)).sort();
+  put('w6002', 'active');
+  assert.deepEqual(ids(), ['w6001', 'w6002']);
+  const kept = (agents as unknown as { pageKept?: { work: Map<string, unknown>; holds?: unknown } }).pageKept;
+  assert.ok(kept?.work.has('k1') && kept.holds, 'kept after the build');
+  assert.deepEqual(ids(), ['w6001', 'w6002']);
+  assert.equal((agents as unknown as { pageKept?: unknown }).pageKept, kept, 'the next build reads the same');
+  put('w6003', 'active');
+  assert.deepEqual(ids(), ['w6001', 'w6002', 'w6003'], 'a saved request is read at the next build');
+  put('w6002', 'done');
+  assert.deepEqual(ids(), ['w6001', 'w6003'], 'and a closed one goes');
+  store.dropWork(['w6003']);
+  assert.deepEqual(ids(), ['w6001'], 'and a dropped one');
+  // Its title names another request: read again although the ledger is unchanged.
+  info.title = 'w6009: renamed';
+  assert.deepEqual(ids(), ['w6009']);
 });
