@@ -12,14 +12,17 @@
  *   no credential in its environment, and writes the lease with the caller's session. Answers the pid.
  * - `players/release` {lease}: the caller's own lease goes. `players/status`: the caller's slots.
  * The slot comes from the caller's token (its sandbox), never from the body: a worker reaches only its own two slots.
- * The build must lie in the caller's sandbox, the temp folder or the nightly folder, never in players, the daemon's folder
- * or the secrets.
+ * The build must lie in the caller's sandbox, its own temp folder or the nightly folder, never in players, the daemon's
+ * folder or the secrets, and it is copied with the worker's rights (machine/workerCopy.ts), never the daemon's. Before it
+ * writes or deletes in a slot (a folder workers can change under "warn") the broker checks the slot, its player/ and
+ * leases/ are plain folders where they should be, and writes no file through a link (w6212 B1, B2).
  */
 import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { RpcRefused, type Caller } from "./daemonRpc.ts";
 import { okSandboxId } from "./slotCaches.ts";
+import { linkIn, plainDirAt, writeFileSafe, writeNew, type WorkerCopy } from "./workerCopy.ts";
 
 /** What a running player writes into its own folder (the game's LocalMultiplayerAutomationSessionConfig): not the build. */
 export const RUNTIME_FILES = new Set([
@@ -57,7 +60,7 @@ export interface BrokerLaunch {
   slotDir: string;
   sandbox: string;
   session: string;
-  /** The folder of its -logFile, when that lies in the workers' temp tree (`<root>/tmp`): the player writes its log there. */
+  /** The folder of its -logFile, when that lies in the caller's own temp folder: the player writes its log there. */
   logDir?: string;
 }
 
@@ -66,8 +69,11 @@ export interface PlayersBrokerDeps {
   host: string;
   /** The caller's sandbox folder, from the pool. */
   sandboxPath: (id: string) => string | undefined;
-  copyTree: (src: string, dst: string) => Promise<void>;
+  /** The copy with the worker's rights (machine/workerCopy.ts workerCopier). */
+  copy: WorkerCopy;
   removeTree: (dir: string) => Promise<void>;
+  /** Where the workers' temp folders are (`ffa-<session>` each; default `<root>/tmp`). */
+  tempDir?: string;
   /** Start the player, fenced, detached; answers its pid or why it was not started. */
   launch: (l: BrokerLaunch) => Promise<{ pid: number } | { refused: string }>;
   alive?: (pid: number) => boolean;
@@ -187,10 +193,37 @@ export function playersRpcHandlers(
       return undefined;
     }
   };
-  const writeJson = (file: string, data: unknown) => {
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(data, null, 1));
-    fs.renameSync(tmp, file);
+  const writeJson = (file: string, data: unknown) =>
+    writeFileSafe(file, JSON.stringify(data, null, 1));
+  /**
+   * B2: the slot is a plain folder at players/<name> (players itself one at <root>/players), with nothing in it a link,
+   * and its player/ and leases/ plain folders where they are. Made when `make` and missing. Refuses otherwise.
+   */
+  const isLink = (p: string) => {
+    try {
+      return fs.lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  const plainSlot = (slot: { name: string; dir: string }, make: boolean) => {
+    const bad = (why: string) =>
+      refuse(409, `players: ${slot.name} ${why}; the broker writes nothing through a link or junction (w6212)`);
+    const there = (p: string) => fs.existsSync(p) || isLink(p);
+    if (!make && !there(players)) return; // nothing installed yet: nothing to write through
+    if (make && !there(players)) fs.mkdirSync(players, { recursive: true });
+    if (!plainDirAt(players, d.root, "players")) throw bad("lies under a players folder that is a link");
+    // each folder is checked before the broker makes anything in it, never after
+    if (make && !there(slot.dir)) fs.mkdirSync(slot.dir);
+    if (!there(slot.dir)) return;
+    if (!plainDirAt(slot.dir, players, slot.name)) throw bad("is a link or junction, not a folder");
+    for (const e of fs.readdirSync(slot.dir, { withFileTypes: true }))
+      if (e.isSymbolicLink()) throw bad(`holds a link (${e.name})`);
+    for (const sub of ["leases", "player"]) {
+      const p = path.join(slot.dir, sub);
+      if (fs.existsSync(p) && !plainDirAt(p, slot.dir, sub)) throw bad(`has ${sub}/ as a link`);
+    }
+    if (make && !there(path.join(slot.dir, "leases"))) fs.mkdirSync(path.join(slot.dir, "leases"));
   };
   /** The slot's live leases (player_slots.py live_leases: a lease whose pid is gone is dead). Reads only. */
   const liveLeases = (dir: string) => {
@@ -228,6 +261,8 @@ export function playersRpcHandlers(
     }
     return out;
   };
+  const ownTemp = (c: Caller) =>
+    path.join(d.tempDir ?? path.join(d.root, "tmp"), `ffa-${c.session.replace(/[^\w-]/g, "").slice(0, 40)}`);
   const allowedSource = (c: Caller, src: string): boolean => {
     const s = real(src);
     const closed = [
@@ -237,7 +272,8 @@ export function playersRpcHandlers(
     ].map(real);
     if (closed.some((x) => inside(s, x))) return false;
     const sb = c.sandbox ? d.sandboxPath(c.sandbox) : undefined;
-    const open = [sb, path.join(d.root, "tmp"), path.join(d.root, "nightly")]
+    // M1: the caller's own temp folder, not every session's.
+    const open = [sb, c.session ? ownTemp(c) : undefined, path.join(d.root, "nightly")]
       .filter((x): x is string => !!x)
       .map(real);
     return open.some((x) => inside(s, x));
@@ -278,10 +314,10 @@ export function playersRpcHandlers(
         if (!allowedSource(c, src))
           throw refuse(
             403,
-            `players/install: ${src} is not in your sandbox, the temp folder or the nightly folder`,
+            `players/install: ${src} is not in your sandbox, your own temp folder or the nightly folder`,
           );
         const fingerprint = buildKey(src);
-        fs.mkdirSync(path.join(slot.dir, "leases"), { recursive: true });
+        plainSlot(slot, true);
         const m = readMarker(slot.dir);
         const dst = path.join(slot.dir, "player");
         if (
@@ -308,6 +344,7 @@ export function playersRpcHandlers(
             409,
             `players/install: ${slot.name} holds a running player (pid ${live.map((l) => l.pid).join(", ")}); end it or use the other peer's slot`,
           );
+        plainSlot(slot, false);
         for (const n of fs.readdirSync(slot.dir))
           if (n.startsWith("trash-"))
             await d.removeTree(path.join(slot.dir, n)).catch(() => undefined);
@@ -337,10 +374,11 @@ export function playersRpcHandlers(
         writeJson(path.join(slot.dir, "slot.json"), marker);
         const t0 = now();
         try {
+          plainSlot(slot, false);
           if (lands) {
-            fs.mkdirSync(dst, { recursive: true });
-            await d.copyTree(src, path.join(dst, lands));
-          } else await d.copyTree(src, dst);
+            fs.mkdirSync(dst);
+            await d.copy(src, path.join(dst, lands), { links: "refuse" });
+          } else await d.copy(src, dst, { links: "refuse" });
           for (const r of RUNTIME_FILES)
             fs.rmSync(path.join(lands ? path.join(dst, lands) : dst, r), {
               force: true,
@@ -354,6 +392,7 @@ export function playersRpcHandlers(
           );
         }
         marker.state = "ready";
+        plainSlot(slot, false);
         writeJson(path.join(slot.dir, "slot.json"), marker);
         d.log(
           `players broker: ${c.session} installed ${src} into ${slot.name} in ${((now() - t0) / 1000).toFixed(1)} s (w5615)`,
@@ -370,6 +409,7 @@ export function playersRpcHandlers(
     "players/launch": (c, b) =>
       serial(async () => {
         const slot = slotOf(c, b);
+        plainSlot(slot, false);
         const m = readMarker(slot.dir);
         if (!m?.broker || m.state !== "ready")
           throw refuse(
@@ -395,6 +435,15 @@ export function playersRpcHandlers(
             409,
             `players/launch: ${top} is gone; players/install again`,
           );
+        // L1: one running player per slot (it shares the slot's automation config and status file).
+        const running = liveLeases(slot.dir);
+        if (running.length)
+          throw refuse(
+            409,
+            `players/launch: ${slot.name} already runs a player (pid ${running.map((l) => l.pid).join(", ")}); end it or use the other peer's slot`,
+          );
+        if (linkIn(path.join(slot.dir, "player")))
+          throw refuse(409, `players/launch: ${slot.name}'s player holds a link now; players/install again (w6212)`);
         const exe = m.entry.endsWith(".app") ? bundleExe(top) : top;
         // The game reads its automation config from the folder above its data folder: the exe's folder, or the .app.
         const projectRoot = m.entry.endsWith(".app") ? top : path.dirname(top);
@@ -409,7 +458,7 @@ export function playersRpcHandlers(
           } catch {
             throw refuse(400, "players/launch: config is not JSON");
           }
-          fs.writeFileSync(path.join(projectRoot, AUTOMATION_CONFIG), b.config);
+          writeNew(path.join(projectRoot, AUTOMATION_CONFIG), b.config);
         } else
           fs.rmSync(path.join(projectRoot, AUTOMATION_CONFIG), { force: true });
         const r = await d.launch({
@@ -419,7 +468,7 @@ export function playersRpcHandlers(
           slotDir: slot.dir,
           sandbox: slot.sandbox,
           session: c.session,
-          ...logDirOf(args as string[], d.root),
+          ...logDirOf(args as string[], ownTemp(c)),
         });
         if ("refused" in r) throw refuse(503, `players/launch: ${r.refused}`);
         const t = now();
@@ -501,12 +550,11 @@ export const PLAYER_DISPLAY_ENV = [
   "TMPDIR",
 ];
 
-/** The -logFile folder of a launch when it lies in `<root>/tmp` (a worker's own temp folder), else nothing. */
-export function logDirOf(args: string[], root: string): { logDir?: string } {
+/** The -logFile folder of a launch when it lies in the caller's own temp folder `own` (M1: not another session's), else nothing. */
+export function logDirOf(args: string[], own: string): { logDir?: string } {
   const i = args.findIndex((a) => a.toLowerCase() === "-logfile");
   const f = i >= 0 ? args[i + 1] : undefined;
   if (!f || !path.isAbsolute(f)) return {};
   const dir = real(path.dirname(f));
-  const tmp = real(path.join(root, "tmp"));
-  return dir !== tmp && inside(dir, tmp) ? { logDir: dir } : {};
+  return inside(dir, real(own)) ? { logDir: dir } : {};
 }

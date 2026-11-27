@@ -226,7 +226,7 @@ function pool(
     root,
     setting: o.setting ?? "warn",
     sandboxes: () => sandboxes,
-    copyTree: o.copy ?? copyTree,
+    copy: o.copy ?? copyTree,
     removeTree,
     log: (l) => log.push(l),
     now: () => clock.t,
@@ -536,6 +536,7 @@ test("mergeEntries and mergeBack: the rule picks the entries, and a copy that th
   const root = tmp(t);
   const clone = path.join(root, "clone");
   const seed = path.join(root, "seed");
+  fs.mkdirSync(seed); // make() makes the seed folder and checks it before it merges
   put(path.join(clone, "archive-v0", "h1", "f"));
   put(path.join(clone, "archive-v0", "h2", "f"));
   put(path.join(clone, "archive-v0", ".ff-merge-1-h3", "f"));
@@ -568,6 +569,24 @@ test("mergeEntries and mergeBack: the rule picks the entries, and a copy that th
     ["h2"],
     "the failed copy left nothing, not even its temp folder",
   );
+});
+
+test("w6212 L3/B2: merge-back never replaces a seed file and writes nothing through a link in the seed", async (t) => {
+  const root = tmp(t);
+  const clone = path.join(root, "clone");
+  const seed = path.join(root, "seed");
+  const rule = { dirs: [{ top: /^archive-v\d+$/, depth: 1 }], files: [/^wheels-v\d+\/[^/]+\.whl$/] };
+  put(path.join(clone, "archive-v0", "h1", "f"), "new");
+  put(path.join(clone, "wheels-v0", "a.whl"), "new");
+  put(path.join(seed, "wheels-v0", "a.whl"), "old");
+  // the seed's archive-v0 is a link to a folder elsewhere: nothing lands there
+  const elsewhere = path.join(root, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync(elsewhere, path.join(seed, "archive-v0"));
+  const now = Date.now() + 3600_000;
+  await mergeBack(clone, seed, rule as never, copyTree, now);
+  assert.equal(fs.readFileSync(path.join(seed, "wheels-v0", "a.whl"), "utf8"), "old");
+  assert.deepEqual(fs.readdirSync(elsewhere), []);
 });
 
 // ---------------------------------------------------------------- the lock: folders, blockers, line
@@ -624,7 +643,7 @@ test('sharedLockLine: nothing for off; warn and on say w5615, and blockers hold 
   );
   assert.match(
     sharedLockLine("on")!,
-    /^shared lock: on; .*read-only to sandbox workers \(w5615\)/,
+    /^shared lock: "on" asked, but this release enforces nothing yet and runs as warn/,
   );
   const held = sharedLockLine("on", ["slot2 has no clones"])!;
   assert.match(held, /on asked, but held off .*: slot2 has no clones/);

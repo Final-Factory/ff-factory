@@ -65,6 +65,7 @@ import { fencedLoginFiles, legacyProjectsDirs, loginClaudeEnv, moveClaudeHome, w
 import { FileTail, defaultEventsFile } from '../server/maxEvents.ts';
 import { OutsideWatch, outsideWatchFile, readOutsideWatch } from './outsideWatch.ts';
 import { copyTree, removeTree, run } from '../server/proc.ts';
+import { workerCopier, type WorkerCopy } from './workerCopy.ts';
 import { probeReadFenceWin } from './readFenceWin.ts';
 import { ensureGitBashTmp, keepGitBashTmp } from '../server/gitBashTmp.ts';
 import { readImage } from '../server/images.ts';
@@ -3768,7 +3769,7 @@ export class Daemon {
               root,
               setting: this.sharedLock,
               sandboxes: () => this.pool.list().map((sb) => ({ id: sb.id, idle: this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) })),
-              copyTree: (src, dst) => this.sharedWrite(() => copyTree(src, dst, process.platform === 'win32' ? { mode: 'clone' } : {})),
+              copy: this.workerCopy(),
               removeTree: async (dir) => {
                 await removeTree(dir);
               },
@@ -3777,6 +3778,22 @@ export class Daemon {
           : null;
     }
     return this.slotCachesMemo ?? undefined;
+  }
+
+  /**
+   * w5615, review w6212 B1: the broker's and the slot caches' copies run with a worker's rights (machine/workerCopy.ts):
+   * the Seatbelt fence with its read rules on (macOS), the write lock and its read half (Linux), the Low node (Windows).
+   */
+  private workerCopy(): WorkerCopy {
+    return workerCopier({
+      macFence: () => this.workerFence,
+      linuxLock: () => this.writeLock && [...this.writeLock, ...this.readLock],
+      lowNode: () => this.lowCopies?.make(process.execPath),
+      run: (cmd, argv) => this.sharedWrite(() => run(cmd, argv, { timeoutMs: 30 * 60_000 })),
+      removeTree: async (dir) => {
+        await this.sharedWrite(() => removeTree(dir));
+      },
+    });
   }
 
   /** w5615: the players broker's calls (machine/playersBroker.ts), with the shared lock on or warn. */
@@ -3788,7 +3805,8 @@ export class Daemon {
       root,
       host: os.hostname().toLowerCase(),
       sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
-      copyTree: (src, dst) => this.sharedWrite(() => copyTree(src, dst, process.platform === 'win32' ? { mode: 'clone' } : {})),
+      copy: this.workerCopy(),
+      tempDir: this.cfg.tempDir || path.join(root, 'tmp'),
       removeTree: async (dir) => {
         await this.sharedWrite(() => removeTree(dir));
       },

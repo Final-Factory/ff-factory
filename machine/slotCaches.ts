@@ -30,6 +30,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { sharedCacheDir } from "./sharedCaches.ts";
+import { plainDirAt, writeFileSafe, type WorkerCopy } from "./workerCopy.ts";
 
 export type SharedLockSetting = "off" | "warn" | "on";
 
@@ -174,8 +175,11 @@ export interface SlotCachesDeps {
   setting: SharedLockSetting;
   /** Every sandbox the pool knows, and whether nothing runs in it now (no agent, no editor, no build). */
   sandboxes: () => { id: string; idle: boolean }[];
-  /** server/proc.ts copyTree: a block clone where the disk has one. */
-  copyTree: (src: string, dst: string) => Promise<void>;
+  /**
+   * The copy with a worker's rights (machine/workerCopy.ts workerCopier; a block clone where the disk has one): the seed
+   * and the clones are folders workers can change under "warn", so the daemon never reads them with its own (w6212 B1).
+   */
+  copy: WorkerCopy;
   removeTree: (dir: string) => Promise<void>;
   log: (l: string) => void;
   now?: () => number;
@@ -252,38 +256,66 @@ export function mergeEntries(
 }
 
 /**
- * Copy into the seed each entry of the clone the seed lacks (by relative path): beside its place under a `.ff-merge-` name,
- * then renamed in, so a reader of the seed sees a whole entry or none. Never replaces or deletes what the seed has.
- * Returns how many entries went back.
+ * Copy into the seed each entry of the clone the seed lacks (by relative path). The copy is made with a worker's rights
+ * into `stage` (a `.ff-merge-` folder in the slot's own cache folder, on the seed's disk), then moved into the seed, so a
+ * reader of the seed sees a whole entry or none and a link in the clone reaches only what a worker reads (w6212 B1).
+ * Never replaces or deletes what the seed has: a folder entry is renamed in (refused where the seed has one with content),
+ * a file entry hard-linked in, which fails where the seed got that file meanwhile (L3: a rename would replace it). The
+ * seed's folders on the way must be plain folders (no link a worker planted under "warn"). The entry's own mtime decides
+ * "quiet" (mergeEntries): that holds because uv renames an entry in whole and the NuGet and Playwright rules wait for
+ * their done-files; a tool that writes into an entry in place needs a done-file rule too. Returns how many went back.
  */
+/**
+ * Each folder from `seed` down to `seed/rel` is a plain folder where it should be; a missing one is made, one level at a
+ * time, only below a folder already checked (w6212 B2: a recursive mkdir would follow a link a worker planted).
+ */
+function plainDirsTo(seed: string, rel: string): boolean {
+  let at = "";
+  for (const part of rel === "." ? [] : rel.split(path.sep)) {
+    at = at ? path.join(at, part) : part;
+    const dir = path.join(seed, at);
+    let st: fs.Stats | undefined;
+    try {
+      st = fs.lstatSync(dir);
+    } catch {
+      st = undefined;
+    }
+    if (!st) fs.mkdirSync(dir);
+    if (!plainDirAt(dir, seed, at)) return false;
+  }
+  return true;
+}
+
 export async function mergeBack(
   clone: string,
   seed: string,
   rule: MergeRule,
-  copyTree: (src: string, dst: string) => Promise<void>,
+  copy: WorkerCopy,
   now = Date.now(),
   quietMs = QUIET_MS,
+  stage = path.join(path.dirname(clone), ".ff-merge"),
 ): Promise<number> {
   let n = 0;
   for (const e of mergeEntries(clone, rule, now, quietMs)) {
     const dst = path.join(seed, e.rel);
     if (fs.existsSync(dst)) continue;
-    const tmp = path.join(
-      path.dirname(dst),
-      `.ff-merge-${process.pid}-${n}-${path.basename(dst)}`,
-    );
+    const tmp = path.join(stage, `${process.pid}-${now}-${n}-${path.basename(dst)}`);
     try {
-      fs.mkdirSync(path.dirname(dst), { recursive: true });
-      if (e.dir) await copyTree(path.join(clone, e.rel), tmp);
-      else
-        fs.copyFileSync(
-          path.join(clone, e.rel),
-          tmp,
-          fs.constants.COPYFILE_FICLONE,
-        );
-      fs.renameSync(tmp, dst);
+      fs.mkdirSync(stage, { recursive: true });
+      if (!plainDirsTo(seed, path.dirname(e.rel))) continue;
+      await copy(path.join(clone, e.rel), tmp, { links: "keep" });
+      if (e.dir) fs.renameSync(tmp, dst);
+      else {
+        // a file a worker swapped for a link, or a hard link to a file elsewhere, while the copy ran goes no further
+        const st = fs.lstatSync(tmp);
+        if (!st.isFile() || st.nlink !== 1) continue;
+        fs.linkSync(tmp, dst);
+        fs.rmSync(tmp, { force: true });
+      }
       n++;
     } catch {
+      // the next pass tries again
+    } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   }
@@ -348,6 +380,9 @@ export class SlotCaches {
   async make(sandbox: string, refresh: boolean): Promise<string> {
     const dir = slotCacheDir(this.d.root, sandbox);
     fs.mkdirSync(dir, { recursive: true });
+    // w6212 B2: cache/slots is worker-writable; the daemon writes and deletes only in a plain folder where it should be.
+    if (!plainDirAt(dir, this.d.root, path.relative(this.d.root, dir)))
+      throw new Error(`${dir} is a link or junction, or lies below one; its clones are left alone (w6212)`);
     fs.mkdirSync(slotAuditDir(this.d.root, sandbox), { recursive: true });
     const seedRoot = sharedCacheDir(this.d.root);
     const t0 = this.now();
@@ -359,13 +394,16 @@ export class SlotCaches {
       const seed = path.join(seedRoot, t.dir);
       if (refresh && t.merge && fs.existsSync(own)) {
         fs.mkdirSync(seed, { recursive: true });
-        merged += await mergeBack(
-          own,
-          seed,
-          t.merge,
-          this.d.copyTree,
-          this.now(),
-        );
+        if (plainDirAt(seed, seedRoot, t.dir))
+          merged += await mergeBack(
+            own,
+            seed,
+            t.merge,
+            this.d.copy,
+            this.now(),
+            QUIET_MS,
+            path.join(dir, ".ff-merge"),
+          );
       }
       // Not refreshed: a clone already there stays (the slot may use it). Refreshed or new: made beside, renamed in.
       if (!refresh && fs.existsSync(own)) {
@@ -384,7 +422,7 @@ export class SlotCaches {
         for (const p of [fresh, gone])
           if (fs.existsSync(p)) await this.d.removeTree(p);
         fs.mkdirSync(path.dirname(own), { recursive: true });
-        if (fs.existsSync(seed)) await this.d.copyTree(seed, fresh);
+        if (fs.existsSync(seed)) await this.d.copy(seed, fresh, { links: "keep" });
         else fs.mkdirSync(fresh, { recursive: true });
         if (fs.existsSync(own)) fs.renameSync(own, gone);
         fs.renameSync(fresh, own);
@@ -402,8 +440,7 @@ export class SlotCaches {
       }
     }
     const marker: SlotMarker = { v: 1, made: this.now(), tools };
-    fs.writeFileSync(path.join(dir, `${MARKER}.tmp`), JSON.stringify(marker));
-    fs.renameSync(path.join(dir, `${MARKER}.tmp`), path.join(dir, MARKER));
+    writeFileSafe(path.join(dir, MARKER), JSON.stringify(marker));
     const secs = ((this.now() - t0) / 1000).toFixed(1);
     const line = `slot caches: ${sandbox}: ${refresh ? "made again" : "made"} from the shared seed in ${secs} s (${tools.join(", ")})${refresh ? `, ${merged} new entr${merged === 1 ? "y" : "ies"} merged back first` : ""}${failed.length ? `; failed: ${failed.join("; ")}` : ""} (w5615)`;
     this.d.log(line);
@@ -436,7 +473,7 @@ export function sharedLockLine(
     return `shared lock: warn only (w5615); each sandbox gets its own clones of the tool caches and players go through the daemon, nothing is refused, and worker writes to the shared caches, players, seed and tools are logged${blockers.length ? `. With "on" it would stay off: ${blockers.join("; ")}` : ""}`;
   return blockers.length
     ? `shared lock: on asked, but held off (writes the daemon did not make are logged instead): ${blockers.join("; ")}`
-    : "shared lock: on; the shared caches, players, seed and tools are read-only to sandbox workers (w5615)";
+    : 'shared lock: "on" asked, but this release enforces nothing yet and runs as warn (w6212 M2; the enforcing change is its own pull request): worker writes to the shared caches, players, seed and tools are logged, never refused';
 }
 
 /**

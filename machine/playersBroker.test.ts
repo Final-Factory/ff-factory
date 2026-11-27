@@ -72,7 +72,7 @@ function broker(
     root,
     host: "hostA",
     sandboxPath: (id) => (id === "slot3" ? sandbox : undefined),
-    copyTree:
+    copy:
       o.copy ??
       (async (s, d) => {
         copies.push([s, d]);
@@ -238,10 +238,10 @@ test("install of the same build again reuses the slot (no second copy); a change
   );
 });
 
-test("install takes a build from the sandbox, the worker root's tmp or nightly; never players, the daemon's folder or the secrets", async (t) => {
+test("install takes a build from the sandbox, the caller's own temp folder or nightly; never players, the daemon's folder or the secrets", async (t) => {
   const b = broker(t);
   const outside = tmp(t);
-  for (const dir of ["tmp", "nightly"]) {
+  for (const dir of [path.join("tmp", "ffa-s1"), "nightly"]) {
     const app = macBuild(path.join(b.root, dir, "run1"));
     assert.equal(
       (
@@ -257,6 +257,9 @@ test("install takes a build from the sandbox, the worker root's tmp or nightly; 
     path.join(b.root, "players", "slot4-0", "player"),
     path.join(b.root, "daemon", "x"),
     path.join(b.root, "secrets"),
+    // w6212 M1: another session's temp folder, and <root>/tmp itself, are not the caller's
+    path.join(b.root, "tmp", "ffa-s9"),
+    path.join(b.root, "tmp", "run1"),
     outside,
     b.root,
   ]) {
@@ -264,7 +267,7 @@ test("install takes a build from the sandbox, the worker root's tmp or nightly; 
     await refused(
       () => b.h["players/install"](ME, { player: app }),
       403,
-      /not in your sandbox, the temp folder or the nightly folder/,
+      /not in your sandbox, your own temp folder or the nightly folder/,
     );
   }
   // a link inside the sandbox to a build in players is followed, not trusted
@@ -522,6 +525,7 @@ test("launch of a Mac build starts the bundle's executable and writes the automa
   assert.equal(r.slot, "slot3-0");
   assert.equal(r.build, marker(b.slot()).fingerprint);
   // a launch without a config takes the stale one away, so the player does not start as the last run's role
+  b.state.alive = false; // the first player has ended (w6212 L1: one live player per slot)
   await b.h["players/launch"](ME, {});
   assert.equal(fs.existsSync(cfgFile), false);
   assert.deepEqual(b.launches[1].args, []);
@@ -543,6 +547,7 @@ test("launch of a Windows build puts the config beside the exe", async (t) => {
     fs.readFileSync(path.join(b.slot(), "player", AUTOMATION_CONFIG), "utf8"),
     '{"a":1}',
   );
+  b.state.alive = false; // the first player has ended (w6212 L1: one live player per slot)
   await b.h["players/launch"](ME, {});
   assert.equal(
     fs.existsSync(path.join(b.slot(), "player", AUTOMATION_CONFIG)),
@@ -955,24 +960,61 @@ test("brokerLauncher: a start that throws is a refusal with the reason", async (
   });
 });
 
-test("w5615: logDirOf opens a -logFile folder only inside <root>/tmp", () => {
+test("w5615: logDirOf opens a -logFile folder only inside the caller's own temp folder (w6212 M1)", () => {
   const root = fs.realpathSync(
     fs.mkdtempSync(path.join(os.tmpdir(), "logdir-")),
   );
   fs.mkdirSync(path.join(root, "tmp", "ffa-1"), { recursive: true });
+  const own = path.join(root, "tmp", "ffa-1");
   assert.deepEqual(
-    logDirOf(["-logFile", path.join(root, "tmp", "ffa-1", "p.log")], root),
+    logDirOf(["-logFile", path.join(root, "tmp", "ffa-1", "p.log")], own),
     { logDir: path.join(root, "tmp", "ffa-1") },
   );
+  fs.mkdirSync(path.join(root, "tmp", "ffa-2"), { recursive: true });
   assert.deepEqual(
-    logDirOf(["-logFile", path.join(root, "tmp", "p.log")], root),
+    logDirOf(["-logFile", path.join(root, "tmp", "ffa-2", "p.log")], own),
     {},
   );
   assert.deepEqual(
-    logDirOf(["-logFile", path.join(root, "daemon", "p.log")], root),
+    logDirOf(["-logFile", path.join(root, "tmp", "p.log")], own),
     {},
   );
-  assert.deepEqual(logDirOf(["-logFile", "rel.log"], root), {});
-  assert.deepEqual(logDirOf([], root), {});
+  assert.deepEqual(
+    logDirOf(["-logFile", path.join(root, "daemon", "p.log")], own),
+    {},
+  );
+  assert.deepEqual(logDirOf(["-logFile", "rel.log"], own), {});
+  assert.deepEqual(logDirOf([], own), {});
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("w6212 L1: a launch onto a slot whose player still runs is refused (409); once it ends the slot launches", async (t) => {
+  const b = broker(t);
+  await b.h["players/install"](ME, { player: macBuild(path.join(b.sandbox, "Build")) });
+  await b.h["players/launch"](ME, {});
+  await refused(() => b.h["players/launch"](ME, {}), 409, /already runs a player/);
+  b.state.alive = false;
+  await b.h["players/launch"](ME, {});
+  assert.equal(b.launches.length, 2);
+});
+
+test("w6212 B2: a slot that is a link and a players folder that is a link are refused", async (t) => {
+  const b = broker(t);
+  // the slot swapped for a link to somewhere else: nothing is written or removed through it
+  const good = macBuild(path.join(b.sandbox, "Good"));
+  await b.h["players/install"](ME, { player: good });
+  const elsewhere = path.join(b.root, "elsewhere");
+  fs.mkdirSync(path.join(elsewhere, "player"), { recursive: true });
+  fs.writeFileSync(path.join(elsewhere, "keep.txt"), "mine");
+  fs.renameSync(b.slot(), path.join(b.root, "players", "moved"));
+  fs.symlinkSync(elsewhere, b.slot());
+  await refused(() => b.h["players/install"](ME, { player: good }), 409, /link or junction/);
+  await refused(() => b.h["players/launch"](ME, { config: "{}" }), 409, /link or junction/);
+  assert.equal(fs.readFileSync(path.join(elsewhere, "keep.txt"), "utf8"), "mine");
+  assert.equal(fs.existsSync(path.join(elsewhere, "player", AUTOMATION_CONFIG)), false);
+  // the players folder itself a link
+  fs.rmSync(b.slot());
+  fs.renameSync(path.join(b.root, "players"), path.join(b.root, "players-real"));
+  fs.symlinkSync(path.join(b.root, "players-real"), path.join(b.root, "players"));
+  await refused(() => b.h["players/install"](ME, { player: good }), 409, /players folder that is a link/);
 });
