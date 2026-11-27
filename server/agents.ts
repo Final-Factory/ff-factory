@@ -5501,6 +5501,18 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
 
   /** The workers holding a sandbox on `machineId`, each with whether it can move for a timed leg (w2055). */
   private preemptOccupants(machineId: string): Occupant[] {
+    // w6336: read once per machine in a pass (timedLegStepFor asked it per queued timed leg, every leg the same answer).
+    const pass = this.placesPass;
+    if (pass) {
+      const memo = (pass.occupants ??= new Map());
+      let got = memo.get(machineId);
+      if (!got) memo.set(machineId, (got = this.preemptOccupantsNow(machineId)));
+      return got;
+    }
+    return this.preemptOccupantsNow(machineId);
+  }
+
+  private preemptOccupantsNow(machineId: string): Occupant[] {
     const now = Date.now();
     const out: Occupant[] = [];
     for (const sb of this.store.machines.get(machineId)?.sandboxes ?? []) {
@@ -5952,6 +5964,20 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * queue. A worker with no open request is left out: its tickets count as normal.
    */
   benchPriorities(machineId: string): Record<string, BenchPriority> {
+    // w6336: within a placement pass, once per machine. preemptVerdict asked it for every occupant of every machine for every
+    // queued timed leg, each a walk of every session and the whole ledger: on 2026-11-27 06:37-06:51Z (stall profile)
+    // blockerWatch's timedLegBound held the loop 4-12 s at a time, several times a minute, and every page connect waited.
+    const pass = this.placesPass;
+    if (pass) {
+      const memo = (pass.bench ??= new Map());
+      let got = memo.get(machineId);
+      if (!got) memo.set(machineId, (got = this.benchPrioritiesNow(machineId)));
+      return got;
+    }
+    return this.benchPrioritiesNow(machineId);
+  }
+
+  private benchPrioritiesNow(machineId: string): Record<string, BenchPriority> {
     // w2044: one read of the ledger for the whole look (w5341's pair marks reuse it).
     const ledger = [...this.store.work.values()];
     const out: Record<string, BenchPriority> = {};
@@ -7279,10 +7305,11 @@ A report is for a person who asked for one, and people want very few. File one w
 
   /** Within withPlacesOnce: the next places() computes afresh (a timed leg started, moved or was re-queued). */
   placesChanged(): void {
-    if (this.placesPass) delete this.placesPass.places;
+    if (this.placesPass) this.placesPass = {};
   }
 
-  private placesPass?: { places?: Computer[] };
+  /** places(), and per machine preemptOccupants and benchPriorities (w6336), each computed once within withPlacesOnce. */
+  private placesPass?: { places?: Computer[]; occupants?: Map<string, Occupant[]>; bench?: Map<string, Record<string, BenchPriority>> };
 
   /** w3843: within withPlacesOnce and a claims memo, the next asks compute afresh (placesChanged and PlaceAgain.claimsChanged). */
   private placementChanged(): void {
