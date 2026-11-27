@@ -16,7 +16,7 @@ test('w5318: an attempt still connecting past the timeout is replaced; one open 
   assert.equal(socketVerdict({ ...base, state: 'none', now: 10 * 60_000 }), 'keep');
 });
 
-test('w5318: the wait between attempts doubles from 0.5 s to at most 15 s, with a ±25% jitter', () => {
+test('w5318, w6336: the wait between attempts doubles from 0.5 s to at most 2 s, with a ±25% jitter', () => {
   assert.equal(socketBackoffMs(0, 0.5), 500);
   assert.equal(socketBackoffMs(1, 0.5), 1_000);
   assert.equal(socketBackoffMs(0, 0), 375);
@@ -24,4 +24,8 @@ test('w5318: the wait between attempts doubles from 0.5 s to at most 15 s, with 
   assert.ok(socketBackoffMs(1_000, 0.999) <= SOCKET_MAX_BACKOFF_MS * 1.25);
   // A hung attempt costs at most the timeout plus one wait: the page is never dark for minutes on one attempt.
   assert.ok(SOCKET_CONNECT_TIMEOUT_MS + SOCKET_MAX_BACKOFF_MS * 1.25 < 30_000);
+  // w6336: a page comes back within 2.5 s of the portal after a restart, whenever in it the portal came back.
+  assert.equal(SOCKET_MAX_BACKOFF_MS, 2_000);
+  const waits = Array.from({ length: 40 }, (_, i) => socketBackoffMs(i, 0.999));
+  assert.ok(Math.max(...waits) <= 2_500);
 });

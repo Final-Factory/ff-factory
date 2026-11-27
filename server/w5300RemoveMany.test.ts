@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import type { CleanupFacts } from './cleanupFolders.ts';
 
 /**
@@ -26,7 +27,9 @@ function put(root: string, rel: string, ageH: number, body = 'x') {
 }
 
 function player(root: string, c: string, ageH: number): string {
-  const key = `${c.repeat(40)}-linux`;
+  // A commit like a real one: `c.repeat(40)` was matched on BEAST by a process whose command line holds base64 zeros
+  // ("AAAA…", lowercased by the in-use check), so the newest build was kept for that reason, not for being new.
+  const key = `${createHash('sha1').update(c).digest('hex')}-linux`;
   const e = `player-cache/${key}`;
   put(root, `${e}/player/finalfactory.x86_64`, ageH, 'p'.repeat(1000));
   put(root, `${e}/build-manifest.json`, ageH, JSON.stringify({ key, status: 'ok', finished: new Date(NOW - ageH * HOUR).toISOString().slice(0, 19) + 'Z' }));

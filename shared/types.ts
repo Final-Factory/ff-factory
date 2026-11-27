@@ -359,7 +359,16 @@ export interface SessionInfo {
    * in that machine's queue are marked away there (Agents.benchPriorities) for BENCH_MOVED_AWAY_MS, so they hold nobody
    * back while its old processes wind down.
    */
-  movedAway?: { machine: string; to: string; at: string };
+  movedAway?: {
+    machine: string;
+    to: string;
+    at: string;
+    /**
+     * w6047: when w5950's enforcing retired it (Agents.retireMovedAway: saved, its new workers told). A later hello or resume
+     * check only stops a process of it still live; it is never saved or its new workers told a second time.
+     */
+    retired?: string;
+  };
   /**
    * Machine sessions (w613): its process ended because its daemon went away (a worker update, a restart, a crash) and
    * not on purpose, at this time. Its sandbox stays its (holdsSandbox, shared/agentState.ts) until it is messaged, stopped
@@ -2498,9 +2507,13 @@ export interface WorkPair {
    * player never reads FF_GAME_DATA_DIR and writes the per-OS data folder in the owner's profile (LocalLow on Windows), which
    * a fenced worker cannot write (w5944: lothdesktop's Low-integrity worker, 'no host-ready within 420s'). Its legs then go
    * only on computers whose worker fence is off (shared/capacity.ts unfitWhy), and never on Linux (pre-1.0 has no Linux
-   * multiplayer build).
+   * multiplayer build). w6189: request_pair and start_agent read the player's GameDataPaths.cs at the pair's commit
+   * (server/gameDataDir.ts); a commit that reads FF_GAME_DATA_DIR (game PR #4357's backport) gets no legacyData, and a
+   * commit that does not, or could not be checked, keeps it with that reason appended.
    */
   legacyData?: string;
+  /** w6189: why a pair run that its words or legacy_data called pre-w5297 is not one (its commit reads FF_GAME_DATA_DIR). */
+  dataDirChecked?: string;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
   /**
@@ -3663,6 +3676,13 @@ export interface AppState {
    * (it drops the others and asks for any it lacks). Absent: `sessions` is the whole list.
    */
   sessionsDelta?: { since: number; ids: string[] };
+  /**
+   * w6336 (shared/pageParts.ts): the whole parts a reconnecting page said it holds unchanged, left out of this state; the
+   * page keeps its own. Absent: every part is here.
+   */
+  partsKept?: ('reports' | 'machines' | 'delegations' | 'accounts' | 'standingAgents')[];
+  /** w6336: set when `work` holds only the requests changed since the page's copy; `ids` are all of them, in order. */
+  workDelta?: { ids: string[] };
   /** How many finished sessions older than the page's window the server left out (a view asks for one by id). */
   olderSessions?: number;
   standingAgents: StandingAgent[];

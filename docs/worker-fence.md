@@ -90,6 +90,85 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   Such a pair run goes on Windows only where Medium or above was measured: never by the fence setting, and never where
   nothing was measured (`shared/capacity.ts` `legacyUnfitWhy`, enforced at `request_pair`, placement and `start_agent`, w6003).
   With every Windows computer fenced, none fits, and `request_pair` says so and files nothing.
+- **Decided per commit** (w6189). Game PR #4357 (merge `6fcc274a`, on pre-1.0 since 2026-11-26) backported
+  `FF_GAME_DATA_DIR` to the 0.50 line, so a pre-1.0 commit is not by itself a pre-w5297 player: w6122 ran 5 of 5 MP
+  scenarios of one at Low integrity on lothdesktop. When a pair run's words or `legacy_data` would mark it, `request_pair`
+  reads `Assets/Scripts/FFCore/GameData/GameDataPaths.cs` at its `commit` (or its published player's) through GitHub
+  (`server/gameDataDir.ts`): a file that reads the variable (the `"FF_GAME_DATA_DIR"` literal and an environment read) clears
+  the mark, the pair says why (`WorkPair.dataDirChecked`), and its legs go where any game pair goes, Low-integrity Windows
+  sandboxes included. The file decides rather than "is #4357's merge an ancestor", since a branch that carries the backport
+  without that merge (a cherry-pick, or #4357's own head `48f1fbab`, the commit w6122 ran) builds the same player. It fails
+  closed: no commit given, a commit GitHub does not know, a failed read, or a file without the read keeps the mark, with that
+  reason added to it, so the refusal says which. `start_agent` makes the same check for a marked pair run that has a commit
+  (one filed before w6189, or by hand) and clears the mark on the request before its legs are checked.
+  Only `commit` is read (w6235, from w6192's review of PR #1402), so `legacy_data` that names another player, a sha that
+  is not `commit` or a `0.50.x.y` build ("the host runs the Steam 0.50.0.47 build"), keeps the mark and says so
+  (`server/gameDataDir.ts` `otherPlayerIn`), and a verdict for another commit than the pair's clears nothing. A queued
+  pair run still marked (filed before w6189, or by hand) is re-checked each minute by BlockerWatch before the queue is
+  read (`Agents.recheckLegacyPairs`, at most once per 10 minutes per run and commit), so it no longer waits for a
+  `start_agent` call to be placed.
+
+## Long runs the daemon starts for a worker (w6367, Windows)
+
+The nightly e2e worker starts the night and stops between check-ins, while the night runs for hours. On LothDesktop, the
+nights of 2026-11-26 and 11-27 died within a second of the daemon replacing their worker's agent host for a code update
+(w2625, the daemon log line "agent host 0e4d75cd: a message for FF Factory code ..."). Neither night ran its exit trap
+(w6360).
+
+The worker job (winJob.cs) has no kill-on-close, so the job itself does not kill the night. What kills it is this:
+
+- Claude Code's Bash tool runs each command inside the kill-on-close job that Node's libuv makes for its children.
+- A `nohup ... & disown` night survived that only while Git Bash could break it away.
+- Since w5554 (a1db8f04) the worker caps' job allows no breakaway.
+
+So the night ended with claude, whatever ended claude: a host swap, a usage limit, a stop to move the worker, or a
+paused machine's deadline. That is why holding the swap back (option c of w6367) would not have been enough.
+
+The route (`machine/longRuns.ts`, RPC `runs/start`, `runs/stop` and `runs/status`) leaves that fence closed. The **daemon**
+starts the run, so the run is not a process of the worker's host, its claude or their jobs. It is still fenced like its
+worker:
+
+- **Low integrity**, through the Low node copy, as the players broker's players are. With no Low copy the call is refused;
+  the run is never started at the daemon's Medium integrity.
+- **Always a job of its own**: no breakaway, and under workerCaps `enforce` the commit and process limits (a `warn` job
+  otherwise, `off` included). A keeper node joins that job (ffjob.exe says ready) before it gets "go" and starts the run
+  as its child, so everything the run starts lands in the job. With no job helper, or a job that cannot be made, there is
+  no run: the keeper is killed before "go".
+- **A bare keeper**: the keeper starts with only the daemon's basics (SystemRoot, Path and the like), never a variable the
+  worker chose, such as NODE_OPTIONS. The run's own environment reaches the keeper over stdin with "go".
+- **No FF_SESSION_ID or FF_FOR_PERSON**, so the leftovers sweep and the worker's own `ff-leftovers end` leave it alone.
+  `FF_LONG_RUN=<id>` names it instead. The record of each run is in `<appDir>/long-runs/<id>.json`, and the daemon log has
+  "long runs: started <id> ..." and, when the keeper exits, "long runs: <id> (nightly) of <sandbox> ended: keeper pid <pid>
+  exit <code>" (124 for its time limit, 143 for `runs/stop`). No sweep ends a run by `FF_LONG_RUN` yet.
+- **Bounded**: the keeper ends the run's whole tree (taskkill /T /F) after 20 hours and exits 124. `runs/stop {id}` ends a
+  live run of the caller's own sandbox sooner: the daemon writes "stop" to that keeper's stdin, which only the daemon
+  process that started it holds, so a stop never reaches a process that reused the pid (review w6379 finding 7). A run
+  from before the daemon's last start can no longer be stopped this way and ends at its limit.
+- **Only one route**, a sandbox worker's only, at most 2 live per sandbox: `nightly` runs the game repo's
+  `scripts/nightly/nightly_run.sh` in the caller's own sandbox, as a plain file there (no link out; junctions included, through
+  `fs.realpathSync.native`, since the JS realpath leaves a Windows junction unresolved, review w6379 finding 6). It is allowed only for
+  a session the portal marks exempt "nightly", meaning it works an open nightly-run request. Nothing else a worker names is
+  run. (A `probe` route open to any sandbox worker was dropped in review w6376; the proof on a machine belongs to the
+  change that turns the route on.)
+- **The env file** carries the worker's daemon token, so it must be `long-run-env-<digits>.json` directly in the caller's
+  own sandbox folder: a plain file with one link (no symbolic or hard link), opened and checked through its handle. Only
+  then does the daemon read it and remove that name, and drop the variables above from it. Any other path is refused with
+  the same answer, whether or not it exists, and is never read or removed (review w6376 found the first version deleting
+  `secrets/daemon-rpc.key`). Neither the answer nor the log says what the file held or how much.
+
+daemon.json `longRuns` (`ops_worker machine_update long_runs off|warn|on`):
+
+- `warn` is the default (lothsahn's lockout rule). Every check is made and the daemon logs "long runs (warn): would start
+  ... ready" (or "could not now: <why>"). It then answers `started: false`, and the caller starts the run itself as before.
+- `on` starts the run. Send it only with a person's go (lothsahn's lockout rule).
+- `off` refuses at once. It does not end runs already live: they end at their limit or by `runs/stop`.
+
+The game's client falls back to its old start on any refusal or error, so `warn` or `off` is the way back, with nobody at the
+machine. On macOS and Linux the route refuses for now and the caller starts the run itself (only the Windows case was
+measured).
+
+Not covered: a run started this way still ends if the daemon's own job is ended. The daemon is not restarted by a worker's
+host swap, so that limit does not affect the case above.
 
 ## How it works
 
@@ -194,6 +273,35 @@ write fence's keys, kept in `read-fence` in the daemon's folder (machine/readFen
 unreadable file is `off`). The portal sets it live, with nobody at the machine and no restart: `machine_daemon` with action
 `read-fence-off`, `read-fence-warn` or `read-fence-on` (or `POST /api/machines/<id>/daemon` `{"action":"read-fence-warn"}`).
 Runs already going keep the fence they started with; the write fence never changes.
+
+**One label pass at a time; the last switch wins** (w5980, measured on LothDesktop 2026-11-26). A first `on` on a machine
+can take many minutes: setting a closed folder's label, and relabelling what inside carries a label of its own, walk
+everything inside it (LothDesktop: 15:45:49 to 16:00:10 UTC; the owner's Full grants took 10 s of that). A `warn` sent at
+15:52 ran beside it, opened what `on` had closed so far (15:56), and `on` finished last, leaving the daemon's folder
+closed under `warn`. Now each switch's pass
+(`applyReadLabelsInTurn`, machine/daemon.ts) waits for the one before, sets the mode the `read-fence` file says when it
+starts, and an `on` pass stops between its steps once the file says otherwise; the next pass then sets the new mode. A
+switch sent during a long pass answers only when the passes before it are done, so the portal's wait may run out: read
+`daemon.log` for `the read fence is <mode>` rather than sending it again.
+
+An `on` pass also stops inside its long steps (w6120): its label run reads the `read-fence` file before each closing
+label and sets no more of them once it says otherwise (the given-back labels are always set, and the one Set under way
+runs to its end, as one Set walks a folder inside Windows); a closed path refused for want of WRITE_OWNER gets no grant
+and no retry once the mode changed, while a given-back one still does; and the walk inside the closed folders checks the
+file every 256 paths and stops. A closed path left unlabelled that way stays open, which only ever lets a worker read
+more, never less, and the next pass (the new mode's) sets everything it wants. Once a pass has seen the mode change it
+stays stopped, even if the file says `on` again (`on`, `warn`, `on`): the later switch has queued a pass of its own.
+`warn` and `off` passes only open, so they always run to the end. So an `off` sent during a first `on` waits only for the step
+already running, not the whole label run: one Set's walk, or one `icacls /grant (OI)(CI)` of WRITE_OWNER, which also
+walks the folder (its timeout is 30 minutes, `labelNoReadUp`).
+
+The login watcher's minute tick (w5559, No-Read-Up on new Claude login files) runs in the same queue, and only while
+the file says `on` when its turn comes: beside a pass it could label a login file after an `off` pass had opened it. A
+tick already waiting is not queued twice. on's probe undoing its own labels (readFenceWin.ts) stays outside the queue
+on purpose: it only opens, so beside any pass it leaves nothing closed that a mode does not want, and in the queue it
+would wait behind a slow pass while workers are locked out. And the given-back paths get their labels
+before the closed folders that hold them (`labelNoReadUp`): labelled after, `app\machine` sat closed under the
+daemon folder's walk, and the gh shim's `ghApp.ts` read as missing to Low workers for minutes (15:54-15:55 UTC).
 
 | Mode | Runs started from now on | Windows labels | Probe |
 |---|---|---|---|
@@ -615,27 +723,77 @@ determined forger. The broker runs only on macOS: elsewhere there is no worker f
 zsh writes heredocs under `TMPPREFIX` (default `/tmp/zsh`), refused by the fence ("can't create temp file for here
 document"); the fence's environment sets `TMPPREFIX=<root>/tmp/zsh`.
 
-## The agents' PATH folders (w5863, macOS and Linux)
+## The agents' PATH folders (w5863, w5899, macOS and Linux)
 
 Every agent the daemon starts, fenced or not, finds the daemon's shims first on its PATH (`machine/daemon.ts` slotEnv):
-unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. Off Windows they live in the Unity slots mailbox's `bin`
+unity-slot, ff-pr, ff-leftovers, ffu-slot and the python shim. Off Windows they lived in the Unity slots mailbox's `bin`
 (`machine/unitySlots.ts` installShims), and both fences let a worker write the whole mailbox (Landlock `--rw <mailbox>`
 in `machine/writeLock.ts`, Seatbelt's extraWritable in `server/workerFence.ts`): a fenced worker could replace `ff-pr`
-and have it run outside the fence in the next unfenced agent. Windows moved its shims to `<root>/tools/shims` (w5838).
+and have it run outside the fence in the next unfenced agent. Windows moved its shims to `<root>/tools/shims` (w5838), then to `<root>/tools-medium/shims`, the name used here too (w6101).
 
-The fix moves them to `<root>/tools-medium/shims` (`enforcedShimDir` in `machine/pathFence.ts`), a folder both fences
-already keep read-only (`LOCKED_CHILDREN`, `READ_ONLY_IN_ROOT`), so no fence rule changes. A deny of `bin` alone is not
+With the path fence **on** (w5899, the default) the shims live in `<root>/tools-medium/shims` (`enforcedShimDir` in
+`machine/pathFence.ts`), a folder both fences already keep read-only (`LOCKED_CHILDREN`, `READ_ONLY_IN_ROOT`), so no
+fence rule changes, and every agent started from then on has it first on its PATH. A deny of `bin` alone is not
 possible on Linux: Landlock only grants, and workers make `req-*` files directly in the mailbox, so it cannot be granted
 child by child. `<root>/tools/node` is not part of it off Windows: no agent runs it there (`server/agentNode.ts`
 agentNodePathDir is Windows only).
 
-It comes in two stages (lothsahn's lockout rule). Now, **warn**: the shims stay in the mailbox, and the daemon logs each
-change in their folder it did not make, `path fence (warn): <path> changed and the daemon did not write it ...`, once per
-name per hour; nothing is refused. Later, a separate pull request moves the shims (enforce). The switch is the daemon
-setting `pathFence` (`off` or `warn`; unset is `warn`), set from anywhere with `ops_worker machine_update path_fence off`,
-so recovery needs nobody at the machine.
+Two more holes, from w5872's review:
 
-Proof (`server/pathFence.test.ts`, live on Linux with Landlock): under the lock a sandbox worker runs with today, a write
-to `<root>/unity-slots/bin/ff-pr` succeeds and is logged; in `<root>/tools-medium/shims` the shim runs from PATH while an
-overwrite, append, truncate, new file, remove, rename in or out, or a move of the folder is refused. On macOS the
-Seatbelt deny of `tools-medium` is checked in the profile text; a live run on a Mac is still to do.
+- **Agents started before the move.** Agent hosts outlive a daemon restart, each with the PATH it started with, so
+  they still run the mailbox's `bin` first, which a worker can still write or make again, with any name (`git`,
+  `node`). Each host now records its PATH in its `place.json` (`machine/agentHost.ts` hostsWithPathDir; a host with no
+  record is older, and counts). While one runs, `guardOldShimBin` makes that folder one symbolic link to
+  `<root>/tools-medium/shims` (w6063's review), so those agents run the daemon's own shims and a write through the
+  link is refused by the fence. On every change it sees at `bin` in the mailbox, and every minute, anything else there
+  (a folder, a planted file, a link elsewhere, there before the daemon started or made since) is renamed into
+  `<root>/tools-medium/quarantine`, which workers cannot write, and removed there, then the link is made again;
+  `path fence: undid a change ...` in the daemon's log. It never deletes through a path a worker can swap: a `bin`
+  swapped for a link to another folder moves as the link, and the folder it named is left alone. When none runs, the
+  link goes the same way (`path fence: removed the old shims folder ...`). A worker that swaps the link for its own
+  folder wins until it is undone: a narrow race, for those older agents only.
+- **chmod is not a write to Landlock** (w6074's review, measured on biscuit). A fenced worker can change modes where
+  it cannot write. Two holes followed, both closed in `machine/pathFence.ts`:
+  - **A folder at `bin` set to 555.** Moving a folder to another parent needs write on the folder itself (its `..`), so
+    the rename into the quarantine failed for good, and older agents ran the planted `ff-pr`. The guard now opens the
+    folder without following a link and `fchmod`s it to 0700 before each rename (`ownFolderMode`), retrying a few
+    times, and makes folders in the quarantine writable before removing them. A failure is logged once an hour by its
+    error code, not its message, which names a new quarantine path each try.
+  - **The real shims.** `chmod 000 ff-pr` in `tools-medium/shims` took ff-pr from every agent, and `chmod 500` on the
+    folder made the daemon's next `writeShims` fail, and so fall back to warn. Before writing them the daemon gives the
+    folder 0755 and each file in it owner read and write again (`readyShimDir`). While it runs, `guardShimModes` puts
+    back the modes it wrote, on every change it sees there and every minute, logged as `path fence: put back the mode
+    ...`. A worker still wins the moment before that.
+  - **One folder up** (w6080's review, measured on biscuit). `chmod 500` of `tools-medium/quarantine` stopped every
+    rename into it, so a worker's folder stayed at `bin` (P12). `chmod 000` of `tools-medium`, or 555 before the shims
+    folder exists (a first deploy), made `writeShims` fail at start (P13r, P15), and the fallback to warn then wrote the
+    shims into the mailbox's `bin`, which workers write, so their own `ff-pr` ran. Now each eviction gives the mailbox
+    owner rwx, `tools-medium` 0755 and the quarantine 0700 first; `readyShimDir` and `guardShimModes` cover
+    `tools-medium` as well as the shims folder; and in `on` there is no fallback into the mailbox at all (below). A
+    folder whose owner may not read it cannot be opened, even by its owner: then a real folder gets owner rwx back by
+    path, and the handle opened after is refused if it is not the folder looked at.
+  - **After w6103's review** (w6144). That chmod by path follows a link a worker swaps in after the look; on macOS,
+    where Seatbelt refuses a worker's own chmod, it is `/bin/chmod -h` (fchmodat with AT_SYMLINK_NOFOLLOW), since no
+    open of a folder at 000 succeeds there (O_EVTONLY and O_SYMLINK included, measured on m5) and Node's `lchmodSync`
+    opens for writing (EISDIR on a folder). Linux has no such call for a folder, and Landlock lets the worker chmod
+    the target itself anyway. Each eviction gives the root and the mailbox owner rwx before it looks at `bin`: in a
+    mailbox at 000 the look itself failed and `bin` was never mended. When the start write failed and the minute's
+    retry writes the shims later (`retryShimWrite`), `guardShimModes` learns their modes then; it had none to guard.
+  - Other locked folders (`secrets`, the daemon's) can be made unreadable the same way: a denial of service, not a way
+    to run code, and not covered here.
+- **Grants add up.** A `writeLockExtra` (or `extraRoots`) folder that holds a locked one, or sits in one (the root,
+  `tools-medium`, the shims), would open it again on Linux; `writeLockArgs` leaves it out and the daemon logs `write
+  lock: left out the extra writable folder ...`. On macOS Seatbelt's later deny already wins.
+
+The switch is the daemon setting `pathFence`: `on` (unset is `on`), `warn` (w5863's stage: the shims stay in the
+mailbox, and each change there the daemon did not make is logged, `path fence (warn): ...`, once per name per hour) or
+`off` (in the mailbox, unwatched). Set it from anywhere with `ops_worker machine_update path_fence off`, so recovery
+needs nobody at the machine: the daemon then writes the shims to the mailbox again, and new agents get that on their
+PATH. If the daemon cannot write `tools-medium/shims`, it stays in `on`: agents run whatever shims are there, the guards run, the write is tried again each minute, and the log line names `path_fence off` as the recovery. It never falls back to the mailbox's `bin`, which fenced workers write (w6080). In off and warn, a link the guard left at `bin` is taken away before the shims are written there, so they go into a real folder.
+
+Proof (`server/pathFence.test.ts`, live on Linux with Landlock): under the lock a sandbox worker runs with, in
+`<root>/tools-medium/shims` the shim runs from PATH while an overwrite, append, truncate, new file, remove, rename in or
+out, or a move of the folder is refused, also with an extra writable folder over the root; the old folder's guard
+undoes a planted name, a changed shim or mode, a hard link, the folder made again and a link in its place, then
+removes the folder once no older agent runs. On macOS the Seatbelt deny of `tools-medium` is checked in the profile
+text.

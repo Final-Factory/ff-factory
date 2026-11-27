@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { checkFlakyRerun, portalDropReader, rerunTargets, readJobLog, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
+import { checkFlakyRerun, oomKill, portalDropReader, rerunTargets, readJobLog, resourceFault, runnerStopped, type RerunJob, type RerunReader, type RerunTarget } from './rerunGuard.ts';
 import { sandboxGuard } from './guard.ts';
 
 // w3784: both fixtures are the `test (ffu-windows)` job of ffu PR #510's CI run 42538461342, read with
@@ -252,17 +252,98 @@ test('w5271: a log with escape sequences is read (with --allow-escape-sequences 
     if (!args.includes('--allow-escape-sequences')) throw Object.assign(new Error('Command failed: gh api'), { stderr: ESCAPES });
     return STOPPED_ANSI_LOG;
   };
-  assert.equal(readJobLog('Final-Factory/ffu', STOPPED.id, newGh), STOPPED_ANSI_LOG);
+  assert.equal(await readJobLog('Final-Factory/ffu', STOPPED.id, newGh), STOPPED_ANSI_LOG);
   assert.deepEqual(calls, [['api', 'repos/Final-Factory/ffu/actions/jobs/137627783371/logs'], ['api', '--allow-escape-sequences', 'repos/Final-Factory/ffu/actions/jobs/137627783371/logs']]);
 
   // An older gh answers on the first call; any other error is not retried and stays a read failure (fail closed).
   const oldCalls: string[][] = [];
-  assert.equal(readJobLog(undefined, 1, (a) => (oldCalls.push(a), 'log')), 'log');
+  assert.equal(await readJobLog(undefined, 1, (a) => (oldCalls.push(a), 'log')), 'log');
   assert.equal(oldCalls.length, 1);
   let n = 0;
-  assert.deepEqual(readJobLog(undefined, 1, () => { n++; throw Object.assign(new Error('x'), { stderr: 'HTTP 404: Not Found' }); }), { error: 'HTTP 404: Not Found' });
+  assert.deepEqual(await readJobLog(undefined, 1, () => { n++; throw Object.assign(new Error('x'), { stderr: 'HTTP 404: Not Found' }); }), { error: 'HTTP 404: Not Found' });
   assert.equal(n, 1);
 
   const cmd = 'gh run rerun 45155653650 --failed -R Final-Factory/ffu';
   assert.equal(await checkFlakyRerun(cmd, { reader: reader([STOPPED], [], { [STOPPED.id]: STOPPED_ANSI_LOG }).r }), undefined);
+});
+
+// w6140: ffu run 45857906682's "check" (job 140043729184, ffu-biscuit-2, attempt 1): its lavapipe step's test binary was
+// SIGKILLed ("./tools/run_built_tests.sh: line 51: 344007 Killed") and the job's runner-health step then read "swap free 5 MB
+// of 8191 MB" and warned "swap is 100 % full". The job and its log are from `gh api repos/Final-Factory/ffu/actions/jobs/
+// 140043729184` and `.../logs` (2026-11-26), the log trimmed to the failed step's start, its last lines and the health step.
+const OOM = load('rerun-oom-killed-job.json');
+const OOM_LOG = text('rerun-oom-killed-job.txt');
+
+test('w6140: a SIGKILLed step beside a full swap is out of memory, rerun once at attempt 1; a kill without memory pressure is not', async () => {
+  assert.equal(oomKill(OOM_LOG), './tools/run_built_tests.sh: line 51: 344007 Killed ( cd "$dir" && "$exe" "$@" ); runner health: swap free 5 MB of 8191 MB');
+  const cmd = 'gh run rerun 45857906682 --failed -R Final-Factory/ffu';
+  assert.equal(OOM.run_attempt, 1);
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, OOM], [], { [OOM.id]: OOM_LOG }).r }), undefined);
+  // A second attempt is the machine's to fix.
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([{ ...OOM, run_attempt: 2 }], [], { [OOM.id]: OOM_LOG }).r }))!, /Refused \(w3836\).*attempt 2/);
+
+  // Negative: the same kill with the runner's memory healthy (no swap pressure, 21 % available) is a real failure.
+  const healthy = OOM_LOG.replace('swap free 5 MB of 8191 MB', 'swap free 7900 MB of 8191 MB').replace(/^.*##\[warning\]swap is 100 % full.*$/m, '');
+  assert.equal(oomKill(healthy), undefined);
+  assert.match((await checkFlakyRerun(cmd, { reader: reader([OOM], [], { [OOM.id]: healthy }).r }))!, /Refused \(w3784\): "check" \(job 140043729184\).*a real failure/);
+  // Negative: memory pressure with no kill (the binary failed by itself) is a real failure.
+  const noKill = OOM_LOG.replace(/^.*344007 Killed.*$/m, '');
+  assert.equal(oomKill(noKill), undefined);
+  assert.ok(await checkFlakyRerun(cmd, { reader: reader([OOM], [], { [OOM.id]: noKill }).r }));
+  // Negative: a failed test beside the kill keeps it refused.
+  assert.equal(oomKill(OOM_LOG.replace('##[error]Process completed', 'test result: FAILED. 27 passed; 1 failed\n##[error]Process completed')), undefined);
+  // Negative: a kill in a step that went on to pass (the next step starts before any failure) does not count.
+  const passedStep = OOM_LOG.replace(/^(.*344007 Killed.*)$/m, '$1\n2026-11-26T16:40:08.7Z ##[group]Run next step');
+  assert.equal(oomKill(passedStep), undefined);
+
+  // Exit 137 and cargo's signal 9 are kills too; available memory under 5 % of RAM is pressure too.
+  const exit137 = noKill.replace('exit code 1.', 'exit code 137.');
+  assert.match(oomKill(exit137)!, /exit code 137.*swap free 5 MB/);
+  const sig9 = noKill.replace('##[error]Process completed', "error: test failed, to rerun pass `-p ffu-client --lib`\nprocess didn't exit successfully: `ffu-xyz` (signal: 9, SIGKILL: kill)\n##[error]Process completed");
+  assert.match(oomKill(sig9)!, /signal: 9, SIGKILL/);
+  const lowAvail = healthy.replace('available 5611 MB of 27186 MB', 'available 900 MB of 27186 MB');
+  assert.match(oomKill(lowAvail)!, /runner health: available 900 MB of 27186 MB$/);
+  assert.equal(oomKill(healthy.replace('available 5611 MB', 'available 1400 MB')), undefined);
+});
+
+// w6229: ffu run 45902685264's "check" (job 140191984567): tools/run_tests_parallel.py printed Python's negative return code for a
+// SIGKILL, "(exit -9)", and runner health read "swap free 13 MB of 8191 MB". Lines from that report; only -9 counts as a kill.
+test('w6229: Python subprocess "exit -9" is a SIGKILL beside full swap; other negative codes are not', () => {
+  const log = text('rerun-oom-exit-minus9.txt');
+  assert.match(oomKill(log)!, /FAILED: ffu-audio\/test\/headless \(exit -9\).*swap free 13 MB of 8191 MB$/);
+  assert.equal(oomKill(log.replace(/exit -9/g, 'exit -11')), undefined);
+  assert.equal(oomKill(log.replace(/exit -9/g, 'exit 9')), undefined);
+  assert.equal(oomKill(log.replace('swap free 13 MB', 'swap free 7900 MB').replace(/^.*swap is 100.*$/m, '')), undefined);
+});
+
+// w6409: ffu PR #1251's run 46000116814, job "test (ffu-windows)" (job 140509304310, ffu-beast-5, attempt 1, 2026-11-27):
+// BEAST's commit charge ran out. Lines 2040-2120 and 5815-5820 of its log: ffu-server's directory test got os error 1455
+// and Rust's allocation abort, so one of its tests failed with a panic; ffu_headless and mix_ff1 aborted (exit 3221226505).
+const ALLOC_LOG = text('rerun-alloc-abort-job.txt');
+const WIN_TEST: RerunJob = { id: 140509304310, name: 'test (ffu-windows)', conclusion: 'failure', run_attempt: 1, steps: [{ name: 'Set up job', conclusion: 'success' }, { name: 'Run python tools/run_tests_parallel.py', conclusion: 'failure' }] };
+
+test('w6409: a test binary that ran out of commit memory is a resource fault, its own failed test included', () => {
+  assert.match(ALLOC_LOG, /test result: FAILED\. 4 passed; 1 failed/);
+  assert.match(ALLOC_LOG, /ffu-headless\/lib\/ffu_headless \(exit 3221226505\)/);
+  assert.match(resourceFault(ALLOC_LOG)!, /paging file is too small for this operation to complete\. \(os error 1455\)$/);
+  // The abort alone, with no 1455 line, still counts.
+  assert.match(resourceFault(ALLOC_LOG.replace(/^.*os error 1455.*$/m, ''))!, /^memory allocation of 3145728 bytes failed$/);
+});
+
+test('w6409: a failed test in another binary, or a rustc error anywhere, keeps the rerun refused', () => {
+  const other = `${ALLOC_LOG}\nrunning 3 tests\ntest a ... FAILED\n\nfailures:\n\ntest result: FAILED. 2 passed; 1 failed`;
+  assert.equal(resourceFault(other), undefined);
+  assert.equal(resourceFault(`error[E0433]: failed to resolve\n${ALLOC_LOG}`), undefined);
+  // A failed test with no abort in its own binary: the fault line elsewhere does not excuse it.
+  const moved = ALLOC_LOG.replace(/^.*memory allocation of 3145728 bytes failed.*$/m, '').replace(/^.*os error 1455.*$/m, '');
+  assert.equal(resourceFault(moved), undefined);
+  // Exit 0xC0000409 alone is any abort, not out of memory.
+  assert.equal(resourceFault('run_tests_parallel: FAILED: ffu-bots/test/mix_ff1 (exit 3221226505)\n##[error]Process completed with exit code 1.'), undefined);
+});
+
+test('w6409: the rerun of that job passes at attempt 1 and is refused at attempt 2', async () => {
+  const cmd = 'gh run rerun 46000116814 --failed -R Final-Factory/ffu';
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, WIN_TEST], undefined, { [WIN_TEST.id]: ALLOC_LOG }).r }), undefined);
+  const second = await checkFlakyRerun(cmd, { reader: reader([{ ...WIN_TEST, run_attempt: 2 }], undefined, { [WIN_TEST.id]: ALLOC_LOG }).r });
+  assert.match(second!, /Refused \(w3836\).*attempt 2/);
 });

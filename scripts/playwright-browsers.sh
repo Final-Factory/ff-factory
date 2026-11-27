@@ -46,7 +46,12 @@ if [ "$HIT" = true ]; then
   shopt -u nullglob
   if [ ${#debs[@]} -gt 0 ]; then
     echo "Installing ${#debs[@]} cached packages with dpkg (no apt, no network)."
-    timeout 300 sudo dpkg -i "${debs[@]}" >"$DEBS.log" 2>&1 || ok=false
+    # A second pass: dpkg -i takes the .debs in name order and refuses one whose Breaks names an older version of a
+    # package later in the set, still installed. On ubuntu26/20261122.9 (run 45851340689, w6117) libasound2-data
+    # 1.2.15.3-1ubuntu1.2 Breaks libasound2t64 << 1.2.15.3-1ubuntu1.2, which the image has at ubuntu1.1: the first pass
+    # unpacks libasound2t64 1.2 but cannot configure it, and the second unpacks libasound2-data over it and configures both.
+    timeout 300 sudo dpkg -i "${debs[@]}" >"$DEBS.log" 2>&1 ||
+      timeout 300 sudo dpkg -i "${debs[@]}" >>"$DEBS.log" 2>&1 || ok=false
   fi
   # Every package Playwright would ask apt for is now installed (its --dry-run only prints the apt command).
   if $ok; then
@@ -62,8 +67,15 @@ if [ "$HIT" = true ]; then
     exit 0
   fi
   echo "::warning::The cached browsers or packages did not install; installing from the network instead."
-  tail -20 "$DEBS.log" 2>/dev/null || true
+  grep -E -A3 '^dpkg: ' "$DEBS.log" 2>/dev/null | head -40 || true
+  # A package the cached set left unconfigured makes every later apt-get install refuse ("Unmet dependencies", exit
+  # 100, run 45851340689) until apt repairs it, so repair it before the network install.
   sudo dpkg --configure -a || true
+  if [ -n "$(sudo dpkg --audit 2>/dev/null)" ]; then
+    timeout "$TRY_SECONDS" sudo apt-get -f install -y || echo "::warning::apt-get -f install did not repair the packages."
+    sudo pkill -x apt-get || true
+    for _ in $(seq 30); do sudo fuser /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock >/dev/null 2>&1 || break; sleep 2; done
+  fi
 fi
 
 # Keep what apt fetches: an empty archive now holds exactly this install's .debs afterwards.

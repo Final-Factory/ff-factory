@@ -1,0 +1,87 @@
+2026-11-27T12:49:15.8420057Z test every_cue_is_heard_through_the_mixer ... ok
+2026-11-27T12:49:15.8420162Z 
+2026-11-27T12:49:15.8420305Z test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 42.80s
+2026-11-27T12:49:15.8420479Z 
+2026-11-27T12:49:37.2475044Z      Running ffu-server test directory (F:\ffw\ffu-runners\ffu-beast-5\_work\ffu\ffu\target\debug\deps\directory-b4ca006e31ceac21.exe) 29.9s, at 344s
+2026-11-27T12:49:37.2475452Z 
+2026-11-27T12:49:37.2475522Z running 5 tests
+2026-11-27T12:49:37.2475695Z test a_term_watch_that_begins_late_asks_its_whole_give_up ... ok
+2026-11-27T12:49:37.2476539Z test the_whole_group_restarts_from_its_files ... ok
+2026-11-27T12:49:37.2476949Z test a_term_watch_whose_lookup_is_held_past_its_give_up_keeps_the_term ... ok
+2026-11-27T12:49:37.2477381Z test a_term_watch_hears_the_group_while_the_shared_client_is_held ... ok
+2026-11-27T12:49:37.2477964Z ffu-server: no minidumps for native faults this run: could not start the crash monitor: The paging file is too small for this operation to complete. (os error 1455)
+2026-11-27T12:49:37.2478467Z memory allocation of 3145728 bytes failed
+2026-11-27T12:49:37.2478754Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-27T12:49:37.2479132Z test kill_the_leader_process_during_200_moves_on_4_shards ... FAILED
+2026-11-27T12:49:37.2479356Z 
+2026-11-27T12:49:37.2479409Z failures:
+2026-11-27T12:49:37.2479495Z 
+2026-11-27T12:49:37.2479622Z ---- kill_the_leader_process_during_200_moves_on_4_shards stdout ----
+2026-11-27T12:49:37.2479817Z 
+2026-11-27T12:49:37.2480091Z thread 'kill_the_leader_process_during_200_moves_on_4_shards' (52296) panicked at crates\ffu-server\tests\directory.rs:89:9:
+2026-11-27T12:49:37.2480631Z replica 0 did not start: ""
+2026-11-27T12:49:37.2480891Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-27T12:49:37.2481194Z 
+2026-11-27T12:49:37.2481198Z 
+2026-11-27T12:49:37.2481267Z failures:
+2026-11-27T12:49:37.2481452Z     kill_the_leader_process_during_200_moves_on_4_shards
+2026-11-27T12:49:37.2481641Z 
+2026-11-27T12:49:37.2481835Z test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 29.84s
+2026-11-27T12:49:37.2482131Z 
+2026-11-27T12:49:37.2548355Z      Running ffu-headless lib ffu_headless (F:\ffw\ffu-runners\ffu-beast-5\_work\ffu\ffu\target\debug\deps\ffu_headless-555585830ab95ff1.exe) 21.4s, at 344s
+2026-11-27T12:49:37.2548760Z 
+2026-11-27T12:49:37.2548824Z running 39 tests
+2026-11-27T12:49:37.2549080Z test tests::bisect_finds_a_fault_at_70000_of_100000 ... ignored, full size, minutes; run in release
+2026-11-27T12:49:37.2549511Z test settle::tests::a_timer_that_wraps_is_a_clock ... ok
+2026-11-27T12:49:37.2549837Z test stream::tests::every_op_body_fits_the_readers_buffer ... ok
+2026-11-27T12:49:37.2550223Z test tests::an_ff1_start_takes_its_tiling_from_the_last_field_and_keeps_a_drive_colon ... ok
+2026-11-27T12:49:37.2550593Z test tests::a_new_start_takes_a_u32_seed ... ok
+2026-11-27T12:49:37.2550927Z test crosscheck::tests::the_first_divergence_names_its_tick_and_parts ... ok
+2026-11-27T12:49:37.2551322Z test settle::tests::a_break_splits_the_stretch ... ok
+2026-11-27T12:49:37.2551616Z test settle::tests::a_period_and_where_it_began ... ok
+2026-11-27T12:49:37.2551900Z test crosscheck::tests::a_trace_survives_its_text ... ok
+2026-11-27T12:49:37.2552270Z test world_bench::tests::the_layout_matches_the_worlds_cut_of_forty_equal_stations ... ok
+2026-11-27T12:49:37.2552685Z test stream::tests::a_ship_leave_in_an_op_log_reads_back ... ok
+2026-11-27T12:49:37.2553034Z test tests::a_bad_op_log_is_an_error_where_the_stream_reaches_it ... ok
+2026-11-27T12:49:37.2557135Z test world_bench::tests::a_world_of_copies_holds_every_station_at_the_start_tick ... ok
+2026-11-27T12:49:37.2557681Z test world_bench::tests::first_divergence_names_the_tick_and_station_that_differ ... ok
+2026-11-27T12:49:37.2558033Z test world_bench::tests::links_need_more_stations_than_k_and_room_on_the_start ... ok
+2026-11-27T12:49:37.2558313Z test crosscheck::tests::an_injected_float_shows_from_its_tick ... ok
+2026-11-27T12:49:37.2558667Z test crosscheck::tests::the_supply_bots_scenario_fills_both_requests ... ok
+2026-11-27T12:49:37.2559196Z test world_bench::tests::plain_links_among_some_stations_carry_cargo_and_leave_the_rest_alone ... ok
+2026-11-27T12:49:37.2559996Z test crosscheck::tests::every_ff1_part_moves_in_its_golden_trace ... ok
+2026-11-27T12:49:37.2560438Z test crosscheck::tests::world_ports_holds_a_port_full_and_refusing ... ok
+2026-11-27T12:49:37.2560905Z test crosscheck::tests::the_guardian_cells_scenario_fights_three_guardians_one_across_a_cell_edge ... ok
+2026-11-27T12:49:37.2561484Z test world_bench::tests::every_station_hashes_the_same_at_every_thread_count_and_as_its_sector_alone ... ok
+2026-11-27T12:49:37.2561978Z test crosscheck::tests::the_world_scenarios_end_on_their_pinned_hashes ... ok
+2026-11-27T12:49:37.2562385Z test tests::a_planted_fault_is_named_by_tick_subsystem_and_field ... ok
+2026-11-27T12:49:37.2562698Z test crosscheck::tests::every_scenario_has_a_golden_trace ... ok
+2026-11-27T12:49:37.2563121Z test crosscheck::tests::the_guardian_scenario_marks_ships_and_buildings_scales_for_two_and_regenerates ... ok
+2026-11-27T12:49:37.2563555Z test tests::record_then_replay_matches ... ok
+2026-11-27T12:49:37.2563855Z test tests::bisect_of_two_equal_recordings_finds_nothing ... ok
+2026-11-27T12:49:37.2564269Z test crosscheck::tests::the_fleet_combat_scenario_fights_with_every_kind_and_a_frenzy ... ok
+2026-11-27T12:49:37.2564895Z test world_bench::tests::linked_stations_carry_cargo_and_hash_the_same_at_every_thread_count ... ok
+2026-11-27T12:49:37.2565289Z test tests::bisect_names_an_op_only_one_peer_applied ... ok
+2026-11-27T12:49:37.2565601Z test crosscheck::tests::the_dragon_cells_scenario_engages_casts_volleys_and_takes_the_turrets_hits ... ok
+2026-11-27T12:49:37.2565968Z test tests::a_live_recording_replays_equal_before_it_is_closed ... ok
+2026-11-27T12:49:37.2566290Z test tests::a_streamed_op_log_runs_as_the_ops_in_memory ... ok
+2026-11-27T12:49:37.2566550Z test tests::hashcheck_is_stable_within_a_process ... ok
+2026-11-27T12:49:37.2566870Z test tests::bisect_finds_a_planted_fault_between_keyframes ... ok
+2026-11-27T12:49:37.2567484Z test tests::a_sampled_recording_bisects_a_planted_fault_to_a_window_that_holds_it ... ok
+2026-11-27T12:49:37.2567983Z test tests::threads_never_change_the_hash ... ok
+2026-11-27T12:49:37.2568265Z memory allocation of 1325856 bytes failed
+2026-11-27T12:49:37.2568623Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-27T12:49:44.8059548Z      Running ffu-bots test mix_ff1 (F:\ffw\ffu-runners\ffu-beast-5\_work\ffu\ffu\target\debug\deps\mix_ff1-0453bc7162a3ce74.exe) 7.6s, at 351s
+2026-11-27T12:49:44.8060005Z 
+2026-11-27T12:49:44.8060090Z running 1 test
+2026-11-27T12:49:44.8060273Z memory allocation of 1531608 bytes failed
+2026-11-27T12:49:44.8069216Z note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+2026-11-27T12:50:23.3877463Z      Running ffu-audio test levels (F:\ffw\ffu-runners\ffu-beast-5\_work\ffu\ffu\target\debug\deps\levels-a077bef7c25f3313.exe) 38.6s, at 390s
+2026-11-27T12:50:23.3877760Z 
+2026-11-27T12:50:23.3877808Z running 4 tests
+2026-11-27T12:54:53.4767137Z 
+2026-11-27T12:54:53.4767281Z test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+2026-11-27T12:54:53.4767457Z 
+2026-11-27T12:54:53.4880733Z run_tests_parallel: 263 binaries in 655s wall, 1581s summed; slowest: ffu-oracle/test/ff1_power_live 165s, ffu-oracle/test/ff1_import 154s, ffu-oracle/test/ff1_import_research 97s, ffu-server/test/failover 86s, ffu-client/bin/ffu 70s, ffu-crash-receiver/test/route 70s, ffu-server/test/owner_term 51s, ffu-ui/lib/ffu_ui 49s, ffu-audio/test/headless 43s, ffu-server/test/deploy_ops 40s
+2026-11-27T12:54:53.4882028Z run_tests_parallel: FAILED: ffu-server/test/directory (exit 101); ffu-headless/lib/ffu_headless (exit 3221226505); ffu-bots/test/mix_ff1 (exit 3221226505)
+2026-11-27T12:54:53.5802593Z ##[error]Process completed with exit code 1.

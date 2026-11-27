@@ -19,7 +19,9 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES } from '../server/claudeHome.ts';
+import { sharedLockParents, sharedLockRel } from './sharedLockPaths.ts';
+import { isLink as isLinkFs, removeLink } from '../server/fsLink.ts';
+import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES, TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
 /** An explicit Medium label, which overrides the Low one a folder inherits (measured, w5377). */
@@ -85,11 +87,28 @@ export interface LowTargetsInput {
   /** Extras the daemon owns that a worker must write although they sit in the daemon's folder (the Unity slots mailbox). */
   allowInAppDir?: (string | undefined)[];
   exists?: (p: string) => boolean;
+  /** A junction or symbolic link (server/fsLink.ts isLink); the shared lock never labels through one (review w6362). */
+  isLink?: (p: string) => boolean;
+  /**
+   * w5959: the tools children kept Medium because they hold a virtual disk (toolsDiskPlan, daemon.json `toolsDiskLock` "on"),
+   * and those disks. Each child leaves the Low list and joins `medium` (after `tools`), its disks after it, so a Low worker
+   * reads them and writes none. Left out or empty: every tools child but MEDIUM_TOOLS is Low, as before.
+   */
+  toolsKeepMedium?: { children: string[]; disks: string[] };
   /**
    * w5614: the store lock holds (machine/storeLock.ts): the main clone's git folder is labelled Medium (No-Write-Up), so Low
    * workers read it (the slot repos' borrowed objects) and cannot write it. Off, it is labelled Low as before.
    */
   lockStore?: boolean;
+  /**
+   * w5615: the shared lock is on (machine/sharedLockPaths.ts): players, seed and the cache seeds are labelled Medium, all
+   * of each (`trees`: a worker's files there carry an explicit Low label of their own, which a folder's label leaves), and
+   * `cache` and `cache/nuget` are kept Medium with each other child Low on its own, as `tools` (w5717). Off or warn: the
+   * same folders go back to Low, all of each, where an earlier "on" left them Medium.
+   */
+  sharedLock?: boolean;
+  /** A folder's entries (tests); fs.readdirSync otherwise. Missing: none. */
+  list?: (dir: string) => { name: string; dir: boolean }[];
 }
 
 const inside = (child: string, parent: string) => {
@@ -98,8 +117,25 @@ const inside = (child: string, parent: string) => {
 };
 const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
+/** What labelLow labels (lowTargets). */
+export interface LowTargets {
+  dirs: string[];
+  files: string[];
+  medium?: string[];
+  /** w5615: the locked folders, labelled whole (labelTree). */
+  trees?: string[];
+  /**
+   * Review w6377: the shared lock's folders on the way (cache, cache/nuget) that hold workers' folders. Nothing inside one
+   * is labelled through a link (a worker could swap a child for a junction while its parent is Low). Under "on"
+   * (`guardFirst`) they turn Medium before anything inside them goes Low, from the top; under off one is left Medium while
+   * a locked folder inside it could not be labelled Low.
+   */
+  guard?: string[];
+  guardFirst?: boolean;
+}
+
 /** The folders and files to label Low. Exported for tests. */
-export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[] } {
+export function lowTargets(i: LowTargetsInput): LowTargets & { medium: string[]; trees: string[]; guard: string[] } {
   const exists = i.exists ?? fs.existsSync;
   // The daemon's and the secrets' folders, and the daemon's own where it sits in the root: never labelled, either way.
   const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
@@ -161,19 +197,242 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   const at = dirs.findIndex((d) => same(d, tools));
   if (at >= 0) {
     if (i.toolsChildren) {
-      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !MEDIUM_TOOLS.includes(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
+      // w5959: a child that holds a virtual disk, with toolsDiskLock on, stays Medium like MEDIUM_TOOLS (toolsDiskPlan).
+      const kept = new Set((i.toolsKeepMedium?.children ?? []).map((c) => c.toLowerCase()));
+      dirs.splice(at, 1, ...i.toolsChildren.filter((c) => c.dir && !keptMediumTool(c.name) && !kept.has(c.name.toLowerCase())).map((c) => path.join(tools, c.name)));
       medium.push(tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)));
+      // w6101: the old shims folder, while it is still there (agents started before the move run it), stays Medium.
+      for (const c of i.toolsChildren) if (c.dir && c.name.toLowerCase() === OLD_TOOLS_SHIMS) medium.push(path.join(tools, c.name));
+      for (const c of i.toolsChildren) if (c.dir && kept.has(c.name.toLowerCase()) && !keptMediumTool(c.name)) medium.push(path.join(tools, c.name));
+      // Its disks after it: one that inherited Low turned Medium with the folder; one Low on its own is raised itself.
+      medium.push(...(i.toolsKeepMedium?.disks ?? []).filter((d) => medium.some((m) => same(path.dirname(d), m))));
     } else medium.push(path.join(tools, 'node'));
   }
   medium.push(...fenced, ...lockedStore);
-  return { dirs, files, medium };
+  // w6101: the shims moved to <root>/tools-medium/shims, first on every agent's PATH, Medium ones included. tools-medium is
+  // never labelled (MEDIUM_ONLY_CHILDREN), but a rollout before w5539 labelled it Low, which nothing undid (w5876's review):
+  // there a Low worker could rename the shims folder away (the parent's FILE_DELETE_CHILD) or plant a command in it. Both
+  // are kept Medium (labelLow relabels only one that reads Low).
+  const tm = i.children.find((c) => c.dir && c.name.toLowerCase() === TOOLS_MEDIUM_CHILD);
+  if (tm) medium.push(path.join(i.root, tm.name), path.join(i.root, tm.name, 'shims'));
+  const { trees, guard } = sharedLockLabels(i, dirs, medium);
+  return { dirs, files, medium, trees, guard, guardFirst: !!i.sharedLock };
+}
+
+/**
+ * w5615: the shared lock's part of lowTargets (LowTargetsInput.sharedLock): moves its folders between `dirs` and `medium`
+ * and answers the ones labelLow labels all of (`trees`). Only folders under a worker child the fence labels (`dirs`).
+ * tools is left to lowTargets' own rule above: it already keeps node, low and unity-low Medium.
+ */
+function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]): { trees: string[]; guard: string[] } {
+  const exists = i.exists ?? fs.existsSync;
+  const link = i.isLink ?? isLinkFs;
+  const list = i.list ?? ((d: string) => {
+    try {
+      return fs.readdirSync(d, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() && !e.isSymbolicLink() }));
+    } catch {
+      return [];
+    }
+  });
+  const abs = (rel: string) => path.join(i.root, ...rel.split('/'));
+  const at = (p: string) => dirs.findIndex((d) => same(d, p));
+  const under = (p: string) => dirs.some((d) => inside(p, d)) || medium.some((m) => same(m, p));
+  // Review w6362: a link a worker planted under off or warn at a folder on the way (cache/nuget a junction to the daemon's
+  // folder) or at a locked one would have icacls label its target, alone or walked. Neither it nor anything under it is
+  // labelled; labelLow's walk skips links inside a locked folder.
+  const viaLink = (p: string) => {
+    for (let q = p; inside(q, i.root) && !same(q, i.root); q = path.dirname(q)) if (link(q)) return true;
+    return false;
+  };
+  const locked = sharedLockRel(false).map(abs).filter((p) => under(p) && !viaLink(p));
+  if (!i.sharedLock) {
+    // Back to Low where "on" left them Medium (labelLow touches one only when it does not read Low). Only the locked folders
+    // are walked whole; the parents are labelled alone (review w6355 H1): workers write the rest of `cache` (cache/slots),
+    // and a walk of it could meet a junction they planted.
+    const back = locked.filter((p) => exists(p));
+    const all = [...sharedLockParents(false).keys()].map(abs);
+    for (const p of all.filter(viaLink)) if (at(p) >= 0) dirs.splice(at(p), 1);
+    const parents = all.filter((p) => (under(p) || at(p) >= 0) && exists(p) && !viaLink(p));
+    // Review w6374: the locked folders first, then the folders on the way, deepest first (cache/nuget before cache). A
+    // parent Low while a locked child is still Medium lets a worker rename that child aside and plant a junction in its
+    // place before the walk reaches it; a child labelled Low under a Medium parent cannot be swapped.
+    for (const p of parents) if (at(p) >= 0) dirs.splice(at(p), 1);
+    for (const p of back) if (at(p) < 0) dirs.push(p);
+    dirs.push(...[...parents].sort((a, b) => b.length - a.length));
+    return { trees: back, guard: parents };
+  }
+  const guard: string[] = [];
+  // Parents first, from the top: each leaves `dirs` for `medium`, its other children join `dirs` on their own.
+  for (const [rel, names] of [...sharedLockParents(false)].sort((a, b) => a[0].length - b[0].length)) {
+    const p = abs(rel);
+    if (!under(p) && !medium.some((m) => same(m, path.dirname(p)))) continue;
+    if (viaLink(p)) {
+      // Neither Low nor Medium: whatever it leads to keeps its label.
+      const k = at(p);
+      if (k >= 0) dirs.splice(k, 1);
+      continue;
+    }
+    const k = at(p);
+    if (k >= 0) dirs.splice(k, 1);
+    medium.push(p);
+    guard.push(p);
+    const kids = list(p).filter((c) => c.dir && !names.has(c.name) && !link(path.join(p, c.name))).map((c) => path.join(p, c.name));
+    // Review w6374: swapped for a link while it was listed, the names came from wherever that leads: none is labelled.
+    if (viaLink(p)) continue;
+    dirs.push(...kids);
+  }
+  for (const p of locked) {
+    const k = at(p);
+    if (k >= 0) dirs.splice(k, 1);
+    medium.push(p);
+  }
+  return { trees: locked, guard };
 }
 
 /** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
-export const MEDIUM_TOOLS = ['node', 'low', 'unity-low', 'shims'];
+export const MEDIUM_TOOLS = ['node', 'low', 'unity-low'];
 
-/** Where the daemon writes the workers' shims on Windows with a root (w5838): a Medium folder, not the Low slots mailbox. */
+/**
+ * w6101: `<root>/tools/shims`, the Windows shims folder from w5838 until the move to `<root>/tools-medium/shims`. Out of
+ * MEDIUM_TOOLS, but never labelled Low while it is there: agents started before the move still run it first on their
+ * PATH. The daemon removes it once none does (dropOldToolsShims); `tools` is Medium, so no Low worker makes it again.
+ */
+export const OLD_TOOLS_SHIMS = 'shims';
+/** A tools child the fence keeps Medium: MEDIUM_TOOLS, and the old shims folder while it is there (w6101). */
+const keptMediumTool = (name: string) => MEDIUM_TOOLS.includes(name.toLowerCase()) || name.toLowerCase() === OLD_TOOLS_SHIMS;
+
+/**
+ * Where the daemon wrote the workers' shims on Windows from w5838 (a Medium folder, not the Low slots mailbox) until w6101
+ * moved them to `<root>/tools-medium/shims` (pathFence.ts enforcedShimDir), the one name on every OS. Still written, and
+ * Medium (OLD_TOOLS_SHIMS), only while an agent host started before the move has it on its PATH (agentHost.ts
+ * hostsWithPathDir); then removed (dropOldToolsShims).
+ */
 export const toolsShimsDir = (root: string) => path.join(root, 'tools', 'shims');
+
+/**
+ * The files the daemon writes in the shims folder on Windows (w6101): unity-slot, ff-leftovers, ff-pr and ffu-slot, each
+ * a `sh` script and a `.cmd`. installPythonShim writes none on Windows. A test writes them all and compares.
+ */
+export const WINDOWS_SHIM_FILES = ['ff-leftovers', 'ff-leftovers.cmd', 'ff-pr', 'ff-pr.cmd', 'ffu-slot', 'ffu-slot.cmd', 'unity-slot', 'unity-slot.cmd'];
+
+/**
+ * w6101: what sits in a Windows shims folder that the daemon does not write (WINDOWS_SHIM_FILES), by name. Every agent's
+ * PATH starts there, so a `git.cmd` planted while `tools-medium` was still Low (a rollout before w5539) would run for
+ * Medium agents too. The daemon moves each one out (quarantineStrayShims). A folder that cannot be read answers its error.
+ */
+export function strayShimFiles(dir: string, list: (d: string) => string[] = (d) => fs.readdirSync(d)): { strays: string[]; error?: string } {
+  try {
+    const want = new Set(WINDOWS_SHIM_FILES);
+    // The temporary files writeAtomic and the installers leave on a failed write (`….tmp`) run by no bare name.
+    return { strays: list(dir).filter((n) => !want.has(n.toLowerCase()) && !n.toLowerCase().endsWith('.tmp')).sort() };
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? { strays: [] } : { strays: [], error: (e as Error).message };
+  }
+}
+
+/** w6101: the Windows shims folder, `<root>/tools-medium/shims`: the name macOS and Linux use (pathFence.ts enforcedShimDir). */
+export const windowsShimsDir = (root: string) => path.join(root, TOOLS_MEDIUM_CHILD, 'shims');
+
+/**
+ * w6101: the Windows daemon's shims at start. They are written to `<root>/tools-medium/shims` (windowsShimsDir), first on
+ * new agents' PATH. `<root>/tools/shims` (toolsShimsDir, Medium) is written too only while an agent host started before
+ * the move has it on its PATH (`waits`, hostsWithPathDir); dropOldToolsShims removes it once none does. A failed write in
+ * the new folder falls back to the old one, which is Medium, so recovery needs nobody at the machine; it is a WARNING.
+ * Answers the folder to put first on PATH (undefined if neither could be written) and whether the old one is still needed.
+ */
+export function windowsShims(root: string, o: { write: (dir: string) => void; waits: () => string[]; log: (l: string) => void }): { bin: string | undefined; oldNeeded: boolean } {
+  const dir = windowsShimsDir(root);
+  const old = toolsShimsDir(root);
+  try {
+    o.write(dir);
+  } catch (e) {
+    o.log(`unity slots: WARNING: could not write the shims in ${dir} (${(e as Error).message}); new agents get ${old} first on their PATH instead, which Low workers cannot write either, and the next daemon start tries again (w6101)`);
+    try {
+      o.write(old);
+      return { bin: old, oldNeeded: true };
+    } catch (e2) {
+      o.log(`unity slots: WARNING: could not write the shims in ${old} either: ${(e2 as Error).message} (w6101)`);
+      return { bin: undefined, oldNeeded: false };
+    }
+  }
+  const w = o.waits();
+  if (!w.length) {
+    o.log(`unity slots: the shims are in ${dir}, first on agents' PATH (w6101); no agent host has ${old} on its PATH, so it is not written and goes`);
+    return { bin: dir, oldNeeded: false };
+  }
+  try {
+    o.write(old);
+  } catch (e) {
+    o.log(`unity slots: WARNING: could not write the shims in ${old}: ${(e as Error).message}; agents started before the move to ${dir} run what is left there (w6101)`);
+  }
+  o.log(`unity slots: the shims are in ${dir}, first on new agents' PATH (w6101); ${old} is written too for the ${w.length} agent host(s) started before the move that have it on their PATH (${w.join(', ')}), and goes once they have ended`);
+  return { bin: dir, oldNeeded: true };
+}
+
+/**
+ * w6101: removes `<root>/tools/shims` once no agent host has it on its PATH (`waits`), looked at now and then every
+ * `everyMs`. `tools` is Medium, so no Low worker can make it again or swap it for a link. Answers the timer while it
+ * still waits (cleared by itself once the folder is gone), or undefined.
+ */
+export function dropOldToolsShims(root: string, o: { waits: () => string[]; log: (l: string) => void; everyMs?: number; remove?: (p: string) => void; exists?: (p: string) => boolean }): ReturnType<typeof setInterval> | undefined {
+  const old = toolsShimsDir(root);
+  const remove = o.remove ?? removeEntry;
+  const tryDrop = (): boolean => {
+    let w: string[];
+    try {
+      w = o.waits();
+    } catch {
+      return false;
+    }
+    if (w.length) return false;
+    try {
+      if (!(o.exists ?? fs.existsSync)(old)) return true;
+      remove(old);
+      o.log(`unity slots: removed the old shims folder ${old}: no agent host has it on its PATH (w6101)`);
+    } catch (e) {
+      o.log(`unity slots: WARNING: could not remove the old shims folder ${old}: ${(e as Error).message}; tried again in a minute (w6101)`);
+      return false;
+    }
+    return true;
+  };
+  if (tryDrop()) return undefined;
+  const t = setInterval(() => {
+    if (tryDrop()) clearInterval(t);
+  }, o.everyMs ?? 60_000);
+  t.unref?.();
+  return t;
+}
+
+/**
+ * w6101: moves each file in the Windows shims folder that the daemon does not write (strayShimFiles) into
+ * `<root>/tools-medium/quarantine/shims-<time>-<pid>`, a folder no agent has on its PATH and no worker writes, where a
+ * person can look at it; nothing is deleted. Each move is a WARNING; one that fails says so and leaves the file. At start
+ * and again once the fence has labelled (`tools-medium` may have read Low until then).
+ */
+export function quarantineStrayShims(root: string, o: { log: (l: string) => void; list?: (d: string) => string[]; rename?: (from: string, to: string) => void; mkdir?: (d: string) => void; now?: () => number }): string[] {
+  const dir = windowsShimsDir(root);
+  const s = strayShimFiles(dir, o.list);
+  if (s.error) o.log(`unity slots: WARNING: could not read ${dir} to look for files the daemon does not write there: ${s.error} (w6101)`);
+  if (!s.strays.length) return [];
+  const to = path.join(root, TOOLS_MEDIUM_CHILD, 'quarantine', `shims-${(o.now ?? Date.now)()}-${process.pid}`);
+  const moved: string[] = [];
+  try {
+    (o.mkdir ?? ((d) => fs.mkdirSync(d, { recursive: true })))(to);
+  } catch (e) {
+    o.log(`unity slots: WARNING: could not make ${to} to move ${s.strays.join(', ')} out of ${dir}: ${(e as Error).message}; left in place (w6101)`);
+    return [];
+  }
+  for (const n of s.strays) {
+    try {
+      (o.rename ?? fs.renameSync)(path.join(dir, n), path.join(to, n));
+      moved.push(n);
+      o.log(`unity slots: WARNING: ${path.join(dir, n)} is not a shim the daemon writes, and every agent's PATH starts in this folder; moved to ${to} (w6101)`);
+    } catch (e) {
+      o.log(`unity slots: WARNING: ${path.join(dir, n)} is not a shim the daemon writes, and could not be moved out: ${(e as Error).message}; left in place (w6101)`);
+    }
+  }
+  return moved;
+}
 
 type Ran = { code: number | null; stdout: string; stderr: string };
 export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<Ran>;
@@ -182,6 +441,8 @@ export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => 
 export const isLabelledLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level/i.test(icaclsOut);
 /** Whether icacls says this path carries a Low label of its own, not an inherited one (`(I)`). Exported for tests. */
 export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level:(?!\(I\))/i.test(icaclsOut);
+/** Whether icacls says this path carries a Medium label of its own (w5615). Exported for tests. */
+export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium Mandatory Level:(?!\(I\))/i.test(icaclsOut);
 
 /**
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
@@ -194,9 +455,45 @@ export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandat
  * still change the DACL, so labelLow then grants the account Full on the path and labels it again (measured on BEAST,
  * w5402: denied, then the grant, then the label succeeds and reaches the files inside).
  */
-export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[] }, exec: Exec, say: (line: string) => void, account = currentAccount()): Promise<boolean> {
+export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) => void, account = currentAccount(), isLink: (p: string) => boolean = isLinkFs): Promise<boolean> {
   let ok = true;
+  // Review w6377: a path inside a guarded folder (cache, cache/nuget), or one on the way to it, that is a link now: icacls
+  // would label where it leads (the daemon's folder, when a worker moved cache/slots aside and planted a junction there).
+  const guard = t.guard ?? [];
+  const tops = guard.filter((g) => !guard.some((h) => !same(h, g) && inside(g, h)));
+  const linkedOnTheWay = (p: string) => {
+    const top = tops.find((g) => inside(p, g));
+    if (!top) return false;
+    for (let q = p; inside(q, top); q = path.dirname(q)) if (isLink(q)) return true;
+    return false;
+  };
+  // Under "on", guarded folders that could not turn Medium first: nothing inside one is labelled Low this pass.
+  const open: string[] = [];
+  // w5615: a shared-lock folder is labelled whole: files a Low worker made there carry a Low label of their own. Never with
+  // icacls /T, which follows junctions with or without /L (review w6355 H1, measured): a junction a worker planted in the
+  // seed before "on" would get its target relabelled. transcriptLabels.ts labelTree walks it and skips every link.
+  const tree = (p: string) => (t.trees ?? []).some((x) => same(x, p));
   const setLabel = async (p: string, label: string) => {
+    if (tree(p)) {
+      // Imported here: transcriptLabels.ts imports this file.
+      const { icaclsOf, labelTree } = await import('../server/transcriptLabels.ts');
+      const found: string[] = [];
+      const low = label === LOW_LABEL;
+      const links = await labelTree(p, low ? 'low' : 'medium', icaclsOf(exec), account, found);
+      if (!links) return;
+      if (low) {
+        say(`worker integrity: WARNING: ${p} holds ${links} link${links === 1 ? '' : 's'} (a junction or symlink), skipped: not followed, not labelled (w5615)`);
+        return;
+      }
+      // Review w6362: a link a worker planted under off or warn, left in a locked seed, leads every reader of the seed to
+      // wherever it points (a folder the worker writes). The folder holding it is Medium now, so once removed it stays
+      // gone; only the link goes, never what it leads to (fsLink.ts removeLink).
+      for (const l of found) {
+        removeLink(l);
+        say(`worker integrity: removed link ${l} from the locked ${p} (a junction or symlink a worker made before "on"; its target is kept) (w5615)`);
+      }
+      return;
+    }
     let r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
     if (r.code !== 0 && account && /access is denied/i.test(r.stderr + r.stdout)) {
       const g = await exec('icacls', [p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
@@ -212,6 +509,24 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
   const own = (p: string) => (t.medium ?? []).some((m) => same(path.dirname(p), m));
   const failed: string[] = [];
   const one = async (p: string, label: string) => {
+    if (linkedOnTheWay(p)) {
+      // Not a failure: a worker could otherwise turn the fence off by planting a link. Its own folder is not labelled.
+      say(`worker integrity: WARNING: ${p} is (or lies below) a junction or symlink now, not labelled: icacls would label where it leads (w6377)`);
+      return;
+    }
+    if (open.some((g) => inside(p, g))) {
+      say(`worker integrity: WARNING: left ${p} as it is: the folder above it could not turn Medium first (w6377)`);
+      return;
+    }
+    // Review w6377, off: a folder on the way stays Medium while a locked folder inside it is not Low yet, so the next pass
+    // walks that one under a Medium parent, where no worker can swap it for a junction.
+    if (!t.guardFirst && guard.some((g) => same(g, p))) {
+      const stuck = failed.filter((f) => inside(f, p));
+      if (stuck.length) {
+        say(`worker integrity: WARNING: left ${p} Medium: ${stuck.join(', ')} could not be labelled Low (w6377)`);
+        return;
+      }
+    }
     try {
       if (!fs.existsSync(p)) {
         if (label === LOW_LABEL) fs.mkdirSync(p, { recursive: true });
@@ -227,6 +542,28 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
       say(`worker integrity: could not label ${p} Low: ${(e as Error).message}`);
     }
   };
+  // Review w6377: under "on" the folders on the way turn Medium before their children go Low, from the top. While cache is
+  // Low a worker can move a child of it aside and plant a junction in its place; once cache is Medium it cannot, and each
+  // child is read for a link (linkedOnTheWay) just before it is labelled.
+  if (t.guardFirst) {
+    for (const g of [...guard].sort((a, b) => a.length - b.length)) {
+      if (open.some((o) => inside(g, o))) {
+        open.push(g);
+        continue;
+      }
+      try {
+        if (!fs.existsSync(g)) continue;
+        if (isLink(g) || linkedOnTheWay(path.dirname(g))) throw new Error('it is (or lies below) a junction or symlink now');
+        const now = await exec('icacls', [g], { timeoutMs: 60_000 });
+        if (now.code === 0 && isExplicitMedium(now.stdout)) continue;
+        await setLabel(g, MEDIUM_LABEL);
+        say(`worker integrity: kept ${g} Medium`);
+      } catch (e) {
+        open.push(g);
+        say(`worker integrity: WARNING: could not keep ${g} Medium before its children, so they are left as they are: ${(e as Error).message} (w6377)`);
+      }
+    }
+  }
   for (const d of t.dirs) await one(d, LOW_LABEL);
   for (const f of t.files) await one(f, 'low');
   // Folders kept Medium inside a Low one (lowTargets' medium): only those that exist and inherited Low. A failure here is
@@ -234,16 +571,19 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
   // whose LowCopies then sweeps it before every run), the Unity junctions and the shims every agent runs (w5877).
   for (const p of t.medium ?? []) {
     try {
-      if (!fs.existsSync(p)) continue;
+      if (!fs.existsSync(p) || open.some((o) => inside(p, o))) continue;
+      if (linkedOnTheWay(p)) throw new Error('it is (or lies below) a junction or symlink now (w6377)');
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
-      if (now.code !== 0 || !isLabelledLow(now.stdout)) continue;
+      // w5615: a shared-lock folder until it carries Medium of its own (its parent's Medium reaches it inherited, not its files).
+      if (now.code !== 0 || (tree(p) ? isExplicitMedium(now.stdout) : !isLabelledLow(now.stdout))) continue;
       // A child that could not get its own Low label would turn Medium with its parent, and workers could no longer write it.
       const stuck = failed.filter((f) => same(path.dirname(f), p));
       if (stuck.length) {
         say(`worker integrity: WARNING: left ${p} Low: ${stuck.join(', ')} could not be labelled Low on its own`);
         continue;
       }
-      await setLabel(p, MEDIUM_LABEL);
+      // A file (w5959: a virtual disk in a tools child kept Medium) takes a file's label, with no inheritance flags.
+      await setLabel(p, fs.statSync(p).isDirectory() ? MEDIUM_LABEL : 'medium');
       say(`worker integrity: kept ${p} Medium`);
     } catch (e) {
       say(`worker integrity: WARNING: could not keep ${p} Medium, so Low workers may write it: ${(e as Error).message}`);
@@ -280,8 +620,8 @@ const DISK_IMAGE = /\.vhdx?$/i;
 
 /**
  * The virtual disks that sit in a folder workers write (w5948): each `<root>/tools/<child>/*.vhdx` (or `.vhd`) whose child
- * the fence labels Low (lowTargets: every tools child but node). The daemon says each one loudly after labelling and
- * changes nothing (warn-only, lothsahn's lockout rule). BEAST's `tools/wsl-ffu-sniper/ext4.vhdx` is the disk of the
+ * the fence labels Low (lowTargets: every tools child but MEDIUM_TOOLS). The daemon says each one loudly after labelling and
+ * changes nothing (warn-only, lothsahn's lockout rule), unless daemon.json `toolsDiskLock` is "on" (w5959, toolsDiskPlan). BEAST's `tools/wsl-ffu-sniper/ext4.vhdx` is the disk of the
  * `ffu-sniper` WSL distro (imported 2026-11-06 for FFU's SteamOS build, ffu docs/steamos.md "Setting up a container host on
  * Windows"). A Low worker cannot start WSL (`wsl.exe` answers Wsl/E_ACCESSDENIED at Low, measured on BEAST, w5870), but it can
  * rewrite the disk while the distro is stopped, and the next `wsl -d` by a Medium process runs what it planted as root in
@@ -295,7 +635,7 @@ const DISK_IMAGE = /\.vhdx?$/i;
 export function lowDiskImages(root: string, toolsChildren: { name: string; dir: boolean }[] | undefined, list: (dir: string) => string[] = (d) => { try { return fs.readdirSync(d); } catch { return []; } }): string[] {
   const found: string[] = [];
   for (const c of toolsChildren ?? []) {
-    if (!c.dir || c.name.toLowerCase() === 'node') continue;
+    if (!c.dir || keptMediumTool(c.name)) continue;
     const dir = path.join(root, 'tools', c.name);
     for (const f of list(dir)) if (DISK_IMAGE.test(f)) found.push(path.join(dir, f));
   }
@@ -305,6 +645,32 @@ export function lowDiskImages(root: string, toolsChildren: { name: string; dir: 
 /** The warning the daemon logs for one disk lowDiskImages finds (w5948). Exported for tests. */
 export const lowDiskImageWarning = (disk: string, root: string) =>
   `WARNING worker integrity: the virtual disk ${disk} is in a folder workers write (labelled Low): a Low worker can rewrite it while its VM or WSL distro is stopped, and the next start by a Medium process runs what it planted at Medium (w5948). Nothing was changed: move it into a folder no worker writes, e.g. \`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\` with the distro stopped (\`wsl --list -v\` names the distro), then relabel the moved disk, which keeps its Low label (a move on one volume is a rename): \`icacls ${path.join(root, 'wsl', '<distro>', 'ext4.vhdx')} /setintegritylevel M\`, and check icacls no longer shows Mandatory Label\\Low.`;
+
+/**
+ * daemon.json `toolsDiskLock` (w5959, the enforce step after w5948's warn): what the daemon does about a virtual disk in a
+ * Low tools child. Absent or "warn": the WARNING of w5948 and nothing else. "on": the child that holds it stays Medium
+ * (lowTargets' toolsKeepMedium), so a Low worker can no longer rewrite the disk, nor anything else in that child. Set and
+ * set back by `ops_worker machine_update tools_disk_lock`; read at the daemon's start, so "warn" plus the restart that
+ * update makes labels the child Low again (labelLow gives a child of the Medium tools folder its own Low label).
+ */
+export type ToolsDiskLockMode = 'warn' | 'on';
+
+/**
+ * Which tools children to keep Medium for their virtual disks, and the lines to log (w5959). Pure: `disks` is what
+ * lowDiskImages found. Chosen over refusing to start the distro: the daemon starts no WSL distro or VM (a person, or a
+ * Medium agent, runs `wsl -d`), so there is nothing of its own to refuse, while the label it already sets at every start is
+ * what keeps a Low worker from writing the disk. Exported for tests.
+ */
+export function toolsDiskPlan(root: string, disks: readonly string[], mode: ToolsDiskLockMode | undefined): { keep: { children: string[]; disks: string[] }; lines: string[] } {
+  const tools = path.join(root, 'tools');
+  if (mode !== 'on') return { keep: { children: [], disks: [] }, lines: disks.map((d) => `${lowDiskImageWarning(d, root)} daemon.json "toolsDiskLock": "on" (ops_worker machine_update tools_disk_lock on) keeps its folder Medium (w5959).`) };
+  const children = [...new Set(disks.map((d) => path.relative(tools, d).split(/[\\/]/)[0]))];
+  const lines = children.map((c) => {
+    const held = disks.filter((d) => path.relative(tools, d).split(/[\\/]/)[0] === c);
+    return `WARNING worker integrity: kept ${path.join(tools, c)} Medium (daemon.json "toolsDiskLock": "on", w5959): it holds the virtual disk${held.length > 1 ? 's' : ''} ${held.join(', ')}, which a Low worker could rewrite while its VM or WSL distro is stopped. Workers can no longer write anything in ${path.join(tools, c)}. Move the disk out (\`wsl --manage <distro> --move ${path.join(root, 'wsl', '<distro>')}\`, then \`icacls <moved disk> /setintegritylevel M\`), or set it back with ops_worker machine_update tools_disk_lock warn, which labels the folder Low again at the daemon's next start.`;
+  });
+  return { keep: { children, disks: [...disks] }, lines };
+}
 
 /** The account the daemon runs as, as icacls names it (DOMAIN\\user), or undefined off Windows. */
 export const currentAccount = (env: NodeJS.ProcessEnv = process.env): string | undefined =>
@@ -438,7 +804,45 @@ export function lockCopyScript(p: string): string {
   ].join('\n');
 }
 
-const psqLock = (s: string) => `'${s.replace(/'/g, "''")}'`;
+// w6321 review (w6325): PowerShell also ends a single-quoted string at the curly quotes U+2018, U+2019, U+201A and
+// U+201B, so each of them is doubled as well as the ASCII one.
+const psqLock = (s: string) => `'${s.replace(/['‘’‚‛]/g, '$&$&')}'`;
+
+/**
+ * w6321: a PowerShell script that removes these files with .NET's File.Delete (DeleteFileW: DELETE access alone, which the
+ * folder's delete-child right gives where the file's own access list is read and run only), and says `gone <i>` or
+ * `err <i> <why>` for each. Exported for tests.
+ */
+export function deleteFilesScript(paths: readonly string[]): string {
+  // Each path once, in a list a loop walks (w6325: a line a path, with the path in it twice, made about 730 characters of
+  // command line a path, and past about 44 paths Windows refused the call, ENAMETOOLONG).
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    `$p = @(${paths.map(psqLock).join(',')})`,
+    'for ($i = 0; $i -lt $p.Count; $i++) { try { [System.IO.File]::Delete($p[$i]); if ([System.IO.File]::Exists($p[$i])) { "kept $i" } else { "gone $i" } } catch { "err $i " + $_.Exception.GetBaseException().Message } }',
+  ].join('\n');
+}
+
+/**
+ * w6321 review (w6325): the paths in batches of at most DELETE_BATCH, each script at most DELETE_SCRIPT_CHARS long, so its
+ * call (base64 of UTF-16: 8/3 characters a script character, about 21,000) stays well inside Windows' 32,767-character
+ * command line. A single path longer than that still gets a batch of its own (its call then fails alone). Exported for tests.
+ */
+export const DELETE_BATCH = 20;
+export const DELETE_SCRIPT_CHARS = 8_000;
+export function deleteBatches(paths: readonly string[]): string[][] {
+  const out: string[][] = [];
+  let cur: string[] = [];
+  for (const p of paths) {
+    if (cur.length && (cur.length >= DELETE_BATCH || deleteFilesScript([...cur, p]).length > DELETE_SCRIPT_CHARS)) {
+      out.push(cur);
+      cur = [];
+    }
+    cur.push(p);
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
 
 /**
  * The Low-labelled copies of claude, node and gh in `<root>\tools\low` the daemon runs (w5333, w5540, w5430): a process
@@ -466,13 +870,17 @@ export class LowCopies {
   private exec: ExecSync;
   private account: string | undefined;
   private hash: (p: string) => string;
+  private remove: (p: string) => void;
+  /** w6321: the old copies already said kept (still running) in this daemon run. */
+  private keptSaid = new Set<string>();
 
-  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash) {
+  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash, remove: (p: string) => void = removeEntry) {
     this.root = root;
     this.say = say;
     this.exec = exec;
     this.account = account;
     this.hash = hash;
+    this.remove = remove;
   }
 
   private sourceHash(exe: string): string {
@@ -502,26 +910,22 @@ export class LowCopies {
       const base = path.basename(exe, path.extname(exe));
       const stem = `${base}-${st.size}-${Math.floor(st.mtimeMs)}`;
       const want = this.sourceHash(exe);
-      let copy: string | undefined;
-      for (let n = 0; n < COPY_SLOTS && !copy; n++) {
-        const p = path.join(dir, `${stem}${n ? `-${n}` : ''}${path.extname(exe)}`);
-        if (!fs.existsSync(p)) {
-          copy = p;
-          break;
-        }
-        const ours = this.copies.get(p)?.source === exe;
-        if (ours && this.sameAs(p, want)) return p;
+      const names = Array.from({ length: COPY_SLOTS }, (_, n) => path.join(dir, `${stem}${n ? `-${n}` : ''}${path.extname(exe)}`));
+      for (const p of names) if (this.copies.get(p)?.source === exe && fs.existsSync(p) && this.sameAs(p, want)) return p;
+      // w6321: every taken name is an earlier run's copy or not its source's bytes, so all of them go in one pass (one
+      // PowerShell call where Node cannot remove them, removeCopies); one still running is kept and its name skipped.
+      const taken = names.filter((p) => fs.existsSync(p));
+      for (const p of taken) {
         if (!this.sameAs(p, want)) this.say(`worker integrity: WARNING: the Low copy ${p} is not ${exe} (its bytes differ, or it cannot be read); made again (w5838)`);
         else this.say(`worker integrity: ${p} was made by an earlier daemon run; made again, never taken over (w5838)`);
-        try {
-          removeEntry(p);
-          this.copies.delete(p);
-          copy = p;
-        } catch {
-          /* still running from an earlier daemon run: the next name, and the next start removes it */
-        }
       }
-      if (!copy) throw new Error(`no free name for it in ${dir} (${COPY_SLOTS} copies of it still running?)`);
+      const kept = this.removeCopies(taken);
+      for (const [p, why] of kept) {
+        this.keptSaid.add(p);
+        this.say(`worker integrity: could not remove ${p} (${why}); its name is skipped (w6321)`);
+      }
+      const copy = names.find((p) => !fs.existsSync(p));
+      if (!copy) throw new Error(`no free name for it in ${dir}: ${COPY_SLOTS} copies of it could not be removed; the last said: ${[...kept.values()].pop() ?? 'nothing'} (w6321)`);
       const part = `${copy}.part`;
       fs.rmSync(part, { force: true });
       fs.copyFileSync(exe, part);
@@ -544,21 +948,85 @@ export class LowCopies {
       // Checked once it is labelled and read-only, so nothing written before that is run.
       if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
       this.copies.set(copy, { source: exe, readOnly });
-      for (const old of fs.readdirSync(dir)) {
-        if (old !== path.basename(copy) && old.startsWith(`${base}-`)) {
-          try {
-            fs.rmSync(path.join(dir, old), { force: true });
-            this.copies.delete(path.join(dir, old));
-          } catch {
-            /* still running: the next start removes it */
-          }
-        }
-      }
+      this.prune(dir, copy);
       return copy;
     } catch (e) {
       this.say(`worker integrity: could not make a Low copy of ${exe}: ${(e as Error).message}`);
       return undefined;
     }
+  }
+
+  /**
+   * w6321: removes earlier copies (its own older ones and every earlier daemon run's) of claude, node and gh, all but
+   * `keep`: the names and the disk come back by themselves. Windows refuses to remove a file a live process runs (measured
+   * on LothDesktop: Node's rmSync and .NET's File.Delete both, EPERM / access denied), so one still running stays and is
+   * tried again after the next copy is made; it is said once per daemon run, not at every make.
+   */
+  private prune(dir: string, keep: string): void {
+    // This run's copies of other programs stay (each still its program's copy); its own older one of `keep`'s program goes.
+    const current = new Set([...this.copies].filter(([p, c]) => p !== keep && c.source !== this.copies.get(keep)?.source).map(([p]) => p));
+    const old = fs.readdirSync(dir).filter((n) => LOW_COPY_NAME.test(n)).map((n) => path.join(dir, n)).filter((p) => p !== keep && !current.has(p));
+    for (const [p, why] of this.removeCopies(old)) {
+      if (this.keptSaid.has(p)) continue;
+      this.keptSaid.add(p);
+      this.say(`worker integrity: kept the old Low copy ${p} (${why}); tried again after the next copy is made (w6321)`);
+    }
+  }
+
+  /**
+   * w6321: removes these copies; answers the ones still there, each with why. Node 22's unlink (libuv) opens a file for
+   * FILE_WRITE_ATTRIBUTES as well as DELETE, which a read-only copy's access list (OWNER RIGHTS:(RX)) refuses, so it
+   * answers EPERM (measured on LothDesktop: Node 22.17.1 EPERM, Node 24.22.1 removes it); .NET's File.Delete
+   * (DeleteFileW) asks for DELETE alone, which the folder's delete-child right gives, so those go in one PowerShell call.
+   * A copy a live process runs is refused by Windows either way (measured), so it is never removed.
+   */
+  private removeCopies(paths: readonly string[]): Map<string, string> {
+    const kept = new Map<string, string>();
+    const retry: { p: string; why: string }[] = [];
+    for (const p of paths) {
+      try {
+        this.remove(p);
+        this.copies.delete(p);
+      } catch (e) {
+        const err = e as NodeJS.ErrnoException;
+        const why = err.code ?? err.message;
+        let file = false;
+        try {
+          file = fs.lstatSync(p).isFile();
+        } catch {
+          /* gone after all */
+        }
+        if (file && (err.code === 'EPERM' || err.code === 'EACCES')) retry.push({ p, why });
+        else if (fs.existsSync(p)) kept.set(p, `${why}: ${err.message}`.slice(0, 300));
+        else this.copies.delete(p);
+      }
+    }
+    if (!retry.length) return kept;
+    const nodeSaid = new Map(retry.map((x) => [x.p, x.why]));
+    // w6325: one call a batch, so a long backlog fits the command line; a batch whose call fails (refused, a timeout, a
+    // throw) keeps only its own paths, each said with that call's own error, and the next batch still runs.
+    for (const batch of deleteBatches(retry.map((x) => x.p))) {
+      let r: Ran;
+      try {
+        r = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(deleteFilesScript(batch), 'utf16le').toString('base64')]);
+      } catch (e) {
+        r = { code: null, stdout: '', stderr: (e as Error).message };
+      }
+      const said = new Map<number, string>();
+      for (const l of r.stdout.split(/\r?\n/)) {
+        const m = /^(gone|kept|err) (\d+) ?(.*)$/.exec(l.trim());
+        if (m) said.set(Number(m[2]), m[1] === 'err' ? m[3] : m[1]);
+      }
+      batch.forEach((p, i) => {
+        if (!fs.existsSync(p)) {
+          this.copies.delete(p);
+          return;
+        }
+        const ps = said.get(i) ?? ((r.stderr || r.stdout).trim().slice(-200) || `no answer (exit ${r.code})`);
+        kept.set(p, `Node: ${nodeSaid.get(p)}; File.Delete: ${ps}`.slice(0, 300));
+      });
+    }
+    return kept;
   }
 
   /**
@@ -763,6 +1231,10 @@ export function strayLowServers(servers: { pid: number; rid: number; dll: string
  */
 export const NO_READ_UP = { dir: 'S:(ML;OICI;NWNR;;;ME)', file: 'S:(ML;;NWNR;;;ME)' };
 export const READ_BACK = { dir: 'S:(ML;OICI;NW;;;ME)', file: 'S:(ML;;NW;;;ME)' };
+/** What a label not set because the read fence changed is said as (w6120). */
+const STOPPED = 'not set: the read fence changed (w6120)';
+/** A label target that gives a path back to workers (no No-Read-Up): setting it only ever opens (w6120). */
+const givenBack = (x: { sddl: string }) => !x.sddl.includes('NWNR');
 
 export interface LabelTarget {
   path: string;
@@ -822,8 +1294,14 @@ export function onSystemDrive(p: string, systemDrive = process.env.SystemDrive |
 
 const psq = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
-/** The PowerShell that sets each label and prints `ok <i>` or `err <i> <win32 error>` per target. Exported for tests. */
-export function labelScript(t: readonly LabelTarget[]): string {
+/**
+ * The PowerShell that sets each label and prints `ok <i>` or `err <i> <win32 error>` per target. With `stop` (w6120), before
+ * each closing (No-Read-Up) target it reads the read fence's mode file, and from the first time that does not hold `want`
+ * on it prints `stopped <i>` for each closing target instead of setting it; a given-back target is always set. Exported
+ * for tests.
+ */
+export function labelScript(t: readonly LabelTarget[], stop?: { file: string; want: string }): string {
+  const set = (x: LabelTarget, i: number) => `$r = [FfLabel]::Set(${psq(x.path)}, ${psq(x.sddl)}); if ($r -eq 0) { 'ok ${i}' } else { 'err ${i} ' + $r }`;
   return [
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -TypeDefinition @"',
@@ -840,7 +1318,8 @@ export function labelScript(t: readonly LabelTarget[]): string {
     '  }',
     '}',
     '"@',
-    ...t.map((x, i) => `$r = [FfLabel]::Set(${psq(x.path)}, ${psq(x.sddl)}); if ($r -eq 0) { 'ok ${i}' } else { 'err ${i} ' + $r }`),
+    ...(stop ? ['$ffStop = $false', `function FfWanted { try { return ([IO.File]::ReadAllText(${psq(stop.file)}).Trim() -eq ${psq(stop.want)}) } catch { return $false } }`] : []),
+    ...t.map((x, i) => (stop && !givenBack(x) ? `if (-not $ffStop -and -not (FfWanted)) { $ffStop = $true }; if ($ffStop) { 'stopped ${i}' } else { ${set(x, i)} }` : set(x, i))),
   ].join('\n');
 }
 
@@ -848,8 +1327,17 @@ export function labelScript(t: readonly LabelTarget[]): string {
  * Sets the No-Read-Up labels (w5546). A target on the system drive is skipped and said; one refused for want of
  * WRITE_OWNER gets the account's Full grant first (as labelLow, w5402) and is tried again. Returns whether every label not
  * skipped was set; never throws.
+ *
+ * `still` (w6120): whether this pass is still wanted (the read fence still `on`). Once it is not, no closing step starts:
+ * the label run does not start, no more grants are made for closed paths, and the retry after the grants sets only the
+ * given-back paths that were refused (a given-back label only opens, and a closed parent set by the first run would
+ * otherwise keep the folder inside it closed until the next pass opens it). Returns false then, said as a stop, so the next
+ * pass (the new mode's) sets what it wants. `stopUnless` (the mode file and the mode wanted) stops a label run between its
+ * Sets too (labelScript); the Set going at that moment runs to its end, as one Set walks a folder inside Windows.
  */
-export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean; grant?: boolean; what?: string } = {}): Promise<boolean> {
+export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (line: string) => void, o: { account?: string; systemDrive?: (p: string) => boolean; grant?: boolean; what?: string; still?: () => boolean; stopUnless?: { file: string; want: string; onStop?: () => void } } = {}): Promise<boolean> {
+  let stopped = false;
+  const still = () => !stopped && (o.still ?? (() => true))();
   const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
   const todo: LabelTarget[] = [];
   for (const x of t) {
@@ -863,40 +1351,64 @@ export async function labelNoReadUp(t: readonly LabelTarget[], exec: Exec, say: 
     todo.push(x);
   }
   if (!todo.length) return true;
+  if (!still()) {
+    say(`worker integrity: read labels not set on ${todo.length} path(s): the read fence changed before the label run started (${o.what ?? "the daemon's folder, secrets and root.json"}); the next pass sets the new mode's`);
+    return false;
+  }
+  // w5980: the given-back paths first. Setting a closed folder's label walks everything inside it, so a given-back folder
+  // labelled after its closed parent sat closed until the walk reached its own label: on LothDesktop the gh shim's
+  // app\machine\ghApp.ts read as missing to Low workers for minutes (15:54-15:55 UTC, 2026-11-26). A given-back folder that
+  // already carries its explicit label keeps it through the parent's walk (the explicit label comes first and wins).
+  todo.sort((a, b) => Number(a.sddl.includes('NWNR')) - Number(b.sddl.includes('NWNR')));
   const runOnce = async (list: readonly LabelTarget[]) => {
-    const script = labelScript(list);
+    const script = labelScript(list, o.stopUnless);
     const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
     const failed = new Map<number, string>();
     const seen = new Set<number>();
     for (const line of r.stdout.split(/\r?\n/)) {
-      const m = /^(ok|err) (\d+)(?: (\d+))?$/.exec(line.trim());
+      const m = /^(ok|err|stopped) (\d+)(?: (\d+))?$/.exec(line.trim());
       if (!m) continue;
       seen.add(Number(m[2]));
       if (m[1] === 'err') failed.set(Number(m[2]), m[3] ?? '?');
+      if (m[1] === 'stopped') {
+        stopped = true;
+        failed.set(Number(m[2]), STOPPED);
+      }
     }
     list.forEach((_, i) => !seen.has(i) && failed.set(i, `no answer (${(r.stderr || r.stdout).trim().slice(-200)})`));
     return failed;
   };
   let failed = await runOnce(todo);
+  if (stopped) say(`worker integrity: the read fence changed during the label run: ${[...failed.values()].filter((c) => c === STOPPED).length} closed path(s) left without their label`);
   const account = o.account ?? currentAccount();
   const denied = [...failed].filter(([, c]) => c === '5').map(([i]) => todo[i]);
   // w5749: the owner's folders on the system drive get their label only (lothsahn's go), never a grant.
   if (denied.length && account && o.grant !== false) {
+    // w6120: once the mode changed, only the given-back paths (which open) are granted and set again, never a closed one.
+    const retry: LabelTarget[] = [];
     for (const x of denied) {
+      if (!givenBack(x) && (stopped || (stopped = !still()))) continue;
       const g = await exec('icacls', [x.path, '/grant', `${account}:${x.sddl.includes('OICI') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
       if (g.code === 0) say(`worker integrity: gave ${account} Full on ${x.path}, which setting its label needs (WRITE_OWNER)`);
+      retry.push(x);
     }
-    const again = await runOnce(denied);
+    if (!stopped && !still()) stopped = true;
+    const list = stopped ? retry.filter(givenBack) : retry;
+    if (stopped) say(`worker integrity: the read fence changed: ${denied.length - list.length} closed path(s) refused for want of WRITE_OWNER get no grant or retry and stay without their label${list.length ? `; setting the ${list.length} given-back one(s) only` : ''}`);
+    const again = list.length ? await runOnce(list) : new Map<number, string>();
     const rest = new Map<number, string>();
     for (const [i, c] of failed) {
-      const j = denied.indexOf(todo[i]);
-      if (j < 0) rest.set(i, c);
-      else if (again.has(j)) rest.set(i, again.get(j)!);
+      const j = list.indexOf(todo[i]);
+      if (j >= 0) {
+        if (again.has(j)) rest.set(i, again.get(j)!);
+      } else if (stopped && denied.includes(todo[i])) rest.set(i, STOPPED);
+      else rest.set(i, c);
     }
     failed = rest;
   }
   for (const [i, c] of failed) say(`worker integrity: could not set ${todo[i].sddl} on ${todo[i].path}: ${c}`);
   say(`worker integrity: read labels set on ${todo.length - failed.size} of ${todo.length} paths (${o.what ?? "No-Read-Up on the daemon's folder, secrets and root.json; their worker reads given back"})`);
+  if (stopped) o.stopUnless?.onStop?.();
   return failed.size === 0;
 }
 
@@ -919,7 +1431,8 @@ export async function openNoReadUp(t: readonly LabelTarget[], exec: Exec, say: (
  * The C# of relabelInside: walks each root, never into a reparse point nor below a skipped (read-back) folder, leaves the
  * label targets themselves alone (but walks into them), and on every other path with an EXPLICIT label at Medium or above
  * adds No-Read-Up (close) or takes it off (open), keeping the label's level, flags and other rights. Prints `set <path>`,
- * `err <code> <path>` and last `done <looked at> <changed> <failed>`. No `$` or backtick inside: it sits in a PowerShell
+ * `err <code> <path>`, `stopped <looked at>` once the stop file no longer holds the wanted mode (w6120; checked every 256
+ * paths, an empty stop file name never), and last `done <looked at> <changed> <failed>`. No `$` or backtick inside: it sits in a PowerShell
  * here-string.
  */
 const RELABEL_CS = String.raw`using System; using System.IO; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text.RegularExpressions;
@@ -946,13 +1459,18 @@ public static class FfWalk {
     int n; if (l.StartsWith("S-1-16-") && int.TryParse(l.Substring(7), out n)) return n; return -1;
   }
   static bool Inherited(string flags) { for (int i = 0; i + 1 < flags.Length; i += 2) if (flags.Substring(i, 2) == "ID") return true; return false; }
-  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close) {
+  static bool Wanted(string stopFile, string wantMode) {
+    if (stopFile.Length == 0) return true;
+    try { return File.ReadAllText(stopFile).Trim() == wantMode; } catch { return false; }
+  }
+  public static string[] Run(string[] roots, string[] skip, string[] targets, bool close, string stopFile, string wantMode) {
     var o = new List<string>(); var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     var sk = new HashSet<string>(skip, StringComparer.OrdinalIgnoreCase); var tg = new HashSet<string>(targets, StringComparer.OrdinalIgnoreCase);
     var rx = new Regex(@"\(ML;([A-Z]*);([A-Z]*);;;([A-Z0-9-]+)\)");
     var st = new Stack<KeyValuePair<string, bool>>(); foreach (var r in roots) st.Push(new KeyValuePair<string, bool>(r, true));
-    int looked = 0, changed = 0, failed = 0;
+    int looked = 0, changed = 0, failed = 0, steps = 0;
     while (st.Count > 0) {
+      if (steps++ % 256 == 0 && !Wanted(stopFile, wantMode)) { o.Add("stopped " + looked); break; }
       var e = st.Pop(); string p = e.Key.TrimEnd('\\'); if (!seen.Add(p) || sk.Contains(p)) continue;
       FileAttributes a; try { a = File.GetAttributes(p); } catch { continue; }
       if (!e.Value && (a & FileAttributes.ReparsePoint) != 0) continue;
@@ -981,9 +1499,9 @@ public static class FfWalk {
 }`;
 
 /** The PowerShell that runs RELABEL_CS on these roots. Exported for tests. */
-export function relabelScript(roots: readonly string[], skip: readonly string[], targets: readonly string[], close: boolean): string {
+export function relabelScript(roots: readonly string[], skip: readonly string[], targets: readonly string[], close: boolean, stop?: { file: string; want: string }): string {
   const arr = (a: readonly string[]) => `@(${a.map(psq).join(', ')})`;
-  return ["$ErrorActionPreference = 'Stop'", 'Add-Type -TypeDefinition @"', RELABEL_CS, '"@', `[FfWalk]::Run([string[]]${arr(roots)}, [string[]]${arr(skip)}, [string[]]${arr(targets)}, $${close})`].join('\n');
+  return ["$ErrorActionPreference = 'Stop'", 'Add-Type -TypeDefinition @"', RELABEL_CS, '"@', `[FfWalk]::Run([string[]]${arr(roots)}, [string[]]${arr(skip)}, [string[]]${arr(targets)}, $${close}, ${psq(stop?.file ?? '')}, ${psq(stop?.want ?? '')})`].join('\n');
 }
 
 /**
@@ -996,13 +1514,17 @@ export function relabelScript(roots: readonly string[], skip: readonly string[],
  * closed folders gets NR too, keeping its level; `open` takes that NR off again. Read-back folders, the label targets
  * themselves, reparse points and the system drive are never touched. Returns whether every path that needed it was set;
  * never throws.
+ *
+ * `stopUnless` (w6120, close only): the read fence's mode file and the mode this pass sets; the walk stops once the file
+ * holds another (checked every 256 paths), and false is returned, said as a stop. Stopping leaves fewer paths closed,
+ * never more. `open` always walks to the end: it is the way back.
  */
-export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | 'open', exec: Exec, say: (line: string) => void, o: { systemDrive?: (p: string) => boolean } = {}): Promise<boolean> {
+export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | 'open', exec: Exec, say: (line: string) => void, o: { systemDrive?: (p: string) => boolean; stopUnless?: { file: string; want: string; onStop?: () => void } } = {}): Promise<boolean> {
   const sys = o.systemDrive ?? ((p: string) => onSystemDrive(p));
   const roots = t.filter((x) => x.sddl === NO_READ_UP.dir && !sys(x.path)).map((x) => x.path);
   if (!roots.length) return true;
   const skip = t.filter((x) => x.sddl === READ_BACK.dir).map((x) => x.path);
-  const script = relabelScript(roots, skip, t.map((x) => x.path), mode === 'close');
+  const script = relabelScript(roots, skip, t.map((x) => x.path), mode === 'close', mode === 'close' ? o.stopUnless : undefined);
   const r = await exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { timeoutMs: 10 * 60_000 });
   const lines = r.stdout.split(/\r?\n/).map((l) => l.trim());
   const done = lines.map((l) => /^done (\d+) (\d+) (\d+)$/.exec(l)).find(Boolean);
@@ -1013,8 +1535,11 @@ export async function relabelInside(t: readonly LabelTarget[], mode: 'close' | '
   const errs = lines.filter((l) => l.startsWith('err '));
   for (const e of errs.slice(0, 20)) say(`worker integrity: explicit label inside a closed folder: ${e}`);
   const [looked, changed, failed] = done.slice(1).map(Number);
-  if (changed || failed) say(`worker integrity: ${mode === 'close' ? 'No-Read-Up added to' : 'No-Read-Up taken off'} ${changed} explicitly labelled path(s) inside the closed folders (${looked} looked at${failed ? `, ${failed} could not be` : ''})`);
-  return failed === 0;
+  const stopped = lines.some((l) => /^stopped \d+$/.test(l));
+  if (stopped) o.stopUnless?.onStop?.();
+  if (stopped) say(`worker integrity: the read fence changed during the walk inside the closed folders: stopped after ${looked} path(s), ${changed} given No-Read-Up; the next pass sets the new mode's`);
+  else if (changed || failed) say(`worker integrity: ${mode === 'close' ? 'No-Read-Up added to' : 'No-Read-Up taken off'} ${changed} explicitly labelled path(s) inside the closed folders (${looked} looked at${failed ? `, ${failed} could not be` : ''})`);
+  return failed === 0 && !stopped;
 }
 
 /** An empty label SACL: setting it takes a path's explicit label off, so it inherits its parent's again (w5749, measured). */

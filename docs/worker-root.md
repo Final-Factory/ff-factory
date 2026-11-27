@@ -820,7 +820,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - **The programs the daemon runs from the root stay out of workers' reach** (w5838). Before, `tools\low` and
     `tools\unity-low` were labelled Low, so a Low worker could replace a copy or turn a junction, and the next sandbox agent
     ran its program with that agent's vault tokens, a probe with the daemon's whole environment, an editor through it.
-    - `tools\low`, `tools\unity-low` and `tools\shims` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`): a worker
+    - `tools\low` and `tools\unity-low` are Medium (`MEDIUM_TOOLS` in `machine/lowIntegrity.ts`), and so are `tools-medium\shims` and, while it is there, the old `tools\shims` (w6101, `OLD_TOOLS_SHIMS`): a worker
       cannot add, rename or delete a file in them, so neither a copy nor a DLL beside it can be planted.
     - Each copy is locked in one call before it takes its name (w5904, `lockCopyScript`): SetNamedSecurityInfoW sets its
       read-only access list (read and run for the account and OWNER RIGHTS, Full for SYSTEM and Administrators, nothing
@@ -845,7 +845,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       entry, measured by w5877) or an open write handle. One that still runs, and so cannot be removed, leaves the new
       copy the next name (`<base>-<size>-<mtime>-<n>`). `isReadOnlyCopy` wants every entry but SYSTEM's and
       Administrators' to be read and run only.
-    - If labelLow cannot keep `tools\low`, `tools\unity-low` or `tools\shims` Medium, the log says `WARNING` and the fence
+    - If labelLow cannot keep `tools\low`, `tools\unity-low` or a shims folder Medium, the log says `WARNING` and the fence
       stays on; `tools\low` is then swept before every run of a copy (`LowCopies.folderCheck`).
     - Whatever was planted while the folders were still Low goes at the daemon's start, each with a `WARNING`: in
       `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `claude|node|gh-<size>-<mtime>[-<n>].exe`), so no DLL beside a copy
@@ -854,9 +854,22 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`).
     - A junction is made again unless it leads to its Unity (`junctionLeadsTo`) and carries no Low label of its own (w5877:
       a worker could have labelled it while the folder was Low, and turn it later).
-    - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to `<root>\tools\shims`,
-      not the mailbox's `bin` (Low), because every agent's `PATH` starts there, Medium agents included; the old `bin` is
-      removed.
+    - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to
+      `<root>\tools-medium\shims` (w6101; `<root>\tools\shims` from w5838), not the mailbox's `bin` (Low), because every
+      agent's `PATH` starts there, Medium agents included; the old `bin` is removed.
+    - **The one name for the shims folder is `<root>/tools-medium/shims`** on every OS (w6101; `enforcedShimDir` in
+      `machine/pathFence.ts`, `windowsShimsDir` and `windowsShims` in `machine/lowIntegrity.ts`). `tools-medium` is never
+      labelled Low, but a rollout before w5539 labelled it Low and nothing undid that, so `lowTargets` keeps it and its
+      `shims` Medium (labelLow relabels one that reads Low): a Low worker can neither rename the folder away nor plant a
+      command in it. At each start, and again once the fence has labelled, every file there the daemon does not write
+      (`strayShimFiles`, `WINDOWS_SHIM_FILES`) is moved to `<root>\tools-medium\quarantine\shims-<time>-<pid>` with a
+      `WARNING` (`quarantineStrayShims`; nothing is deleted, so a person can look at it). A failed write there falls back
+      to `tools\shims`, which is Medium too, with a `WARNING`, so recovery needs nobody at the machine. Warn first came in
+      ff-factory #1391, enforce in its own change (lothsahn's lockout rule).
+    - `<root>\tools\shims` is written only while an agent host started before the move keeps it first on its `PATH`
+      (`hostsWithPathDir`; the start line names them), and kept Medium while it is there (`OLD_TOOLS_SHIMS`, no longer in
+      `MEDIUM_TOOLS`). Once none has it, `dropOldToolsShims` removes it, looked at each minute; `tools` is Medium, so no Low
+      worker makes it again.
 - A sandbox agent's environment (`runSpec`) gets `APPDATA` and `LOCALAPPDATA` under `<root>\home`, the root's Git first on
   `PATH` with `CLAUDE_CODE_GIT_BASH_PATH`, and `FF_UNITY_EDITOR_ROOT` set to the junction folder. The game repo's batch
   scripts start Windows Unity from `$FF_UNITY_EDITOR_ROOT/<version>/Unity.exe` when it is set (FinalFactory #4285).
@@ -986,7 +999,7 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     deny-only, SeChangeNotify the only privilege). Start the probe with the worker's token: `LOWRUN` in
     `server/toolsLabelsWin.test.ts` removes every privilege but SeChangeNotify, makes Administrators deny-only and sets
     the Low label. Reuse it (w5717).
-  - **A virtual disk in a Low tools child is said, not moved** (w5948, warn-only). BEAST's `tools\wsl-ffu-sniper\ext4.vhdx` is the
+  - **A virtual disk in a Low tools child is said, or with `toolsDiskLock` on kept Medium** (w5948 warn, w5959 enforce). BEAST's `tools\wsl-ffu-sniper\ext4.vhdx` is the
     disk of the `ffu-sniper` WSL distro, imported 2026-11-06 for FFU's SteamOS build (ffu `docs/steamos.md`, "Setting up a
     container host on Windows"). A Low worker cannot start WSL (Wsl/E_ACCESSDENIED, measured, w5870) but can rewrite the
     disk while the distro is stopped, and a Medium `wsl -d` then runs it with the user's drives and WSL interop at Medium.
@@ -995,7 +1008,24 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     `wsl --manage ffu-sniper --move <root>\wsl\ffu-sniper` with the distro stopped, then a relabel: a move within one volume
     is a rename, so `ext4.vhdx` keeps the Low label it inherited, and `<root>\wsl` is not in WORKER_CHILDREN, so nothing
     relabels it later. Run `icacls <root>\wsl\ffu-sniper\ext4.vhdx /setintegritylevel M` (or `/reset`) and check that
-    `icacls` no longer shows `Mandatory Label\Low` (w5958's review).
+    `icacls` no longer shows `Mandatory Label\Low` (w5958's review). BEAST's disk was moved so on 2026-11-26 (w6010): it is
+    now `F:\ffw\wsl\ffu-sniper\ext4.vhdx`, labelled Medium.
+  - **The enforce switch, daemon.json `toolsDiskLock`** (w5959, Windows only; `toolsDiskPlan` in `machine/lowIntegrity.ts`):
+    - Absent or `"warn"` (the default): the WARNING above, nothing else. It now also names the switch.
+    - `"on"`: at start, each tools child that holds a `.vhd` or `.vhdx` leaves the Low list and is kept Medium like
+      `MEDIUM_TOOLS` (lowTargets `toolsKeepMedium`). labelLow raises the child with `(OI)(CI)medium` after `tools`, then each
+      disk in it that still reads Low (one Low on its own) with a file label. The daemon logs `WARNING worker integrity: kept
+      <child> Medium (daemon.json "toolsDiskLock": "on", w5959)`. **Workers can then write nothing in that child**, not just
+      the disk: move the disk out to give the child back.
+    - Why this and not refusing to start the distro: the daemon starts no WSL distro or VM (a person or a Medium agent runs
+      `wsl -d`), so it has no start to refuse; the label it already sets at every start is what keeps a Low worker out.
+    - Set and set back with `ops_worker` `machine_update` `tools_disk_lock` (`warn` or `on`), which writes daemon.json and
+      restarts the daemon (installer flags `--tools-disk-lock`, `-ToolsDiskLock`). **Recovery needs nobody at the machine**:
+      `tools_disk_lock warn` and the restart it makes label the child Low again (labelLow gives a child of the Medium `tools`
+      its own Low label). A disk that got its own Medium file label keeps it; workers had no business writing it.
+    - Ships off: no machine has it on. Turning it on per machine is lothsahn's step.
+    - Tests: `server/lowIntegrity.test.ts` "w5959" (BEAST's tools layout with `wsl-ffu-sniper\ext4.vhdx` as the fixture),
+      `scripts/worker-install.test.ts`, `scripts/worker/linkJob.test.ts`, `server/opsWorker.test.ts`.
   - **The daemon relabels at start, which takes a minute or two.** A probe right after a deploy reads the old labels. On
     LothDesktop on 2026-11-25, `worker integrity: kept V:\ffw\tools Medium` came about a minute after the new daemon
     started, at 17:36:17Z. A probe just before it still saw `tools` Low and `tools\node` deletable. Probe after that
@@ -1115,6 +1145,70 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - A `sandbox-exec` that fails at launch is not retried unfenced: the start reports the pid and the editor never comes
     up (the hang watch then restarts it). The probe at the daemon's start runs the same profile, so it would fail there
     first and the editors would start unfenced.
+- **Linux: sandbox editors start unfenced; `editorFence: true` starts them under the workers' Landlock write rules**
+  (w5631, stage 3 of w5540). Off by default since the live check (biscuit, 2026-11-27): any Landlock domain, warn-only
+  (`--rw /`) too, forbids changing the mount topology ([kernel docs, Current limitations](https://docs.kernel.org/userspace-api/landlock.html#filesystem-topology-modification)),
+  and a windowed editor's GTK loads its icons through glycin 2.1.1, which runs every image loader in
+  `bwrap --unshare-all`; bwrap fails ("Failed to make / slave: Operation not permitted"), GTK aborts ("Gtk:ERROR ...
+  Loader process exited early with status '1'") and the editor exits before the project loads. The batchmode
+  `-nographics` legs below load no GTK and passed, which is why they missed it. Ubuntu's gdk-pixbuf 2.44 here has no
+  PNG loader but glycin's, and glycin 2.1.1 has no switch to run unsandboxed when not in Flatpak, so a fence needs a
+  GTK without glycin, a glycin that falls back, or a fence that is not Landlock. With `editorFence: true` the write
+  lock must be on (`"writeLock": true`), `MacUnity.start` (`machine/unity.ts`) starts a Linux sandbox editor through
+  `launchFenced` as `python3 ff-landlock.py <rules> -- <Unity> -projectPath <sandbox>`, inside its systemd scope as
+  before (`scoped`, `machine/linuxScope.ts`). ff-landlock execs Unity, so the pid is the editor's and its children
+  (compiler server, Burst, shader compiler, UPM, import workers) inherit the rules. The rules are the workers' own
+  (`writeLockArgs`, `machine/writeLock.ts`, through the daemon's `lockRules`) with `<root>/home` as the home
+  (`linuxEditorFenceFor`); the environment adds `HOME=<root>/home` and `UNITY_MCP_STATUS_DIR=<root>/home/.unity-mcp`.
+  - **Why the home moves.** Workers write only inside the root (lothsahn). Unity's Linux editor writes its EditorPrefs to
+    `~/.local/share/unity3d/prefs`, its global prefs, layouts and `upm.log` to `~/.config/unity3d`, and the bridge's port
+    file to `~/.unity-mcp`; all follow HOME. Unity makes a prefs folder without its parents, so the daemon makes
+    `<root>/home/.local/share/unity3d` and `.config/unity3d` before each fenced start, and seeds each `prefs` file it lacks
+    from the person's home once (`seedLinuxEditorHome`): EditorPrefs hold the bridge's tool switches
+    (`MCPForUnity.ToolEnabled.*`) and `BurstCompilation`. Without the folders Unity logged "Editor preferences folder ...
+    does not exist and could not be created. Preferences won't be saved" (measured, biscuit, w5631). The Burst check
+    (`ensureBurstPrefOn`) runs on the moved home's prefs too. Changes a person makes later in their own prefs do not
+    reach the editors' copy; deleting `<root>/home/.local/share/unity3d/prefs` seeds it again at the next start.
+  - **Licensing** goes through the user's running client (the Hub's `Unity.Licensing.Client --namedPipe
+    Unity-LicenseClient-<user>`, socket in `/tmp`). With none running, a fenced editor would start one under the moved
+    home, which holds no licence, so the editor starts unfenced and the start message says "unfenced (no Unity licensing
+    client runs for this user ...)" (`licensingClient`, `linuxLicensingClientRunning`). Unity logs "LicensingClient has
+    failed validation; ignoring" under the rules: Landlock refuses the editor `readlink /proc/<client pid>/exe` of a
+    process outside its domain, and Unity then uses the client anyway ("Successfully resolved entitlement details").
+  - **No warn step any more** (w6371's review of #1448). The lockout rule asked for warn first; on Linux warn is still a
+    Landlock domain (`--rw /`, no `--deny-unix`), which aborts a windowed editor in GTK just as enforce does, so the
+    daemon offers only off (unset or `false`) and enforce (`true`). `linuxEditorFenceFor`'s warn mode and the warn
+    fallback in `MacUnity.start` (a fenced launch that throws starts unfenced, with "unfenced (the fenced launch
+    failed: ...)") stay for a future fence that GTK survives. Enforced, a fenced launch that throws fails the start
+    with the reason, so a planted file cannot buy an unfenced editor. Under `true`, Landlock also scopes signals to the
+    editor's domain (ABI 6+), sets `no_new_privs` and blocks `/proc/<pid>` reads outside it (the licensing readlink
+    below). The choice is read once per daemon run (`linuxEditorMemo`): a change takes a daemon restart.
+  - **The moved home is a folder workers write**, so the daemon never writes there as itself: it makes only `<root>/home`
+    (the root's child) and runs the seeding and the Burst check in a child under `ff-landlock.py --rw <root>/home`
+    (`seedEditorHomeFenced`, `machine/editorHomeSeed.ts`). w6356's review showed why: with path checks alone, a folder
+    swapped for a link (`renameat2` `RENAME_EXCHANGE`) between the lstat and the write sent 8,117 of 40,000 starts'
+    writes outside the home (measured on m5); Landlock resolves each write in the kernel, so a swap reaches nothing past
+    the home. Inside the child, `seedLinuxEditorHome` still follows no link it sees (w6354's review): each folder lstat'ed
+    and made one level at a time, a link or non-folder logged and left (`editor fence: WARNING: left the editor's home
+    as it is ...`), the copy `COPYFILE_EXCL`, the Burst write `O_NOFOLLOW`. `"editorFence":
+    true` enforces; `false` starts editors unfenced. Read once per daemon run; the log says `editor fence: ...`.
+  - **The kernel hold** (w5748/w5562: Linux fences stay warn-only until kernel 7.1) covers the read fence and the
+    owner-socket denies, not the write lock, which agents already run enforced on ABI 8 (biscuit's daemon log,
+    2026-11-27T06:55Z: "write lock: landlock is on for sandbox agents"). The editor's rules are
+    write rules, so enforcing them is not held by it. As for agents, `--deny-unix` is a no-op below ABI 9, so an editor
+    (and `execute_code` in it) could still reach `systemd-run --user` and start a job outside the rules until 7.1. The
+    read rules (`readLockArgs`) are not given to editors yet: agents get them only once the read fence enforces.
+  - **What enforce would refuse, measured with strace** (biscuit, 2026-11-27, Unity 6000.3.19f1, the enforced rules, HOME
+    and TMPDIR moved as the daemon does, `-batchmode -nographics -runTests`, warm Library): EditMode
+    `Tests.Core.SimulationRateConstantsTest` 31 of 31 and PlayMode `SaveLoadFailureReturnsToMenuTest` 5 of 5 passed,
+    licensed, compiled and imported only changed assets. The only refused calls were `access("/etc/localtime", W_OK)`
+    (a check, nothing written) and the licensing readlink above. `/tmp` gained only Unity's own `Unity-Upm-<pid>.sock`
+    and `ilpp.sock-<hash>` (create-only there).
+  - **Recovery, nobody at the machine:** `ops_worker machine_update worker_fence off` (4.3) turns off the agents' write
+    lock and the editors' rules with it; or the ops worker sets `"editorFence": false` in daemon.json over ssh and
+    restarts the daemon. Then `mcp__machine__unity restart` starts the editor unfenced.
+  - **Batch runs and builds** are not started by the daemon: `unity-slot run` from a worker's shell already runs inside
+    the agents' write lock, with the person's home.
 
 **What a Low worker meets** (LothDesktop's trial, w5377, 2026-11-24; all measured from a Low agent):
 - **Works at Low:**
@@ -1338,6 +1432,202 @@ agents without one stay at the daemon's level (Medium on Windows) and never wait
 (`linkJob.ts` `putBack`), but it does not revert daemon.json. That is intended: a bad fence does not stop the daemon
 (it fails closed above, holding only sandbox workers), so a daemon that fails after an update failed for another reason, and the fence setting stays
 as the update set it.
+
+### 4.4 Per-slot caches and the players broker (w5615, stage 2 of w5544)
+
+lothsahn approved stages 1-3 of the per-slot isolation design (r384, w5544): "per-slot repos, read-only shared caches and
+tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sharedLock` (`ops_worker` `machine_update`
+`shared_lock`: `off`, `warn`, `on`; off when unset; decided once per daemon process, machine/slotCaches.ts):
+
+- **Each sandbox gets its own clones of the tool caches** at `<root>/cache/slots/<sandbox>/<tool>` for uv, pip, npm, nuget,
+  upm, dotnet and ms-playwright (`SLOT_CACHE_TOOLS`). The daemon makes them from the shared seed `<root>/cache/<tool>` with
+  `server/proc.ts` `copyTree`: an APFS clone (`cp -c`) on a Mac, `cp --reflink=auto` on Linux (a full copy where the disk has
+  no reflink), the Windows copy engine on a Dev Drive (block clone on ReFS). A clone is made only while its sandbox is idle
+  (no live agent, no editor), one sandbox per 10-minute tick, under `.ff-new-<tool>` and renamed into place; the marker
+  `.ff-slot-cache.json` is written last. A clone older than a day is merged back into the seed and made again.
+- **A clone counts cache by cache** (w6284): the marker lists the caches whose clone was made, and a sandbox whose marker
+  lacks one, or whose folder for one is gone, is completed at a later tick (`missingSlotCaches`): the caches it lacks are
+  cloned, the ones there kept, and the line says which (`completed ... made uv, npm; already there: ...`). A clone with a
+  failed cache, or whose clone threw before any cache (a junction at its folder), is tried again after an hour, or at once
+  when the Windows daemon makes its Low node copies (`retryNow`, kept for one more pass when a tick is running): on
+  LothDesktop the start's first tick ran before them and slot1's uv, npm, upm and dotnet copies failed with "no Low node
+  copy". The `With "on" it would stay off` list names each sandbox's missing caches too (`sandbox slot1 lacks 4 of its 7
+  cache clones (...)`), so "on" holds off until every cache of every sandbox is cloned.
+- **Every copy runs with a worker's rights, never the daemon's** (machine/workerCopy.ts, review w6212 B1): a worker can
+  plant a link or junction in its build or its cache clone, and `cp -R`, `cp -a` and Copy-Item would follow or keep it with
+  the daemon's reads (Copy-Item follows a junction: measured on BEAST by the reviewer). So the copy runs inside the workers'
+  Seatbelt profile with its read rules on (macOS), under ff-landlock.py with the write lock and its read half (Linux), or in
+  the Low node with a walk that never enters a link (Windows; with no Low node it refuses rather than copy at Medium). A
+  cache copy keeps a link as a link (uv's cache holds 98 symlinks, measured on m5); a player copy refuses one before and
+  after (a built player holds none: measured on m5's `players/slot1-0`).
+- **No write through a link** (w6212 B2): before it writes or deletes in `players/<slot>`, `cache/slots/<sandbox>` or a
+  seed folder, the daemon checks the folder is a plain folder at its own path (`plainDirAt`), makes missing folders one level
+  at a time below checked ones, and writes files by a fresh name and a rename (`writeFileSafe`), never through a link at the
+  name. A link is what lstat or the entry's Dirent in its parent says is one, and a real path is
+  `realpathSync.native`'s: a `mklink /J` junction made in a worker session stores `\??\Global\F:\...`, which lstat and the JS
+  realpath miss (review w6247, measured on BEAST at Low); `machine/workerCopyJunction.test.ts` makes one on Windows.
+- **Merge-back** copies what the slot downloaded and the seed lacks (uv `archive-v*` entries and wheels, pip wheels, npm
+  `_cacache`, nuget package folders with `.nupkg.metadata`, upm files, finished Playwright browsers) into the seed through a
+  `.ff-merge` stage beside the clone and a rename (a folder) or a hard link then unlink (a file, which fails rather than
+  replace one, w6212 L3). It never replaces a seed entry, leaves an entry touched in the last minute, and drops a file that
+  is no longer a single plain file after the copy. Under `on` merge-back stays a path from one slot's downloads into every
+  slot's seed (w6212 M3), on purpose: lothsahn, asked whether `on` should share only what it can check, answered "Keep
+  sharing everything daily, as warn mode does now." What `on` adds there is that the moved entry is the daemon's from then
+  on (`lockIn`, below), so a worker can no longer change a seed entry after it was shared.
+- **The env**: every sandbox agent (machine/daemon.ts `runSpec`) and editor (machine/sandboxes.ts `sandboxEditorEnv`) gets
+  `UV_CACHE_DIR`, `PIP_CACHE_DIR`, `npm_config_cache`, `NUGET_PACKAGES`, `UPM_CACHE_ROOT`, `DOTNET_CLI_HOME` and
+  `PLAYWRIGHT_BROWSERS_PATH` pointing at its clones (under `warn` only once a tool's clone is made; under `on` always), its
+  own `FF_DETERMINISM_AUDIT_DIR` (`cache/slots/<sandbox>/determinism-audit`), and `FF_PLAYER_BROKER=1`.
+- uv can't use the read-only seed as `UV_CACHE_DIR`; use the slot clone. (uv opens its 0-byte cache marker files, such as
+  `sdists-v9/.git`, for writing on every start, so it exits 2 with "Operation not permitted", `--offline` too. Measured on
+  macOS Seatbelt with the lock on, uv 0.11.27, w6424 on m5, 2026-11-27: the slot clone ran warm at 0.070 s min; Windows not
+  checked.)
+- **After a sharedLock switch** (w6287): the switch restarts the daemon, and the new daemon adopts the running agent hosts
+  (w605). A host keeps the environment it started with, so an agent adopted across the switch keeps the old mode's cache
+  paths and `FF_PLAYER_BROKER` until its next host start (a stop, the idle reap after an hour, a code update's restart);
+  agents started after the switch get the new mode at once. Seen on LothDesktop (w6213, 2026-11-27): after off -> warn at
+  03:49:16Z, 12 hosts were adopted, and worker 95c5d71d (slot2) still had `FF_PLAYER_BROKER` unset and `UV_CACHE_DIR` /
+  `npm_config_cache` on the shared `V:\ffw\cache` at 03:53Z. `machine_update shared_lock` says so in its reply.
+  Each host records a hash of the variables the switch decides (`lockenv.sha` in its host folder, machine/agentHost.ts
+  `lockEnvOf`; Daemon `lockEnvFor`: the slot clones, the audit folder and `FF_PLAYER_BROKER`, none when off). When an
+  adopted agent is idle and its hash differs from what the daemon gives now, daemon.json `hostRestage` decides:
+  - `warn` (the default; lothsahn's lockout rule): one daemon log line per host, `agent host <id>: its agent host started on
+    another shared-lock environment ... hostRestage warn: it keeps the old cache paths and FF_PLAYER_BROKER until its next
+    host start`. Nothing is stopped.
+  - `on`: the daemon sends its host a `restage` command. The host ends its agent only if it is idle when it reads the command:
+    a message read before it has started a turn, and then the restage is skipped and asked again at that turn's end. A turn is
+    never cut. The next message starts a new host on the new environment, in the same conversation (the path the idle reap
+    takes). A host from before w6287 has no `lockenv.sha` and is left alone (a code update restarts it anyway).
+  - Not covered: a Unity editor running across the switch keeps its old environment until it is started again, and so does
+    a CI runner's job (neither is ever restarted mid-run).
+  - Setting it (w6305): `ops_worker machine_update host_restage warn|on` writes daemon.json `hostRestage` with nobody at
+    the machine, over the daemon link or the installer (`--host-restage`, `-HostRestage`), and the update restarts the
+    daemon with it. `host_restage warn` is the way back. A sharedLock switch and `host_restage on` can be sent in the
+    same update. The hash also changes, with no switch, when a slot's cache clone is made after its host started (under
+    `warn`, `slotCacheEnv` names a clone only once it exists); `on` then restages that agent once, which picks up the clone.
+    Turning it on, by default or per machine, is a separate change with its own independent review and a person's go,
+    after the warn lines of a real switch were read and named exactly the adopted hosts.
+- **Long runs** (w6367, daemon.json `longRuns` off|warn|on, default warn): the daemon starts a sanctioned long run (the
+  nightly) for a sandbox worker outside that worker's agent host, so a host swap or a stopped claude no longer ends it.
+  [worker-fence.md](worker-fence.md) "Long runs the daemon starts for a worker" covers the design and the fence it keeps.
+  To set it, send `ops_worker machine_update long_runs off|warn|on` over the daemon link, or use the installer
+  (`--long-runs`, `-LongRuns`); the update restarts the daemon with it. `warn` and `off` are the way back, since the game's
+  client then starts the run itself as before. Turning it on is a separate change with its own independent review.
+- **Mailboxes per slot**: the procs broker (machine/procsBroker.ts) reads `unity-slots/procs/<sandbox>/` and the shared
+  mailbox, answering each ask in the folder it came from; `ff-leftovers` writes into its own sandbox's folder. The unity-slots
+  queue itself needs no per-slot folder: it already goes through the daemon's RPC into the daemon's own folder (w5545).
+- **The players broker** (machine/playersBroker.ts, machine/playersLaunch.ts): RPC calls `players/install` {player, sha,
+  peer}, `players/launch` {peer, args, config}, `players/release` {lease} and `players/status`. The daemon copies the build
+  into the caller's own `players/<sandbox>-<peer>/player` (a clone, never a hard link, so the slot's files are not the
+  worker's), writes `slot.json` as `player_slots.py` does, and starts the player itself: in the player write fence on Linux and
+  macOS (machine/playerFence.ts), through the Low node copy on Windows (never at the daemon's Medium), with no credential in
+  its environment. The slot comes from the caller's token, never the body. The source must be in the caller's sandbox, its
+  own temp folder (`<tempDir>/ffa-<session>`, not all of `<root>/tmp`: w6212 M1), `<root>/nightly` or the `player/`
+  folder of a ready player-cache entry (`<player cache>/<sha>-<os>[-burstN]/player`, build-manifest.json status ok; w6286),
+  and a `-logFile` folder the player may write must be in that own temp folder. The player cache is worker-written (build_player.sh
+  runs in workers), as nightly is, so it is no more trusted than them: the copy runs with the worker's rights and refuses
+  links (machine/workerCopy.ts), into the caller's own slot only, so a file planted there reaches only a worker that chose
+  that entry, as running it from the cache would. A launch onto a slot whose player still runs is refused (w6212 L1).
+- **No player slot for a light folder on Windows** (w6348): a light agent folder (`agentN`, machine/lightFolders.ts) asks
+  for `players/agentN-<peer>`, but Windows Firewall rules name one exact program path and the worker install's firewall step
+  (scripts/worker/firewall.ps1) makes them only for `slotK-0`/`slotK-1`, so `player_slots.py` refuses to start a player
+  there (no inbound rule; seen on LothDesktop in w6294). Light folder ids run to agent999 as agents start, so no fixed rule
+  list covers them, and a new rule per folder would need an elevated step per agent start. So on Windows `players/install`
+  and `players/launch` refuse a light folder up front (409, "... is a light agent folder ... Run the player from a game
+  sandbox"); `players/status` and `players/release` still answer. Linux and macOS have no per-path rule and go on (biscuit's
+  `agent1-0` ran five broker launches in w6294).
+- **What `warn` watches**: the seeds, `players`, `seed` and `tools` (`sharedLockedFolders`), each folder and its first level
+  (not recursive), one daemon log line per entry an hour: `shared lock (warn): <path> changed and the daemon did not write it`.
+- **What `on` adds** (the enforce PR, w5615): the seeds `cache/uv`, `pip`, `npm`, `nuget/packages`, `upm`, `dotnet`,
+  `ms-playwright`, then `players`, `seed` and `tools/node`, `low` and `unity-low` become read-only to sandbox workers
+  (machine/sharedLockPaths.ts `sharedLockRel`, one list for the three fences). `on` with a sandbox that lacks a clone holds
+  to `warn` for that daemon run and logs why (`sharedLockBlockers`); every check below reads the effective mode.
+  - **Windows** (machine/lowIntegrity.ts `lowTargets`, `sharedLockLabels`): each locked folder gets a Medium No-Write-Up
+    label, all of it (a file a Low worker made carries an explicit Low label of its own, which a folder's label never
+    reaches). The walk is server/transcriptLabels.ts `labelTree`, folder by folder, never `icacls /T`: `/T` follows
+    junctions, with or without `/L` (review w6355 H1, measured), so a junction a worker planted in a seed before `on`
+    would get its target relabelled. `labelTree` skips every link, labels a folder Medium before it reads its entries (no
+    worker can add one meanwhile), and the daemon log counts the links it skipped (`worker integrity: WARNING: <path>
+    holds N links ... skipped`). Never an ACE (w5599). A folder on the way (`cache`,
+    `cache/nuget`) is kept Medium too, with each of its other children Low on its own: in a Low `cache` a worker holds
+    FILE_DELETE_CHILD and could rename `cache/uv` aside and write it there. A Medium `cache` also means a worker can no
+    longer make a new child of it, so the daemon makes the ones workers use (`WORKER_CACHE_CHILDREN`: slots, uv-tools,
+    uv-bin, cargo, asset-store, determinism-audit, xdg) at each start before it labels (`makeSharedLockDirs`). `tools`
+    already ran this way (w5717). `off` and `warn` label the locked folders Low again, whole, with the same walk, and
+    `cache` and `cache/nuget` alone: workers write the rest of `cache` (`cache/slots`), and a walk of it could meet a
+    junction they planted (review w6355 H1). Nothing is labelled through a link (review w6362): a folder on the way or a
+    locked one that is a junction or symlink, or sits under one (a worker could plant `cache\nuget` as a junction to the
+    daemon's folder under off or warn), is left out of every list, Low and Medium, and so is a link among `cache`'s
+    children. The walk reads each folder again after labelling it and never walks one that turned into a link (the root
+    too: its parent may be Low). Under `on`, a link the walk finds inside a locked folder is removed (fsLink.ts
+    `removeLink`, the link only, never its target; the log says `worker integrity: removed link <path> from the locked
+    <seed>`): its folder is Medium by then, so it stays gone. `makeSharedLockDirs` makes one folder at a time and stops at a
+    link, read again after each folder it makes. Under off the locked folders go back to Low before the folders on the way,
+    deepest first (review w6374): a Low `cache` over a still-Medium `cache\uv` would let a worker rename the seed aside and
+    plant a junction before the walk reaches it. The walk reads its root again after its first icacls call, in both
+    directions, and `cache\nuget` is read again after it is listed. A locked folder or one on the way that is already a
+    link holds "on" off (`sharedLockBlockers` names it: remove the link and restart the daemon), and no slot clone copies
+    from a seed that is, or lies below, a link. Under "on" `cache` and `cache\nuget` turn Medium before any child of
+    theirs goes Low, from the top (review w6377): while `cache` is Low a worker can move `cache\slots` aside and plant a
+    junction to the daemon's folder in its place. Each path inside them is read for a link just before icacls labels it,
+    and one that is a link is left alone with a WARNING (not a failure, which would turn the fence off). One that cannot
+    turn Medium first leaves its children as they are that pass. Under off a folder on the way stays Medium while a locked
+    folder inside it could not be labelled Low, so the next pass walks that one under a Medium parent.
+  - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
+    and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
+    made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
+    built, review w6355 M2). A `--rw-children` folder that is, or sits under, a symlink opens none of its children, a
+    symlink child is not granted, and each child is opened `O_NOFOLLOW` (review w6362: the write rule would otherwise land
+    on the link's target). The folder is listed through an `O_DIRECTORY|O_NOFOLLOW` descriptor, and that descriptor and
+    each child's must have landed at the path asked for (`/proc/self/fd`), so a folder above swapped for a symlink in
+    between opens nothing (review w6374). The path asked for is the worker root's real path plus the rest, so a root that
+    sits under a symlinked folder (a symlinked home) still opens its children (review w6377).
+  - **macOS** (server/workerFence.ts `fenceFor` `sharedLocked`): a `(deny file-write* (subpath ...))` per locked path in
+    the read-only block, after the root's allow (later Seatbelt rules win), and a `(deny file-write* (literal ...))` on
+    each folder on the way (`cache`, `cache/nuget`, `tools`; `sharedLockParents`), so a rename or removal of one is
+    refused while its other children stay writable. That Seatbelt would refuse a parent's rename as a write to the paths
+    under it was never measured (review w6362), so it is not relied on. Measured by the live macOS leg in
+    server/sharedLock.test.ts, which runs only on a Mac (no macOS CI runner runs it).
+  - **What the daemon moves in** (machine/lockIn.ts): a merge-back entry and a broker install are copied with a worker's
+    rights into a folder workers write, so the moved entry is the worker's until `lockIn` has run on it. First, on every
+    OS, every entry must be a plain folder or a file with one name (a symlink, a junction or a hard link the worker
+    planted would leave it a way in); then on Windows it is labelled Medium with `labelTree` (never `/T`, review w6355
+    M1) and checked again; otherwise the whole entry is removed again and
+    the daemon log says `shared lock: removed <path> again: ... (w5615)`. Under `on` the broker copies into
+    `cache/slots/<sandbox>/.ff-player-<pid>-<t>`, moves it to `players/<slot>/player` and locks it; a refused lock answers
+    500 and leaves no build. A launch checks the slot again (`players/launch` refuses a file with a second name, 409).
+  - **Residuals**, each known and left:
+    - a write handle a worker opened on a stage file before the move and keeps open still writes it (the label and the
+      denies are checked at open). A seed entry is used by the next agents only, and every merge-back entry has sat
+      untouched for a minute first.
+    - macOS: whether Seatbelt's deny holds for a hard link a worker makes from a folder it writes to a seed file is not
+      settled by reasoning; it is a proof leg on a Mac (a link made before `lockIn` is caught there on every OS).
+    - The game writes `.ff-local-automation-status.json` into its exe folder (LocalMultiplayerAutomationSessionConfig.cs,
+      a temp file and File.Replace). In a Medium player folder the Low player cannot, so it warns and runs on. No broker
+      caller reads it (run_cross_platform_peer.py only leaves it out of its hash); a caller that needs it would read it
+      from a folder the player writes, a game change.
+    - `ff-leftovers remove-slot` on `players/` is refused under `on`; the daemon's broker owns those slots.
+    - timed runs (machine/timedRunner.ts) are unaffected: the daemon fills `players/` itself, and a worker's leg builds
+      into `timing/builds`.
+- **Idle for a refresh** (w6212 L4): a sandbox counts as idle with no live agent, no editor and nothing else holding its
+  tree, as `switch_branch` judges it (`switchHold`: a `unity-slot run` holding slots for it, a batchmode Unity with its
+  project open, a night running in it). The holds are read once per tick (`idleForRefresh`, machine/slotCaches.ts); a read
+  that fails or takes over 90 s counts every sandbox busy (review w6281), and a tick whose sandbox list takes over 120 s
+  gives up until the next one, so a hung read never stops later refreshes. A first clone is made idle or not (its folder is
+  renamed in and named only in the next run's environment).
+- **Light agent folders get their clones too** (w6393): `agent1`, `agent2`, ... are in the tick's list beside the game
+  sandboxes, and a light folder's create makes its clones before it answers (`SlotCaches.ensure`, `lightClones` in
+  machine/daemon.ts), waiting up to 45 s, below the portal's 60 s for the create. Its worker starts as soon as the create
+  answers, and under "on" its env names the slot folder from that first run, so a clone left to a later tick found the
+  worker's own cold cache there and kept it: on LothDesktop `agent5` ran with a 19 MB uv cache built from scratch beside the
+  1005 MB seed (w6393, measured). A cache folder already there when the create comes (a deleted folder's id made again) is
+  merged back and replaced, as an idle refresh does. A clone that takes longer than the wait goes on in the background.
+- **Left shared and writable**: `cache/uv-tools`, `cache/uv-bin`, `cache/xdg` and `cache/cargo` (cargo is the next stage).
+- **Way back**: `shared_lock off` and the daemon restart the update makes (the link job and installer run outside every fence,
+  4.3). The clones stay on disk, unused; the env goes back to the shared caches at each agent's next host start (see "After a
+  sharedLock switch" above).
+- **Measured (m5, 2026-11-26)**: `uv run --with pillow` warm on the shared cache 0.042-0.044 s (first run 0.145 s); an APFS
+  clone of `cache/uv` (331 MB) 1.62 s; from the clone 0.067 s first, then 0.042-0.044 s.
 
 ## 5. Migration
 

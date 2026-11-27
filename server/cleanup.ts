@@ -10,6 +10,7 @@ import { inNeverGames, installDrive, onInstallDrive } from './rootFence.ts';
 import { LIBRARY_CACHES, staleCacheEntries } from './cacheTrim.ts';
 import { renameAway } from './renameAway.ts';
 import { clearDeadMounts } from './deadMounts.ts';
+import { isLink } from './fsLink.ts';
 import { daemonTempDir, systemTempDir, systemTempEnv } from '../machine/daemonTemp.ts';
 
 export { DEFAULT_CLEANUP, type CleanupPolicy } from './config.ts';
@@ -625,6 +626,14 @@ export async function touchedSince(p: string, cutoffMs: number, budget = 200_000
 }
 
 /**
+ * A folder's entries, less its links: a walk never goes through one into what it leads to. Their own folder entry says so:
+ * lstat calls a junction a Low-integrity process made (each BEAST worker's) a plain folder (w5915, measured).
+ */
+async function childrenNotLinks(dir: string): Promise<string[]> {
+  return (await fs.promises.readdir(dir, { withFileTypes: true })).filter((d) => !d.isSymbolicLink()).map((d) => path.join(dir, d.name));
+}
+
+/**
  * touchedSince with its reason: 'changed' (something changed after the cutoff, or is unreadable), 'too-big' (more than
  * `budget` entries and none of those changed: unknown), or undefined (nothing changed). w1575: a stopped session's folder of
  * 12 game clones (about 630,000 entries, 139 GB on beast) answered "changed recently" this way and was kept, unlisted, for good.
@@ -644,7 +653,7 @@ export async function touchedWhy(p: string, cutoffMs: number, budget = 200_000):
     if (++seen > budget) return 'too-big';
     if (!st.isDirectory()) continue;
     try {
-      for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+      for (const n of await childrenNotLinks(cur)) stack.push(n);
     } catch {
       return 'changed'; // unreadable inside: not ours to judge
     }
@@ -665,7 +674,7 @@ export async function sizeOf(p: string, budget = 2_000_000, links?: Set<string>)
     const cur = stack.pop()!;
     try {
       const st = await fs.promises.lstat(cur);
-      if (st.isDirectory()) for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+      if (st.isDirectory()) for (const n of await childrenNotLinks(cur)) stack.push(n);
       else if (links && st.nlink > 1) {
         const big = await fs.promises.lstat(cur, { bigint: true });
         const key = `${big.dev}:${big.ino}`;
@@ -711,7 +720,7 @@ export async function freeableBytes(roots: string[], o: { inTotal?: boolean[]; b
       try {
         const st = await fs.promises.lstat(cur, { bigint: true });
         if (st.isDirectory()) {
-          for (const n of await fs.promises.readdir(cur)) stack.push(path.join(cur, n));
+          for (const n of await childrenNotLinks(cur)) stack.push(n);
           continue;
         }
         const size = Number(st.size);
@@ -819,7 +828,7 @@ export async function staleUnityLibraries(roots: string[], minDays: number, now 
     const lib = path.join(dir, 'Library');
     if (fs.existsSync(path.join(dir, 'ProjectSettings', 'ProjectVersion.txt'))) {
       const st = await fs.promises.lstat(lib).catch(() => undefined);
-      if (!st?.isDirectory() || fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile'))) return;
+      if (!st?.isDirectory() || isLink(lib) || fs.existsSync(path.join(dir, 'Temp', 'UnityLockfile'))) return;
       let newest = Math.max(st.mtimeMs, await mtime(path.join(dir, 'Temp')), await mtime(path.join(dir, 'Logs')), await mtime(path.join(dir, 'UserSettings')));
       for (const n of await fs.promises.readdir(lib).catch(() => [] as string[])) newest = Math.max(newest, await mtime(path.join(lib, n)));
       const days = Math.floor((now - newest) / 86_400_000);
@@ -984,11 +993,42 @@ export async function runCleanup(items: CleanupItem[], guard: CleanupGuard, busy
   return out;
 }
 
+/** The removals in flight in this process, by normalized path (w6166). */
+const removing = new Map<string, Promise<boolean>>();
+const removalKey = (p: string) => (process.platform === 'win32' ? path.resolve(p).toLowerCase() : path.resolve(p));
+const atOrInside = (p: string, dir: string) => p === dir || p.startsWith(dir.endsWith(path.sep) ? dir : dir + path.sep);
+
 /**
  * Measure `it.path`, rename it to `<name>.ffclean-<n>` (renameAway: one suffix at most) and delete that, adding the outcome to `out`. The rename
  * fails on Windows while a file inside is open, so an entry in use is skipped whole. Returns whether it went.
+ *
+ * One removal of a path at a time in this process (w6166): on Windows, two fs.promises.rename calls of one directory at the same
+ * moment both return ok (measured on BEAST, w6161: 10 of 10 trials), so the w6044 alone step and a pass's later step removing one
+ * released ffu target at once both counted it removed, with its full bytes. A removal of a path that is, or is inside, one in
+ * flight waits for that one and counts nothing (neither removed nor failed); a removal of a folder that holds one in flight waits
+ * for it first. The check and the claim are one synchronous step, so a third removal at the same moment sees the first.
  */
 export async function removeRenamed(it: CleanupItem, out: CleanupRun): Promise<boolean> {
+  const key = removalKey(it.path);
+  for (const [k, p] of removing) {
+    if (!atOrInside(key, k)) continue;
+    await p.catch(() => false);
+    return true;
+  }
+  const below = [...removing].filter(([k]) => atOrInside(k, key)).map(([, p]) => p);
+  const run = (async () => {
+    await Promise.allSettled(below);
+    return removeRenamedNow(it, out);
+  })();
+  removing.set(key, run);
+  try {
+    return await run;
+  } finally {
+    if (removing.get(key) === run) removing.delete(key);
+  }
+}
+
+async function removeRenamedNow(it: CleanupItem, out: CleanupRun): Promise<boolean> {
   if (it.members) return removeMembers(it, out);
   // A dead FUSE mount inside comes off first (EBUSY otherwise); a live one refuses the entry whole (w5276).
   const mounts = await clearDeadMounts(it.path);
@@ -1383,6 +1423,13 @@ export interface CleanupRunnerDeps {
   started?(trigger: CleanupSummary['trigger'], low: boolean): void;
   /** The words for a pass this start found cut off (describeCutOff), said once at construction. */
   cutOff?(text: string, m: PassMarker): void;
+  /**
+   * The released ffu slots' first step alone, at low (w6044 stage 3): run when a low trigger (a low-space tick, an asked or a
+   * critical pass) meets a pass in flight that is not low. That pass's own first step ran at its start with the 7-day idle
+   * rule, and it runs on for an hour or more (BEAST, 2026-11-26: hourly passes of 59 to 72 min back to back, so a low tick
+   * and six asked passes were all dropped, while free space can swing 40 GB in minutes). `trigger` says which. Absent: none.
+   */
+  firstAlone?(trigger: CleanupSummary['trigger']): Promise<unknown>;
 }
 
 /** When to run a pass, and what to say about it. Shared by the host guard and the machine daemons. */
@@ -1392,6 +1439,15 @@ export class CleanupRunner {
   private lastStaleAt: number;
   private noticeAt = 0;
   private running = false;
+  /** The pass in flight is low (its first step took the released ffu slot targets at low already). */
+  private runningLow = false;
+  /** The last firstAlone, and whether one is in flight (w6044): at most one per LOW_PASS_MINUTES from a tick. */
+  private aloneAt = 0;
+  private aloneRunning = false;
+  /** The first step alone in flight, which a new pass waits for before its own first step (w6142 review). */
+  private aloneDone: Promise<void> | undefined;
+  /** The pass in flight has decided whether it is low: before that, nothing runs alone beside it (w6142 review). */
+  private lowDecided = false;
   /** What deferred the last due pass, while it still does (said once). */
   private heldBy?: string;
   last?: CleanupSummary;
@@ -1448,8 +1504,16 @@ export class CleanupRunner {
   }
 
   /** The periodic look (the host guard's tick, the daemon's timer). */
+  /** A pass is running now (w6290: the busy ffu slots' re-check waits for it). */
+  get inPass() {
+    return this.running;
+  }
+
   async tick(): Promise<CleanupSummary | undefined> {
-    if (this.running) return undefined;
+    if (this.running) {
+      await this.midPassLow();
+      return undefined;
+    }
     const v = await this.volumes();
     const trigger = this.due(v.free, undefined, this.d.fitSoftToVolume ? v.total : undefined);
     if (!trigger) return undefined;
@@ -1471,14 +1535,23 @@ export class CleanupRunner {
    * included, remove nothing; its summary is returned and logged, and not reported as the last pass.
    */
   async run(trigger: CleanupSummary['trigger'], opts: { dryRun?: boolean } = {}): Promise<CleanupSummary | undefined> {
-    if (this.running) return undefined;
+    if (this.running) {
+      // w6044: an asked or critical pass that meets a pass in flight that is not low still has the released targets taken.
+      if (!opts.dryRun && (trigger === 'asked' || trigger === 'critical')) await this.alone(trigger);
+      return undefined;
+    }
     this.running = true;
+    this.lowDecided = false;
     try {
+      // w6142 review: a first step alone still in flight ends before this pass plans its own.
+      if (this.aloneDone) await this.aloneDone;
       const s = this.d.settings();
       const dryRun = !!opts.dryRun;
       const first = await this.volumes();
       const before = first.free;
       const low = trigger === 'critical' || trigger === 'asked' || (before !== undefined && before < softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? first.total : undefined));
+      if (!dryRun) this.runningLow = low;
+      this.lowDecided = true;
       const st = s.staleOutput;
       const withStale = !!st && st.mode !== 'off' && (dryRun || low || staleDue(this.now(), this.lastStaleAt, st.everyHours, this.d.localHour?.(this.now())));
       if (!dryRun) {
@@ -1549,7 +1622,39 @@ export class CleanupRunner {
     } finally {
       if (!opts.dryRun) this.d.marker?.clear();
       this.running = false;
+      this.runningLow = false;
+      this.lowDecided = false;
     }
+  }
+
+  /** A tick during a pass (w6044): below the soft threshold, a non-low pass in flight, no hold: the first step alone. */
+  private async midPassLow() {
+    if (!this.d.firstAlone || !this.lowDecided || this.runningLow || this.aloneRunning) return;
+    if (this.now() - this.aloneAt < LOW_PASS_MINUTES * 60_000) return;
+    const v = await this.volumes();
+    const s = this.d.settings();
+    if (v.free === undefined || v.free >= softFreeBytes(s.softFreeGB, this.d.fitSoftToVolume ? v.total : undefined)) return;
+    const floor = this.d.holdFloorGB?.();
+    if (this.d.hold?.() && !(floor !== undefined && v.free < floor * GB)) return;
+    await this.alone('low-space');
+  }
+
+  private async alone(trigger: CleanupSummary['trigger']) {
+    if (!this.d.firstAlone || !this.lowDecided || this.runningLow || this.aloneRunning) return;
+    this.aloneRunning = true;
+    this.aloneAt = this.now();
+    const done = (async () => {
+      try {
+        await this.d.firstAlone!(trigger);
+      } catch {
+        // its own log line says it; the pass in flight goes on
+      } finally {
+        this.aloneRunning = false;
+        this.aloneDone = undefined;
+      }
+    })();
+    this.aloneDone = done;
+    await done;
   }
 }
 

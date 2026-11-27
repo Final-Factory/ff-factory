@@ -171,6 +171,26 @@ test('w5937: a drain-held message for a worker whose request closed is dropped a
   assert.equal(mine(), 1);
 });
 
+test('w6092: a dispatcher message_agent naming a request, to a stopped worker on a drained machine whose own request closed, is held, not dropped', async (t) => {
+  const { env, hold } = await drained(t);
+  const h = env.sessions.create({ kind: 'worker', title: 'held', permissionMode: 'bypassPermissions', options: () => ({ model: 'opus' }) });
+  Object.assign(h.info, { machineId: 'pc', status: 'stopped' });
+  env.store.putSession(h.info);
+  const id = h.info.id;
+  // Its own request closed: the worker has no open request until the new one is linked to it.
+  env.store.putWork({ ...env.store.work.get('w5475')!, status: 'done', sessionIds: ['stop1', id] });
+  putRequests(env.store, [{ id: 'w6092', status: 'queued', by: LOTH, sessionIds: [] }]);
+  const mine = () => env.sessions.queued().filter((q) => q.id === id).length;
+  const r = await env.call(env.dispatcher().info, 'message_agent', { session_id: id, text: 'A follow-up for you.', work_id: 'w6092', title: 'follow-up', session: 'same', session_reason: 'a fix for what it shipped' });
+  assert.ok(!r.isError, r.text);
+  env.sessions.drain();
+  await new Promise((res) => setImmediate(res));
+  assert.equal(mine(), 1, `held on the drain, not dropped: ${env.store.readTranscript(id).filter((e) => e.kind === 'system').map((e) => e.text).join(' | ')}`);
+  assert.ok(env.store.work.get('w6092')!.sessionIds.includes(id), 'linked to the worker');
+  assert.ok(hold(h), 'the drain holds it');
+  assert.ok(!env.store.readTranscript(id).some((e) => e.kind === 'system' && /A resume was not delivered/.test(e.text)));
+});
+
 test('w5937: a drain with resumes all holds no worker already there (w5878\'s behavior)', async (t) => {
   const { hold, s } = await drained(t, { resumes: 'all' });
   assert.equal(hold(s('stop1')), undefined);

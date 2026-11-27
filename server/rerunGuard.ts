@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { runOffThread } from './hostProbe.ts';
 import { trustedGh } from '../machine/evidenceGate.ts';
 import { simpleCommands } from './waitGuard.ts';
 
@@ -35,6 +35,13 @@ import { simpleCommands } from './waitGuard.ts';
  * the test binary and systemd's OOMPolicy=stop stopped the runner's unit. A failed step passes when its log shows that pair
  * (exit 143, SIGTERM, then the runner's own annotation within a few lines) and no real failure (REAL_FAILURE) anywhere in it.
  * The annotation is read from the log, since a fine-grained token cannot read check-run annotations.
+ *
+ * w6140 (ben): the Linux OOM killer's SIGKILL leaves a fifth shape, an out-of-memory fault like w3836's but with no message.
+ * ffu run 45857906682's "check" (job 140043729184, ffu-biscuit-2, attempt 1) failed in its lavapipe step with
+ * "./tools/run_built_tests.sh: line 51: 344007 Killed", and the same job's runner-health step then printed "swap free 5 MB of
+ * 8191 MB" and "##[warning]swap is 100 % full". A kill (bash's "<pid> Killed", exit code 137, or cargo's "signal: 9, SIGKILL")
+ * inside a step that failed counts as out of memory only beside that evidence in the same job's log (oomKill): swap under 1 %
+ * free, or available memory under 5 % of RAM. A kill without it stays a real failure: a SIGKILL can also be a test's own doing.
  */
 
 export interface RerunStep {
@@ -74,9 +81,9 @@ export interface RerunTarget {
  * messages and log. A failure answers `{ error }`.
  */
 export interface RerunReader {
-  jobs(t: RerunTarget, cwd: string | undefined, env?: Record<string, string | undefined>): RerunJob[] | { error: string };
-  annotations(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): string[] | { error: string };
-  log(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): string | { error: string };
+  jobs(t: RerunTarget, cwd: string | undefined, env?: Record<string, string | undefined>): Maybe<RerunJob[] | { error: string }>;
+  annotations(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): Maybe<string[] | { error: string }>;
+  log(repo: string | undefined, job: number, cwd: string | undefined, env?: Record<string, string | undefined>): Maybe<string | { error: string }>;
 }
 
 export const RULE = '"a flaky test gets its cause fixed. Never rerun it to get green, and never lengthen a timeout on its own."';
@@ -86,7 +93,8 @@ const ROUTE =
   'lost communication with the server", or a step that ended with exit code 143 and "The runner has received a shutdown signal" ' +
   'and no failed test, or (with no step that failed) a step that never finished, a missing log (404), or its ' +
   'runner\'s machine disconnecting from the portal within a minute of the job\'s end; or, once (attempt 1), a step that failed because the runner ran out of memory, disk, ' +
-  'page file or commit quota (os error 1453, 1455, 112, 28).';
+  'page file or commit quota (os error 1453, 1455, 112, 28, or Rust\'s "memory allocation of N bytes failed" abort, exit 0xC0000409, with any failed test inside the binary that aborted), or a process SIGKILLed ("Killed", exit code 137) while the ' +
+  'job\'s runner-health step shows swap full or available memory under 5 % of RAM.';
 const LOST = /self-hosted runner lost communication with the server/i;
 
 /**
@@ -96,7 +104,7 @@ const LOST = /self-hosted runner lost communication with the server/i;
  */
 export const RESOURCE_FAULT =
   /\(os error (?:1453|1455|112|28)\)|Insufficient quota to complete the requested service|paging file is too small|LNK1171.*\b1455\b|No space left on device|not enough space on the disk|\bout of memory\b|memory allocation of \d+ bytes failed/i;
-/** w3836: a real failure in the same log keeps the rerun refused: a rustc error code, a failed test, a panic. */
+/** w3836: a real failure in the same log keeps the rerun refused: a rustc error code, a failed test, a panic (w6409: outside a binary that ran out of memory). */
 export const REAL_FAILURE = /error\[E\d{4}\]|test result: FAILED|^\s*failures:\s*$|panicked at/im;
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
@@ -104,8 +112,76 @@ const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
 /** w3836: the out-of-resource line of a job's log, when that and no real failure is why it failed. Exported for tests. */
 export function resourceFault(log: string): string | undefined {
   const lines = log.replace(ANSI, '').split(/\r?\n/);
-  if (lines.some((l) => REAL_FAILURE.test(l))) return undefined;
+  if (lines.some((l) => RUSTC_ERROR.test(l))) return undefined;
+  if (segments(lines).some((seg) => seg.some((l) => REAL_FAILURE.test(l)) && !seg.some((l) => ALLOC_FAULT.test(l)))) return undefined;
   return lines.find((l) => RESOURCE_FAULT.test(l))?.replace(/^\S+Z\s+/, '').trim().slice(0, 240);
+}
+
+/** w6409: a rustc error code refuses wherever it is; a failed test only outside a binary that itself ran out of memory. */
+const RUSTC_ERROR = /error\[E\d{4}\]/;
+/**
+ * w6409: a test binary that ran out of commit memory: Rust's allocation abort ("memory allocation of N bytes failed", exit
+ * 0xC0000409 = 3221226505 on Windows) or the page file refusing it (os error 1455). ffu run 46000116814 (PR #1251, BEAST,
+ * 2026-11-27): ffu-server's directory test got 1455 and the abort, so its test failed with "replica 0 did not start" and a
+ * panic; two other binaries aborted outright. A failure in a binary's own output beside one of these lines is that fault's.
+ */
+const ALLOC_FAULT = /memory allocation of \d+ bytes failed|\(os error 1455\)|paging file is too small/i;
+/** w6409: cargo test prints "running N tests" at each test binary's start; the log splits into one segment per binary. */
+const BINARY_START = /^(?:\S+Z\s+)?\s*running \d+ tests?\s*$/;
+function segments(lines: string[]): string[][] {
+  const out: string[][] = [[]];
+  for (const l of lines) {
+    if (BINARY_START.test(l)) out.push([]);
+    out[out.length - 1]!.push(l);
+  }
+  return out;
+}
+
+/** w6140: a SIGKILLed process: bash's job report ("<script>: line 51: 344007 Killed"), exit 137, or cargo's signal 9, or Python subprocess's negative return code (ffu's run_tests_parallel.py: "(exit -9)", w6229; only -9). */
+const KILLED = /\bline \d+:\s+\d+ Killed\b|##\[error\]Process completed with exit code 137\.|signal: 9, SIGKILL|\(exit -9\)/;
+const STEP_START = /##\[group\]Run /;
+const STEP_FAILED = /##\[error\]Process completed with exit code \d+\./;
+/** w6140: ffu's tools/ci-runners/runner_health.sh line, and its warning when swap is over 90 % full. */
+const HEALTH = /runner health \(([^)]*)\): available (\d+) MB of (\d+) MB, swap free (\d+) MB of (\d+) MB/;
+const SWAP_FULL = /##\[warning\]swap is 100 % full/;
+/**
+ * w6140: available memory under this share of RAM at the health step counts as memory pressure. The step runs after the
+ * kill freed the killed process's memory (biscuit-2 read 5611 of 27186 MB then, 21 %), so a low reading there means the
+ * machine stayed near exhaustion even without it; w5213's thrash on biscuit read 0.7 GB of 26 GB (2.7 %). 5 % is about
+ * 1.3 GB on a 27 GB runner: below a normal job's footprint, so a healthy runner does not read under it.
+ */
+export const AVAILABLE_FLOOR = 0.05;
+
+/**
+ * w6140: the kill line and the memory evidence when a step that failed had a process SIGKILLed and the job's runner-health
+ * step shows memory pressure, with no real failure in the log; undefined otherwise. Exported for tests.
+ */
+export function oomKill(log: string): string | undefined {
+  const lines = log.replace(ANSI, '').split(/\r?\n/);
+  if (lines.some((l) => REAL_FAILURE.test(l))) return undefined;
+  const k = lines.findIndex((l, i) => {
+    if (!KILLED.test(l)) return false;
+    if (STEP_FAILED.test(l)) return true;
+    for (const n of lines.slice(i + 1)) {
+      if (STEP_START.test(n)) return false;
+      if (STEP_FAILED.test(n)) return true;
+    }
+    return false;
+  });
+  if (k < 0) return undefined;
+  let pressure: string | undefined;
+  for (const l of lines) {
+    const h = HEALTH.exec(l);
+    if (h) {
+      const [avail, total, swapFree, swap] = [h[2], h[3], h[4], h[5]].map(Number);
+      if (swap > 0 && swapFree * 100 < swap) pressure = `swap free ${swapFree} MB of ${swap} MB`;
+      else if (total > 0 && avail < total * AVAILABLE_FLOOR) pressure = `available ${avail} MB of ${total} MB`;
+    } else if (SWAP_FULL.test(l)) pressure ??= 'swap is 100 % full';
+    if (pressure) break;
+  }
+  if (!pressure) return undefined;
+  const clean = (l: string) => l.replace(/^\S+Z\s+/, '').replace(/\s+/g, ' ').trim();
+  return `${clean(lines[k]).slice(0, 160)}; runner health: ${pressure}`;
 }
 
 const EXIT_143 = /##\[error\]Process completed with exit code 143\./;
@@ -124,8 +200,16 @@ export function runnerStopped(log: string): boolean {
 /** A job the rerun starts again because it failed (a cancelled or skipped job is not a red test). */
 const FAILED = new Set(['failure', 'timed_out']);
 
-function gh(args: string[], cwd: string | undefined, env?: Record<string, string | undefined>): string {
-  return execFileSync(trustedGh(), args, { cwd, encoding: 'utf8', timeout: 20_000, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv });
+type Maybe<T> = T | Promise<T>;
+
+/**
+ * w6237: the trusted gh on the probe thread (server/hostProbe.ts): this check runs in the portal on every `gh run rerun`.
+ * Its output, or a throw carrying gh's stderr (what readJobLog and why() read).
+ */
+async function gh(args: string[], cwd: string | undefined, env?: Record<string, string | undefined>, timeoutMs = 20_000, maxBuffer?: number): Promise<string> {
+  const r = await runOffThread(trustedGh(), args, timeoutMs, { ...(cwd ? { cwd } : {}), env: { ...process.env, ...env } as NodeJS.ProcessEnv, ...(maxBuffer ? { maxBuffer } : {}) });
+  if (r.code !== 0) throw Object.assign(new Error(r.stderr.trim() || `gh exited ${r.code}`), { stderr: r.stderr });
+  return r.stdout;
 }
 
 const why = (e: unknown) => {
@@ -135,29 +219,29 @@ const why = (e: unknown) => {
 
 /** RerunReader through gh api; `{owner}/{repo}` is gh's own placeholder for the cwd's repository. */
 export const ghRerunReader: RerunReader = {
-  jobs(t, cwd, env) {
+  async jobs(t, cwd, env) {
     const repo = t.repo ?? '{owner}/{repo}';
     try {
       if (t.job) {
-        const j = JSON.parse(gh(['api', `repos/${repo}/actions/jobs/${t.job}`], cwd, env)) as RerunJob;
+        const j = JSON.parse(await gh(['api', `repos/${repo}/actions/jobs/${t.job}`], cwd, env)) as RerunJob;
         return [{ id: j.id, name: j.name, conclusion: j.conclusion, steps: (j.steps ?? []).map((s) => ({ name: s.name, status: s.status, conclusion: s.conclusion })), run_attempt: j.run_attempt, runner_name: j.runner_name, completed_at: j.completed_at }];
       }
-      const out = gh(['api', '--paginate', `repos/${repo}/actions/runs/${t.run}/jobs?per_page=100`, '--jq', '.jobs[] | {id, name, conclusion, run_attempt, runner_name, completed_at, steps: [(.steps // [])[] | {name, status, conclusion}]}'], cwd, env);
+      const out = await gh(['api', '--paginate', `repos/${repo}/actions/runs/${t.run}/jobs?per_page=100`, '--jq', '.jobs[] | {id, name, conclusion, run_attempt, runner_name, completed_at, steps: [(.steps // [])[] | {name, status, conclusion}]}'], cwd, env);
       return out.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as RerunJob);
     } catch (e) {
       return { error: why(e) };
     }
   },
-  annotations(repo, job, cwd, env) {
+  async annotations(repo, job, cwd, env) {
     try {
-      const out = gh(['api', '--paginate', `repos/${repo ?? '{owner}/{repo}'}/check-runs/${job}/annotations`, '--jq', '.[].message'], cwd, env);
+      const out = await gh(['api', '--paginate', `repos/${repo ?? '{owner}/{repo}'}/check-runs/${job}/annotations`, '--jq', '.[].message'], cwd, env);
       return out.split('\n').filter((l) => l.trim());
     } catch (e) {
       return { error: why(e) };
     }
   },
   log(repo, job, cwd, env) {
-    return readJobLog(repo, job, (args) => execFileSync(trustedGh(), args, { cwd, encoding: 'utf8', timeout: 30_000, maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, env: { ...process.env, ...env } as NodeJS.ProcessEnv }));
+    return readJobLog(repo, job, (args) => gh(args, cwd, env, 30_000, 256 * 1024 * 1024));
   },
 };
 
@@ -166,15 +250,15 @@ export const ghRerunReader: RerunReader = {
  * every cargo log has: "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway".
  * An older gh (biscuit's 2.46) has no such flag, so it is passed only when gh asks for it. Exported for tests.
  */
-export function readJobLog(repo: string | undefined, job: number, run: (args: string[]) => string): string | { error: string } {
+export async function readJobLog(repo: string | undefined, job: number, run: (args: string[]) => Maybe<string>): Promise<string | { error: string }> {
   const url = `repos/${repo ?? '{owner}/{repo}'}/actions/jobs/${job}/logs`;
   try {
-    return run(['api', url]);
+    return await run(['api', url]);
   } catch (e) {
     if (!/allow-escape-sequences/.test(why(e))) return { error: why(e) };
   }
   try {
-    return run(['api', '--allow-escape-sequences', url]);
+    return await run(['api', '--allow-escape-sequences', url]);
   } catch (e) {
     return { error: why(e) };
   }
@@ -264,7 +348,7 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
   for (const t of targets) {
     const what = t.job ? `job ${t.job}` : `run ${t.run}`;
     const where = t.repo ? ` in ${t.repo}` : '';
-    const jobs = read.jobs(t, ctx.cwd, ctx.env);
+    const jobs = await read.jobs(t, ctx.cwd, ctx.env);
     if (!Array.isArray(jobs))
       return `Refused (w3784): ${what}${where} could not be read (${jobs.error}), so this rerun cannot be checked against Ben's rule ${RULE} ${ROUTE} Read the jobs with \`gh api repos/<owner>/<repo>/actions/runs/<id>/jobs\` and \`gh run view <id> --log-failed\`.`;
     const failed = jobs.filter((j) => FAILED.has(String(j.conclusion)));
@@ -273,10 +357,11 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
       if (!step) continue;
       const of = `"${j.name}" (job ${j.id})${t.job ? '' : ` of run ${t.run}`}${where}`;
       // w3836: once, a runner that ran out of a resource; a second attempt means the fault is the job's, or the machine's.
-      const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
+      const log = await read.log(t.repo, j.id, ctx.cwd, ctx.env);
       // w5271: the runner's service was stopped under the step (exit 143 and its stop annotation): the runner died.
       if (typeof log === 'string' && runnerStopped(log)) continue;
-      const fault = typeof log === 'string' ? resourceFault(log) : undefined;
+      // w6140: a SIGKILL beside the runner's memory pressure is the Linux OOM killer: the same one-time rerun.
+      const fault = typeof log === 'string' ? (resourceFault(log) ?? oomKill(log)) : undefined;
       if (fault && j.run_attempt === 1) continue;
       if (fault)
         return `Refused (w3836): ${of} failed in its step "${step.name}" on a runner out of resources ("${fault}"), but it is attempt ${j.run_attempt ?? 'unknown'}: an out-of-resource fault is rerun once, at attempt 1. A second one is the machine's to fix (its page file, disk or runner count) or the job's. Ben's rule: ${RULE} ${ROUTE}`;
@@ -290,10 +375,10 @@ export async function checkFlakyRerun(cmd: string, ctx: { cwd?: string; env?: Re
       const of = `"${j.name}" (job ${j.id})${t.job ? '' : ` of run ${t.run}`}${where}`;
       // w4136: a failed (not timed-out) job whose step never finished, or whose log is gone, died with its runner.
       if (j.conclusion === 'failure' && unfinished(j)) continue;
-      const notes = read.annotations(t.repo, j.id, ctx.cwd, ctx.env);
+      const notes = await read.annotations(t.repo, j.id, ctx.cwd, ctx.env);
       if (Array.isArray(notes) && notes.some((n) => LOST.test(n))) continue;
       if (j.conclusion === 'failure') {
-        const log = read.log(t.repo, j.id, ctx.cwd, ctx.env);
+        const log = await read.log(t.repo, j.id, ctx.cwd, ctx.env);
         if (typeof log !== 'string' && LOG_MISSING.test(log.error)) continue;
       }
       let drop: string | undefined | { error: string } = undefined;

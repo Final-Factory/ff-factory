@@ -1,3 +1,4 @@
+import './testLocalRemotes.ts'; // w6099: these checkouts' origins are bare repositories in a temp folder
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';

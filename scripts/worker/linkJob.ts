@@ -227,9 +227,17 @@ export function updateFlagsOf(source: string, f: LinkUpdateFlags): UpdateFlags {
     ...(f.transcriptLock === 'on' || f.transcriptLock === 'off' ? { transcriptLock: f.transcriptLock } : {}),
     ...(f.storeLock === 'off' || f.storeLock === 'warn' || f.storeLock === 'on' ? { storeLock: f.storeLock } : {}),
     ...(f.editorTmpdir === 'on' || f.editorTmpdir === 'off' ? { editorTmpdir: f.editorTmpdir } : {}),
-    ...(f.pathFence === 'off' || f.pathFence === 'warn' ? { pathFence: f.pathFence } : {}),
+    ...(f.pathFence === 'off' || f.pathFence === 'warn' || f.pathFence === 'on' ? { pathFence: f.pathFence } : {}),
     ...(f.mediumAgentFolders === 'warn' || f.mediumAgentFolders === 'on' ? { mediumAgentFolders: f.mediumAgentFolders } : {}),
     ...(f.daemonTmpdir === 'on' || f.daemonTmpdir === 'off' ? { daemonTmpdir: f.daemonTmpdir } : {}),
+    ...(f.toolsDiskLock === 'warn' || f.toolsDiskLock === 'on' ? { toolsDiskLock: f.toolsDiskLock } : {}),
+    ...(f.winCiFirst === 'off' || f.winCiFirst === 'warn' || f.winCiFirst === 'enforce' ? { winCiFirst: f.winCiFirst } : {}),
+    ...(f.sharedLock === 'off' || f.sharedLock === 'warn' || f.sharedLock === 'on' ? { sharedLock: f.sharedLock } : {}),
+    ...(f.runnerPriority === 'off' || f.runnerPriority === 'warn' || f.runnerPriority === 'enforce' ? { runnerPriority: f.runnerPriority } : {}),
+    ...(f.hostRestage === 'warn' || f.hostRestage === 'on' ? { hostRestage: f.hostRestage } : {}),
+    ...(f.longRuns === 'off' || f.longRuns === 'warn' || f.longRuns === 'on' ? { longRuns: f.longRuns } : {}),
+    ...(f.liveRunGuard === 'off' || f.liveRunGuard === 'warn' ? { liveRunGuard: f.liveRunGuard } : {}),
+    ...(f.editorGitPackages === 'off' || f.editorGitPackages === 'warn' || f.editorGitPackages === 'on' ? { editorGitPackages: f.editorGitPackages } : {}),
   };
 }
 

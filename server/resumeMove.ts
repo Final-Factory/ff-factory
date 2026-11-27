@@ -301,12 +301,19 @@ export class MoveGuard {
 
   /** `what` says what was refused (w5976: a move's fresh session that did not start there); a daemon's cap refusal by default. */
   noteRefusal(machine: string, why: string, now: number, what?: string) {
+    // w6047 (the w6056 review): a cap refusal never turns a standing "did not start there" into one a start clears early.
+    const had = this.refused.get(machine);
+    if (!what && had?.what && now - had.at < REFUSED_FOR_MS) return;
     this.refused.set(machine, { at: now, why, ...(what ? { what } : {}) });
   }
 
-  /** A start on `machine` went through: its daemon's count has room again, so it is a move target again. */
+  /**
+   * A start on `machine` went through: its daemon's count has room again, so a cap refusal (w5942) there is over. A moved
+   * session that did not start there (w5976, `what` set) is not a cap count and stays no target for REFUSED_FOR_MS: any other
+   * start on that computer cleared it before (the w5995 review), so the same failing move start was tried again (w6047).
+   */
   startedOn(machine: string) {
-    this.refused.delete(machine);
+    if (!this.refused.get(machine)?.what) this.refused.delete(machine);
   }
 
   /** The computers no room move may go to now, with why (MoveFacts.held). */

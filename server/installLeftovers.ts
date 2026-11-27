@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasLocalWork, localWorkWhy, neverDelete, unpushedWorkWhy, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
-import { mentions } from './ownLeftovers.ts';
+import { mentions, real } from './ownLeftovers.ts';
+import { procPlaces, type ProcPlace } from './procPlaces.ts';
 import { gitIgnores, strayCargoOutput } from './cleanupFolders.ts';
 import { isPublished, type PublishedRecord } from './published.ts';
 import { gitExecFile } from './safeGit.ts';
@@ -10,7 +11,7 @@ import { benchQueueDir } from '../machine/benchQueue.ts';
 import { benchLockDir, pidAlive } from '../machine/benchLock.ts';
 import { holdsJob, listenerLog, readListenerLog, runnerCensus } from '../machine/benchRunners.ts';
 import { FFU_SLOTS_DIR, readSlotState } from '../machine/ffuSlots.ts';
-import { planCargoSweep, type CargoSweep } from './cargoGraphSweep.ts';
+import { cargoUnitHashes, planCargoSweep, sweptUnits, type CargoSweep } from './cargoGraphSweep.ts';
 
 /**
  * Leftovers inside the install folder (w899, docs/self-recovery.md "Install-folder leftovers"): what w876 had to remove
@@ -116,6 +117,32 @@ export interface InstallLeftoverSettings {
    * (LothDesktop slot2, 2026-11-25: 8.8 of 12.8 GB was units no build of its last hour used). 0: the held-slot window.
    */
   ffuSlotReleasedKeepHours: number;
+  /**
+   * What the rule ffu-runner-target does with an idle FFU runner's cargo target (`_work/<entry>/target` and
+   * `_work/<entry>/<child>/target`, w6291): 'off' touches nothing, 'warn' (the default) plans nothing and lists what 'on' would
+   * take, with the units it would have swept that a later build used again counted (`runnerWarnFile`), 'on' takes it.
+   * lothsahn's lockout rule (docs/worker-fence.md "Modes, off by default"): warn-only first, enforcement flips the default in
+   * a separate PR after measured zero misses. 'off' is meant as the recovery route that needs no person; a value that is not
+   * one of the three falls back to 'warn'. Not wired yet: installLeftoverSettings(raw) parses it, but machine/daemon.ts reads
+   * no daemon.json key into it and passes planInstallLeftovers no `settings`, so today the default is what runs.
+   */
+  runnerTargetMode: 'off' | 'warn' | 'on';
+  /**
+   * An idle FFU runner's cargo target keeps what its workspace built within this many hours of its newest build, and everything
+   * that build used (server/cargoGraphSweep.ts, w6291); the window narrows to 24, 6, 1 h and 15 min only while the target is over
+   * runnerTargetCapGB. Measured on ffu-lothdesktop-1 (2026-11-27, 2049 units): a 48 h window kept all of them (frees 0), 24 h freed
+   * 0.01 GB, 6 h 0.51 GB, 1 h 4.5 GB. The warm target is almost all live, so 48 h (the ffu slots' ffuSlotKeepHours) only drops the
+   * variants no build of two days uses. 0: no sweep.
+   */
+  runnerTargetKeepHours: number;
+  /**
+   * An idle FFU runner's cargo target over this many GB, after its stale units, goes whole once nothing in it was written for the
+   * settle time (w6291): an active runner is never runnerWorkDays untouched, so its target had no cap until a low pass took the
+   * whole job folder (a cold CI build). The warm target measured 19.8 GB physical on ffu-lothdesktop-1 (debug 16.5 GB, 8.4 GB of
+   * it PDBs; release 2.7 GB), the ffu slots' targets 14.5 to 20.7 GB; 24 GB leaves about 20% over a warm target and bounds a
+   * runner near 24 GB instead of letting it grow until a low pass. 0: no cap.
+   */
+  runnerTargetCapGB: number;
 }
 
 export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
@@ -139,13 +166,16 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   ffuSlotIdleDays: 7,
   ffuSlotKeepHours: 48,
   ffuSlotReleasedKeepHours: 1,
+  runnerTargetMode: 'warn',
+  runnerTargetKeepHours: 48,
+  runnerTargetCapGB: 24,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
 export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
   const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const d = INSTALL_LEFTOVER_DEFAULTS;
-  const n = (k: keyof InstallLeftoverSettings, min: number, max: number) => (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) >= min && (r[k] as number) <= max ? (r[k] as number) : d[k]);
+  const n = (k: Exclude<keyof InstallLeftoverSettings, 'runnerTargetMode'>, min: number, max: number) => (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) >= min && (r[k] as number) <= max ? (r[k] as number) : d[k]);
   return {
     keepBuilds: n('keepBuilds', 1, 20),
     buildUntouchedHours: n('buildUntouchedHours', 1, 24 * 30),
@@ -167,6 +197,9 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     ffuSlotIdleDays: n('ffuSlotIdleDays', 1, 365),
     ffuSlotKeepHours: n('ffuSlotKeepHours', 0, 24 * 365),
     ffuSlotReleasedKeepHours: n('ffuSlotReleasedKeepHours', 0, 24 * 365),
+    runnerTargetMode: r.runnerTargetMode === 'off' || r.runnerTargetMode === 'warn' || r.runnerTargetMode === 'on' ? r.runnerTargetMode : d.runnerTargetMode,
+    runnerTargetKeepHours: n('runnerTargetKeepHours', 0, 24 * 365),
+    runnerTargetCapGB: n('runnerTargetCapGB', 0, 10_000),
   };
 }
 
@@ -249,12 +282,13 @@ export function runnerJobWhy(runner: string, procs: ProcLite[] | undefined, now:
 }
 
 /**
- * The re-check for runCleanup (w5502): for an ffu-runner-work item, runnerJobWhy again with a fresh process list right before the
- * rename, since a job may have been handed out after the plan. Any other item passes. An unreadable list keeps the item.
+ * The re-check for runCleanup (w5502): for an ffu-runner-work item (and since w6291 an ffu-runner-target one, a sweep of its
+ * cargo target or the whole target), runnerJobWhy again with a fresh process list right before the rename, since a job may have
+ * been handed out after the plan. Any other item passes. An unreadable list keeps the item.
  */
 export function runnerBusyNow(procs: () => Promise<ProcLite[] | undefined>, now: () => number = Date.now, readLog?: (runner: string) => string | undefined): (it: { rule: string; runner?: string }) => Promise<string | undefined> {
   return async (it) => {
-    if (it.rule !== 'ffu-runner-work' || !it.runner) return undefined;
+    if ((it.rule !== 'ffu-runner-work' && it.rule !== 'ffu-runner-target') || !it.runner) return undefined;
     const why = runnerJobWhy(it.runner, await procs(), now(), readLog);
     return why ? `a job may have started on the FFU runner since the plan: ${why}` : undefined;
   };
@@ -286,8 +320,27 @@ export const ffuHolderUp = (holder: string | undefined, guard: CleanupGuard) =>
  * again (a worker that took the slot since the plan keeps it: its holder or take time moved) and a fresh process list (a cargo
  * build or a program in it keeps it). Any other item passes. An unreadable slot state or process list keeps the item.
  */
-export function ffuSlotBusyNow(root: string | undefined, procs: () => Promise<ProcLite[] | undefined>, guard?: () => CleanupGuard, now: () => number = Date.now): (it: CleanupItem) => Promise<string | undefined> {
+export function ffuSlotBusyNow(
+  root: string | undefined,
+  procs: () => Promise<ProcLite[] | undefined>,
+  guard?: () => CleanupGuard,
+  now: () => number = Date.now,
+  places: () => Promise<ProcPlace[] | undefined> = () => procPlaces(),
+): (it: CleanupItem) => Promise<string | undefined> {
   return async (it) => {
+    // w6240: every ffu slot target item (a sweep, a trim, a whole target, a stray ffu/target) is checked again right before its
+    // removal for a program running from the slot, which may have started since the plan.
+    if (it.rule === 'ffu-slot-target' && root) {
+      const base = path.join(root, FFU_SLOTS_DIR);
+      const id = within(it.path, base) ? path.relative(base, it.path).split(/[\\/]/)[0] : '';
+      if (/^slot\d+$/.test(id)) {
+        const slot = path.join(base, id);
+        const stray = path.join(slot, 'ffu', 'target');
+        const [t, cwdRoot] = within(it.path, stray) ? [stray, stray] : [path.join(slot, 'target'), slot];
+        const why = runsFromDir(t, cwdRoot, await procs().catch(() => undefined), await places().catch(() => undefined));
+        if (why) return `since the plan: ${why}`;
+      }
+    }
     if (!it.ffuSlot) return undefined;
     if (!root) return 'no install root to read the slot state again';
     let slot: { holder?: string; takenAt?: string; usedAt?: string } | undefined;
@@ -440,6 +493,27 @@ export async function cargoTargetBusy(target: string, session: string, procs: Pr
  */
 export function cargoTargetRunners(target: string, procs: ProcLite[] | undefined): ProcLite[] {
   return (procs ?? []).filter((p) => mentions(p.cmd, target) && !CARGO_PROC.test(p.cmd) && !/(^|[\\/\s"'])(cargo|rustc)[\w-]*(\.exe)?(["'\s]|$)/i.test(p.cmd));
+}
+
+/**
+ * Why a cargo target must stay whole now because something runs from it, or undefined (w6240). Checked for an ffu slot's
+ * target (`cwdRoot` the slot, its checkout included) and a stray `ffu/target` (`cwdRoot` the stray itself), on the plan and
+ * again right before the removal (ffuSlotBusyNow): a command line naming the target or `cwdRoot`, an executable inside the
+ * target, or a working folder inside `cwdRoot` (server/procPlaces.ts reads both; Windows gives no working folder). biscuit,
+ * 2026-11-27: the sweep took 62 of 257 test executables from slot4's target while `python3 tools/run_tests_parallel.py`, its
+ * working folder the slot's checkout, ran them. A process list or places that cannot be read keep it.
+ */
+export function runsFromDir(target: string, cwdRoot: string, procs: ProcLite[] | undefined, places: ProcPlace[] | undefined): string | undefined {
+  if (!procs) return 'the process list could not be read, so a program running from it cannot be ruled out';
+  const named = procs.find((p) => mentions(p.cmd, target) || mentions(p.cmd, cwdRoot));
+  if (named) return `a running process names it (pid ${named.pid}: ${named.cmd.slice(0, 120)})`;
+  if (!places) return "the processes' executables and working folders could not be read, so a program running from it cannot be ruled out";
+  const inside = (p: string | undefined, root: string) => !!p && [...new Set([root, real(root)])].some((r) => within(p, r) || within(real(p), r));
+  const exe = places.find((x) => inside(x.exe, target));
+  if (exe) return `a program runs from it (pid ${exe.pid}: ${exe.exe})`;
+  const cwd = places.find((x) => inside(x.cwd, cwdRoot));
+  if (cwd) return `a process works in it (pid ${cwd.pid}, working folder ${cwd.cwd}${procs.find((p) => p.pid === cwd.pid) ? `: ${procs.find((p) => p.pid === cwd.pid)!.cmd.slice(0, 120)}` : ''})`;
+  return undefined;
 }
 
 /** The newest write in a cargo target's top three levels (cargoTargetBusy reads the same): what a build touches, without its artifacts. */
@@ -842,6 +916,134 @@ async function oversizeOutputs(session: string, capBytes: number): Promise<{ fil
   return out;
 }
 
+/** What the warn period of rule ffu-runner-target remembers of one runner's cargo target (w6291). */
+export interface RunnerWarnRecord {
+  at: string;
+  /** The window the units below were found stale at; the next check plans at it again. */
+  keepHours: number;
+  /** The unit keys (`<crate>-<16 hex>`) the warn plan would have swept. */
+  units: string[];
+  checks: number;
+  misses: number;
+  /** The last 20 units counted as misses. */
+  missedUnits: string[];
+}
+
+const MISSED_KEPT = 20;
+
+/** The warn file's records by target path; a missing, torn or ill-typed file or record is skipped (the counts start fresh). */
+export function readRunnerWarn(file: string | undefined): Record<string, RunnerWarnRecord> {
+  const out: Record<string, RunnerWarnRecord> = {};
+  if (!file) return out;
+  let targets: unknown;
+  try {
+    targets = (JSON.parse(fs.readFileSync(file, 'utf8')) as { targets?: unknown } | null)?.targets;
+  } catch {
+    return out;
+  }
+  if (!targets || typeof targets !== 'object') return out;
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0);
+  for (const [t, v] of Object.entries(targets)) {
+    const r = v as Partial<RunnerWarnRecord> | null;
+    if (!r || typeof r !== 'object' || typeof r.keepHours !== 'number' || !Array.isArray(r.units)) continue;
+    out[t] = { at: typeof r.at === 'string' ? r.at : '', keepHours: r.keepHours, units: strings(r.units), checks: count(r.checks), misses: count(r.misses), missedUnits: strings(r.missedUnits).slice(-MISSED_KEPT) };
+  }
+  return out;
+}
+
+/** The warn file, written in place (a torn write is read as no record). A failed write loses the counts, nothing else. */
+function writeRunnerWarn(file: string, targets: Record<string, RunnerWarnRecord>): void {
+  // Written beside it, then renamed over it (review w6301): a daemon stopped mid-write leaves the last whole file, not a torn one.
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify({ targets }, null, 1));
+    fs.renameSync(tmp, file);
+  } catch {
+    fs.rmSync(tmp, { force: true });
+    // the next pass starts its counts again
+  }
+}
+
+const samePath = (a: string, b: string) => (process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b));
+const errCode = (e: unknown) => (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+
+/**
+ * w6291 (review w6301 of #1427): why `p` may not be removed as a path of the install folder `root`: it is outside it, a link or
+ * junction on the way leads elsewhere (its real path is not the root's real path plus the same relative path), or, with `walk`,
+ * a link or junction lies anywhere under it. A junction a Low-integrity process made reads as a plain folder to lstat (w5915), so
+ * each folder's real path is compared, not only its entry type. Undefined: none, or `p` is gone. Anything unreadable refuses.
+ */
+export async function linkOnPath(root: string, p: string, walk: boolean, realRoot?: string): Promise<string | undefined> {
+  if (!within(p, root) || norm(p) === norm(root)) return `${p} is not inside the install folder ${root}`;
+  let rr: string;
+  try {
+    rr = realRoot ?? (await fs.promises.realpath(root));
+  } catch (e) {
+    return `the install folder's real path is unreadable (${errCode(e)})`;
+  }
+  const want = (q: string) => path.join(rr, path.relative(root, q));
+  try {
+    const rp = await fs.promises.realpath(p);
+    if (!samePath(rp, want(p))) return `${p} leads through a link or junction to ${rp}`;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : `${p}: its real path is unreadable (${errCode(e)})`;
+  }
+  if (!walk || !(await fs.promises.lstat(p).catch(() => undefined))?.isDirectory()) return undefined;
+  const stack = [p];
+  while (stack.length) {
+    const d = stack.pop()!;
+    let ents: fs.Dirent[];
+    try {
+      ents = await fs.promises.readdir(d, { withFileTypes: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      return `${d} is unreadable (${errCode(e)})`;
+    }
+    for (const e of ents) {
+      const c = path.join(d, e.name);
+      if (e.isSymbolicLink()) return `${c} is a link or junction`;
+      if (!e.isDirectory()) continue;
+      try {
+        const rc = await fs.promises.realpath(c);
+        if (!samePath(rc, want(c))) return `${c} is a link or junction to ${rc}`;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        return `${c}: its real path is unreadable (${errCode(err)})`;
+      }
+      stack.push(c);
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The re-check for runCleanup (w6291, review w6301): an ffu-runner-target item again right before its removal, by linkOnPath: the
+ * whole target walked, or each member (a folder member walked). A link or junction made since the plan keeps the item whole.
+ */
+export function runnerTargetLinksNow(root: string | undefined): (it: { rule: string; path: string; members?: string[] }) => Promise<string | undefined> {
+  return async (it) => {
+    if (it.rule !== 'ffu-runner-target') return undefined;
+    if (!root) return 'no install folder to check the target against';
+    let rr: string;
+    try {
+      rr = await fs.promises.realpath(root);
+    } catch (e) {
+      return `the install folder's real path is unreadable (${errCode(e)})`;
+    }
+    const why = await linkOnPath(root, it.path, !it.members, rr);
+    if (why) return `a link or junction is on the target's path (w6291): ${why}`;
+    for (const m of it.members ?? []) {
+      if (!within(m, it.path)) return `a member is outside the target: ${m}`;
+      const st = await fs.promises.lstat(m).catch(() => undefined);
+      const w = await linkOnPath(root, m, !!st?.isDirectory(), rr);
+      if (w) return `a link or junction is in the target (w6291): ${w}`;
+    }
+    return undefined;
+  };
+}
+
 /**
  * The plan: reads only. `root` is the install folder (nothing outside it is ever planned); `sandboxes` are the pool's
  * folders; `tempRoots` the agent temp roots; `procs` the process list (absent: no process is named). `guard` is the
@@ -854,6 +1056,11 @@ export async function planInstallLeftovers(o: {
   guard: CleanupGuard;
   ctx?: StaleContext;
   procs?: ProcLite[];
+  /**
+   * Each process's executable and working folder (w6240, server/procPlaces.ts; tests pass a list). Read once, only when an ffu
+   * slot's target is judged; undefined from the reader keeps the slots' targets.
+   */
+  places?: ProcPlace[] | (() => Promise<ProcPlace[] | undefined>);
   settings?: InstallLeftoverSettings;
   now?: number;
   /** Pids never named a stray (this daemon and its parents). */
@@ -869,8 +1076,12 @@ export async function planInstallLeftovers(o: {
   /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'cargo-cap': only the
    * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471); since w3674 it
    * covers the Unity Library copy cap (library-copy-cap) too. 'ffu-slots': only the released ffu slots' cargo targets, the
-   * first step of every pass (w6044: BEAST's released targets held 190.6 GB while every pass was cut off before the rule ran). */
-  scope?: 'all' | 'sandboxes' | 'cargo-cap' | 'ffu-slots';
+   * first step of every pass (w6044: BEAST's released targets held 190.6 GB while every pass was cut off before the rule ran).
+   * 'ffu-busy-retry': only the ffu slots in `slots`, with the same rule a pass runs on them (w6290: the re-check, minutes after a
+   * pass, of a slot target that pass kept over ffuSlotTargetCapGB because a build or a test ran from it). */
+  scope?: 'all' | 'sandboxes' | 'cargo-cap' | 'ffu-slots' | 'ffu-busy-retry';
+  /** With scope 'ffu-busy-retry': the slots (slot1, slot2, ...) to judge; the rest are not read. */
+  slots?: string[];
   /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
   low?: boolean;
   /** A low pass says which check kept a temp folder's rebuildable caches once they reach this size (plan.held; default 256 MiB). */
@@ -891,6 +1102,12 @@ export async function planInstallLeftovers(o: {
   runnerLog?: (runner: string) => string | undefined;
   /** Each ffu slot's target size this pass measured (w5912): the daemon caches it for its status, so a report never runs a du. */
   ffuSized?: (slot: string, bytes: number) => void;
+  /**
+   * A JSON file the warn period of rule ffu-runner-target keeps (w6291, runnerTargetMode 'warn' only; the one place this plan
+   * writes): per runner target the units the warn plan would have swept, so the next pass can count the ones a build used
+   * again (a miss: still on disk, no longer stale at the recorded window). Absent: nothing is counted or written.
+   */
+  runnerWarnFile?: string;
 }): Promise<InstallPlan> {
   const plan: InstallPlan = { items: [], listed: [], strays: [] };
   if (!o.root) return plan; // not a worker-root install: nothing here is the install folder
@@ -1274,8 +1491,11 @@ export async function planInstallLeftovers(o: {
     // ---- ffu slots' cargo targets (w3764, machine/ffuSlots.ts): <install>/ffu-sandboxes/slot<N>/target, kept warm between
     // workers on purpose (a cold workspace test build costs minutes, a warm one seconds: docs/ffu-sandboxes.md). Only the target
     // is ever taken, never a slot's checkout (it may hold a worker's work) nor the shared clone. Nothing goes while cargo builds
-    // in it (cargoTargetBusy: a cargo process, or a write within the settle time); a program merely running from it (a long test
-    // binary, cargoTargetRunners) leaves it open to the sweep, sparing the units it runs (w4258). Then:
+    // in it (cargoTargetBusy: a cargo process, or a write within the settle time), nor while anything runs from the slot
+    // (runsFromDir, w6240: a command line naming the target or the slot, an executable in the target, a working folder in the
+    // slot, its checkout included; unreadable processes keep it). w4258 let the sweep run beside a long test binary; biscuit
+    // slot4 lost 62 of 257 test binaries that way to a test runner whose argv named neither. The sweep's roots keep the newest
+    // test binary and bin of each name in deps/ (cargoGraphSweep.ts), whatever the window. Then:
     // - a slot no running or resumable worker holds, nothing running from it, untouched ffuSlotIdleDays: the whole target;
     // - on every pass, the stale units: what no workspace unit built within ffuSlotKeepHours of the newest one uses, and
     //   superseded object files (server/cargoGraphSweep.ts, w4258); over ffuSlotTargetCapGB or on a low pass the window narrows to
@@ -1287,6 +1507,9 @@ export async function planInstallLeftovers(o: {
     const ffuBase = path.join(root, FFU_SLOTS_DIR);
     const ffuState = fs.existsSync(ffuBase) ? readSlotState(root) : { slots: [] };
     const holderUp = (holder: string | undefined) => ffuHolderUp(holder, o.guard);
+    // w6240: read once, on the first target judged.
+    let placesRead: Promise<ProcPlace[] | undefined> | undefined;
+    const places = () => (placesRead ??= Array.isArray(o.places) ? Promise.resolve(o.places) : (o.places ?? (() => procPlaces()))().catch(() => undefined));
     // w5796: a cargo target inside a slot's checkout (ffu/target) is a build that missed the slot's own target: a build run with
     // its working folder outside the slot (cargo reads .cargo/config.toml from the working folder up, not from the manifest's),
     // or a script that named $repo/target/<dir> itself (ffu's check_snapshot_compat.sh, rolling_deploy.sh and sim_switch.sh
@@ -1299,6 +1522,7 @@ export async function planInstallLeftovers(o: {
       if (items.has(stray) || !fs.existsSync(stray) || !(isCargoTarget(stray) || strayCargoOutput(slot))) return;
       const runners = cargoTargetRunners(stray, o.procs);
       if (runners.length || (await cargoTargetBusy(stray, path.join(slot, 'ffu'), o.procs, Infinity, now, runners)) || neverDelete(stray, o.guard)) return;
+      if (runsFromDir(stray, stray, o.procs, await places())) return;
       const newest = await newestTopWrite(stray);
       const held = holderUp(ffuState.slots.find((x) => x.id === id)?.holder);
       const keepMs = held ? s.ffuSlotKeepHours * HOUR : settleMs;
@@ -1313,6 +1537,7 @@ export async function planInstallLeftovers(o: {
     };
     for (const e of await children(ffuBase)) {
       if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
+      if (o.scope === 'ffu-busy-retry' && !(o.slots ?? []).includes(e.name)) continue;
       const slot = path.join(ffuBase, e.name);
       // The first step takes the slots' own targets only: a stray ffu/target may be in a held slot (review of #1358).
       if (!firstOnly) await strayInTreeTarget(slot, e.name);
@@ -1336,6 +1561,13 @@ export async function planInstallLeftovers(o: {
       const no = busy ?? neverDelete(target, o.guard);
       if (no) {
         if (!firstOnly) await keptSlot(no);
+        continue;
+      }
+      // w6240: anything running from the slot keeps its whole target (no sweep, no trim): the test executables a run is about
+      // to start are files no unit graph can see in use.
+      const runs = runsFromDir(target, slot, o.procs, await places());
+      if (runs) {
+        if (!firstOnly) await keptSlot(runs);
         continue;
       }
       const holder = ffuState.slots.find((x) => x.id === e.name)?.holder;
@@ -1436,6 +1668,17 @@ export async function planInstallLeftovers(o: {
     return plan;
   }
 
+  // w6290: the busy-slot re-check (machine/ffuBusyRetry.ts): the named slots' targets only, by the rule above, with what it
+  // kept (plan.held) so the re-check knows a slot is still busy.
+  if (o.scope === 'ffu-busy-retry') {
+    await ffuSlotTargets();
+    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+    plan.items = [...items.values()];
+    const kept = held.filter((h) => !plan.items.some((i) => within(h.path, i.path)));
+    if (kept.length) plan.held = kept;
+    return plan;
+  }
+
   if (o.scope === 'cargo-cap') {
     for (const t of [...new Set(o.tempRoots)]) {
       if (!within(t, root)) continue;
@@ -1514,6 +1757,81 @@ export async function planInstallLeftovers(o: {
   // actions-runner* under home or a drive root) never matched. A job recreates them (a cold cargo build costs minutes), so they
   // go only while that runner runs no job: once untouched runnerWorkDays, or lowCacheSettleMinutes in a low pass. _tool and
   // _actions stay, as in actions-work.
+  // w6291: an active runner is never runnerWorkDays untouched, so its cargo target (`_work/ffu/ffu/target`, 19.8 GB on
+  // ffu-lothdesktop-1, measured 2026-11-27) had no cap until a low pass took the whole job folder. While no job runs and the disk
+  // is not low, its targets (`_work/<entry>/target`, `_work/<entry>/<child>/target`) get the ffu slots' rule: the stale units
+  // (cargoGraphSweep.ts) at runnerTargetKeepHours, the window narrowing only while over runnerTargetCapGB, then the whole target
+  // over the cap once settled. Mode 'warn' (the default) plans nothing: it lists what 'on' would take and counts the units a later
+  // pass found live again (runnerWarnFile), the measure of "zero misses" before enforcement flips the default.
+  const warn = s.runnerTargetMode === 'warn';
+  const runnerWarn = warn ? readRunnerWarn(o.runnerWarnFile) : {};
+  let warnDirty = false;
+  const runnerTargets = async (runner: string, name: string, work: string, entries: fs.Dirent[]) => {
+    const found: string[] = [];
+    for (const e of entries) {
+      const entry = path.join(work, e.name);
+      // The runner's own folders (_temp, _PipelineMapping) hold no job's target; an entry planned whole goes with its target.
+      if (!e.isDirectory() || e.name.startsWith('_') || items.has(entry)) continue;
+      found.push(path.join(entry, 'target'));
+      for (const c of await children(entry)) if (c.isDirectory()) found.push(path.join(entry, c.name, 'target'));
+    }
+    const gbs = (b: number) => `${(b / GB).toFixed(1)} GB`;
+    const cap = s.runnerTargetCapGB * GB;
+    const keep = s.runnerTargetKeepHours;
+    for (const target of found) {
+      if (items.has(target) || !isCargoTarget(target) || neverDelete(target, relaxed(runner))) continue;
+      // Review w6301 of #1427: a junction on the way to the target, or inside it, led the removal outside the install folder.
+      const link = await linkOnPath(root, target, true);
+      if (link) {
+        listed.set(target, `refused (w6291): FFU runner ${name}'s cargo target is never swept through a link or junction: ${link}`);
+        continue;
+      }
+      const bytes = await sizeOf(target);
+      let sweep: CargoSweep | undefined;
+      let hours = 0;
+      if (keep > 0) {
+        for (const h of [...new Set([keep, 24, 6, 1, 0.25].filter((x) => x <= keep))]) {
+          sweep = await planCargoSweep(target, { keepHours: h, settleMs, now });
+          hours = h;
+          if (!(cap && bytes - sweep.bytes > cap)) break;
+        }
+      }
+      // The warn period's count: a unit the last warn plan would have swept that is still on disk and no longer stale at that
+      // plan's window was used by a build since (or written within the settle time): a miss.
+      let tail = '';
+      if (warn && o.runnerWarnFile) {
+        const rec = runnerWarn[target];
+        let { checks, misses, missedUnits } = rec ?? { checks: 0, misses: 0, missedUnits: [] as string[] };
+        if (rec?.units.length) {
+          const again = sweep && rec.keepHours === hours ? sweep : await planCargoSweep(target, { keepHours: rec.keepHours, settleMs, now });
+          const staleNow = new Set(sweptUnits(again).map((k) => k.slice(-16)));
+          const onDisk = await cargoUnitHashes(target);
+          const missed = rec.units.filter((k) => onDisk.has(k.slice(-16)) && !staleNow.has(k.slice(-16)));
+          checks++;
+          misses += missed.length;
+          missedUnits = [...missedUnits, ...missed].slice(-MISSED_KEPT);
+        }
+        runnerWarn[target] = { at: new Date(now).toISOString(), keepHours: hours, units: sweep ? sweptUnits(sweep) : [], checks, misses, missedUnits };
+        warnDirty = true;
+        tail = `; misses so far: ${misses} in ${checks} checks`;
+      }
+      const stale = sweep?.paths.length ? sweep : undefined;
+      const left = bytes - (stale?.bytes ?? 0);
+      let why: string | undefined;
+      let members: string[] | undefined;
+      if (stale) {
+        members = stale.paths;
+        why = `stale build output in FFU runner ${name}'s cargo target (${gbs(stale.bytes)} of ${gbs(bytes)}): ${stale.paths.length - stale.objects} entries of units no workspace build of the last ${hours < 1 ? `${hours * 60} min` : `${hours} h`} uses${stale.objects ? `, ${stale.objects} superseded object files` : ''}; ${stale.live} of ${stale.units} units stay; the next job rebuilds only those (w6291)`;
+      }
+      if (cap && left > cap && (await newestTopWrite(target)) <= now - settleMs) {
+        members = undefined;
+        why = `FFU runner ${name}'s cargo target (${gbs(bytes)}) is over the ${s.runnerTargetCapGB} GB runner cap${stale ? ` even without its ${gbs(stale.bytes)} of stale units` : ''}, no job runs and nothing in it was written for ${settleMs / 60_000} min; the next job rebuilds it cold (w6291)`;
+      }
+      if (!why) continue;
+      if (warn) listed.set(target, `warn-only (runnerTargetMode warn, w6291): would take ${why}${tail}`);
+      else items.set(target, { path: target, rule: 'ffu-runner-target', why, base: runner, runner, ...(members ? { members } : {}) });
+    }
+  };
   const runners = path.join(root, 'ffu-runners');
   for (const r of await children(runners)) {
     if (!r.isDirectory()) continue;
@@ -1530,6 +1848,12 @@ export async function planInstallLeftovers(o: {
     for (const e of entries) {
       await take(path.join(work, e.name), runner, 'ffu-runner-work', `FFU runner ${r.name}'s job folder (${e.name}), no job running, untouched for ${o.low ? `${age / 60_000} min (the disk is low)` : `${s.runnerWorkDays} days`}; the next job recreates it`, age, true);
     }
+    // A low pass keeps today's rule: the whole job folder goes after the settle time, target and all.
+    if (!o.low && s.runnerTargetMode !== 'off') await runnerTargets(runner, r.name, work, entries);
+  }
+  if (warnDirty && o.runnerWarnFile) {
+    for (const t of Object.keys(runnerWarn)) if (!fs.existsSync(t)) delete runnerWarn[t]; // a target a job folder's removal took
+    writeRunnerWarn(o.runnerWarnFile, runnerWarn);
   }
 
   await ffuSlotTargets();

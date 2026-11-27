@@ -12,12 +12,12 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
-import { CensusWatch, censusOf, type PortalCounted, type PortalSeen } from './agentCensus.ts';
+import { CensusWatch, censusOf, placementCountMode, placementCountOf, type PlacementCount, type PortalCounted, type PortalSeen } from './agentCensus.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { AnsweredCalls } from './answeredCalls.ts';
 import { ATTACHMENT_PROTOCOL, BATCH_CLEAR_PROTOCOL, MAIN_CLONE_NO_AGENTS, RELOCATE_FALLBACK_MINUTES, RELOCATE_PROTOCOL, SANDBOX_PROTOCOL, protocolProblem, relocateProblem, type DaemonLiveView, type DaemonSandbox, type FromDaemon, type LinkUpdateFlags, type LinkUpdateReport, type ToDaemon } from './machineProtocol.ts';
-import { LINK_ACK_MS, PendingCalls, THIN_REFUSED, type UpdateBundle, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
+import { LINK_ACK_MS, linkControlWaitMs, PendingCalls, THIN_REFUSED, type UpdateBundle, UpdateBundles, UpdateNotReached, unwaitedAnswer } from './machineLink.ts';
 import type { OutsideWatchConfig } from '../machine/outsideWatch.ts';
 import type { PortalPinStatus } from '../machine/portalPin.ts';
 import { branchProblem, normalizePurpose, slugify } from './sandboxes.ts';
@@ -1015,15 +1015,22 @@ export class MachineManager {
 
   /** Each worker's request priority on a machine, for its bench queue (w1628; set by server/index.ts). */
   benchPrioritiesFor?: (machineId: string) => Record<string, BenchPriority>;
+  /** w6381: runs pushBenchPriorities' reads in one placement pass (Agents.placementRead; set by server/index.ts). */
+  benchPass?: <T>(fn: () => T) => T;
   /** Whether a machine's workers ask timed_place before an exclusive timing ticket (w1969; set by server/index.ts). */
   timedAskFor?: (machineId: string) => TimedAskMark | undefined;
 
   /** Send every connected daemon its workers' request priorities for its bench queue (w1628): at connect and each minute. */
   pushBenchPriorities() {
-    for (const id of this.links.keys()) {
-      const sessions = this.benchPrioritiesFor?.(id);
-      if (sessions) this.post(id, this.benchPrioritiesMsg(id, sessions), false);
-    }
+    // w6381: every machine's priorities read in one placement pass (benchPass), then sent: one pass per machine held the
+    // portal 5.8 s at 10:43Z on 2026-11-27.
+    const msgs = (this.benchPass ?? ((fn) => fn()))(() =>
+      [...this.links.keys()].flatMap((id) => {
+        const sessions = this.benchPrioritiesFor?.(id);
+        return sessions ? [{ id, msg: this.benchPrioritiesMsg(id, sessions) }] : [];
+      }),
+    );
+    for (const { id, msg } of msgs) this.post(id, msg, false);
   }
 
   /** The bench_priorities message for one machine: its workers' priorities, whether it hosts one worker, and its timed-run refusal (w1861). */
@@ -1415,7 +1422,7 @@ export class MachineManager {
     // w5546: an older daemon reads any action but restart as uninstall, so the switch goes only to one that offers it.
     if (action.startsWith('read-fence') && !this.hellos.get(id)?.readFenceSwitch) throw new Error(`${id}'s daemon has no read fence switch (it runs code from before w5546): nothing was sent`);
     const callId = randomUUID();
-    const done = this.linkControls.wait(callId, id, 60_000, `the ${action}`);
+    const done = this.linkControls.wait(callId, id, linkControlWaitMs(action), `the ${action}`);
     this.post(id, { type: 'daemon_control', id: callId, action });
     await done;
   }
@@ -1625,18 +1632,39 @@ export class MachineManager {
       const h = this.sessions.sessions.get(sid);
       return h ? { ...(h.info.machineId ? { machine: h.info.machineId } : {}), status: h.info.status, live: h.live } : undefined;
     };
-    const line = this.census.note(id, census, portal, seen, Date.now());
+    const line = this.census.note(id, census, portal, seen, Date.now(), { placement: placementCountMode(this.cfg.placementAgentCount), movedAway: movedAwayMode(this.cfg.movedAwayWorkers) });
     if (line) console.warn(`machine ${id}: ${line}`);
   }
 
-  /** The census `id`'s daemon sent last, and when (w5972; for the enforce stage, read by nothing that acts yet). */
+  /** The census `id`'s daemon sent last, and when (w5972; placement reads it with placementAgentCount "on", w5985). */
   daemonCensus(id: string) {
     return this.census.lastOf(id);
   }
 
+  /**
+   * w5985: what placement counts on `id` with config placementAgentCount "on" (server/agentCensus.ts): capFull's count
+   * (midTurnTotal, turns sent and not yet reported included) and runningIn per sandbox of `sandboxes`, each the larger of
+   * that and its daemon's census while it is fresh. Undefined with "off" (the default): placement counts as before.
+   */
+  placementCount(id: string, sandboxes: readonly string[], now = Date.now()): (PlacementCount & { daemon?: number }) | undefined {
+    if (placementCountMode(this.cfg.placementAgentCount) !== 'on') return undefined;
+    // w6381: one pass over the sessions for every sandbox, not one per sandbox (the same counts as runningIn).
+    const inSandbox = new Map(sandboxes.map((sb) => [sb, 0]));
+    for (const s of this.sessions.sessions.values()) {
+      const sb = s.info.machineSandbox;
+      if (s.info.machineId !== id || sb === undefined || !inSandbox.has(sb) || !(isMidTurn(s.info) || this.isStarting(s))) continue;
+      inSandbox.set(sb, inSandbox.get(sb)! + 1);
+    }
+    const portal: PlacementCount = { midTurn: this.midTurnTotal(id), inSandbox };
+    return placementCountOf(portal, this.census.lastOf(id), now);
+  }
+
   /** Agents mid-turn on a machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */
   midTurnTotal(id: string) {
-    return this.runningIn(id, '*') + this.runningIn(id, undefined);
+    // w6381: its sandboxes ('*') and its standing agents (no sandbox) are every agent mid-turn there: one pass, not two.
+    let n = 0;
+    for (const s of this.sessions.sessions.values()) if (s.info.machineId === id && s.info.machineSandbox !== '' && (isMidTurn(s.info) || this.isStarting(s))) n++;
+    return n;
   }
 
   /** Why `m` is at its agent cap (agentCap), or undefined. */
@@ -3031,13 +3059,14 @@ export class MachineManager {
         const file = String(msg.file ?? '').slice(0, 80);
         const sandbox = String(msg.sandbox ?? '').slice(0, 80);
         if (!this.testHistory) return;
-        let ack: { ok: boolean; error?: string };
+        // Answered once the run is stored (w6415: the portal records it in its writer thread), or with why not.
+        const refused = (e: unknown) => ({ ok: false, error: String((e as Error)?.message ?? e).slice(0, 200) });
+        const answer = (ack: { ok: boolean; error?: string }) => this.post(id, { type: 'test_history_ack', sandbox, file, ...ack }, false);
         try {
-          ack = this.testHistory(id, sandbox, file, String(msg.record ?? ''));
+          void Promise.resolve(this.testHistory(id, sandbox, file, String(msg.record ?? ''))).then(answer, (e) => answer(refused(e)));
         } catch (e) {
-          ack = { ok: false, error: (e as Error).message.slice(0, 200) };
+          answer(refused(e));
         }
-        this.post(id, { type: 'test_history_ack', sandbox, file, ...ack }, false);
         return;
       }
       case 'test_history_started':
@@ -3274,7 +3303,7 @@ export class MachineManager {
   /** w1996: a daemon's exclusive-bench hours (server/benchHoursStore.ts validates them). */
   benchHours?: (machineId: string, rows: unknown) => void;
   /** w4922: a sandbox's local test run (server/testHistory.ts); answers what to tell the daemon (ok: keep no more). */
-  testHistory?: (machineId: string, sandbox: string, file: string, record: string) => { ok: boolean; error?: string };
+  testHistory?: (machineId: string, sandbox: string, file: string, record: string) => { ok: boolean; error?: string } | Promise<{ ok: boolean; error?: string }>;
   testHistoryStarted?: (machineId: string, sandbox: string, file: string) => void;
   timedReport?: (machineId: string, msg: Extract<FromDaemon, { type: 'timed_run_status' | 'timed_run_done' | 'timed_run_result' }>) => void;
 

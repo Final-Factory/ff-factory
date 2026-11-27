@@ -157,6 +157,37 @@ net_is_ours() { v net-dumpxml "$NET_NAME" 2>/dev/null | matches -F "<bridge name
 # guest_agent JSON: a guest agent command; prints its "return" (jq), fails when the agent does not answer.
 guest_agent() { v qemu-agent-command "$VM_NAME" "$1" --timeout "${2:-10}" 2>/dev/null | jq -c '.return'; }
 
+# ssh_guest ARG...: ssh into the guest as its admin, with the host root's own key (fff-vm ssh).
+ssh_guest() {
+  ssh -i "$FFF_VM_ETC/ssh/id_ed25519" -o UserKnownHostsFile="$FFF_VM_ETC/ssh/known_hosts" -o StrictHostKeyChecking=accept-new \
+    -o ConnectTimeout=10 -o ServerAliveInterval=5 -o ServerAliveCountMax=4 -o BatchMode=yes "$VM_ADMIN_USER@$NET_VM_IP" "$@"
+}
+
+# first_boot_report: what a first boot that never brought the guest agent up was doing, on stderr (w6402: CI's job
+# said only "look at the serial log", and the cause, cloud-init still downloading 711 MB of linux-firmware at
+# 0.3 MB/s, was in an artifact nobody opens). The serial console needs no agent, no network and no sshd; cloud-init's
+# own status and log come over ssh when sshd is up (its keys are set before the packages are installed).
+first_boot_report() {
+  local serial=/var/log/libvirt/qemu/$VM_NAME-serial.log clean
+  {
+    echo "---- what the first boot was doing"
+    if [ -r "$serial" ]; then
+      clean=$(sed $'s/\e\\[[0-9;]*[a-zA-Z]//g; s/\r//g' "$serial")
+      echo "the guest's kernel booted $(grep -c 'Linux version ' <<<"$clean") time(s); apt in cloud-init:"
+      grep -E 'cloud-init\[[0-9]+\]: (Need to get|[0-9]+ upgraded,)' <<<"$clean" | tail -n 6 || echo "  (no apt run seen)"
+      echo "cloud-init's last line on the console: $(grep -E 'cloud-init\[[0-9]+\]:' <<<"$clean" | tail -n 1 || true)"
+      echo "---- the last 40 lines of $serial"
+      tail -n 40 <<<"$clean"
+    else
+      echo "(no $serial)"
+    fi
+    echo "---- cloud-init in the guest, over ssh"
+    # shellcheck disable=SC2016
+    ssh_guest 'cloud-init status --long; echo; sudo tail -n 30 /var/log/cloud-init-output.log; ps -eo etimes,args | grep -E "[a]pt|[d]pkg" | head -n 5' 2>&1 ||
+      echo "(no ssh into the guest)"
+  } >&2
+}
+
 # guest_exec TIMEOUT PATH ARG...: run a program in the guest through the agent, wait for it; prints its stdout,
 # returns its exit code (124 on timeout, 125 when the agent did not take it).
 guest_exec() {

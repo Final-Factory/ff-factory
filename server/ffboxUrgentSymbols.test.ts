@@ -44,12 +44,31 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
 }
 
 type Q = { id: string; what: string; args?: Record<string, unknown> };
-function onQuery(c: MockConnector, answer: (q: Q) => void, onBatch?: (puts: number) => void) {
+function onQuery(c: MockConnector, answer: (q: Q) => void, onBatch?: (puts: number) => void, hold?: (puts: Q[]) => boolean) {
   const timer = setInterval(() => {
-    onBatch?.(c.received.filter((m) => m.type === 'query' && (m as Q).what === 'symbols_put').length);
+    const puts = c.received.filter((m) => m.type === 'query' && (m as Q).what === 'symbols_put') as Q[];
+    onBatch?.(puts.length);
+    if (hold?.(puts)) return;
     for (let i = c.received.findIndex((m) => m.type === 'query'); i >= 0; i = c.received.findIndex((m) => m.type === 'query')) answer(c.received.splice(i, 1)[0] as Q);
   }, 5);
   return () => clearInterval(timer);
+}
+
+/**
+ * w6191: `fillWindow` holds the parts' answers until `n` wait, or the archive's last part is among them: answered every 5 ms
+ * as they come, a loaded machine's portal had sent only 4 when the first answers came back (a full Windows run on BEAST, "saw
+ * 4"), so how many it keeps in flight was not what the test measured. A second with fewer is answered anyway, and the
+ * window's assert says how many there were.
+ */
+let heldSince: number | undefined;
+function holdForWindow(puts: Q[], n: number): boolean {
+  const last = puts.some((q) => Number(q.args?.offset) + SYMBOLS_UPLOAD.partBytes >= Number(q.args?.bytes));
+  if (!puts.length || puts.length >= n || last || (heldSince !== undefined && Date.now() - heldSince > 1000)) {
+    heldSince = undefined;
+    return false;
+  }
+  heldSince ??= Date.now();
+  return true;
 }
 
 /**
@@ -57,7 +76,7 @@ function onQuery(c: MockConnector, answer: (q: Q) => void, onBatch?: (puts: numb
  * ffwatch, which takes them on every 4th part), complete once the bytes' SHA-256 is the archive's name; symbols_ingest
  * filing, then filed (or refused for `refuse`).
  */
-function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number; refusePut?: boolean; lose?: number } = {}) {
+function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number; refusePut?: boolean; lose?: number; fillWindow?: number } = {}) {
   const got = new Map<string, Buffer[]>();
   const log: { what: string; args: Record<string, unknown> }[] = [];
   let puts = 0;
@@ -96,7 +115,7 @@ function fakeFfbox(c: MockConnector, opts: { refuse?: string; busyEvery?: number
       return c.send({ type: 'query_result', id: q.id, what: q.what, ok: true, data: n < 2 ? { state: 'filing', archive: a.archive } : { state: 'filed', modules: 12, sources: ['master@abc'] } });
     }
     c.send({ type: 'query_result', id: q.id, what: q.what, ok: false, error: 'unsupported' });
-  }, (n) => (flight.max = Math.max(flight.max, n)));
+  }, (n) => (flight.max = Math.max(flight.max, n)), opts.fillWindow ? (puts) => holdForWindow(puts, opts.fillWindow!) : undefined);
   return { got, log, stop, flight };
 }
 
@@ -184,7 +203,7 @@ const BIG = Buffer.from(Array.from({ length: 1_000_000 }, (_, i) => (i * 7907 + 
 
 test('w1664: parts go on a sliding window of 8, never more, and a post or a view is never busy behind an upload', async (t) => {
   const { pm, store, c, dataDir } = await setup(t);
-  const ffbox = fakeFfbox(c);
+  const ffbox = fakeFfbox(c, { fillWindow: SYMBOLS_UPLOAD.window });
   t.after(ffbox.stop);
   const big = await publish(store, dataDir, 'big.tgz', BIG);
   const job = new FfboxSymbolUploads(pm, store, quick).start('1.0.0.3', [{ app: 'main', platform: 'WindowsPlayer', attachment: big.id }], 'w');

@@ -1,0 +1,941 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import os from 'node:os';
+import { runnerCensus } from '../machine/benchRunners.ts';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  LOTHDESKTOP_CI_FIRST,
+  WIN_CI_FIRST,
+  WinCiFirst,
+  agentTrees,
+  cpuBetween,
+  loweredFile,
+  priorityName,
+  readLowered,
+  writeLowered,
+  type Lowered,
+  type ProcFact,
+  type WinCiFirstDeps,
+  type WinCiFirstMode,
+  type WinCiFirstSettings,
+  type WinProc,
+  sameRoot,
+  ENV_RETRY_TICKS,
+} from '../machine/ciFirstWin.ts';
+
+/**
+ * w6110: on 2026-11-26 12:54-14:53 UTC a worker's planted CPU hogs (64 to 96 busy loops, w6066) ran at Normal priority beside
+ * LothDesktop's ffu runners, and their steps ran 10-25 times slower (a 1-4 min crosscheck took 56 min and timed out). The
+ * daemon finds the agents' processes beside a running job and logs what they use; warn only: it sets nothing.
+ */
+const P = os.constants.priority;
+const R2 = 'V:\\ffw\\ffu-runners\\ffu-lothdesktop-2';
+const DAEMON = 5;
+const BASE: WinProc[] = [
+  { pid: 10, ppid: 1, cmd: `"${R2}\\bin\\Runner.Listener.exe" run` },
+  { pid: 11, ppid: 10, cmd: `"${R2}\\bin\\Runner.Worker.exe" spawnclient 1 2` },
+  { pid: 12, ppid: 11, cmd: 'cargo.exe test' },
+  { pid: 20, ppid: DAEMON, cmd: 'node.exe agentHost.ts' }, // an agent host: never counted
+  { pid: 21, ppid: 20, cmd: 'claude.exe' },
+  { pid: 22, ppid: 21, cmd: 'python.exe hog.py' },
+  { pid: 23, ppid: 21, cmd: 'Unity.exe -batchmode' }, // already BelowNormal
+  { pid: 30, ppid: DAEMON, cmd: 'node.exe agentHost.ts' },
+  { pid: 31, ppid: 30, cmd: 'claude.exe' },
+];
+
+interface RigOpts {
+  settings?: WinCiFirstSettings | null;
+  procs?: WinProc[];
+  mode?: WinCiFirstMode;
+  record?: Lowered;
+  prio?: [number, number][];
+  /** When each host wrote its own record (its start), by pid. */
+  hostStart?: Record<number, number>;
+  noRecord?: boolean;
+  onFacts?: (r: Rig) => void;
+  /** w6217: each process's FF_SESSION_ID and FF_WORKER_ROOT, by pid; given, the rig reads environments. */
+  env?: Record<number, { session?: string; root?: string }>;
+  root?: string;
+}
+type Rig = ReturnType<typeof rig>;
+
+function rig(o: RigOpts = {}) {
+  let procs = o.procs ?? BASE;
+  const prio = new Map<number, number>([...[10, 11, 12, 20, 21, 22, 30].map((p) => [p, P.PRIORITY_NORMAL] as [number, number]), [23, P.PRIORITY_BELOW_NORMAL], [31, P.PRIORITY_ABOVE_NORMAL]]);
+  const started = new Map<number, number>(procs.map((p) => [p.pid, 100 + p.pid])); // parents start before children
+  const cpuMs = new Map<number, number>();
+  const lines: string[] = [];
+  const asked: number[][] = [];
+  let now = 1_000_000;
+  let busy = 0;
+  let fail = false;
+  let factsFail = false;
+  let held = false;
+  let writeFail = false;
+  let setFail = false;
+  let envFail = false;
+  const envAsked: number[][] = [];
+  let record: Lowered = o.record ?? {};
+  let api: Rig | undefined;
+  const set: [number, number][] = [];
+  const d: WinCiFirstDeps = {
+    // the logic is the same at any level; these cases are written at BelowNormal (LothDesktop's own is Idle, tested above)
+    settings: o.settings === null ? undefined : (o.settings ?? { ...LOTHDESKTOP_CI_FIRST, priority: P.PRIORITY_BELOW_NORMAL }),
+    procs: async () => {
+      if (fail) throw new Error('Get-CimInstance timed out');
+      return procs;
+    },
+    census: (ps) => runnerCensus(ps),
+    hosts: () => [
+      { session: 'aaaa1111', pid: 20, startedAt: o.hostStart?.[20] },
+      { session: 'bbbb2222', pid: 30, startedAt: o.hostStart?.[30] },
+    ],
+    priorityOf: (pid) => prio.get(pid),
+    facts: async (pids) => {
+      if (factsFail) throw new Error('inspecting processes failed (1)');
+      asked.push(pids);
+      if (api) o.onFacts?.(api);
+      return pids.filter((p) => procs.some((x) => x.pid === p)).map((p): ProcFact => ({ pid: p, startedAt: started.get(p), cpuMs: cpuMs.get(p) ?? 0 }));
+    },
+    machineBusyMs: () => busy,
+    envOf: o.env
+      ? async (pids) => {
+          if (envFail) throw new Error('reading the environments timed out');
+          envAsked.push(pids);
+          return new Map(pids.flatMap((p) => (o.env![p] ? [[p, o.env![p]] as const] : [])));
+        }
+      : undefined,
+    root: o.root,
+    self: DAEMON,
+    mode: o.mode,
+    held: () => held,
+    setPriority: (pid, p) => {
+      if (!prio.has(pid) || setFail) return false;
+      prio.set(pid, p);
+      set.push([pid, p]);
+      return true;
+    },
+    record: o.noRecord
+      ? undefined
+      : {
+          read: () => ({ ...record }),
+          write: (l) => {
+            if (writeFail && Object.keys(l).length) throw new Error('EPERM: operation not permitted, rename'); // as writeLowered: an empty one is a delete
+            record = { ...l };
+          },
+        },
+    now: () => now,
+    log: (l) => void lines.push(l),
+  };
+  for (const [pid, p] of o.prio ?? []) prio.set(pid, p);
+  const out = {
+    cf: new WinCiFirst(d),
+    setWriteFail: (f: boolean) => void (writeFail = f),
+    setSetFail: (f: boolean) => void (setFail = f),
+    setEnvFail: (f: boolean) => void (envFail = f),
+    envAsked,
+    now: () => now,
+    set,
+    record: () => record,
+    setHeld: (h: boolean) => void (held = h),
+    prio,
+    started,
+    lines,
+    asked,
+    burn: (pid: number, ms: number) => {
+      cpuMs.set(pid, (cpuMs.get(pid) ?? 0) + ms);
+      busy += ms;
+    },
+    advance: (ms: number) => void (now += ms),
+    setProcs: (p: WinProc[]) => void (procs = p),
+    setFail: (f: boolean) => void (fail = f),
+    setFactsFail: (f: boolean) => void (factsFail = f),
+  };
+  api = out;
+  return out;
+}
+
+test('lothdesktop is the one Windows CI-first machine, Idle (its runners run their jobs at BelowNormal)', () => {
+  assert.equal(WIN_CI_FIRST.lothdesktop, LOTHDESKTOP_CI_FIRST);
+  assert.deepEqual(Object.keys(WIN_CI_FIRST), ['lothdesktop']);
+  assert.equal(LOTHDESKTOP_CI_FIRST.priority, P.PRIORITY_LOW);
+  assert.equal(priorityName(P.PRIORITY_LOW), 'Idle');
+  assert.equal(priorityName(P.PRIORITY_NORMAL), 'Normal');
+  assert.equal(priorityName(P.PRIORITY_BELOW_NORMAL), 'BelowNormal');
+  assert.equal(priorityName(P.PRIORITY_LOW), 'Idle');
+  assert.equal(priorityName(P.PRIORITY_ABOVE_NORMAL), 'AboveNormal');
+});
+
+test('no settings: disabled, does nothing', async () => {
+  const r = rig({ settings: null });
+  assert.equal(r.cf.enabled, false);
+  assert.equal(await r.cf.tick(), undefined);
+  assert.deepEqual(r.lines, []);
+  assert.deepEqual(r.asked, []);
+});
+
+test('beside a job: the job and the agents are logged, with the machine, the jobs, each agent and the rest in cores', async () => {
+  const r = rig();
+  const first = await r.cf.tick();
+  assert.equal(first?.jobs, 1);
+  // 22 (Normal) runs above BelowNormal; 21 and 31 are the hosts' own children (claude) and 23 a Unity, none of them a tool;
+  // the hosts 20 and 30 are not counted
+  assert.equal(first?.above, 1);
+  assert.equal(r.lines.length, 1);
+  assert.match(r.lines[0], /CI job\(s\) running: ffu-lothdesktop-2 \(worker 11 at Normal\); 2 agent\(s\) beside them; 1 of their tools' process\(es\) run above BelowNormal, which enforcing would lower \(warn only, w6110\)/);
+  r.advance(120_000); // an uneven tick: the window says what it was
+  r.burn(22, 120_000 * 12); // a 12-core hog
+  r.burn(12, 120_000 * 2);
+  r.burn(999, 120_000 * 1); // something outside both (an editor, an orphan): the rest
+  const second = await r.cf.tick();
+  assert.equal(second?.windowMs, 120_000);
+  assert.equal(second?.agentCores?.aaaa1111, 12);
+  assert.equal(second?.agentCores?.bbbb2222, 0);
+  assert.equal(second?.jobCores, 2);
+  assert.equal(second?.machineCores, 15);
+  assert.match(r.lines[1], /over the last 120 s the machine used 15\.0 of \d+ cores: the CI job\(s\) on ffu-lothdesktop-2 \(worker 11 at Normal\) 2\.0, FF Factory's agents 12\.0 \(aaaa1111 12\.0\), the rest 1\.0/);
+  // rate-limited: the next minute's hog says nothing new
+  r.advance(60_000);
+  r.burn(22, 60_000 * 12);
+  await r.cf.tick();
+  assert.equal(r.lines.length, 2);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+});
+
+test('a process new since the last tick counts in full', async () => {
+  const r = rig();
+  await r.cf.tick();
+  r.advance(60_000);
+  r.setProcs([...BASE, { pid: 24, ppid: 21, cmd: 'rustc.exe' }]);
+  r.started.set(24, 1_030_000); // started inside the window
+  r.burn(24, 60_000 * 5);
+  const res = await r.cf.tick();
+  assert.equal(res?.agentCores?.aaaa1111, 5);
+});
+
+test('a reused pid is not walked into: a parent that started after its child is not its parent', () => {
+  // 40's real parent died; the daemon's old pid... any pid can come back as an unrelated process. 41 names 21 as parent but
+  // started before 21 did; 50 is another host, 51 its claude, and 60 the daemon's child: none are agent 20's.
+  const procs = [
+    { pid: 20, ppid: 5 },
+    { pid: 21, ppid: 20 },
+    { pid: 41, ppid: 21 },
+    { pid: 50, ppid: 21 },
+    { pid: 51, ppid: 50 },
+    { pid: 5, ppid: 21 },
+    { pid: 60, ppid: 5 },
+  ];
+  const started = new Map([
+    [20, 1_000],
+    [21, 2_000],
+    [41, 500],
+    [50, 3_000],
+    [51, 3_100],
+    [5, 2_500],
+    [60, 2_600],
+  ]);
+  const trees = agentTrees([20, 50], procs, new Set([20, 50, 5]), started);
+  assert.deepEqual(trees.get(20), [21]);
+  assert.deepEqual(trees.get(50), [51]);
+  // a pid with no start time read is not walked into either
+  assert.deepEqual(agentTrees([20], procs, new Set([20]), new Map([[20, 1_000]])).get(20), []);
+});
+
+test("a runner started under an agent host is the job's, not the agent's", async () => {
+  const procs = [...BASE, { pid: 40, ppid: 21, cmd: `"${R2}\\bin\\Runner.Worker.exe" spawnclient` }, { pid: 41, ppid: 40, cmd: 'cargo.exe' }];
+  const r = rig({ procs });
+  r.prio.set(40, P.PRIORITY_NORMAL);
+  r.prio.set(41, P.PRIORITY_NORMAL);
+  assert.equal((await r.cf.tick())?.above, 1);
+  r.advance(60_000);
+  r.burn(41, 60_000 * 3);
+  const res = await r.cf.tick();
+  assert.equal(res?.agentCores?.aaaa1111, 0);
+  assert.equal(res?.jobCores, 3);
+});
+
+test('no job: nothing read beyond the listing and nothing logged; a job ending is logged once', async () => {
+  const idle = BASE.filter((p) => p.pid !== 11 && p.pid !== 12);
+  const r = rig({ procs: idle });
+  assert.equal((await r.cf.tick())?.jobs, 0);
+  assert.deepEqual(r.lines, []);
+  assert.deepEqual(r.asked, []);
+  r.setProcs(BASE);
+  await r.cf.tick();
+  r.setProcs(idle);
+  await r.cf.tick();
+  await r.cf.tick();
+  assert.equal(r.lines.length, 2);
+  assert.match(r.lines[1], /no CI job running now/);
+});
+
+test('a failing process listing or CPU read is survived and said once per streak', async () => {
+  const r = rig();
+  r.setFail(true);
+  assert.equal(await r.cf.tick(), undefined);
+  assert.equal(await r.cf.tick(), undefined);
+  assert.equal(r.lines.length, 1);
+  assert.match(r.lines[0], /could not list processes: Get-CimInstance timed out/);
+  r.setFail(false);
+  assert.equal((await r.cf.tick())?.jobs, 1);
+  assert.match(r.lines[1], /answers again/);
+  r.setFactsFail(true);
+  await r.cf.tick();
+  await r.cf.tick();
+  assert.equal(r.lines.filter((l) => /could not read the processes' start times and CPU/.test(l)).length, 1);
+  r.setFactsFail(false);
+  r.advance(60_000);
+  const back = await r.cf.tick();
+  assert.equal(back?.windowMs, undefined); // no baseline across the gap
+  assert.match(r.lines.at(-1)!, /read again/);
+});
+
+test('ticks never overlap: one still waiting on its listing makes the next return at once, and runs once more after it', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((res) => (release = res));
+  let calls = 0;
+  const cf = new WinCiFirst({
+    settings: LOTHDESKTOP_CI_FIRST,
+    procs: async () => {
+      calls++;
+      await gate;
+      return [];
+    },
+    census: (ps) => runnerCensus(ps),
+    hosts: () => [],
+    priorityOf: () => undefined,
+    facts: async () => [],
+    machineBusyMs: () => 0,
+    self: 1,
+    now: () => 0,
+    log: () => {},
+  });
+  const a = cf.tick();
+  assert.equal(await cf.tick(), undefined);
+  release();
+  assert.equal((await a)?.jobs, 0);
+  assert.equal(calls, 2, 'run once more after, never beside it');
+});
+
+test('cpuBetween: a difference for one read twice, in full for one new in the window, nothing for a reused pid from before', () => {
+  const before = new Map([
+    ['1@5', 1000],
+    ['2@5', 0],
+  ]);
+  const after: ProcFact[] = [
+    { pid: 1, startedAt: 5, cpuMs: 4000 },
+    { pid: 2, startedAt: 50, cpuMs: 9000 }, // pid 2 again, a new process started in the window
+    { pid: 3, startedAt: 1, cpuMs: 7000 }, // not read last time and older than the window: no baseline
+  ];
+  assert.equal(cpuBetween(before, after, 10), 3000 + 9000);
+});
+
+test("an adopted host whose old parent pid a job's process got again stays the agents', not the job's", async () => {
+  // after a daemon restart host 20's parent pid is the old daemon's; a job's rustc now has that pid
+  const procs = BASE.map((p) => (p.pid === 20 ? { ...p, ppid: 77 } : p)).concat([{ pid: 77, ppid: 12, cmd: 'rustc.exe' }]);
+  const r = rig({ procs });
+  r.prio.set(77, P.PRIORITY_NORMAL);
+  assert.equal((await r.cf.tick())?.above, 1);
+  r.advance(60_000);
+  r.burn(22, 60_000 * 8);
+  const res = await r.cf.tick();
+  assert.equal(res?.agentCores?.aaaa1111, 8);
+  assert.equal(res?.jobCores, 0);
+});
+
+test("a job whose first CPU read fails still gets its start line once the read answers", async () => {
+  const r = rig();
+  r.setFactsFail(true);
+  await r.cf.tick();
+  r.setFactsFail(false);
+  await r.cf.tick();
+  assert.equal(r.lines.filter((l) => /CI job\(s\) running/.test(l)).length, 1);
+});
+
+// ---- enforce (w6110's second step): daemon.json winCiFirst "enforce" ----
+
+test("enforce: beside a job only an agent's tools go to BelowNormal, recorded with what they had; hosts, claude, Unity and the job keep theirs", async () => {
+  const procs = [...BASE, { pid: 24, ppid: 23, cmd: 'bee_backend.exe' }];
+  const r = rig({ procs, mode: 'enforce', prio: [[24, P.PRIORITY_NORMAL]] });
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 1);
+  assert.deepEqual(r.set, [[22, P.PRIORITY_BELOW_NORMAL]]);
+  for (const pid of [10, 11, 12, 20, 21, 24, 30]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `pid ${pid}`);
+  assert.equal(r.prio.get(31), P.PRIORITY_ABOVE_NORMAL);
+  assert.deepEqual(r.record(), { '22@122': { prev: P.PRIORITY_NORMAL, at: 1_000_000, host: 20 } });
+  assert.match(r.lines.join('\n'), /lowered 1 of the agents' tools' process\(es\) to BelowNormal beside the CI job\(s\), so the jobs go first \(w6110\): 22 python\.exe/);
+  assert.match(r.lines.join('\n'), /1 of their tools' process\(es\) lowered to BelowNormal so far/);
+  // the next tick finds it BelowNormal already: nothing set again
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.lowered, 0);
+  assert.equal(r.set.length, 1);
+});
+
+test('warn (the default) sets nothing even with a way to set', async () => {
+  const r = rig();
+  await r.cf.tick();
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.deepEqual(r.set, []);
+  assert.deepEqual(r.record(), {});
+});
+
+test("enforce: a bench or a person's turn raises what was lowered (and what it started since) back, and lowers nothing until it ends", async () => {
+  const procs = [...BASE, { pid: 25, ppid: 22, cmd: 'python.exe child.py' }, { pid: 26, ppid: 22, cmd: 'python.exe old.py' }];
+  const r = rig({ procs, mode: 'enforce', prio: [[26, P.PRIORITY_BELOW_NORMAL]] });
+  r.started.set(25, 1_010_000); // started after 22 was lowered (1_000_000), so it inherited BelowNormal
+  r.prio.set(25, P.PRIORITY_BELOW_NORMAL);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  r.setHeld(true);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.equal(res?.raised, 2);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(25), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(26), P.PRIORITY_BELOW_NORMAL, 'BelowNormal of its own before 22 was lowered: left alone');
+  assert.ok(Object.values(r.record()).every((l) => l.raisedAt !== undefined), 'kept one more raise, marked raised');
+  assert.equal(res?.lowered, 0);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL, 'nothing lowered while the turn holds');
+  assert.match(r.lines.join('\n'), /a bench or a person's turn holds this machine: what was lowered is raised back/);
+  r.setHeld(false);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL, 'lowered again once the turn ends');
+  assert.match(r.lines.join('\n'), /the turn holding this machine ended/);
+});
+
+test('enforce: once no CI job runs, what was lowered goes back', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  r.setProcs(BASE.filter((p) => p.pid !== 11 && p.pid !== 12));
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.equal(res?.jobs, 0);
+  assert.equal(res?.raised, 1);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.deepEqual(r.record(), {}, 'dropped at the next raise, whose cutoff is past the first');
+});
+
+test('a daemon started with warn or off raises what the record holds; a reused pid (another start time) is left alone', async () => {
+  for (const mode of ['warn', 'off'] as const) {
+    const r = rig({
+      mode,
+      record: { '22@122': { prev: P.PRIORITY_NORMAL, at: 500 }, '31@999': { prev: P.PRIORITY_NORMAL, at: 500 } },
+      prio: [[22, P.PRIORITY_BELOW_NORMAL]],
+    });
+    r.prio.set(31, P.PRIORITY_BELOW_NORMAL); // 31 started at 131, not 999: another process with that pid
+    const res = await r.cf.tick();
+    assert.equal(res?.raised, 1, mode);
+    assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+    assert.equal(r.prio.get(31), P.PRIORITY_BELOW_NORMAL);
+    assert.match(r.lines[0], new RegExp(`raised 1 process\\(es\\) back to the priority they had \\(winCiFirst is ${mode}; 2 were recorded as lowered, 1 of the recorded still run\\)`));
+    if (mode === 'off') assert.equal(r.lines.length, 1, 'off: nothing else is read or said');
+    r.advance(60_000);
+    await r.cf.tick();
+    assert.deepEqual(r.record(), {}, mode);
+    assert.equal(r.lines.filter((l) => /raised/.test(l)).length, 1, 'the second look says nothing when it raises nothing');
+  }
+});
+
+test('the record file: written atomically under <root>/tmp, bad entries dropped, removed when empty', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w6110-'));
+  try {
+    assert.deepEqual(readLowered(root), {});
+    writeLowered(root, { '22@122': { prev: 0, at: 5 } });
+    assert.deepEqual(readLowered(root), { '22@122': { prev: 0, at: 5 } });
+    fs.writeFileSync(loweredFile(root), JSON.stringify({ '22@122': { prev: 0, at: 5 }, bad: { prev: 0, at: 1 }, '7@1': { prev: 'x' } }));
+    assert.deepEqual(readLowered(root), { '22@122': { prev: 0, at: 5 } });
+    fs.writeFileSync(loweredFile(root), 'not json');
+    assert.deepEqual(readLowered(root), {});
+    writeLowered(root, {});
+    assert.equal(fs.existsSync(loweredFile(root)), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ---- the independent review's cases (pid reuse, orphans, the record, a turn mid-read) ----
+
+test("enforce: a tool's pid that another process took after the listing (it started later) is left alone", async () => {
+  const r = rig({ mode: 'enforce' });
+  r.started.set(22, 1_000_000); // pid 22 is now a process started after the listing could have been taken
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.deepEqual(r.set, []);
+});
+
+test("enforce: a host's pid a job's process got (it started after the host's own record) is the job's: its children are not lowered", async () => {
+  // host 20 died; a CI rustc (child of the job's cargo 12) now has pid 20, started after host 20 wrote its record
+  const procs = BASE.filter((p) => ![20, 21, 22, 23].includes(p.pid)).concat([
+    { pid: 20, ppid: 12, cmd: 'rustc.exe' },
+    { pid: 41, ppid: 20, cmd: 'rustc.exe' },
+    { pid: 42, ppid: 41, cmd: 'cc.exe' },
+  ]);
+  const r = rig({ procs, mode: 'enforce', prio: [[41, P.PRIORITY_NORMAL], [42, P.PRIORITY_NORMAL]], hostStart: { 20: 50 } });
+  r.started.set(20, 900_000);
+  r.started.set(41, 900_100);
+  r.started.set(42, 900_200);
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.deepEqual(r.set, []);
+  assert.match(r.lines[0], /1 agent\(s\) beside them/);
+});
+
+test('raise: what a lowered tool started stays BelowNormal after it ends (Windows keeps no new parent) unless raised: it is raised too', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  // 22 ends; what it started (inheriting BelowNormal) runs on, its parent pid now pointing at nothing
+  r.setProcs([...BASE.filter((p) => p.pid !== 22), { pid: 27, ppid: 22, cmd: 'sccache.exe' }, { pid: 28, ppid: 27, cmd: 'rustc.exe' }]);
+  r.started.set(27, 1_010_000);
+  r.started.set(28, 1_020_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.prio.set(28, P.PRIORITY_BELOW_NORMAL);
+  r.started.delete(22);
+  r.setHeld(true);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.equal(res?.raised, 2);
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
+  assert.equal(r.prio.get(28), P.PRIORITY_NORMAL);
+});
+
+test("raise: a child of a recorded pid's new holder (started after it) is that process's, and is not raised", async () => {
+  const r = rig({ mode: 'warn', record: { '22@122': { prev: P.PRIORITY_NORMAL, at: 500 } } });
+  r.started.set(22, 900_000); // pid 22 is another process now
+  r.setProcs([...BASE, { pid: 29, ppid: 22, cmd: 'child.exe' }]);
+  r.started.set(29, 950_000);
+  r.prio.set(29, P.PRIORITY_BELOW_NORMAL);
+  r.prio.set(22, P.PRIORITY_BELOW_NORMAL);
+  assert.equal((await r.cf.tick())?.raised, 0);
+  assert.equal(r.prio.get(29), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+});
+
+test('enforce: a record that cannot be written lowers nothing (it is written before anything is lowered)', async () => {
+  const r = rig({ mode: 'enforce' });
+  r.setWriteFail(true);
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.deepEqual(r.cf.loweredNow(), {});
+  assert.match(r.lines.join('\n'), /could not write the record of lowered processes/);
+  assert.match(r.lines.join('\n'), /lowered none of 1 process\(es\), since the record/);
+  assert.deepEqual(r.set, [], 'nothing was set, so nothing needs putting back');
+  r.setWriteFail(false);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.lowered, 1);
+  assert.match(r.lines.join('\n'), /the record of lowered processes is written again/);
+});
+
+test('enforce: without a record to undo from, nothing is lowered', async () => {
+  const r = rig({ mode: 'enforce', noRecord: true });
+  await r.cf.tick();
+  assert.deepEqual(r.set, []);
+});
+
+test("enforce: a turn that begins during the processes' read is honoured: nothing lowered", async () => {
+  const r = rig({ mode: 'enforce', onFacts: (x) => x.setHeld(true) });
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+});
+
+test('raise: one that fails is tried again, then given up with a line in the log; toolsLowered names the host meanwhile', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.cf.toolsLowered(20), true);
+  assert.equal(r.cf.toolsLowered(30), false);
+  r.setSetFail(true);
+  r.setHeld(true);
+  for (let i = 0; i < 3; i++) {
+    r.advance(60_000);
+    await r.cf.tick();
+  }
+  assert.match(r.lines.join('\n'), /gave up raising process 22 back after 3 tries/);
+  assert.deepEqual(r.cf.loweredNow(), {});
+  assert.equal(r.cf.toolsLowered(20), false);
+});
+
+// ---- the re-review's cases ----
+
+test('raise: what a lowered tool started in the seconds before the raise (not yet in the listing) is raised at the next look', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  r.setHeld(true);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.raised, 1);
+  // 22 started 27 three seconds before that raise, inheriting BelowNormal; the listing then was older than that
+  r.setProcs([...BASE, { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.started.set(27, r.now() - 3_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.raised, 1);
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
+  assert.deepEqual(r.record(), {});
+});
+
+test('toolsLowered: only while a tool of that host runs lowered beside a job, not once it ended', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  assert.equal(r.cf.toolsLowered(20), true);
+  r.setProcs(BASE.filter((p) => p.pid !== 22));
+  r.started.delete(22);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.cf.toolsLowered(20), false);
+  assert.deepEqual(r.record(), {}, 'an ended entry that left nothing running is pruned');
+});
+
+test('enforce: a record that stays unwritable lowers nothing tick after tick (no lower and put back each minute)', async () => {
+  const r = rig({ mode: 'enforce' });
+  r.setWriteFail(true);
+  for (let i = 0; i < 3; i++) {
+    await r.cf.tick();
+    r.advance(60_000);
+  }
+  assert.deepEqual(r.set, []);
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  assert.equal(r.lines.filter((l) => /could not be written|could not write/.test(l)).length, 2, 'said once for the streak');
+});
+
+// ---- the final check's cases ----
+
+test('toolsLowered stays true while a tick is under way and after a failed read, while the tools stay lowered', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  let mid: boolean | undefined;
+  const r2 = r; // read it during the next tick's facts read
+  r.setFactsFail(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  mid = r2.cf.toolsLowered(20);
+  assert.equal(mid, true, 'a failed read keeps what the last good tick saw');
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+});
+
+test('toolsLowered is true during the facts read of a tick', async () => {
+  let during: boolean | undefined;
+  let n = 0;
+  const r = rig({ mode: 'enforce', onFacts: (x) => void (n++ === 1 && (during = x.cf.toolsLowered(20))) });
+  await r.cf.tick();
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(during, true);
+});
+
+test('prune: an entry whose process the listing still shows is kept (what it started after the listing is not seen yet)', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  // 22 is in the (cached) listing but has ended by the facts read; it started 27 after the listing, which inherited BelowNormal
+  r.started.delete(22);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.ok(r.record()['22@122'], 'kept: the listing still shows 22');
+  r.setProcs([...BASE.filter((p) => p.pid !== 22), { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.started.set(27, r.now() - 30_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.setProcs([...BASE.filter((p) => p.pid !== 11 && p.pid !== 12 && p.pid !== 22), { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL, 'raised once the job ended');
+});
+
+test('raise: raisedAt is the time the raise was done, so a child started during the raise read is caught by the next look', async () => {
+  let k = 0;
+  const r = rig({
+    mode: 'enforce',
+    // the raise's facts read takes 20 s; meanwhile 22 starts 27 (still lowered, so it inherits BelowNormal)
+    onFacts: (x) => {
+      if (k++ !== 1) return;
+      x.advance(20_000);
+      x.setProcs([...BASE, { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+      x.started.set(27, x.now() - 10_000);
+      x.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+    },
+  });
+  await r.cf.tick();
+  r.setHeld(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL);
+  r.advance(8_000); // the next look comes soon (a 5 s turn check)
+  await r.cf.tick();
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(27), P.PRIORITY_NORMAL);
+});
+
+test('raise: the second look raises neither the raised process nor what it started after its raise', async () => {
+  const r = rig({ mode: 'enforce' });
+  await r.cf.tick();
+  r.setHeld(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  // after its raise, 22 set itself BelowNormal and started 27 at BelowNormal: its own choice
+  r.prio.set(22, P.PRIORITY_BELOW_NORMAL);
+  r.setProcs([...BASE, { pid: 27, ppid: 22, cmd: 'rustc.exe' }]);
+  r.started.set(27, r.now() + 1_000);
+  r.prio.set(27, P.PRIORITY_BELOW_NORMAL);
+  r.advance(60_000);
+  assert.equal((await r.cf.tick())?.raised, 0);
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(27), P.PRIORITY_BELOW_NORMAL);
+  assert.deepEqual(r.record(), {});
+});
+
+test('tick: one asked for while a tick runs runs once more after it (a turn that begins mid-tick is acted on)', async () => {
+  let inner: Promise<unknown> | undefined;
+  let k = 0;
+  const r = rig({
+    mode: 'enforce',
+    onFacts: (x) => {
+      if (k++ !== 1) return;
+      x.setHeld(true);
+      inner = x.cf.tick();
+    },
+  });
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(await inner, undefined, 'the inner call returns at once');
+  assert.equal(r.prio.get(22), P.PRIORITY_NORMAL, 'the rerun saw the turn and raised');
+});
+
+// ---- at LothDesktop's own level, Idle ----
+
+test("Idle: a tool at BelowNormal is lowered to Idle and raised back to BelowNormal; a Unity batch run below a tool is not raised", async () => {
+  const procs = [...BASE, { pid: 25, ppid: 22, cmd: '"C:\\U\\Unity.exe" -batchmode -projectPath x' }];
+  const r = rig({ procs, mode: 'enforce', settings: LOTHDESKTOP_CI_FIRST, prio: [[22, P.PRIORITY_BELOW_NORMAL]] });
+  r.started.set(25, 1_010_000);
+  r.prio.set(25, P.PRIORITY_LOW); // the bench turn's lowerBuild put it at Idle
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_LOW);
+  assert.equal(r.cf.loweredNow()['22@122']?.prev, P.PRIORITY_BELOW_NORMAL);
+  r.setHeld(true);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.prio.get(22), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(25), P.PRIORITY_LOW, 'a Unity run is lowerBuild\'s to set, not ours');
+});
+
+/**
+ * w6217: a tool whose starter exited (a `cargo test` under a `bash /tmp/bugchecks.sh` whose parent was gone, 2026-11-26
+ * 21:54 UTC) is outside every walk from a host. Its tree is found by its environment's FF_SESSION_ID; step one only counts it.
+ */
+const ROOT = 'V:\\ffw';
+const ORPHANS: WinProc[] = [
+  ...BASE,
+  { pid: 40, ppid: 99, cmd: 'bash.exe /tmp/bugchecks.sh' }, // 99 is gone; Git Bash shows no environment
+  { pid: 41, ppid: 40, cmd: 'cargo.exe test' },
+  { pid: 42, ppid: 41, cmd: 'rustc.exe' },
+  { pid: 50, ppid: 98, cmd: 'Unity.exe -batchmode' }, // an orphaned Unity: never a tool, nor what it started
+  { pid: 51, ppid: 50, cmd: 'bee_backend.exe' },
+  { pid: 60, ppid: 97, cmd: 'python.exe other.py' }, // another FF Factory's worker (another root)
+  { pid: 70, ppid: 96, cmd: 'python.exe old.py' }, // a session that is not live here
+  { pid: 80, ppid: 95, cmd: 'svchost.exe' }, // no FF environment at all
+];
+const ORPHAN_ENV = {
+  41: { session: 'aaaa1111', root: 'v:/ffw/' },
+  42: { session: 'aaaa1111', root: ROOT },
+  50: { session: 'bbbb2222', root: ROOT },
+  51: { session: 'bbbb2222', root: ROOT },
+  60: { session: 'bbbb2222', root: 'F:\\ffw' },
+  70: { session: 'dead0000', root: ROOT },
+};
+const NORMAL_ORPHANS: [number, number][] = [40, 41, 42, 50, 51, 60, 70, 80].map((p) => [p, P.PRIORITY_NORMAL]);
+
+test("w6217: sameRoot is leftovers.ts's on Windows: no case, either slash, an unknown either side is the same", () => {
+  assert.equal(sameRoot('V:\\ffw', 'v:/ffw/'), true);
+  assert.equal(sameRoot('F:\\ffw', 'V:\\ffw'), false);
+  assert.equal(sameRoot(undefined, 'V:\\ffw'), true);
+  assert.equal(sameRoot('V:\\ffw', undefined), true);
+});
+
+test("w6217: warn: an orphaned tool tree is found by its session's environment (the shell above it is not), named, nothing lowered", async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'warn' });
+  const res = await r.cf.tick();
+  // 41 and 42 are aaaa1111's; 40 (no env), the Unity tree, another root's 60, the dead session's 70 and 80 are not
+  assert.equal(res?.orphans, 2);
+  assert.equal(res?.above, 3, "22 under the host, and the two orphans");
+  const said = r.lines.filter((l) => /found by their session's environment/.test(l));
+  assert.equal(said.length, 1);
+  assert.match(said[0], /2 more of the agents' tools' process\(es\) run above BelowNormal .*found by their session's environment \(w6217; 5 orphan tree\(s\) of 8 process\(es\) looked at\); enforcing would lower them \(warn only\): 41 cargo\.exe \(aaaa1111\), 42 rustc\.exe \(aaaa1111\)$/);
+  assert.match(r.lines.find((l) => /CI job\(s\) running/.test(l))!, /3 of their tools' process\(es\) run above BelowNormal, which enforcing would lower \(warn only, w6110\); 2 of them with the process that started them gone \(w6217\)/);
+  for (const pid of [40, 41, 42, 50, 51, 60, 70, 80]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+  assert.deepEqual(r.set, []);
+  // the hosts', the job's and the daemon's own trees are never orphan roots: their environments are not read
+  assert.ok(!r.envAsked.flat().some((p) => [10, 11, 12, 20, 21, 22, 23, 30, 31].includes(p)));
+});
+
+test('w6217: enforce: the orphaned tools go to the priority with the rest, recorded with their host, and back once the job ends', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'enforce' });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 2);
+  assert.equal(res?.lowered, 3, '22, 41 and 42');
+  for (const pid of [22, 41, 42]) assert.equal(r.prio.get(pid), P.PRIORITY_BELOW_NORMAL, `${pid}`);
+  for (const pid of [40, 50, 51, 60, 70, 80]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid} keeps its own`);
+  assert.deepEqual(r.record()['41@141'], { prev: P.PRIORITY_NORMAL, at: 1_000_000, host: 20 });
+  assert.deepEqual(r.record()['42@142'], { prev: P.PRIORITY_NORMAL, at: 1_000_000, host: 20 });
+  assert.match(r.lines.find((l) => /found by their session's environment/.test(l))!, /lowered with the rest: 41 cargo\.exe \(aaaa1111\) lowered, 42 rustc\.exe \(aaaa1111\) lowered$/);
+  assert.match(r.lines.find((l) => /ci first: lowered 3/.test(l))!, /: 22 python\.exe, 41 cargo\.exe, 42 rustc\.exe/);
+  // the job ends: everything lowered goes back, the orphans too
+  r.setProcs(ORPHANS.filter((p) => p.pid !== 11 && p.pid !== 12));
+  r.advance(60_000);
+  const after = await r.cf.tick();
+  assert.equal(after?.raised, 3);
+  for (const pid of [22, 41, 42]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid} raised`);
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.deepEqual(r.record(), {});
+});
+
+test("w6217: enforce: a bench or a person's turn keeps the orphans where they are, and so does a process too new for the listing", async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'enforce' });
+  r.setHeld(true);
+  const res = await r.cf.tick();
+  assert.equal(res?.lowered, 0);
+  assert.equal(r.prio.get(41), P.PRIORITY_NORMAL);
+  assert.match(r.lines.find((l) => /found by their session's environment/.test(l))!, /not lowered while a bench or a person's turn holds this machine/);
+  r.setHeld(false);
+  r.advance(60_000);
+  r.started.set(42, r.now()); // 42 is a new process with that pid, started after the listing could have been taken
+  await r.cf.tick();
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL);
+  assert.equal(r.prio.get(42), P.PRIORITY_NORMAL);
+});
+
+test('w6217: each environment is read once; a new orphan is named once', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS });
+  await r.cf.tick();
+  const n = r.envAsked.length;
+  r.advance(60_000);
+  await r.cf.tick();
+  assert.equal(r.envAsked.length, n, 'nothing new: nothing read');
+  assert.equal(r.lines.filter((l) => /found by their session's environment/.test(l)).length, 1, 'not said again');
+  r.advance(60_000);
+  r.setProcs([...ORPHANS, { pid: 43, ppid: 41, cmd: 'rustc.exe' }]);
+  r.started.set(43, 1_100_000);
+  r.prio.set(43, P.PRIORITY_NORMAL);
+  const res = await r.cf.tick();
+  assert.deepEqual(r.envAsked.at(-1), [43]);
+  assert.equal(res?.orphans, 3);
+  assert.match(r.lines.filter((l) => /found by their session's environment/.test(l)).at(-1)!, /^.*ci first: 1 more .*: 43 rustc\.exe \(aaaa1111\)$/);
+  // one at the priority already is not counted
+  r.advance(60_000);
+  r.prio.set(43, P.PRIORITY_BELOW_NORMAL);
+  assert.equal((await r.cf.tick())?.orphans, 2);
+});
+
+test('w6217: a failed environment read is said once and tried again only after 5 ticks; the trees it did not read are left alone', async () => {
+  const r = rig({ procs: ORPHANS, env: ORPHAN_ENV, root: ROOT, prio: NORMAL_ORPHANS, mode: 'enforce' });
+  r.setEnvFail(true);
+  const first = await r.cf.tick();
+  assert.equal(first?.jobs, 1);
+  assert.equal(first?.lowered, 1, "the hosts' own walk is untouched: 22");
+  assert.equal(first?.orphans, 0);
+  r.setEnvFail(false);
+  for (let i = 0; i < ENV_RETRY_TICKS; i++) {
+    r.advance(60_000);
+    assert.equal((await r.cf.tick())?.orphans, 0, `skipped tick ${i}`);
+  }
+  assert.deepEqual(r.envAsked, [], 'not read while it waits');
+  assert.equal(r.lines.filter((l) => /could not read the processes' environments \(tried again every 6 ticks\): reading the environments timed out/.test(l)).length, 1);
+  assert.equal(r.prio.get(41), P.PRIORITY_NORMAL);
+  r.advance(60_000);
+  const res = await r.cf.tick();
+  assert.ok(r.lines.some((l) => /environments read again/.test(l)));
+  assert.equal(res?.orphans, 2);
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL);
+});
+
+test('w6222 review: the orphaned wrapper above a runner listener is not an agent tool, nor what is above it', async () => {
+  const procs = ORPHANS.map((p) => (p.pid === 10 ? { ...p, ppid: 90 } : p));
+  procs.push({ pid: 90, ppid: 92, cmd: 'cmd.exe /c run.cmd' }, { pid: 92, ppid: 89, cmd: 'bash.exe' }, { pid: 93, ppid: 92, cmd: 'python.exe' }); // 89 (the agent's shell) is gone
+  const r = rig({
+    procs,
+    mode: 'enforce',
+    env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT }, 92: { session: 'aaaa1111', root: ROOT }, 93: { session: 'aaaa1111', root: ROOT } },
+    root: ROOT,
+    prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL], [92, P.PRIORITY_NORMAL], [93, P.PRIORITY_NORMAL]],
+  });
+  r.started.set(92, 50);
+  r.started.set(90, 60);
+  r.started.set(93, 70);
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 3, '41, 42 and 93 (a sibling of the wrapper, below no listener)');
+  for (const pid of [90, 92, 10, 11, 12]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid} is the runner's or above it`);
+  assert.equal(r.prio.get(93), P.PRIORITY_BELOW_NORMAL);
+});
+
+test("w6222 review: a CI job step's orphan is not an agent tool, whatever session the runner's environment carries, nor what it started or what is above it", async () => {
+  const procs = [
+    ...ORPHANS,
+    { pid: 94, ppid: 87, cmd: 'bash.exe' }, // an agent's shell, its parent gone
+    { pid: 91, ppid: 94, cmd: 'node.exe test-server.js' }, // a job step's process (the runner's env), somehow below it
+    { pid: 85, ppid: 91, cmd: 'python.exe' },
+    { pid: 86, ppid: 88, cmd: 'node.exe stray.js' }, // started by job step 88, which ended
+  ];
+  const ci = { session: 'aaaa1111', root: ROOT, ci: true };
+  const r = rig({
+    procs,
+    mode: 'enforce',
+    env: { ...ORPHAN_ENV, 94: { session: 'aaaa1111', root: ROOT }, 91: ci, 85: { session: 'aaaa1111', root: ROOT }, 86: ci },
+    root: ROOT,
+    prio: [...NORMAL_ORPHANS, ...[91, 94, 85, 86].map((p): [number, number] => [p, P.PRIORITY_NORMAL])],
+  });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 2, "only 41 and 42; 91 and 86 are the job's, 85 below one, 94 above one");
+  for (const pid of [91, 94, 85, 86]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+});
+
+test("w6225 review: a runner's run.cmd wrapper is not lowered while its listener is between runs (a relaunch, exit 2 to 4)", async () => {
+  // Runner 1's listener exited and run.cmd starts the next under the same cmd.exe, while runner 2's job (10/11/12) runs.
+  const R1 = 'V:\\ffw\\ffu-runners\\ffu-lothdesktop-1';
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: `cmd.exe /c "${R1}\\run.cmd"` }]; // 89, the agent's shell that started it, is gone
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'the next listener (and its jobs) would start at the lowered priority');
+  assert.equal(r.prio.get(41), P.PRIORITY_BELOW_NORMAL, 'the real orphaned tool is still lowered');
+});
+
+test("w6225 review: a runner's conhost.exe naming only its folder is not lowered either", async () => {
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: '\\??\\C:\\Windows\\system32\\conhost.exe 0x4 V:/ffw/ffu-runners/ffu-lothdesktop-1' }];
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL);
+});
+
+test("w6225 review: Unity's licensing client, left running after an agent's batch Unity ended, is not lowered", async () => {
+  const procs = [...ORPHANS, { pid: 90, ppid: 89, cmd: '"C:\\Program Files\\Unity\\Hub\\Editor\\6000.0.58f2\\Editor\\Data\\Resources\\Licensing\\Client\\Unity.Licensing.Client.exe" --namedPipe Unity-LicenseClient-lothsahn' }];
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: { session: 'aaaa1111', root: ROOT } }, root: ROOT, prio: [...NORMAL_ORPHANS, [90, P.PRIORITY_NORMAL]] });
+  await r.cf.tick();
+  assert.equal(r.prio.get(90), P.PRIORITY_NORMAL, 'every Unity editor on the machine talks to it');
+});
+
+test('w6225 review: Unity Hub and a tool run from a Unity Editor install are not lowered, nor what they started', async () => {
+  const procs = [
+    ...ORPHANS,
+    { pid: 90, ppid: 89, cmd: '"C:\\Program Files\\Unity Hub\\Unity Hub.exe" --silent' },
+    { pid: 91, ppid: 90, cmd: 'node.exe hub-helper.js' },
+    { pid: 92, ppid: 88, cmd: 'C:/Program Files/Unity/Hub/Editor/6000.0.58f2/Editor/Data/Tools/Bee/bee_backend.exe' },
+  ];
+  const s = { session: 'aaaa1111', root: ROOT };
+  const r = rig({ procs, mode: 'enforce', env: { ...ORPHAN_ENV, 90: s, 91: s, 92: s }, root: ROOT, prio: [...NORMAL_ORPHANS, ...[90, 91, 92].map((p): [number, number] => [p, P.PRIORITY_NORMAL])] });
+  await r.cf.tick();
+  for (const pid of [90, 91, 92]) assert.equal(r.prio.get(pid), P.PRIORITY_NORMAL, `${pid}`);
+});
+
+test('w6217: without an environment reader (not a real daemon) no orphan is looked for', async () => {
+  const r = rig({ procs: ORPHANS, root: ROOT, prio: NORMAL_ORPHANS });
+  const res = await r.cf.tick();
+  assert.equal(res?.orphans, 0);
+  assert.ok(!r.lines.some((l) => /orphaned|started them gone/.test(l)));
+});

@@ -16,6 +16,7 @@ import { cleanBlock, cleanLine, intakeSettings } from './intakeRules.ts';
 import { redactSecrets } from './secrets.ts';
 import { DEV_LIMITS, type DevOwn, type DevAck, type DevAckError, type DevChunkMessage, type DevFiled, type DevFiledError, type DevMessageMessage, type DevReceivedMessage, type DevReply, type DevRequestMessage, type DevUpdate } from './providerProtocol.ts';
 import { questionFor, type AttachmentRef, type Requester, type WorkItem } from '../shared/types.ts';
+import { onRequest } from '../shared/blockers.ts';
 
 /** config providers.ffbox.devRequests. */
 export interface DevRequestsConfig {
@@ -662,7 +663,7 @@ export class DevRequests {
     const say = async (sid: string, by: Requester) => this.d.sendFiles(sid, text, files, by).catch((e: Error) => console.warn(`dev message ${m.ref}: session ${sid} could not get its files: ${e.message}`));
     await say(o.personalFor(st.person).info.id, st.person);
     // Every worker still alive on the request, idle ones too: they work for it and would not see the files otherwise.
-    for (const sid of w.sessionIds) {
+    for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
       const s = o.sessionInfo(sid);
       if (s && s.kind !== 'orchestrator' && (BUSY.includes(s.status) || s.status === 'idle')) await say(sid, w.requestedBy);
     }

@@ -1,4 +1,5 @@
-import { execFile, execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { runOffThread } from './hostProbe.ts';
 
 /**
  * Which GitHub repos are public, and the git settings that make agents commit with the public identity in every
@@ -6,14 +7,12 @@ import { execFile, execFileSync } from 'node:child_process';
  * the configured ones) on the host and on the machines, and by the worker launch (docs/machines.md).
  */
 
-type Run = (cmd: string, args: string[]) => string | undefined;
+type Run = (cmd: string, args: string[]) => string | undefined | Promise<string | undefined>;
 
-const runSync: Run = (cmd, args) => {
-  try {
-    return execFileSync(cmd, args, { encoding: 'utf8', timeout: 10_000, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-  } catch {
-    return undefined;
-  }
+/** w6237: on the probe thread (server/hostProbe.ts): the guard asks this inside the portal, whose loop a spawn would hold. */
+const runOff: Run = async (cmd, args) => {
+  const r = await runOffThread(cmd, args, 10_000);
+  return r.code === 0 ? r.stdout : undefined;
 };
 
 const HOUR = 3_600_000;
@@ -24,17 +23,17 @@ const visibility = new Map<string, { isPublic: boolean | undefined; at: number }
  * anonymous request to the GitHub API (200: anyone can see it). Cached: public for a day, private for an
  * hour, unknown for 5 minutes. undefined when neither could tell.
  */
-export function repoIsPublic(key: string, now = Date.now(), run: Run = runSync): boolean | undefined {
+export async function repoIsPublic(key: string, now = Date.now(), run: Run = runOff): Promise<boolean | undefined> {
   const m = /^github\.com\/([\w.-]+)\/([\w.-]+)$/i.exec(key);
   if (!m) return undefined;
   const hit = visibility.get(key.toLowerCase());
   if (hit && now - hit.at < (hit.isPublic ? 24 * HOUR : hit.isPublic === false ? HOUR : 5 * 60_000)) return hit.isPublic;
   let isPublic: boolean | undefined;
-  const gh = run('gh', ['api', `repos/${m[1]}/${m[2]}`, '--jq', '.private'])?.trim();
+  const gh = (await run('gh', ['api', `repos/${m[1]}/${m[2]}`, '--jq', '.private']))?.trim();
   if (gh === 'false') isPublic = true;
   else if (gh === 'true') isPublic = false;
   else {
-    const code = run('curl', ['-s', '-o', process.platform === 'win32' ? 'NUL' : '/dev/null', '-w', '%{http_code}', '--max-time', '8', `https://api.github.com/repos/${m[1]}/${m[2]}`])?.trim();
+    const code = (await run('curl', ['-s', '-o', process.platform === 'win32' ? 'NUL' : '/dev/null', '-w', '%{http_code}', '--max-time', '8', `https://api.github.com/repos/${m[1]}/${m[2]}`]))?.trim();
     if (code === '200') isPublic = true;
     else if (code === '404') isPublic = false;
   }

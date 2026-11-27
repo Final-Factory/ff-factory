@@ -283,6 +283,7 @@ test('w4930: end to end on the real ledger: a done request is reopened with the 
   const o = agents.orchestrators;
   t.after(async () => {
     o.close();
+    agents.close(); // w6152: Agents' timers stop before the folder goes (w5915: a release pass wrote into a removed transcript, ENOENT).
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();

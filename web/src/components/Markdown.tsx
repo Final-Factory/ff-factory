@@ -6,6 +6,7 @@ import { sanitizeSvg } from '../../../shared/svg';
 import { reportStill, watchStill } from '../mediaTrouble';
 import { openLightbox, type LightboxItem } from '../store';
 import { baseName, FullQualityLink, PreviewVideo } from './Images';
+import { IdRef, useIdLinkPlugin } from './IdLink';
 import { CopyButton, Icon } from './ui';
 
 const Mermaid = lazy(() => import('./Mermaid'));
@@ -138,12 +139,21 @@ const components: Components = {
     </div>
   ),
   pre: CodeBlock,
+  // A word shaped like an id in an orchestrator's chat (w6216, ./IdLink.tsx): a link while the page knows what it names.
+  span: ({ node: _node, ...props }) => {
+    const token = (props as Record<string, unknown>)['data-id-token'];
+    return typeof token === 'string' ? <IdRef token={token} /> : <span {...props} />;
+  },
 };
 
+const REMARK = [remarkGfm];
+
 export const Markdown = memo(function Markdown({ text }: { text: string }) {
+  const idLinks = useIdLinkPlugin();
+  const rehype = useMemo(() => (idLinks ? [idLinks] : []), [idLinks]);
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components} urlTransform={urlTransform}>
+      <ReactMarkdown remarkPlugins={REMARK} rehypePlugins={rehype} components={components} urlTransform={urlTransform}>
         {text}
       </ReactMarkdown>
     </div>

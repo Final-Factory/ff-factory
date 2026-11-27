@@ -319,6 +319,22 @@ export function liveOnAccount(sessions: Iterable<{ id?: string; account?: string
   return n;
 }
 
+/**
+ * w6381: liveOnAccount for every key at once, from one pass over `sessions`: the same count for each (key, except), without
+ * a scan of every session per token. Built fresh for each pick (vault.pools, forRun), so a process started since counts.
+ */
+export function liveCounter(sessions: Iterable<{ id?: string; account?: string; status?: string; kind?: string; orchestratorRole?: string }>): (key: string, except?: string) => number {
+  const byKey = new Map<string, number>();
+  const keyOf = new Map<string, string>();
+  for (const s of sessions) {
+    if (!s.account || s.status === 'stopped' || s.status === 'error') continue;
+    if (s.kind === 'orchestrator' && s.orchestratorRole === 'dispatcher') continue;
+    byKey.set(s.account, (byKey.get(s.account) ?? 0) + 1);
+    if (s.id !== undefined) keyOf.set(s.id, s.account);
+  }
+  return (key, except) => (byKey.get(key) ?? 0) - (except !== undefined && keyOf.get(except) === key ? 1 : 0);
+}
+
 /** The role a session on this host runs as (claudeAccounts): the dispatcher's own when it has one, else by its kind. */
 export function hostRoleOf(cfg: Pick<Config, 'claudeAccounts'>, info: Pick<SessionInfo, 'kind'> & Partial<Pick<SessionInfo, 'orchestratorRole'>>): HostRole {
   return info.kind === 'orchestrator' && info.orchestratorRole === 'dispatcher' && dispatcherOwnAccount(cfg) ? 'dispatcher' : hostRole(info.kind);
@@ -405,7 +421,7 @@ export function machineRunEnv(
   const pool = person ? (ctx.poolOf?.(person) ?? person) : undefined;
   const other = !!pool && !isSamePerson(pool, person);
   const wantGithub = githubFromVault(cfg, refId(machine));
-  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
+  const s = ctx.vault.forRun({ machineId: refId(machine), role: run.role, userId: person, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, github: wantGithub, githubUsable: ctx.githubUsable, usageOf: ctx.usageOf, liveOn: ctx.liveOnNow?.() ?? ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
   // GitHub (w868): the person's own token, else the machine's own gh login as before; never another person's.
   const github = s.github ? { github: `${s.github.name} …${s.github.last4}` } : {};
@@ -446,7 +462,7 @@ export function poolRunEnv(run: { role: 'orchestrator' | 'ops'; personId: string
   // w5891: the dispatcher on "pool:<login>" runs on that person's own pool, whatever their pool setting names: never another.
   const pool = run.ownPool ? run.personId : (ctx.poolOf?.(run.personId) ?? run.personId);
   const other = !isSamePerson(pool, run.personId);
-  const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
+  const s = ctx.vault.forRun({ machineId: 'portal', role: run.role, userId: run.personId, ...(other ? { claudeOwner: pool } : {}), sessionId: run.sessionId }, { claude: true, usageOf: ctx.usageOf, liveOn: ctx.liveOnNow?.() ?? ctx.liveOn, limits: ctx.limits, reservedFor: ctx.reservedFor, now: ctx.now });
   for (const p of s.problems) ctx.onProblem?.(p);
   if (s.claude) return { env: { ...hostBaseEnv(), CLAUDE_CODE_OAUTH_TOKEN: s.claude.token }, account: run.ownPool ? `vault token ${s.claude.entry.name} …${s.claude.entry.last4} (the dispatcher's, from ${pool}'s pool: claudeAccounts.dispatcher "pool:${pool}", docs/vault.md)` : poolAccount(s.claude, pool, other ? run.personId : undefined) };
   // Only a pool whose every token is used up gets here (pickPool's use-it-up for both roles): Claude would refuse them all.

@@ -51,10 +51,51 @@
   machine_update store_lock does: on makes the main clone read-only to the Low integrity workers once every sandbox is a
   slot repo (held off until then), warn refuses nothing and logs each write the daemon did not make, off opens it again.
   Left out: the install keeps what it has.
+.PARAMETER SharedLock
+  With -Update (w5615, docs/worker-root.md "Per-slot caches and the players broker"): set the shared-cache lock in
+  daemon.json (sharedLock), as ops_worker machine_update shared_lock does: each sandbox gets its own copy-on-write clone of
+  the tool caches and players are installed and launched by the daemon; warn logs worker writes to the shared caches,
+  players, seed and tools, on makes those read-only to workers, off opens them again. Left out: the install keeps what it has.
+.PARAMETER HostRestage
+  With -Update (w6305, docs/worker-root.md "After a sharedLock switch"): set what the daemon does with an idle agent
+  adopted across a sharedLock switch in daemon.json (hostRestage), as ops_worker machine_update host_restage does: on
+  ends that agent between turns, never mid-turn, so its next message starts a host on the new mode; warn (the default)
+.PARAMETER LongRuns
+  With -Update (w6367, machine/longRuns.ts): set the long-run route in daemon.json (longRuns), as ops_worker machine_update
+  long_runs does: the route that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the
+  default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back.
+  Left out: the install keeps what it has.
+  only logs it (the recovery). Left out: the install keeps what it has.
+.PARAMETER LiveRunGuard
+  With -Update (w6378): set daemon.json's liveRunGuard, as ops_worker machine_update live_run_guard does: warn (the
+  default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still
+  lives; off looks at nothing (the way back). Left out: the install keeps what it has.
+.PARAMETER EditorGitPackages
+  With -Update (w6412): set daemon.json's editorGitPackages, as ops_worker machine_update editor_git_packages does: how a
+  sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts).
+  warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice;
+  on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and
+  gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager
+  fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. Left out: the
+  install keeps what it has.
 .PARAMETER DaemonTmpdir
   With -Update (w6000, docs/worker-root.md): set the daemon's own temp folder in daemon.json (daemonTmpdir), as ops_worker
   machine_update daemon_tmpdir does: on (the default) points the daemon's TEMP and TMP at <root>\tmp-daemon, off keeps the
   system temp folder (the recovery). Left out: the install keeps what it has.
+.PARAMETER ToolsDiskLock
+  With -Update (w5959, docs/worker-root.md): set what the daemon does about a virtual disk (.vhd, .vhdx) in a Low
+  <root>\tools child in daemon.json (toolsDiskLock), as ops_worker machine_update tools_disk_lock does: on keeps that
+  child Medium, so workers cannot write there; warn only logs it (the recovery). Left out: the install keeps what it has.
+.PARAMETER WinCiFirst
+  With -Update (w6110, machine/ciFirstWin.ts): set what the daemon does about the agents' processes beside a CI job on a
+  Windows CI-first machine in daemon.json (winCiFirst), as ops_worker machine_update win_ci_first does: enforce lowers the
+  processes agents' tools start to BelowNormal while a job runs, warn (the default) only logs what they take (the
+  recovery), off stops it. Left out: the install keeps what it has.
+.PARAMETER RunnerPriority
+  With -Update (w6163, machine/runnerPriority.ts): set what the daemon does about the ffu CI runners' scheduled tasks and
+  listeners (Windows) in daemon.json (runnerPriority), as ops_worker machine_update runner_priority does: enforce sets
+  the tasks to priority 4 and raises the listeners to Normal, warn only logs what it reads (the recovery), off stops it.
+  Left out: the install keeps what it has.
 .PARAMETER MediumAgentFolders
   With -Update (w5862, w5869, docs/worker-root.md "Medium agents' temp folders and cargo home"): set Medium agents' own
   temp root and cargo home in daemon.json (mediumAgentFolders), as ops_worker machine_update medium_agent_folders does:
@@ -116,8 +157,16 @@ param(
     [ValidateSet('on', 'off')][string]$WorkerFence,
     [ValidateSet('off', 'warn', 'enforce')][string]$WorkerCaps,
     [ValidateSet('off', 'warn', 'on')][string]$StoreLock,
+    [ValidateSet('off', 'warn', 'on')][string]$SharedLock,
+    [ValidateSet('warn', 'on')][string]$HostRestage,
+    [ValidateSet('off', 'warn', 'on')][string]$LongRuns,
+    [ValidateSet('off', 'warn')][string]$LiveRunGuard,
+    [ValidateSet('off', 'warn', 'on')][string]$EditorGitPackages,
     [ValidateSet('warn', 'on')][string]$MediumAgentFolders,
     [ValidateSet('on', 'off')][string]$DaemonTmpdir,
+    [ValidateSet('warn', 'on')][string]$ToolsDiskLock,
+    [ValidateSet('off', 'warn', 'enforce')][string]$WinCiFirst,
+    [ValidateSet('off', 'warn', 'enforce')][string]$RunnerPriority,
     [switch]$NoDevDrive,
     [switch]$PlayOnly,
     [switch]$DevDrive,
@@ -285,8 +334,16 @@ if ($Update) {
     if ($WorkerFence) { $argv += @('--worker-fence', $WorkerFence) }
     if ($WorkerCaps) { $argv += @('--worker-caps', $WorkerCaps) }
     if ($StoreLock) { $argv += @('--store-lock', $StoreLock) }
+    if ($SharedLock) { $argv += @('--shared-lock', $SharedLock) }
+    if ($HostRestage) { $argv += @('--host-restage', $HostRestage) }
+    if ($LongRuns) { $argv += @('--long-runs', $LongRuns) }
+    if ($LiveRunGuard) { $argv += @('--live-run-guard', $LiveRunGuard) }
+    if ($EditorGitPackages) { $argv += @('--editor-git-packages', $EditorGitPackages) }
     if ($MediumAgentFolders) { $argv += @('--medium-agent-folders', $MediumAgentFolders) }
     if ($DaemonTmpdir) { $argv += @('--daemon-tmpdir', $DaemonTmpdir) }
+    if ($ToolsDiskLock) { $argv += @('--tools-disk-lock', $ToolsDiskLock) }
+    if ($WinCiFirst) { $argv += @('--win-ci-first', $WinCiFirst) }
+    if ($RunnerPriority) { $argv += @('--runner-priority', $RunnerPriority) }
     if ($NoDevDrive) { $argv += '--no-dev-drive' }
     if ($DevDrive) { $argv += '--dev-drive' }
     if ($MoveToDevDrive) { $argv += '--move-to-dev-drive' }

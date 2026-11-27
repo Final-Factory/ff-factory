@@ -3,6 +3,7 @@
 // the scripted fake SDK a test installs with setQueryForTesting (e2e/fakeAgent.ts) answers them as it answers host ones.
 // Test-only: no production code imports it. Nothing here touches the real home folder: the daemon's folder, Unity slots,
 // agents' temp folders and its clean-up settings are all inside the machine's own temp root, and its clean-up never runs.
+import './testLocalRemotes.ts'; // w6099: these checkouts' origins are bare repositories in a temp folder
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -324,7 +325,11 @@ export async function createTestMachine(o: TestMachineOptions = {}): Promise<Tes
       daemon?.shutdown();
       server?.close();
       // The last session and machine updates have landed once the portal has the link's close: they came before it.
-      if (portal) await until(`machine ${id} offline`, () => !portal!.isOnline(id), 5000, 10).catch(() => undefined);
+      // A link still open after 5 s is said, not swallowed: what it was still sending lands after the folders go (w6152).
+      if (portal)
+        await until(`machine ${id} offline`, () => !portal!.isOnline(id), 5000, 10).catch((e: unknown) =>
+          console.warn(`testMachine ${id} stop: the portal still had the machine's link open after 5 s; removing its folders anyway (${e instanceof Error ? e.message : String(e)})`),
+        );
       // No git still running in a sandbox when its folder goes (fakePoolDeps).
       await closePoolDeps();
       repos.cleanup();

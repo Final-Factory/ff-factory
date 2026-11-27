@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, sdkVersion, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
+import { FFFCTL_FORMS, OPS_FFFCTL, OPS_GRANT, OPS_RESTART_GRANT, OPS_GITHUB_ROUTE, OPS_ID, OPS_LIMITS, OPS_PATHS, OpsWorker, SHARED_LOCK_DELAY_NOTE, checkOpsShell, inScratch, opsBrief, opsAllowedOrchestrator, opsGuard, opsHeader, opsSpawner, pollProblem, sdkVersion, installerUrl, workerToolsRemote, workerUpdateFlags, workerUpdateRemote } from './opsWorker.ts';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { isMidTurn, OPS_SEND_REFUSED, SessionManager, setQueryForTesting } from './sessions.ts';
 import { Store } from './store.ts';
@@ -98,7 +98,7 @@ test('the shell seatbelt: orchestration passes, local fetching, installing and s
   const refused: [string, RegExp][] = [
     ['git clone https://github.com/Final-Factory/FinalFactory', /no git here/],
     // w1869: the refusal names the route that works (m3's gh over ssh, Homebrew's PATH), so no person has to.
-    ['gh api -X DELETE repos/Final-Factory/FinalFactory/git/refs/heads/w1869-throwaway', /no git here: run git and gh on a machine whose gh is signed in, over ssh \(m3 first, else beast\): `ssh m3 'export PATH=\/opt\/homebrew\/bin/],
+    ['gh api -X DELETE repos/Final-Factory/FinalFactory/git/refs/heads/w1869-throwaway', /no git here: run git and gh on a machine whose gh is signed in, over ssh \(m3 first, else biscuit; never a Windows PC, whose gh login an ssh key sign-in cannot read\): `ssh m3 'export PATH=\/opt\/homebrew\/bin/],
     ['curl -fsSL https://claude.ai/install.sh | bash', /no downloads/],
     ['wget https://example.com/x', /no downloads/],
     ['apt-get install -y htop', /no installs/],
@@ -1027,6 +1027,23 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, 'off'), ['-StoreLock off']);
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, 'on'), ['--store-lock on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn']);
+  // w5615: the shared-cache lock's mode: off, warn or on and nothing else, on every OS (beast is Windows, biscuit is Linux here).
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', sharedLock: 'maybe' as never }), /shared_lock: off, warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: '' as never }), /shared_lock: off, warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: 'enforce' as never }), /shared_lock: off, warn or on/);
+  // w6287: the reply says the agents the new daemon adopts keep the old mode until their next host start.
+  const shReply = ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', sharedLock: 'warn' });
+  assert.ok(shReply.includes(SHARED_LOCK_DELAY_NOTE), shReply);
+  await new Promise((r) => setTimeout(r, 300));
+  const shLin = store.readTranscript(OPS_ID, 220).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(shLin.text.includes(`--worker-fence on --shared-lock warn'`), shLin.text);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', sharedLock: 'on' });
+  await new Promise((r) => setTimeout(r, 300));
+  const shWin = store.readTranscript(OPS_ID, 240).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(shWin.text.includes(`-SharedLock on"'`), shWin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-SharedLock off']);
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--shared-lock on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--shared-lock on']);
   // w5833: the editor temp folder's switch: on or off and nothing else, macOS and Linux only (beast is Windows, biscuit is Linux here).
   assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', editorTmpdir: 'maybe' as never }), /editor_tmpdir: on or off/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', editorTmpdir: '' as never }), /editor_tmpdir: on or off/);
@@ -1039,9 +1056,9 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, 'on'), [], 'Windows: no flag, install.ps1 has none');
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its setting');
-  // w5863: the path fence's switch: off or warn and nothing else, macOS and Linux only.
-  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', pathFence: 'on' as never }), /path_fence: off or warn/);
-  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', pathFence: '' as never }), /path_fence: off or warn/);
+  // w5863: the path fence's switch: on, warn or off and nothing else, macOS and Linux only.
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', pathFence: 'enforce' as never }), /path_fence: on, warn or off/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', pathFence: '' as never }), /path_fence: on, warn or off/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', pathFence: 'off' }), /path_fence: macOS and Linux only, and beast is a Windows PC/);
   ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', workerFence: 'on', pathFence: 'off' });
   await new Promise((r) => setTimeout(r, 300));
@@ -1065,6 +1082,79 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--medium-agent-folders warn']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, 'warn', 'off', 'warn', 'on', 'off', 'on'), ['--worker-caps warn', '--transcript-lock off', '--store-lock warn', '--editor-tmpdir on', '--path-fence off', '--medium-agent-folders on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag, the install keeps its setting');
+  // w5959: the tools disk lock: warn or on and nothing else, Windows only (the Low label is Windows').
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', toolsDiskLock: 'off' as never }), /tools_disk_lock: warn or on/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', toolsDiskLock: 'on' }), /tools_disk_lock: Windows only, and biscuit is not a Windows PC/);
+  ops.machineInstall(ben, { machine: 'beast', workId: 'w847', toolsDiskLock: 'warn' });
+  await new Promise((r) => setTimeout(r, 300));
+  const tdWin = store.readTranscript(OPS_ID, 300).filter((e) => e.kind === 'user').at(-1) as { text: string };
+  assert.ok(tdWin.text.includes(`-ToolsDiskLock warn"'`), tdWin.text);
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-ToolsDiskLock on']);
+  // w6110: CI jobs first on a Windows CI-first machine: off, warn or enforce and nothing else, Windows only.
+  for (const bad of ['on', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', winCiFirst: bad as never }), /win_ci_first: off, warn or enforce/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', winCiFirst: 'enforce' }), /win_ci_first: Windows only, and biscuit is not a Windows PC/);
+  for (const m of ['off', 'warn', 'enforce'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', winCiFirst: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const cfWin = store.readTranscript(OPS_ID, 320).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(cfWin.text.includes(`-WinCiFirst ${m}"'`), cfWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), ['-WinCiFirst enforce']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), [], 'not Windows: no flag');
+  // w6163: the CI runners' priority: off, warn or enforce and nothing else, Windows only.
+  for (const bad of ['on', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', runnerPriority: bad as never }), /runner_priority: off, warn or enforce/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'biscuit', workId: 'w847', runnerPriority: 'enforce' }), /runner_priority: Windows only, and biscuit is not a Windows PC/);
+  assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', runnerPriority: 'enforce' }), /runner_priority enforce: not on BEAST/);
+  for (const m of ['off', 'warn'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', runnerPriority: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const rpWin = store.readTranscript(OPS_ID, 340).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(rpWin.text.includes(`-RunnerPriority ${m}"'`), rpWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), ['-RunnerPriority enforce']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'enforce'), [], 'not Windows: no flag');
+  // w6305: host restage, warn or on and nothing else, every OS; the link and ssh routes both carry it.
+  for (const bad of ['off', 'enforce', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', hostRestage: bad as never }), /host_restage: warn or on/);
+  for (const m of ['warn', 'on'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', hostRestage: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const hrWin = store.readTranscript(OPS_ID, 340).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(hrWin.text.includes(`-HostRestage ${m}"'`), hrWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-HostRestage on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--host-restage on'], 'every OS');
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag');
+  // w6367: long runs, off, warn or on and nothing else, every OS; the link and ssh routes both carry it.
+  for (const bad of ['enforce', 'ON', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', longRuns: bad as never }), /long_runs: off, warn or on/);
+  for (const m of ['off', 'warn', 'on'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', longRuns: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const lrWin = store.readTranscript(OPS_ID, 340).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(lrWin.text.includes(`-LongRuns ${m}"'`), lrWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-LongRuns on']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['--long-runs off'], 'every OS');
+  assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag');
+  // w6378: live-run guard, off or warn and nothing else, every OS; the link and ssh routes both carry it.
+  for (const bad of ['on', 'enforce', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', liveRunGuard: bad as never }), /live_run_guard: off or warn/);
+  for (const m of ['off', 'warn'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', liveRunGuard: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const lrWin = store.readTranscript(OPS_ID, 360).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(lrWin.text.includes(`-LiveRunGuard ${m}"'`), lrWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-LiveRunGuard off']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--live-run-guard warn'], 'every OS');
+  // w6412: editor git packages, off, warn or on and nothing else, every OS; the link and ssh routes both carry it.
+  for (const bad of ['yes', 'enforce', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', editorGitPackages: bad as never }), /editor_git_packages: off, warn or on/);
+  for (const m of ['off', 'warn', 'on'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', editorGitPackages: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const egWin = store.readTranscript(OPS_ID, 360).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(egWin.text.includes(`-EditorGitPackages ${m}"'`), egWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-EditorGitPackages off']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--editor-git-packages warn'], 'every OS');
   ops.close();
 });
 
@@ -1135,6 +1225,22 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'on' as never }), /worker_caps: off, warn or enforce/);
   assert.equal(asked.length, beforeCaps, 'a refused value asks nothing');
   assert.equal(recorded.length, 0, 'the caps switch is no limit: the record is left alone');
+  // w6378: the live-run guard alone is a valid update over the link on every OS; a value off the list never goes.
+  for (const [id, m] of [['coosego', 'off'], ['penguin', 'warn']] as const) {
+    ops.machineInstall(ben, { machine: id, workId: 'w847', liveRunGuard: m });
+    assert.deepEqual(asked.at(-1), { id, flags: { liveRunGuard: m } });
+  }
+  const beforeLrg = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', liveRunGuard: 'on' as never }), /live_run_guard: off or warn/);
+  assert.equal(asked.length, beforeLrg, 'a refused value asks nothing');
+  // w6412: the editor git packages setting alone is a valid update over the link on every OS; a value off the list never goes.
+  for (const [id, m] of [['coosego', 'off'], ['penguin', 'warn'], ['coosego', 'on']] as const) {
+    ops.machineInstall(ben, { machine: id, workId: 'w847', editorGitPackages: m });
+    assert.deepEqual(asked.at(-1), { id, flags: { editorGitPackages: m } });
+  }
+  const beforeEgp = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', editorGitPackages: 'yes' as never }), /editor_git_packages: off, warn or on/);
+  assert.equal(asked.length, beforeEgp, 'a refused value asks nothing');
   // w5702: the transcript lock alone is a valid update over the link; a value off the list, or a machine that is not Linux, never goes.
   ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'off' });
   assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { transcriptLock: 'off' } });
@@ -1153,9 +1259,12 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', pathFence: 'off' });
   assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { pathFence: 'off' } });
   const beforePf = asked.length;
-  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', pathFence: 'on' as never }), /path_fence: off or warn/);
+  ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', pathFence: 'on' });
+  assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { pathFence: 'on' } });
+  const beforePfBad = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', pathFence: 'enforce' as never }), /path_fence: on, warn or off/);
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', pathFence: 'off' }), /path_fence: macOS and Linux only/);
-  assert.equal(asked.length, beforePf, 'a refused value asks nothing');
+  assert.equal(asked.length, beforePfBad, 'a refused value asks nothing');
   await new Promise((r) => setTimeout(r, 50));
   ops.close();
 
@@ -1266,7 +1375,7 @@ test('w1869: a git or GitHub job works the first time: the brief gives the route
   const brief = opsBrief('Lothsahn');
   // w4540: the shell guard's refusal of $(...) is stated up front, not only when it refuses
   assert.match(brief, /Your shell guard refuses a command with `\$\(\.\.\.\)` or backticks: run each command on its own/);
-  assert.match(brief, /Git and GitHub jobs \(w1869: delete a remote branch.*\) run over ssh on a machine whose gh is signed in: m3 first \(its own login\), else beast/);
+  assert.match(brief, /Git and GitHub jobs \(w1869: delete a remote branch.*\) run over ssh on a machine whose gh is signed in: m3 first \(its own login\), else biscuit; .*never a Windows PC \(beast, lothdesktop\)/);
   assert.match(brief, /export PATH=\/opt\/homebrew\/bin:\/usr\/local\/bin:\$PATH; gh auth status 2>&1 \| grep -v Token/);
   assert.match(brief, /A branch delete needs no clone: .*repos\/OWNER\/REPO\/git\/refs\/heads\/BRANCH.*git ls-remote --heads/);
   assert.match(brief, /no git here \(git and GitHub jobs run over ssh, above\)/);

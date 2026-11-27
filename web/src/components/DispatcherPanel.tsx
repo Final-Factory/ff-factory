@@ -22,7 +22,7 @@ import { accountOf } from './SystemMeters';
 import { Chip, Confirm, Dot, Icon, Menu, ModelChip, ToggleChip } from './ui';
 import { TimersButton } from './Timers';
 import { IntakeApproveCard, WaitingTab } from './WaitingTab';
-import { orchestratorAsks, ownerAnswersFor, waitingItems } from '../../../shared/waiting';
+import { orchestratorAsks, ownerAnswersFor, waitingItems, waitingTotals } from '../../../shared/waiting';
 import { useKeepScroll } from '../scrollKeep';
 import { ReportPage, ReportsTab, WorkReports } from './Reports';
 
@@ -79,6 +79,21 @@ function TalkToYourOrchestrator() {
  * them, the intake from Discord and FFBox (docs/intake.md), and its conversation, which only the owner writes to.
  * `tab`: "intake", "conversation", or a request id to open.
  */
+/**
+ * Bring a request's row into view when a link opens it (a notice, or an id in a chat, w6216), and leave the list alone
+ * when its top already shows: the row opens expanded, often taller than the panel, and `scrollIntoView` 'nearest' then
+ * scrolled it to the top even from in view, cutting the filter chips above it in half (the ui-critic's s8, w6216).
+ */
+function revealRow(row: HTMLElement | null) {
+  if (!row) return;
+  let box: HTMLElement | null = row.parentElement;
+  while (box && !/(auto|scroll)/.test(getComputedStyle(box).overflowY)) box = box.parentElement;
+  const view = box ? box.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+  const top = row.getBoundingClientRect().top;
+  if (top >= view.top && top <= view.bottom - 48) return;
+  row.scrollIntoView({ block: 'nearest' });
+}
+
 export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: string; onClose?: () => void }) {
   const now = useNow(15_000);
   const [confirmReset, setConfirmReset] = useState(false);
@@ -101,7 +116,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
   const queue = app.me ? waitingItems(open, live, { userId: app.me.userId, displayName: app.me.displayName, reviewer }) : [];
   // w1868: and the viewer's orchestrator's open questions, each a card of its own.
   const asks = app.me ? orchestratorAsks(app.sessions, work, app.me) : [];
-  const onMe = queue.filter((i) => i.mine).length + asks.length;
+  // w6436: one count of the queue and the cards together, for the tab, its badge, its tooltip and the banner.
+  const totals = waitingTotals(queue, asks);
+  const onMe = totals.onMe;
   const account = session ? accountOf(app, session.id) : undefined;
   // Its context and last compaction (w535).
   const ctx = session ? contextGlance(session, now) : undefined;
@@ -174,9 +191,9 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
         <button role="tab" aria-selected={current === 'waiting'} className={`tab${current === 'waiting' ? ' active' : ''}`} onClick={() => setTab('waiting')} data-testid="tab-waiting">
           Waiting on input{' '}
-          {queue.length > 0 && (
-            <span className={onMe ? 'tone-amber' : 'dim'} title={`${onMe} on you, ${queue.length - onMe} on someone else`}>
-              {queue.length}
+          {totals.total > 0 && (
+            <span className={onMe ? 'tone-amber' : 'dim'} title={`${onMe} on you, ${totals.onOthers} on someone else`}>
+              {totals.total}
             </span>
           )}
         </button>
@@ -196,7 +213,7 @@ export function DispatcherPanel({ app, tab, onClose }: { app: AppState; tab?: st
         </button>
       </nav>
 
-      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={queue.length} onMe={onMe} />}
+      {current === 'requests' && <Requests app={app} work={work} open={open} stalled={stalled} closed={closed} focus={focus} now={now} waiting={totals.total} onMe={onMe} />}
       {current === 'waiting' && <WaitingTab app={app} items={queue} asks={asks} now={now} />}
       {current === 'intake' && app.intake && <IntakeTab app={app} intake={app.intake} work={work} now={now} />}
       {current === 'reports' && (reportId ? <ReportPage key={reportId} app={app} id={reportId} now={now} /> : <ReportsTab app={app} now={now} />)}
@@ -288,7 +305,7 @@ function Requests({ app, work, open, stalled, closed, focus, now, waiting, onMe 
     setExpanded(focus);
     if (closed.some((w) => w.id === focus)) setShowClosed(true);
     if (stalled.some((w) => w.id === focus)) setShowStalled(true);
-    requestAnimationFrame(() => document.getElementById(`work-${focus}`)?.scrollIntoView({ block: 'nearest' }));
+    requestAnimationFrame(() => revealRow(document.getElementById(`work-${focus}`)));
     // The focus comes from a link (a notice in a chat): open it once, then leave the rows to the user.
   }, [focus]);
 

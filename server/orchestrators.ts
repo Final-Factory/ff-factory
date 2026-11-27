@@ -9,7 +9,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, heardOn, newestFirst, offSince, onRequest, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
@@ -90,6 +90,7 @@ import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPerson
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
+import { dataDirClearedText, otherPlayerIn, type DataDirVerdict } from './gameDataDir.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
@@ -130,6 +131,14 @@ const cardMedia = (ask: Ask) => new Set([ask.question, ...ask.options.map((o) =>
 const ANSWER_MARK = '[answer] ';
 /** How a person's note that names one worker of several starts its resume (noteToWorker, w3117); it goes like an answer. */
 const NOTE_MARK = '[note] ';
+/**
+ * w6047 (the w6172 review): a resume that carries a person's own words (an [answer] to its [needs you], a [note] naming the
+ * worker, sent as a check-in by wakeNow), which always goes (w2495), unlike the old worker's own gate or check-in.
+ */
+export function personsResume(m: { text: string; resumeOf?: { note: string } }): boolean {
+  const note = m.resumeOf?.note ?? /^\[wake_me\][^\n]*?Your note: ([\s\S]*)$/.exec(m.text)?.[1] ?? '';
+  return note.startsWith(ANSWER_MARK) || note.startsWith(NOTE_MARK);
+}
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
 export const OFFLINE_NOTICE_MS = 60 * 60_000;
@@ -842,6 +851,8 @@ export class Orchestrators {
   onTurnBudget?: (session: SessionInfo, users: string[], what: string) => void;
   /** Notices gathered for the dispatcher, per person they are about. */
   private readonly gathered = new Map<string, { by: Requester; texts: string[]; timer: NodeJS.Timeout }>();
+  /** close() ran: nothing more is gathered, so no timer set after it sends into a store that is gone (w6152). */
+  private closed = false;
   private capacityTimer?: NodeJS.Timeout;
   /** w2956: the pending standing-target check (fanOutSoon). */
   private fanOutTimer?: NodeJS.Timeout;
@@ -934,6 +945,7 @@ export class Orchestrators {
   }
 
   close() {
+    this.closed = true;
     clearTimeout(this.digestTimer);
     for (const g of this.gathered.values()) clearTimeout(g.timer);
     this.gathered.clear();
@@ -1233,6 +1245,9 @@ export class Orchestrators {
 
   /** Gather a notice for the dispatcher: a burst of filings from one person reaches it as one message. */
   private gatherForDispatcher(by: Requester, text: string, lane?: 'intake') {
+    // w6152: a worker failure heard after close() (ledgerSweep.test.ts, as its sessions stopped) was sent 100 ms later,
+    // into a test's removed folder (ENOENT).
+    if (this.closed) return;
     const key = lane ? `${lane}:${by.userId.toLowerCase()}` : by.userId.toLowerCase();
     const g = this.gathered.get(key) ?? { by, texts: [], timer: undefined as unknown as NodeJS.Timeout };
     clearTimeout(g.timer);
@@ -1488,28 +1503,104 @@ It is for your part of the work, not an answer to another worker's question.`;
     }
     // w2433: with the Latest line it answers, which shows as answered until the request's next report.
     r.answered = { by: by.displayName, at: this.now().toISOString(), ...(w.outcome ? { outcome: w.outcome } : {}), ...(forWho?.length ? { for: forWho } : {}) };
-    const sid = r.worker;
+    // w6047 (the w6214, w6223, w6226 and w6239 reviews): every request the answer answers (this one and those w1812 shares it
+    // with, below) goes to the worker on it now. The asking worker gets those it still holds; a request it is off (moved, or
+    // handed back and placed on a next worker) goes to that request's worker now, never to the asker, whose resume would be
+    // refused (staleResume, w2079) and lost, and which must never take it up again; one handed back with no worker yet takes
+    // the answer in its hand-off, which its next worker reads when it starts. Each worker hears it once, naming only the
+    // requests it holds.
+    const asker = r.worker;
+    // w6309 (the w6335 review): an asker moved off it that a merge listed again does not hold it (onRequest).
+    const holds = (x: WorkItem) => !!asker && onRequest(x, asker);
+    // The w6248 and w6253 reviews: a request's newest worker other than the asker is on it now unless the request was handed
+    // back after that worker's link (a hand-back leaves it with nobody, and sessionIds keeps every worker it ever had): such an
+    // earlier worker is never resumed on it (w2079). A worker with no link time counts only when there is no hand-back (a
+    // placement after one always links its worker). A worker linked before the asker left still holds it (two on one
+    // request, w1049). The hand-off takes the answer only while it is live: nobody was sent or linked to the request since
+    // (an old hand-off, read by a worker placed after it, never takes one). Off the request with neither, the asker is not
+    // resumed (staleResume would refuse it): the person is told nobody is on it.
+    const at = (t: string | undefined) => Date.parse(t ?? '') || 0;
+    const hbAt = (x: WorkItem) => at(x.handedBack?.at);
+    const onNow = (x: WorkItem): string | undefined => {
+      const now = latestWorker(x);
+      // w6309 (R1): nor one moved off it and back only through a merge (latestWorker ranks it last, w6318 F2).
+      if (!now || now === asker || offSince(x, now)) return undefined;
+      const link = x.links?.[now]?.at;
+      return !x.handedBack || (link && at(link) >= hbAt(x)) ? now : undefined;
+    };
+    // Someone on it since: a link after the hand-back, or a worker taken off after it (moveOff drops the link); the hand-back's
+    // own moveOff of its worker comes in the same breath, so that worker counts only a minute on.
+    const liveHandOff = (x: WorkItem) =>
+      !!x.handedBack &&
+      !Object.values(x.links ?? {}).some((l) => at(l.at) > hbAt(x)) &&
+      !Object.entries(x.movedOff ?? {}).some(([s, t]) => at(t) > hbAt(x) + (s === x.handedBack!.session ? 60_000 : 0));
+    const workerOf = (x: WorkItem): string | undefined => (!asker || holds(x) ? asker : onNow(x));
+    const sid = workerOf(w);
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
     // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
     const share = questionShareKey(r.key);
-    const also = share && sid
-      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === sid && questionShareKey(x.needsYou.key) === share)
+    const also = share && asker
+      ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === asker && questionShareKey(x.needsYou.key) === share)
       : [];
     for (const x of also) {
       x.needsYou!.answered = { ...r.answered, on: w.id, outcome: x.outcome };
-      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${sid}, not asked again (w1812)`);
+      this.stamp(x, `[needs you] answered by ${by.displayName} on ${w.id}: the same question from worker ${asker}, not asked again (w1812)`);
       this.store.putWork(x);
     }
     const both = also.length ? ` (the same question on ${also.map((x) => x.id).join(', ')}: answered there too)` : '';
+    const carried = (x: WorkItem) => !!asker && !holds(x) && !onNow(x) && liveHandOff(x);
+    const carry = (x: WorkItem): boolean => {
+      const words = `${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\nIt answers what worker ${asker} asked before ${x.id} was handed back: "${clip(r.question, 300)}". Carry on with it.`;
+      return this.carryInHandBack(x, asker!, words, true);
+    };
+    // The requests each worker gets, `w`'s worker first, and those carried in a hand-off.
+    const groups = new Map<string, WorkItem[]>();
+    const inHandOff: WorkItem[] = [];
+    for (const x of [w, ...also]) {
+      if (carried(x)) {
+        inHandOff.push(x);
+        continue;
+      }
+      const to = workerOf(x);
+      if (to) groups.set(to, [...(groups.get(to) ?? []), x]);
+    }
+    const textFor = (to: string, mine: WorkItem[]): string => {
+      const ids = mine.map((x) => x.id).join(' and ');
+      const what = to !== asker ? `worker ${asker} asked before ${ids} moved to you` : 'you waited on';
+      const where = mine.length > 1 ? `, which ${to !== asker ? 'it' : 'you'} asked on ${ids}: it answers it on all of them` : mine[0] !== w ? `, which ${to !== asker ? 'it' : 'you'} asked on ${ids} as well: it answers it there` : '';
+      return `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\nIt answers what ${what}: "${clip(r.question, 300)}"${where}. Carry on with it.`;
+    };
+    // The other workers (not `w`'s), each resumed with the answer tagged with a request it holds; what became of each is said.
+    const others = (): string => {
+      let out = '';
+      for (const x of inHandOff) if (x !== w && carry(x)) out += `; ${x.id} was handed back since worker ${asker} asked, so the answer goes with its hand-off to its next worker`;
+      for (const [to, mine] of groups) {
+        if (to === sid && mine.includes(w)) continue;
+        const ids = mine.map((x) => x.id).join(' and ');
+        const a = this.store.sessions.get(to);
+        if (!a) {
+          out += `; its worker ${to} on ${ids} is gone`;
+          continue;
+        }
+        if (BUSY.includes(a.status)) {
+          out += `; its worker ${to} on ${ids} is mid-turn: pass it on there with message_agent`;
+          continue;
+        }
+        const gates = mine.map((x) => this.clearReportedGates(x, to)).join('');
+        out += this.wakeNow(to, textFor(to, mine), mine[0]!.id) ? `; its worker ${to} on ${ids} resumes with it there${gates}` : `; its worker ${to} on ${ids} could not be resumed: pass it on there with message_agent`;
+      }
+      return out;
+    };
+    // w6047 (the w6223 review, F2): a request handed back since it asked (Queued, no worker on it now) carries the answer in
+    // its hand-off, which its next worker reads when it starts.
+    if (inHandOff.includes(w) && carry(w)) return `answers the [needs you] question${both}: ${w.id} was handed back since worker ${asker} asked, so the answer goes with its hand-off to its next worker (nothing for you to pass on)${others()}`;
     const s = sid ? this.store.sessions.get(sid) : undefined;
-    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}`;
-    if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent`;
-    const cleared = this.clearReportedGates(w, sid);
-    const text =
-      `${ANSWER_MARK}${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\n` +
-      `It answers what you waited on: "${clip(r.question, 300)}"${also.length ? `, which you asked on ${[w, ...also].map((x) => x.id).join(' and ')}: it answers it on all of them` : ''}. Carry on with it.`;
-    if (!this.wakeNow(sid, text, w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent`;
-    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)${cleared}`;
+    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : asker ? ` (worker ${asker} asked it but is off ${w.id} now, and nobody is on it: start the work with it)` : ''}${others()}`;
+    if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent${others()}`;
+    const main = groups.get(sid) ?? [w];
+    const cleared = main.map((x) => this.clearReportedGates(x, sid)).join('');
+    if (!this.wakeNow(sid, textFor(sid, main), w.id)) return `answers the [needs you] question${both}; its worker ${sid} could not be resumed: pass it on with message_agent${others()}`;
+    return `answers the [needs you] question${both}: sent to its worker ${sid}, which resumes with it (nothing for you to pass on)${cleared}${others()}`;
   }
 
   /**
@@ -1644,7 +1735,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     const to = this.handUpTo(w, sessionId, { count: items.length, items }, '');
     return (
       `Handed up ${items.length} follow-up request${items.length === 1 ? '' : 's'} for ${w.id}${to ? ` to ${to}'s orchestrator, which files them (or asks its person first)` : ', but its requester has no orchestrator to file them: the ledger shows them on the request'}. ` +
-      `You file nothing yourself. Your DONE for ${w.id} is kept and the request closes by itself once they are filed or its person closes it (w2969).`
+      `You file nothing yourself. Your DONE for ${w.id} is kept and the request closes by itself once they are filed or its person closes it (w2969). ` +
+      `If ${w.id} waits on one of them, end your turn with a line "${w.id}: still open: blocked on the follow-up I handed up": once it is filed, FF Factory waits on it for you and resumes you, with its id, when it closes (done, cancelled or declined; w6397). Told its id mid-turn, call blocked_on with it instead.`
     );
   }
 
@@ -1812,8 +1904,29 @@ It is for your part of the work, not an answer to another worker's question.`;
       const left = handUpsPending(w);
       this.stamp(w, `follow-up ${filed.id} "${clip(filed.title, 80)}" filed for it; ${left ? `${left} still to file` : 'all its follow-ups are filed'} (w2969)`);
       this.store.putWork(w);
+      this.tellFollowUpFiled(w, filed);
       if (!left) this.recheckDone(w.id, 'its follow-up requests are filed (w2969)');
     }
+  }
+
+  /**
+   * w6397: the worker that handed up a follow-up learns its id. w6096's worker cc0f9074 asked for w6254's id at 01:29 UTC on
+   * 2026-11-27 to wait on it with blocked_on, was never told it, and w6096 sat Stalled 8 h after w6254 closed as done. A
+   * worker stopped on a line that waits on the hand-up ("blocked on the fix I handed up") needs no turn for it: the blocker
+   * watch records that wait on the filed follow-up within a minute (BlockerWatch.recordReportedWaits, handUpWaitRef) and its
+   * close resumes the worker with the id. A worker mid-turn is told now, so its blocked_on can name it; one done with the
+   * request, or stopped on anything else, is not woken for it (the request's log names the id).
+   */
+  private tellFollowUpFiled(w: WorkItem, filed: WorkItem) {
+    const sid = w.handedUp?.worker;
+    const s = sid ? this.store.sessions.get(sid) : undefined;
+    if (!sid || !s || w.done?.[sid] || !onRequest(w, sid) || !BUSY.includes(s.status)) return;
+    if (gatesOf(w).some((g) => g.kind === 'request' && g.ref?.toLowerCase() === filed.id.toLowerCase())) return;
+    const note =
+      `[follow-up filed] The follow-up you handed up for ${w.id}, "${clip(filed.title, 100)}", is filed as ${filed.id} (w6397). ` +
+      `If ${w.id} waits on it, call blocked_on with requests ["${filed.id}"] and end your turn: you are resumed when ${filed.id} closes, as done or not. ` +
+      `If nothing of yours waits on it, carry on.`;
+    if (this.wakeNow(sid, note)) this.stamp(w, `worker ${sid}, mid-turn, is told its follow-up's id ${filed.id} (w6397)`);
   }
 
   /**
@@ -1860,9 +1973,10 @@ It is for your part of the work, not an answer to another worker's question.`;
    */
   runningLegs(w: WorkItem): string[] {
     const gated = new Set(gatesOf(w).map((g) => g.by));
+    // w6309 (the w6331 review): a worker moved off it that a merge listed again runs no leg of it (onRequest).
     return w.sessionIds.filter((sid) => {
       const s = this.store.sessions.get(sid);
-      if (!s || s.kind !== 'worker' || w.done?.[sid]) return false;
+      if (!s || s.kind !== 'worker' || w.done?.[sid] || !onRequest(w, sid)) return false;
       if (w.setAside?.[sid]) return false;
       return BUSY.includes(s.status) || !!this.d.pendingWake?.(sid) || gated.has(sid);
     });
@@ -1923,7 +2037,7 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /** The open ledger items a worker works on (a closed one no longer hears from it, even if the worker is reused). */
   itemsOf(sessionId: string): WorkItem[] {
-    return [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && isOpen(w));
+    return [...this.store.work.values()].filter((w) => heardOn(w, sessionId) && isOpen(w));
   }
 
   /**
@@ -2034,7 +2148,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       w.heldCheckIns = undefined;
       if (isOpen(w) || w.status === 'stalled') {
         for (const h of held) {
-          if (this.store.sessions.get(h.session) && w.sessionIds.includes(h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
+          if (this.store.sessions.get(h.session) && onRequest(w, h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
         }
       }
     }
@@ -2244,10 +2358,34 @@ It is for your part of the work, not an answer to another worker's question.`;
    * hand-off and its Queued state undone. A request the move had not touched yet is left as it is. Without it the request sat
    * Queued with no worker while `s` kept its movedAway mark (the w5950 review: handBack before startMoved succeeds).
    */
-  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string) {
-    if (!isOpen(w)) return;
+  /**
+   * w6047 (the w6056 review, 2): a message a failed move held for worker `sid`, whose hand-back of `w` (made meanwhile) stands,
+   * goes into that hand-off's message, so the request's next worker gets it.
+   */
+  carryInHandBack(w: WorkItem, sid: string, text: string, anyHandBack = false): boolean {
+    const hb = w.handedBack;
+    // w6047 (the w6223 review, F1): `anyHandBack` takes a hand-back another worker made (a sibling it took and handed back
+    // during the move), so the message goes with it to the request's next worker instead of nowhere.
+    if (!hb || (hb.session !== sid && !anyHandBack) || !text) return false;
+    w.handedBack = { ...hb, message: hb.message ? `${hb.message}\n\n---\n\n${text}` : text };
+    this.stamp(w, `the message its move held for worker ${sid} goes with its hand-back${hb.session !== sid ? ` (made by worker ${hb.session})` : ''} (w6047)`);
+    this.store.putWork(w);
+    return true;
+  }
+
+  moveUndone(w: WorkItem, s: Pick<SessionInfo, 'id'>, before: MoveBefore, why: string, move?: { how: string; to: string }): boolean {
+    if (!isOpen(w)) return false;
     const off = !w.sessionIds.includes(s.id);
-    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return;
+    if (!off && !w.movedOff?.[s.id] && w.handedBack?.session !== s.id) return false;
+    // w6047 (the w5995 review): a hand-back made while the start was under way (a pause, a stop_agent move_to) is not this
+    // move's: it stands, Queued for the dispatcher as it said, and is not undone. The move's own is the one with its how and to.
+    const hb = w.handedBack;
+    if (move && hb && hb.session === s.id && hb.at !== before.handedBack?.at && (hb.how !== move.how || hb.to !== move.to)) {
+      this.stamp(w, `not given back to worker ${s.id} (${why}): it was handed back meanwhile (${hb.how}), and that stands (w6047)`);
+      this.store.putWork(w);
+      console.log(`ledger: ${w.id}: not given back to worker ${s.id}: handed back meanwhile (${hb.how}) (w6047)`);
+      return false;
+    }
     if (off) w.sessionIds = [...w.sessionIds, s.id];
     w.links = { ...w.links, [s.id]: before.link ?? { at: this.now().toISOString(), how: 'sent' } };
     if (w.movedOff?.[s.id]) {
@@ -2264,6 +2402,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     this.stamp(w, `given back to worker ${s.id}: ${why} (w5976)`);
     this.store.putWork(w);
     console.log(`ledger: ${w.id}: given back to worker ${s.id}, its move did not start (w5976): ${why}`);
+    return true;
   }
 
   /**
@@ -2294,7 +2433,8 @@ It is for your part of the work, not an answer to another worker's question.`;
   }
 
   private workersOf(w: WorkItem): SessionInfo[] {
-    return w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker');
+    // w6309 (the w6331 sweep): its workers are the ones on it (onRequest), not one moved off it that a merge listed again.
+    return w.sessionIds.filter((id) => onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker');
   }
 
   /** Its latest worker's last turn, when it ended in an error or an interrupt instead of a report (w1870), and which worker. */
@@ -3070,7 +3210,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (settledFor) this.toPeople(settledFor.asked, dispatchNotice(w, `${owner.displayName} answered its question; ${settledFor.line}`, note));
     // Closing as done needs nothing from the dispatcher; anything else may.
     if (input.close !== 'done') {
-      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const live = w.sessionIds.filter((sid) => onRequest(w, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(owner, updateNotice(w, owner, `${what.join('; ')}.${hint}`));
     }
@@ -3874,7 +4014,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const how = `by ${d.by.displayName}'s decision of ${utcShort(d.at)} ("${clip(d.words, 160)}"), once ${why}`;
     if (others.length) this.toPeople(others, dispatchNotice(w, `${verb} ${how}${own ? '' : ' (it is your request; owners close each other\'s, w677)'}`, d.note));
     if (close === 'cancelled') {
-      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const live = w.sessionIds.filter((sid) => onRequest(w, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(d.by, updateNotice(w, d.by, `${verb} ${how}.${hint}`));
     }
@@ -4136,7 +4276,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const how = turn.words ? `${by.displayName}, who answered the proposal with ${turn.words}` : own ? `${by.displayName}, who asked for it in their own words` : `${by.displayName}'s orchestrator, on its own judgment (owners close each other's requests as their own, w677)`;
     this.toPeople(w.requesters, dispatchNotice(w, `${verb} by ${how} (it is your request)`, note));
     if (input.close !== 'done') {
-      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const live = w.sessionIds.filter((sid) => onRequest(w, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(by, updateNotice(w, by, `${verb} for ${names(w.requesters)} (an owner's close or reopen of another person's request): ${note}.${hint}`));
     }
@@ -4371,7 +4511,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // passed) could not be dropped: start_agent refuses a pair run of two or more legs started one at a time, and a queued request cannot be queued again. pair_legs 0
     // clears the mark of a pair run whose legs never started; done closes one that never had a worker as a repeat of the run
     // that finished (finishedTwinOf), with that run's result as its outcome, so whoever waited on it is resumed with it.
-    const twin = input.action === 'done' && w.pair && !w.pair.started && !w.sessionIds.length ? this.finishedTwinOf(w) : undefined;
+    const twin = input.action === 'done' && w.pair && !w.pair.started && !w.sessionIds.some((sid) => onRequest(w, sid)) ? this.finishedTwinOf(w) : undefined;
     if (input.pair_legs === 0) {
       if (!w.pair) throw new Error(`${w.id} is not a pair run: pair_legs 0 clears the mark of one`);
       if (w.pair.started) throw new Error(`${w.id}'s legs started together at ${w.pair.started.at.slice(11, 16)} UTC: it stays a pair run until they end`);
@@ -4427,15 +4567,41 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (input.action === 'merge') {
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
+      // w6288: a worker moved off t that comes back with w is never shifted past t's hand-back below (w2079).
+      // w6309 (the w6318 review, F1): and one an earlier merge listed again, still off t since its move (offSince).
+      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => offSince(t, sid)));
+      // w6309 (the w6302 review, R1 and R2): such a worker stays listed, so the merge takes no running worker off its work
+      // (keep rather than kill) and a person's answer or note still reaches it (w2495), but it keeps its moved-off mark and its
+      // link on w does not come with it: it is off t since its move (offSince), so it is never t's worker now (answerNeedsYou)
+      // and its own stale resumes are refused (staleResume). Linking it to w after the move does not put it back on t.
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
       // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
-      if (w.links) t.links = { ...w.links, ...t.links };
+      if (w.links) t.links = { ...Object.fromEntries(Object.entries(w.links).filter(([sid]) => !offT.has(sid))), ...t.links };
+      // w6271 (the w6269 review): workers merged onto a request handed back since their own links join t after that hand-back,
+      // or answerNeedsYou takes them for gone and an answer on t goes only into the old hand-off. Their links all shift by one
+      // offset, so the newest of them lands just after the hand-back (w6277: keeping their order among themselves, and a worker
+      // placed on t after the hand-back stays the newest, w1696). Only a worker that still exists counts (a gone one could not
+      // take an answer: the hand-off keeps it), only one whose link came with w (t's own stands), and one with no link keeps
+      // none (it ranks last, as before) unless none of them has one.
+      const hbAt = Date.parse(t.handedBack?.at ?? '') || 0;
+      const joined = hbAt ? w.sessionIds.filter((sid) => !offT.has(sid) && this.store.sessions.get(sid) && (!t.links?.[sid] || t.links[sid] === w.links?.[sid])) : [];
+      const linkAt = (sid: string) => Date.parse(t.links?.[sid]?.at ?? '');
+      const timed = joined.filter((sid) => Number.isFinite(linkAt(sid)));
+      const newest = timed.length ? Math.max(...timed.map(linkAt)) : -Infinity;
+      if (joined.length && newest <= hbAt) {
+        const shift = timed.length ? hbAt + 1 - newest : 0;
+        const moved = timed.length ? timed : joined;
+        for (const sid of moved) {
+          const at = new Date(timed.length ? linkAt(sid) + shift : hbAt + 1).toISOString();
+          t.links = { ...t.links, [sid]: { ...(t.links?.[sid] ?? { how: 'sent' as const }), at } };
+        }
+      }
       this.stamp(t, `merged ${w.id} from ${names(w.requesters)}: ${note}`);
       this.store.putWork(t);
       w.mergedInto = t.id;
       // w2610: a gate of t on w now names t itself (w2607 Blocked on w2608, its own copy): it can never clear, so it goes.
       this.dropSelfGates(t, w.id);
-      const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid)).map((sid) => this.workerLine(sid));
+      const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid) && onRequest(t, sid)).map((sid) => this.workerLine(sid));
       what = `merged into ${t.id} "${clip(t.title, 80)}" (${t.status}${workers.length ? `: ${workers.join(', ')}` : ''}), which ${names(t.requesters)} will hear about`;
     } else if (input.action === 'link') {
       const ids = (input.session_ids ?? []).map((x) => x.trim()).filter(Boolean);
@@ -4546,7 +4712,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
-      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid));
+      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid) && onRequest(w, sid));
       if (needs.length && worker) {
         const at = this.now().toISOString();
         w.legs = [...(w.legs ?? []).filter((l) => !sameNeeds(l.needs, needs)), { at, needs, what: clip(note, 200) }].slice(-MAX_LEGS);
@@ -4579,7 +4745,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         const room = this.pairRoomNow(w);
         if (room.length) throw new Error(`${w.id} is ${pairText(w.pair)}, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room for it now: a pair run waits for no named computer or time (w4925; strict priority, any OS). Start ${w.pair.legs === 1 ? `its one leg (start_agent with work_id "${w.id}" and sandbox alone)` : `its ${w.pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1 and pair_sandboxes for the others)`} on ${room.join(' or ')}. Only if a person asked it to wait for ${parked.map((b) => b.ref ?? b.until ?? b.what).join(', ')}, block again with override_gate quoting their words.`);
       }
-      const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => sid.startsWith(x)));
+      const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => onRequest(w, sid) && sid.startsWith(x)));
       if (strangers.length) throw new Error(`block's session_ids name the workers the blocker is about, and ${strangers.join(', ')} ${strangers.length > 1 ? 'are not workers' : 'is not a worker'} of ${w.id} (its workers: ${w.sessionIds.map((x) => x.slice(0, 8)).join(', ') || 'none'})`);
       const fresh = keepMergeOnGreen(kept, asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher')));
       // Without a new gate, it blocks again on the ones it kept through a hold (w754). A single blocker replaces what it
@@ -4672,7 +4838,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       if (o.kind === 'session') {
         const s = this.store.sessions.get(o.ref);
-        return !!s && s.status !== 'stopped' && s.status !== 'error' && !w.sessionIds.includes(s.id);
+        return !!s && s.status !== 'stopped' && s.status !== 'error' && !onRequest(w, s.id);
       }
       if (o.kind === 'delegation') return this.store.delegations.get(o.ref)?.status === 'pending';
       // A commit is work already merged: the dispatcher judges whether the request is still needed.
@@ -4759,7 +4925,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const back: string[] = [];
     const skip = typeof except === 'string' ? [except] : (except ?? []);
     for (const h of w.heldCheckIns ?? []) {
-      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
+      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !onRequest(w, h.session)) continue;
       const note = h.resume
         ? `${lead}. An earlier resume reached you only after ${w.id} was blocked again, so it was kept until now; carry on from it: ${h.note}`
         : `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
@@ -4787,7 +4953,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * not 0b5f813d that set the gate, and nobody merged the PR.
    */
   private gateOwner(w: WorkItem, gates: readonly WorkBlocker[]): { sid: string; gone?: string } | undefined {
-    const exists = (sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const exists = (sid: string) => !!this.store.sessions.get(sid) && onRequest(w, sid);
     const setters = [...new Set(gates.map(gateSetter).filter((x): x is string => !!x))];
     const setter = setters.find(exists);
     if (setter) return { sid: setter };
@@ -4907,16 +5073,22 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.store.putWork(w);
       return `${w.id} is blocked again on ${name}; the resume is kept and handed back when that clears`;
     }
-    if (!isOpen(w) && w.status !== 'stalled') return `${w.id} is ${w.status}`;
+    // w6047 (the w6193 review): a person's answer or note goes even when its request closed while it waited: the person's
+    // words are never dropped; the worker sees the request closed. A moved-off worker still does not take one (w2079 below):
+    // an answer to a question it asked goes to the request's new worker (answerNeedsYou, the w6214 review), and a move
+    // forwards what was queued for it there (forwardToHeirs).
+    if (!isOpen(w) && w.status !== 'stalled' && !answer) return `${w.id} is ${w.status}`;
     // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
     // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.
-    if (w.movedOff?.[sessionId] && !w.sessionIds.includes(sessionId)) {
+    // w6309 (the w6302 review, R2): one a merge listed on it again is off it too, unless a placement linked it since; it is
+    // on the merged work, so a person's answer or note to it still goes (w2495), but none of its own resumes.
+    if (offSince(w, sessionId) && (!w.sessionIds.includes(sessionId) || !answer)) {
       const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
       if (left.length !== (w.gateResumes ?? []).length) {
         w.gateResumes = left.length ? left : undefined;
         this.store.putWork(w);
       }
-      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
+      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff?.[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
     }
     return undefined;
   }
@@ -5055,7 +5227,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (changed || fresh) this.store.putWork(w);
     }
     if (!newly.length) return { told: [], resumed: [] };
-    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && onRequest(w, sid);
     const repoOk = (r: string) => (h.repo ? r.toLowerCase() === h.repo.toLowerCase() : /\/ff-factory$/i.test(r));
     const merged = [...this.store.work.values()].filter((w) => (w.prs ?? []).some((p) => h.prs.includes(p.number) && repoOk(p.repo)));
     const prsText = h.prs.length ? `pull request ${h.prs.map((n) => `#${n}`).join(', ')}` : 'a pull request';
@@ -5187,7 +5359,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * have room at once, and its own request is Blocked on that request's report: the w890 release frees its sandbox when its
    * turn ends, and the report resumes it. One open pair run per request: asked again, it waits on the one there is.
    */
-  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string }): string {
+  filePair(sessionId: string, a: { what?: string; brief?: string; legs?: number; cross_os?: string; timed?: boolean; request?: string; retry?: boolean; avoid?: string[]; pr?: string; commit?: string; steam?: string; menus?: string; split?: string; player?: PairPlayer; legacy_data?: string; data_dir?: DataDirVerdict }): string {
     const w = this.workerRequest(sessionId, a.request, 'request_pair', { reopen: true });
     const what = clip(String(a.what ?? '').replace(/\s+/g, ' ').trim(), 100);
     const brief = String(a.brief ?? '').trim();
@@ -5208,7 +5380,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const menus = steam || menusNone ? undefined : menusSaid || (mentionsMenus(what, brief) ? MENUS_READ : undefined);
     // w5965: a player from before w5297 goes only where the worker fence is off: said by the worker, or read from its words.
     const legacySaid = String(a.legacy_data ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
-    const legacyData = saysNone(legacySaid) ? undefined : legacySaid || (mentionsLegacyPlayer(what, brief) ? LEGACY_READ : undefined);
+    let legacyData = saysNone(legacySaid) ? undefined : legacySaid || (mentionsLegacyPlayer(what, brief) ? LEGACY_READ : undefined);
     // w4618: 1 leg unless it names a reason to need computers at once; a leg count asked for outright stands (legsSaid).
     const splitSaid = String(a.split ?? '').replace(/\s+/g, ' ').trim().slice(0, 300);
     const legs = a.legs ?? (pairComputersReason({ title: what, brief, pair: { crossOs, steam, timed: a.timed === true, split: splitSaid && !saysNone(splitSaid) ? splitSaid : undefined } }) ? 2 : 1);
@@ -5219,6 +5391,25 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (a.player && given && !a.player.key.startsWith(given)) throw new Error(`player ${a.player.id} is a player of ${a.player.key.slice(0, 10)}, not of commit ${given.slice(0, 10)}: publish the player of the commit the legs run`);
     const commit = given ?? a.player?.key.slice(0, 40);
     if (a.pr?.trim() && !normPr(a.pr)) throw new Error(`pr is the pull request the legs check ("#2340", "Final-Factory/FinalFactory#2340" or its link), not "${clip(a.pr, 80)}"`);
+    // w6189: decided per commit. A commit whose GameDataPaths.cs reads FF_GAME_DATA_DIR (game PR #4357's backport, checked by
+    // Agents.requestPair through server/gameDataDir.ts) is no pre-w5297 player; one that does not, or that could not be
+    // checked (no commit given, GitHub does not know it, the read failed), keeps the refusal, and its reason says which.
+    let dataDirChecked: string | undefined;
+    if (legacyData) {
+      const v = a.data_dir;
+      // w6235: legacy_data about another player (a Steam 0.50 build, another sha) is not settled by this commit's file.
+      const other = commit && legacySaid && !saysNone(legacySaid) ? otherPlayerIn(legacySaid, commit) : undefined;
+      if (v?.reads && commit && sameCommit(v.commit, commit) && !other) {
+        dataDirChecked = dataDirClearedText(v.commit);
+        legacyData = undefined;
+      } else {
+        const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)'
+          : v && !v.reads ? v.why
+          : other ?? (v?.reads ? `FF Factory's check answered for ${v.commit.slice(0, 10)}, not ${commit.slice(0, 10)}, so ${commit.slice(0, 10)} was not checked for the FF_GAME_DATA_DIR backport (w6235)`
+          : `FF Factory did not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (w6189)`);
+        legacyData = clip(`${legacyData}; ${why}`, 400);
+      }
+    }
     const openPrs = (w.prs ?? []).filter((x) => x.state === 'open');
     const pr = normPr(a.pr) ?? prIn(what) ?? prIn(brief) ?? (openPrs.length === 1 ? `${openPrs[0].repo}#${openPrs[0].number}` : undefined);
     const open = [...this.store.work.values()].find((x) => x.pair?.for === w.id && isOpen(x));
@@ -5277,7 +5468,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     } else {
       const avoid = [...new Set([...(open ? this.pairFailedOn(open) : []), ...named])];
       const split = a.split?.replace(/\s+/g, ' ').trim().slice(0, 300);
-      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}) });
+      p = this.newPair(w, sessionId, { what, brief, legs, ...(a.legs !== undefined ? { legsSaid: true as const } : {}), crossOs, timed: a.timed === true, ...(split && !saysNone(split) ? { split } : {}), ...(steam ? { steam } : {}), ...(menus ? { menus } : {}), ...(menusNone ? { noMenus: MENUS_NONE } : {}), ...(steamNone ? { noSteam: STEAM_NONE } : {}), ...(open ? { retryOf: open.id } : {}), avoid, ...(pr ? { pr } : {}), ...(commit ? { commit } : {}), ...(a.player ? { player: a.player } : {}), ...(legacyData ? { legacyData } : {}), ...(dataDirChecked ? { dataDirChecked } : {}) });
       if (open) this.supersedePair(open, p, spent!);
       head = open
         ? `${open.id} (${spent}) is cancelled, and its legs no longer count for ${w.id}: filed ${p.id}, a retry, ${pairText(p.pair!)}, with fresh legs. Only ${p.id}'s report resumes you, never one from ${open.id}'s legs. The dispatcher starts its legs together, one new worker on each computer, as soon as that many computers have room at once.`
@@ -5287,7 +5478,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const steamShort = !p.pair?.started && p.status !== 'blocked' ? this.steamShortOf(p.pair) : undefined;
     const steamHeld = steamShort ? ` ${p.id} needs Steam and is ${this.blockOnSteam(p, steamShort, `worker ${sessionId}`)}; it starts by itself once enough are.` : '';
     const blocked = this.workerBlocked(sessionId, { request: w.id, reports: [p.id], what: `pair run ${p.id}: ${what}` });
-    return `${head}${steamHeld} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
+    return `${head}${dataDirChecked && !open ? ` Not a pre-w5297 run: ${dataDirChecked}.` : ''}${steamHeld} ${blocked} Commit and push your work before the turn ends: your sandbox is then released at once for other work, and you are resumed (in a free sandbox on your machine, on your branch) when the pair's host leg reports its result.`;
   }
 
   /**
@@ -5448,7 +5639,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     p.outcome = `FAIL: ${why}. No player was run: fix the build, push, and request_pair again with the new commit (w4925).`;
     this.stamp(p, `closed as done: ${why} (w4925: a pair run of a commit that does not compile stops before its players run)`);
     this.store.putWork(p);
-    for (const sid of p.sessionIds) {
+    for (const sid of p.sessionIds.filter((x) => onRequest(p, x))) {
       const s = this.store.sessions.get(sid);
       if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || doneOf(p)[sid]) continue;
       try {
@@ -5469,7 +5660,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     old.outcome = `superseded by ${retry.id}, a retry (${why})`;
     this.stamp(old, `cancelled: ${why}; ${old.pair?.for ?? 'its asker'} asked again, so ${retry.id} runs it with fresh legs${retry.pair?.avoid?.length ? `, not on ${retry.pair.avoid.join(' or ')}` : ''} (w2041)`);
     this.store.putWork(old);
-    for (const sid of old.sessionIds) {
+    for (const sid of old.sessionIds.filter((x) => onRequest(old, x))) {
       const s = this.store.sessions.get(sid);
       if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || doneOf(old)[sid]) continue;
       try {
@@ -5858,7 +6049,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     return last && legs?.length ? { from: last.from, legs } : undefined;
   }
 
-  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer; legacyData?: string }): WorkItem {
+  private newPair(w: WorkItem, sessionId: string, x: { what: string; brief: string; legs: number; legsSaid?: true; crossOs?: string; split?: string; timed: boolean; steam?: string; menus?: string; noMenus?: string; noSteam?: string; retryOf?: string; avoid?: string[]; pr?: string; commit?: string; player?: PairPlayer; legacyData?: string; dataDirChecked?: string }): WorkItem {
     const now = this.now().toISOString();
     const pair: WorkPair = {
       legs: x.legs,
@@ -5878,6 +6069,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       ...(x.commit ? { commit: x.commit } : {}),
       ...(x.player ? { player: x.player } : {}),
       ...(x.legacyData ? { legacyData: x.legacyData } : {}),
+      ...(x.dataDirChecked ? { dataDirChecked: x.dataDirChecked } : {}),
     };
     const warm = this.warmLegsFor(w.id, x.avoid);
     if (warm) pair.warm = warm;
@@ -6240,7 +6432,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    */
   private recordReportedWorker(w: WorkItem | undefined, sessionId: string, a: { worker: string; line: string; at: number; key: string }): boolean {
     const ref = a.worker.trim();
-    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !w.sessionIds.includes(ref)) return false;
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !onRequest(w, ref)) return false;
     const gate = this.makeGate({ kind: 'worker', ref, what: `worker ${ref}'s part (its DONE or final report)` }, new Date(a.at).toISOString(), `worker ${sessionId}`);
     w.blocked = gate;
     w.alsoBlocked = undefined;
@@ -6298,7 +6490,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       for (const id of holdsOf(sid, items).held) {
         const w = this.store.work.get(id);
         if (!w || (w.status !== 'active' && w.status !== 'stalled')) continue;
-        const running = w.sessionIds.filter((o) => o !== sid).map((o) => this.store.sessions.get(o)).some((o) => o && BUSY.includes(o.status) && o.machineId?.toLowerCase() !== m);
+        const running = w.sessionIds.filter((o) => o !== sid && onRequest(w, o)).map((o) => this.store.sessions.get(o)).some((o) => o && BUSY.includes(o.status) && o.machineId?.toLowerCase() !== m);
         if (running) continue;
         const gate = this.makeGate({ kind: 'machine', ref: m, what: `its worker ${sid} was stopped mid-turn when ${m} went offline` }, at, `worker ${sid}`);
         w.blocked = gate;
@@ -6344,7 +6536,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const by = `worker ${sid}`;
     let dropped = 0;
     for (const w of this.store.work.values()) {
-      if (w.status !== 'blocked' || !w.sessionIds.includes(sid)) continue;
+      if (w.status !== 'blocked' || !onRequest(w, sid)) continue;
       const gates = gatesOf(w);
       const rest = gates.filter((g) => !(g.kind === 'machine' && g.by === by && !g.pause));
       if (rest.length === gates.length) continue;
@@ -6549,7 +6741,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * on 2026-11-03: "it requires a `DONE: w2895` line, and that would close the whole fan-out request, not just my row".
    */
   private legOffer(w: WorkItem, sessionId: string): string {
-    const others = w.sessionIds.filter((id) => id !== sessionId && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
+    const others = w.sessionIds.filter((id) => id !== sessionId && onRequest(w, id) && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
     const leg = `end it with "LEG DONE: ${w.id} <your leg>" in place of the DONE line: that records your leg as done and leaves ${w.id} open for the rest; only a "DONE: ${w.id}" closes it, once no other worker is on it. `;
     if (others.length || standingTargetOf(w)) return `You are one leg of ${w.id} (${others.length ? `other workers on it: ${others.slice(0, 6).join(', ')}` : 'its people keep several legs running'}): ${leg}`;
     return `If your work is one leg of ${w.id} (one row of a fan-out), ${leg}`;
@@ -6566,7 +6758,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     for (const id of legDoneIdsIn(text)) {
       if (full.has(id)) continue;
       const w = this.store.work.get(id);
-      if (!w || !(isOpen(w) || w.status === 'stalled') || !w.sessionIds.includes(s.id)) continue;
+      // w6309 (the w6331 review): a worker moved off it that a merge listed again closes no leg of it, as its DONE closes nothing.
+      if (!w || !(isOpen(w) || w.status === 'stalled') || !onRequest(w, s.id)) continue;
       // Held as the pilot's report while its merge waits on green CI, as a DONE is (doneMarkers).
       if (w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
       const prior = doneOf(w)[s.id];
@@ -6710,7 +6903,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (opts.moved) {
       for (const g of gatesOf(w)) {
         const by = gateSetter(g);
-        if (by && by !== s.id && !w.sessionIds.includes(by) && w.movedOff?.[by]) g.by = `worker ${s.id}`;
+        if (by && by !== s.id && offSince(w, by)) g.by = `worker ${s.id}`;
       }
     }
     const exempt = opts.moved ? gatesOf(w).filter((g) => this.gateOpen(g)) : w.pair ? othersGates(w, s.id) : [];
@@ -6721,7 +6914,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (opts.overrideGate?.trim() && gatesOf(w).length) what += ` (gate overridden: "${clip(opts.overrideGate.trim(), 200)}")`;
     // w2566: a new worker started over the wait of one stopped on its paused or offline computer is the request's move: that
     // one is taken off it, so it no longer counts as still on it (w2542's e6d3dfe1, left on LothLaptop when c59d84ed started).
-    if (!w.sessionIds.includes(s.id)) {
+    // w6309: a worker moved off it that a merge listed again is placed on it anew (onRequest; it is linked below).
+    if (!onRequest(w, s.id)) {
       const waits = gatesOf(w).filter((g) => g.kind === 'machine' && g.ref);
       this.releaseStoppedAway(
         w,
@@ -6732,7 +6926,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // After the release above: a gate the worker taken off set is no longer another worker's to keep.
     const others = !opts.moved && !w.pair && opts.overrideGate?.trim() ? othersGates(w, s.id) : exempt;
     // w3615: a new worker started on it settles the question it waited on (a message to one already on it does not).
-    const settled = !w.sessionIds.includes(s.id) ? this.settleQuestion(w, 'the dispatcher') : undefined;
+    const settled = !onRequest(w, s.id) ? this.settleQuestion(w, 'the dispatcher') : undefined;
     if (settled) what += `; ${settled.line}`;
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
@@ -6770,7 +6964,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * Nothing is recorded twice: a worker already on a request is left alone. Returns the item's id.
    */
   recordStart(s: Pick<SessionInfo, 'id' | 'title'>, prompt: string, by: Requester, how: string, humanAsked: boolean): string {
-    const on = [...this.store.work.values()].find((w) => w.sessionIds.includes(s.id));
+    const on = [...this.store.work.values()].find((w) => onRequest(w, s.id));
     if (on) return on.id;
     const now = this.now();
     const w: WorkItem = {
@@ -7037,7 +7231,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!live || live.status !== 'idle' || holdsItsPlace(live, now) || this.sessions.queued().length) return;
     const ask = ids
       .map((id) => this.store.work.get(id))
-      .filter((w): w is WorkItem => !!w && isOpen(w) && w.sessionIds.includes(s.id) && w.approval?.state !== 'pending' && !w.question && !w.flag)
+      .filter((w): w is WorkItem => !!w && isOpen(w) && onRequest(w, s.id) && w.approval?.state !== 'pending' && !w.question && !w.flag)
       .filter((w) => now - (this.statusAsked.get(`${s.id}:${w.id}`) ?? -Infinity) >= STATUS_ASK_EVERY_MS);
     if (!ask.length) return;
     for (const w of ask) {
@@ -7274,7 +7468,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const re = new RegExp(`\\b${id}\\b`, 'i');
     const text = (x: WorkItem) => [x.title, x.brief, x.constraints ?? '', ...(x.notes ?? []).map((n) => n.text)].join('\n');
     return [...this.store.work.values()]
-      .filter((x) => x.id !== id && x.sessionIds.includes(sid) && x.status !== 'merged')
+      .filter((x) => x.id !== id && onRequest(x, sid) && x.status !== 'merged')
       .filter((x) => (x.relatedIds ?? []).some((r) => r.trim().toLowerCase() === id) || re.test(text(x)))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   }
@@ -7288,7 +7482,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   workerEnded(s: Pick<SessionInfo, 'id'>) {
     for (const w of [...this.store.work.values()]) {
       const done = doneOf(w);
-      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id]) continue;
+      if (!isOpen(w) || !onRequest(w, s.id) || !Object.keys(done).length || done[s.id]) continue;
       if (this.releaseAfterDone(w).includes(s.id)) {
         this.recheckDone(w.id, `its worker ${s.id} ended on a paused or offline computer after another worker's DONE (w2566)`);
         continue;
@@ -7359,13 +7553,19 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!(isOpen(w) || w.status === 'stalled')) continue;
       // w2045: a DONE while its after-merge report waits on green CI is that report's, filed when FF Factory merges.
       if (!ops && w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
-      if (!w.sessionIds.includes(s.id)) {
+      // w6309 (the w6329 review): a worker moved off it that a merge listed again is heard (its report is kept in Findings),
+      // but its DONE does not close it: the worker on it now, or the dispatcher, does.
+      if (!ops && heardOn(w, s.id) && !onRequest(w, s.id)) {
+        refused.push(`${id}: you were moved off it at ${w.movedOff?.[s.id]?.slice(11, 16) ?? '?'} UTC, so your DONE does not close it; your report is kept with it, and ${latestWorker(w) ? `its worker ${latestWorker(w)}` : 'the dispatcher'} carries it on`);
+        continue;
+      }
+      if (!onRequest(w, s.id)) {
         const by = ops ? undefined : this.namedBy(s.id, id);
         if (ops?.workIds.has(id)) {
           also.set(id, [ops.by]);
           this.stamp(w, `the orchestration worker said DONE for it (the job ${ops.by.displayName} sent it for ${id})`);
         } else if (by) {
-          w.sessionIds = [...w.sessionIds, s.id];
+          if (!w.sessionIds.includes(s.id)) w.sessionIds = [...w.sessionIds, s.id];
           w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'linked' } };
           also.set(id, by.requesters);
           this.stamp(w, `worker ${s.id} said DONE for it from ${by.id} "${clip(by.title, 80)}" (${names(by.requesters)}'s), which names ${id}: now one of its workers`);
@@ -7385,6 +7585,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       this.releaseAfterDone(w);
       if (!ops) this.dropWorkerWaitsOf(w, s.id);
+      // w6397: its follow-up's id, sent mid-turn (tellFollowUpFiled), would resume it after this DONE for nothing (w6401).
+      if (this.d.pendingWake?.(s.id)?.note.startsWith(`[follow-up filed] The follow-up you handed up for ${w.id},`)) this.d.cancelWake?.(s.id);
       const others = this.stillOn(w, s.id);
       if (others.length && !ops) this.tellLegsRunOver(w, s.id, others);
       if (others.length) {
@@ -7475,8 +7677,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private supersede(s: SessionInfo, id: string, by: string) {
     const w = this.store.work.get(id);
     if (!w || !(isOpen(w) || w.status === 'stalled')) return;
-    const own = w.sessionIds.includes(s.id);
-    const from = own ? undefined : this.namedBy(s.id, id);
+    // w6309 (the w6331 review): a worker moved off it that a merge listed again is heard, not on it: its SUPERSEDED closes
+    // nothing, as its DONE does not (doneMarkers); the request goes to the dispatcher to decide.
+    const own = onRequest(w, s.id);
+    const from = own || heardOn(w, s.id) ? undefined : this.namedBy(s.id, id);
     const open = (w.prs ?? []).find((p) => p.state === 'open');
     if (open) {
       this.stamp(w, `worker ${s.id} says it is superseded by ${by}, not closed: PR #${open.number} is still open (w3248)`);
@@ -7485,7 +7689,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     const others = this.stillOn(w, s.id);
     if ((own || from) && !others.length) return this.closeSuperseded(w, s, by, from);
-    const why = others.length ? `${others.map((x) => this.workerLine(x)).join(', ')} ${others.length > 1 ? 'are' : 'is'} still on it` : `no request of worker ${s.id}'s names it`;
+    const why = others.length ? `${others.map((x) => this.workerLine(x)).join(', ')} ${others.length > 1 ? 'are' : 'is'} still on it` : heardOn(w, s.id) && !own ? `worker ${s.id} was moved off it at ${w.movedOff?.[s.id]?.slice(11, 16) ?? '?'} UTC` : `no request of worker ${s.id}'s names it`;
     const hands = this.handsOf(s.id).map((h) => h.id).filter((x) => x !== id);
     this.stamp(w, `worker ${s.id} says it is superseded by ${by}; sent to the dispatcher to decide (${why}) (w3248)`);
     this.store.putWork(w);
@@ -7860,7 +8064,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.priority = 'urgent';
     }
     this.store.putWork(w);
-    for (const sid of w.sessionIds) {
+    for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
       const s = this.store.sessions.get(sid);
       if (!s || !BUSY.includes(s.status)) continue;
       try {
@@ -7883,7 +8087,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.stamp(w, a.line);
     this.store.putWork(w);
     if (isOpen(w)) {
-      for (const sid of w.sessionIds) {
+      for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
         const s = this.store.sessions.get(sid);
         if (!s || !BUSY.includes(s.status)) continue;
         try {
@@ -7920,7 +8124,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.store.putWork(w);
     if (reopen) this.gatherForDispatcher(w.requestedBy, updateNotice(w, w.requestedBy, `reopened by FF Factory: ${a.text}`));
     else {
-      for (const sid of w.sessionIds) {
+      for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
         const s = this.store.sessions.get(sid);
         if (!s || !BUSY.includes(s.status)) continue;
         try {
@@ -8077,7 +8281,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const closed: WorkItem[] = [];
     for (const { id, closed: how } of batch) {
       const w = this.store.work.get(id);
-      if (!w || !isOpen(w) || w.status === 'active' || w.sessionIds.length) continue;
+      if (!w || !isOpen(w) || w.status === 'active' || w.sessionIds.some((sid) => onRequest(w, sid))) continue;
       const at = this.now().toISOString();
       w.status = 'done';
       w.autoClosed = { ...how, at };
@@ -8172,7 +8376,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.store.putWork(w);
       this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
       // A worker already on it hears about the new thread.
-      for (const sid of target.sessionIds) {
+      for (const sid of target.sessionIds.filter((x) => onRequest(target, x))) {
         const s = this.store.sessions.get(sid);
         if (!s || !BUSY.includes(s.status)) continue;
         try {
@@ -8256,7 +8460,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   private crashFactsOf(w: WorkItem) {
-    const live = w.sessionIds.filter((sid) => ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+    const live = w.sessionIds.filter((sid) => onRequest(w, sid) && ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
     return crashFacts(w, live);
   }
 
@@ -8459,6 +8663,40 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private readonly boardTexts = new Map<string, { src: string; doc: string[]; title: string[] }>();
   /** How many requests' concepts were worked out (w2044), for the tests. */
   boardTextsMade = 0;
+
+  /**
+   * w6381: works out the concepts of every request a board_check over `lookbackDays` reads, in slices of sliceMs, so the
+   * first board_check after a start finds them made: it made them all in one go and held the portal 3.5 s at 10:42Z on
+   * 2026-11-27, minutes after the 0966c33 restart (stall profile: onBoardCheck > concepts, stem). Returns how many it made.
+   */
+  /**
+   * The board check's warm-up (warmBoardTexts), started once and shared: a board_check waits for it before it answers
+   * (Providers.boardReady). w6381: the 25 ms slices of the first warm-up waited behind every other busy turn after the
+   * 12:01Z restart on 2026-11-27, and FFBox's board_check at 12:01:59Z (36 s after the start) still made every request's
+   * concepts in one go: a 2.3 s block (stall profile: onBoardCheck > concepts, stem).
+   */
+  boardWarmed(lookbackDays: number): Promise<number> {
+    this.boardWarm ??= this.warmBoardTexts(lookbackDays).catch((e) => {
+      console.warn(`board check warm-up failed: ${(e as Error).message}`);
+      return 0;
+    });
+    return this.boardWarm;
+  }
+  private boardWarm?: Promise<number>;
+
+  async warmBoardTexts(lookbackDays: number, sliceMs = 25): Promise<number> {
+    const before = this.boardTextsMade;
+    let start = performance.now();
+    for (const e of this.pool(undefined, lookbackDays * 86_400_000)) {
+      const w = e.kind === 'work' ? this.store.work.get(e.ref) : undefined;
+      if (w) this.boardTextOf(w);
+      if (performance.now() - start >= sliceMs) {
+        await new Promise((r) => setImmediate(r));
+        start = performance.now();
+      }
+    }
+    return this.boardTextsMade - before;
+  }
 
   private boardTextOf(w: WorkItem): { doc: string[]; title: string[] } {
     const src = `${w.title}\n${w.brief.slice(0, 1500)}`;
@@ -8717,7 +8955,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.takeOver(target, person, `${person.displayName} joined it from FFBox (dev request ${f.ref})`);
       target.ffboxDev = [...(target.ffboxDev ?? []), link('covered')].slice(-20);
       this.store.putWork(target);
-      const busy = target.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const busy = target.sessionIds.filter((sid) => onRequest(target, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const matches = [{ id: target.id, status: target.status, score: highOpen?.score ?? 1, why }, ...ranked.filter((x) => x.w.id !== target.id).map(wire)].slice(0, 5);
       return {
         outcome: 'covered',
@@ -9201,7 +9439,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private attachFollowUp(worker: SessionInfo, about: readonly WorkItem[], by: string) {
     const serving = servedBy(worker.id, [...this.store.work.values()]).size > 0;
     const first = about[0];
-    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' ? { id: first.id, at: this.now().toISOString(), by } : undefined;
+    // w6309 (the w6335 review): a worker moved off it that a merge listed again hears the follow-up but never reopens it.
+    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' && onRequest(first, worker.id) ? { id: first.id, at: this.now().toISOString(), by } : undefined;
     if (!next && !worker.followUpOn) return;
     if (next) {
       worker.followUpOn = next;
@@ -9219,7 +9458,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const f = this.store.sessions.get(sessionId)?.followUpOn;
     if (!f || this.now().getTime() - Date.parse(f.at) > FOLLOW_UP_TIMED_MS) return undefined;
     const w = this.store.work.get(f.id);
-    if (!w || isOpen(w) || !w.sessionIds.includes(sessionId)) return undefined;
+    if (!w || isOpen(w) || !onRequest(w, sessionId)) return undefined;
     if (servedBy(sessionId, [...this.store.work.values()]).size) return undefined;
     return w;
   }
@@ -9432,6 +9671,17 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const w = this.store.work.get(id);
     if (!w || w.status !== 'blocked' || !w.blocked) return;
     const g = gate ?? w.blocked;
+    // w6397: a follow-up its own worker handed up and waits on, cancelled or declined: that worker decides how to go on
+    // without it, so it is resumed with the news (its resume names the follow-up and how it closed), not its person asked.
+    const followUp = g.kind === 'request' && !!g.ref && !!w.handedUp?.filed.some((x) => x.toLowerCase() === g.ref!.toLowerCase());
+    const setter = gateSetter(g);
+    if (followUp && setter && this.store.sessions.get(setter) && onRequest(w, setter)) {
+      const news = `${why}: the follow-up it handed up will not deliver, so decide how ${w.id} goes on without it (w6397)`;
+      // Its other waits go with it (it blocks again on what still holds), unless another worker set them.
+      if (gatesOf(w).every((x) => gateSetter(x) === setter)) this.unblock(w.id, news);
+      else this.gatesCleared(w.id, [g], news);
+      return;
+    }
     const text = clip(`It was blocked on ${blockerName(g, this.now().getTime())} (${g.what}), and ${why}. Is ${w.id} still needed, and what should it wait for now?`, 1000);
     w.status = 'question';
     // A gate that died is the person's to rule on (w754): none of its gates is kept through that question.

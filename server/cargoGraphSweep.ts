@@ -9,8 +9,9 @@
  * A mark and sweep over cargo's own records. Each unit's `.fingerprint/<pkg>-<hash>/<kind>.json` lists the fingerprints of
  * the units it was built from (`deps: [[id, name, public, fingerprint]]`), and the unit's `<kind>` file holds its own
  * fingerprint as 16 hex digits (the u64's little-endian bytes). The roots are the workspace's own units (their `local`
- * holds a CheckDepInfo: a crate built from a checkout, not a registry) built within `keepHours` of the newest one, plus any
- * unit a running process names (a test binary still running). Everything those reach stays, however old (a dependency
+ * holds a CheckDepInfo: a crate built from a checkout, not a registry) built within `keepHours` of the newest one, the newest
+ * executable of each name in deps/ (the test binaries and bins of the latest build, however old: w6240), plus any unit a
+ * running process names (a test binary still running). Everything those reach stays, however old (a dependency
  * built once on day one is current). What no root reaches goes, unless it was written within `settleMs`.
  *
  * On macOS, rustc keeps a unit's codegen objects (`<unit>.<cgu>.rcgu.o`) in deps/ for debug info, and every rebuild of a
@@ -39,6 +40,8 @@ export interface CargoSweep {
   bytes: number;
   units: number;
   live: number;
+  /** How many executables in deps/ were roots as the newest of their name (w6240). */
+  executables: number;
   /** How many of `paths` are superseded object files of live units. */
   objects: number;
   /** How many of `bytes` lie in a profile's incremental/ (a trim of debug/incremental takes them anyway). */
@@ -49,6 +52,8 @@ const HASHED = /^(?:lib)?(.+?)-([0-9a-f]{16})(?=[.-]|$)/;
 const UNIT_DIR = /^(.+)-([0-9a-f]{16})$/;
 const HASH_DIRS = ['deps', 'build', 'incremental', '.fingerprint', 'examples'];
 const HEX16 = /^[0-9a-f]{16}$/;
+/** An executable cargo links into deps/: a test binary or a bin, with no extension, or `.exe` on Windows (w6240). */
+const EXE = /^(.+)-([0-9a-f]{16})(\.exe)?$/;
 
 const list = async (d: string): Promise<fs.Dirent[]> => fs.promises.readdir(d, { withFileTypes: true }).catch(() => []);
 const lstat = (p: string) => fs.promises.lstat(p).catch(() => undefined);
@@ -131,6 +136,24 @@ async function sweepProfile(prof: string, o: CargoSweepOptions, out: CargoSweep)
   const live = new Set<string>();
   const stack = [...roots].filter(([, t]) => t >= newest - o.keepHours * 3_600_000).map(([h]) => h);
   for (const cmd of o.pinned ?? []) for (const h of hashesIn(cmd)) if (deps.has(h)) stack.push(h);
+  // w6240: the newest executable of each name in deps/ (a test binary or a bin, `<name>-<hash>`, `.exe` on Windows) is a root
+  // however old: the one the latest `cargo test --no-run` or build left. Cargo rewrites no file of a unit that is already up
+  // to date, so a test binary whose crate did not change keeps its old time and its fingerprint's, and a window measured from
+  // the newest build dropped it while a run was about to start it (biscuit slot4, 2026-11-27: 62 of 257 test binaries at the
+  // 15 min window). Rooting its hash keeps its fingerprint, its .d, its .dSYM or .pdb and everything it was built from.
+  const newestExe = new Map<string, { hash: string; mtime: number }>();
+  for (const e of await list(path.join(prof, 'deps'))) {
+    const m = EXE.exec(e.name);
+    if (!m || !e.isFile()) continue;
+    const st = await lstat(path.join(prof, 'deps', e.name));
+    if (!st || (!m[3] && !(st.mode & 0o111))) continue;
+    const had = newestExe.get(m[1]);
+    if (!had || st.mtimeMs > had.mtime) newestExe.set(m[1], { hash: m[2], mtime: st.mtimeMs });
+  }
+  for (const { hash } of newestExe.values()) {
+    stack.push(hash);
+    out.executables++;
+  }
   while (stack.length) {
     const h = stack.pop()!;
     if (live.has(h)) continue;
@@ -181,7 +204,46 @@ async function sweepProfile(prof: string, o: CargoSweepOptions, out: CargoSweep)
 
 /** What a sweep of `target` would delete (nothing is deleted here). A target with no workspace unit is left alone. */
 export async function planCargoSweep(target: string, o: CargoSweepOptions): Promise<CargoSweep> {
-  const out: CargoSweep = { paths: [], bytes: 0, units: 0, live: 0, objects: 0, incrementalBytes: 0 };
+  const out: CargoSweep = { paths: [], bytes: 0, units: 0, live: 0, executables: 0, objects: 0, incrementalBytes: 0 };
   for (const prof of await cargoProfiles(target)) await sweepProfile(prof, o, out);
+  return out;
+}
+
+/**
+ * A unit's key as `<crate>-<16 hex>` from the basename of one of its entries (a `deps/lib<crate>-<hash>.rlib`, a
+ * `.fingerprint/<crate>-<hash>` folder, `incremental/<crate>-<hash>-<id>`), or undefined for a name with no unit hash (w6291). The
+ * `lib` prefix is dropped as the sweep drops it, so a crate whose own name starts with `lib` is named differently by its rlib and
+ * its fingerprint folder: compare keys by their last 16 characters, the hash.
+ */
+export const unitKeyOf = (name: string): string | undefined => {
+  const m = HASHED.exec(name);
+  return m ? `${m[1]}-${m[2]}` : undefined;
+};
+
+/** The units a plan would sweep, one key each (a superseded object file is a live unit's, not a unit swept). */
+export function sweptUnits(sweep: CargoSweep): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of sweep.paths) {
+    const base = path.basename(p);
+    if (base.endsWith('.rcgu.o')) continue;
+    const key = unitKeyOf(base);
+    if (key && !seen.has(key.slice(-16))) {
+      seen.add(key.slice(-16));
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+/** The hashes of the units a target still has a fingerprint folder for: what a build can reuse (w6291). */
+export async function cargoUnitHashes(target: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const prof of await cargoProfiles(target)) {
+    for (const u of await list(path.join(prof, '.fingerprint'))) {
+      const m = UNIT_DIR.exec(u.name);
+      if (u.isDirectory() && m) out.add(m[2]);
+    }
+  }
   return out;
 }

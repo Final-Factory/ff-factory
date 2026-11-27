@@ -258,10 +258,38 @@ export class ReportStore {
 
   private dir = (id: string) => path.join(this.root, id);
 
+  /** w6336: each report's excerpt, for the body it was made of (every page connect lists them all). */
+  private excerpts = new Map<string, { body: string; excerpt: string }>();
+
   private summary(f: ReportFile): ReportSummary {
     const { history, media: _media, ...rest } = f;
-    const text = plainText(this.bodies.get(f.id) ?? '');
-    return { ...rest, revisions: history.length, excerpt: text.length > EXCERPT ? `${text.slice(0, EXCERPT - 1)}…` : text };
+    const body = this.bodies.get(f.id) ?? '';
+    let e = this.excerpts.get(f.id);
+    if (e?.body !== body) {
+      const text = plainText(body);
+      e = { body, excerpt: text.length > EXCERPT ? `${text.slice(0, EXCERPT - 1)}…` : text };
+      this.excerpts.set(f.id, e);
+    }
+    return { ...rest, revisions: history.length, excerpt: e.excerpt };
+  }
+
+  /**
+   * Work out every report's excerpt ahead (w6382), yielding to the event loop every `sliceMs`: the first page connect after
+   * a restart spent 187 ms of its 728 ms state build in plainText (2026-11-27 12:52Z), with no excerpt yet.
+   */
+  async warmExcerpts(sliceMs = 20, clock: () => number = Date.now): Promise<number> {
+    let since = clock();
+    let n = 0;
+    for (const f of [...this.files.values()]) {
+      if (clock() - since >= sliceMs) {
+        await new Promise<void>((r) => setImmediate(r));
+        since = clock();
+      }
+      if (!this.files.has(f.id)) continue;
+      this.summary(f);
+      n++;
+    }
+    return n;
   }
 
   /** Every report, newest first. */

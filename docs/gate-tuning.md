@@ -87,6 +87,12 @@ what was filed, proposals and time saved), with the proposals as rows, most gate
 one row per day: `(day, at, summary, json)`, where `json` is the whole result (`GateTuning` in `server/gateTuning.ts`).
 Read older days with `{query: "sql", sql: "SELECT day, summary FROM gate_tuning ORDER BY day DESC"}`.
 
+## Where its queries run
+
+The tuning's queries (`findMisses`, `findProposals`) run apart from the portal's loop, in a worker thread on their own
+read-only connection (`TestHistory.allApart`). Each query is stopped after 5 min. On 2026-11-27 at 09:17Z, the proposals
+query on the portal's own connection held the loop for 22.9 s: no page got its state and every page's ping timed out (w6370).
+
 ## Config
 
 `gateTuning: { enabled?: boolean; hourUtc?: number; autoApprove?: { enabled?: boolean; maxPerDay?: number } }`, read at

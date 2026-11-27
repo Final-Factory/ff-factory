@@ -1,5 +1,5 @@
 import { redactInPlace, redactValue } from './secrets.ts';
-import { SnapshotFile, dataRecoveries, isObject, readJsonDurable, writeFileDurable, type Check } from './durable.ts';
+import { SnapshotFile, dataRecoveries, stringifyPrettyPieces, isObject, readJsonDurable, writeFileDurable, type Check } from './durable.ts';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
@@ -191,6 +191,8 @@ export class Store {
   assistantText?: (sessionId: string, text: string) => string;
   /** The work ledger (docs/orchestrators.md), kept in its own file, data/work.json. */
   readonly work = new Map<string, WorkItem>();
+  /** Counts putWork and dropWork: an index of the requests built at one count holds until the next (w6336). */
+  workRev = 0;
   /** The number of the last work item ("w12" is 12). */
   workSeq = 0;
   /** The dispatcher's session id (the key keeps its old name: it was the one shared orchestrator). */
@@ -218,8 +220,11 @@ export class Store {
     this.meters = meterStates(path.join(dataDir, 'meters'));
     this.seals = sealStore(path.join(dataDir, 'transcript-seals'));
     fs.mkdirSync(this.transcriptDir, { recursive: true });
-    this.stateFile = new SnapshotFile(file, () => JSON.stringify(this.persisted(), null, 2), { ...STATE_SAVE, label: 'state' });
-    this.workFile = new SnapshotFile(workFile, () => JSON.stringify({ seq: this.workSeq, items: [...this.work.values()] }, null, 2), { ...WORK_SAVE, label: 'work ledger' });
+    // w6381: the background writes serialize in slices (stringifyPrettyPieces, the same text in pieces): one go held the portal 0.5-1.7 s.
+    // The lists are taken at the start; each record is written whole as it is when its turn comes. flushSync stays one go.
+    const workSnapshot = () => ({ seq: this.workSeq, items: [...this.work.values()] });
+    this.stateFile = new SnapshotFile(file, () => JSON.stringify(this.persisted(), null, 2), { ...STATE_SAVE, label: 'state' }, () => stringifyPrettyPieces(this.persisted()));
+    this.workFile = new SnapshotFile(workFile, () => JSON.stringify(workSnapshot(), null, 2), { ...WORK_SAVE, label: 'work ledger' }, () => stringifyPrettyPieces(workSnapshot()));
     const p = readJsonDurable<Persisted>(file, { check: checkState });
     if (p) {
       this.leftoverSandboxes.push(...p.sandboxes);
@@ -331,6 +336,7 @@ export class Store {
     // Its log lines, DONE reports, [needs you] text and notes: never a secret in work.json or on screen (w1584).
     redactInPlace(w);
     this.work.set(w.id, w);
+    this.workRev++;
     this.saveWork();
     emit({ type: 'work', item: w });
   }
@@ -338,6 +344,7 @@ export class Store {
   /** Forget work items (pruning closed ones); no event: pages drop them at their next state. */
   dropWork(ids: string[]) {
     for (const id of ids) this.work.delete(id);
+    if (ids.length) this.workRev++;
     if (ids.length) this.saveWork();
   }
 

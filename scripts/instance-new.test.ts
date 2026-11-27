@@ -16,6 +16,7 @@ import {
   msysPath,
   nextSteps,
   parseOptions,
+  PORTAL_PRIORITY_PS,
   plist,
   refusals,
   startScript,
@@ -122,7 +123,13 @@ test('startScript: the Lens Scout shape', () => {
     s,
   );
   assert.ok(lines.includes('unset CLAUDE_CODE_OAUTH_TOKEN ANTHROPIC_API_KEY GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN'), s);
-  assert.ok(lines.includes('cd "F:/ffw/atlas/app" && exec node server/index.ts >> "F:/ffw/atlas/portal.log" 2>&1'), s);
+  // w6221: started in the background, raised, then waited for, so the task still ends with the portal's exit code
+  assert.ok(lines.includes('cd "F:/ffw/atlas/app" || exit 1'), s);
+  assert.ok(lines.includes('node server/index.ts >> "F:/ffw/atlas/portal.log" 2>&1 &'), s);
+  assert.ok(!s.includes('exec node'), s);
+  assert.ok(s.includes(PORTAL_PRIORITY_PS), s);
+  assert.ok(s.includes('FF_PORTAL_PID=$(cat "/proc/$portal/winpid") powershell.exe -NoProfile -NonInteractive -EncodedCommand'), s);
+  assert.equal(lines.at(-2), 'wait $portal');
   assert.equal(msysPath(path.win32.join('C:', 'Program Files', 'nodejs')), '/c/Program Files/nodejs');
 });
 
@@ -133,6 +140,7 @@ test('taskScript: the logon task as register-tasks.ps1 registers it', () => {
   assert.ok(s.includes(`$bash = '${bash}'`), s);
   assert.ok(s.includes(`$dir = '${dir}'`), s);
   assert.ok(s.includes('-RestartCount 999'), s);
+  assert.ok(s.includes('-Priority 4'), 'Normal CPU, I/O and memory priority, not the default 7 (w6221)');
   assert.ok(s.includes('-RestartInterval (New-TimeSpan -Minutes 1)'), s);
   assert.ok(s.includes('-MultipleInstances IgnoreNew'), s);
   assert.ok(s.includes('-ExecutionTimeLimit ([TimeSpan]::Zero)'), s);

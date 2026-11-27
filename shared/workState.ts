@@ -43,7 +43,7 @@
 import { needsAwayText } from './availability.ts';
 import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type Requester, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
-import { gatesName, gatesOf } from './blockers.ts';
+import { gatesName, gatesOf, onRequest } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
 
@@ -184,7 +184,7 @@ function linkOf(w: WorkItem, sessionId: string): { at: number; how: 'sent' | 'li
  * who a request waits on (stillOn) read this one.
  */
 export function servedBy(sessionId: string, items: readonly WorkItem[]): Set<string> {
-  const mine = items.filter((w) => live(w) && w.sessionIds.includes(sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
+  const mine = items.filter((w) => live(w) && onRequest(w, sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
   const lastSent = Math.max(-1, ...mine.filter((x) => x.l.how === 'sent').map((x) => x.l.at));
   return new Set(mine.filter((x) => (x.l.how === 'sent' ? x.l.at === lastSent : x.l.at >= lastSent)).map((x) => x.w.id));
 }
@@ -215,7 +215,7 @@ export function holdsOf(sessionId: string, items: readonly WorkItem[], byId?: Re
   const paused = new Map<string, string>();
   let all = byId;
   for (const w of items) {
-    if (served.has(w.id) || !live(w) || !w.sessionIds.includes(sessionId) || w.done?.[sessionId]) continue;
+    if (served.has(w.id) || !live(w) || !onRequest(w, sessionId) || w.done?.[sessionId]) continue;
     const a = w.setAside?.[sessionId];
     if (a && (Date.parse(a.at) || 0) > linkOf(w, sessionId).at) {
       if (a.kind === 'released') continue;
@@ -358,6 +358,44 @@ export function requestWaitOf(line: string, selfId: string): string | undefined 
     if (id && id !== selfId.toLowerCase()) return id;
   }
   return undefined;
+}
+
+/**
+ * w6397: a wait on a follow-up the worker handed up (hand_up_requests, w2969), which has no id in the line because the worker
+ * was never told one: cc0f9074 on w6096 wrote "w6096: still open: blocked on a fix for the flaky ffu-server gateway_standby
+ * test (handed up), then CI on Final-Factory/ffu#1213" at 01:29 UTC on 2026-11-27, its follow-up was filed as w6254 that
+ * minute, and w6096 sat Stalled 8 h after w6254 closed as done. Only a stated wait counts ("blocked on", "waiting for/on",
+ * "waits for/on"; not "needs" or "until", which also describe work), and not a negated one ("not blocked on", "no longer
+ * waiting on"). Its own clause, cut at a , ; . or "then", "and", "but", "not", must name the hand-up or follow-up. A bracket
+ * counts only when it says nothing else ("(handed up)"): "blocked on CI (the follow-up is handed up separately)" is a wait
+ * on CI. w6401 (the review of PR #1459) gated requests on such lines, and they showed Blocked, not Stalled.
+ */
+const HANDED_UP = /\bhand(?:ed)?[- ]?ups?\b|\bfollow[- ]?ups?\b/i;
+const HAND_UP_WAIT = /\b(?:blocked on|waiting (?:for|on)|waits (?:for|on))\b([^;.]{0,140})/gi;
+const HAND_UP_BRACKET = /^\s*(?:handed[- ]up|hand[- ]?up|(?:an?|the|my)?\s*follow[- ]?up(?: request)?(?: I handed up)?)\s*$/i;
+const NEGATED = /(?:\b(?:not|never|no longer|nothing|none)|n't)\s+(?:(?:be|been|being|is|am|are|was|currently|yet|really)\s+)*$/i;
+export function handUpWaitIn(line: string): boolean {
+  const body = line
+    .replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '')
+    .replace(QUOTED, ' ')
+    .replace(/\(([^()]*)\)/g, (_, inner: string) => (HAND_UP_BRACKET.test(inner) ? ` ${inner} ` : ' '));
+  for (const m of body.matchAll(HAND_UP_WAIT)) {
+    if (NEGATED.test(body.slice(0, m.index))) continue;
+    if (HANDED_UP.test(m[1].split(/,|\b(?:then|and|but|not)\b/i)[0])) return true;
+  }
+  return false;
+}
+
+/**
+ * w6397: the follow-up a line waits on (handUpWaitIn) among those filed for `w`'s hand-up: the newest still open, or undefined
+ * (none filed yet, all closed, or the line names no hand-up).
+ */
+export function handUpWaitRef(w: Pick<WorkItem, 'id' | 'handedUp'>, line: string, work: (id: string) => Pick<WorkItem, 'status'> | undefined): string | undefined {
+  if (!w.handedUp?.filed.length || !handUpWaitIn(line)) return undefined;
+  return [...w.handedUp.filed].reverse().find((id) => {
+    const t = work(id);
+    return !!t && id.toLowerCase() !== w.id.toLowerCase() && !['done', 'rejected', 'cancelled'].includes(t.status);
+  });
 }
 
 /**
@@ -1047,7 +1085,8 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
 function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
   if (!live(w)) return undefined;
   const holds = holdsFor ?? ((sid: string) => holdsOf(sid, f.items));
-  const workers = w.sessionIds.map((id) => f.session(id)).filter((s): s is SessionInfo => !!s);
+  // w6309: its workers are the ones on it (onRequest), not one moved off it that a merge listed again.
+  const workers = w.sessionIds.filter((id) => onRequest(w, id)).map((id) => f.session(id)).filter((s): s is SessionInfo => !!s);
   // Mine: the workers that hold it, serving it now or not (w915). Only the report- and message-based signals below read
   // `serving`: what a worker said last, and what waits to be sent it, is about the request it is on now.
   const mine = workers.filter((s) => holds(s.id).held.has(w.id));
@@ -1106,7 +1145,7 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   // w1841: another worker of the request reported after a time and this one did not: what came then went to that one.
   const waiting = (s: SessionInfo): WaitingWorker => ({ id: s.id, elsewhere: (t) => reportAt(s) <= t && workers.some((o) => o.id !== s.id && reportAt(o) > t) });
   const team = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
-  const heldWith = (s: SessionInfo) => f.items.filter((x) => x.id !== w.id && live(x) && x.sessionIds.includes(s.id) && !x.done?.[s.id]);
+  const heldWith = (s: SessionInfo) => f.items.filter((x) => x.id !== w.id && live(x) && onRequest(x, s.id) && !x.done?.[s.id]);
 
   // Waiting on a person, declared (w691): the worker says only a person can move it on, and who. A check-in it set as
   // well does not make it Working: no wake-up moves a person.

@@ -213,8 +213,20 @@ before redeploying by hand.
   plus turns sent but not yet reported) by session id (`CensusWatch`, `noteCensus` in `server/machines.ts`). A
   difference that outlasts 60 s and two reports is logged as one `agent count:` warning naming each id counted on only
   one side and what the portal holds of it. The warning repeats when the set changes and every 30 minutes, and one
-  line follows when the counts agree again. Nothing is stopped, dropped or placed by it: making placement use the
-  daemon's count is a separate stage.
+  line follows when the counts agree again. Nothing is stopped, dropped or placed by it.
+- **Placement on the daemon's count** (w5985, off by default). The owner's setting `placementAgentCount` "on" (set_app_config,
+  read live) makes placement (`Agents.placesNow`, through `MachineManager.placementCount` and `placementCountOf` in
+  `server/agentCensus.ts`) count a machine as its agent cap does (`midTurnTotal`: reported mid-turn, turns sent and not
+  yet reported, standing agents too; `runningIn` per sandbox for its seats), and take the larger of that and its daemon's
+  last census while that is under 45 s old (`CENSUS_FRESH_MS`). Replayed on beast's 2026-11-26 case
+  (`server/w5985PlacementCount.test.ts`): "2 of 6" becomes 6 of 6, so placement sends nothing its daemon would refuse. It
+  only keeps work off a machine: it never stops or ends an agent (lothsahn's lockout rule). An agent only the daemon
+  counts that the portal holds on another computer (a moved request's stale copy, as 716b6111 was) stays counted until it
+  ends; stopping it is w5950's `movedAwayWorkers` "on" at its daemon's next hello, and the `agent count:` warning names
+  that setting's mode beside it. Recovery needs nobody at the machine: `placementAgentCount` "off" (or `null`) puts back
+  the old count at once, and a census gone stale (a daemon that stopped reporting) or never sent (a daemon before w5972)
+  is ignored by itself. The journal of 2026-11-26 13:24 to 2026-11-27 05:00 (local) held only lothdesktop mismatches, all
+  the portal counting more (turns sent, not yet reported) for about a minute; "on" counts those already, as capFull does.
 - **Awake.** While any agent process is live the daemon holds `caffeinate -i`.
 - **Clean-up.** The daemon cleans its machine's disk by itself (the continuous clean-up,
   [self-recovery.md](self-recovery.md#5-continuous-clean-up)): a pass every hour, every 15 minutes while
@@ -816,7 +828,7 @@ finish"); LothDesktop was held only at 03:47 the next day. Each cause and its fi
 | The worker's "It needs the hold set by the orchestrator" (03:42) matched no `[orchestrator step]` route (w2870), and workers have no hold tool. | `orchestratorAskIn` (`shared/workState.ts`, `ORCHESTRATOR_HOLD`) routes such a line to the orchestrator, and `orchestratorStepText` tells it to use `update_work hold`. |
 | Nothing showed the decision as unset: system_status and list_machines showed LothDesktop NOT held. | `Agents.unsetHoldAsks`: a `HOLD ASKED, NOT SET: wNNN …` line in system_status and under the machine in list_machines, naming the `hold_machine` call, until the machine is held (by any route). |
 | Nothing read the state back after a change. | `hold_machine` and `update_work hold` end with `Read back live:` (`holdReadback` in `server/machineDrain.ts`, from `placement()` and the store). `set_app_config` re-reads the live config (`readBackSetting`, `server/appConfig.ts`) and fails loudly on a mismatch; `placement.hold` adds each named machine's read-back. The `hold_machine` and `update_work hold` descriptions say to check it before telling the person (the briefs are at their size caps). |
-| The 03:47 config hold excepted w5475, w5586, w5656 and w5796, whose workers were stopped; a config hold's `holdExcept` lets those requests' workers resume, so w5475's resumed at its check-in (04:39). | The read-back names each excepted request with no running worker there ("w5475: worker … stopped; will resume here at its check-in 04:39Z"). A drain now defaults to `resumes: 'running'`: it snapshots the workers mid-turn (`MachineDrain.running`), and only those (over as many turns as they need) and the excepted requests' workers resume. **Enforced since w5937** (warn-only in #1307 first, lothsahn's lockout rule): `Agents.machineHold` returns `drainWouldHold`'s reason when no other hold applies, so any other worker's resume there (a check-in, CI, a reply, message_agent) waits in the send queue, Blocked on its machine, retried every 30 s; it stays there (its drain reason is none `roomMove` moves, which is right: the drain means nobody else resumes, and every release needs nobody at the machine), and leaves on a lift, a hold set again with resumes 'all', or the drain's hours running out; when its worker has no open request left, a check-in or gate resume is dropped as stale (w1128) and any other held message (a reply, message_agent, CI) is dropped too and said in its transcript (`Agents.drainOrphan`, w6058's review); a drain set again keeps the `running` list of the one in force and adds the workers mid-turn now (w6055 F1); a worker holding a bench ticket there still goes on (w3715). `machineHold` logs `drain: worker … resume held` once per worker and drain, and the read-back marks the resume HELD. `resumes: 'all'` is w5878's behavior, and a drain set before w5895 counts as `'all'`. |
+| The 03:47 config hold excepted w5475, w5586, w5656 and w5796, whose workers were stopped; a config hold's `holdExcept` lets those requests' workers resume, so w5475's resumed at its check-in (04:39). | The read-back names each excepted request with no running worker there ("w5475: worker … stopped; will resume here at its check-in 04:39Z"). A drain now defaults to `resumes: 'running'`: it snapshots the workers mid-turn (`MachineDrain.running`), and only those (over as many turns as they need) and the excepted requests' workers resume. **Enforced since w5937** (warn-only in #1307 first, lothsahn's lockout rule): `Agents.machineHold` returns `drainWouldHold`'s reason when no other hold applies, so any other worker's resume there (a check-in, CI, a reply, message_agent) waits in the send queue, Blocked on its machine, retried every 30 s; it stays there (its drain reason is none `roomMove` moves, which is right: the drain means nobody else resumes, and every release needs nobody at the machine), and leaves on a lift, a hold set again with resumes 'all', or the drain's hours running out; when its worker has no open request left, a check-in or gate resume is dropped as stale (w1128) and any other held message (a reply, message_agent, CI) is dropped too and said in its transcript (`Agents.drainOrphan`, w6058's review); a `message_agent` naming a request links it to the worker as soon as the send returns, before the queue's first pass, a message parked on its Claude pool (w2231) included (it is then Blocked on the pool with the rest), so it is not taken for an orphan's once the worker's own request closes (w6092); a send refused outright links nothing, so it sends no notice, closes no card and releases no other session (w6180); a drain set again keeps the `running` list of the one in force and adds the workers mid-turn now (w6055 F1); a worker holding a bench ticket there still goes on (w3715). `machineHold` logs `drain: worker … resume held` once per worker and drain, and the read-back marks the resume HELD. `resumes: 'all'` is w5878's behavior, and a drain set before w5895 counts as `'all'`. |
 
 Recovery needs nobody at the computer: `hold_machine lift`, `update_work hold {action: lift}`, the hold set again with `resumes: 'all'` (it keeps the machine drained and lets its workers resume), or `hours`. Each releases a held resume on the send queue's next pass (`server/w5895HoldReadback.test.ts`, the w5937 tests).
 
@@ -863,7 +875,21 @@ offscreen Metal renders run; on a locked Windows session GDI capture fails or is
   log in for a window (`screenUnlockAskProblem`); the worker hands the windowed step to a computer whose screen is
   unlocked.
 
-Tests: `server/w4868LockedScreen.test.ts`.
+- **Linux reads its lock too** (w6311: w6282's windowed pair leg went on biscuit behind a locked GNOME desktop and drew
+  no frames). The daemon asks GNOME first, `gdbus call --session --dest org.gnome.ScreenSaver --object-path
+  /org/gnome/ScreenSaver --method org.gnome.ScreenSaver.GetActive` (`(true,)` is locked) on the user's bus
+  (`/run/user/<uid>/bus` when its environment names none), else `loginctl` for the user's graphical session
+  (`show-user <uid> -p Display`), whose `LockedHint` or `IdleHint` `yes` counts as locked; neither answering is
+  `via: "none"`, which counts as locked for work that draws a window only (`readLinuxDesktop`, `machine/steamClient.ts`).
+  The daemon log line reads `steam client: ...; screen: locked (gnome)`. `LINUX_LOCK_ENFORCED` (`shared/desktop.ts`) is
+  on: a locked or unreadable Linux desktop takes no work that draws a window and no pair leg that clicks the game's
+  menus (they wait Queued for an unlocked computer), while headless work still goes there. It shipped warn-only first
+  (#1432), and biscuit's live daemon read `screen locked (gnome, warn-only)`. Recovery needs nobody: the reading is
+  taken again every 2 minutes, so an unlocked desktop takes windowed work at the next one; setting the flag false goes
+  back to warn-only, where the portal log says `would not place: <machine> screen locked`. Without GNOME, an idle
+  (`IdleHint`) but unlocked session counts as locked: such work waits for another computer rather than risk drawing nothing.
+
+Tests: `server/w4868LockedScreen.test.ts`, `server/w6311LinuxLock.test.ts`.
 
 ## Closing Firefox to free RAM
 
@@ -915,6 +941,39 @@ then "Closing Firefox should be off by default"). Code: `machine/firefox.ts` and
   (`closeFirefox` `pids`) while another person's Firefox ran beside it: three windows closed one at a time, the main process
   exited with code 0, and the same windows and tabs were running again after a restart; that person's Firefox kept its
   processes. The real tray showed no item by default and the item once allowed.
+
+## The foreground lock guard (w6350)
+
+Windows 11 25H2 leaks a kernel token object (pool tag `Toke`) for every process that creates a process while win32k's
+*foreground lock* is armed: `win32kfull!CForegroundLaunch::_CheckAllowForeground` references the creator's primary token and
+never releases it, so the dead token stays until the next reboot. The public trace, with the reference ledgers, is
+[bentoner/windows-token-leak](https://github.com/bentoner/windows-token-leak). FF Factory starts processes all day (the
+daemon's probes, git, gh, Unity's `bee_backend` chains, the ffu runners' cargo builds), so the leak follows its load: BEAST
+and LothDesktop each held about 4 million dead tokens after 12 days of uptime (2026-11-27), BEAST gaining 1,000 to 1,400 a
+minute after a reboot. Each one holds its slot in the table `NtCreateUserProcess` walks under a lock, so process starts
+slow down and paged pool grows until the reboot.
+
+The lock is armed for `ForegroundLockTimeout` ms after the last input, and Windows sets that live value to 2147483647
+(24.9 days) at every logon and every Remote Desktop connect or disconnect, whatever `HKCU\Control Panel\Desktop` says. At 0
+it is armed only within the clock tick that input arrives, and the leak stops while nobody is typing. So the tray app keeps
+the live value at 0 (`ForegroundLockGuard` in `machine/tray/FFFactoryTray.cs`): it reads it every 10 s (every 2 s for 15
+minutes after it starts and after each logon, unlock or Remote Desktop change) and sets it back when Windows changed it.
+win32k refuses the set with error 87 unless the caller may take the foreground, so a repair tries the direct call, the call
+with its input attached to the foreground window's thread, and, after 3 s with no input, the call from a 1x1 window of its
+own that takes the foreground for about half a second and gives it back. It never writes the registry value.
+
+- **The cost:** the old focus-stealing tweak. Any program may bring its window to the front, for example a Unity editor an
+  agent starts while a person types elsewhere.
+- **Turning it off:** `daemon.json` `"foregroundLockGuard": false`, then restart the daemon. Windows puts its own value
+  back at the next logon. The guard runs only with the tray (`"tray": false` turns off both).
+- **Checking it:** the daemon log's `tray: foreground lock guard:` lines say each change and each repair. The live value and
+  the leak can be read without elevation: `SystemParametersInfo(SPI_GETFOREGROUNDLOCKTIMEOUT)`, and the `Toke` pool tag's
+  paged allocations minus frees from `NtQuerySystemInformation(SystemPoolTagInformation)`.
+- **What it cannot do:** release the tokens already leaked. Only a reboot (a Restart, not a Shut down with Fast Startup)
+  clears them. While a person moves the mouse or types, the lock is armed within those ticks and a few tokens still leak.
+- **Low integrity:** a Low process (an agent's tools) is refused the set with error 5, so agents cannot change it. The guard
+  runs in the tray, a Medium process of the daemon, and changes nothing about the Low fence, the restricted tokens or the
+  read fence.
 
 ## Machine sandboxes
 
@@ -1256,6 +1315,16 @@ older daemon ignores it and keeps making worktrees.
   sandbox's own folder (`.git` to `.git.worktree`, `.git.new` to `.git`); a restart cut between them is finished by
   `finishConversion` when the daemon loads its sandboxes. Then the clone's `worktrees/<name>` record is removed, so
   the branch is free there. The old pointer stays as `.git/worktree-pointer`.
+- **A placement converts too** (`SandboxPool.switch`, w5614 fix): on a busy machine a sandbox is free only between a
+  release and the next placement, so the 2-minute look may never see it free (BEAST's slot2 and slot3, 2026-11-26).
+  With `all`, a worktree becomes a slot repo when a worker is placed in it (the switch to its branch), under the same
+  checks except the live agent (the placed one waits on the switch). A failure leaves the worktree whole and the switch
+  goes on. The look logs why it passes a worktree by ("not becoming a slot repo yet: an agent is live there"), once
+  each time the reason changes. Limits at a placement (w6086's review): up to 90 s waiting for the main clone's lock
+  (past it nothing is done and nothing is held against the sandbox), then up to 90 s of conversion once it holds the
+  lock, plus up to 10 s for a cut git call to end. A conversion that fails or times out after taking the lock is skipped
+  at that sandbox's placements for 6 h (`CONVERT_BACKOFF_MS`); the idle look still tries. A cut that lands after the
+  swap leaves a whole slot repo and logs "became a slot repo".
 - **One branch, one sandbox**: git no longer refuses a branch another sandbox holds, since they share no refs, so the
   pool does (`slotBranchHolder`): `switch_branch` and `create_sandbox` to a branch a slot-repo sandbox holds are
   refused with "branch X is checked out in sandbox Y". Between two worktrees git still refuses in its own words.
@@ -1308,6 +1377,16 @@ older daemon ignores it and keeps making worktrees.
   (`warn` or `on`, every OS) writes daemon.json `mediumAgentFolders`; the daemon restarts with it. `on` moves Medium agents
   to `<root>/tmp-medium` and `<root>/cache-medium/cargo`, `warn` only logs the exposure (docs/worker-root.md, "Medium
   agents' temp folders and cargo home"). There is no `off`: unset is `warn`.
+- **A virtual disk in a Low tools child** (w5959; docs/worker-root.md "The enforce switch"): `ops_worker` `machine_update`
+  `tools_disk_lock` (`warn` or `on`, Windows only) writes daemon.json `toolsDiskLock`; the daemon restarts with it. `on`
+  keeps a `<root>\tools` child that holds a `.vhd`/`.vhdx` Medium, so workers cannot write there; `warn` (unset) only logs it
+  and is the way back.
+- **CI jobs go first on a Windows CI-first machine** (w6110; docs/self-recovery.md "CI jobs go first on LothDesktop"):
+  `ops_worker` `machine_update` `win_ci_first` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `winCiFirst`;
+  the daemon restarts with it. `enforce` lowers agents' tools to Idle while a CI job runs (the jobs themselves run BelowNormal); `warn` (unset) only logs
+  what they use and raises back anything lowered, the way back.
+- **The ffu CI runners at Normal priority** (w6163, machine/runnerPriority.ts): `ops_worker` `machine_update` `runner_priority` (`off`, `warn` or `enforce`, Windows only) writes daemon.json `runnerPriority`;
+  the daemon restarts with it. `enforce` sets the runners' scheduled tasks to priority 4 and raises their listeners to Normal; `warn` (the default everywhere but the machines in `RUNNER_PRIORITY_ENFORCE`, and the recovery) only logs what it reads; `off` stops it. Unset leaves it as it is.
 - **Not yet**: a sandbox can still write another sandbox's `.git` (`sandboxes` is one open folder); stage 3 (w5616,
   per-slot fences on macOS and Linux) and stage 4 (Windows) close that.
 
@@ -2054,7 +2133,11 @@ LothDesktop and Beast, not just when BEAST is full").
     read `bryding (gist, read:org, repo, workflow)` at 05:14Z and 06:19Z and a worker's `gh api user` there answered 200.
     A Windows ssh session with key sign-in cannot read Credential Manager (a Mac's ssh cannot read the login Keychain), so
     gh sends no token at all; GitHub's "Bad credentials" is the sign of a token that is really refused. Check a machine's
-    gh from its daemon's reading (list_machines) or a worker there, never over ssh.
+    gh from its daemon's reading (list_machines) or a worker there, never over ssh. "default" is gh's own name for that
+    case (gh's `TokenForUser` returns `TokenSourceDefault` when neither its keyring nor hosts.yml gave a token), so a
+    reading with that source says `REFUSED_NO_TOKEN` ("gh found no token it could read"), still a refused login with
+    its warning, never `REFUSED_401` (w5546). The ops worker's GitHub route skips the Windows PCs for this reason
+    (docs/ops-worker.md, "Where").
   - **Fixing a machine:** on it, as its user, `gh auth refresh -h github.com -s workflow` (a browser sign-in); the daemon
     sees the hosts file change within a minute. Tests: `server/ghLogin.test.ts`, and the w1463 case in
     `server/orchestrators*.test.ts` (a daemon with a stand-in gh whose output carries a token, through list_machines,
@@ -2776,6 +2859,23 @@ LothDesktop and Beast, not just when BEAST is full").
       whose start failed is no move target for `REFUSED_FOR_MS` ("a moved session did not start there … (w5976)",
       `MoveGuard.noteRefusal`), so the next drain moves it elsewhere or keeps it waiting, never the same start again. `"warn"`
       and `"off"` keep the hand-back. Tests: `server/w5976MoveGiveBack.test.ts`.
+    - **Retired once, whole** (w6047, the w5995 review of #1330 and #1336, and the w6056 review of #1356): a retire marks
+      the worker `movedAway.retired` when it ends, but only when its process ended and its sandbox's work was saved or
+      there was none (no sandbox, or nothing uncommitted). A retire that could not save (the daemon could not save then,
+      another agent in the sandbox, its process did not end in 10 s) leaves it unmarked, so the next check retires it
+      again, whole: stopped, saved, its new worker told. A later hello or resume check of a retired worker that is not
+      running never saves or tells again. One that runs again is retired again, whole, since it may have written more; a
+      hello that finds it running while its retire is under way has it retired again once that ends (`retireAgain`). All
+      of it only while `movedAwayVerdict` still says every request has a started new worker; otherwise it keeps running,
+      reported as kept. Under the w5976 give-back: `MoveGuard.startedOn` clears only a cap refusal, never "a moved session
+      did not start there", and a later cap refusal there does not replace it (both last `REFUSED_FOR_MS`); `moveUndone`
+      leaves a hand-back made while the start ran (a pause, a stop_agent move_to: another `how` or `to`) as it is, and when
+      every request was handed back so, the message the move held goes to the request's next worker when the dispatcher
+      placed it on one already while the start ran (one whose link is at or after the hand-back that stands, a re-send to a worker already on it included, never an older worker still listed;
+      `forwardToHeirs`: that worker read its hand-off at its start, the w6088, w6104 and w6118 reviews; the hand-back compared is the one from when the move began, before its stop and save waits; a request handed back during those waits keeps that hand-back and is never started, so neither a late failure nor a start writes over it, the w6124 review; the message goes with the hand-back of the request it resumes, else the move's own, and a resume of a request the old worker no longer holds is never put back to it, the w6136 review; each message is routed by its own send, so only such a resume goes with the hand-back and any other message goes back to the old worker, the w6149 review; every other exit from a move, a start that goes through, a failed start in warn mode and a move whose own request was handed back meanwhile, routes a message resuming another of its requests to that request the same way, never with the move's own request, and a resume of a request whose next worker already read its hand-off goes nowhere, as `forwardToHeirs` does, the w6159 review, except a person's answer or note sent as a resume (`personsResume`, the w2495 rule), which both always forward to that next worker, the w6172 review; a give-back whose requests were all handed back meanwhile, and the forward of messages that came during the fresh start, route each message by its own send and forward each on its own, with its own sender and images, so an old worker's own `[wake_me]` at the front drops only itself, the w6177 review; a give-back puts each kept message back on its own with its own send, so the drain's stale-resume check drops only a stale resume, never a person's words joined with it, and a request closed while the start ran takes no message into a hand-off nobody reads: with no open request left, the messages go back to the old worker as before, the w6182 review; a message for another of its requests that closed meanwhile goes the move's own request's way, into its hand-off or forwarded to its new worker, but for the old worker's own waits, and a message no open request takes goes back to the old worker, which then keeps its session and is not retired; only the start can fail a move, so a fault in a step after it never gives the request back, the w6190 review; a person's answer or note put back to the old worker loses its resume mark when its request closed or moved off it, and `staleResume` lets a person's answer or note to a closed request go, so the drain never drops one, and after a start that went through a message for a sibling another worker handed back meanwhile goes to the new worker, never back to the moved one, the w6193 review; a message for a sibling another worker took meanwhile, before the start as well as after it, goes into that worker's hand-off or to its next worker, never back to the moving one, and a person's answer to a question the old worker asked goes to the request's worker now, the w6214 review; such a hand-off takes the message although another worker made it, and a person's answer to a request handed back since its worker asked goes with that hand-off, the w6223 review; and when such an answer goes elsewhere, the asking worker still on another request with the same question is resumed with it there, the w6226 review; every request that shares the answer goes to the worker on it now, each worker hearing it once and named only the requests it holds, the w6239 review; a request's newest worker is on it now unless the request was handed back after that worker's link, so a handed-back request with an earlier worker carries the answer in its hand-off, the w6248 review, while a worker that shares the request with the asker still gets it, and a hand-off takes an answer only while nobody was placed on the request since, the w6253 review; one table, `server/answerRouting.test.ts`, holds every routing shape), else into that hand-off's `message` (`Orchestrators.carryInHandBack`), never back to the old worker; and a timed-leg pre-empt shares its move entry with
+      `roomMove`, so a message that comes during any move goes with it (to the new worker on a start, `forwardLate`; back
+      to the old one on a give-back; in the hand-off on a hand-back), and its log says which happened. Tests: the w6047
+      ones in `server/w5950MovedAwayEnforce.test.ts` and `server/w5976MoveGiveBack.test.ts`.
   - **UI-heavy work does not move to a computer with one Unity slot while another fits** (w4738: w4488's stills leg went to
     biscuit, `pool.maxUnity` 1). UI-heavy is game work that needs a Live view (`needsLive`) or whose title, brief or notes
     name stills, screenshots, clips, play mode, a playtest, the HUD, the UI gate's tools (ui_look, ui_layout, ui-critic,

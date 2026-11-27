@@ -39,6 +39,7 @@ function sources(): string[] {
  * either fences git (calls gitFence or gitFenceSync in its file, as proc.ts, worker.ts and prFlow.ts do) or joins this list.
  */
 const NOT_GIT: Record<string, string> = {
+  'machine/playersLaunch.ts|cmd': 'a players-broker player, inside the player fence (fencedPlayer: sandbox-exec or the Landlock wrapper around the slot exe, w5615)',
   'machine/daemon.ts|runnerEnvCmd': 'plutil, launchctl and powershell.exe for the macOS and Windows CI runners (machine/runnerEnv.ts, w5999)',
   'server/spawnThread.ts|m.cmd': 'whatever execFileOffThread is given: its callers fence git (proc.run), and the lint checks each caller as a spawner (w6077)',
   'server/spawnThread.ts|cmd': 'the same, on the main thread when the spawn thread is off: its callers fence git (proc.run; w6077)',
@@ -54,6 +55,10 @@ const NOT_GIT: Record<string, string> = {
   'machine/fenceProbe.ts|cmd': 'the fence probe (sandbox-exec, landlock)',
   'machine/maxEventsFence.ts|cmd': 'the Max events probe (/bin/sh under sandbox-exec or landlock, w5552)',
   'machine/workerCaps.ts|exe': 'the Windows job-object helper (w5554)',
+  'machine/longRuns.ts|node': "the long-run keeper: the daemon's Low node copy (w6367)",
+  'machine/longRuns.ts|b': "the keeper script's run: Git Bash for agents on the sandbox's nightly_run.sh (w6367)",
+  'machine/longRuns.ts|tk': "the keeper's time limit and runs/stop: Windows' taskkill.exe on its run's tree (w6367)",
+  'machine/longRuns.ts|helper': 'the Windows job-object helper ffjob.exe, around a long run (w6367)',
   'machine/unity.ts|bin': 'the Unity editor',
   'machine/unity.ts|SANDBOX_EXEC': 'sandbox-exec running the Unity editor under the workers\' Seatbelt profile (w5630)',
   'machine/unity.ts|lc': 'Unity\'s licensing client (Unity.Licensing.Client), started outside the fence before a fenced Mac editor (w5630)',
@@ -67,6 +72,8 @@ const NOT_GIT: Record<string, string> = {
   'machine/unitySlots.ts|run.cmd': "a worker's own batch command (unity-slot run)",
   'machine/unitySlots.ts|process.execPath': 'node',
   'machine/ffuSlots.ts|process.execPath': 'node (the daemon runs `ffu-slot list --json`, w5912)',
+  'machine/ffuSlots.ts|cmd': 'rustc -V, to find rustc for the native slot hook (findRustc, w6062)',
+  'machine/ffuSlots.ts|rustc.cmd': 'rustc, building the native slot hook (ensureNativeSlotHooks, w6062)',
   'server/publicGit.ts|cmd': 'gh and curl',
   'server/voice.ts|c.python': 'python',
   'server/machineDeployWin.ts|cmd': 'powershell or ssh',

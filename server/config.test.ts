@@ -210,17 +210,17 @@ test('version: package.json and the checkout, with an override for builds withou
   assert.equal(formatVersion(undefined), 'unknown version');
 });
 
-test('guard git lookups: push remotes, none outside a repo', (t) => {
+test('guard git lookups: push remotes, none outside a repo', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-git-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
-  assert.equal(gitRemotes(dir), undefined);
+  assert.equal((await gitRemotes(dir)), undefined);
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { stdio: 'ignore' });
   git('init', '-q');
   git('remote', 'add', 'origin', 'https://example.test/game.git');
   git('remote', 'set-url', '--push', 'origin', 'git@example.test:game.git');
   git('remote', 'add', 'fork', 'https://example.test/fork.git');
   assert.deepEqual(
-    [...gitRemotes(dir)!.entries()].sort(),
+    [...(await gitRemotes(dir))!.entries()].sort(),
     [
       ['fork', 'https://example.test/fork.git'],
       ['origin', 'git@example.test:game.git'],

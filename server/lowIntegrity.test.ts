@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
+import { NO_READ_UP, READ_BACK, currentAccount, ghConfigDirFor, hasLabel, isExplicitLow, isLabelledLow, isLabelledMedium, labelLow, ownerGameDataLock, lowDiskImageWarning, lowDiskImages, toolsDiskPlan, labelNoReadUp, LowCopies, LOW_COPY_NAME, lowUnityJunctions, MEDIUM_TOOLS, pickEnv, PROBE_ENV_KEYS, isReadOnlyCopy, junctionLeadsTo, lockCopyScript, deleteFilesScript, deleteBatches, readOnlyGrants, type ExecSync, lowEnv, lowRunners, lowTargets, lowUnityDir, noReadUpTargets, onSystemDrive, openNoReadUp, strayLowServers, unlabelNoReadUp, credDeleteScript, deleteGenericCreds, NO_LABEL, type Exec } from '../machine/lowIntegrity.ts';
 import { FENCE_READ_ALLOW } from './daemonReads.ts';
 import { ensureDaemonOnlyDirs } from '../machine/readFence.ts';
 
@@ -67,7 +67,7 @@ test('w5717: given its children, tools turns Medium, each child folder but node 
   // w5838: the folders of programs the daemon runs (the Low copies, the Unity junctions, the shims) stay Medium too.
   for (const c of ['low', 'unity-low']) assert.ok(!t.dirs.includes(path.join(tools, c)), `${c} is not labelled Low`);
   assert.deepEqual(t.medium, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c))]);
-  assert.deepEqual(MEDIUM_TOOLS, ['node', 'low', 'unity-low', 'shims']);
+  assert.deepEqual(MEDIUM_TOOLS, ['node', 'low', 'unity-low'], 'w6101: shims left MEDIUM_TOOLS; the old folder is kept Medium only while it is there');
   // Without the list (a daemon from before w5717 never passes one): the old layout.
   const old = lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: kids('tools'), exists: () => true });
   assert.ok(old.dirs.includes(tools));
@@ -283,7 +283,7 @@ const markKey = (p: string) => {
 };
 
 // The one-call lock (lockCopyScript, w5904) is faked by path: what it locked, the `.part`, keeps it under the copy's name.
-const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string>; locked: Set<string>; events: string[] } => {
+const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean; running?: Set<string>; deleteFails?: Set<number> } = {}): { exec: ExecSync; calls: string[][]; low: Set<string>; ro: Set<string>; locked: Set<string>; events: string[] } => {
   const calls: string[][] = [];
   const low = new Set<string>();
   const ro = new Set<string>();
@@ -299,6 +299,21 @@ const icaclsSync = (o: { readOnlyFails?: boolean; lockFails?: boolean } = {}): {
       calls.push(args);
       if (cmd === 'powershell.exe') {
         const script = Buffer.from(args[args.length - 1], 'base64').toString('utf16le');
+        // w6321: deleteFilesScript: each path goes, but one a live process runs (o.running), as Windows refuses that.
+        if (script.includes('[System.IO.File]::Delete(')) {
+          events.push('delete');
+          // w6325: Windows refuses a command line past 32,767 characters, as spawnSync says it.
+          if (['powershell.exe', ...args].join(' ').length > 32_767) return { code: null, stdout: '', stderr: 'spawnSync powershell.exe ENAMETOOLONG' };
+          if (o.deleteFails?.has(events.filter((e) => e === 'delete').length)) throw new Error('spawnSync powershell.exe ETIMEDOUT');
+          const list = /^\$p = @\((.*)\)$/m.exec(script)![1];
+          const out = [...list.matchAll(/'((?:[^']|'')*)'/g)].map((m, i) => {
+            const at = m[1].replace(/''/g, "'");
+            if (o.running?.has(at)) return `err ${i} Access to the path '${at}' is denied.`;
+            fs.rmSync(at, { force: true });
+            return `gone ${i}`;
+          });
+          return { code: 0, stdout: out.join('\r\n'), stderr: '' };
+        }
         const at = /\[FfLock\]::Set\('((?:[^']|'')*)'/.exec(script)![1].replace(/''/g, "'");
         events.push(`lock ${at}`);
         if (o.lockFails) return { code: 1, stdout: '', stderr: 'Add-Type failed' };
@@ -387,10 +402,10 @@ test('w5838 review: what was planted in tools/low before it was Medium goes befo
   fs.writeFileSync(path.join(dir, 'claude.exe.local', 'version.dll'), 'evil');
   fs.writeFileSync(path.join(dir, 'version.dll'), 'evil');
   fs.writeFileSync(path.join(dir, 'node-1-2.exe.part'), 'evil');
-  fs.writeFileSync(path.join(dir, 'gh-10-20.exe'), 'a copy of another program, kept');
+  fs.writeFileSync(path.join(dir, 'gh-10-20.exe'), "an earlier run's copy of another program: not planted, but old, so it goes too (w6321)");
   const said: string[] = [];
   const copy = new LowCopies(root, (l) => void said.push(l), icaclsSync().exec, 'BEAST\\rydin').make(exe)!;
-  assert.deepEqual(fs.readdirSync(dir).sort(), [path.basename(copy), 'gh-10-20.exe'].sort());
+  assert.deepEqual(fs.readdirSync(dir), [path.basename(copy)]);
   assert.equal(said.filter((l) => /WARNING: removed .*not a copy the daemon made/.test(l)).length, 3, said.join('\n'));
   assert.ok(LOW_COPY_NAME.test('node-1-2.exe') && LOW_COPY_NAME.test('node-1-2') && !LOW_COPY_NAME.test('node-1-2.exe.part') && !LOW_COPY_NAME.test('version.dll'));
 });
@@ -491,6 +506,147 @@ test('w5877: a copy left by an earlier daemon run is never taken over, even with
   assert.ok(after.ino !== before.ino || after.birthtimeNs !== before.birthtimeNs, 'a new file, not the old one');
   assert.deepEqual(f.events, [`lock ${again}.part`], 'locked by this run');
   assert.ok(said.some((l) => /earlier daemon run; made again, never taken over/.test(l)), said.join('\n'));
+});
+
+/** w6321: Node 22's unlink as LothDesktop's daemon meets it on a read-only copy (OWNER RIGHTS:(RX)): EPERM. */
+const nodeRefuses = (p: string) => {
+  if (fs.existsSync(p)) throw Object.assign(new Error(`EPERM: operation not permitted, unlink '${p}'`), { code: 'EPERM' });
+};
+
+test('w6321: 20 names taken by an earlier run that Node cannot remove are freed by File.Delete, in one call', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'node.exe');
+    fs.writeFileSync(exe, 'the real node');
+    const st = fs.statSync(exe);
+    const dir = path.join(root, 'tools', 'low');
+    fs.mkdirSync(dir, { recursive: true });
+    const stem = `node-${st.size}-${Math.floor(st.mtimeMs)}`;
+    for (let n = 0; n < 20; n++) fs.writeFileSync(path.join(dir, `${stem}${n ? `-${n}` : ''}.exe`), 'the real node');
+    // An older gh build's copies from an earlier run, and an older claude's: they go too, once a copy is made.
+    fs.writeFileSync(path.join(dir, 'gh-1-2.exe'), 'old gh');
+    fs.writeFileSync(path.join(dir, 'claude-3-4.exe'), 'old claude');
+    const f = icaclsSync();
+    const said: string[] = [];
+    const copy = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin', undefined, nodeRefuses).make(exe);
+    assert.equal(copy, path.join(dir, `${stem}.exe`), said.join('\n'));
+    assert.deepEqual(fs.readdirSync(dir), [`${stem}.exe`], said.join('\n'));
+    assert.equal(f.events.filter((e) => e === 'delete').length, 2, 'one call for the taken names, one for the old copies');
+    assert.ok(!said.some((l) => /could not/.test(l)), said.join('\n'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6321: a copy a live process runs is never removed: its name is skipped and why is said, once for an old one', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'node.exe');
+    fs.writeFileSync(exe, 'the real node');
+    const st = fs.statSync(exe);
+    const dir = path.join(root, 'tools', 'low');
+    fs.mkdirSync(dir, { recursive: true });
+    const stem = `node-${st.size}-${Math.floor(st.mtimeMs)}`;
+    const busy = path.join(dir, `${stem}.exe`);
+    const oldGh = path.join(dir, 'gh-1-2.exe');
+    fs.writeFileSync(busy, 'the real node');
+    fs.writeFileSync(oldGh, 'old gh');
+    const f = icaclsSync({ running: new Set([busy, oldGh]) });
+    const said: string[] = [];
+    const copies = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin', undefined, nodeRefuses);
+    const copy = copies.make(exe);
+    assert.equal(copy, path.join(dir, `${stem}-1.exe`));
+    assert.ok(fs.existsSync(busy) && fs.existsSync(oldGh), 'what runs stays');
+    assert.ok(said.some((l) => l.includes(`could not remove ${busy} (Node: EPERM; File.Delete: Access to the path`)), said.join('\n'));
+    assert.equal(said.filter((l) => l.includes(`kept the old Low copy ${oldGh}`)).length, 1, said.join('\n'));
+    // The next make (a new node build): the old gh copy is not said again; once its process is gone, it goes.
+    fs.writeFileSync(exe, 'the real node, v2');
+    copies.make(exe);
+    assert.equal(said.filter((l) => l.includes(`kept the old Low copy ${oldGh}`)).length, 1, said.join('\n'));
+    f.events.length = 0;
+    const g = icaclsSync();
+    fs.writeFileSync(exe, 'the real node, v3');
+    const c3 = new LowCopies(root, () => {}, g.exec, 'BEAST\\rydin', undefined, nodeRefuses).make(exe)!;
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(c3)]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6321: making one program\'s copy keeps the copies this run made of the others', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const node = path.join(root, 'node.exe');
+    const gh = path.join(root, 'gh.exe');
+    fs.writeFileSync(node, 'node');
+    fs.writeFileSync(gh, 'gh');
+    const copies = new LowCopies(root, () => {}, icaclsSync().exec, 'BEAST\\rydin');
+    const g = copies.make(gh)!;
+    const n = copies.make(node)!;
+    assert.ok(fs.existsSync(g) && fs.existsSync(n));
+    assert.equal(copies.check(g), g);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6321: deleteFilesScript quotes each path and says gone or err by index', () => {
+  const s = deleteFilesScript(["F:\\ffw\\tools\\low\\it's.exe", 'F:\\b\u2019+(New-Item pwn)+\u2018.exe']);
+  assert.ok(s.includes("$p = @('F:\\ffw\\tools\\low\\it''s.exe','F:\\b\u2019\u2019+(New-Item pwn)+\u2018\u2018.exe')"), s);
+  assert.ok(s.includes('"gone $i"') && s.includes('"err $i "'), s);
+});
+
+test('w6325: 150 old copies Node cannot remove all go, in batches that fit the command line', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'node.exe');
+    fs.writeFileSync(exe, 'the real node');
+    const dir = path.join(root, 'tools', 'low');
+    fs.mkdirSync(dir, { recursive: true });
+    // LothDesktop-shaped names, long enough that one call for all of them would be refused.
+    for (let n = 0; n < 150; n++) fs.writeFileSync(path.join(dir, `claude-367634080-1789${String(n).padStart(9, '0')}-${n % 20}.exe`), 'old claude');
+    const f = icaclsSync();
+    const said: string[] = [];
+    const copy = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin', undefined, nodeRefuses).make(exe)!;
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(copy)], said.join('\n'));
+    assert.ok(f.events.filter((e) => e === 'delete').length >= 8, 'at most 20 a call');
+    assert.ok(!said.some((l) => /could not|kept/.test(l)), said.join('\n'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6325: a batch whose call fails keeps only its own copies, with that error, and the other batches still go', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lowcopy-'));
+  try {
+    const exe = path.join(root, 'node.exe');
+    fs.writeFileSync(exe, 'the real node');
+    const dir = path.join(root, 'tools', 'low');
+    fs.mkdirSync(dir, { recursive: true });
+    for (let n = 0; n < 60; n++) fs.writeFileSync(path.join(dir, `gh-${n}-1.exe`), 'old gh');
+    const f = icaclsSync({ deleteFails: new Set([2]) });
+    const said: string[] = [];
+    const copies = new LowCopies(root, (l) => void said.push(l), f.exec, 'BEAST\\rydin', undefined, nodeRefuses);
+    const copy = copies.make(exe)!;
+    const left = fs.readdirSync(dir).filter((n) => n !== path.basename(copy));
+    assert.equal(left.length, 20, 'only the failed batch stays');
+    const kept = said.filter((l) => l.includes('kept the old Low copy'));
+    assert.equal(kept.length, 20, said.join('\n'));
+    assert.ok(kept.every((l) => l.includes('File.Delete: spawnSync powershell.exe ETIMEDOUT') && !l.includes('still running')), kept[0]);
+    // The next make tries them again, and they go.
+    fs.writeFileSync(exe, 'the real node, v2');
+    const c2 = copies.make(exe)!;
+    assert.deepEqual(fs.readdirSync(dir), [path.basename(c2)]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('w6325: deleteBatches keeps each call inside the command line, even for long paths', () => {
+  const long = Array.from({ length: 120 }, (_, n) => `V:\\ffw\\tools\\low\\${'x'.repeat(200)}-${n}.exe`);
+  const b = deleteBatches(long);
+  assert.equal(b.flat().length, 120);
+  assert.ok(b.every((x) => x.length <= 20 && Buffer.from(deleteFilesScript(x), 'utf16le').toString('base64').length < 32_000), String(b.map((x) => x.length)));
 });
 
 test('w5877: a same-size rewrite with its times put back is still caught before the run', () => {
@@ -828,4 +984,88 @@ test("lowDiskImages names each virtual disk in a Low tools child, never node's, 
   assert.match(w, /Nothing was changed/);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>')), w);
   assert.ok(w.includes(path.join(R, 'wsl', '<distro>', 'ext4.vhdx') + ' /setintegritylevel M'), w); // a same-volume move keeps the Low label (w5958)
+});
+
+// w5959: BEAST's layout before w6010's move, as w5870's worker measured it: F:\ffw\tools held cargo, git, node, low, shims
+// and wsl-ffu-sniper, whose ext4.vhdx (the ffu-sniper WSL distro's disk, ~18 GB) was Low on its own child folder.
+const SNIPER = { name: 'wsl-ffu-sniper', dir: true };
+const BEAST_TOOLS = [{ name: 'cargo', dir: true }, { name: 'git', dir: true }, { name: 'node', dir: true }, { name: 'low', dir: true }, { name: 'shims', dir: true }, SNIPER, { name: 'git.json', dir: false }];
+const sniperDisk = path.join(R, 'tools', 'wsl-ffu-sniper', 'ext4.vhdx');
+const beastList = (d: string) => (d === path.join(R, 'tools', 'wsl-ffu-sniper') ? ['ext4.vhdx'] : d === path.join(R, 'tools', 'low') ? ['old.vhdx'] : []);
+const beastTargets = (keep?: { children: string[]; disks: string[] }) =>
+  lowTargets({ root: R, appDir: path.join(R, 'daemon'), children: [{ name: 'tools', dir: true }, { name: 'sandboxes', dir: true }], toolsChildren: BEAST_TOOLS, toolsKeepMedium: keep, exists: () => false });
+
+test("w5959: toolsDiskLock warn (the default) keeps w5948's warning and labels ffu-sniper's tools child Low as before", () => {
+  const disks = lowDiskImages(R, BEAST_TOOLS, beastList);
+  assert.deepEqual(disks, [sniperDisk], 'tools/low is the daemon\'s own (MEDIUM_TOOLS), never named');
+  for (const mode of [undefined, 'warn'] as const) {
+    const plan = toolsDiskPlan(R, disks, mode);
+    assert.deepEqual(plan.keep, { children: [], disks: [] }, String(mode));
+    assert.equal(plan.lines.length, 1);
+    assert.match(plan.lines[0], /^WARNING worker integrity: the virtual disk .*Nothing was changed/);
+    assert.ok(plan.lines[0].includes('"toolsDiskLock": "on"'), plan.lines[0]);
+    const t = beastTargets(plan.keep);
+    assert.ok(t.dirs.includes(path.join(R, 'tools', 'wsl-ffu-sniper')), 'still Low');
+    assert.ok(!t.medium.includes(sniperDisk));
+  }
+  // The same targets as a daemon that predates the switch computes.
+  assert.deepEqual(beastTargets(toolsDiskPlan(R, disks, 'warn').keep), beastTargets(undefined));
+});
+
+test("w5959: toolsDiskLock on keeps ffu-sniper's tools child Medium, its disk after it, and every other child as it was", () => {
+  const plan = toolsDiskPlan(R, lowDiskImages(R, BEAST_TOOLS, beastList), 'on');
+  assert.deepEqual(plan.keep, { children: ['wsl-ffu-sniper'], disks: [sniperDisk] });
+  assert.equal(plan.lines.length, 1);
+  assert.match(plan.lines[0], /^WARNING worker integrity: kept .*wsl-ffu-sniper Medium \(daemon.json "toolsDiskLock": "on", w5959\)/);
+  assert.match(plan.lines[0], /Workers can no longer write anything in/);
+  assert.match(plan.lines[0], /machine_update tools_disk_lock warn/, 'the line names the way back');
+  const t = beastTargets(plan.keep);
+  const tools = path.join(R, 'tools');
+  assert.deepEqual(t.dirs.filter((d) => d.startsWith(tools)).sort(), [path.join(tools, 'cargo'), path.join(tools, 'git')]);
+  const m = t.medium.filter((d) => d.startsWith(tools));
+  assert.deepEqual(m, [tools, ...MEDIUM_TOOLS.map((c) => path.join(tools, c)), path.join(tools, 'shims'), path.join(tools, 'wsl-ffu-sniper'), sniperDisk], 'tools first, the child after it, the disk last');
+  // A disk lowDiskImages did not place in a kept child (a stale plan) is never labelled.
+  assert.ok(!beastTargets({ children: [], disks: [sniperDisk] }).medium.includes(sniperDisk));
+  // Two disks in one child are one line, one kept child.
+  const two = toolsDiskPlan(R, [sniperDisk, path.join(R, 'tools', 'wsl-ffu-sniper', 'swap.vhdx')], 'on');
+  assert.deepEqual(two.keep.children, ['wsl-ffu-sniper']);
+  assert.equal(two.lines.length, 1);
+  // No disk: nothing kept, nothing said.
+  assert.deepEqual(toolsDiskPlan(R, [], 'on'), { keep: { children: [], disks: [] }, lines: [] });
+});
+
+test('w5959: labelLow raises the kept child and a disk Low on its own (a file label), and warn labels the child Low again', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'low-disk-'));
+  const tools = path.join(dir, 'tools');
+  const cargo = path.join(tools, 'cargo');
+  const sniper = path.join(tools, 'wsl-ffu-sniper');
+  const disk = path.join(sniper, 'ext4.vhdx');
+  for (const d of [cargo, sniper]) fs.mkdirSync(d, { recursive: true });
+  fs.writeFileSync(disk, '');
+  // After w5717's rollout: tools Medium, each child Low on its own; the disk Low on its own too (the worst case).
+  const label = new Map<string, string>([
+    [tools, 'Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)'],
+    [cargo, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'],
+    [sniper, 'Mandatory Label\\Low Mandatory Level:(OI)(CI)(NW)'],
+    [disk, 'Mandatory Label\\Low Mandatory Level:(NW)'],
+  ]);
+  const calls: string[][] = [];
+  const exec: Exec = async (_c, args) => {
+    calls.push(args);
+    if (args.length === 1) return { code: 0, stdout: `${args[0]} ${label.get(args[0]) ?? ''}`, stderr: '' };
+    const lvl = args[2].endsWith('low') ? 'Low' : 'Medium';
+    label.set(args[0], `Mandatory Label\\${lvl} Mandatory Level:${args[2].startsWith('(OI)') ? '(OI)(CI)' : ''}(NW)`);
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const said: string[] = [];
+  assert.equal(await labelLow({ dirs: [cargo], files: [], medium: [tools, sniper, disk] }, exec, (l) => void said.push(l)), true);
+  const sets = () => calls.filter((c) => c.length > 1).map((c) => `${path.basename(c[0])} ${c[2]}`);
+  assert.deepEqual(sets(), ['wsl-ffu-sniper (OI)(CI)medium', 'ext4.vhdx medium'], 'the child a folder label, the disk a file label; cargo and tools untouched');
+  assert.ok(said.includes(`worker integrity: kept ${sniper} Medium`), said.join('\n'));
+  // The way back (toolsDiskLock warn): the child is a Low target again, right inside the Medium tools.
+  calls.length = 0;
+  assert.equal(await labelLow({ dirs: [cargo, sniper], files: [], medium: [tools] }, exec, () => {}), true);
+  assert.deepEqual(sets(), ['wsl-ffu-sniper (OI)(CI)low']);
+  assert.match(label.get(sniper)!, /Low/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

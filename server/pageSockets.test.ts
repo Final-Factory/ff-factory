@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PageSockets, fromThisMachine, reconnectOf, viaOf } from './pageSockets.ts';
+import { PageSockets, fromThisMachine, readyOf, reconnectOf, viaOf } from './pageSockets.ts';
 
 const req = (addr: string, headers: Record<string, string> = {}, url = '/ws') => ({ socket: { remoteAddress: addr }, headers, url }) as never;
 
@@ -55,4 +55,33 @@ test('w4723: one line per open and close, naming who closed it, and drops counte
   assert.deepEqual(p.health(false), { open: 0, dropsLastHour: 3, dropsSinceStart: 3 }, 'no logins for a request from outside');
   t += 3_600_001;
   assert.deepEqual(p.health(true), { open: 0, dropsLastHour: 0, dropsSinceStart: 3, byUser: { lothsahn: { lastHour: 0, sinceStart: 2 }, ben: { lastHour: 0, sinceStart: 1 } } });
+});
+
+test('w6336: the page says when its first state is on screen, and one line gives every phase of that connect', () => {
+  const lines: string[] = [];
+  const p = new PageSockets<object>((l) => lines.push(l), () => 0);
+  const a = {};
+  p.opened(a, 'lothsahn', req('127.0.0.1', { 'x-forwarded-for': '203.0.113.9', 'tailscale-funnel-request': '?1' }, '/ws?why=first'), { ms: 1130.2, bytes: 4 * 1024 * 1024, buildMs: 980.4, jsonMs: 149.8 });
+  assert.equal(lines[0], 'page socket open: lothsahn from 203.0.113.9 via funnel, why=first, state 1130ms (build 980ms json 150ms) 4096KB (1 open)');
+  p.ready(a, JSON.stringify({ type: 'ready', open: 120.4, state: 1400, parse: 90, render: 210.6, load: 2300 }));
+  assert.equal(lines[1], 'page socket ready: lothsahn via funnel, 1821ms: open 120ms, first state 1400ms, parse 90ms, render 211ms, server build 1130ms 4096KB; 2300ms since the page began loading');
+  // Once per socket, and nothing else a page sends is logged.
+  p.ready(a, JSON.stringify({ type: 'ready', open: 1, state: 1, parse: 1, render: 1 }));
+  p.ready({}, JSON.stringify({ type: 'ready', open: 1, state: 1, parse: 1, render: 1 }));
+  assert.equal(lines.length, 2);
+});
+
+test('w6336: a ready message is only its numbers: anything odd is dropped, not logged', () => {
+  assert.deepEqual(readyOf('{"type":"ready","open":1,"state":2,"parse":3,"render":4}'), { open: 1, state: 2, parse: 3, render: 4 });
+  for (const bad of ['', 'nope', '{"type":"ping"}', '{"type":"ready","open":1,"state":2,"parse":3}', '{"type":"ready","open":-1,"state":2,"parse":3,"render":4}', '{"type":"ready","open":"1\nfake line","state":2,"parse":3,"render":4}', `{"type":"ready","open":1e12,"state":2,"parse":3,"render":4}`, 'x'.repeat(600), 42])
+    assert.equal(readyOf(bad), undefined, String(bad).slice(0, 40));
+  // A bad `load` is left out, the rest kept.
+  assert.deepEqual(readyOf('{"type":"ready","open":1,"state":2,"parse":3,"render":4,"load":"x"}'), { open: 1, state: 2, parse: 3, render: 4 });
+});
+
+test("w6382: the open line names a build's slowest phases, leaving out the quick ones", () => {
+  const lines: string[] = [];
+  const p = new PageSockets<object>((l) => lines.push(l), () => 0);
+  p.opened({}, 'lothsahn', req('127.0.0.1', {}, '/ws?why=closed'), { ms: 700, bytes: 2048, buildMs: 640, jsonMs: 60, phases: [['work', 20.4], ['sessions', 310.2], ['reports', 1], ['accounts', 300]] });
+  assert.equal(lines[0], 'page socket open: lothsahn from 127.0.0.1 via local, why=closed, state 700ms (build 640ms [sessions 310, accounts 300, work 20] json 60ms) 2KB (1 open)');
 });

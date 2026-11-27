@@ -102,6 +102,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, peo
     server.close();
     intake.close();
     o.close();
+    agents.close(); // w6152: Agents' timers stop before the folder goes (w5915: a release pass wrote into a removed transcript, ENOENT).
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
@@ -280,6 +281,42 @@ test('intake.ffbox: switching the ledger check on keeps the connected FFBox, whi
   assert.deepEqual(intake.settings.ffbox.match, { high: 0.8, medium: 0.45 });
   assert.equal(intake.settings.ffbox.dailyCap, 5);
   assert.equal(pm.ledgerProblem(), undefined, 'no "LEDGER CHECK OFF HERE" once it is on');
+});
+
+test('w6381: a board_check waits for the board warm-up (boardReady) and is answered once it settles, failed or not', async (t) => {
+  const { connect, pm, remote } = await setup(t);
+  const r = await remote(BEN, 'set_app_config', { key: 'intake.ffbox', value: WANTED, user_asked: true });
+  assert.equal(r.isError, false, r.text);
+  let release!: () => void;
+  let fail!: (e: Error) => void;
+  const asked: string[] = [];
+  const inner = pm.onBoardCheck!;
+  pm.onBoardCheck = (m) => (asked.push(m.ref), inner(m));
+  pm.boardReady = () => new Promise<void>((res) => (release = res));
+  const c = connect();
+  await c.hello({ protocol: 2, accepts: ['board', 'filed'] });
+  c.send({ type: 'board_check', ref: 'conv-580', keys: ['discord:1424000000000000002'], conversation: '580' });
+  await new Promise((res) => setTimeout(res, 50));
+  assert.deepEqual(asked, [], 'not worked out while the warm-up runs');
+  release();
+  const board = (await c.next('board')) as { verdict: string; ref: string };
+  assert.equal(board.ref, 'conv-580');
+  assert.equal(board.verdict, 'clear');
+  assert.deepEqual(asked, ['conv-580']);
+  // A warm-up that failed still lets the check be answered (it makes what it needs itself).
+  pm.boardReady = () => new Promise<void>((_, rej) => (fail = rej));
+  c.send({ type: 'board_check', ref: 'conv-581', keys: ['discord:1424000000000000003'], conversation: '581' });
+  await new Promise((res) => setTimeout(res, 20));
+  fail(new Error('warm-up broke'));
+  assert.equal(((await c.next('board')) as { ref: string }).ref, 'conv-581');
+});
+
+test('w6381: boardWarmed starts the warm-up once and shares it', async (t) => {
+  const { agents } = await setup(t);
+  const o = agents.orchestrators;
+  const a = o.boardWarmed(30);
+  assert.equal(o.boardWarmed(30), a, 'one warm-up, shared');
+  assert.equal(typeof (await a), 'number');
 });
 
 test('ffbox_activity: one schema for every belt, with the live views, id and paging, and their description', async (t) => {

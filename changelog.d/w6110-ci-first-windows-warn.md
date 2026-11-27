@@ -1,0 +1,1 @@
+- On LothDesktop, while an ffu CI job runs, the daemon logs once a minute what the machine, the jobs and each agent's processes use in cores, and how many of the agents' processes run above BelowNormal; warn only, nothing is set yet (w6110, `machine/ciFirstWin.ts`).

@@ -46,6 +46,8 @@ import {
   type SpawnSyncOptions,
 } from 'node:child_process';
 import path from 'node:path';
+import { runOffThread } from './hostProbe.ts';
+import type { RunResult } from './proc.ts';
 import { fileURLToPath } from 'node:url';
 
 type Env = NodeJS.ProcessEnv;
@@ -317,6 +319,22 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
       (_e, out) => resolve(fenced(args, env, String(out ?? ''))),
     );
   });
+}
+
+/**
+ * w6237: a git call whose two spawns (the fence's scan and git itself) both run on the probe thread (server/hostProbe.ts),
+ * never on the caller's event loop: the guard runs inside the portal on every shell command. `bin` is the git to run (the
+ * guard's trusted git), `pre` the settings that go before the fenced arguments (TRUSTED_GIT).
+ */
+export async function gitOffThread(args: string[], opts: { cwd?: string; env?: Env; timeoutMs?: number; bin?: string; pre?: string[] } = {}): Promise<RunResult> {
+  const env = opts.env ?? process.env;
+  let f: { args: string[]; env: Env };
+  if (!needsScan(args)) f = unscanned(args, env);
+  else {
+    const scan = await runOffThread('git', scanArgs(splitGlobal(args).location), 15_000, { cwd: opts.cwd, env: scanEnv(env), maxBuffer: 4 * 1024 * 1024 });
+    f = fenced(args, env, scan.stdout);
+  }
+  return runOffThread(opts.bin ?? 'git', [...(opts.pre ?? []), ...f.args], opts.timeoutMs ?? 15_000, { cwd: opts.cwd, env: f.env });
 }
 
 const cwdOf = (o?: { cwd?: string | URL }) => (o?.cwd === undefined ? undefined : String(o.cwd instanceof URL ? fileURLToPath(o.cwd) : o.cwd));

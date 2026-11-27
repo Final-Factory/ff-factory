@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import type { Config } from './config.ts';
 import type { HostStats, SystemStats, UnitySlotsReport } from '../shared/types.ts';
 import { unitySlotsLine } from '../shared/fleet.ts';
-import { run } from './proc.ts';
+import { CachedProbe, runOffThread, type ProbeResult } from './hostProbe.ts';
 import { memUsed } from '../shared/stats.ts';
 
 export { memUsed };
@@ -186,34 +186,72 @@ export function linuxDrmGpu(read: (p: string) => string = (p) => fs.readFileSync
   return best;
 }
 
-async function gpu(memTotalBytes: number): Promise<HostStats['gpu']> {
-  if (process.platform === 'darwin') {
-    const r = await run('ioreg', ['-r', '-d', '1', '-c', 'IOAccelerator'], { timeoutMs: 5000 });
-    return r.code === 0 ? parseIoregGpu(r.stdout, memTotalBytes) : undefined;
+/**
+ * The GPU probe's command in place of nvidia-smi, as a JSON array [cmd, ...args] whose output reads as nvidia-smi's (tests:
+ * a fake that hangs, w6234). Unset in every install.
+ */
+function nvidiaCommand(): [string, string[]] {
+  const o = process.env.FFSB_GPU_PROBE_CMD;
+  if (o) {
+    const [cmd, ...args] = JSON.parse(o) as string[];
+    return [cmd, args];
   }
-  const r = await run('nvidia-smi', ['--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits'], { timeoutMs: 5000 });
-  const nvidia = r.code === 0 ? parseNvidiaSmi(r.stdout) : undefined;
-  if (!nvidia && process.platform === 'linux') return linuxDrmGpu();
-  if (nvidia || process.platform !== 'win32') return nvidia;
-  // No nvidia-smi (an Intel or AMD card): Windows' own counters. Get-Counter takes a second or two.
-  const w = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN_GPU_SCRIPT], { timeoutMs: 20_000 });
-  return w.code === 0 ? parseWinGpu(w.stdout) : undefined;
+  return ['nvidia-smi', ['--query-gpu=name,memory.total,memory.used,utilization.gpu', '--format=csv,noheader,nounits']];
 }
 
-async function memory(): Promise<Pick<HostStats, 'memTotalBytes' | 'memFreeBytes' | 'memUsedBytes' | 'memPressure'>> {
+/** No nvidia-smi on this computer (it could not start): not tried again until the portal restarts. */
+let noNvidiaSmi = false;
+
+async function gpuNow(memTotalBytes: number): Promise<ProbeResult<HostStats['gpu']>> {
+  if (process.platform === 'darwin') {
+    const r = await runOffThread('ioreg', ['-r', '-d', '1', '-c', 'IOAccelerator'], 5000);
+    return { value: r.code === 0 ? parseIoregGpu(r.stdout, memTotalBytes) : undefined, timedOut: r.timedOut };
+  }
+  let nvidia: HostStats['gpu'];
+  if (!noNvidiaSmi) {
+    const [cmd, args] = nvidiaCommand();
+    const r = await runOffThread(cmd, args, 5000);
+    if (r.timedOut) return { value: undefined, timedOut: true };
+    if (r.code === -1 && /ENOENT/.test(r.stderr) && !process.env.FFSB_GPU_PROBE_CMD) noNvidiaSmi = true;
+    nvidia = r.code === 0 ? parseNvidiaSmi(r.stdout) : undefined;
+  }
+  if (!nvidia && process.platform === 'linux') return { value: linuxDrmGpu() };
+  if (nvidia || process.platform !== 'win32') return { value: nvidia };
+  // No nvidia-smi (an Intel or AMD card): Windows' own counters. Get-Counter takes a second or two.
+  const w = await runOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WIN_GPU_SCRIPT], 20_000);
+  return { value: w.code === 0 ? parseWinGpu(w.stdout) : undefined, timedOut: w.timedOut };
+}
+
+type MacMemory = Pick<HostStats, 'memUsedBytes' | 'memPressure'> & { memFreeBytes?: number };
+
+async function macMemoryNow(): Promise<ProbeResult<MacMemory>> {
   const memTotalBytes = os.totalmem();
-  if (process.platform !== 'darwin') return { memTotalBytes, memFreeBytes: os.freemem() };
-  const [vm, pressure] = await Promise.all([run('vm_stat', [], { timeoutMs: 5000 }), run('sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], { timeoutMs: 5000 })]);
+  const [vm, pressure] = await Promise.all([runOffThread('vm_stat', [], 5000), runOffThread('sysctl', ['-n', 'kern.memorystatus_vm_pressure_level'], 5000)]);
   const m = vm.code === 0 ? parseVmStat(vm.stdout, memTotalBytes) : undefined;
   return {
-    memTotalBytes,
-    memFreeBytes: m?.freeBytes ?? os.freemem(),
-    memUsedBytes: m?.usedBytes,
-    memPressure: pressure.code === 0 ? parsePressure(pressure.stdout) : undefined,
+    value: { memFreeBytes: m?.freeBytes, memUsedBytes: m?.usedBytes, memPressure: pressure.code === 0 ? parsePressure(pressure.stdout) : undefined },
+    timedOut: vm.timedOut && pressure.timedOut,
   };
 }
 
-/** This computer's load; disk is the volume holding `diskPath`. */
+/**
+ * The probes behind hostStats (w6234): each answers with its last value at once and runs at most one child at a time, on
+ * the probe thread (server/hostProbe.ts). The portal and each daemon read hostStats every 5 s; a GPU probe that keeps
+ * timing out backs off to one try in 10 minutes. Exported for tests.
+ */
+export const probes = {
+  gpu: new CachedProbe('GPU', () => gpuNow(os.totalmem()), { everyMs: 4000, maxBackoffMs: 10 * 60_000 }),
+  macMemory: new CachedProbe('memory', macMemoryNow, { everyMs: 4000, maxBackoffMs: 10 * 60_000 }),
+};
+
+function memory(): Pick<HostStats, 'memTotalBytes' | 'memFreeBytes' | 'memUsedBytes' | 'memPressure'> {
+  const memTotalBytes = os.totalmem();
+  if (process.platform !== 'darwin') return { memTotalBytes, memFreeBytes: os.freemem() };
+  const m = probes.macMemory.get();
+  return { memTotalBytes, memFreeBytes: m?.memFreeBytes ?? os.freemem(), memUsedBytes: m?.memUsedBytes, memPressure: m?.memPressure };
+}
+
+/** This computer's load; disk is the volume holding `diskPath`. Its GPU and a Mac's memory are the last probe's (w6234). */
 export async function hostStats(diskPath: string): Promise<HostStats> {
   let diskTotalBytes: number | undefined;
   let diskFreeBytes: number | undefined;
@@ -224,7 +262,7 @@ export async function hostStats(diskPath: string): Promise<HostStats> {
   } catch {
     // statfs is unavailable on some filesystems; the UI hides the meter
   }
-  const mem = await memory();
+  const mem = memory();
   return {
     hostname: os.hostname(),
     platform: `${os.platform()} ${os.release()}`,
@@ -234,7 +272,8 @@ export async function hostStats(diskPath: string): Promise<HostStats> {
     ...mem,
     diskTotalBytes,
     diskFreeBytes,
-    gpu: await gpu(mem.memTotalBytes),
+    // The last probe's value: hostStats never waits on a child process (w6234).
+    gpu: probes.gpu.get(),
   };
 }
 

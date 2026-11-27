@@ -122,7 +122,8 @@ const runnerName = (root: string) => flatLower(root).split('/').pop() ?? root;
  */
 export function runnerRestartScript(root: string): string {
   const win = root.replace(/\//g, '\\').replace(/\\+$/, '');
-  if (!/^[a-z]:\\/i.test(win) || /['\r\n]/.test(win)) throw new Error(`${root} is not a runner folder to start`);
+  // a whitelist, not a quote check (w6163's review): PowerShell ends a single-quoted string at U+2018..U+201B as well as at '
+  if (!/^[a-z]:\\[A-Za-z0-9 _.\\-]+$/i.test(win)) throw new Error(`${root} is not a runner folder to start`);
   return [
     `$root = '${win}'`,
     `$re = [regex]::Escape($root) + '(?![\\w.-])'`,
