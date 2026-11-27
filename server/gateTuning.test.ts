@@ -84,7 +84,7 @@ test('a filing that cannot be made is kept pending and tried again', async () =>
   assert.ok(await job.tick(), 'a pending filing makes it due again');
 });
 
-test('findProposals: only an always-run class with enough runs, days, no gate failure, no detect and no Performance tag', () => {
+test('findProposals: only an always-run class with enough runs, days, no gate failure, no detect and no Performance tag', async () => {
   const now = T0;
   const h = new TestHistory({ dataDir: tmp(), now: () => now });
   const runs = 320;
@@ -97,7 +97,7 @@ test('findProposals: only an always-run class with enough runs, days, no gate fa
     h.addRun({ source: 'pr-gate', key: `g${i}`, repo: 'o/r', branch: `b${i}`, sha: `s${i}`, finished: iso(at) }, cases);
   }
   h.addRun({ source: 'local', key: 'perf', finished: iso(now - DAY) }, [{ name: 'Tests.G.Perf.a', outcome: 'pass', ms: 5, categories: ['Performance'] }]);
-  const out = findProposals(h, now);
+  const out = await findProposals(h, now);
   assert.equal(out.gateRuns, runs);
   const names = out.proposals.map((p) => p.test);
   assert.deepEqual(names, ['Tests.G.Quiet', 'Tests.G.SaveLayoutGuard']);
@@ -108,8 +108,36 @@ test('findProposals: only an always-run class with enough runs, days, no gate fa
   assert.equal(quiet.crownJewel, false);
   assert.equal(out.proposals[1]!.crownJewel, true);
   assert.ok(CROWN_JEWEL.test('Tests.Multiplayer.PerFrameSystemCensusTest'));
-  assert.equal(findProposals(new TestHistory({ dataDir: tmp(), now: () => now }), now).proposals.length, 0);
+  assert.equal((await findProposals(new TestHistory({ dataDir: tmp(), now: () => now }), now)).proposals.length, 0);
+  // w6370: read apart (a worker on its own read-only connection) it answers what the portal's own connection answers.
+  const onMain = (sql: string, ...args: (string | number | null)[]) => Promise.resolve(h.all(sql, ...args));
+  assert.deepEqual(out, await findProposals(h, now, onMain));
   assert.ok(OUT_RULE.minRuns >= 300, '95% bound ≤ 1%');
+});
+
+// w6370: the daily tuning's queries ran on the portal's own connection and held its loop 22.9 s (2026-11-27 09:17Z). Run
+// apart, a whole tuning over the same history gives the same result, and the loop keeps turning while its queries run.
+test('w6370: a gate-tuning run reads the history apart from the loop and gives the same result as on the main connection', async () => {
+  const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
+  h.setMeta('gate_tuning_baseline', '0');
+  for (let i = 0; i < 320; i++) h.addRun({ source: 'pr-gate', key: `g${i}`, repo: 'o/r', branch: `b${i}`, sha: `s${i}`, finished: iso(T0 - 20 * DAY + i * 3600_000) }, [tc('Tests.G.Quiet.a', 'pass', 2000), tc('Tests.G.Other.a', 'pass')]);
+  missOn(h, 41, ['Tests.A.Other.x'], 'Tests.A.Leech.bites', T0 - 2 * DAY);
+  missOn(h, 42, ['Tests.A.Ran.y'], 'Tests.A.Ran.y', T0 - DAY);
+  const onMain = (sql: string, ...args: (string | number | null)[]) => Promise.resolve(h.all(sql, ...args));
+  const queries: string[] = [];
+  const apart = h.allApart.bind(h);
+  h.allApart = (sql, ...args) => (queries.push(sql), apart(sql, ...args));
+  let turns = 0;
+  const beat = setInterval(() => turns++, 1);
+  const t = await new GateTuningJob({ cfg: cfg(), history: h, prHead: heads, now: () => T0 }).run();
+  clearInterval(beat);
+  assert.ok(queries.some((q) => /WITH r AS/.test(q)), 'the proposals query ran apart');
+  assert.ok(queries.some((q) => /f.label = 'detect'/.test(q)), 'the misses query ran apart');
+  assert.ok(turns > 0, 'the loop turned while the queries ran');
+  assert.deepEqual(t.proposals, (await findProposals(h, T0, onMain)).proposals);
+  assert.deepEqual(t.misses, await findMisses(h, 'o/r', heads, 0, onMain));
+  assert.deepEqual(t.proposals.map((p) => p.test), ['Tests.G.Quiet', 'Tests.G.Other'], 'most gate time first');
+  assert.deepEqual(t.misses.map((m) => [m.pr, m.verdict]), [[41, 'not-in-gate'], [42, 'gate-ran-passed']]);
 });
 
 test('the gate_tuning query answers the newest summary and its proposals; the request has its own key and rules', async () => {

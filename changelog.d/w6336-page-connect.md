@@ -7,3 +7,5 @@
     a restart.
   - A state build is one placement pass.
   - Every connect logs a `page socket ready` line with the page's own phase times.
+  - Within a placement pass, each worker's requests are read from one index of the ledger. The pass used to scan every
+    request once per worker, 1–3 s of each 4–6 s block.

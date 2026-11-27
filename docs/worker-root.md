@@ -1145,8 +1145,16 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
   - A `sandbox-exec` that fails at launch is not retried unfenced: the start reports the pid and the editor never comes
     up (the hang watch then restarts it). The probe at the daemon's start runs the same profile, so it would fail there
     first and the editors would start unfenced.
-- **Linux: sandbox editors start under the workers' Landlock write rules** (w5631, stage 3 of w5540). When the workers'
-  write lock is on (`"writeLock": true`), `MacUnity.start` (`machine/unity.ts`) starts a Linux sandbox editor through
+- **Linux: sandbox editors start unfenced; `editorFence: true` starts them under the workers' Landlock write rules**
+  (w5631, stage 3 of w5540). Off by default since the live check (biscuit, 2026-11-27): any Landlock domain, warn-only
+  (`--rw /`) too, forbids changing the mount topology ([kernel docs, Current limitations](https://docs.kernel.org/userspace-api/landlock.html#filesystem-topology-modification)),
+  and a windowed editor's GTK loads its icons through glycin 2.1.1, which runs every image loader in
+  `bwrap --unshare-all`; bwrap fails ("Failed to make / slave: Operation not permitted"), GTK aborts ("Gtk:ERROR ...
+  Loader process exited early with status '1'") and the editor exits before the project loads. The batchmode
+  `-nographics` legs below load no GTK and passed, which is why they missed it. Ubuntu's gdk-pixbuf 2.44 here has no
+  PNG loader but glycin's, and glycin 2.1.1 has no switch to run unsandboxed when not in Flatpak, so a fence needs a
+  GTK without glycin, a glycin that falls back, or a fence that is not Landlock. With `editorFence: true` the write
+  lock must be on (`"writeLock": true`), `MacUnity.start` (`machine/unity.ts`) starts a Linux sandbox editor through
   `launchFenced` as `python3 ff-landlock.py <rules> -- <Unity> -projectPath <sandbox>`, inside its systemd scope as
   before (`scoped`, `machine/linuxScope.ts`). ff-landlock execs Unity, so the pid is the editor's and its children
   (compiler server, Burst, shader compiler, UPM, import workers) inherit the rules. The rules are the workers' own
