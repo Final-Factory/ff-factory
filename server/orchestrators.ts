@@ -90,7 +90,7 @@ import { inheritedPayer, isSamePerson, personForWork, sessionPerson, tokenPerson
 import { MERGE_ON_GREEN_MARK } from './mergeOnGreen.ts';
 import { mergeOwnerProblem, mergeOwnerRefusal, type MergeOwner } from './mergeOwner.ts';
 import { handoffQuote, handoffReport, isHandoff } from './handoffReport.ts';
-import { dataDirClearedText, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, otherPlayerInWords, type DataDirVerdict } from './gameDataDir.ts';
 import { commitsIn, normPr, pairCommitsOf, pairPrOf, pairRanCommit, prIn, resultFor, sameCommit, samePr } from './pairRuns.ts';
 import type { AttachmentRef, PairPlayer, BenchGrant, ConditionalDecision, CrashHold, ForYouMark, OpenAsk, WorkNeedsYou, GateResume, GitStatus, Machine, WorkAutoClosed, WorkBlocker, WorkDigest, ProviderConversation, Requester, Sandbox, SessionInfo, TranscriptEvent, WorkFfbox, WorkFfboxDev, WorkHandedUp, WorkItem, WorkOverlap, WorkPair, WorkPriority, WorkScope, WorkSource, WorkSourceKind, WorkTriage } from '../shared/types.ts';
 import { designGoAsk } from './designGo.ts';
@@ -5397,12 +5397,20 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     let dataDirChecked: string | undefined;
     if (legacyData) {
       const v = a.data_dir;
-      if (v?.reads && commit && sameCommit(v.commit, commit)) {
+      // w6235: legacy_data about another player (a Steam 0.50 build, another sha) is not settled by this commit's file;
+      // w6451: nor are what and brief that name one, the words a run with no legacy_data is marked from.
+      const other = commit ? otherPlayerInWords(commit, saysNone(legacySaid) ? '' : legacySaid, what, brief) : undefined;
+      if (v?.reads && commit && sameCommit(v.commit, commit) && !other) {
         dataDirChecked = dataDirClearedText(v.commit);
         legacyData = undefined;
       } else {
-        const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)' : v && !v.reads ? v.why : `FF Factory did not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (w6189)`;
-        legacyData = clip(`${legacyData}; ${why}`, 400);
+        const why = !commit ? 'no commit was given, so FF Factory could not check it for the FF_GAME_DATA_DIR backport (pass commit; w6189)'
+          : v && !v.reads ? v.why
+          : other ?? (v?.reads ? `FF Factory's check answered for ${v.commit.slice(0, 10)}, not ${commit.slice(0, 10)}, so ${commit.slice(0, 10)} was not checked for the FF_GAME_DATA_DIR backport (w6235)`
+          : `FF Factory did not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (w6189)`);
+        // w6451: the other player's reason is kept in the mark even when another reason leads, so start_agent and the queue's
+        // re-check, which read only the mark, keep it too after a read that failed now and works later.
+        legacyData = clip(`${legacyData}; ${why}${other && other !== why ? `; ${other}` : ''}`, 700);
       }
     }
     const openPrs = (w.prs ?? []).filter((x) => x.state === 'open');
@@ -8185,7 +8193,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const i = gates.findIndex((g) => sameGate(g, gate));
     if (i < 0) return false;
     const line = `${gate.ref} is ${to}'s to act on, not ${w.id}'s (${why}); ${w.id} now waits for it to merge (w5845)`;
-    const next: WorkBlocker = { kind: 'pr', ref: gate.ref, what: `${gate.ref} merging (${to} works on it, w5845)`, at: this.now().toISOString(), by: 'blocker watch' };
+    // w6446: the holder is the request it now waits on, so the blocker watch's wait-cycle check sees the wait (waitCycles).
+    const next: WorkBlocker = { kind: 'pr', ref: gate.ref, what: `${gate.ref} merging (${to} works on it, w5845)`, holder: to, at: this.now().toISOString(), by: 'blocker watch' };
     const left = gates.map((g, j) => (j === i ? next : g)).filter((g, j, xs) => xs.findIndex((x) => sameGate(x, g)) === j);
     w.blocked = left[0];
     w.alsoBlocked = left.length > 1 ? left.slice(1) : undefined;

@@ -64,7 +64,7 @@ ambiguous is "notify": it is reported to the orchestrator, which restarts the ed
 | "Precompiled Assemblies Update Consent Request": "Unity found assemblies using deprecated Unity APIs…" | Yes / No | Notify | Yes rewrites assemblies; No may leave the project broken. Someone decides. |
 | "Corrupted Library Detected" | "Rebuild Library" / "Don't rebuild Library" | Notify | A rebuild re-imports everything (hours on this project); not rebuilding may not open. |
 | "Recovering Scene Backups": "Scene backups from a previous Editor session have been detected… Do you want to copy and preserve these backups in Assets/_Recovery/?" | "Yes" / "No" | **Auto: No, only when no `*.unity` file has uncommitted changes**; otherwise notify | Appears after an editor was killed or crashed. Agents do not make manual scene edits, and Yes would copy the backups into `Assets/_Recovery/` as untracked files. With a modified scene file in the tree, the backups may hold real work, so a person decides. |
-| "Unity Package Manager Error" (and "Unity Package Manager: Manifest relocation") | "Retry" / "Continue" / "Diagnose" | Notify; agents never press Retry | Retry relaunches Unity as a new process the app does not track (a restart through the unity tool does the same, tracked); Continue opens with packages missing. Read the log first. |
+| "Unity Package Manager Error" (and "Unity Package Manager: Manifest relocation") | "Retry" / "Continue" / "Diagnose" | Notify; agents never press Retry | Retry relaunches Unity as a new process the app does not track (a restart through the unity tool does the same, tracked); Continue opens with packages missing. Read the log first. A git package that `Library/PackageCache` lacks is named in the notice with its cause and route: see "Git packages a sandbox editor lacks" below (w6412). |
 | "License error" / "No valid Unity Editor license found…" | "Open Hub" and others | Notify a **person** | The licence has to be fixed in Unity Hub; nothing to dismiss. |
 | "Unsupported Platform": "Support for the selected build platform has been deprecated…" | "Switch Platform" / "Exit Unity" | Notify | Switching changes the project's build target. |
 | "Auto Graphics API" notice | "Confirm" / "Auto" | Notify | Either choice changes Player Settings. |
@@ -229,3 +229,39 @@ to the user. All of that was the portal's own editors', and was deleted with the
 A daemon sends the watch's text to the portal as `unity_event` (`MacUnityWatch`'s report in `machine/daemon.ts`;
 `restarted` is set when it restarted the editor). Every dismissal is kept in the watch (`dismissed`, the last 40,
 listed by `unity status` for the last hour) and logged to the daemon's log.
+
+## Git packages a sandbox editor lacks (w6412)
+
+When a branch's `Packages/manifest.json` names a git package that the sandbox's `Library/PackageCache` has no copy of,
+the Package Manager fetches it as the editor starts. A Windows sandbox editor runs at Low integrity, and that fetch fails
+there in two ways. First, the machine's Git dies at Low with
+`sh.exe: fatal error - NtCreateDirectoryObject(...): 0xC0000022`. Second, once it gets past that, there is no
+credential for a private repository: `could not read Username for 'https://github.com': terminal prompts disabled`. The
+editor then waits on "Unity Package Manager Error". This was first seen for w6403, the KNN pin on origin/pre-1.0
+(`com.akb.knn`, `https://github.com/Final-Factory/KNN.git#375be6b9ff…`, which master no longer has).
+
+The daemon.json setting `editorGitPackages` controls what happens (machine/gitPackages.ts). Set it remotely with
+`ops_worker machine_update editor_git_packages …`.
+
+- **warn** is the default. The start note, `unity status`, a switch's notes and the dialog notice name the package, the
+  cause and the route.
+- **on** fetches each missing repository into a bare mirror at
+  `<root>/cache-medium/git-packages/github.com/<owner>/<repo>.git`. The fetch uses the daemon's own git and credential,
+  outside the fence, and runs after a switch and again before the start. The folder is a Medium-only root child: a Low
+  editor can read it but cannot write it. The Low editor then starts with the workers' Git (`<root>\tools\git`, whose
+  msys runs at Low) first on its PATH, plus one command-scope `url.file:///<mirror>.insteadOf=<manifest URL>` per
+  repository. The Package Manager runs its own `git fetch --depth=1 origin <commit>` against the mirror. No credential
+  reaches the editor, and `packages-lock.json` keeps the GitHub URL and commit.
+- **off** looks at nothing.
+
+What Unity 6000.3 accepts was measured on m5 on 2026-11-27, in batchmode with GitHub blocked:
+
+- A cache folder put in place by hand (`<name>@<hash[0:12]>`, or with `?path=` `sha1(hash + path)[0:12]`) is **not**
+  reused. The Package Manager clones again, because it reuses only what its own `Library/PackageManager/ProjectCache`
+  lists.
+- An embedded copy (`Packages/<name>`) resolves, but it rewrites the tracked `packages-lock.json`.
+- The `insteadOf` mirror resolves with the same cache folder name and an unchanged lock file.
+
+By hand, as a fallback: clone the package at its commit into `Packages/<name>`, start the editor, and delete the folder
+afterwards. Never commit the `packages-lock.json` change this makes.
+
