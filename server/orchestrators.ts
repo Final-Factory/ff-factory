@@ -9,7 +9,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, offSince, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
@@ -138,16 +138,6 @@ const NOTE_MARK = '[note] ';
 export function personsResume(m: { text: string; resumeOf?: { note: string } }): boolean {
   const note = m.resumeOf?.note ?? /^\[wake_me\][^\n]*?Your note: ([\s\S]*)$/.exec(m.text)?.[1] ?? '';
   return note.startsWith(ANSWER_MARK) || note.startsWith(NOTE_MARK);
-}
-/**
- * w6309 (the w6302 review, R1 and R2): worker `sid` was moved off `w` and not sent or linked to it since. Off its list, or
- * on it again only through a merge (which keeps the mark and brings no link of its own for it): either way it never takes
- * `w` up again (w2079). Every placement and link links its worker, so a worker put on `w` again is not off it.
- */
-export function offSince(w: Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>, sid: string): boolean {
-  const off = w.movedOff?.[sid];
-  if (!off) return false;
-  return !w.sessionIds.includes(sid) || !(Date.parse(w.links?.[sid]?.at ?? '') >= Date.parse(off));
 }
 const BUSY: SessionInfo['status'][] = ['running', 'starting', 'waiting_permission'];
 /** A request Blocked on a machine its worker was cut off on is named to the dispatcher after this long offline (w2433, ledger.offlineNoticeMinutes). */
@@ -1532,7 +1522,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const hbAt = (x: WorkItem) => at(x.handedBack?.at);
     const onNow = (x: WorkItem): string | undefined => {
       const now = latestWorker(x);
-      // w6309 (R1): nor one moved off it and back only through a merge.
+      // w6309 (R1): nor one moved off it and back only through a merge (latestWorker ranks it last, w6318 F2).
       if (!now || now === asker || offSince(x, now)) return undefined;
       const link = x.links?.[now]?.at;
       return !x.handedBack || (link && at(link) >= hbAt(x)) ? now : undefined;
@@ -4553,7 +4543,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
       // w6288: a worker moved off t that comes back with w is never shifted past t's hand-back below (w2079).
-      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => !t.sessionIds.includes(sid)));
+      // w6309 (the w6318 review, F1): and one an earlier merge listed again, still off t since its move (offSince).
+      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => offSince(t, sid)));
       // w6309 (the w6302 review, R1 and R2): such a worker stays listed, so the merge takes no running worker off its work
       // (keep rather than kill) and a person's answer or note still reaches it (w2495), but it keeps its moved-off mark and its
       // link on w does not come with it: it is off t since its move (offSince), so it is never t's worker now (answerNeedsYou)

@@ -11,6 +11,7 @@ import { Identity } from './identity.ts';
 import type { Computer } from './placement.ts';
 import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
+import { isWith, latestWorker } from '../shared/blockers.ts';
 
 /**
  * w6047 (the w6253 review asked for it): one table of where answerNeedsYou sends a person's [answer], over every shape the
@@ -273,4 +274,69 @@ test('a moved-off worker merged back, then placed on it again, is not refused it
   k.merge(w, [E], { [E]: 3 * H });
   k.place(env.store.work.get('w5869')!, E);
   assert.equal(env.agents.orchestrators.staleResume('w5869', E, 'CI on #9 finished'), undefined);
+});
+
+// The w6318 review of #1430 (w6309). Q1 (F1): a second merge that brings a moved-off worker again, now with a link newer
+// than its move, does not put it back on the request either. Q2, Q3 (F2): a moved-off worker a merge listed again never
+// hides a worker really on it, for the answer (onNow) or the release pass (isWith).
+const mergeAgain = (env: Env, into: string, id: string, ids: string[], links: Record<string, number>) => {
+  const x = env.request(ids, id);
+  x.links = Object.fromEntries(Object.entries(links).map(([s, ago]) => [s, { at: T(ago), how: 'sent' as const }]));
+  x.status = 'blocked';
+  env.store.putWork(x);
+  env.agents.orchestrators.decide({ id, action: 'merge', into, note: 'a second repeat (test)' });
+};
+
+test('Q1 a moved-off worker merged back twice: the second merge does not put it back on it (w6318 F1, w2079)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H });
+  k.moveOff(w, E);
+  k.handBack(w);
+  k.merge(w, [E], { [E]: 3 * H });
+  mergeAgain(env, 'w5869', 'w5872', [E], { [E]: -1000 });
+  const o = env.agents.orchestrators;
+  assert.match(o.staleResume('w5869', E, 'CI on #9 finished') ?? '', /was moved off worker/);
+  const said = answer(env, env.store.work.get('w5869')!, 'yes, ship it');
+  assert.ok(!reached(env, E), `${E} is resumed with the answer: "${said}"`);
+  assert.match(env.store.work.get('w5869')!.handedBack?.message ?? '', /ship it/, `the hand-off lacks the answer: "${said}"`);
+});
+
+const hiddenBehind = (k: Kit) => {
+  // N is on it with no link time; E and the asker are moved off it; a merge lists E again.
+  const w = k.req([N, E, A], 'w5869', { [E]: 2 * H, [A]: H });
+  k.moveOff(w, E);
+  k.moveOff(w);
+  k.merge(w, [E], { [E]: 3 * H });
+  return w;
+};
+
+test('Q2 a moved-off worker merged back does not hide an unlinked worker still on it from the answer (w6318 F2)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  hiddenBehind(k);
+  const said = answer(env, env.store.work.get('w5869')!, 'yes, ship it');
+  assert.ok(reached(env, N), `${N} never hears the answer: "${said}"`);
+  assert.ok(!reached(env, E), `${E} is resumed with the answer: "${said}"`);
+  assert.ok(!reached(env, A), `${A} is resumed with the answer: "${said}"`);
+});
+
+test('Q3 a moved-off worker merged back is not the newest for the release pass over an unlinked worker on it (w6318 F2)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  hiddenBehind(k);
+  const x = env.store.work.get('w5869')!;
+  assert.equal(latestWorker(x), N);
+  assert.ok(isWith(x, N));
+  assert.ok(!isWith(x, E));
+});
+
+test('a moved-off worker merged back alone stays the newest of the request, so the release pass keeps it (w6309)', async (t) => {
+  const env = await setup(t, 'on');
+  const k = kit(env);
+  const w = k.req([E, A], 'w5869', { [E]: 2 * H, [A]: H });
+  k.moveOff(w, E);
+  k.handBack(w);
+  k.merge(w, [E], { [E]: 3 * H });
+  assert.equal(latestWorker(env.store.work.get('w5869')!), E);
 });
