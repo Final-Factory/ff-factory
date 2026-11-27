@@ -210,9 +210,26 @@ clone. Nothing goes while cargo builds in the target, as `cargoTargetBusy` judge
 names the target or runs in the checkout's process tree. A write within the settle time (15 min) in its top three levels
 stops only the incremental trim and the whole removals: the stale-unit sweep still runs and spares every unit written
 within the settle time (w4258: four slots in steady use, 71 GB on LothDesktop, were each written every few minutes, and a
-pass on 2026-11-15 freed nothing). A target kept whole over the cap is named in every pass's kept list. A program that only runs from the target (a long test binary from `debug/deps`, with the
-`cargo test` and the shell that started it) no longer keeps it whole (w4258): `cargoTargetRunners` finds those, and the
-sweep spares the units they run. Otherwise:
+pass on 2026-11-15 freed nothing). A target kept whole over the cap is named in every pass's kept list.
+
+**Anything running from the slot keeps its whole target (w6240).** No sweep, no trim and no whole removal while a process
+runs from the slot, as `runsFromDir` (`server/installLeftovers.ts`) judges it: a command line naming the target or the slot
+(its checkout included), an executable inside the target, or a working folder inside the slot. The executables and working
+folders come from `server/procPlaces.ts`: `/proc/<pid>/exe` and `cwd` on Linux, `lsof -d cwd,txt` on macOS, Win32_Process
+`ExecutablePath` on Windows (which gives no working folder, so there the executable and the command line stand for it). A
+process list or places that cannot be read keep the target, and `ffuSlotBusyNow` checks the same again right before each
+removal, sweeps included. Why: on biscuit, 2026-11-27T00:23:32Z, the sweep took 12.0 GB of slot4's 35.0 GB target at the
+15 min window, 62 of the 257 test binaries among it (`deps/redteam_race-b158fae8531a6a53`, `deps/alarms-bdd02d47710ae4cf`),
+while its holder ran `python3 tools/run_tests_parallel.py` over them in the checkout; the run died with FileNotFoundError.
+The runner's argv named neither the target nor the checkout, so w4258's `cargoTargetRunners` (a command line naming the
+target), which let the sweep run beside a long test binary, did not see it.
+
+**The latest build's executables are roots (w6240).** `cargo test --no-run` rewrites only the units that changed: a test
+binary whose crate did not change keeps its old time and its old fingerprint, so a window measured from the newest build
+(15 min over the cap) left it unreached. The sweep (`server/cargoGraphSweep.ts`) roots the newest executable of each name
+in `deps/` (`<name>-<hash>`, no extension, or `.exe`), however old, and so keeps its fingerprint, its `.d`, `.dSYM` or
+`.pdb` and everything it was built from. An older binary of the same name (another feature set, an older build) still goes.
+Otherwise:
 
 | When | What goes |
 |---|---|
