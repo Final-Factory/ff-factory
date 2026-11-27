@@ -2,7 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { hasLocalWork, localWorkWhy, neverDelete, unpushedWorkWhy, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
-import { mentions } from './ownLeftovers.ts';
+import { mentions, real } from './ownLeftovers.ts';
+import { procPlaces, type ProcPlace } from './procPlaces.ts';
 import { gitIgnores, strayCargoOutput } from './cleanupFolders.ts';
 import { isPublished, type PublishedRecord } from './published.ts';
 import { gitExecFile } from './safeGit.ts';
@@ -286,8 +287,27 @@ export const ffuHolderUp = (holder: string | undefined, guard: CleanupGuard) =>
  * again (a worker that took the slot since the plan keeps it: its holder or take time moved) and a fresh process list (a cargo
  * build or a program in it keeps it). Any other item passes. An unreadable slot state or process list keeps the item.
  */
-export function ffuSlotBusyNow(root: string | undefined, procs: () => Promise<ProcLite[] | undefined>, guard?: () => CleanupGuard, now: () => number = Date.now): (it: CleanupItem) => Promise<string | undefined> {
+export function ffuSlotBusyNow(
+  root: string | undefined,
+  procs: () => Promise<ProcLite[] | undefined>,
+  guard?: () => CleanupGuard,
+  now: () => number = Date.now,
+  places: () => Promise<ProcPlace[] | undefined> = () => procPlaces(),
+): (it: CleanupItem) => Promise<string | undefined> {
   return async (it) => {
+    // w6240: every ffu slot target item (a sweep, a trim, a whole target, a stray ffu/target) is checked again right before its
+    // removal for a program running from the slot, which may have started since the plan.
+    if (it.rule === 'ffu-slot-target' && root) {
+      const base = path.join(root, FFU_SLOTS_DIR);
+      const id = within(it.path, base) ? path.relative(base, it.path).split(/[\\/]/)[0] : '';
+      if (/^slot\d+$/.test(id)) {
+        const slot = path.join(base, id);
+        const stray = path.join(slot, 'ffu', 'target');
+        const [t, cwdRoot] = within(it.path, stray) ? [stray, stray] : [path.join(slot, 'target'), slot];
+        const why = runsFromDir(t, cwdRoot, await procs().catch(() => undefined), await places().catch(() => undefined));
+        if (why) return `since the plan: ${why}`;
+      }
+    }
     if (!it.ffuSlot) return undefined;
     if (!root) return 'no install root to read the slot state again';
     let slot: { holder?: string; takenAt?: string; usedAt?: string } | undefined;
@@ -440,6 +460,27 @@ export async function cargoTargetBusy(target: string, session: string, procs: Pr
  */
 export function cargoTargetRunners(target: string, procs: ProcLite[] | undefined): ProcLite[] {
   return (procs ?? []).filter((p) => mentions(p.cmd, target) && !CARGO_PROC.test(p.cmd) && !/(^|[\\/\s"'])(cargo|rustc)[\w-]*(\.exe)?(["'\s]|$)/i.test(p.cmd));
+}
+
+/**
+ * Why a cargo target must stay whole now because something runs from it, or undefined (w6240). Checked for an ffu slot's
+ * target (`cwdRoot` the slot, its checkout included) and a stray `ffu/target` (`cwdRoot` the stray itself), on the plan and
+ * again right before the removal (ffuSlotBusyNow): a command line naming the target or `cwdRoot`, an executable inside the
+ * target, or a working folder inside `cwdRoot` (server/procPlaces.ts reads both; Windows gives no working folder). biscuit,
+ * 2026-11-27: the sweep took 62 of 257 test executables from slot4's target while `python3 tools/run_tests_parallel.py`, its
+ * working folder the slot's checkout, ran them. A process list or places that cannot be read keep it.
+ */
+export function runsFromDir(target: string, cwdRoot: string, procs: ProcLite[] | undefined, places: ProcPlace[] | undefined): string | undefined {
+  if (!procs) return 'the process list could not be read, so a program running from it cannot be ruled out';
+  const named = procs.find((p) => mentions(p.cmd, target) || mentions(p.cmd, cwdRoot));
+  if (named) return `a running process names it (pid ${named.pid}: ${named.cmd.slice(0, 120)})`;
+  if (!places) return "the processes' executables and working folders could not be read, so a program running from it cannot be ruled out";
+  const inside = (p: string | undefined, root: string) => !!p && [...new Set([root, real(root)])].some((r) => within(p, r) || within(real(p), r));
+  const exe = places.find((x) => inside(x.exe, target));
+  if (exe) return `a program runs from it (pid ${exe.pid}: ${exe.exe})`;
+  const cwd = places.find((x) => inside(x.cwd, cwdRoot));
+  if (cwd) return `a process works in it (pid ${cwd.pid}, working folder ${cwd.cwd}${procs.find((p) => p.pid === cwd.pid) ? `: ${procs.find((p) => p.pid === cwd.pid)!.cmd.slice(0, 120)}` : ''})`;
+  return undefined;
 }
 
 /** The newest write in a cargo target's top three levels (cargoTargetBusy reads the same): what a build touches, without its artifacts. */
@@ -854,6 +895,11 @@ export async function planInstallLeftovers(o: {
   guard: CleanupGuard;
   ctx?: StaleContext;
   procs?: ProcLite[];
+  /**
+   * Each process's executable and working folder (w6240, server/procPlaces.ts; tests pass a list). Read once, only when an ffu
+   * slot's target is judged; undefined from the reader keeps the slots' targets.
+   */
+  places?: ProcPlace[] | (() => Promise<ProcPlace[] | undefined>);
   settings?: InstallLeftoverSettings;
   now?: number;
   /** Pids never named a stray (this daemon and its parents). */
@@ -1274,8 +1320,11 @@ export async function planInstallLeftovers(o: {
     // ---- ffu slots' cargo targets (w3764, machine/ffuSlots.ts): <install>/ffu-sandboxes/slot<N>/target, kept warm between
     // workers on purpose (a cold workspace test build costs minutes, a warm one seconds: docs/ffu-sandboxes.md). Only the target
     // is ever taken, never a slot's checkout (it may hold a worker's work) nor the shared clone. Nothing goes while cargo builds
-    // in it (cargoTargetBusy: a cargo process, or a write within the settle time); a program merely running from it (a long test
-    // binary, cargoTargetRunners) leaves it open to the sweep, sparing the units it runs (w4258). Then:
+    // in it (cargoTargetBusy: a cargo process, or a write within the settle time), nor while anything runs from the slot
+    // (runsFromDir, w6240: a command line naming the target or the slot, an executable in the target, a working folder in the
+    // slot, its checkout included; unreadable processes keep it). w4258 let the sweep run beside a long test binary; biscuit
+    // slot4 lost 62 of 257 test binaries that way to a test runner whose argv named neither. The sweep's roots keep the newest
+    // test binary and bin of each name in deps/ (cargoGraphSweep.ts), whatever the window. Then:
     // - a slot no running or resumable worker holds, nothing running from it, untouched ffuSlotIdleDays: the whole target;
     // - on every pass, the stale units: what no workspace unit built within ffuSlotKeepHours of the newest one uses, and
     //   superseded object files (server/cargoGraphSweep.ts, w4258); over ffuSlotTargetCapGB or on a low pass the window narrows to
@@ -1287,6 +1336,9 @@ export async function planInstallLeftovers(o: {
     const ffuBase = path.join(root, FFU_SLOTS_DIR);
     const ffuState = fs.existsSync(ffuBase) ? readSlotState(root) : { slots: [] };
     const holderUp = (holder: string | undefined) => ffuHolderUp(holder, o.guard);
+    // w6240: read once, on the first target judged.
+    let placesRead: Promise<ProcPlace[] | undefined> | undefined;
+    const places = () => (placesRead ??= Array.isArray(o.places) ? Promise.resolve(o.places) : (o.places ?? (() => procPlaces()))().catch(() => undefined));
     // w5796: a cargo target inside a slot's checkout (ffu/target) is a build that missed the slot's own target: a build run with
     // its working folder outside the slot (cargo reads .cargo/config.toml from the working folder up, not from the manifest's),
     // or a script that named $repo/target/<dir> itself (ffu's check_snapshot_compat.sh, rolling_deploy.sh and sim_switch.sh
@@ -1299,6 +1351,7 @@ export async function planInstallLeftovers(o: {
       if (items.has(stray) || !fs.existsSync(stray) || !(isCargoTarget(stray) || strayCargoOutput(slot))) return;
       const runners = cargoTargetRunners(stray, o.procs);
       if (runners.length || (await cargoTargetBusy(stray, path.join(slot, 'ffu'), o.procs, Infinity, now, runners)) || neverDelete(stray, o.guard)) return;
+      if (runsFromDir(stray, stray, o.procs, await places())) return;
       const newest = await newestTopWrite(stray);
       const held = holderUp(ffuState.slots.find((x) => x.id === id)?.holder);
       const keepMs = held ? s.ffuSlotKeepHours * HOUR : settleMs;
@@ -1336,6 +1389,13 @@ export async function planInstallLeftovers(o: {
       const no = busy ?? neverDelete(target, o.guard);
       if (no) {
         if (!firstOnly) await keptSlot(no);
+        continue;
+      }
+      // w6240: anything running from the slot keeps its whole target (no sweep, no trim): the test executables a run is about
+      // to start are files no unit graph can see in use.
+      const runs = runsFromDir(target, slot, o.procs, await places());
+      if (runs) {
+        if (!firstOnly) await keptSlot(runs);
         continue;
       }
       const holder = ffuState.slots.find((x) => x.id === e.name)?.holder;
