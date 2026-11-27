@@ -61,6 +61,7 @@ import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './
 import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
 import { batchUnityIn, holdParts, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { liveRunGuardModeOf } from './liveRunGuard.ts';
+import { gitPackagesModeOf } from './gitPackages.ts';
 import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
@@ -358,6 +359,14 @@ export interface DaemonConfig {
    * batchmode Unity): "warn" (default) logs a WARNING and goes ahead; "off" looks at nothing (machine/liveRunGuard.ts).
    */
   liveRunGuard?: 'off' | 'warn';
+  /**
+   * w6412: a git package a sandbox's Packages/manifest.json names that its Library/PackageCache lacks (machine/gitPackages.ts):
+   * "warn" (default) names it, the cause and the route in the start note, `unity status`, the switch's notes and the
+   * Package Manager dialog notice; "on" also mirrors its repository under <root>/cache-medium/git-packages with the daemon's
+   * own git and credential and starts a Windows Low-integrity editor with the workers' Git and a url.insteadOf to the
+   * mirror, so its Package Manager fetches without the dialog; "off" looks at nothing (the way back). Read at each start.
+   */
+  editorGitPackages?: 'off' | 'warn' | 'on';
   /**
    * w6367: the long-run route (machine/longRuns.ts): the daemon starts a sanctioned long run (the nightly) for a worker,
    * outside that worker's host and jobs, so it outlives the host. "warn" (default) checks and logs what it would start and
@@ -870,7 +879,7 @@ export class Daemon {
     const platform = machinePlatformOf(process.platform);
     const where = { editorRoot: cfg.unityEditorRoot, unityPath: cfg.unityPath };
     // One process listing (cached a few seconds) serves the sandboxes' watches and the Unity count.
-    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on', () => this.sharedLock);
+    const pd = poolDeps ?? realPoolDeps(platform, cfg.repoPath, where, (line) => log(line), () => this.editorFence(), cfg.root, cfg.editorTmpdir === 'on', () => this.sharedLock, () => gitPackagesModeOf(this.cfg.editorGitPackages));
     this.procs = () => pd.procs();
     this.selfUpdate = new SelfUpdater({
       root: cfg.root,
@@ -4405,7 +4414,9 @@ export class Daemon {
     fs.mkdirSync(status, { recursive: true });
     addMcpStatusDir(status);
     const user = process.env.USERNAME || process.env.USER || 'worker';
-    return { launcher, unityDir: lowUnityDir(root), licensingIpc: `LicenseClient-${user}-low`, env: { APPDATA, LOCALAPPDATA, USERPROFILE: path.join(root, 'home'), UNITY_MCP_STATUS_DIR: status } };
+    // w6412: the workers' Git, for a Package Manager fetch from the daemon's git-package mirrors (machine/gitPackages.ts).
+    const gitDir = agentGitPathDir(root);
+    return { launcher, unityDir: lowUnityDir(root), licensingIpc: `LicenseClient-${user}-low`, env: { APPDATA, LOCALAPPDATA, USERPROFILE: path.join(root, 'home'), UNITY_MCP_STATUS_DIR: status }, ...(gitDir ? { gitDir } : {}) };
   }
 
   /**
