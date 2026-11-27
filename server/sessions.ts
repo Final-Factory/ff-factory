@@ -1854,6 +1854,8 @@ export class SessionManager {
    * when a pull request of its request merged during its session and the message went to a fresh session in the same
    * sandbox, so it is not delivered here. Checked last, once nothing holds the message. Set by Agents.
    */
+  /** w6381: false when freshStart would answer false and change nothing (read-only; drainOnce asks it inside its memo). */
+  freshStartMaybe?: (s: SessionHandle, m: { images?: ImageInput[] }) => boolean;
   freshStart?: (s: SessionHandle, m: { text: string; from: 'human' | 'orchestrator' | 'system'; images?: ImageInput[]; requestedBy?: Requester; attachments?: DeliveredAttachment[] }) => boolean;
   /**
    * Why a worker's live process must restart on the FF Factory code its machine runs now before its next turn (w1166: an
@@ -2216,7 +2218,17 @@ export class SessionManager {
   private drainOnce(now: number): number {
     let sent = 0;
     // w3843: what changes placement (a send, a drop, a fresh start) runs without the drain's memo of places and claims.
-    const free = <T>(fn: () => T): T => (this.placementFree ? this.placementFree(fn) : fn());
+    // w6381: one inside another (deliver's drop) runs as it is: the outer one empties the memo as it ends, after both.
+    let freeing = false;
+    const free = <T>(fn: () => T): T => {
+      if (freeing || !this.placementFree) return fn();
+      freeing = true;
+      try {
+        return this.placementFree(fn);
+      } finally {
+        freeing = false;
+      }
+    };
     // A session whose first waiting message cannot go keeps the rest waiting too, so its messages go in order (w496).
     const held = new Set<string>();
     for (const q of [...this.queue]) {
@@ -2324,7 +2336,9 @@ export class SessionManager {
         continue;
       }
       // w2043: a pilot worker whose pull request merged goes on in a fresh session; the message goes there.
-      if (free(() => this.freshStart?.(s, q))) {
+      // w6381: freshStart's own check first, inside the memo: a free() wipes it, and for each message delivered (most, none
+      // due) the next one's fullFor and roomMove built claims and places again (1.4 s under drainOnce at 12:01Z, 2026-11-27).
+      if ((this.freshStartMaybe?.(s, q) ?? true) && free(() => this.freshStart?.(s, q))) {
         drop();
         continue;
       }

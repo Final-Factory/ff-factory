@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { joinedPieces, stringifyPrettyPieces, stringifyPrettySliced, textPieces, writeFileDurableAsync } from './durable.ts';
-import { setup, setupOnMachine, putRequests, LOTH } from './orchestratorsTestKit.ts';
+import { setup, setupOnMachine, putRequests, startedFor, until, LOTH } from './orchestratorsTestKit.ts';
 import type { BenchPriority } from '../shared/types.ts';
 
 const pretty = (v: unknown) => JSON.stringify(v, null, 2);
@@ -159,4 +159,66 @@ test('w6381: warmBoardTexts works out every request\'s concepts ahead, so the fi
   (o as unknown as { boardTexts: Map<string, unknown> }).boardTexts.clear();
   assert.deepEqual(o.boardCheck(q, 30), warm, 'the same answer as from a cold cache');
   assert.equal(await o.warmBoardTexts(30, 0), 0, 'a second warm-up makes none');
+});
+
+test('w6381: switch_branch reads its sandbox\'s agent seats from one holds index, not a ledger scan per session', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha'] });
+  const { agents, store } = env;
+  const sb = store.machines.get('pc')!.sandboxes!.find((s) => s.id === 'alpha')!;
+  const T0 = new Date().toISOString();
+  const ids = Array.from({ length: 20 }, (_, i) => `seat${i}`);
+  for (const [i, id] of ids.entries()) {
+    store.putSession({ id, kind: 'worker', title: `w${900 + i}: leg`, status: 'stopped', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId: 'pc', machineSandbox: 'alpha' } as never);
+    store.putWork({ id: `w${900 + i}`, title: `leg ${i}`, brief: '', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], status: 'active', needs: i % 2 ? 'agent' : 'game', createdAt: T0, updatedAt: T0, sessionIds: [id], overlaps: [], asks: 0, log: [] } as never);
+  }
+  sb.sessionIds = [...ids];
+  const a = agents as unknown as { holdsIndexNow: () => unknown; onAgentSeat: (id: string) => boolean };
+  const seatsAlone = ids.filter((id) => a.onAgentSeat(id));
+  assert.equal(seatsAlone.length, 10, 'the agent-work half sits on agent seats');
+  const real = a.holdsIndexNow.bind(agents);
+  const built = new Set<unknown>();
+  let outside = 0;
+  a.holdsIndexNow = () => {
+    const ix = real();
+    if (ix) built.add(ix);
+    else outside++;
+    return ix;
+  };
+  agents.switchChecked({ sandbox: 'pc/alpha', branch: 'feature/x' });
+  assert.equal(outside, 0, 'every seat check ran inside a pass');
+  assert.equal(built.size, 1, 'one holds index for the whole sandbox');
+  // The same seats as one at a time: seated agents are left out of the busy check and sent to the daemon.
+  a.holdsIndexNow = real;
+  assert.deepEqual(agents.workInSandbox('pc', 'alpha').requests, [], 'no live workers there');
+  assert.deepEqual(ids.filter((id) => a.onAgentSeat(id)), seatsAlone);
+});
+
+test('w6381: a drain delivers a message with no fresh start due inside its memo, emptying it only for the send', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions } = env;
+  putRequests(store, [{ id: 'w1', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  sessions.sessions.get(a.id)!.stop(true);
+  await until('its process stopped', () => !sessions.sessions.get(a.id)?.live);
+  const s = sessions as unknown as { placementFree: <T>(fn: () => T) => T; freshStart: (...x: unknown[]) => boolean; freshStartMaybe: (...x: unknown[]) => boolean };
+  assert.equal(s.freshStartMaybe(sessions.sessions.get(a.id)!, { text: 'x' }), false, 'nothing merged: none due');
+  const free0 = s.placementFree;
+  let frees = 0;
+  s.placementFree = (fn) => (frees++, free0(fn));
+  const fresh0 = s.freshStart;
+  let freshAsked = 0;
+  s.freshStart = (...x) => (freshAsked++, fresh0(...x));
+  // Queued while its computer is full, then the drain delivers it once room is back.
+  const full = sessions as unknown as { placeFull?: (s: unknown) => string | undefined };
+  const placeFull = full.placeFull;
+  full.placeFull = () => 'no sandbox on pc is free';
+  sessions.send(a.id, 'carry on.');
+  full.placeFull = placeFull;
+  assert.equal(sessions.queued().filter((q) => q.id === a.id).length, 1, 'queued');
+  freshAsked = 0;
+  frees = 0;
+  sessions.drain();
+  await until('delivered', () => !!sessions.sessions.get(a.id)?.live);
+  assert.equal(freshAsked, 0, 'freshStart, which empties the memo, is not asked when none is due');
+  assert.equal(frees, 1, 'the memo emptied once, for the send');
 });

@@ -8640,6 +8640,21 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * first board_check after a start finds them made: it made them all in one go and held the portal 3.5 s at 10:42Z on
    * 2026-11-27, minutes after the 0966c33 restart (stall profile: onBoardCheck > concepts, stem). Returns how many it made.
    */
+  /**
+   * The board check's warm-up (warmBoardTexts), started once and shared: a board_check waits for it before it answers
+   * (Providers.boardReady). w6381: the 25 ms slices of the first warm-up waited behind every other busy turn after the
+   * 12:01Z restart on 2026-11-27, and FFBox's board_check at 12:01:59Z (36 s after the start) still made every request's
+   * concepts in one go: a 2.3 s block (stall profile: onBoardCheck > concepts, stem).
+   */
+  boardWarmed(lookbackDays: number): Promise<number> {
+    this.boardWarm ??= this.warmBoardTexts(lookbackDays).catch((e) => {
+      console.warn(`board check warm-up failed: ${(e as Error).message}`);
+      return 0;
+    });
+    return this.boardWarm;
+  }
+  private boardWarm?: Promise<number>;
+
   async warmBoardTexts(lookbackDays: number, sliceMs = 25): Promise<number> {
     const before = this.boardTextsMade;
     let start = performance.now();
