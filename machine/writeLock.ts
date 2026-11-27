@@ -230,11 +230,39 @@ export function makeOpenRootChildren(root: string, args: string[], appDir?: stri
   return made;
 }
 
-/** /tmp/.dotnet and its shm, world-writable and sticky like the .NET runtime makes them (pal/src/sharedmemory). */
+/**
+ * /tmp/.dotnet and its shm, world-writable and sticky like the .NET runtime makes them (pal/src/sharedmemory). Workers
+ * write both, and the daemon makes them unfenced, as the person, so nothing here follows a link (w6358's review of
+ * w5631: a worker that swapped the new folder for a link to ~/.ssh between the mkdir and a path chmod got that folder
+ * chmod 1777, 1 in 70,000 starts on m5). Each folder is opened O_NOFOLLOW|O_DIRECTORY and chmodded through that handle;
+ * shm is made through the handle of the folder above it (/proc/self/fd), so a swap of /tmp/.dotnet cannot move it.
+ */
 export function makeDotnetShm(dir: string): void {
-  for (const d of [dir, path.join(dir, 'shm')]) {
-    if (fs.existsSync(d)) continue;
-    fs.mkdirSync(d);
-    fs.chmodSync(d, 0o1777);
+  const top = stickyDir(dir);
+  if (top === undefined) return;
+  try {
+    const shm = stickyDir(`/proc/self/fd/${top}/shm`);
+    if (shm !== undefined) fs.closeSync(shm);
+  } finally {
+    fs.closeSync(top);
   }
+}
+
+/** Makes `p` (one level), opens it without following a link, and makes it 1777 through the handle if this call made it; undefined when `p` is a link or not a folder. */
+function stickyDir(p: string): number | undefined {
+  let made = false;
+  try {
+    fs.mkdirSync(p);
+    made = true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+  }
+  let fd: number;
+  try {
+    fd = fs.openSync(p, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+  } catch {
+    return undefined; // a link (ELOOP) or a file (ENOTDIR) a worker put there: left alone
+  }
+  if (made) fs.fchmodSync(fd, 0o1777);
+  return fd;
 }
