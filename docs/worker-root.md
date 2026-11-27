@@ -1174,10 +1174,14 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     Landlock blocks `/proc/<pid>` reads of processes outside the domain (the licensing readlink below). A fenced launch
     that throws falls back to an unfenced start in warn, with "unfenced (the fenced launch failed: ...)" in the start
     message; enforced, the start fails with the reason, so a planted file cannot buy an unfenced editor.
-  - **The moved home is a folder workers write**, and the daemon seeds it unfenced, so `seedLinuxEditorHome` follows no
-    link (w6354's review): each folder is lstat'ed and made one level at a time, a link or non-folder leaves that chain
-    as it is (logged `editor fence: WARNING: left the editor's home as it is ...`), the copy uses `COPYFILE_EXCL`, and
-    the Burst pref is written there only through plain folders, with `O_NOFOLLOW`. `"editorFence":
+  - **The moved home is a folder workers write**, so the daemon never writes there as itself: it makes only `<root>/home`
+    (the root's child) and runs the seeding and the Burst check in a child under `ff-landlock.py --rw <root>/home`
+    (`seedEditorHomeFenced`, `machine/editorHomeSeed.ts`). w6356's review showed why: with path checks alone, a folder
+    swapped for a link (`renameat2` `RENAME_EXCHANGE`) between the lstat and the write sent 8,117 of 40,000 starts'
+    writes outside the home (measured on m5); Landlock resolves each write in the kernel, so a swap reaches nothing past
+    the home. Inside the child, `seedLinuxEditorHome` still follows no link it sees (w6354's review): each folder lstat'ed
+    and made one level at a time, a link or non-folder logged and left (`editor fence: WARNING: left the editor's home
+    as it is ...`), the copy `COPYFILE_EXCL`, the Burst write `O_NOFOLLOW`. `"editorFence":
     true` enforces; `false` starts editors unfenced. Read once per daemon run; the log says `editor fence: ...`.
   - **The kernel hold** (w5748/w5562: Linux fences stay warn-only until kernel 7.1) covers the read fence and the
     owner-socket denies, not the write lock, which agents already run enforced on ABI 8 (biscuit's daemon log,

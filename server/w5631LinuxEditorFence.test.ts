@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { MacUnity, linuxEditorFenceFor, linuxLicensingClientRunning, macEditorStatusDir, seedLinuxEditorHome, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
+import { EDITOR_HOME_SEED, MacUnity, linuxEditorFenceFor, seedEditorHomeFenced, linuxLicensingClientRunning, macEditorStatusDir, seedLinuxEditorHome, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 
 const ROOT = '/home/u/ffw';
@@ -172,4 +172,37 @@ test('w6354 (review of w5631): a fenced launch that throws starts the editor unf
   const e = fakeLinux(linuxEditorFenceFor(RULES, ROOT, 'enforce')!, { throws: 'EACCES: mkdir' });
   await assert.rejects(e.u.start(), /EACCES: mkdir/);
   assert.equal(e.world.plain.length, 0, 'never an unfenced editor once enforced');
+});
+
+const BURST_OFF = '<unity_prefs version_major="1"><pref name="BurstCompilation" type="int">0</pref></unity_prefs>';
+
+test('w6356 (review of w5631): the daemon seeds the home in a child under ff-landlock.py that may write only that home', async () => {
+  const calls: string[][] = [];
+  const r = await seedEditorHomeFenced(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'w5631argv-')), 'home'), '/home/u', async (cmd, args) => (calls.push([cmd, ...args]), { code: 0, stdout: '{"seeded":[],"refused":[],"safe":[]}\n', stderr: '' }) as never);
+  assert.deepEqual(r, { seeded: [], refused: [], safe: [] });
+  const [cmd, lock, ...rest] = calls[0];
+  assert.equal(cmd, 'python3');
+  assert.equal(lock, FF_LANDLOCK);
+  assert.deepEqual(rest.slice(0, 3), ['--rw', rest[1], '--'], 'one writable folder, the home');
+  assert.ok(rest.includes(EDITOR_HOME_SEED));
+  const fail = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'w5631fail-')), 'home');
+  await assert.rejects(seedEditorHomeFenced(fail, '/home/u', async () => ({ code: 1, stdout: '', stderr: 'boom' }) as never), /seeding the editor's home failed \(exit 1\): boom/);
+});
+
+test('w6356 (review of w5631): under Landlock the seeding child seeds the home and turns Burst on, and cannot write outside it (Linux with Landlock)', { skip: !landlockRuns() }, async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631child-'));
+  const real = path.join(tmp, 'real');
+  const home = path.join(tmp, 'ffw', 'home');
+  fs.mkdirSync(path.join(real, '.local', 'share', 'unity3d'), { recursive: true });
+  fs.writeFileSync(path.join(real, '.local', 'share', 'unity3d', 'prefs'), BURST_OFF);
+  const r = await seedEditorHomeFenced(home, real);
+  assert.deepEqual(r.seeded, [path.join(home, '.local', 'share', 'unity3d', 'prefs')]);
+  assert.match(r.burst ?? '', /BurstCompilation was 0/);
+  assert.match(fs.readFileSync(path.join(home, '.local', 'share', 'unity3d', 'prefs'), 'utf8'), /type="int">1</);
+  assert.equal(fs.readFileSync(path.join(real, '.local', 'share', 'unity3d', 'prefs'), 'utf8'), BURST_OFF, 'the person\'s own prefs untouched');
+  // The kernel is what holds the child to the home: the same rules refuse a write outside it, whatever path leads there.
+  const out = spawnSync('python3', [FF_LANDLOCK, '--rw', home, '--', process.execPath, '-e', `require('fs').writeFileSync(${JSON.stringify(path.join(real, 'x'))}, 'x')`], { encoding: 'utf8' });
+  assert.notEqual(out.status, 0);
+  assert.ok(!fs.existsSync(path.join(real, 'x')));
+  fs.rmSync(tmp, { recursive: true, force: true });
 });

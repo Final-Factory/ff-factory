@@ -234,6 +234,24 @@ export function seedLinuxEditorHome(home: string, realHome: string, f: SeedFs = 
   return r;
 }
 
+/** w5631: the child that seeds the moved home (machine/editorHomeSeed.ts). */
+export const EDITOR_HOME_SEED = path.join(import.meta.dirname, 'editorHomeSeed.ts');
+
+/**
+ * w5631: seeds the moved home and checks its Burst pref in a child under ff-landlock.py that may write only that home
+ * (w6356's review: in the daemon, as the person, a folder swapped for a link between the lstat and the write sent the
+ * write outside; Landlock resolves every write in the kernel). The daemon makes only the home itself, whose parent is
+ * the root, which workers do not write. Throws with the child's error when it fails.
+ */
+export async function seedEditorHomeFenced(home: string, realHome: string, runner: typeof run = run): Promise<SeedResult & { burst?: string }> {
+  fs.mkdirSync(home, { recursive: true });
+  const node = process.execArgv.filter((a) => /^--(experimental-strip-types|experimental-transform-types|disable-warning|no-warnings)/.test(a));
+  const r = await runner('python3', [FF_LANDLOCK, '--rw', home, '--', process.execPath, ...node, EDITOR_HOME_SEED, home, realHome], { timeoutMs: 60_000 });
+  const line = r.stdout.trim().split('\n').pop() ?? '';
+  if (r.code !== 0 || !line.startsWith('{')) throw new Error(`seeding the editor's home failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+  return JSON.parse(line) as SeedResult & { burst?: string };
+}
+
 /** w5631: a Unity licensing client (the Hub's or an editor's) is among `ps -o command=` lines (this user's). */
 export const linuxLicensingClientRunning = (psCommands: string) =>
   psCommands.split('\n').some((l) => path.posix.basename(l.trim().split(/\s+/)[0] ?? '') === 'Unity.Licensing.Client');
@@ -769,14 +787,10 @@ export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string)
         if (!isLandlockFence(fence)) throw new Error('only a Landlock fence applies on Linux');
         const home = fence.env.HOME;
         if (home) {
-          const seed = seedLinuxEditorHome(home, os.homedir());
+          const seed = await seedEditorHomeFenced(home, os.homedir());
           if (seed.seeded.length) log(`editor fence: seeded ${seed.seeded.join(', ')} from the person's home before the first fenced start (w5631)`);
           if (seed.refused.length) log(`editor fence: WARNING: left the editor's home as it is where it holds a link or a non-folder: ${seed.refused.join('; ')} (w5631)`);
-          // The Burst pref is written only through a chain of plain folders, and never through a link at the file itself.
-          if (seed.safe.includes(linuxPrefsPath(home))) {
-            const burst = await ensureBurstPrefOn({ ...realBurstPrefDeps('linux'), home, writeFile: (p, s) => { const fd = fs.openSync(p, fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW); try { fs.writeFileSync(fd, s); } finally { fs.closeSync(fd); } } });
-            if (burst) log(burst);
-          }
+          if (seed.burst) log(seed.burst);
         }
         // The .NET runtime's IPC folder the rules grant; the agents' spawner makes it too (writeLock.ts).
         const dotnet = fence.args.find((a, i) => fence.args[i - 1] === '--rw' && path.posix.basename(a) === DOTNET_DIR);
