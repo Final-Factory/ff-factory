@@ -225,7 +225,11 @@ message:
   Since w6382 that holds across a portal restart too: the revs are saved in `session-revs.json` with a content key per
   session (server/pageState.ts `SessionRevs`), and the start logs `session revs: <n> kept, <n> changed since the last
   run`. `(build <ms> [<phase> <ms>, ...] json <ms>)` (w6382) names the build's slowest phases of 5 ms or more
-  (server/index.ts `appStateIn`; `kept` is leaving out the parts the page holds unchanged).
+  (server/index.ts `appStateIn`; `kept` is leaving out the parts the page holds unchanged). `(<n> checked)` (w6382) is
+  how many sessions that build looked at again rather than take from `PageSessionsCache`: about 650 of 13,500 on
+  2026-11-27, the ones the page shows, since only a session that drops off the page is remembered as off. A reconnect
+  after a gap over 10 minutes (`SESSIONS_DELTA_MAX_GAP_MS`, shared/pageSessions.ts) sends no `have` and gets every
+  session again (1.9-4.5 MB that day), restart or not.
 - `page socket first state sent: <login> via <path>, <ms>ms after the open` (w5861): only when handing the first state to
   the network took a second or more, which on a slow path means the page was still taking it in.
 - `page state sizes: <top fields with KB>; <n> sessions, by field: <session fields with KB>` (w5861): where the first
