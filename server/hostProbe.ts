@@ -10,13 +10,14 @@ import type { RunResult } from './proc.ts';
  * its worst, every 5 s refresh. Here the spawn runs on a thread of its own, so a slow one blocks only that thread.
  */
 
-// Plain JavaScript, run as an eval worker (CommonJS): one job at a time is all the probes need.
+// Plain JavaScript, run as an eval worker (CommonJS). execFile answers by callback, so jobs run side by side; only each
+// spawn holds the thread, while it starts.
 const WORKER_SOURCE = `
 const { parentPort } = require('node:worker_threads');
 const { execFile } = require('node:child_process');
-parentPort.on('message', ({ id, cmd, args, timeoutMs }) => {
+parentPort.on('message', ({ id, cmd, args, timeoutMs, cwd, env, maxBuffer }) => {
   try {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: maxBuffer || 16 * 1024 * 1024, windowsHide: true, cwd, env }, (err, stdout, stderr) => {
       const raw = err ? err.code : undefined;
       parentPort.postMessage({
         id,
@@ -64,11 +65,18 @@ function probeWorker(): Worker {
   return w;
 }
 
+/** Where and how the child runs: its folder, its whole environment (default: the portal's), its output cap (default 16 MB). */
+export interface OffThreadOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  maxBuffer?: number;
+}
+
 /**
  * Runs cmd on the probe thread. Answers within timeoutMs plus 5 s whatever the child does: a spawn still stuck in the
- * thread then answers timedOut here, and its late result is dropped.
+ * thread then answers timedOut here, and its late result is dropped. w6237: the guard's git, gh and python run here too.
  */
-export function runOffThread(cmd: string, args: string[], timeoutMs: number): Promise<RunResult> {
+export function runOffThread(cmd: string, args: string[], timeoutMs: number, opts: OffThreadOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     const id = nextId++;
     const timer = setTimeout(() => {
@@ -82,7 +90,7 @@ export function runOffThread(cmd: string, args: string[], timeoutMs: number): Pr
     });
     const w = probeWorker();
     w.ref();
-    w.postMessage({ id, cmd, args, timeoutMs });
+    w.postMessage({ id, cmd, args, timeoutMs, ...(opts.cwd ? { cwd: opts.cwd } : {}), ...(opts.env ? { env: { ...opts.env } } : {}), ...(opts.maxBuffer ? { maxBuffer: opts.maxBuffer } : {}) });
   });
 }
 

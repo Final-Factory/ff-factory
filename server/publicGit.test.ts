@@ -7,7 +7,7 @@ import path from 'node:path';
 import { clearVisibilityCache, gitIdentityEnv, githubSlug, repoIsPublic } from './publicGit.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 
-test('public repos: gh first, then the anonymous API, cached', () => {
+test('public repos: gh first, then the anonymous API, cached', async () => {
   clearVisibilityCache();
   const calls: string[] = [];
   const answers: Record<string, string | undefined> = {
@@ -24,15 +24,15 @@ test('public repos: gh first, then the anonymous API, cached', () => {
     return answers[key];
   };
   const NOW = Date.parse('2026-09-24T18:00:00Z');
-  assert.equal(repoIsPublic('github.com/o/pub', NOW, run), true);
-  assert.equal(repoIsPublic('github.com/o/priv', NOW, run), false);
-  assert.equal(repoIsPublic('github.com/o/nogh', NOW, run), true);
-  assert.equal(repoIsPublic('github.com/o/gone', NOW, run), false);
-  assert.equal(repoIsPublic('gitlab.com/o/x', NOW, run), undefined);
+  assert.equal(await repoIsPublic('github.com/o/pub', NOW, run), true);
+  assert.equal(await repoIsPublic('github.com/o/priv', NOW, run), false);
+  assert.equal(await repoIsPublic('github.com/o/nogh', NOW, run), true);
+  assert.equal(await repoIsPublic('github.com/o/gone', NOW, run), false);
+  assert.equal(await repoIsPublic('gitlab.com/o/x', NOW, run), undefined);
   const n = calls.length;
-  assert.equal(repoIsPublic('github.com/o/pub', NOW + 3_600_000, run), true);
+  assert.equal(await repoIsPublic('github.com/o/pub', NOW + 3_600_000, run), true);
   assert.equal(calls.length, n, 'cached');
-  assert.equal(repoIsPublic('github.com/o/priv', NOW + 2 * 3_600_000, run), false);
+  assert.equal(await repoIsPublic('github.com/o/priv', NOW + 2 * 3_600_000, run), false);
   assert.equal(calls.length, n + 1, 'a private answer is re-checked after an hour');
   assert.equal(githubSlug('git@github.com:Final-Factory/ff-factory.git'), 'Final-Factory/ff-factory');
   assert.equal(githubSlug('https://github.com/Final-Factory/ff-factory'), 'Final-Factory/ff-factory');
