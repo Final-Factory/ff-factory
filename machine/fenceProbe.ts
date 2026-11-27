@@ -10,6 +10,7 @@
  * installer re-run that turns the fence off always works (docs/worker-root.md, "Turning a fence off").
  */
 import { spawnSync } from 'node:child_process';
+import { execFileOffThread } from '../server/spawnThread.ts';
 
 export interface ProbeResult {
   ok: boolean;
@@ -33,11 +34,41 @@ export function probeFence(argv: string[], o: { run?: ProbeRun; timeoutMs?: numb
   try {
     const [cmd, ...args] = argv;
     if (!cmd) return { ok: false, why: 'no command' };
-    const r = (o.run ?? realRun)(cmd, args, o.timeoutMs ?? 15_000, o.env);
-    if (r.error) return { ok: false, why: `${cmd} could not run: ${r.error.message}` };
-    if (r.status === 0) return { ok: true };
-    const tail = (r.stderr ?? '').trim().split('\n').slice(-3).join(' | ');
-    return { ok: false, why: `${r.status === null ? `ended by ${r.signal ?? 'a timeout'}` : `exited ${r.status}`}${tail ? `; stderr: ${tail}` : ''}` };
+    return judge(cmd, (o.run ?? realRun)(cmd, args, o.timeoutMs ?? 15_000, o.env));
+  } catch (e) {
+    return { ok: false, why: `probe failed: ${(e as Error).message}` };
+  }
+}
+
+function judge(cmd: string, r: ReturnType<ProbeRun>): ProbeResult {
+  if (r.error) return { ok: false, why: `${cmd} could not run: ${r.error.message}` };
+  if (r.status === 0) return { ok: true };
+  const tail = (r.stderr ?? '').trim().split('\n').slice(-3).join(' | ');
+  return { ok: false, why: `${r.status === null ? `ended by ${r.signal ?? 'a timeout'}` : `exited ${r.status}`}${tail ? `; stderr: ${tail}` : ''}` };
+}
+
+export type ProbeRunAsync = (cmd: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv) => Promise<ReturnType<ProbeRun>>;
+
+/**
+ * w6479: realRun from the spawn thread (server/spawnThread.ts), so the daemon's loop runs on while the probe does. A
+ * program that ran answers its exit code, one ended (a timeout, a kill) its signal, one that could not start its error.
+ */
+const realRunAsync: ProbeRunAsync = (cmd, args, timeoutMs, env) =>
+  new Promise((resolve) =>
+    execFileOffThread(cmd, args, { timeout: timeoutMs, windowsHide: true, ...(env ? { env } : {}) }, (err, _stdout, stderr) => {
+      if (!err) return resolve({ status: 0, stderr });
+      if (typeof err.code === 'number') return resolve({ status: err.code, signal: err.signal ?? null, stderr });
+      if (err.killed || err.signal) return resolve({ status: null, signal: err.signal ?? null, stderr });
+      resolve({ status: null, error: err, stderr });
+    }),
+  );
+
+/** w6479: probeFence, its program run off the daemon's event loop (the daemon's Low setup probes its copies so). */
+export async function probeFenceAsync(argv: string[], o: { run?: ProbeRunAsync; timeoutMs?: number; env?: NodeJS.ProcessEnv } = {}): Promise<ProbeResult> {
+  try {
+    const [cmd, ...args] = argv;
+    if (!cmd) return { ok: false, why: 'no command' };
+    return judge(cmd, await (o.run ?? realRunAsync)(cmd, args, o.timeoutMs ?? 15_000, o.env));
   } catch (e) {
     return { ok: false, why: `probe failed: ${(e as Error).message}` };
   }

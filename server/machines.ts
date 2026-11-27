@@ -178,7 +178,7 @@ export interface SandboxLimits {
 }
 
 /** A machine's pool extras (docs/beast-machine.md): the Library seed, editor priority and the folders never to touch. */
-export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'slotRepos' | 'protectedPaths' | 'noTimedRuns' | 'noPlayers' | 'playOnly'>;
+export type PoolExtras = Pick<Machine, 'librarySeed' | 'librarySeedCopy' | 'librarySeedGB' | 'unityBelowNormal' | 'slotRepos' | 'commitCheck' | 'protectedPaths' | 'noTimedRuns' | 'noPlayers' | 'playOnly'>;
 
 /**
  * The machines that take no timed runs unless their record says otherwise (w1861). lothsahn, 2026-10-23, after Ben's
@@ -240,6 +240,7 @@ export function poolSettingsOf(m: Pick<Machine, 'sandboxRoot'> & SandboxLimits &
     ...(m.librarySeedGB !== undefined ? { librarySeedGB: m.librarySeedGB } : {}),
     ...(m.unityBelowNormal ? { belowNormal: true } : {}),
     ...(m.slotRepos === 'new' || m.slotRepos === 'all' ? { slotRepos: m.slotRepos } : {}),
+    ...(m.commitCheck === 'off' ? { commitCheck: 'off' as const } : {}),
     ...(m.protectedPaths?.length ? { protectedPaths: m.protectedPaths } : {}),
   };
 }
@@ -1854,6 +1855,7 @@ export class MachineManager {
       librarySeedGB: opts.librarySeedGB ?? prev?.librarySeedGB,
       unityBelowNormal: opts.unityBelowNormal ?? prev?.unityBelowNormal,
       slotRepos: opts.slotRepos ?? prev?.slotRepos,
+      commitCheck: opts.commitCheck ?? prev?.commitCheck,
       noTimedRuns: opts.noTimedRuns ?? prev?.noTimedRuns,
       noPlayers: opts.noPlayers ?? prev?.noPlayers,
       playOnly: opts.playOnly ?? prev?.playOnly,
@@ -1909,6 +1911,7 @@ export class MachineManager {
       ...(opts.librarySeedGB !== undefined ? { librarySeedGB: opts.librarySeedGB } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
       ...(opts.slotRepos !== undefined ? { slotRepos: opts.slotRepos } : {}),
+      ...(opts.commitCheck !== undefined ? { commitCheck: opts.commitCheck } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
       ...(opts.noPlayers !== undefined ? { noPlayers: opts.noPlayers } : {}),
       ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),
@@ -1954,6 +1957,7 @@ export class MachineManager {
       ...(opts.librarySeedCopy !== undefined ? { librarySeedCopy: opts.librarySeedCopy } : {}),
       ...(opts.unityBelowNormal !== undefined ? { unityBelowNormal: opts.unityBelowNormal } : {}),
       ...(opts.slotRepos !== undefined ? { slotRepos: opts.slotRepos } : {}),
+      ...(opts.commitCheck !== undefined ? { commitCheck: opts.commitCheck } : {}),
       ...(opts.noTimedRuns !== undefined ? { noTimedRuns: opts.noTimedRuns } : {}),
       ...(opts.noPlayers !== undefined ? { noPlayers: opts.noPlayers } : {}),
       ...(opts.playOnly !== undefined ? { playOnly: opts.playOnly } : {}),

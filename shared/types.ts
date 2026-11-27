@@ -620,6 +620,8 @@ export interface HostStats {
   memUsedBytes?: number;
   /** macOS memory pressure (kern.memorystatus_vm_pressure_level). */
   memPressure?: 'normal' | 'warn' | 'critical';
+  /** Windows' commit charge (w6411, server/system.ts WIN_COMMIT_SCRIPT): committed and limit bytes, read at `at` (epoch ms). */
+  commit?: { committedBytes: number; limitBytes: number; at: number };
   diskTotalBytes?: number;
   diskFreeBytes?: number;
   /**
@@ -1337,6 +1339,11 @@ export interface Machine {
    */
   slotRepos?: 'new' | 'all' | 'off';
   /**
+   * w6411 (machine/commitCharge.ts): its daemon's commit-charge check before an editor start or a unity-slot grant on
+   * Windows. Unset or 'warn': it logs what it would refuse and refuses nothing; 'off': no check, no log line.
+   */
+  commitCheck?: 'warn' | 'off';
+  /**
    * Why it takes no timed runs (w1861, add_machine no_timed_runs; server/machines.ts noTimedRunsOf): its bench queue refuses
    * a timing ticket and placement sends timed work elsewhere. Unset: the default (NO_TIMED_RUNS: m5); "" clears it.
    */
@@ -1467,6 +1474,8 @@ export interface SandboxPoolSettings {
   slotRepos?: 'new' | 'all';
   /** Protocol 6: folders clean-up never deletes (a live game), besides the clone, the sandboxes and the daemon's folder. */
   protectedPaths?: string[];
+  /** w6411: the commit-charge check (Machine.commitCheck): "off" turns it off; unset: warn-only. An older daemon ignores it. */
+  commitCheck?: 'warn' | 'off';
 }
 
 // ---- providers (docs/ffbox-integration.md): FFBox, reached through the connector it runs ----
@@ -3133,7 +3142,7 @@ export interface WorkBlocker {
   ref?: string;
   /** request (and a lock some request holds): clears when that request closes as done (`done`, default) or reports. */
   on?: 'done' | 'report';
-  /** lock: the request holding it, whose close or report frees it. */
+  /** lock: the request holding it, whose close or report frees it. pr set by the blocker watch (w5845, w6446): the request it was handed to, which works on the PR. */
   holder?: string;
   /** time: when it clears. lock: when to look again at the latest. */
   until?: string;
@@ -3382,8 +3391,9 @@ export interface WorkSource {
    * `sha` of PR `pr`), `no-results` (nothing ran at the tip: a compile error or a crash) or `unbisected` (failing tests no
    * merge in the window explains). Not `pr` or `branch` above: those would make the merge watch close it when the culprit's PR merged.
    * `gate-miss` (w4928, server/gateTuning.ts): the daily merge-gate tuning's tests to pull into the gate; run `gate-tuning`, tip the day.
+   * `branch` (w6457): the branch whose batch went red when it is not master (pre-1.0); absent is master.
    */
-  masterBatch?: { run: string; tip: string; kind: 'culprit' | 'no-results' | 'unbisected' | 'hung' | 'gate-miss'; sha?: string; pr?: number };
+  masterBatch?: { run: string; tip: string; kind: 'culprit' | 'no-results' | 'unbisected' | 'hung' | 'gate-miss'; sha?: string; pr?: number; branch?: string };
 }
 
 /** An intake request's plain-words summary (w3602, shared/intakeDigest.ts): whose words, and each part found in them. */

@@ -31,7 +31,7 @@ interface Open {
 
 /** Building the first state, in parts: appState, JSON.stringify, and the whole. */
 /** `kept`: the whole parts the page kept its own of; `work`: requests sent of all (w6336, shared/pageParts.ts). */
-export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; checked?: number; work?: { sent: number; of: number }; phases?: readonly (readonly [string, number])[] }
+export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; checked?: number; work?: { sent: number; of: number }; phases?: readonly (readonly [string, number])[]; place?: string }
 
 /**
  * What a page says once its first state is on screen (w6336, web/src/api.ts): each phase of its connect in ms, as the
@@ -47,7 +47,9 @@ export interface PageReady { open: number; state: number; parse: number; render:
 export const PHASE_LOG_MIN_MS = 5;
 function phasesOf(s: FirstState): string {
   const shown = [...(s.phases ?? [])].filter(([, ms]) => ms >= PHASE_LOG_MIN_MS).sort((a, b) => b[1] - a[1]).slice(0, 6);
-  return shown.length ? ` [${shown.map(([k, ms]) => `${k} ${Math.round(ms)}`).join(', ')}]` : '';
+  // w6428: and what placement cost inside them (server/placeCost.ts): " place{places 40ms x1 free 30ms x48 claims 25ms x8}".
+  const place = s.place ? ` place{${s.place}}` : '';
+  return shown.length ? ` [${shown.map(([k, ms]) => `${k} ${Math.round(ms)}`).join(', ')}]${place}` : place;
 }
 
 function keptOf(s: FirstState): string {

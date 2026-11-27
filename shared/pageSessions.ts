@@ -4,15 +4,13 @@
 import type { AppState, SessionInfo } from './types.ts';
 
 /**
- * A page away longer than this asks for the whole list again rather than what changed: a short gap is the Funnel drop
- * (lothsahn's sockets closed 'by network' about 30 times in 2 h on 2026-11-25, many within 0-7 s of opening, each
- * reconnect resending all 11.5 MB), a long one a laptop that slept.
+ * The `have` a reconnecting page sends on /ws: its sessions' rev, after any gap (w6456). Until then a page away over
+ * 10 minutes asked for the whole list: 1.9-4.5 MB per reconnect on 2026-11-27, about 30 of ben's tabs at once at 16:09Z.
+ * The server decides what a token is still good for (server/pageState.ts SessionRevs.since: this run, or an earlier
+ * run's up to its saved rev), and a delta is never more than the whole list and its ids.
  */
-export const SESSIONS_DELTA_MAX_GAP_MS = 10 * 60_000;
-
-/** The `have` a reconnecting page sends on /ws: its sessions' rev, while the gap is short. */
 export function sessionsHave(app: Pick<AppState, 'sessionsRev'> | undefined, gapMs: number): string | undefined {
-  return app?.sessionsRev && gapMs >= 0 && gapMs <= SESSIONS_DELTA_MAX_GAP_MS ? app.sessionsRev : undefined;
+  return app?.sessionsRev && gapMs >= 0 ? app.sessionsRev : undefined;
 }
 
 /**

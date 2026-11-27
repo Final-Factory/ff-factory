@@ -84,13 +84,83 @@ export const dataDirClearedText = (commit: string): string =>
  * a digit in it (so English words such as "acceded" are none); one that is `commit` (either a prefix of the other) is the
  * checked player. Any 0.50.x.y version is a build, not a commit, so nothing here checked it. Answers why, or undefined.
  */
-export function otherPlayerIn(said: string, commit: string): string | undefined {
+export function otherPlayerIn(said: string, commit: string, where = 'legacy_data'): string | undefined {
   const c = commit.toLowerCase();
   const sha = (said.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).find((h) => /\d/.test(h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
   const version = /\b0\.50\.\d+\.\d+\b/.exec(said)?.[0];
-  if (!sha && !version) return undefined;
-  return `its legacy_data names ${sha ? `commit ${sha.slice(0, 10)}` : `build ${version}`}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
+  const installed = sha || version ? undefined : installedBuildIn(said);
+  if (!sha && !version && !installed) return undefined;
+  const named = sha ? `commit ${sha.slice(0, 10)}` : version ? `build ${version}` : `a build no commit is ("${clip(installed!.replace(/\s+/g, ' '), 60)}")`;
+  return `its ${where} names ${named}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
 }
+
+/**
+ * w6458 (w6454's review of PR #1484): a build named without a number, "the host runs the Steam pre-1.0 build", is a player no
+ * commit is: Steam's copy, or an installed, published or released one. The mark itself already needs pre-1.0 or 0.50 words
+ * (or legacy_data), so these need none of their own. "Steam" alone is not one (a Steam lobby or join runs the PR's own
+ * player), and neither is the pre-1.0 release branch or line, which is git, not a build. Fails closed: a false match keeps
+ * the mark, and legacy_data "none" is the way out.
+ */
+export const INSTALLED_BUILD: readonly RegExp[] = [
+  /\bsteam(?:'s)?\s+(?:[\w.-]+\s+){0,3}?(?:build|player|version|branch|install(?:ation)?|copy|release|game)\b/i,
+  /\b(?:installed|downloaded)\s+(?:from|via|through|on)\s+steam\b/i,
+  /\b(?:installed|published|public|released|release|shipped|live|retail)\s+(?:[\w.-]+\s+){0,2}?(?:build|player|version|copy|game)\b/i,
+  /\b(?:pre-1\.0|0\.50(?:\.\d+)*)\s+release\b(?!\s+(?:branch|line))/i,
+  // w6467 (w6463's review of PR #1487): "the client runs Steam 0.50" names Steam's build by a short version, no build word.
+  /\bsteam(?:'s)?\s+(?:pre-1\.0|0\.50(?:\.\d+)*)(?![\w-]|\.\d)/i,
+];
+
+/**
+ * w6467 (w6463's review of PR #1487): a match is no other player when it is the PR's own build ("a release player of the PR
+ * head", "the Steam game client of the PR build": at most two build nouns, then of/at/from/for/on the PR head or build), or
+ * when "release" is the build config ("a debug or release build", or "build a release player" with no pre-1.0 or 0.50 after
+ * it). Only those: "the published 0.50 player and the PR head" keeps the mark, failing closed.
+ */
+export function excusedBuild(said: string, at: number, words: string): boolean {
+  // w6469's review: never excused are a match that names an installed copy (published, shipped, live, ...) and Steam with a
+  // version ("Steam 0.50"): both name a build no commit is, whatever follows.
+  const before = said.slice(0, at);
+  // The word just before counts too: "the published release or debug build" matches from "release".
+  if (/\b(?:installed|downloaded|published|public|released|shipped|live|retail)\b/i.test(`${/(\S+)\s+$/.exec(before)?.[1] ?? ''} ${words}`)) return false;
+  if (/\bsteam(?:'s)?\s+(?:pre-1\.0|0\.50)/i.test(words)) return false;
+  const after = said.slice(at + words.length);
+  // Only build nouns between the match and "of the PR head": "and clients on the PR head" or "host joins from the PR build"
+  // names a second player, so it keeps the mark (w6469).
+  if (/^\s+(?:(?:game\s+)?(?:build|player|client|copy|version|binary)s?\s+){0,2}?(?:of|at|from|for|on)\s+(?:the\s+)?(?:PR|pull request)(?:'s)?\s+(?:head|build)\b/i.test(after)) return true;
+  // A Steam or a pre-1.0/0.50 release is that line's published build, never the build config: "the Steam release or
+  // debug build" and "a debug or pre-1.0 release" keep the mark (w6474).
+  if (!/\brelease\b/i.test(words) || /^steam|\b(?:pre-1\.0|0\.50)/i.test(words)) return false;
+  return /\b(?:debug|development|dev)\b/i.test(words)
+    || /\b(?:debug|development|dev)\s+(?:or|and|vs\.?|versus)\s+$/i.test(before)
+    || /^\s+(?:or|and|vs\.?|versus)\s+(?:debug|development|dev)\b/i.test(after)
+    // "build a release player", but not "builds a release build of pre-1.0": that names the line's release (w6469).
+    || (/\bbuild(?:s|ing)?\s+an?\s+$/i.test(before) && /^release\b/i.test(words) && !/\b(?:pre-1\.0|0\.50)\b/i.test(after));
+}
+
+/** The first INSTALLED_BUILD match in said that excusedBuild does not excuse (w6467). */
+export function installedBuildIn(said: string): string | undefined {
+  for (const r of INSTALLED_BUILD) {
+    for (const m of said.matchAll(new RegExp(r.source, `${r.flags.replace('g', '')}g`))) if (!excusedBuild(said, m.index, m[0])) return m[0];
+  }
+  return undefined;
+}
+
+/**
+ * w6451 (w6442's review of PR #1477): a pair run is marked from its what or brief too (mentionsLegacyPlayer), so those words
+ * may name the other player ("the host runs Steam 0.50.0.47") with legacy_data empty. The first such reason in legacy_data,
+ * what or brief, in that order, or undefined. `legacy` "none" (saysNone) is passed by the caller as ''.
+ */
+export const otherPlayerInWords = (commit: string, legacy: string, what: string, brief: string): string | undefined =>
+  (legacy ? otherPlayerIn(legacy, commit) : undefined) ?? otherPlayerIn(what, commit, 'what') ?? otherPlayerIn(brief, commit, 'brief');
+
+/** What newPair puts after the worker's own brief in a pair run's brief: the words that follow are FF Factory's, not the worker's. */
+export const PAIR_FILED_BY = '\n\nFF Factory filed this for worker ';
+
+/** w6451: a pair run's own what and brief as the worker gave them to request_pair (newPair's title and brief, less its own words). */
+export const pairAskWords = (w: { title: string; brief: string }): { what: string; brief: string } => {
+  const cut = w.brief.lastIndexOf(PAIR_FILED_BY);
+  return { what: w.title.replace(/^Pair run for w\d+: /, ''), brief: cut >= 0 ? w.brief.slice(0, cut) : w.brief };
+};
 
 // w6206: w6187's pair run was filed with a mistyped full sha (20786882d8bd6c1a…) whose first 10 characters matched the real
 // head of game PR #4382 (20786882d8c3f540…), and only its leg's own `gh pr view` caught it. request_pair and start_agent now

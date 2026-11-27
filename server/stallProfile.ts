@@ -43,7 +43,8 @@ const where = (f: CallFrame) => {
   const name = f.functionName.startsWith('RegExp: ') ? 'RegExp' : f.functionName;
   return `${name || '(anonymous)'}${file ? ` (${file}:${f.lineNumber + 1})` : ''}`;
 };
-const ours = (f: CallFrame) => /\/(server|shared)\/[^/]+\.ts$/.test(f.url) && !f.url.includes('/node_modules/');
+// w6077: the daemon's own code (machine/) counts too, since the daemon runs one as well.
+const ours = (f: CallFrame) => /\/(server|shared|machine)\/[^/]+\.ts$/.test(f.url) && !f.url.includes('/node_modules/');
 
 /**
  * The functions that took the time in a profile: `self` by their own time (where the CPU was), `under` the portal's own functions
@@ -103,6 +104,10 @@ export class StallProfiler {
   private readonly worstLagSince: (since: number) => number;
   private readonly blocksSince: (since: number) => [number, number][];
   private readonly log: (line: string) => void;
+  /** A window whose worst lag is at least this keeps its profile (PROFILE_STALL_MS; the daemon's is its stall line's, w6077). */
+  private readonly stallMs: number;
+  /** Whose functions the lines name: "the portal's" (default) or "the daemon's" (w6077). */
+  private readonly whose: string;
   /** Slow spans noted in this window (noteSpan): what, when it ended (epoch ms) and how long. */
   private spans: { what: string; end: number; ms: number }[] = [];
   /** w6416: windows overlap as console profiles (true), or stop and start the session's own profile (false, older Node). */
@@ -113,11 +118,13 @@ export class StallProfiler {
   /** w6416: the last roll's cost in ms and its profile's size, for tests and the roll line. */
   lastRoll?: { startMs: number; endMs: number; summaryMs: number; totalMs: number; nodes: number; samples: number };
 
-  constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void }) {
+  constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void; stallMs?: number; whose?: string }) {
     this.dir = path.join(o.dataDir, 'profiles');
     this.worstLagSince = o.worstLagSince;
     this.blocksSince = o.blocksSince ?? (() => []);
     this.log = o.log ?? ((l) => console.warn(l));
+    this.stallMs = o.stallMs ?? PROFILE_STALL_MS;
+    this.whose = o.whose ?? "the portal's";
   }
 
   start() {
@@ -203,7 +210,7 @@ export class StallProfiler {
     const t0 = performance.now();
     const from = this.windowStart;
     const lag = this.worstLagSince(from);
-    const blocks = this.blocksSince(from).filter(([, l]) => l >= PROFILE_STALL_MS);
+    const blocks = this.blocksSince(from).filter(([, l]) => l >= this.stallMs);
     const spans = this.spans;
     this.spans = [];
     const done = (profile: CpuProfile | undefined, tStart: number, tEnd: number) => {
@@ -211,7 +218,7 @@ export class StallProfiler {
       if (!profile) return;
       const t2 = performance.now();
       this.logSpans(profile, from, spans);
-      if (lag >= PROFILE_STALL_MS) void this.keep(profile, lag, from, blocks);
+      if (lag >= this.stallMs) void this.keep(profile, lag, from, blocks);
       const t3 = performance.now();
       this.lastRoll = { startMs: tStart, endMs: tEnd, summaryMs: t3 - t2, totalMs: t3 - t0, nodes: profile.nodes.length, samples: profile.samples?.length ?? 0 };
       if (t3 - t0 >= ROLL_LINE_MS)
@@ -247,7 +254,7 @@ export class StallProfiler {
     const fmt = (l: { fn: string; ms: number }[]) => l.map((x) => `${x.fn} ${x.ms} ms`).join('; ') || 'none';
     for (const sp of [...spans].sort((a, b) => b.ms - a.ms).slice(0, SPAN_LINES)) {
       const b = summarizeProfile(p, 10, [[sp.end - sp.ms - from, sp.end - from]]);
-      this.log(`stall profile: ${sp.what} of ${Math.round(sp.ms)} ms ending ${new Date(sp.end).toISOString()}. Own time: ${fmt(b.self)}. In the portal's functions: ${fmt(b.under)}`);
+      this.log(`stall profile: ${sp.what} of ${Math.round(sp.ms)} ms ending ${new Date(sp.end).toISOString()}. Own time: ${fmt(b.self)}. In ${this.whose} functions: ${fmt(b.under)}`);
     }
   }
 
@@ -255,13 +262,13 @@ export class StallProfiler {
     try {
       const sum = summarizeProfile(p);
       const fmt = (l: { fn: string; ms: number }[]) => l.map((x) => `${x.fn} ${(x.ms / 1000).toFixed(1)} s`).join('; ') || 'none';
-      this.log(`stall profile: the loop stalled ${(lag / 1000).toFixed(1)} s in the minute from ${new Date(from).toISOString()}; CPU ${(sum.totalMs / 1000).toFixed(1)} s. Own time: ${fmt(sum.self)}. In the portal's functions: ${fmt(sum.under)}`);
+      this.log(`stall profile: the loop stalled ${(lag / 1000).toFixed(1)} s in the minute from ${new Date(from).toISOString()}; CPU ${(sum.totalMs / 1000).toFixed(1)} s. Own time: ${fmt(sum.self)}. In ${this.whose} functions: ${fmt(sum.under)}`);
       // The minute's totals mix the block with everything else that ran (w2044: a state save once a second summed to 5 s a
       // minute, though no one save came near a second): each of the longest blocks gets its own line, from its samples only.
       // A beat `lag` ms late ran at `at`, so the loop was held from at most `at - lag` to `at`.
       for (const [at, l] of blocks.sort((a, b) => b[1] - a[1]).slice(0, BLOCK_LINES)) {
         const b = summarizeProfile(p, 4, [[at - l - from, at - from]]);
-        this.log(`stall profile: block of ${(l / 1000).toFixed(1)} s ending ${new Date(at).toISOString()}. Own time: ${fmt(b.self)}. In the portal's functions: ${fmt(b.under)}`);
+        this.log(`stall profile: block of ${(l / 1000).toFixed(1)} s ending ${new Date(at).toISOString()}. Own time: ${fmt(b.self)}. In ${this.whose} functions: ${fmt(b.under)}`);
       }
       await fs.promises.mkdir(this.dir, { recursive: true });
       await fs.promises.writeFile(path.join(this.dir, `stall-${new Date(from).toISOString().replace(/[:.]/g, '-')}.cpuprofile`), JSON.stringify(p));

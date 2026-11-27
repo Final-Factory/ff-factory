@@ -172,7 +172,24 @@ export const isBetweenTurns = (s: AgentFacts, now?: number) => agentState(s, und
  * Whether the agent will come back to its sandbox, so the sandbox is not free: between turns, or stopped with a check-in
  * ahead or a message queued for it (it resumes there).
  */
-export const holdsItsPlace = (s: AgentFacts, now?: number) => {
+export const holdsItsPlace = (s: AgentFacts, now: number = Date.now()): boolean => {
+  // w6428: agentState's own branches, without building its view (its time strings): placement asks this of every session
+  // placed in a sandbox, 13,000 on the live portal, several times per page build. agentStatePlaces is the reference.
+  if (s.hostFailure || s.status === 'waiting_permission') return false;
+  const live = s.status === 'running' || s.status === 'starting' || s.status === 'idle';
+  if (s.queueWait && live) return s.status === 'idle';
+  if (s.status === 'running' || s.status === 'starting' || s.status === 'error') return false;
+  const wakeAhead = !!s.wakeAt && Date.parse(s.wakeAt) > now - OVERDUE_MS;
+  if (s.status === 'stopped') {
+    if (wakeAhead || s.queuedSend) return true;
+    const heldAt = s.heldSince ? Date.parse(s.heldSince) : NaN;
+    return !!heldAt && now - heldAt < HOLD_PLACE_MS;
+  }
+  return Math.max(s.backgroundJobs?.length ?? 0, s.backgroundTasks ?? 0) > 0 || (!!s.benchHold && live) || !!s.queuedSend || wakeAhead;
+};
+
+/** holdsItsPlace as agentState's view says it (w6428: the reference its fast path is tested against). */
+export const agentStatePlaces = (s: AgentFacts, now?: number) => {
   const a = agentState(s, undefined, now);
   return a.state === 'between_turns' || !!a.resumes || !!a.held;
 };

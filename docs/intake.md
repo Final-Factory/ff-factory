@@ -718,7 +718,14 @@ merge, on master, in batches (`.github/workflows/master-batch.yml`, job `Master 
 breaks the suite is therefore found after it merged, and this watch (`server/masterBatch.ts`, `MasterBatchWatch`) hands it
 back to its request.
 
-- **The source.** Every 3 minutes the watch lists the workflow's newest 10 runs on master (`gh api
+- **Every branch on its own** (w6457). The game repo's `master-batch.yml` runs on a push to `pre-1.0` too since w6444
+  (FinalFactory PR #4425), so the watch reads each branch in `masterBatch.branches` (default `["master", "pre-1.0"]`,
+  config.json only) apart: a branch's first read records its runs without filing, "a later run passed" counts only that
+  branch's runs, and the one open hung note is per branch (identity key `master-batch:hung` for master,
+  `master-batch:hung:<branch>` for another). A red `pre-1.0` batch files `pre-1.0 batch red: ...` with its revert from
+  `origin/pre-1.0` and its PR into `pre-1.0`, its source carries `masterBatch.branch`, and the culprit's request is told
+  "broke pre-1.0's batch ... into pre-1.0". Master's requests carry no branch and read as before.
+- **The source.** Every 3 minutes the watch lists the workflow's newest 10 runs on each branch (`gh api
   repos/<repo>/actions/workflows/<workflow>/runs`, on the system payer's GitHub token: the portal's own login lacks
   "Actions: read", portal-on-ffbox-host.md D7). For each run that finished since it last looked it reads the job's log
   and takes the **last** `MASTER_BATCH_VERDICT {json}` line (`parseVerdict`: version 1; `verdict` red, green, flaky,
@@ -1042,7 +1049,7 @@ setting under the same guard as `intake.ffbox`, and it applies at once, with no 
   "lookbackDays": 14
 },
 "providers": { "ffbox": { "enabled": false, "sendWork": false, "devRequests": { "enabled": true, "perHour": 20, "maxFiles": 10, "maxRequestMB": 500 } } },
-"masterBatch": { "enabled": true, "autoApprove": { "enabled": true, "maxPerDay": 10 }, "repo": "Final-Factory/FinalFactory", "workflow": "master-batch.yml" }
+"masterBatch": { "enabled": true, "autoApprove": { "enabled": true, "maxPerDay": 10 }, "repo": "Final-Factory/FinalFactory", "workflow": "master-batch.yml", "branches": ["master", "pre-1.0"] }
 "ffuPostMerge": { "enabled": true, "repo": "Final-Factory/ffu", "workflow": "ci.yml" }
 ```
 

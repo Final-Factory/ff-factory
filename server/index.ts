@@ -128,6 +128,7 @@ import { dataGuardSettings, footprint, gzipRatioCached, runDataGuard } from './d
 import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
+import { costMark, costSince } from './placeCost.ts';
 import { pageAllStats } from './ffuSlotsView.ts';
 import { pageNamedSessions, pageSession, pageSessions, PageSessionsCache, SESSION_REVS_FILE, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { dropKeptParts } from '../shared/pageParts.ts';
@@ -1225,6 +1226,10 @@ const sessionRevs = new SessionRevs(undefined, { ready: false });
 const sessionRevsFile = new SnapshotFile(path.join(cfg.dataDir, SESSION_REVS_FILE), () => JSON.stringify(sessionRevs.saved(store.sessions)), { delayMs: 5_000, intervalMs: 30_000, generations: 0, label: 'session revs' });
 /** What each page connect's pageSessions worked out, kept while a session is unchanged (w6382). */
 const pageSessionsCache = new PageSessionsCache();
+// w6456: a page copy that gains or loses its report is a new rev, so a reconnect after any gap gets it again.
+pageSessionsCache.onCopy = (id, withResult) => {
+  if (sessionRevs.pageCopy(id, withResult) && sessionRevs.isReady) sessionRevsFile.changed();
+};
 bus.on('event', (e: ServerEvent) => {
   sessionRevs.note(e);
   pageSessionsCache.note(e);
@@ -2871,7 +2876,10 @@ server.on('upgrade', (req, socket, head) => {
     const q = new URL(req.url ?? '/', 'http://x').searchParams;
     // w6336: a reconnecting page's parts it holds unchanged are left out (shared/pageParts.ts).
     const phases: [string, number][] = [];
+    // w6428: what placement cost within this build (free, places, claims), for the line's 'place' part.
+    const marks = [costMark(agents.placeCost.free), costMark(agents.placeCost.places), costMark(agents.placeAgain.claimsCost)] as const;
     const whole = appState(user, q.get('have'), phases);
+    const place = `${costSince('places', agents.placeCost.places, marks[1])}${costSince('free', agents.placeCost.free, marks[0])}${costSince('claims', agents.placeAgain.claimsCost, marks[2])}`.trim();
     const tKeep = performance.now();
     const state = dropKeptParts(whole, q.get('parts'));
     const t1 = performance.now();
@@ -2884,7 +2892,7 @@ server.on('upgrade', (req, socket, head) => {
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, checked: pageSessionsCache.checked, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, checked: pageSessionsCache.checked, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases, place });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));

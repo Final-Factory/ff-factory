@@ -14,13 +14,13 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
-import { probeFence } from './fenceProbe.ts';
+import { probeFence, probeFenceAsync } from './fenceProbe.ts';
 import { integrityArgv, measureAgentIntegrity } from './agentIntegrity.ts';
 import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
-import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
+import { liveSessionIds, lockTranscripts, probeTranscriptLockAsync, unlockTranscripts } from '../server/transcriptLabels.ts';
+import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, lowCopiesWanted, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
 import { createRequire } from 'node:module';
@@ -28,6 +28,8 @@ import { CATALOG, buildOptions, githubCredentialEnv, type CatalogTool, type Laun
 import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCATE_FALLBACK_MINUTES, SELF_UPDATE_VERSION, relocateProblem, type DaemonLiveView, type FromDaemon, type SignalName, type ToDaemon } from '../server/machineProtocol.ts';
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
+import { StallProfiler } from '../server/stallProfile.ts';
+import { useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
@@ -84,7 +86,8 @@ import { LIVE_MATERIAL_NAME, LIVE_PROPERTY_NAME, keepInMat, type MatKnobType } f
 import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from './liveStage.ts';
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
-import { hostStats } from '../server/system.ts';
+import { commitNow, hostStats } from '../server/system.ts';
+import { CommitCheck, editorStartGate, warnOnly } from './commitCharge.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard, type CleanupItem, type CleanupRun } from '../server/cleanup.ts';
@@ -686,6 +689,7 @@ export class Daemon {
   private lastBeat = 0;
   /** The daemon's own event-loop watch (w4926): a block is a line in daemon.log, beside what ran around it. */
   private loopWatch?: LoopWatch;
+  private stallProfiler?: StallProfiler;
   private stopped = false;
   /** What keeps the machine awake while agents run: caffeinate on a Mac, a PowerShell holding SetThreadExecutionState on Windows. */
   private caffeinate?: ChildProcess;
@@ -778,16 +782,54 @@ export class Daemon {
       end?.();
     }
   }
+  /**
+   * w6417: the Low copies from the first time one is asked for, not only once lowSetup's labelling is done: after a restart
+   * LothDesktop's labelling of the shared-lock folders ran from 13:55 to past 14:25 UTC, and every copy asked for meanwhile
+   * (the players broker's installs, the slot caches) got none, said nowhere but in the caller's "no Low node copy".
+   */
+  private lowCopiesNow(): LowCopies | undefined {
+    if (!this.lowCopies && lowCopiesWanted(this.cfg, process.platform)) this.lowCopies = new LowCopies(this.cfg.root!, (l) => log(l));
+    return this.lowCopies;
+  }
   private lowMake(exe: string): string | undefined {
-    return this.lowCopies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => this.lowCopies!.make(exe)) : undefined;
+    const copies = this.lowCopiesNow();
+    return copies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => copies.make(exe)) : undefined;
+  }
+  /**
+   * w6479: lowMake with the copy's programs (PowerShell, icacls) run off the event loop (LowCopies.makeAsync), its write to
+   * tools/low held until it is done. The daemon's start (lowSetup) makes its copies so: one held the loop 7.8 s of a 14.9 s
+   * block on LothDesktop (2026-11-27 18:10 UTC).
+   */
+  private async lowMakeAsync(exe: string): Promise<string | undefined> {
+    const copies = this.lowCopiesNow();
+    if (!copies || !this.cfg.root) return undefined;
+    const end = this.sharedWrites.begin([lowToolsDir(this.cfg.root)]);
+    try {
+      return await copies.makeAsync(exe);
+    } finally {
+      end?.();
+    }
   }
   private lowCheck(copy: string): string | undefined {
-    return this.lowCopies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => this.lowCopies!.check(copy)) : undefined;
+    const copies = this.lowCopiesNow();
+    return copies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => copies.check(copy)) : undefined;
   }
   /** The GitHub App shims and tokens' file (w1519, machine/ghApp.ts), once written. */
   private ghApp?: GhAppSetup;
   private lastSlotTick = 0;
   private lastStats?: { stats: HostStats; at: number };
+  /** w6411: CI jobs running on this machine's runners, as the Unity slots' last process listing counted them. */
+  private ciJobsSeen?: { n: number; at: number };
+  /**
+   * w6411: the commit-charge check before an editor start and a unity-slot grant (machine/commitCharge.ts). Warn-only:
+   * it logs what it would refuse. The pool's commitCheck "off" (add_machine commit_check) turns it off.
+   */
+  private readonly commitCheck = new CommitCheck({
+    read: () => commitNow(),
+    ciJobs: () => (this.ciJobsSeen && Date.now() - this.ciJobsSeen.at < 2 * 60_000 ? this.ciJobsSeen.n : undefined),
+    mode: () => this.currentPool()?.commitCheck ?? 'warn',
+    log: (line) => log(line),
+  });
   /** Each ffu slot's target size as the last clean-up pass measured it (w5912): the status reports it, never a du of its own. */
   private readonly ffuSizes = new Map<string, { bytes: number; at: string }>();
   /** The last `ffu-slot list --json` (w5912), read again every FFU_REPORT_MS in the background. */
@@ -933,7 +975,13 @@ export class Daemon {
     this.slots = new UnitySlots({
       dir: cfg.slotQueueDir ?? path.join(appDirOfConfig(cfg), 'slot-queue'),
       platform,
-      procs: () => pd.procs(),
+      procs: async () => {
+        const procs = await pd.procs();
+        // w6411: the same listing counts the CI jobs the commit check reserves room for (runner workers, as the bench drain
+        // does); a bug in the count never fails the listing (w6414)
+        warnOnly('counting CI jobs', () => void (this.ciJobsSeen = { n: runnerCensus(procs).workers.length, at: Date.now() }), log);
+        return procs;
+      },
       alive: isAlive,
       now: () => Date.now(),
       limit: () => this.currentPool()?.maxUnity,
@@ -943,6 +991,8 @@ export class Daemon {
       // w5324: a lower-priority idle editor yields its slot to a waiting higher-priority run, closed through the editor
       preempt: (p, why) => this.slotPreemptClose(p, why),
       ramPct: () => this.ramPct(),
+      ramWords: () => warnOnly('reading the commit figure', () => this.commitCheck.words(), log),
+      onGrant: (r) => void warnOnly('a unity-slot grant', () => this.commitCheck.check(`a unity-slot grant to "${r.label}" (${r.holder})`, r.count), log),
       machine: cfg.id,
       // w4620: the queue goes in strict priority order, read live from the bench queue's priorities.json under this root
       root: cfg.root,
@@ -1301,7 +1351,8 @@ export class Daemon {
         liveRun: (id, sandboxPath) => this.liveRunIn(id, sandboxPath),
         log,
         // w1894: no editor starts while a person plays here (the turn closed the others; they reopen after its grace)
-        startGate: () => this.guard?.blockReason('editor') ?? this.personStartGate(),
+        // w6411: the commit check is warn-only: the gate is the host guard's and a person's, whatever it says (commitCharge.ts)
+        startGate: () => editorStartGate({ base: (commit) => this.guard?.blockReason('editor', { commit }) ?? this.personStartGate(), check: this.commitCheck, log }),
         onChange: () => this.reportSandboxes(),
         onEvent: (e) => {
           log(`sandboxes: ${e.text}`);
@@ -2265,6 +2316,12 @@ export class Daemon {
     if (this.cfg.root) void refreshTrustedBenchAsync({ appDir: appDirOfConfig(this.cfg), background: true }, this.cfg.root);
     this.timers.push(setInterval(loopLabel('timer warmScopeProbes', () => void warmScopeProbes()), 60_000));
     this.loopWatch = new LoopWatch({ log: (l) => log(l), who: 'the daemon', stallLogMs: DAEMON_STALL_LOG_MS }).start();
+    // w6077: a block LoopWatch can name only by "last ran" (code after an await, under no label) gets the functions that held
+    // the loop from V8's sampling profiler, as the portal's do (server/stallProfile.ts); profiles in <app>/profiles, the newest few.
+    if (this.cfg.root && process.env.FF_STALL_PROFILE !== 'off') {
+      const lw = this.loopWatch;
+      this.stallProfiler = new StallProfiler({ dataDir: appDirOfConfig(this.cfg), worstLagSince: (t) => lw.worstLagSince(t), blocksSince: (t) => lw.blocksSince(t), log: (l) => log(l), stallMs: DAEMON_STALL_LOG_MS, whose: "the daemon's" }).start();
+    }
     // An update job's result (w1596): sent once the link is up, then the job's task or LaunchAgent removed.
     this.timers.push(setInterval(loopLabel('timer selfUpdate.tick', () => void this.selfUpdate.tick().catch((e) => log(`update job report: ${(e as Error).message}`))), 10_000));
     this.timers.push(setInterval(loopLabel('timer reportStats', () => void this.reportStats()), STATS_MS));
@@ -2387,6 +2444,7 @@ export class Daemon {
     clearTimeout(this.usageTimer);
     for (const t of this.timers) clearInterval(t);
     this.loopWatch?.stop();
+    this.stallProfiler?.stop();
     this.slots.close();
     // Not on purpose (a redeploy, a restart, logging off): each agent keeps its restart marks (turnOpenSince), so the
     // portal knows which ones were mid-turn and resumes them when the daemon is back (MachineManager.resumeCutOff).
@@ -3771,6 +3829,14 @@ export class Daemon {
    * variables (PROBE_ENV_KEYS: PATH, the profile and temp folders; never the vault tokens or daemon.json `env`, w5838
    * review) and said as a WARNING.
    */
+  /** w6479: bareProbe with its runs off the event loop (probeFenceAsync), for the daemon's start. */
+  private async bareProbeAsync(argv: string[], what: string): Promise<ReturnType<typeof probeFence>> {
+    const bare = await probeFenceAsync(argv, { timeoutMs: 60_000, env: bareEnv() });
+    if (bare.ok) return bare;
+    const more = await probeFenceAsync(argv, { timeoutMs: 60_000, env: { ...bareEnv(), ...pickEnv(PROBE_ENV_KEYS) } });
+    if (more.ok) log(`worker integrity: WARNING: ${what} did not run with a bare environment (${bare.why}) but did with Windows' own variables; its probe keeps those (w5838)`);
+    return more;
+  }
   private bareProbe(argv: string[], what: string): ReturnType<typeof probeFence> {
     const bare = probeFence(argv, { timeoutMs: 60_000, env: bareEnv() });
     if (bare.ok) return bare;
@@ -4301,17 +4367,18 @@ export class Daemon {
       const writable = (p: string) => [root, ...allow].some((a) => !path.relative(a, p).startsWith('..') && !path.isAbsolute(path.relative(a, p)));
       if (!writable(this.slotMailbox)) log(`worker integrity: the Unity slots mailbox ${this.slotMailbox} is outside the root and not in workerIntegrityAllow; a Low worker's unity-slot run cannot ask for a slot`);
       const sdkClaude = this.cfg.claude ?? path.join(path.dirname(createRequire(import.meta.url).resolve('@anthropic-ai/claude-agent-sdk-win32-x64/package.json')), 'claude.exe');
-      this.lowCopies ??= new LowCopies(root, say); // w5877: one per daemon run, which never takes over another run's copies
+      // w5877: one per daemon run, which never takes over another run's copies; w6417: made at the first ask (lowCopiesNow).
+      this.lowCopiesNow();
       // w6284: the slot caches' first tick may have run before the Low node copy its copies need; try what it lacks again now.
       if (this.slotCaches) {
         this.slotCaches.retryNow();
         void this.sharedWrite(() => this.slotCaches?.tick(), this.cacheSeeds());
       }
-      const claude = this.lowMake(sdkClaude);
+      const claude = await this.lowMakeAsync(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');
       }
-      const probe = this.bareProbe([claude, '--version'], 'the Low claude');
+      const probe = await this.bareProbeAsync([claude, '--version'], 'the Low claude');
       if (!probe.ok) {
         return this.lowFail(`the Low claude could not run (${probe.why})`);
       }
@@ -4391,8 +4458,8 @@ export class Daemon {
       return false;
     }
     if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
-    const node = this.lowMake(process.execPath);
-    const probe = node ? probeTranscriptLock(node, projects, undefined, bareEnv()) : 'no Low node copy';
+    const node = await this.lowMakeAsync(process.execPath);
+    const probe = node ? await probeTranscriptLockAsync(node, projects, bareEnv()) : 'no Low node copy';
     log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
     return true;
   }
@@ -4403,9 +4470,9 @@ export class Daemon {
    * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
    */
   private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<LowEditorFence | undefined> {
-    const launcher = this.lowMake(process.execPath);
+    const launcher = await this.lowMakeAsync(process.execPath);
     if (!launcher) return undefined;
-    const probe = this.bareProbe([launcher, '-e', '0'], 'the Low node launcher');
+    const probe = await this.bareProbeAsync([launcher, '-e', '0'], 'the Low node launcher');
     if (!probe.ok) {
       log(`worker integrity: the Low node launcher could not run (${probe.why}); sandbox editors stay Medium`);
       return undefined;
@@ -4433,7 +4500,7 @@ export class Daemon {
       const where = await exec('where.exe', ['gh'], { timeoutMs: 30_000 });
       const exe = where.code === 0 ? where.stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) : undefined;
       if (!exe) return loud("gh is not on the daemon's PATH");
-      const copy = this.lowMake(exe);
+      const copy = await this.lowMakeAsync(exe);
       if (!copy) return loud('no Low copy of gh to test with');
       // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
@@ -4554,7 +4621,7 @@ export class Daemon {
           mode,
           labels,
           t,
-          lowNode: this.lowMake(process.execPath),
+          lowNode: await this.lowMakeAsync(process.execPath),
           mirrorDir: path.join(appDir, 'read-fence-precheck'),
           skip: this.labelSystemDrive,
           run: exec,
@@ -5717,6 +5784,9 @@ if (isMainModule(import.meta.filename)) {
   const cfg: DaemonConfig = withRootDefaults({ ...JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), configFile: file });
   cfg.token = readToken(cfg);
   for (const [k, v] of Object.entries(cfg.env ?? {})) if (typeof v === 'string') process.env[k] = v;
+  // w6077: programs start from a thread of their own, not the loop (server/spawnThread.ts): starting one PowerShell held BEAST's
+  // loop up to 35.5 s. FF_SPAWN_THREAD=off (daemon.json "env") starts them on the loop again; a thread that keeps dying does too.
+  useSpawnThread(process.env.FF_SPAWN_THREAD !== 'off', (line) => log(line));
   // A worker root (w513): agents and the scripts they run find the player slots (and the nightly history) in it.
   // w5501: a CARGO_HOME outside the root (the person's ~/.cargo on C:, where a Low worker's `cargo fetch` was refused) moves
   // to <root>/cache/cargo, seeded in the background from the old one, which is only read; one inside the root stays.

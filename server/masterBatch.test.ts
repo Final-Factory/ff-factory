@@ -164,8 +164,8 @@ test('w1180: injection text in a title stays inert data: one cleaned line in a f
 // ---------------------------------------------------------------- the pieces
 
 test('w1180: settings default to on, auto-approving 10 a day, the game repo and its workflow', () => {
-  assert.deepEqual(masterBatchSettings({}), { enabled: true, autoApprove: { enabled: true, maxPerDay: 10 }, repo: REPO, workflow: 'master-batch.yml' });
-  assert.deepEqual(masterBatchSettings({ masterBatch: { enabled: false, autoApprove: { enabled: false, maxPerDay: 400 }, repo: 'a/b', workflow: 'x.yml' } }), { enabled: false, autoApprove: { enabled: false, maxPerDay: 100 }, repo: 'a/b', workflow: 'x.yml' });
+  assert.deepEqual(masterBatchSettings({}), { enabled: true, autoApprove: { enabled: true, maxPerDay: 10 }, repo: REPO, workflow: 'master-batch.yml', branches: ['master', 'pre-1.0'] });
+  assert.deepEqual(masterBatchSettings({ masterBatch: { enabled: false, autoApprove: { enabled: false, maxPerDay: 400 }, repo: 'a/b', workflow: 'x.yml' } }), { enabled: false, autoApprove: { enabled: false, maxPerDay: 100 }, repo: 'a/b', workflow: 'x.yml', branches: ['master', 'pre-1.0'] });
   const bad = masterBatchSettings({ masterBatch: { repo: 'not a repo', workflow: '../../etc' } });
   assert.deepEqual([bad.repo, bad.workflow], [REPO, 'master-batch.yml'], 'a malformed repo or workflow falls back, so it never reaches a gh path');
 });
@@ -233,9 +233,11 @@ class FakeGh implements MasterBatchGh {
   logs = new Map<number, string | typeof JOB_SKIPPED | Error | undefined>();
   prs = new Map<number, PrFacts>();
   calls: string[] = [];
-  async runs(repo: string, workflow: string) {
-    this.calls.push(`runs ${repo} ${workflow}`);
-    return this.list;
+  /** Another branch's runs (w6457); `list` is master's. */
+  lists = new Map<string, BatchRun[]>();
+  async runs(repo: string, workflow: string, branch = 'master') {
+    this.calls.push(`runs ${repo} ${workflow}${branch === 'master' ? '' : ` ${branch}`}`);
+    return branch === 'master' ? this.list : (this.lists.get(branch) ?? []);
   }
   async jobLog(_repo: string, id: number) {
     this.calls.push(`log ${id}`);
@@ -252,7 +254,8 @@ class FakeGh implements MasterBatchGh {
 function setup(t: { after: (fn: () => void) => void }, masterBatch: Config['masterBatch'] = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-mb-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
-  const cfg = { dataDir: dir, masterBatch } as unknown as Config;
+  // The tests from before w6457 watch master alone; the w6457 tests below pass both branches.
+  const cfg = { dataDir: dir, masterBatch: { branches: ['master'], ...masterBatch } } as unknown as Config;
   const work = new Map<string, WorkItem>();
   const filed: IntakeFiling[] = [];
   const told: { id: string; mark: string; line: string; text: string }[] = [];
@@ -676,14 +679,14 @@ test('w1180: switched off it does nothing at all; switched on again it starts fr
   assert.deepEqual(s.gh.calls, [], 'no GitHub read');
   assert.equal(fs.existsSync(path.join(s.dir, 'master-batch.json')), false, 'no state written');
   // On: it records what is there.
-  s.cfg.masterBatch = { enabled: true };
+  s.cfg.masterBatch = { enabled: true, branches: ['master'] };
   assert.equal((await w.tick()).length, 1);
   s.gh.list = [run(101, 'failure'), run(100, 'success')];
   s.gh.logs.set(101, logOf(verdict()));
   // Off again while a red run finishes, then on: that run is old news.
   s.cfg.masterBatch = { enabled: false };
   assert.deepEqual(await w.tick(), []);
-  s.cfg.masterBatch = { enabled: true };
+  s.cfg.masterBatch = { enabled: true, branches: ['master'] };
   assert.deepEqual(await w.tick(), ['recorded 2 finished runs without filing']);
   assert.equal(s.filed.length, 0);
 });
@@ -708,11 +711,13 @@ test('w1180: the gh reads are api calls on the system payer\'s runner, and the v
   assert.deepEqual((await gh.runs(REPO, 'master-batch.yml')).map((r) => r.id), [5]);
   assert.equal(await gh.jobLog(REPO, 5), 'the log');
   assert.deepEqual(await gh.pr(REPO, 1234), { body: 'b', title: 'T', url: 'u', author: 'someone' });
+  assert.deepEqual((await gh.runs(REPO, 'master-batch.yml', 'pre-1.0')).map((r) => r.id), [5], 'another branch is asked by name (w6457)');
   assert.deepEqual(calls, [
     `gh api repos/${REPO}/actions/workflows/master-batch.yml/runs?branch=master&per_page=10`,
     `gh api repos/${REPO}/actions/runs/5/jobs?per_page=100`,
     `gh api --allow-escape-sequences repos/${REPO}/actions/jobs/12/logs`,
     `gh pr view 1234 -R ${REPO} --json body,title,author,url`,
+    `gh api repos/${REPO}/actions/workflows/master-batch.yml/runs?branch=pre-1.0&per_page=10`,
   ]);
   assert.ok(asked.every((a) => a.length > 0), 'every call names what it reads, for the token\'s last use');
   // A gh older than --allow-escape-sequences (2.102 refuses a Unity log without it) is asked plainly.
@@ -811,4 +816,150 @@ test('w1180: end to end on the real ledger: an urgent auto-approved request, the
   assert.equal([...store.work.values()].filter((x) => x.source?.kind === 'master-batch').length, 2);
   // Told again for this run: a new mark; a repeated tell for the same mark adds nothing.
   assert.equal(o.tellMasterBatch('w50', { mark: 'master batch run 103 merge bbbbbbbbb', line: 'again', text: 't' }), false);
+});
+
+// ---------------------------------------------------------------- pre-1.0's batch (w6457)
+
+// What master-batch.py prints on a push to pre-1.0 since w6444 (FinalFactory PR #4425): ref is GITHUB_REF_NAME.
+const PRE = 'pre-1.0';
+const preVerdict = (o: Record<string, unknown> = {}) => verdict({ ref: PRE, ...o });
+const BOTH = { branches: ['master', PRE] };
+
+test('w6457: settings read masterBatch.branches, keeping valid names once; none valid is master and pre-1.0', () => {
+  assert.deepEqual(masterBatchSettings({ masterBatch: { branches: ['pre-1.0'] } }).branches, ['pre-1.0']);
+  assert.deepEqual(masterBatchSettings({ masterBatch: { branches: ['master', 'master', 'release/1.0', '../x', 'a b', '-x', 7 as unknown as string] } }).branches, ['master', 'release/1.0']);
+  assert.deepEqual(masterBatchSettings({ masterBatch: { branches: [] } }).branches, ['master', 'pre-1.0']);
+});
+
+test('w6457: every pre-1.0 draft targets pre-1.0 and names it; master\'s drafts read as before', () => {
+  const v = parseVerdict(line(preVerdict()))!;
+  assert.equal(v.ref, PRE);
+  const noMaster = (b: string) => !/origin\/master|into master|on master/.test(b);
+  const c = culpritDraft({ repo: REPO, run: run(201, 'failure'), v, c: v.culprits[0], linked: [], branch: PRE });
+  assert.equal(c.title, 'pre-1.0 batch red: revert #1234 (Fix belt merge order)');
+  assert.ok(c.brief.includes(`git switch -c revert-1234 origin/pre-1.0 && git revert -m 1 ${MERGE}`), c.brief);
+  assert.ok(c.brief.includes('open a PR into pre-1.0') && c.brief.includes('runs on pre-1.0 after merges'));
+  assert.ok(noMaster(c.brief), c.brief);
+  assert.deepEqual(c.source.masterBatch, { run: '201', tip: TIP, kind: 'culprit', sha: MERGE, pr: 1234, branch: PRE });
+  const rules = workerRules({ id: 'w960', source: c.source, brief: c.brief, triage: c.triage });
+  assert.ok(rules.includes('merge it into pre-1.0') && rules.includes('git log on origin/pre-1.0') && !rules.includes('origin/master'), rules);
+
+  const n = noResultsDraft({ repo: REPO, run: run(202, 'failure'), v: parseVerdict(line(preVerdict({ verdict: 'no-results', culprits: [], failed: 0 })))!, branch: PRE });
+  assert.equal(n.title, 'pre-1.0 batch red at aaaaaaaaa: no results (compile error or crash)');
+  assert.ok(n.brief.includes('origin/pre-1.0 && git revert') && n.brief.includes('git log --first-parent origin/pre-1.0') && noMaster(n.brief), n.brief);
+  assert.equal(n.source.masterBatch?.branch, PRE);
+
+  const lost = parseVerdict(line(preVerdict({ culprits: [], unresolved: ['Tests.A'] })))!;
+  const u = unbisectedDraft({ repo: REPO, run: run(203, 'failure'), v: lost, branch: PRE });
+  assert.equal(u.title, 'pre-1.0 batch red: 1 tests not bisected');
+  assert.ok(u.brief.includes('origin/pre-1.0 && git revert') && u.brief.includes('a PR into pre-1.0') && noMaster(u.brief), u.brief);
+
+  const h = hungDraft({ repo: REPO, run: run(204, 'failure'), v: parseVerdict(line(hungVerdict({ ref: PRE })))!, branch: PRE });
+  assert.equal(h.title, 'pre-1.0 batch hung at aaaaaaaaa: no culprit (an infrastructure note)');
+  assert.ok(h.brief.includes('--branch pre-1.0') && h.brief.includes('a PR into pre-1.0') && noMaster(h.brief), h.brief);
+  // pre-1.0's hung note has its own identity key: it never takes in master's hangs, nor master's in it.
+  assert.ok(identityKeys(h.source).includes('master-batch:hung:pre-1.0') && !identityKeys(h.source).includes('master-batch:hung'));
+
+  // Master's drafts carry no branch and the words they had.
+  const m = culpritDraft({ repo: REPO, run: run(205, 'failure'), v, c: v.culprits[0], linked: [] });
+  assert.equal(m.title, 'Master batch red: revert #1234 (Fix belt merge order)');
+  assert.ok(m.brief.includes('origin/master && git revert') && m.brief.includes('open a PR into master'));
+  assert.equal(m.source.masterBatch?.branch, undefined);
+});
+
+test('w6457: a red pre-1.0 run files a revert into pre-1.0 and tells the culprit PR\'s request so; master\'s runs and state are untouched', async (t) => {
+  const s = setup(t, BOTH);
+  s.linked('w700');
+  s.gh.list = [run(100, 'success')];
+  s.gh.lists.set(PRE, [run(150, 'failure')]);
+  const w = s.make();
+  // The first look records each branch on its own, filing nothing for pre-1.0's old red run.
+  assert.deepEqual(await w.tick(), ['recorded 1 finished runs without filing', 'recorded 1 finished runs on pre-1.0 without filing']);
+  assert.deepEqual(s.gh.calls, ['runs Final-Factory/FinalFactory master-batch.yml', 'runs Final-Factory/FinalFactory master-batch.yml pre-1.0']);
+  assert.deepEqual(s.state().baselinedOn, ['master', PRE]);
+  const masterBefore = JSON.stringify(s.state().seen.filter((k: string) => k.startsWith('100#')));
+
+  // pre-1.0 goes red after it; master has a LATER green run, which must not supersede pre-1.0's red one.
+  s.gh.lists.set(PRE, [run(151, 'failure'), run(150, 'failure')]);
+  s.gh.logs.set(151, logOf(preVerdict({ run: '151' })));
+  s.gh.list = [run(160, 'success'), run(100, 'success')];
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 1);
+  const f = s.filed[0];
+  assert.equal(f.title, 'pre-1.0 batch red: revert #1234 (Fix belt merge order)');
+  assert.equal(f.priority, 'urgent');
+  assert.ok(f.brief.includes(`git switch -c revert-1234 origin/pre-1.0 && git revert -m 1 ${MERGE}`) && f.brief.includes('open a PR into pre-1.0'));
+  assert.ok(!f.brief.includes('origin/master') && !f.brief.includes('into master'), f.brief);
+  assert.equal(f.source.masterBatch?.branch, PRE);
+  assert.equal(s.told.length, 1);
+  assert.equal(s.told[0].text, `Your PR #1234 (w700) broke pre-1.0's batch: Tests.Belts.MergeOrder, Tests.Belts.SplitterLeft. Filed w901 to revert it first into pre-1.0. Run: https://github.com/${REPO}/actions/runs/151`);
+
+  // Master's state is its own: its run 100 is as it was, and a red master run after all this is filed as master's.
+  assert.equal(JSON.stringify(s.state().seen.filter((k: string) => k.startsWith('100#'))), masterBefore);
+  s.gh.list = [run(170, 'failure'), run(160, 'success'), run(100, 'success')];
+  s.gh.logs.set(170, logOf(verdict({ run: '170', culprits: [{ sha: sha('d'), pr: 1300, subject: 's', title: 'Master change', tests: ['Tests.M'] }] })));
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 2);
+  assert.equal(s.filed[1].title, 'Master batch red: revert #1300 (Master change)');
+  assert.ok(s.filed[1].brief.includes('origin/master && git revert') && !s.filed[1].brief.includes('pre-1.0'));
+  assert.equal(s.filed[1].source.masterBatch?.branch, undefined);
+});
+
+test('w6457: a pre-1.0 run never supersedes master\'s red run, and one open hung note per branch', async (t) => {
+  const s = setup(t, BOTH);
+  s.gh.list = [run(100, 'success')];
+  s.gh.lists.set(PRE, [run(110, 'success')]);
+  const w = s.make();
+  await w.tick();
+  // master red, then a later green pre-1.0 run: master's red is still filed.
+  s.gh.list = [run(120, 'failure'), run(100, 'success')];
+  s.gh.logs.set(120, logOf(verdict({ run: '120' })));
+  s.gh.lists.set(PRE, [run(130, 'success'), run(110, 'success')]);
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 1);
+  assert.equal(s.filed[0].title, 'Master batch red: revert #1234 (Fix belt merge order)');
+  // A hung pre-1.0 batch files its own note, and master's hang still files one while pre-1.0's is open.
+  s.gh.lists.set(PRE, [run(140, 'failure'), run(130, 'success'), run(110, 'success')]);
+  s.gh.logs.set(140, logOf(hungVerdict({ run: '140', ref: PRE })));
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 2);
+  assert.equal(s.filed[1].title, 'pre-1.0 batch hung at aaaaaaaaa: no culprit (an infrastructure note)');
+  s.gh.list = [run(145, 'failure'), run(120, 'failure'), run(100, 'success')];
+  s.gh.logs.set(145, logOf(hungVerdict({ run: '145' })));
+  await quiet(() => w.tick());
+  assert.equal(s.filed.length, 3);
+  assert.equal(s.filed[2].title, 'Master batch hung at aaaaaaaaa: no culprit (an infrastructure note)');
+  // A second pre-1.0 hang while its note is open adds nothing.
+  s.gh.lists.set(PRE, [run(146, 'failure'), run(140, 'failure'), run(130, 'success'), run(110, 'success')]);
+  s.gh.logs.set(146, logOf(hungVerdict({ run: '146', ref: PRE })));
+  const { out } = await quiet(() => w.tick());
+  assert.equal(s.filed.length, 3);
+  assert.ok(out.some((d) => d.startsWith('run 146: hung,')), out.join('; '));
+});
+
+test('w6457: a state from before w6457 keeps master baselined and records pre-1.0 once; a pre-1.0 read that fails skips only pre-1.0', async (t) => {
+  const s = setup(t, BOTH);
+  fs.writeFileSync(path.join(s.dir, 'master-batch.json'), JSON.stringify({ v: 1, baselined: true, seen: ['100#1'], filed: {}, skipped: [] }));
+  s.gh.list = [run(101, 'failure'), run(100, 'success')];
+  s.gh.logs.set(101, logOf(verdict({ run: '101' })));
+  s.gh.lists.set(PRE, [run(150, 'failure')]);
+  const w = s.make();
+  const { out } = await quiet(() => w.tick());
+  assert.equal(s.filed.length, 1, 'master files as before');
+  assert.ok(out.includes('recorded 1 finished runs on pre-1.0 without filing'), out.join('; '));
+  assert.deepEqual([s.state().baselined, s.state().baselinedOn], [true, ['master', PRE]]);
+  // pre-1.0's read fails: master is still read.
+  const s2 = setup(t, BOTH);
+  const gh2 = s2.gh;
+  const runs = gh2.runs.bind(gh2);
+  gh2.runs = async (repo, wf, b) => {
+    if (b === PRE) throw new Error('HTTP 502');
+    return runs(repo, wf, b);
+  };
+  s2.gh.list = [run(100, 'success')];
+  const w2 = s2.make();
+  const r = await quiet(() => w2.tick());
+  assert.deepEqual(r.out, ['recorded 1 finished runs without filing']);
+  assert.ok(r.warned.some((x) => x.includes('runs of Final-Factory/FinalFactory on pre-1.0') && x.includes('HTTP 502')), r.warned.join('; '));
+  assert.deepEqual(s2.state().baselinedOn, ['master']);
 });

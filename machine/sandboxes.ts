@@ -241,12 +241,46 @@ export type LfsDedup = { bytes: number } | { skipped: string };
  * smudges every LFS file into a full copy: 9.1 GB of each game worktree on lothdesktop, its proof videos, art and FMOD audio
  * (5,026 files; the dedup took 9 s there, measured 2026-10-19). git-lfs does nothing where the file system cannot clone (NTFS,
  * ext4) and refuses a worktree with any uncommitted or untracked change. Never throws.
+ *
+ * w6432: git-lfs's dedup puts back only each file's mode, not its times, so every cloned file's mtime is new and the
+ * index's stat data no longer matches: the next `git status` re-reads every LFS file through the clean filter (17.2 s for
+ * 200 files of 400 MB on lothdesktop at 100% CPU, measured; slot1's 8.5 GB ran past switchBranch's 120 s timeout, and
+ * w6431's start failed). The content is the same bytes, so the times taken before the dedup are put back after it, and the
+ * index stays clean (0 stale entries after, 57 ms for the next status, measured). Without the list of files, no dedup.
  */
 export async function lfsDedup(git: PoolDeps['git'], dir: string, signal?: AbortSignal): Promise<LfsDedup> {
-  const res = await git(['-C', dir, 'lfs', 'dedup'], { timeoutMs: 10 * 60_000, signal }).catch((e: Error) => ({ code: -1, stdout: '', stderr: e.message }));
+  const failed = (e: Error) => ({ code: -1, stdout: '', stderr: e.message });
+  const ls = await git(['-C', dir, 'lfs', 'ls-files', '--name-only'], { timeoutMs: 5 * 60_000, signal }).catch(failed);
+  if (ls.code !== 0) return { skipped: `could not list the LFS files: ${tail(ls.stderr || ls.stdout) || `exit ${ls.code}`}` };
+  const times = await lfsTimes(dir, ls.stdout);
+  const res = await git(['-C', dir, 'lfs', 'dedup'], { timeoutMs: 10 * 60_000, signal }).catch(failed);
+  // An aborted dedup (the trim's timeout won, and the sandbox may already be back in use) gets no times back: a checkout's
+  // new bytes of the same size would be stamped with the old mtime and hidden from git status (w6453's review).
+  if (!signal?.aborted) await restoreLfsTimes(dir, times, signal);
   if (res.code !== 0) return { skipped: tail(res.stderr || res.stdout) || `exit ${res.code}` };
   const m = /De-duplicated\s+size:\s*(\d+)\s*bytes/i.exec(res.stdout + res.stderr);
   return { bytes: m ? Number(m[1]) : 0 };
+}
+
+/** Each listed LFS file's size and times before a dedup (w6432); a file that cannot be read is left out. Exported for tests. */
+export async function lfsTimes(dir: string, names: string): Promise<Map<string, fs.Stats>> {
+  const out = new Map<string, fs.Stats>();
+  for (const name of names.split(/\r?\n/).filter(Boolean)) {
+    const st = await fs.promises.stat(path.join(dir, name)).catch(() => undefined);
+    if (st?.isFile()) out.set(name, st);
+  }
+  return out;
+}
+
+/** Put back the times lfsTimes took, on every file whose size is still the same (the dedup's clone is the same bytes); it stops once `signal` aborts. Never throws. */
+export async function restoreLfsTimes(dir: string, times: Map<string, fs.Stats>, signal?: AbortSignal): Promise<void> {
+  for (const [name, was] of times) {
+    if (signal?.aborted) return;
+    const p = path.join(dir, name);
+    const now = await fs.promises.stat(p).catch(() => undefined);
+    if (!now || now.size !== was.size || now.mtimeMs === was.mtimeMs) continue;
+    await fs.promises.utimes(p, was.atime, was.mtime).catch(() => undefined);
+  }
 }
 
 /** The log's words for an lfsDedup result. */
