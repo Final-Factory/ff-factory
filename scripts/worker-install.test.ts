@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -777,6 +777,31 @@ test('w5614: --store-lock takes off, warn or on and refuses anything else, befor
   const none = path.join(os.tmpdir(), `ffw-slock-none-${process.pid}`);
   await assert.rejects(main(['update', '--root', none, '--store-lock', 'maybe']), /--store-lock is off, warn or on, not "maybe"/);
   await assert.rejects(main(['update', '--root', none, '--store-lock']), /--store-lock is off, warn or on/);
+});
+
+test('w5615: worker update --shared-lock writes the mode to daemon.json as sharedLock on every OS; unset carries it', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-shlock-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { sharedLock?: 'off' | 'warn' | 'on' }, platform: NodeJS.Platform = 'linux') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('sharedLock' in written(BEAST_CONFIG, {}), false, 'no key unless asked');
+  for (const p of ['linux', 'darwin', 'win32'] as const) for (const m of ['off', 'warn', 'on'] as const) assert.equal(written(BEAST_CONFIG, { sharedLock: m }, p).sharedLock, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, sharedLock: 'on' };
+  assert.equal(written(had, {}).sharedLock, 'on', 'unset carries it');
+  assert.equal(written(had, { sharedLock: 'off' }).sharedLock, 'off', 'the switch replaces it');
+  assert.deepEqual(written(had, { sharedLock: 'warn' }).protectedPaths, BEAST_CONFIG.protectedPaths, 'the other settings are carried');
+  const cfg = { a: 1 };
+  assert.equal(applySharedLock(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applySharedLock(cfg, 'warn'), { a: 1, sharedLock: 'warn' });
+});
+
+test('w5615: --shared-lock takes off, warn or on and refuses anything else, before the update touches anything', async () => {
+  assert.deepEqual(parseArgs(['update', '--root', '/r', '--shared-lock', 'warn']).opts, { root: '/r', 'shared-lock': 'warn' });
+  assert.equal(sharedLockFlag(undefined), undefined);
+  for (const m of ['off', 'warn', 'on'] as const) assert.equal(sharedLockFlag(m), m);
+  for (const bad of ['ON', 'true', 'enforce', '']) assert.throws(() => sharedLockFlag(bad), /--shared-lock is off, warn or on/);
+  const none = path.join(os.tmpdir(), `ffw-shlock-none-${process.pid}`);
+  await assert.rejects(main(['update', '--root', none, '--shared-lock', 'maybe']), /--shared-lock is off, warn or on, not "maybe"/);
+  await assert.rejects(main(['update', '--root', none, '--shared-lock']), /--shared-lock is off, warn or on/);
 });
 
 test('w5862: worker update --medium-agent-folders writes the mode to daemon.json as mediumAgentFolders on every OS; unset carries it', () => {

@@ -1385,7 +1385,7 @@ export function slotProcList(procs: Proc[], self: number, callers: number[] = []
 /** The player slots' context for `folders`, `check` and `remove-slot` (w2796): this host, live pids and the running processes' command lines. */
 export async function slotContext(o: { procs?: () => Promise<Proc[]>; self?: number; callers?: number[]; session?: string } = {}): Promise<SlotContext> {
   const platform: UnityPlatform = process.platform === 'win32' ? 'win32' : process.platform === 'linux' ? 'linux' : 'darwin';
-  const list = o.procs ?? workerCensus(platform, procsMailbox(slotsDir()));
+  const list = o.procs ?? workerCensus(platform, procsMailbox(slotsDir(), process.env.FF_SANDBOX_ID));
   const all = await list().catch(() => undefined);
   const procList = all && slotProcList(all, o.self ?? process.pid, o.callers ?? callerPids(process.env.FF_LEFTOVERS_CALLERS));
   const procs = procList?.map((p) => p.cmd);
@@ -1737,7 +1737,7 @@ export async function leftoversMain(argv: string[], e: NodeJS.ProcessEnv = proce
   const { realDeps } = await import('./unity.ts');
   const hands = realDeps(platform);
   // w5397: under the worker fence `ps` is refused, and the daemon reads for this worker.
-  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e)), undefined, undefined, whoAsks(e));
+  const read = t.read ?? workerReaders(platform, procsMailbox(slotsDir(e), e.FF_SANDBOX_ID), undefined, undefined, whoAsks(e));
   const send = t.signal ?? ((pid: number, sig: 'SIGTERM' | 'SIGKILL') => hands.kill(pid, sig));
   const wait = t.wait ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const tempRoot = sessionTempRoot(session, e);
