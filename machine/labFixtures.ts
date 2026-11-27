@@ -19,13 +19,23 @@ export const fixturesDir = (root: string) => path.join(root, 'nightly-history', 
 /** A path on drive C: (Windows only), which no worker install reads or writes. */
 export const onDriveC = (p: string, platform: string = process.platform): boolean => platform === 'win32' && /^c:/i.test(path.win32.resolve(p));
 
-/** The fixtures folder of a worker root, when this computer offers it: the folder exists and is not on C:. */
-export function offeredDir(root: string | undefined): string | undefined {
+/**
+ * The fixtures folder of a worker root, when this computer offers it: the folder exists and is not on C:. Async (w6486):
+ * BEAST's daemon spent 55.8 s in the synchronous realpath here on 2026-11-27, with its event loop held. Its errors are
+ * the synchronous version's: a missing folder offers nothing, any other stat or realpath error rejects.
+ */
+export async function offeredDir(root: string | undefined): Promise<string | undefined> {
   if (!root) return undefined;
   const dir = fixturesDir(root);
-  if (onDriveC(dir) || !fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return undefined;
-  // a junction or link from the install folder into C: is C: too
-  return onDriveC(fs.realpathSync.native(dir)) ? undefined : dir;
+  if (onDriveC(dir)) return undefined;
+  // as statSync's throwIfNoEntry: false: a missing folder is no folder; any other error throws
+  const st = await fs.promises.stat(dir).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === 'ENOENT') return undefined;
+    throw e;
+  });
+  if (!st?.isDirectory()) return undefined;
+  // a junction or link from the install folder into C: is C: too (fs.promises.realpath is the native realpath)
+  return onDriveC(await fs.promises.realpath(dir)) ? undefined : dir;
 }
 
 /** Hashes by (name, size, mtime), so a listing only reads a file that is new or changed. */

@@ -242,13 +242,62 @@ test('machine/labFixtures: drive C: is never read, and a root with no fixtures f
   assert.equal(onDriveC('V:\\ffw\\nightly-history\\fixtures', 'win32'), false);
   assert.equal(onDriveC('C:\\x', 'linux'), false, 'a drive letter means nothing off Windows');
   if (process.platform === 'win32') {
-    assert.equal(offeredDir('C:\\ff-worker-that-does-not-exist'), undefined);
+    assert.equal(await offeredDir('C:\\ff-worker-that-does-not-exist'), undefined);
   }
   const bare = tmp(t, 'w3939-bare-');
-  assert.equal(offeredDir(bare), undefined);
-  assert.equal(offeredDir(undefined), undefined);
+  assert.equal(await offeredDir(bare), undefined);
+  assert.equal(await offeredDir(undefined), undefined);
   fs.mkdirSync(fixturesDir(bare), { recursive: true });
-  if (!onDriveC(bare)) assert.equal(offeredDir(bare), fixturesDir(bare));
+  if (!onDriveC(bare)) assert.equal(await offeredDir(bare), fixturesDir(bare));
+});
+
+/** offeredDir as it was before w6486: synchronous, on the daemon's event loop. */
+function offeredDirSync(root: string | undefined): string | undefined {
+  if (!root) return undefined;
+  const dir = fixturesDir(root);
+  if (onDriveC(dir) || !fs.statSync(dir, { throwIfNoEntry: false })?.isDirectory()) return undefined;
+  return onDriveC(fs.realpathSync.native(dir)) ? undefined : dir;
+}
+
+test('w6486: offeredDir, now off the event loop, offers the same folder and fails the same way as the synchronous one', async (t) => {
+  const same = async (root: string | undefined, what: string): Promise<{ dir?: string; code?: string }> => {
+    let want: { dir?: string; code?: string };
+    try {
+      want = { dir: offeredDirSync(root) };
+    } catch (e) {
+      want = { code: (e as NodeJS.ErrnoException).code ?? (e as Error).name };
+    }
+    const got: { dir?: string; code?: string } = await offeredDir(root).then(
+      (dir) => ({ dir }),
+      (e: NodeJS.ErrnoException) => ({ code: e.code ?? e.name }),
+    );
+    assert.deepEqual(got, want, what);
+    return got;
+  };
+  await same(undefined, 'no worker root');
+  const root = tmp(t, 'w6486-root-');
+  assert.equal((await same(root, 'no fixtures folder')).dir, undefined);
+  fs.mkdirSync(path.join(root, 'nightly-history'), { recursive: true });
+  fs.writeFileSync(fixturesDir(root), 'a file, not a folder');
+  assert.equal((await same(root, 'a file where the folder goes')).dir, undefined);
+  fs.rmSync(fixturesDir(root));
+  fs.mkdirSync(fixturesDir(root));
+  if (!onDriveC(root)) assert.equal((await same(root, 'the folder')).dir, fixturesDir(root));
+  // A link (a junction on Windows) to a folder off C: is followed and offered under the root's own path, as before.
+  const elsewhere = tmp(t, 'w6486-elsewhere-');
+  const linked = tmp(t, 'w6486-linked-');
+  fs.mkdirSync(path.join(linked, 'nightly-history'), { recursive: true });
+  fs.symlinkSync(elsewhere, fixturesDir(linked), 'junction');
+  if (!onDriveC(elsewhere)) assert.equal((await same(linked, 'a link to a folder elsewhere')).dir, fixturesDir(linked));
+  // A link to nowhere: stat follows it to nothing, so nothing is offered.
+  const dangling = tmp(t, 'w6486-dangling-');
+  fs.mkdirSync(path.join(dangling, 'nightly-history'), { recursive: true });
+  fs.mkdirSync(path.join(dangling, 'gone'));
+  fs.symlinkSync(path.join(dangling, 'gone'), fixturesDir(dangling), 'junction');
+  fs.rmdirSync(path.join(dangling, 'gone'));
+  assert.equal((await same(dangling, 'a link to nowhere')).dir, undefined);
+  // An error other than a missing folder throws in both (a NUL in the path: an invalid argument).
+  assert.ok((await same(`${root}\0x`, 'a path stat refuses')).code, 'it fails, as the synchronous one threw');
 });
 
 test('fetch_lab_fixture: the worker tool takes a sha256 and a name, never a path', () => {
