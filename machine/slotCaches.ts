@@ -495,39 +495,88 @@ export function sharedLockBlockers(
 }
 
 /**
+ * How long after a daemon write or clone ends its events still count as its own (w6274). FSEvents on macOS delivers them
+ * late: on m5 the broker's slot.json write was reported 28 ms after the install ended, a clone's reads of the seed 33 ms
+ * after it. 2 s covers that with room; a worker's write inside the window goes unlogged, which warn-only can afford.
+ */
+export const DAEMON_GRACE_MS = 2_000;
+/** An event on an entry whose mtime and ctime are both older than this is no write (a clone's read, an atime). */
+export const STALE_MS = 10_000;
+/**
+ * Random temporary names (uv's `cache/uv/builds-v0/.tmpAbC123`, Rust's tempfile crate): a new name each run would defeat
+ * the per-name hourly dedup, so they share one key per folder.
+ */
+export const RANDOM_TMP = /^\.tmp[A-Za-z0-9_-]{4,}$/;
+
+export interface SharedWatchOptions {
+  /** A write now is the daemon's own (a merge-back, an install, a clone). */
+  daemonBusy?: () => boolean;
+  /** When the daemon's last write in these folders ended (ms); events within graceMs of it are its own. */
+  lastDaemonWrite?: () => number;
+  graceMs?: number;
+  now?: () => number;
+}
+
+/**
+ * The watch's decision for one event: the entry `name` in `dir` (a watched folder below `top`) changed. Logs it unless
+ * it is the daemon's (busy, or within the grace after its last write), a name the daemon owns, an entry whose mtime and
+ * ctime both predate the event by STALE_MS, or a key already logged this hour. Exported for its tests.
+ */
+export function sharedEventHandler(
+  log: (l: string) => void,
+  o: SharedWatchOptions = {},
+): (dir: string, top: string, name: string) => void {
+  const now = o.now ?? Date.now;
+  const grace = o.graceMs ?? DAEMON_GRACE_MS;
+  const said = new Map<string, number>();
+  return (dir, top, n) => {
+    if (o.daemonBusy?.()) return;
+    const t = now();
+    if (o.lastDaemonWrite && t - o.lastDaemonWrite() < grace) return;
+    if (
+      n === SLOTS_CHILD ||
+      n.startsWith(".ff-") ||
+      n.endsWith(".tmp") ||
+      n.endsWith(".lock") ||
+      n === "pool.lock"
+    )
+      return;
+    const file = path.join(dir, n);
+    if (n) {
+      try {
+        const st = fs.lstatSync(file);
+        if (Math.max(st.mtimeMs, st.ctimeMs) < t - STALE_MS) return;
+      } catch {
+        // gone: a delete counts
+      }
+    }
+    const grouped = RANDOM_TMP.test(n);
+    const key = grouped ? `${dir}/.tmp*` : `${top}/${n}`;
+    if ((said.get(key) ?? -Infinity) > t - 3600_000) return;
+    said.set(key, t);
+    log(
+      `shared lock (warn): ${file} changed and the daemon did not write it${grouped ? ` (random .tmp names in ${dir} make one line an hour)` : ""}; a worker's write there is refused once shared_lock is on (w5615)`,
+    );
+  };
+}
+
+/**
  * Watch the locked folders ("warn", or "on" held off) and log each write the daemon did not make, at most one line per
- * folder and top entry per hour. Not recursive (w5764's lesson: an inotify watch per folder): each folder and its first level.
- * `daemonBusy` says a write now is the daemon's own (a merge-back, an install).
+ * folder and top entry per hour (sharedEventHandler). Not recursive (w5764's lesson: an inotify watch per folder): each
+ * folder and its first level.
  */
 export function watchShared(
   folders: string[],
   log: (l: string) => void,
-  o: { daemonBusy?: () => boolean; now?: () => number } = {},
+  o: SharedWatchOptions = {},
 ): () => void {
-  const now = o.now ?? Date.now;
-  const said = new Map<string, number>();
+  const on = sharedEventHandler(log, o);
   const ws: fs.FSWatcher[] = [];
   const watchOne = (dir: string, top: string) => {
     try {
-      const w = fs.watch(dir, { persistent: false }, (_ev, name) => {
-        if (o.daemonBusy?.()) return;
-        const n = typeof name === "string" ? name : "";
-        if (
-          n === SLOTS_CHILD ||
-          n.startsWith(".ff-") ||
-          n.endsWith(".tmp") ||
-          n.endsWith(".lock") ||
-          n === "pool.lock"
-        )
-          return;
-        const key = `${top}/${n}`;
-        const t = now();
-        if ((said.get(key) ?? -Infinity) > t - 3600_000) return;
-        said.set(key, t);
-        log(
-          `shared lock (warn): ${path.join(dir, n)} changed and the daemon did not write it; a worker's write there is refused once shared_lock is on (w5615)`,
-        );
-      });
+      const w = fs.watch(dir, { persistent: false }, (_ev, name) =>
+        on(dir, top, typeof name === "string" ? name : ""),
+      );
       w.on("error", () => undefined);
       ws.push(w);
     } catch {
