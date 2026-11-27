@@ -176,8 +176,7 @@ test('w6544: a long run with no whitespace before a match keeps the mark', () =>
 
 test('w6544: lastWordOf is the word before trailing whitespace, else empty', () => {
   assert.equal(lastWordOf('the published '), 'published');
-  assert.equal(lastWordOf('a  b 
-'), 'b');
+  assert.equal(lastWordOf('a  b \n'), 'b');
   assert.equal(lastWordOf('the published'), '');
   assert.equal(lastWordOf(''), '');
   assert.equal(lastWordOf('   '), '');
