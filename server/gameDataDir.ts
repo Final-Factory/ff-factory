@@ -127,7 +127,9 @@ export function excusedBuild(said: string, at: number, words: string): boolean {
   // Only build nouns between the match and "of the PR head": "and clients on the PR head" or "host joins from the PR build"
   // names a second player, so it keeps the mark (w6469).
   if (/^\s+(?:(?:game\s+)?(?:build|player|client|copy|version|binary)s?\s+){0,2}?(?:of|at|from|for|on)\s+(?:the\s+)?(?:PR|pull request)(?:'s)?\s+(?:head|build)\b/i.test(after)) return true;
-  if (!/\brelease\b/i.test(words)) return false;
+  // A Steam or a pre-1.0/0.50 release is that line's published build, never the build config: "the Steam release or
+  // debug build" and "a debug or pre-1.0 release" keep the mark (w6474).
+  if (!/\brelease\b/i.test(words) || /^steam|\b(?:pre-1\.0|0\.50)/i.test(words)) return false;
   return /\b(?:debug|development|dev)\b/i.test(words)
     || /\b(?:debug|development|dev)\s+(?:or|and|vs\.?|versus)\s+$/i.test(before)
     || /^\s+(?:or|and|vs\.?|versus)\s+(?:debug|development|dev)\b/i.test(after)

@@ -101,11 +101,16 @@ test('w6467: Steam and a short version keep the mark; the PR\'s own release or S
     // and "builds a release build" of pre-1.0 or 0.50 names that line's release.
     'the tester builds a release build of pre-1.0', 'Build a release player for the 0.50 line',
     // Each of these pins one guard: a non-noun word before the PR head, an installed-type word, a slash before "release".
-    'the Steam build and clients on the PR head', 'the published player of the PR head', 'the host runs the published release or debug build', 'the host runs dev / release build']) {
+    'the Steam build and clients on the PR head', 'the published player of the PR head', 'the host runs the published release or debug build', 'the host runs dev / release build',
+    // w6474's review of PR #1492 (measured CLEAR at 08a1ae2e): a Steam or a pre-1.0/0.50 release is no build config.
+    'debug and 0.50 release on the host', 'a debug or pre-1.0 release', 'the 0.50 release or debug build',
+    'the host runs the Steam release or debug build', 'the Steam dev release', "Steam's debug release"]) {
     assert.ok(otherPlayerIn(t, NEW), t);
   }
   for (const t of ['Build a release player of the PR head', 'the 0.50 release build at the PR head', 'join with the Steam game client of the PR build', 'a Steam lobby on 0.50',
-    'the release build for the PR\'s head', 'Build a release player and run the MP scenarios.', 'a debug or release build of the 0.50 line', 'a release or debug player of the 0.50 line']) {
+    'the release build for the PR\'s head', 'Build a release player and run the MP scenarios.', 'a debug or release build of the 0.50 line', 'a release or debug player of the 0.50 line',
+    'a debug or release build', 'a dev vs release build', 'release or development build of the PR head', 'the Steam build of the PR head',
+    'the pre-1.0 release branch']) {
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
 });
