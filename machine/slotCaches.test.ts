@@ -24,11 +24,13 @@ import {
   slotCacheDir,
   slotCacheEnv,
   watchShared,
+  inSharedLocked,
   sharedEventHandler,
   DAEMON_GRACE_MS,
   STALE_MS,
   type SharedLockSetting,
 } from "./slotCaches.ts";
+import { UvCachePruner } from "./sharedCaches.ts";
 
 /**
  * w5615: per-slot tool caches and the shared-cache lock (machine/slotCaches.ts). Real folders under a temp root; copyTree and
@@ -970,4 +972,63 @@ test("w6292 review: retryNow while a tick runs is kept: that tick makes one more
   assert.match(line!, /^slot caches: slot1: completed .*made uv;/);
   assert.deepEqual(missingSlotCaches(p.root, "slot1"), []);
   assert.equal(p.log.length, 2, "the failed pass, then the completing one");
+});
+
+// w6314: m5's hourly `uv cache prune` of the shared uv seed was logged as a worker's write (+34 ms into it, +44 ms after).
+test("a uv cache prune run through `around` is the daemon's write: its events during and just after are not logged; a worker's after the grace is", async (t) => {
+  const root = tmp(t);
+  const uvDir = path.join(root, "cache", "uv");
+  fs.mkdirSync(path.join(uvDir, "archive-v0"), { recursive: true });
+  // The daemon's sharedWrite, as machine/daemon.ts has it.
+  let busy = 0;
+  let doneAt = -Infinity;
+  const sharedWrite = async <T>(f: () => Promise<T>): Promise<T> => {
+    busy++;
+    try {
+      return await f();
+    } finally {
+      busy--;
+      doneAt = Date.now();
+    }
+  };
+  let clock = Date.now();
+  const lines: string[] = [];
+  const on = sharedEventHandler((l) => lines.push(l), { daemonBusy: () => busy > 0, lastDaemonWrite: () => doneAt, now: () => clock });
+  const gone = path.join(uvDir, "archive-v0", "aHHohnc-NRDz7QxD");
+  let seenBusy = false;
+  const pruner = new UvCachePruner({
+    dir: uvDir,
+    uv: () => "uv",
+    log: () => undefined,
+    around: (f) => sharedWrite(f),
+    run: async (_uv, args) => {
+      assert.deepEqual(args.slice(0, 2), ["cache", "prune"]);
+      seenBusy = busy > 0;
+      clock = Date.now();
+      on(path.join(uvDir, "archive-v0"), uvDir, path.basename(gone)); // a delete while it runs
+      return { out: "Removed 3 files (70.0MiB)" };
+    },
+  });
+  assert.ok(inSharedLocked(root, uvDir), "the shared uv seed is a shared-lock folder");
+  await pruner.maybe(false);
+  assert.ok(seenBusy, "the prune ran inside sharedWrite");
+  assert.equal(busy, 0);
+  clock = doneAt + 44; // FSEvents' late event after the prune's own line
+  on(path.join(uvDir, "archive-v0"), uvDir, "-2LDG6dWqxIVVpy0");
+  assert.deepEqual(lines, []);
+  clock = doneAt + DAEMON_GRACE_MS + 1; // a worker's delete after the grace still counts
+  on(path.join(uvDir, "archive-v0"), uvDir, "worker-removed");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /worker-removed changed and the daemon did not write it/);
+});
+
+test("inSharedLocked: the cache seeds, players, seed and tools and what is in them; not cache/slots, the medium uv cache or a look-alike", (t) => {
+  const root = tmp(t);
+  assert.ok(inSharedLocked(root, path.join(root, "players")));
+  assert.ok(inSharedLocked(root, path.join(root, "players", "slot2-0", "slot.json")));
+  assert.ok(inSharedLocked(root, path.join(root, "cache", "uv", "archive-v0", "x")));
+  assert.ok(inSharedLocked(root, path.join(root, "tools", "uv")));
+  assert.ok(!inSharedLocked(root, path.join(root, "cache", "slots", "slot1", "uv")));
+  assert.ok(!inSharedLocked(root, path.join(root, "players-old")));
+  assert.ok(!inSharedLocked(root, path.join(root, "tmp", "x")));
 });

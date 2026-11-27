@@ -593,6 +593,15 @@ export function sharedLockedFolders(root: string): string[] {
   ];
 }
 
+/** Whether `p` is one of the shared-lock folders or inside one (w6314: the daemon's clean-up there is its own write). */
+export function inSharedLocked(root: string, p: string): boolean {
+  const r = path.resolve(p);
+  return sharedLockedFolders(root).some((f) => {
+    const rel = path.relative(path.resolve(f), r);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  });
+}
+
 /** The log line for the setting at daemon start. */
 export function sharedLockLine(
   setting: SharedLockSetting,
