@@ -365,10 +365,16 @@ cloud-init (a NoCloud seed ISO from `cloud-localds`, read at the first boot only
 - the admin account `fffadmin`: sudo, key-only ssh, no password. Its keys are the host root's own key (for
   `fff-vm ssh`) and Lothsahn's keys from `/etc/fff-vm/admin_authorized_keys`.
 - a static address, a default route through the host's bridge address, and public resolvers.
-- `qemu-guest-agent`, `unattended-upgrades` and `nftables`, plus `linux-image-extra-virtual`. The cloud image's kernel
-  has no `i6300esb` module: it ships in `linux-modules-extra`, which the cloud image does not install *(sourced:
-  packages.ubuntu.com file lists for noble's linux-modules-6.8.0-101-generic and linux-modules-extra-6.8.0-101-generic,
-  and its cloud image manifest; resolute splits its kernel the same way, and CI checks the device is armed)*. `package_reboot_if_required` boots once into an upgraded kernel, so the module matches it.
+- `qemu-guest-agent`, `unattended-upgrades` and `nftables`, plus `linux-image-extra-virtual` on a noble guest only.
+  noble's cloud image kernel has no `i6300esb` module: it ships in `linux-modules-extra`, which the cloud image does
+  not install *(sourced: packages.ubuntu.com file lists for noble's linux-modules-6.8.0-101-generic and
+  linux-modules-extra-6.8.0-101-generic, and its cloud image manifest)*. resolute does not split it: `i6300esb.ko` is in
+  `linux-modules-<version>-generic`, which the 26.04 cloud image installs and `linux-image-virtual` follows *(sourced,
+  2026-11-27: the archive's resolute-updates Contents-amd64 for 7.0.0-43 and 7.0.0-44, and
+  ubuntu-26.04-server-cloudimg-amd64.manifest)*. On resolute `linux-image-extra-virtual` only added
+  `linux-image-generic`'s linux-firmware and microcode, 711 MB downloaded at the first boot before the guest agent
+  starts, and at 0.3 MB/s from the archive that outran install's 20 minute wait (w6402, CI run 45994673616). CI checks
+  the device is armed. `package_reboot_if_required` boots once into an upgraded kernel, so the module matches it.
 - the watchdog: `RuntimeWatchdogSec=30s` makes PID 1 pet `/dev/watchdog0` *(sourced: systemd-system.conf(5))*.
   `RebootWatchdogSec=10min` covers a hung shutdown. `fff-watchdog-arm.service` loads `i6300esb` with an explicit
   `modprobe` on every boot and re-executes PID 1 if the device appeared after it started. With `modules-load.d` alone
@@ -1232,7 +1238,8 @@ it rests on.
 - **A reload of the host's nftables** with `flush ruleset` drops the VM's table until the watch loads it again (at most
   a minute, alerted). During that minute libvirt's own NAT rules still keep the LAN from reaching the VM, but the VM
   could reach the LAN.
-- **The watchdog module** depends on `linux-modules-extra` following each new kernel (`linux-image-extra-virtual`). If
+- **The watchdog module** depends on each new kernel bringing it: on resolute in `linux-modules-<version>-generic`, on
+  noble in `linux-modules-extra` (`linux-image-extra-virtual`). If
   a kernel ever ships without it, `fff-watchdog-arm` reports `missing`, and the host's own hang detection still
   resets the VM.
 - **Prompt injection in standing agents** that read Discord text now runs on a host that also runs FFBox. An escape
