@@ -102,14 +102,16 @@ export function otherPlayerIn(said: string, commit: string, where = 'legacy_data
  * the mark, and legacy_data "none" is the way out.
  */
 export const INSTALLED_BUILD: readonly RegExp[] = [
-  /\bsteam(?:'s)?\s+(?:[\w.-]+\s+){0,3}?(?:builds?|players?|versions?|branch(?:es)?|install(?:ation)?s?|cop(?:y|ies)|releases?|games?)\b/i,
+  /\bsteam(?:['’]s)?[\s-]+(?:[\w.-]+\s+){0,3}?(?:builds?|players?|versions?|branch(?:es)?|install(?:ation)?s?|cop(?:y|ies)|releases?|games?)\b/i,
   /\b(?:installed|downloaded)\s+(?:from|via|through|on)\s+steam\b/i,
-  /\b(?:installed|published|public|released|release|shipped|live|retail)\s+(?:[\w.-]+\s+){0,2}?(?:build|player|version|copy|game)\b/i,
-  /\b(?:pre-1\.0|0\.50(?:\.\d+)*)\s+release\b(?!\s+(?:branch|line))/i,
+  /\b(?:installed|published|public|released|release|shipped|live|retail)\s+(?:[\w.-]+\s+){0,2}?(?:builds?|players?|versions?|cop(?:y|ies)|games?)\b/i,
+  /\b(?:pre-1\.0|0\.50(?:\.\d+)*)\s+releases?\b(?!\s+(?:branch|line))/i,
   // w6467 (w6463's review of PR #1487): "the client runs Steam 0.50" names Steam's build by a short version, no build word.
-  /\bsteam(?:'s)?\s+\(?\s*v?(?:pre-1\.0|0\.50(?:\.\d+)*)(?![\w-]|\.\d)/i,
+  // w6488's review of PR #1499: any separator after Steam, "Steam [0.50]", "Steam: 0.50", "Steam-pre-1.0", "Steam ver 0.50".
+  /\bsteam(?:['’]s)?(?:[\s(\[{:,-]+|\s+(?:ver(?:sion)?|on|at)\s+)v?(?:pre-1\.0|0\.50(?:\.\d+)*)(?![\w-]|\.\d)/i,
   // w6485 (497345e4's review of PR #1492): the version named before Steam, "0.50 from Steam", "the 0.50 Steam client".
-  /\b(?:pre-1\.0|v?0\.50(?:\.\d+)*)\s+(?:(?:from|on|via|through|in|over)\s+)?steam\b/i,
+  // and a build word, "the" or punctuation between: "0.50 build from Steam", "0.50 (from the Steam store)", "0.50-Steam".
+  /\b(?:pre-1\.0|v?0\.50(?:\.\d+)*)[\s(,-]+(?:(?:build|player|version|copy|client|game)s?\s+)?(?:(?:from|on|via|through|in|over|off)\s+)?(?:the\s+)?steam\b/i,
 ];
 
 /**
@@ -124,7 +126,7 @@ export function excusedBuild(said: string, at: number, words: string): boolean {
   const before = said.slice(0, at);
   // The word just before counts too: "the published release or debug build" matches from "release".
   if (/\b(?:installed|downloaded|published|public|released|shipped|live|retail)\b/i.test(`${/(\S+)\s+$/.exec(before)?.[1] ?? ''} ${words}`)) return false;
-  if (/\bsteam\b/i.test(words) && /(?:^|[^\w.-])v?(?:pre-1\.0|0\.50)(?![\w-])/i.test(words)) return false;
+  if (/\bsteam\b/i.test(words) && /(?<![\w.])v?(?:pre-1\.0|0\.50)(?!\w)/i.test(words)) return false;
   const after = said.slice(at + words.length);
   // Only build nouns between the match and "of the PR head": "and clients on the PR head" or "host joins from the PR build"
   // names a second player, so it keeps the mark (w6469).

@@ -127,3 +127,19 @@ test('w6485: plural Steam builds and a version named before Steam keep the mark;
     assert.equal(otherPlayerIn(t, NEW), undefined, t);
   }
 });
+
+// w6488's review of PR #1499 (measured lifting the mark at 03344c09).
+test('w6485: plurals of every build pattern, a word or punctuation around Steam and its version, and a curly apostrophe keep the mark', () => {
+  for (const t of ['the published builds', 'shipped players', 'the live copies', 'pre-1.0 releases', '0.50 releases',
+    '0.50 build from Steam', 'the 0.50 version on Steam', 'pre-1.0 from the Steam client', '0.50 from the Steam store', '0.50 off Steam',
+    '0.50 (from Steam)', '0.50, from Steam', '0.50-Steam',
+    'Steam [pre-1.0]', 'Steam [0.50]', 'Steam: 0.50', 'Steam, pre-1.0', 'Steam - 0.50', 'Steam-0.50', 'Steam-pre-1.0', 'Steam ver 0.50',
+    'Steam on pre-1.0', 'Steam at 0.50', 'the Steam-0.50 build of the PR head', 'the 0.50-Steam client of the PR head',
+    'Steam’s 0.50', 'Steam’s build']) {
+    assert.ok(otherPlayerIn(t, NEW), t);
+  }
+  for (const t of ['a Steam lobby on 0.50', 'the Steam builds of the PR head', 'Steam’s build of the PR head', 'join through a Steam lobby',
+    'the pre-1.0 release branch', 'a debug or release build', 'Build a release player of the PR head']) {
+    assert.equal(otherPlayerIn(t, NEW), undefined, t);
+  }
+});
