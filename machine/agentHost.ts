@@ -49,6 +49,8 @@ export const BEAT_MS = 3000;
 export const BEAT_STALE_MS = 30_000;
 /** How often each side reads the other's file. */
 const POLL_MS = 100;
+/** w6595: how long the daemon keeps a host's out.jsonl open between polls (it opens it again after that). */
+const TAIL_KEEP_OPEN_MS = 2000;
 /** A host given no message to deliver this long after it started closes (a daemon died between start and send). */
 const IDLE_START_MS = 2 * 60_000;
 /** After its agent process ended, how long a host waits for a message that would start it again before it closes. */
@@ -102,10 +104,36 @@ export class LineTail {
   private partial = Buffer.alloc(0);
   readonly file: string;
   private readonly onLine: (line: string) => void;
-  constructor(file: string, onLine: (line: string) => void, offset = 0) {
+  /** w6595: an open read handle kept between polls, and the timer that closes it (keepOpenMs after it was opened). */
+  private fd: number | undefined;
+  private closer: NodeJS.Timeout | undefined;
+  private readonly keepOpenMs: number;
+  /**
+   * `keepOpenMs` (w6595): keep the file open between polls for that long, then close it; the next poll opens it again.
+   * The daemon's tail of each host's out.jsonl polls every POLL_MS, and opening the file each time held its loop 7 to 11 s
+   * a minute with ~26 hosts on a busy disk (LothDesktop, 2026-11-27 22:57Z). 0 (the default): open and close every poll.
+   */
+  constructor(file: string, onLine: (line: string) => void, offset = 0, keepOpenMs = 0) {
     this.file = file;
     this.onLine = onLine;
     this.offset = offset;
+    this.keepOpenMs = keepOpenMs;
+  }
+
+  /** Polls under way (a line's handler may close the tail, or poll it again, while a poll reads). */
+  private depth = 0;
+  /** Handles let go of while a poll read them: closed once the outermost poll is done. */
+  private deferred: number[] = [];
+
+  /** Let go of the kept handle now (before its folder is removed); a later poll opens the file again. */
+  close() {
+    clearTimeout(this.closer);
+    this.closer = undefined;
+    const fd = this.fd;
+    this.fd = undefined;
+    if (fd === undefined) return;
+    if (this.depth > 0) this.deferred.push(fd);
+    else closeQuietly(fd);
   }
 
   /** How far whole lines have been read. */
@@ -115,9 +143,18 @@ export class LineTail {
 
   /** Read what was appended since the last call. */
   poll() {
-    let fd: number | undefined;
+    let fd = this.fd;
+    let own = false;
+    this.depth++;
     try {
-      fd = fs.openSync(this.file, 'r');
+      if (fd === undefined) {
+        fd = fs.openSync(this.file, 'r');
+        if (this.keepOpenMs > 0) {
+          this.fd = fd;
+          this.closer = setTimeout(() => this.close(), this.keepOpenMs);
+          this.closer.unref?.();
+        } else own = true;
+      }
       const size = fs.fstatSync(fd).size;
       while (this.offset < size) {
         const buf = Buffer.alloc(Math.min(size - this.offset, 8 * 1024 * 1024));
@@ -134,9 +171,20 @@ export class LineTail {
       }
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') console.log(new Date().toISOString(), `reading ${this.file}: ${(e as Error).message}`);
+      // A kept handle that failed is not kept: the next poll opens the file again.
+      if (fd !== undefined && fd === this.fd) this.close();
     } finally {
-      if (fd !== undefined) fs.closeSync(fd);
+      if (own && fd !== undefined) closeQuietly(fd);
+      if (--this.depth === 0) for (const d of this.deferred.splice(0)) closeQuietly(d);
     }
+  }
+}
+
+function closeQuietly(fd: number) {
+  try {
+    fs.closeSync(fd);
+  } catch {
+    // already closed
   }
 }
 
@@ -633,6 +681,7 @@ export class HostedSession implements SessionHandle {
   /** The daemon is going (a restart, an update): stop reading, leave the host running for the next daemon. */
   detach() {
     clearInterval(this.timer);
+    this.tail?.close();
     this.timer = undefined;
     this.saveOffsetNow();
   }
@@ -648,6 +697,7 @@ export class HostedSession implements SessionHandle {
   private start(first: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>): boolean {
     const f = this.files;
     this.offsetGen++;
+    this.tail?.close();
     try {
       fs.rmSync(f.dir, { recursive: true, force: true });
     } catch (e) {
@@ -684,6 +734,7 @@ export class HostedSession implements SessionHandle {
       this.running = false;
       this.liveNow = false;
       clearInterval(this.timer);
+      this.tail?.close();
       this.timer = undefined;
       Object.assign(this.info, { status: 'error', statusDetail: error });
       this.deps.log(`agent ${this.info.id}: ${error}`);
@@ -700,7 +751,8 @@ export class HostedSession implements SessionHandle {
 
   private follow(offset: number) {
     clearInterval(this.timer);
-    this.tail = new LineTail(this.files.out, (line) => this.onLine(line), offset);
+    this.tail?.close();
+    this.tail = new LineTail(this.files.out, (line) => this.onLine(line), offset, TAIL_KEEP_OPEN_MS);
     this.timer = setInterval(() => this.poll(), POLL_MS);
     this.timer.unref?.();
   }
@@ -1055,6 +1107,7 @@ export class HostedSession implements SessionHandle {
     this.running = false;
     this.liveNow = false;
     clearInterval(this.timer);
+    this.tail?.close();
     this.timer = undefined;
     if (why) {
       this.deps.log(`agent ${this.info.id}: ${why}`);
@@ -1076,6 +1129,7 @@ export class HostedSession implements SessionHandle {
   private teardown(waitExitMs: number): Promise<void> {
     if (this.stoppingNow) return this.stoppingNow;
     clearInterval(this.timer);
+    this.tail?.close();
     this.timer = undefined;
     const id = this.info.id;
     const pid = this.hostPid;
@@ -1163,6 +1217,14 @@ export function hostFolders(root: string): { sessionId: string; dir: string; rec
 export const readHostState = (dir: string) => readJson<Extract<HostMessage, { op: 'state' }>>(hostFiles(dir).state);
 /** When the agent host in `dir` started (ms, its host.json), or undefined (w3673: what an earlier host left is older). */
 export const hostStartedAt = (dir: string) => Date.parse(readJson<HostRecord>(hostFiles(dir).host)?.startedAt ?? '') || undefined;
+/** hostStartedAt off the loop (w6595). */
+export async function hostStartedAtAsync(dir: string): Promise<number | undefined> {
+  try {
+    return Date.parse((JSON.parse(await fs.promises.readFile(hostFiles(dir).host, 'utf8')) as HostRecord).startedAt ?? '') || undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** The worker's temp folder (<root>/tmp/ffa-<session>) from its env, or undefined. */
 export function workerTempDir(env: Record<string, string | undefined> | undefined): string | undefined {

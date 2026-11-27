@@ -45,7 +45,7 @@ import { longRunsRpcHandlers, longRunsSetting } from './longRuns.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
 import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFenceMode, readyShimDir, shimDirFor, shimQuarantineDir, unlinkShimBinLink, watchShimBin, retryShimWrite, type ShimModeGuard } from './pathFence.ts';
 import { isSlotRepo } from './slotRepo.ts';
-import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
+import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostStartedAtAsync, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState, restageModeOf } from './agentHost.ts';
 import { capsModeOf, jobHelper } from './workerCaps.ts';
 import { junctionRmSignalLine } from '../server/junctionRmWarn.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
@@ -64,7 +64,7 @@ import { describeCounted, type AgentCensus, type CensusAgent } from '../server/a
 import { batchUnityIn, holdParts, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
 import { liveRunGuardModeOf } from './liveRunGuard.ts';
 import { gitPackagesModeOf } from './gitPackages.ts';
-import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
+import { UnitySlots, editorInstancePid, editorInstancePidAsync, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
 import { CliScrubber, type CliScrubReport } from '../server/cliScrub.ts';
@@ -627,6 +627,8 @@ const HOME = os.homedir();
 /** A knob's later moves within this long amend its line in the conversation instead of adding one (a drag is one line). */
 const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
+/** w6595: how old a session's cached host start (hostSinceCached) may be before it is read again, off the loop. */
+const HOST_SINCE_MS = 20_000;
 /** w5615: how often the clone keeper looks for a sandbox whose caches to make, merge back or refresh. */
 const SLOT_CACHES_EVERY_MS = 10 * 60_000;
 /** w6393: how long a light folder's create waits for its cache clones before it answers: below the portal's 60 s for the create (server/machines.ts createLightFolder). */
@@ -865,6 +867,31 @@ export class Daemon {
   private readonly mcpScopes = new McpScopes();
   /** w5746: the machine's top-level Unity processes at the last McpScopes look (refreshMcpScopes); undefined: not read yet. */
   private mcpEditors?: { pid: number; project?: string }[];
+  /**
+   * w6595: when each session's current agent host started (host.json), for the leftovers sweep's wait-loop rule. The sweep
+   * asks once per process it looks at, and those reads of host.json held the loop 7 s on LothDesktop's busy disk
+   * (2026-11-27 23:00Z): a session's first ask reads it here, later ones answer from this and read it again off the loop
+   * when it is HOST_SINCE_MS old (a host started since then counts from the next sweep after that).
+   */
+  private hostSinces = new Map<string, { at: number; since: number | undefined; reading?: boolean }>();
+  private hostSinceCached(id: string): number | undefined {
+    const dir = path.join(this.hostsRoot, id);
+    const now = Date.now();
+    const c = this.hostSinces.get(id);
+    if (!c) {
+      const since = hostStartedAt(dir);
+      this.hostSinces.set(id, { at: now, since });
+      if (this.hostSinces.size > 2000) this.hostSinces.delete(this.hostSinces.keys().next().value!);
+      return since;
+    }
+    if (now - c.at >= HOST_SINCE_MS && !c.reading) {
+      c.reading = true;
+      void hostStartedAtAsync(dir).then((since) => this.hostSinces.set(id, { at: Date.now(), since }), () => (c.reading = false));
+    }
+    return c.since;
+  }
+  /** w6595: each sandbox's EditorInstance.json pid as refreshMcpScopes last read it off the loop, by project path. */
+  private mcpInstancePids = new Map<string, number | undefined>();
   /** Windows: the folder Git Bash maps /tmp to, never cleaned up and made again when missing (server/gitBashTmp.ts, w603). */
   private bashTmp?: string;
 
@@ -1096,7 +1123,7 @@ export class Daemon {
       wakeAt: (id) => this.wakes.get(id),
       // w3715: a stopped worker's detached bench script keeps the machine's bench lock; its far check-in must not keep it
       holdsTicket: (id) => cfg.root !== undefined && holdsOwnTicket(this.sweepTickets(cfg.root), id),
-      hostSince: (id) => (this.hosted && /^[\w-]+$/.test(id) ? hostStartedAt(path.join(this.hostsRoot, id)) : undefined),
+      hostSince: (id) => (this.hosted && /^[\w-]+$/.test(id) ? this.hostSinceCached(id) : undefined),
       liveSandboxes: () => new Set([...this.entries.values()].filter((e) => e.s.live && e.spec?.sandbox).map((e) => e.spec!.sandbox!)),
       ready: () => this.welcomed,
       slotRoots,
@@ -1956,7 +1983,9 @@ export class Daemon {
         return (e as NodeJS.ErrnoException).code === 'EPERM' ? pid : undefined;
       }
     };
-    const places = mcpPlaces(this.pool.list(), alive, editorInstancePid, this.mcpEditors);
+    // w6595: the pids refreshMcpScopes read off the loop (at most 5 s old); a sandbox not read yet is read here once.
+    const instancePid = (project: string) => (this.mcpInstancePids.has(project) ? this.mcpInstancePids.get(project) : editorInstancePid(project));
+    const places = mcpPlaces(this.pool.list(), alive, instancePid, this.mcpEditors);
     this.mcpScopes.sync(appDirOfConfig(this.cfg), places, Date.now(), (line) => log(line));
   }
 
@@ -1971,6 +2000,11 @@ export class Daemon {
       this.mcpEditors = undefined;
       log(`unity mcp: reading the processes: ${(e as Error).message}`);
     }
+    // w6595: each sandbox's Library/EditorInstance.json, read off the loop (read in syncMcpScopes, these held it 6.6 s on
+    // LothDesktop's busy disk, 2026-11-27 23:00Z).
+    const projects = this.pool.list().map((sb) => sb.path);
+    const pids = await Promise.all(projects.map((p) => editorInstancePidAsync(p)));
+    this.mcpInstancePids = new Map(projects.map((p, i) => [p, pids[i]]));
     this.syncMcpScopes();
   }
 
