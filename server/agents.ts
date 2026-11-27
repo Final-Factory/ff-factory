@@ -68,6 +68,7 @@ import { inMergeOnGreenPilot } from './mergeOnGreen.ts';
 import { inReadChainPilot, withReadChainMark } from './readChain.ts';
 import { tempSizeLedgerLine } from './tempSizeHook.ts';
 import { capLedgerLine } from '../machine/workerCaps.ts';
+import { junctionRmSignalLine } from './junctionRmWarn.ts';
 import { withTerseProse } from './terseProse.ts';
 import { WORKER_READ_RULES_TOOL, workerRuleText } from './workerRules.ts';
 import { activityLine, Waker } from './wake.ts';
@@ -1388,6 +1389,11 @@ export class Agents {
     // w3686: a worker's temp folder is over its threshold: one line in each open request it serves (the worker was told by its own hook).
     sessions.events.on('tempSize', (s: SessionHandle, arg?: unknown) => this.onWorkerTempSize(s, arg));
     sessions.events.on('workerCap', (s: SessionHandle, arg?: unknown) => this.onWorkerCap(s, arg));
+    // w6266: a Windows worker's junction rm warning, one line in the portal's log for the warn week's count (portal_logs).
+    sessions.events.on('junctionRm', (s: SessionHandle, arg?: unknown) => {
+      const line = junctionRmSignalLine(arg);
+      if (line) console.log(`${line} machine=${s.info.machineId ?? '-'}`);
+    });
   }
 
   /**

@@ -7,7 +7,9 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { firstLink, junctionRmLogLine, junctionRmMessage, junctionRmScan, rmRecursiveTargets } from './junctionRmWarn.ts';
+import { firstLink, junctionRmLogLine, junctionRmMessage, junctionRmScan, junctionRmSignalLine, rmRecursiveTargets } from './junctionRmWarn.ts';
+import { buildOptions, type LaunchSpec } from './launch.ts';
+import { Daemon, type Probes } from '../machine/daemon.ts';
 import { sandboxGuard } from './guard.ts';
 
 const win = process.platform === 'win32';
@@ -101,4 +103,58 @@ test('w6266: a refusal wins over the warning, and the warning is off where it is
   assert.equal(lines.length, 0);
   const off = sandboxGuard({ sandboxId: 'sb1', sandboxPath: 'C:/ffsb/sb1', protectedPaths: [], prBase: () => undefined, evidence: () => undefined, platform: 'linux', log: (l) => lines.push(l) });
   assert.deepEqual(await off(pre('rm -rf x', 'C:/ffsb/sb1') as never, 'x', { signal: new AbortController().signal }), {});
+});
+
+test('w6266: the warning line crosses as a junctionRm signal only when it is one, one line, capped', () => {
+  const line = 'junction rm warn (w6266, warn): s1 hit target="V:\\t" link="V:\\t\\j" lstatLink=false';
+  assert.equal(junctionRmSignalLine({ line }), line);
+  assert.equal(junctionRmSignalLine({ line: `${line}\nforged` }), `${line} forged`);
+  assert.equal(junctionRmSignalLine({ line: `${line}${'x'.repeat(5000)}` })!.length, 4000);
+  for (const bad of [undefined, null, 'x', { line: 7 }, { line: 'something else' }]) assert.equal(junctionRmSignalLine(bad), undefined);
+});
+
+test('w6266: the daemon keeps a junctionRm signal in daemon.log and forwards it to the portal', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w6266-daemon-'));
+  const probes = {
+    stats: async () => ({}),
+    usage: async () => ({ account: { email: 'someone@example.com', plan: 'Claude Max' }, reply: { subscription_type: 'max', rate_limits_available: false } }),
+  } as unknown as Probes;
+  const d = new Daemon({ portalUrl: 'http://127.0.0.1:1', id: 'mx', token: 't', repoPath: root, appDir: root, tempDir: path.join(root, 'tmp'), maxEventsFile: null }, () => {
+    throw new Error('no sessions here');
+  }, probes);
+  const inside = d as unknown as { events: import('node:events').EventEmitter; out: (m: unknown) => void };
+  const sent: unknown[] = [];
+  inside.out = (m) => sent.push(m);
+  const logged: string[] = [];
+  const realLog = console.log;
+  console.log = (...a: unknown[]) => void logged.push(a.map(String).join(' '));
+  t.after(() => {
+    console.log = realLog;
+    d.shutdown();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const line = 'junction rm warn (w6266, warn): sess-1 hit target="V:\\t" link="V:\\t\\j" lstatLink=false';
+  inside.events.emit('junctionRm', { info: { id: 'sess-1' } }, { line });
+  inside.events.emit('junctionRm', { info: { id: 'sess-1' } }, { line: 'not a warning' });
+  console.log = realLog;
+  assert.equal(logged.filter((l) => l.includes('junction rm warn')).length, 1, logged.join('\n'));
+  assert.ok(logged.some((l) => l.endsWith(line)));
+  assert.ok(!logged.some((l) => l.includes('not a warning')));
+  assert.deepEqual(sent.filter((m) => (m as { name?: string }).name === 'junctionRm')[0], { type: 'signal', name: 'junctionRm', sessionId: 'sess-1', arg: { line } });
+});
+
+test('w6266: the options a worker runs with send the guard\'s line to the sink the host gives, not to host.log', { skip: !win && 'mklink /J is Windows only' }, async () => {
+  const t = junctionTree();
+  const lines: string[] = [];
+  try {
+    const spec = { cwd: t.root, settingSources: ['user'], append: '', strictMcp: true, env: { CLAUDE_CODE_OAUTH_TOKEN: 'x' }, guard: { id: 'sb1', ownPath: t.root, protectedPaths: [] } } as unknown as LaunchSpec;
+    const o = buildOptions(spec, {}, process.env, undefined, (l) => lines.push(l));
+    const hook = o.hooks!.PreToolUse![0].hooks[0];
+    const r = (await hook(pre('rm -rf tree', t.root) as never, 'x', { signal: new AbortController().signal })) as Out;
+    assert.match(r.hookSpecificOutput?.additionalContext ?? '', /rd \/s \/q/);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /^junction rm warn \(w6266, warn\): .* hit target=/);
+  } finally {
+    t.done();
+  }
 });

@@ -179,6 +179,16 @@ export function junctionRmMessage(found: LinkFound[]): string {
   );
 }
 
+/**
+ * The line a 'junctionRm' signal carries (arg { line }), or undefined when it is not one: it crossed a machine link, so it is
+ * checked, kept to one line and capped.
+ */
+export function junctionRmSignalLine(arg: unknown): string | undefined {
+  const line = arg && typeof arg === 'object' ? (arg as { line?: unknown }).line : undefined;
+  if (typeof line !== 'string' || !line.startsWith('junction rm warn (w6266, warn): ')) return undefined;
+  return line.replace(/[\r\n]+/g, ' ').slice(0, 4000);
+}
+
 /** The one log line per command, for counting hits and likely false positives (`lstatLink=true`) over the warn week. */
 export function junctionRmLogLine(session: string | undefined, r: JunctionRmResult): string | undefined {
   if (!r.found.length && !r.unfinished.length) return undefined;

@@ -42,6 +42,7 @@ import { enforcedShimDir, guardOldShimBin, guardShimModes, pathFenceLine, pathFe
 import { isSlotRepo } from './slotRepo.ts';
 import { HANG_WATCH, HOST_PROTOCOL, HostedSession, hostFolders, hostStartedAt, hostLook, hostNodeArgs, hostPlace, hostsDir, hostsWithPathDir, hostsWithoutTranscripts, pidAlive, readHostState } from './agentHost.ts';
 import { capsModeOf } from './workerCaps.ts';
+import { junctionRmSignalLine } from '../server/junctionRmWarn.ts';
 import { SelfUpdater, readJson as readJsonFile, type PublishedOrigin } from './selfUpdate.ts';
 import { installSshOf } from './installSsh.ts';
 import { PortalPin, hostOf, onPortalRedirect, pinnedHosts } from './portalPin.ts';
@@ -1278,8 +1279,11 @@ export class Daemon {
       });
     }
     if (cfg.maxSessions !== undefined) log(`daemon.json maxSessions (${cfg.maxSessions}) is obsolete (w536): workers run in sandboxes only, and the portal sends this machine's agent cap`);
-    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap'] as SignalName[]) {
+    for (const name of ['turnEnd', 'permission', 'result', 'ended', 'rateLimit', 'tempSize', 'workerCap', 'junctionRm'] as SignalName[]) {
       this.events.on(name, (s: SessionHandle, arg?: unknown, meta?: { compaction?: CompactionTrigger }) => {
+        // w6266: the junction rm warning's line is kept in daemon.log (the host's own log goes with its folder).
+        const jl = name === 'junctionRm' ? junctionRmSignalLine(arg) : undefined;
+        if (jl) log(jl);
         this.out({ type: 'signal', name, sessionId: s.info.id, arg: name === 'permission' ? undefined : arg, ...(meta?.compaction ? { meta: { compaction: meta.compaction } } : {}) });
         this.awake();
       });
@@ -4760,7 +4764,9 @@ export class Daemon {
         : this.makeSession({ ...info, pendingPermissions: [] }, this.sink(), () => {
             const spec = holder.e!.spec!;
             const sandbox = spec.sandbox;
-            return buildOptions(this.runSpec(info, spec), this.handlers(info.id), process.env, sandbox ? () => this.pool.editorUp(sandbox) : undefined);
+            return buildOptions(this.runSpec(info, spec), this.handlers(info.id), process.env, sandbox ? () => this.pool.editorUp(sandbox) : undefined, (line) =>
+              events.emit('junctionRm', holder.e!.s, { line }),
+            );
           }, events);
       e = { s, seq: lastSeq };
       holder.e = e;
