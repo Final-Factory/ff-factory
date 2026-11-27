@@ -1609,8 +1609,13 @@ export class Daemon {
   /** The released ffu slots' first step (w6044), its plan at `low` and its log line; `mid` names a step run apart from a pass. */
   private ffuFirstStep(low: boolean, guard: CleanupGuard, mid: string) {
     return {
-      plan: async () =>
-        planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+      plan: async () => {
+        const p = await planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low });
+        // w6524: what the low first step would take of the FFU runners' job folders, in warn mode, said where the log shows it.
+        const warned = (p.listed ?? []).filter((l) => l.why.startsWith('warn-only (runnerFirstMode'));
+        if (warned.length) log(`clean-up: ffu slots first${mid} (w6524): ${warned.length} runner job folder(s) listed, none removed: ${warned.slice(0, 4).map((l) => `${l.path} (${l.why.slice(0, 200)})`).join('; ')}`);
+        return p;
+      },
       report: (items: CleanupItem[], ms: number, run?: CleanupRun) =>
         log(
           `clean-up: ffu slots first${mid} (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
