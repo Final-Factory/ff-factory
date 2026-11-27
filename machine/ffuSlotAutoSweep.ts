@@ -7,9 +7,10 @@
  *
  * Now every slot report the daemon reads (FFU_REPORT_MS, `ffu-slot list --json`) that names a stale slot (stale: free, and
  * held by another session) is acted on by the staleOutput setting `ffuSlotSweep`:
- *   warn (the default, docs/worker-fence.md: warn-only first): log what a sweep would free, once per slot and holder;
- *   on: run `ffu-slot sweep` as its own process (the same rule, lock and rescue a worker's sweep runs: unpushed work is saved
+ *   on (the default since w6484's enforce step, after the warn-only #1500; lothsahn: "Turn it on everywhere: free stale
+ *       slots by themselves."): run `ffu-slot sweep` as its own process (the same rule, lock and rescue a worker's sweep runs: unpushed work is saved
  *       on a rescue branch first, the target stays warm), and log what it printed;
+ *   warn: log what a sweep would free, once per slot and holder, and free nothing;
  *   off: nothing.
  * Only holders that no longer run are freed (sweepSlots skips running ones when it has no session); a running holder's stale
  * slot is left to the next take. The sweep runs in a child process, so a failure is a log line and never stops the daemon; the portal's

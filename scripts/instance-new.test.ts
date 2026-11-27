@@ -129,7 +129,10 @@ test('startScript: the Lens Scout shape', () => {
   assert.ok(lines.includes('node server/index.ts >> "F:/ffw/atlas/portal.log" 2>&1 &'), s);
   assert.ok(!s.includes('exec node'), s);
   assert.ok(s.includes(PORTAL_PRIORITY_PS), s);
-  assert.ok(s.includes('FF_PORTAL_PID=$(cat "/proc/$portal/winpid") powershell.exe -NoProfile -NonInteractive -EncodedCommand'), s);
+  // w6542: the winpid is read again while it names no portal node.exe
+  assert.ok(lines.includes('  winpid=$(cat "/proc/$portal/winpid" 2>/dev/null)'), s);
+  assert.ok(s.includes('raised=$(FF_PORTAL_PID="${winpid:-0}" powershell.exe -NoProfile -NonInteractive -EncodedCommand "$enc" 2>/dev/null)'), s);
+  assert.ok(lines.includes('for try in 1 2 3 4 5; do'), s);
   assert.equal(lines.at(-2), 'wait $portal');
   assert.equal(msysPath(path.win32.join('C:', 'Program Files', 'nodejs')), '/c/Program Files/nodejs');
 });

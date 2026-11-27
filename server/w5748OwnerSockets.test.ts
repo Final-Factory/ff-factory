@@ -10,9 +10,10 @@ import { FF_LANDLOCK } from '../machine/writeLock.ts';
 
 const landlock = process.platform === 'linux' && spawnSync('python3', [FF_LANDLOCK, '--', 'true']).status === 0;
 
-test('w5748: the owner sockets are the session bus, the keyring folder and the ssh and gpg agents', () => {
+test('w5748: the owner sockets are the session bus, the systemd user manager (w6443), the keyring folder and the ssh and gpg agents', () => {
   assert.deepEqual(ownerSocketPaths({ runtimeDir: '/run/user/1000', env: { SSH_AUTH_SOCK: '/run/user/1000/gcr/ssh' } }), [
     '/run/user/1000/bus',
+    '/run/user/1000/systemd',
     '/run/user/1000/keyring',
     '/run/user/1000/gcr',
     '/run/user/1000/gnupg',

@@ -2204,6 +2204,10 @@ export interface CleanupSummary {
   phasesMs?: Record<string, number>;
   /** The whole pass, in ms. */
   passMs?: number;
+  /** When freeBytes was read (ISO): the end of the pass, re-read just before the notice (w6551). */
+  freeReadAt?: string;
+  /** The pass's interval in minutes, set when the pass ran longer than it (w6551). */
+  overranMinutes?: number;
 }
 
 export interface DrainStatus {

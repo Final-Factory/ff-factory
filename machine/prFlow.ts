@@ -22,6 +22,7 @@ import { awayLabelsOf, awayNote, failedNote, offlineLabels, settleJobs, type Leg
 import { noPrCi } from './ciPaths.ts';
 import { fontAtlasNoise, mayBeDynamicFont } from '../server/editorNoise.ts';
 import { STALE_EVIDENCE, evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceVerdict, findLocalPrEvidence, noScriptRefusal, updateLocalPlugin } from './evidenceGate.ts';
+import { isMainModule } from './isMain.ts';
 
 export interface Ran {
   code: number;
@@ -651,7 +652,7 @@ export function installPrShim(bin: string, node = process.execPath, nodeArgs = p
 }
 
 // Run when started directly (the ff-pr shim).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   try {
     process.exit(prMain(process.argv.slice(2), realPrDeps));
   } catch (e) {
