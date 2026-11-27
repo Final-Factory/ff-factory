@@ -1511,23 +1511,33 @@ It is for your part of the work, not an answer to another worker's question.`;
     // requests it holds.
     const asker = r.worker;
     const holds = (x: WorkItem) => !!asker && x.sessionIds.includes(asker);
-    // The w6248 review: sessionIds keeps every worker a request ever had, so its newest is its worker now only when it was sent
-    // or linked to it since the asker left it (moveOff's time, or the hand-back's); an earlier worker never is, and is never
-    // resumed on it (w2079). A worker with no link time counts only on a request not handed back (a placement after a
-    // hand-back always links its worker). With none since, a hand-off carries the answer (carried, below).
-    const leftAt = (x: WorkItem) => Math.max(Date.parse((asker && x.movedOff?.[asker]) || '') || 0, Date.parse(x.handedBack?.at ?? '') || 0);
-    const workerOf = (x: WorkItem): string | undefined => {
-      if (!asker || holds(x)) return asker;
+    // The w6248 and w6253 reviews: a request's newest worker other than the asker is on it now unless the request was handed
+    // back after that worker's link (a hand-back leaves it with nobody, and sessionIds keeps every worker it ever had): such an
+    // earlier worker is never resumed on it (w2079). A worker with no link time counts only when there is no hand-back (a
+    // placement after one always links its worker). A worker linked before the asker left still holds it (two on one
+    // request, w1049). The hand-off takes the answer only while it is live: nobody was sent or linked to the request since
+    // (an old hand-off, read by a worker placed after it, never takes one). Off the request with neither, the asker is not
+    // resumed (staleResume would refuse it): the person is told nobody is on it.
+    const at = (t: string | undefined) => Date.parse(t ?? '') || 0;
+    const hbAt = (x: WorkItem) => at(x.handedBack?.at);
+    const onNow = (x: WorkItem): string | undefined => {
       const now = latestWorker(x);
-      const link = now ? x.links?.[now]?.at : undefined;
-      const since = link ? (Date.parse(link) || 0) >= leftAt(x) : !x.handedBack;
-      return now && now !== asker && since ? now : asker;
+      if (!now || now === asker) return undefined;
+      const link = x.links?.[now]?.at;
+      return !x.handedBack || (link && at(link) >= hbAt(x)) ? now : undefined;
     };
+    // Someone on it since: a link after the hand-back, or a worker taken off after it (moveOff drops the link); the hand-back's
+    // own moveOff of its worker comes in the same breath, so that worker counts only a minute on.
+    const liveHandOff = (x: WorkItem) =>
+      !!x.handedBack &&
+      !Object.values(x.links ?? {}).some((l) => at(l.at) > hbAt(x)) &&
+      !Object.entries(x.movedOff ?? {}).some(([s, t]) => at(t) > hbAt(x) + (s === x.handedBack!.session ? 60_000 : 0));
+    const workerOf = (x: WorkItem): string | undefined => (!asker || holds(x) ? asker : onNow(x));
     const sid = workerOf(w);
     // w1812: the same question from the same worker on other requests is answered by this too: none of them waits on input
     // any more, and none is asked again (Ben, w1768: "i already answered this why are you asking me ... still").
     const share = questionShareKey(r.key);
-    const also = share && sid
+    const also = share && asker
       ? [...this.store.work.values()].filter((x) => x !== w && isOpen(x) && x.needsYou && !x.needsYou.answered && x.needsYou.worker === asker && questionShareKey(x.needsYou.key) === share)
       : [];
     for (const x of also) {
@@ -1536,7 +1546,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       this.store.putWork(x);
     }
     const both = also.length ? ` (the same question on ${also.map((x) => x.id).join(', ')}: answered there too)` : '';
-    const carried = (x: WorkItem) => !!asker && workerOf(x) === asker && !holds(x) && !!x.handedBack;
+    const carried = (x: WorkItem) => !!asker && !holds(x) && !onNow(x) && liveHandOff(x);
     const carry = (x: WorkItem): boolean => {
       const words = `${by.displayName} answered on ${w.id} "${clip(w.title, 100)}", in their own words: ${note}\n\nIt answers what worker ${asker} asked before ${x.id} was handed back: "${clip(r.question, 300)}". Carry on with it.`;
       return this.carryInHandBack(x, asker!, words, true);
@@ -1583,7 +1593,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     // its hand-off, which its next worker reads when it starts.
     if (inHandOff.includes(w) && carry(w)) return `answers the [needs you] question${both}: ${w.id} was handed back since worker ${asker} asked, so the answer goes with its hand-off to its next worker (nothing for you to pass on)${others()}`;
     const s = sid ? this.store.sessions.get(sid) : undefined;
-    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : ''}${others()}`;
+    if (!sid || !s) return `answers the [needs you] question${both}${sid ? ` (its worker ${sid} is gone: start the work with it)` : asker ? ` (worker ${asker} asked it but is off ${w.id} now, and nobody is on it: start the work with it)` : ''}${others()}`;
     if (BUSY.includes(s.status)) return `answers the [needs you] question${both}; its worker ${sid} is mid-turn: pass it on with message_agent${others()}`;
     const main = groups.get(sid) ?? [w];
     const cleared = main.map((x) => this.clearReportedGates(x, sid)).join('');
