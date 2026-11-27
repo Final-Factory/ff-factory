@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheDir, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, within, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheDir, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { makeSharedLockDirs } from './sharedLockPaths.ts';
 import { lockIn } from './lockIn.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
@@ -609,6 +609,8 @@ const LIVE_LINE_MERGE_MS = 5000;
 const STATS_MS = 15_000;
 /** w5615: how often the clone keeper looks for a sandbox whose caches to make, merge back or refresh. */
 const SLOT_CACHES_EVERY_MS = 10 * 60_000;
+/** w6393: how long a light folder's create waits for its cache clones before it answers: below the portal's 60 s for the create (server/machines.ts createLightFolder). */
+const LIGHT_CLONE_WAIT_MS = 45_000;
 /** How often the status reads the ffu slots again (w5912): a git status and a few stats per held slot, in a child process. */
 const FFU_REPORT_MS = 2 * 60_000;
 /** The link heartbeat (w4926): a ping every LINK_BEAT_MS; the portal is called silent after LINK_DEAD_MS with nothing from it. */
@@ -3898,9 +3900,10 @@ export class Daemon {
               // Idle: no live agent, no editor, and nothing else holding its tree: a unity-slot run, a batchmode Unity or a
               // night (switchHoldIn, as switch_branch refuses; review w6212 L4). One holds() read per tick; one that fails or
               // does not answer counts every sandbox busy (review w6281).
+              // w6393: the light agent folders too (agent1, ...): under "on" their workers get a slot folder as well.
               sandboxes: () =>
                 idleForRefresh(
-                  this.pool.list(),
+                  [...this.pool.list(), ...this.light.list().filter((s) => s.status !== 'deleting')],
                   () => this.slots.holds(),
                   (sb, holds) => this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) && !this.switchHoldIn(sb, holds),
                 ),
@@ -3914,6 +3917,23 @@ export class Daemon {
           : null;
     }
     return this.slotCachesMemo ?? undefined;
+  }
+
+  /**
+   * w6393: a light folder's cache clones, made before the portal starts its worker (which it does as soon as the create
+   * answers): a clone made at a later tick would find the worker's cold cache in the slot folder and keep it. Waited for up
+   * to LIGHT_CLONE_WAIT_MS; past that, or on a failure, the folder is answered made all the same and the tick goes on.
+   * ensure stops replacing folders 5 s before that answer (review w6394): a clone still copying then keeps what is there.
+   */
+  private async lightClones(id: string, text: string): Promise<string> {
+    const sc = this.slotCaches;
+    if (!sc) return text;
+    const line = await within(this.sharedWrite(() => sc.ensure(id, LIGHT_CLONE_WAIT_MS - 5_000), this.cacheSeeds()), LIGHT_CLONE_WAIT_MS, `the slot caches of ${id}`).catch((e: Error) => {
+      const l = `slot caches: ${id}: ${e.message} (w6393)`;
+      log(l);
+      return l;
+    });
+    return line ? `${text} ${line}` : text;
   }
 
   /**
@@ -5467,7 +5487,7 @@ export class Daemon {
         if (isLightId(msg.sandbox) && (msg.op === 'create' || msg.op === 'delete' || msg.op === 'release' || msg.op === 'log')) {
           const live = msg.op === 'create' || msg.op === 'log' ? 0 : this.liveIn(msg.sandbox);
           if (live) reply(Promise.reject(new Error(`${live} agent(s) still run in light folder ${msg.sandbox}; stop them first`)));
-          else if (msg.op === 'create') reply(Promise.resolve().then(() => this.light.create(msg.sandbox)));
+          else if (msg.op === 'create') reply(Promise.resolve().then(() => this.light.create(msg.sandbox)).then((text) => this.lightClones(msg.sandbox, text)));
           else if (msg.op === 'delete') reply(this.light.remove(msg.sandbox, msg.force === true));
           else if (msg.op === 'log') reply(Promise.resolve(`light folder ${msg.sandbox} has no editor, so no editor log`));
           else reply(Promise.resolve(`light folder ${msg.sandbox} released (it stays on disk until it is deleted)`));
