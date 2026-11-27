@@ -150,6 +150,8 @@ export interface LinkUpdateFlags {
   sharedLock?: 'off' | 'warn' | 'on';
   /** The ffu CI runners' scheduled tasks and listeners at Normal priority, off, warn or enforce (w6163, machine/runnerPriority.ts), Windows only: daemon.json `runnerPriority`; unset: carried. A daemon that predates it ignores it. */
   runnerPriority?: 'off' | 'warn' | 'enforce';
+  /** What an idle agent adopted across a sharedLock switch gets, warn or on (w6305, w6287), any OS: daemon.json `hostRestage`; unset: carried. A daemon that predates it ignores it. */
+  hostRestage?: 'warn' | 'on';
 }
 
 /**
