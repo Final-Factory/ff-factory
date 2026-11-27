@@ -117,6 +117,16 @@ export const INSTALLED_BUILD: readonly RegExp[] = [
   /\b(?:pre-1\.0|v?0\.50(?:\.\d+)*)\W+(?:(?:build|player|version|copy|client|game)s?\W+)?(?:(?:from|on|via|through|in|over|off)\W+)?(?:the\W+)?steam\b/i,
 ];
 
+/** The last word of text when text ends in whitespace, else '' (a backwards scan: /(\S+)\s+$/ is quadratic on a long run). */
+export const lastWordOf = (text: string): string => {
+  let end = text.length;
+  while (end > 0 && /\s/.test(text[end - 1])) end--;
+  if (end === text.length) return '';
+  let start = end;
+  while (start > 0 && !/\s/.test(text[start - 1])) start--;
+  return text.slice(start, end);
+};
+
 /**
  * w6467 (w6463's review of PR #1487): a match is no other player when it is the PR's own build ("a release player of the PR
  * head", "the Steam game client of the PR build": at most two build nouns, then of/at/from/for/on the PR head or build), or
@@ -128,7 +138,7 @@ export function excusedBuild(said: string, at: number, words: string): boolean {
   // version ("Steam 0.50"): both name a build no commit is, whatever follows.
   const before = said.slice(0, at);
   // The word just before counts too: "the published release or debug build" matches from "release".
-  if (/\b(?:installed|downloaded|published|public|released|shipped|live|retail)\b/i.test(`${/(\S+)\s+$/.exec(before)?.[1] ?? ''} ${words}`)) return false;
+  if (/\b(?:installed|downloaded|published|public|released|shipped|live|retail)\b/i.test(`${lastWordOf(before)} ${words}`)) return false;
   if (/\bsteam\b/i.test(words) && /(?<![\w.])v?(?:pre-1\.0|0\.50)(?!\w)/i.test(words)) return false;
   const after = said.slice(at + words.length);
   // Only build nouns between the match and "of the PR head": "and clients on the PR head" or "host joins from the PR build"
