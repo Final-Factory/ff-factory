@@ -4544,6 +4544,18 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
       // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
       if (w.links) t.links = { ...w.links, ...t.links };
+      // w6271 (the w6269 review): a worker merged onto a request handed back since its own link joins t now, after that
+      // hand-back, or answerNeedsYou takes it for gone and an answer on t goes only into the old hand-off. Its link moves to
+      // just after the hand-back, not to now, so a worker placed on t after the hand-back stays the newest (w1696).
+      const hbAt = Date.parse(t.handedBack?.at ?? '') || 0;
+      if (hbAt) {
+        const after = new Date(hbAt + 1).toISOString();
+        for (const sid of w.sessionIds) {
+          if (t.links?.[sid] && t.links[sid] !== w.links?.[sid]) continue; // t's own link for it stands
+          const own = Date.parse(t.links?.[sid]?.at ?? '') || 0;
+          if (own <= hbAt) t.links = { ...t.links, [sid]: { ...(t.links?.[sid] ?? { how: 'sent' as const }), at: after } };
+        }
+      }
       this.stamp(t, `merged ${w.id} from ${names(w.requesters)}: ${note}`);
       this.store.putWork(t);
       w.mergedInto = t.id;
