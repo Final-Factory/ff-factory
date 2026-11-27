@@ -93,7 +93,7 @@ const ROUTE =
   'lost communication with the server", or a step that ended with exit code 143 and "The runner has received a shutdown signal" ' +
   'and no failed test, or (with no step that failed) a step that never finished, a missing log (404), or its ' +
   'runner\'s machine disconnecting from the portal within a minute of the job\'s end; or, once (attempt 1), a step that failed because the runner ran out of memory, disk, ' +
-  'page file or commit quota (os error 1453, 1455, 112, 28), or a process SIGKILLed ("Killed", exit code 137) while the ' +
+  'page file or commit quota (os error 1453, 1455, 112, 28, or Rust\'s "memory allocation of N bytes failed" abort, exit 0xC0000409, with any failed test inside the binary that aborted), or a process SIGKILLed ("Killed", exit code 137) while the ' +
   'job\'s runner-health step shows swap full or available memory under 5 % of RAM.';
 const LOST = /self-hosted runner lost communication with the server/i;
 
@@ -104,7 +104,7 @@ const LOST = /self-hosted runner lost communication with the server/i;
  */
 export const RESOURCE_FAULT =
   /\(os error (?:1453|1455|112|28)\)|Insufficient quota to complete the requested service|paging file is too small|LNK1171.*\b1455\b|No space left on device|not enough space on the disk|\bout of memory\b|memory allocation of \d+ bytes failed/i;
-/** w3836: a real failure in the same log keeps the rerun refused: a rustc error code, a failed test, a panic. */
+/** w3836: a real failure in the same log keeps the rerun refused: a rustc error code, a failed test, a panic (w6409: outside a binary that ran out of memory). */
 export const REAL_FAILURE = /error\[E\d{4}\]|test result: FAILED|^\s*failures:\s*$|panicked at/im;
 // eslint-disable-next-line no-control-regex
 const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
@@ -112,8 +112,29 @@ const ANSI = /\x1b\[[0-9;?]*[A-Za-z]/g;
 /** w3836: the out-of-resource line of a job's log, when that and no real failure is why it failed. Exported for tests. */
 export function resourceFault(log: string): string | undefined {
   const lines = log.replace(ANSI, '').split(/\r?\n/);
-  if (lines.some((l) => REAL_FAILURE.test(l))) return undefined;
+  if (lines.some((l) => RUSTC_ERROR.test(l))) return undefined;
+  if (segments(lines).some((seg) => seg.some((l) => REAL_FAILURE.test(l)) && !seg.some((l) => ALLOC_FAULT.test(l)))) return undefined;
   return lines.find((l) => RESOURCE_FAULT.test(l))?.replace(/^\S+Z\s+/, '').trim().slice(0, 240);
+}
+
+/** w6409: a rustc error code refuses wherever it is; a failed test only outside a binary that itself ran out of memory. */
+const RUSTC_ERROR = /error\[E\d{4}\]/;
+/**
+ * w6409: a test binary that ran out of commit memory: Rust's allocation abort ("memory allocation of N bytes failed", exit
+ * 0xC0000409 = 3221226505 on Windows) or the page file refusing it (os error 1455). ffu run 46000116814 (PR #1251, BEAST,
+ * 2026-11-27): ffu-server's directory test got 1455 and the abort, so its test failed with "replica 0 did not start" and a
+ * panic; two other binaries aborted outright. A failure in a binary's own output beside one of these lines is that fault's.
+ */
+const ALLOC_FAULT = /memory allocation of \d+ bytes failed|\(os error 1455\)|paging file is too small/i;
+/** w6409: cargo test prints "running N tests" at each test binary's start; the log splits into one segment per binary. */
+const BINARY_START = /^(?:\S+Z\s+)?\s*running \d+ tests?\s*$/;
+function segments(lines: string[]): string[][] {
+  const out: string[][] = [[]];
+  for (const l of lines) {
+    if (BINARY_START.test(l)) out.push([]);
+    out[out.length - 1]!.push(l);
+  }
+  return out;
 }
 
 /** w6140: a SIGKILLed process: bash's job report ("<script>: line 51: 344007 Killed"), exit 137, or cargo's signal 9, or Python subprocess's negative return code (ffu's run_tests_parallel.py: "(exit -9)", w6229; only -9). */
