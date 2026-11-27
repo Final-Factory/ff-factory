@@ -63,6 +63,7 @@ import { inspectProcs, type ProcFacts } from './unityReaper.ts';
 import { askDaemon, orDaemon, procsMailbox, type ProcsAsk, type ProcsWho } from './procsBroker.ts';
 import { readShellGroups, shellGroupsDir, withShellGroups, type ShellGroup } from './shellGroups.ts';
 import { isLink } from '../server/fsLink.ts';
+import { isMainModule } from './isMain.ts';
 
 const MIN = 60_000;
 
@@ -1928,7 +1929,7 @@ export function installLeftoversShim(bin: string, node = process.execPath, nodeA
 }
 
 // Run when started directly (the ff-leftovers shim).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   leftoversMain(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (e) => {

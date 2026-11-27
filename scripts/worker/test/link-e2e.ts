@@ -31,6 +31,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { layoutOf } from '../worker.ts';
+import { linuxCodeFolder } from '../linuxCode.ts';
 
 const [scratchArg, portArg = '8795'] = process.argv.slice(2);
 if (!scratchArg) throw new Error('usage: node scripts/worker/test/link-e2e.ts <scratch folder> [port]');
@@ -198,7 +199,7 @@ try {
 
   // 3. An update to a commit whose daemon exits at start (C): the job puts B back by itself.
   const daemonTs = path.join(P, 'machine', 'daemon.ts');
-  fs.writeFileSync(daemonTs, fs.readFileSync(daemonTs, 'utf8').replace("if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {", "if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {\n  console.error('link-e2e: this daemon exits at start');\n  process.exit(3);"));
+  fs.writeFileSync(daemonTs, fs.readFileSync(daemonTs, 'utf8').replace("if (isMainModule(import.meta.filename)) {", "if (isMainModule(import.meta.filename)) {\n  console.error('link-e2e: this daemon exits at start');\n  process.exit(3);"));
   git(P, 'commit', '-qam', 'link-e2e: C, a daemon that exits at start');
   const C = git(P, 'rev-parse', 'HEAD');
   // w5516: C is not on the published main yet, so the daemon refuses it and changes nothing.
@@ -210,7 +211,10 @@ try {
   check(bad.ok && bad.report?.ok === false, 'an update to C, whose daemon never comes back, is reported failed', bad.error ?? '');
   check(bad.report?.rollback === 'ok', 'its job put B back by itself', bad.report?.note ?? '');
   check(version().startsWith(short(B)), "the daemon's code is B again", version());
-  check(fs.existsSync(path.join(l.daemon, 'app.failed', 'machine', 'VERSION')) && fs.readFileSync(path.join(l.daemon, 'app.failed', 'machine', 'VERSION'), 'utf8').trim().startsWith(short(C)), "C's code is kept aside in app.failed");
+  // w6434: on Linux the code folders sit in <daemon>/code behind the app link (scripts/worker/linuxCode.ts).
+  const failedDir = linuxCodeFolder(l.daemon, 'app.failed');
+  check(fs.existsSync(path.join(failedDir, 'machine', 'VERSION')) && fs.readFileSync(path.join(failedDir, 'machine', 'VERSION'), 'utf8').trim().startsWith(short(C)), "C's code is kept aside in app.failed");
+  if (process.platform === 'linux') check(fs.lstatSync(path.join(l.daemon, 'app')).isSymbolicLink() && fs.readlinkSync(path.join(l.daemon, 'app')) === path.join('code', 'app'), 'the daemon runs behind the code link after the updates and the rollback (w6434)');
   check(await waitFor('the portal to see B again', async () => (await linkState()).daemon?.startsWith(short(B)) === true, 60_000), 'the portal sees the daemon online on B again');
 
   // 4. A restart over the link.

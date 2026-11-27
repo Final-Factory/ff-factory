@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
+import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, lastWordOf, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
 import type { Runner } from './githubTokens.ts';
 
 const REPO = 'Final-Factory/FinalFactory';
@@ -166,4 +166,19 @@ test('w6485: a separator alone after Steam keeps the mark, and a long run of pun
     const ms = performance.now() - t0;
     assert.ok(ms < 500, `steam followed by 50,000 ${JSON.stringify(c)} took ${ms.toFixed(0)} ms`);
   }
+});
+
+// w6544: excusedBuild's last-word lookup was a quadratic regex on a long run with no whitespace before a match; it is a
+// backwards scan now. No wall-clock bound here (CI keeps no timing assertions): a quadratic one would show as a stalled run.
+test('w6544: a long run with no whitespace before a match keeps the mark', () => {
+  for (const said of ['-'.repeat(50000) + 'steam build', 'steam—'.repeat(8000) + ' build']) assert.ok(otherPlayerIn(said, NEW));
+});
+
+test('w6544: lastWordOf is the word before trailing whitespace, else empty', () => {
+  assert.equal(lastWordOf('the published '), 'published');
+  assert.equal(lastWordOf('a  b \n'), 'b');
+  assert.equal(lastWordOf('the published'), '');
+  assert.equal(lastWordOf(''), '');
+  assert.equal(lastWordOf('   '), '');
+  assert.equal(lastWordOf('-'.repeat(50000) + ' '), '-'.repeat(50000));
 });

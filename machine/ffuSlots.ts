@@ -37,6 +37,7 @@ import { MEDIUM_AGENT_VAR } from './mediumFolders.ts';
 import type { FfuSlotsReport, FfuSlotView } from '../shared/types.ts';
 import { workerCargoHome } from './sharedCaches.ts';
 import { guardRemoteSync } from '../server/remoteGuard.ts';
+import { isMainModule } from './isMain.ts';
 
 export const FFU_REMOTE = 'https://github.com/Final-Factory/ffu.git';
 export const FFU_SLOTS_DIR = 'ffu-sandboxes';
@@ -1014,7 +1015,7 @@ export function runFfuSlotSweep(o: { root: string; factsFile: string; max: numbe
 }
 
 // Run when started directly (the ffu-slot shim).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   try {
     process.exit(ffuSlotMain(process.argv.slice(2), realFfuSlotDeps()));
   } catch (e) {
