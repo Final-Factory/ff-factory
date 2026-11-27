@@ -364,6 +364,8 @@ test('w6486: the poll saves its offset off the event loop, and a going daemon\'s
   const f = hostFiles(dir);
   const call = (n: string) => fs.appendFileSync(f.out, JSON.stringify({ op: 'rpc', id: n, method: 'read_work', args: { n } }) + '\n');
   const size = () => fs.statSync(f.out).size;
+  // The offset file is made by the first poll's write: until then it is not there.
+  const saved = (p: string) => (fs.existsSync(p) ? Number(fs.readFileSync(p, 'utf8')) : NaN);
   const first = hostedOn(root, 'o1', { handlers });
   let second: ReturnType<typeof hostedOn> | undefined;
   t.after(async () => {
@@ -373,7 +375,7 @@ test('w6486: the poll saves its offset off the event loop, and a going daemon\'s
   });
   assert.equal(first.s.adopt(), true);
   call('r1');
-  await until('r1 answered and its offset saved by the poll', () => answered.includes('r1') && Number(fs.readFileSync(f.offset, 'utf8')) === size());
+  await until('r1 answered and its offset saved by the poll', () => answered.includes('r1') && saved(f.offset) === size());
   assert.equal(fs.existsSync(f.offsetStop), false, 'no stop file while no write races the going daemon');
 
   // A slow disk (BEAST: 6-10 s a write): the poll's next write is held until after the daemon has gone.
@@ -394,10 +396,10 @@ test('w6486: the poll saves its offset off the event loop, and a going daemon\'s
   await until('r3 answered, read while the write is still held', () => answered.includes('r3'));
   const end = size();
   first.s.detach();
-  assert.equal(Number(fs.readFileSync(f.offset, 'utf8')), end, 'the going daemon saves what it read, at once');
-  assert.equal(Number(fs.readFileSync(f.offsetStop, 'utf8')), end, 'and in the stop file, since a write still races it');
+  assert.equal(saved(f.offset), end, 'the going daemon saves what it read, at once');
+  assert.equal(saved(f.offsetStop), end, 'and in the stop file, since a write still races it');
   release();
-  await until('the held write landed, older', () => Number(fs.readFileSync(f.offset, 'utf8')) < end);
+  await until('the held write landed, older', () => saved(f.offset) < end);
   t.mock.restoreAll();
 
   // The next daemon forwards exactly what the last one had not: r4 only.
