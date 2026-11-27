@@ -27,7 +27,7 @@ import { evidenceArgs, evidenceGated, evidencePython, evidenceRefusal, evidenceV
 import { pairDelivers, partOfIdsIn, reportDelivers, requestIdsIn, stillOpenIn } from './ledgerRules.ts';
 import { isOpen } from './work.ts';
 import { GAME_REPO } from './pairRuns.ts';
-import { diskWaitIn, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
+import { diskWaitIn, handUpWaitRef, lastOpenLine, personWaitOn, portalWaitIn, reportAt, requestWaitOf, siblingWaitOf } from '../shared/workState.ts';
 import type { SessionInfo, WorkBlocker, WorkItem } from '../shared/types.ts';
 import type { RoomNow } from './placement.ts';
 import { steamShortIn } from '../shared/capacity.ts';
@@ -198,7 +198,8 @@ export class BlockerWatch {
           // ledger infers, whatever else it names: w2443's "waiting on lothsahn to click Pause in FF Factory's tray" became
           // a deploy gate and held lothsahn's answer.
           if (l && personWaitOn(l.line, team)) continue;
-          const ref = l ? requestWaitOf(l.line, w.id) : undefined;
+          // w6397: a wait on its own handed-up follow-up, named by no id (it was never told one): the follow-up filed for it.
+          const ref = l ? (requestWaitOf(l.line, w.id) ?? handUpWaitRef(w, l.line, (id) => this.d.store.work.get(id.toLowerCase()))) : undefined;
           const portal = !!l && portalWaitIn(l.line, team);
           // w3338: a worker that stopped for low disk on its machine ("paused for low disk"), never a disk clean-up's own worker (w3328).
           const disk = !!l && !w.diskCleanup && !!s.machineId && diskWaitIn(l.line, team) ? s.machineId : undefined;

@@ -361,6 +361,32 @@ export function requestWaitOf(line: string, selfId: string): string | undefined 
 }
 
 /**
+ * w6397: a wait on a follow-up the worker handed up (hand_up_requests, w2969), which has no id in the line because the worker
+ * was never told one: cc0f9074 on w6096 wrote "w6096: still open: blocked on a fix for the flaky ffu-server gateway_standby
+ * test (handed up), then CI on Final-Factory/ffu#1213" at 01:29 UTC on 2026-11-27, its follow-up was filed as w6254 that
+ * minute, and w6096 sat Stalled 8 h after w6254 closed as done. The wait's own words (up to a ; or ., or a "then") must say
+ * handed up or follow-up.
+ */
+const HANDED_UP = /\bhand(?:ed)?[- ]?ups?\b|\bfollow[- ]?ups?\b/i;
+export function handUpWaitIn(line: string): boolean {
+  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(QUOTED, ' ');
+  for (const m of body.matchAll(WAITS_ON_WORK)) if (HANDED_UP.test(m[1].split(/\bthen\b/i)[0])) return true;
+  return false;
+}
+
+/**
+ * w6397: the follow-up a line waits on (handUpWaitIn) among those filed for `w`'s hand-up: the newest still open, or undefined
+ * (none filed yet, all closed, or the line names no hand-up).
+ */
+export function handUpWaitRef(w: Pick<WorkItem, 'id' | 'handedUp'>, line: string, work: (id: string) => Pick<WorkItem, 'status'> | undefined): string | undefined {
+  if (!w.handedUp?.filed.length || !handUpWaitIn(line)) return undefined;
+  return [...w.handedUp.filed].reverse().find((id) => {
+    const t = work(id);
+    return !!t && id.toLowerCase() !== w.id.toLowerCase() && !['done', 'rejected', 'cancelled'].includes(t.status);
+  });
+}
+
+/**
  * w2457: a wait on an FF Factory change, which only a portal deploy brings ("blocked on FF Factory letting lothdesktop grant
  * the exclusive ticket", "waiting for the portal fix to deploy"): w2434's worker said so at 03:44 UTC and sat idle until
  * 07:57, though the fix deployed at 04:28. Not a wait on CI or a pull request in the ff-factory repo ("blocked on CI on
