@@ -131,7 +131,7 @@ import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
-import { dataDirClearedText, gameCommitAt, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, gameCommitAt, otherPlayerIn, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -2347,6 +2347,51 @@ export class Agents {
     } catch (e) {
       return { reads: false, checked: false, why: `FF Factory could not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (${clip((e as Error).message, 160)}; w6189)` };
     }
+  }
+
+  /**
+   * w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR is no such run: clear its mark and say why (by:
+   * start_agent, or the queue's re-check). w6235: words that name another player (a Steam 0.50 build, another sha) keep the
+   * mark, since only the commit is read, and so does a verdict for another commit. True when it cleared the mark.
+   */
+  private async clearLegacyByCommit(w: WorkItem, by: string): Promise<boolean> {
+    const commit = w.pair?.commit;
+    if (!w.pair?.legacyData || !commit) return false;
+    if (otherPlayerIn(w.pair.legacyData, commit)) return false;
+    const v = await this.gameDataDirAt(commit).catch((): undefined => undefined);
+    if (!v?.reads || !sameCommit(v.commit, commit)) return false;
+    // The read awaited GitHub: act on the request as it is now, and only while it is still marked for that same commit.
+    const now = this.store.work.get(w.id) ?? w;
+    if (!now.pair?.legacyData || now.pair.commit !== commit) return false;
+    const cleared = dataDirClearedText(v.commit);
+    const { legacyData: was, ...rest } = now.pair;
+    now.pair = { ...rest, dataDirChecked: cleared };
+    now.log = [...now.log, logLine(new Date(), `${by}: ${cleared}; it was marked "${clip(was ?? '', 120)}"`)].slice(-40);
+    this.store.putWork(now);
+    if (now !== w) w.pair = now.pair;
+    return true;
+  }
+
+  /** w6235: when each queued marked pair run's commit was last read, so a commit that cannot be checked is not asked every minute. */
+  private legacyRechecked = new Map<string, number>();
+
+  /**
+   * w6235 (w6192's review of PR #1402, nit 3): a queued pair run marked pre-w5297 before w6189, or by hand, waited outside
+   * placement until someone called start_agent on it. BlockerWatch runs this each minute, before the queue is read: each
+   * such run's commit is read (at most once per 10 minutes per run and commit) and the mark cleared where it reads
+   * FF_GAME_DATA_DIR. Answers the ids it cleared.
+   */
+  async recheckLegacyPairs(nowMs = Date.now()): Promise<string[]> {
+    const done: string[] = [];
+    for (const w of [...this.store.work.values()]) {
+      // Not yet started: filed (new) or waiting for room (queued); a started run's legs already passed start_agent's check.
+      if ((w.status !== 'new' && w.status !== 'queued') || w.sessionIds.length || !w.pair?.legacyData || !w.pair.commit) continue;
+      const key = `${w.id} ${w.pair.commit.toLowerCase()}`;
+      if (nowMs - (this.legacyRechecked.get(key) ?? -Infinity) < 10 * 60_000) continue;
+      this.legacyRechecked.set(key, nowMs);
+      if (await this.clearLegacyByCommit(w, 'the queue re-check')) done.push(w.id);
+    }
+    return done;
   }
 
   private async requestPair(sessionId: string, a: Record<string, unknown>): Promise<string> {
@@ -6801,16 +6846,7 @@ A report is for a person who asked for one, and people want very few. File one w
     // w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR (one filed before this check, or by hand) is
     // decided per commit here too, so start_agent and request_pair agree; a commit that does not, or that cannot be checked,
     // keeps the refusal below.
-    if (w.pair?.legacyData && w.pair.commit) {
-      const v = await this.gameDataDirAt(w.pair.commit).catch((): undefined => undefined);
-      if (v?.reads) {
-        const cleared = dataDirClearedText(v.commit);
-        const { legacyData: _was, ...rest } = w.pair;
-        w.pair = { ...rest, dataDirChecked: cleared };
-        w.log = [...w.log, logLine(new Date(), `start_agent: ${cleared}; it was marked "${clip(_was ?? '', 120)}"`)].slice(-40);
-        this.store.putWork(w);
-      }
-    }
+    await this.clearLegacyByCommit(w, 'start_agent');
     // Every leg checked before any starts.
     const legs = refs.map((ref, i) => {
       const t = this.target(ref, i ? undefined : a.machine);

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, readsDataDirSource } from './gameDataDir.ts';
+import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
 import type { Runner } from './githubTokens.ts';
 
 const REPO = 'Final-Factory/FinalFactory';
@@ -58,4 +58,22 @@ test('w6189: a commit that cannot be checked fails closed, and says why', async 
   const none = await gameDataDirAt(fakeGh({ [OLD]: null }).gh, REPO, OLD);
   assert.ok(!none.reads && none.checked && /has no Assets\/Scripts\/FFCore\/GameData\/GameDataPaths\.cs/.test(none.why));
   assert.equal((await gameDataDirAt(fakeGh({}).gh, REPO, 'pre-1.0')).reads, false, 'a branch name is not a commit');
+});
+
+// w6235 (w6192's review of PR #1402, nit 2): the source test needs both halves; nothing tested the environment read.
+test('w6235: the FF_GAME_DATA_DIR literal without an environment read is no read; with one it is', () => {
+  assert.equal(readsDataDirSource('public static class GameDataPaths { public const string RootVariable = "FF_GAME_DATA_DIR"; public static string Root => Application.persistentDataPath; }'), false);
+  assert.equal(readsDataDirSource('public const string RootVariable = "FF_GAME_DATA_DIR";\nvar given = Environment.GetEnvironmentVariable(RootVariable);'), true);
+  assert.equal(readsDataDirSource(BACKPORT), true);
+  assert.equal(readsDataDirSource(BEFORE), false);
+});
+
+// w6235 (w6192's should-fix-later point): legacy_data about another player than the checked commit keeps the mark.
+test('w6235: legacy_data that names another commit or a 0.50 build is not settled by the checked commit', () => {
+  assert.match(otherPlayerIn('the host runs the Steam pre-1.0 0.50.0.47 build', '20786882d8') ?? '', /^its legacy_data names build 0\.50\.0\.47, but FF Factory checked only 20786882d8 for the FF_GAME_DATA_DIR backport, so the mark stays \(w6235\)$/);
+  assert.match(otherPlayerIn('the client runs ac80d7b0bb', NEW) ?? '', /names commit ac80d7b0bb, but FF Factory checked only 20786882d8/);
+  // The checked commit itself, by a short or a full sha, and words with no sha or version, say nothing about another player.
+  assert.equal(otherPlayerIn('20786882d8 is a pre-1.0 PR head', NEW), undefined);
+  assert.equal(otherPlayerIn(`the pre-1.0 line at ${NEW}`, '20786882d8'), undefined);
+  assert.equal(otherPlayerIn('read from its words: pre-1.0 or the 0.50 line; it acceded to the deadbeef plan', NEW), undefined);
 });
