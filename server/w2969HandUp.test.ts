@@ -87,15 +87,16 @@ test('w2969: the [follow-ups to file] message carries the line, the report and t
   assert.match(text, /^\[follow-ups to file\] w2194 "Ancient Dragon design"\nIts worker c68864ef wrote 5 follow-up requests to file/);
   assert.match(text, /Ben's newest note on w2194 \(2026-10-28 09:50 UTC\): "Build it in the five stages as designed/);
   assert.match(text, /request_work, related_ids \["w2194"\]/);
-  assert.match(text, /If they are not wanted, close w2194 with update_work/);
+  assert.match(text, /If Ben already decided against them, or they are outdated, drop them: file_follow_ups request "w2194" drop true, reason quoting Ben.s words/);
 });
 
-test('w5577: an unfiled hand-up is its orchestrator’s backlog until 12 h, then its person’s card to file or drop, and nothing is pending once dropped', () => {
+test('w5577, w6581: an unfiled hand-up is its orchestrator’s backlog, Working, until 12 h, then its person’s card to file or drop (Waiting on input), and nothing is pending once dropped', () => {
   const h: WorkHandedUp = { worker: 'c68864ef', at: '2026-11-15T00:00:00.000Z', count: 2, items: [], to: ['ben'], filed: [] };
   const ben = { userId: 'ben', displayName: 'Ben' };
   const w = { handedUp: h, requestedBy: ben, requesters: [ben] };
   const live = handUpLive(w as never, Date.parse('2026-11-15T03:00:00.000Z'))!;
-  assert.equal(live.state, 'waiting');
+  assert.equal(live.state, 'working', 'the orchestrator has it: not Waiting on input on Ben (w6581)');
+  assert.match(live.why, /Ben's orchestrator has them to file or drop/);
   assert.deepEqual(live.waitsOn, ["Ben's orchestrator"]);
   assert.equal(live.backlog, true);
   assert.equal(live.orchestrator, true);
@@ -103,6 +104,7 @@ test('w5577: an unfiled hand-up is its orchestrator’s backlog until 12 h, then
   assert.doesNotMatch(live.why, /files them itself/);
   h.card = '2026-11-15T12:00:00.000Z';
   const card = handUpLive(w as never, Date.parse('2026-11-15T13:00:00.000Z'))!;
+  assert.equal(card.state, 'waiting');
   assert.deepEqual(card.waitsOn, ['Ben']);
   assert.equal(card.handUpCard, true);
   assert.ok(!card.backlog && !card.orchestrator);
@@ -110,6 +112,15 @@ test('w5577: an unfiled hand-up is its orchestrator’s backlog until 12 h, then
   h.dropped = { at: '2026-11-15T14:00:00.000Z', by: 'Ben' };
   assert.equal(handUpsPending(w), 0);
   assert.equal(handUpLive(w as never, Date.parse('2026-11-15T15:00:00.000Z')), undefined);
+});
+
+test('w6581: items its orchestrator dropped one by one count as settled', () => {
+  const h: WorkHandedUp = { worker: 'c68864ef', at: '2026-11-15T00:00:00.000Z', count: 3, items: [], to: ['ben'], filed: ['w9'] };
+  assert.equal(handUpsPending({ handedUp: h }), 2);
+  h.droppedItems = [{ n: 2, at: '2026-11-15T01:00:00.000Z', by: "Ben's orchestrator", why: 'Ben: "not needed"' }];
+  assert.equal(handUpsPending({ handedUp: h }), 1);
+  h.droppedItems.push({ n: 3, at: '2026-11-15T01:00:00.000Z', by: "Ben's orchestrator", why: 'Ben: "not needed"' });
+  assert.equal(handUpsPending({ handedUp: h }), 0);
 });
 
 test('w4352: a hand-up FF Factory filed before w5577 (autoFiled) still reads as settled', () => {

@@ -31,13 +31,11 @@
  * `git diff` working with no program run; a `core.hooksPath` naming a regular file runs no hook.
  */
 import {
-  execFile,
   execFileSync,
   spawn,
   spawnSync,
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
-  type ExecFileOptions,
   type SpawnOptionsWithoutStdio,
   type SpawnSyncOptionsWithStringEncoding,
   type SpawnSyncReturns,
@@ -47,6 +45,7 @@ import {
 } from 'node:child_process';
 import path from 'node:path';
 import { runOffThread } from './hostProbe.ts';
+import { execFileOffThread, type ThreadExecOptions } from './spawnThread.ts';
 import type { RunResult } from './proc.ts';
 import { fileURLToPath } from 'node:url';
 
@@ -305,7 +304,8 @@ export function gitFence(args: string[], opts: { cwd?: string; env?: Env } = {})
   const env = opts.env ?? process.env;
   if (!needsScan(args)) return Promise.resolve(unscanned(args, env));
   return new Promise((resolve) => {
-    execFile(
+    // w6554: started from the spawn thread in the daemon (server/spawnThread.ts); BEAST's loop held 48.8 s in this spawn.
+    execFileOffThread(
       'git',
       scanArgs(splitGlobal(args).location),
       {
@@ -363,13 +363,13 @@ export function gitSpawn(args: string[], opts: SpawnOptions = {}): ChildProcess 
   return spawn('git', f.args, { ...opts, env: f.env });
 }
 
-/** execFile('git', ...) with the fence, string output. */
-export function gitExecFile(
-  args: string[],
-  opts: ExecFileOptions & { encoding?: BufferEncoding },
-  cb: (err: Error | null, stdout: string, stderr: string) => void,
-): void {
-  gitFence(args, { cwd: cwdOf(opts), env: opts.env }).then((f) =>
-    execFile('git', f.args, { ...opts, encoding: 'utf8', env: f.env }, (e, out, err) => cb(e, String(out ?? ''), String(err ?? ''))),
+/**
+ * execFile('git', ...) with the fence, string output. w6554: both spawns (the fence's scan and git) start from the daemon's
+ * spawn thread (server/spawnThread.ts; elsewhere it is execFile itself): on 2026-11-27 BEAST's loop was held 19-49 s in one
+ * git start here (the clean-up's unpushedWorkWhy). The options are the ones that cross to that thread.
+ */
+export function gitExecFile(args: string[], opts: Omit<ThreadExecOptions, 'encoding'> & { encoding?: BufferEncoding }, cb: (err: Error | null, stdout: string, stderr: string) => void): void {
+  gitFence(args, { cwd: opts.cwd, env: opts.env }).then((f) =>
+    execFileOffThread('git', f.args, { ...opts, encoding: 'utf8', env: f.env }, (e, out, err) => cb(e, String(out ?? ''), String(err ?? ''))),
   );
 }

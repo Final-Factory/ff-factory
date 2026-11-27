@@ -564,3 +564,50 @@ test('w6508: a poll write of an earlier start that lands after a new start never
   const next = Math.max(saved(f.offset) || 0, saved(f.offsetStop) || 0);
   assert.equal(next, end, `the next daemon reads from what the new start read (${end}), not from the first start's offset (${old})`);
 });
+
+test('w6554: daemon.progress is written off the event loop, and a failed write lets the next progress try again', { timeout: 60_000 }, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w6554-progress-'));
+  const dir = path.join(root, 'p1');
+  const { pid, child } = await fakeHost(dir);
+  const answered: string[] = [];
+  const handlers = () => ({ read_work: async (args: unknown) => (answered.push(String((args as { n: string }).n)), 'ok') });
+  const f = hostFiles(dir);
+  const call = (n: string) => fs.appendFileSync(f.out, JSON.stringify({ op: 'rpc', id: n, method: 'read_work', args: { n } }) + '\n');
+  const h = hostedOn(root, 'p1', { handlers });
+  t.after(async () => {
+    h.s.detach();
+    await cleanUp(root, pid, child);
+  });
+  const sync = fs.writeFileSync;
+  t.mock.method(fs, 'writeFileSync', (...a: Parameters<typeof sync>) => {
+    if (String(a[0]) === f.progress) throw new Error('daemon.progress written synchronously');
+    return sync(...a);
+  });
+  const write = fs.promises.writeFile;
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  let tries = 0;
+  let fail = true;
+  t.mock.method(fs.promises, 'writeFile', async (...a: Parameters<typeof write>) => {
+    if (String(a[0]) === f.progress) {
+      tries++;
+      if (fail) {
+        fail = false;
+        throw new Error('a slow disk gave up');
+      }
+      await held;
+    }
+    return write(...a);
+  });
+  assert.equal(h.s.adopt(), true);
+  call('r1');
+  await until('r1 answered and its progress write failed', () => answered.includes('r1') && tries === 1);
+  assert.equal(fs.existsSync(f.progress), false);
+  call('r2');
+  await until('r2 answered while the retried write is held', () => answered.includes('r2') && tries === 2);
+  call('r3');
+  await until('r3 answered, the loop free while the write is held', () => answered.includes('r3'));
+  assert.equal(tries, 2, 'no second write races the held one, and the minute between saves holds');
+  release();
+  await until('the progress saved', () => fs.existsSync(f.progress) && Number(fs.readFileSync(f.progress, 'utf8')) > 0);
+});
