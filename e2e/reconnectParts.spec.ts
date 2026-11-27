@@ -8,8 +8,9 @@ import type { AppState } from '../shared/types.ts';
 /** Before the page's scripts: every /ws socket and its first message are kept, and while `__hold` attempts fail at once. */
 function watchSockets() {
   const Real = window.WebSocket;
-  const w = window as unknown as { __socks: WebSocket[]; __urls: string[]; __first: string[]; __hold: boolean };
+  const w = window as unknown as { __socks: WebSocket[]; __urls: string[]; __first: string[]; __sent: string[]; __hold: boolean };
   w.__socks = [];
+  w.__sent = [];
   w.__urls = [];
   w.__first = [];
   w.__hold = false;
@@ -20,6 +21,11 @@ function watchSockets() {
     const s = new Real(url, protocols);
     w.__socks.push(s);
     w.__urls.push(u);
+    const send = s.send.bind(s);
+    s.send = (d: string) => {
+      w.__sent.push(String(d));
+      send(d);
+    };
     s.addEventListener('message', (m) => {
       const d = String(m.data);
       if (d.startsWith('{"type":"state"') && w.__first.length < w.__socks.length) w.__first.push(d);
@@ -45,6 +51,10 @@ test('w6336: a reconnect resends only what changed while the page was away, and 
   await expect(panel.getByTestId(`work-${edited}`)).toContainText(`Edited offline ${tag}`);
   await expect(panel.getByTestId(`work-${kept}`)).toContainText(`Kept as it was ${tag}`);
   await expect.poll(() => page.evaluate(() => (window as unknown as { __first: string[] }).__first.length)).toBe(1);
+  // Once its first state is drawn, the page tells the server each phase of the connect (server/pageSockets.ts ready).
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __sent: string[] }).__sent.filter((d) => d.includes('"type":"ready"')).length)).toBe(1);
+  const ready = JSON.parse(await page.evaluate(() => (window as unknown as { __sent: string[] }).__sent[0])) as Record<string, number>;
+  for (const k of ['open', 'state', 'parse', 'render', 'load']) expect(ready[k], k).toBeGreaterThanOrEqual(0);
 
   // Offline: the socket drops, attempts fail, and the request changes meanwhile (its event goes nowhere).
   await page.evaluate(() => {
@@ -73,6 +83,7 @@ test('w6336: a reconnect resends only what changed while the page was away, and 
   expect(again.work?.map((w) => w.id)).not.toContain(kept);
   expect(again.partsKept?.length).toBeGreaterThan(0);
   expect(first[1].length).toBeLessThan(first[0].length);
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __sent: string[] }).__sent.filter((d) => d.includes('"type":"ready"')).length)).toBe(2);
 
   // The same as a fresh load: the page's requests, in order, match the server's whole state.
   const rows = async () => (await panel.locator('[data-testid^="work-w"]').evaluateAll((els) => els.map((e) => e.getAttribute('data-testid')))).filter((t, i, a) => a.indexOf(t) === i);
