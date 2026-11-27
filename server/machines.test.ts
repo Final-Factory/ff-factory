@@ -782,6 +782,45 @@ test('machine: add_machine on a worker root install changes its settings in plac
   assert.throws(() => mm.deployMachine({ id: 'mx', sandboxRoot: 'E:\\sb' }), /worker root install .*sandboxRoot come from its installer/);
 });
 
+test('w6414: add_machine commit_check "off" on a worker root install reaches its running daemon in a welcome, and its commit check says nothing on a start; "warn" turns it back on', async (t) => {
+  const { store, mm, daemon, cleanup } = await setup();
+  t.after(cleanup);
+  const d = daemon();
+  await until('online', () => mm.isOnline('mx'));
+  (mm as unknown as { runDeploy: () => Promise<void> }).runDeploy = async () => assert.fail('a root install is never redeployed over ssh');
+  // What add_machine sends its daemon now.
+  const welcomeAfter = (o: { commitCheck: 'off' | 'warn' }) => {
+    // The test's daemon is no root install, so its own hello and reports clear the root again: set it for each call.
+    Object.assign(store.machines.get('mx')!, { root: 'D:\\work\\ffw', sandboxRoot: 'D:\\work\\ffw\\sandboxes', maxSandboxes: 6, maxAgentsPerSandbox: 2, maxUnity: 3 });
+    const sent: string[] = [];
+    const link = (mm as unknown as { links: Map<string, { ws: { send: (s: string) => void } }> }).links.get('mx')!;
+    const send = link.ws.send;
+    link.ws.send = (s: string) => (sent.push(s), send.call(link.ws, s));
+    try {
+      mm.deployMachine({ id: 'mx', ...o });
+    } finally {
+      link.ws.send = send;
+    }
+    const w = sent.map((x) => JSON.parse(x)).filter((x) => x.type === 'welcome');
+    assert.equal(w.length, 1, `add_machine ${o.commitCheck} sends one welcome`);
+    return w[0];
+  };
+  // The daemon's own check, fed BEAST's full commit charge (a Mac or Linux test runner reads none), logging to a list.
+  const lines: string[] = [];
+  const cc = (d as unknown as { commitCheck: { d: { read: () => unknown; log: (l: string) => void; ciJobs: () => number | undefined }; check: (what: string) => string | undefined } }).commitCheck;
+  Object.assign(cc.d, { read: () => ({ committedBytes: 127.8 * 1024 ** 3, limitBytes: 127.8 * 1024 ** 3, at: Date.now() }), log: (l: string) => lines.push(l), ciJobs: () => 2 });
+  assert.equal(welcomeAfter({ commitCheck: 'off' }).sandboxes.commitCheck, 'off', 'the welcome carries it at once');
+  assert.equal(store.machines.get('mx')!.commitCheck, 'off');
+  await until('the daemon has it', () => (d as unknown as { currentPool: () => { commitCheck?: string } | undefined }).currentPool()?.commitCheck === 'off');
+  assert.equal(cc.check('an editor start'), undefined);
+  assert.deepEqual(lines, [], '"off": no commit-check line on an editor start');
+  // Back to warn: the welcome sends no field, and the daemon logs again.
+  assert.equal(welcomeAfter({ commitCheck: 'warn' }).sandboxes.commitCheck, undefined);
+  await until('the daemon has it', () => (d as unknown as { currentPool: () => { commitCheck?: string } | undefined }).currentPool()?.commitCheck === undefined);
+  assert.match(cc.check('an editor start') ?? '', /commit 127\.8 of 127\.8 GB/);
+  assert.match(lines.join('|'), /commit check \(warn-only, nothing refused\): would refuse an editor start/);
+});
+
 test('machine: add_machine worker_install makes only the record a new machine installs against, never deploys it over ssh, and its first hello settles it (w676)', async (t) => {
   const { store, mm, cleanup } = await setup();
   t.after(cleanup);

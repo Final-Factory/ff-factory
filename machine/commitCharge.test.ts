@@ -2,7 +2,7 @@
 // failed read falls back to RAM only, "off" says nothing, and the commit figure goes beside RAM in the wait messages.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CommitCheck, GB, commitVerdict, commitWords, type CommitCheckMode } from './commitCharge.ts';
+import { CommitCheck, GB, commitVerdict, commitWords, editorStartGate, warnOnly, type CommitCheckMode } from './commitCharge.ts';
 import { parseWinCommit } from '../server/system.ts';
 import { blockReason } from '../server/hostHealth.ts';
 import { assess } from './unitySlots.ts';
@@ -27,10 +27,10 @@ test('w6411: BEAST at 57.6 of 127.8 GB committed admits an editor beside its two
   assert.equal(commitWords(at(123)), 'commit 123.0 of 127.8 GB');
 });
 
-function check(o: { commit?: NonNullable<HostStats['commit']>; jobs?: number; mode?: CommitCheckMode } = {}) {
+function check(o: { commit?: NonNullable<HostStats['commit']>; jobs?: number; mode?: CommitCheckMode; windows?: boolean } = {}) {
   const lines: string[] = [];
   let now = 1_000_000;
-  const c = new CommitCheck({ read: () => o.commit, ciJobs: () => o.jobs, mode: () => o.mode ?? 'warn', log: (l) => lines.push(l), now: () => now });
+  const c = new CommitCheck({ read: () => o.commit, ciJobs: () => o.jobs, mode: () => o.mode ?? 'warn', log: (l) => lines.push(l), now: () => now, windows: () => o.windows ?? false });
   return { c, lines, tick: (ms: number) => void (now += ms) };
 }
 
@@ -98,4 +98,58 @@ test('w6411: commit_check "off" goes to the daemon in the pool settings; warn an
   assert.equal(poolSettingsOf({ sandboxRoot: '/s', commitCheck: 'off' })?.commitCheck, 'off');
   assert.equal(poolSettingsOf({ sandboxRoot: '/s', commitCheck: 'warn' })?.commitCheck, undefined);
   assert.equal(poolSettingsOf({ sandboxRoot: '/s' })?.commitCheck, undefined);
+});
+
+// ---------------------------------------------------------------- w6414's review: warn-only where it is wired in
+
+test('w6414: the editor start gate returns what the guard returns, whatever the commit check says or throws', () => {
+  // 127.8 of 127.8 GB committed and the guard admitting: the gate admits, and the would-refuse line is logged.
+  const full = check({ commit: at(127.8), jobs: 2 });
+  const seen: (string | undefined)[] = [];
+  assert.equal(editorStartGate({ base: (commit) => (seen.push(commit), undefined), check: full.c, log: (l) => full.lines.push(l) }), undefined);
+  assert.deepEqual(seen, ['commit 127.8 of 127.8 GB'], 'the guard gets the commit figure for its RAM message');
+  assert.equal(full.lines.length, 1);
+  assert.match(full.lines[0], /^commit check \(warn-only, nothing refused\): would refuse an editor start: commit 127\.8 of 127\.8 GB/);
+  // The guard refusing: its reason, unchanged, and the check does not run.
+  const low = check({ commit: at(127.8), jobs: 2 });
+  const why = 'only 3.0 GB of RAM is free and an editor needs about 10 GB (limits.minFreeRamGB); stop an editor first';
+  assert.equal(editorStartGate({ base: () => why, check: low.c, log: (l) => low.lines.push(l) }), why);
+  assert.deepEqual(low.lines, []);
+  // words() and check() throwing: the gate still admits (or refuses) as the guard says, and says what failed.
+  const lines: string[] = [];
+  const broken = { words: (): string | undefined => assert.fail('words broke'), check: (): string | undefined => assert.fail('check broke') };
+  const bases: (string | undefined)[] = [];
+  assert.equal(editorStartGate({ base: (c) => (bases.push(c), undefined), check: broken, log: (l) => lines.push(l) }), undefined);
+  assert.deepEqual(bases, [undefined]);
+  assert.equal(editorStartGate({ base: () => why, check: broken, log: (l) => lines.push(l) }), why);
+  assert.equal(lines.length, 3);
+  assert.match(lines[0], /^commit check: reading the commit figure failed, ignored \(warn-only, nothing changes\): words broke$/);
+  assert.match(lines[1], /^commit check: an editor start failed, ignored .*check broke$/);
+  // Even a log that throws changes nothing.
+  assert.equal(warnOnly('x', () => assert.fail('boom'), () => assert.fail('log broke')), undefined);
+});
+
+test('w6414 nits: a missing read on Windows is said once until a read works; the admitted line is throttled too', () => {
+  let commit: NonNullable<HostStats['commit']> | undefined;
+  const lines: string[] = [];
+  let now = 0;
+  const c = new CommitCheck({ read: () => commit, ciJobs: () => 0, mode: () => 'warn', log: (l) => lines.push(l), now: () => now, windows: () => true });
+  c.check('an editor start');
+  c.check('an editor start');
+  assert.deepEqual(lines, ['commit check: no commit charge read on this Windows machine (the read failed, or is over 2 minutes old); an editor start is checked on RAM only']);
+  commit = at(57.6);
+  c.check('an editor start');
+  c.check('an editor start');
+  assert.equal(lines.length, 2, 'one admitted line a minute');
+  assert.match(lines[1], /^commit check: an editor start admitted, commit 57\.6 of 127\.8 GB/);
+  commit = at(127.8);
+  c.check('an editor start');
+  assert.equal(lines.length, 3, 'a would-refuse right after an admit is still said');
+  commit = undefined;
+  c.check('an editor start');
+  assert.equal(lines.length, 4, 'the read failing again is said again');
+  now += 60_000;
+  commit = at(57.6);
+  c.check('an editor start');
+  assert.equal(lines.length, 5);
 });

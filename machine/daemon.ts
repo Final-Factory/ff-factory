@@ -84,7 +84,7 @@ import { legsText, parseStage, restage, stageSummary, type LiveStageStep } from 
 import { FramePump, parseAck } from '../shared/framePump.ts';
 import { addMcpStatusDir, bridgeExecute, bridgeInfo } from '../server/unityHang.ts';
 import { commitNow, hostStats } from '../server/system.ts';
-import { CommitCheck } from './commitCharge.ts';
+import { CommitCheck, editorStartGate, warnOnly } from './commitCharge.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard, type CleanupItem, type CleanupRun } from '../server/cleanup.ts';
@@ -938,8 +938,9 @@ export class Daemon {
       platform,
       procs: async () => {
         const procs = await pd.procs();
-        // w6411: the same listing counts the CI jobs the commit check reserves room for (runner workers, as the bench drain does)
-        this.ciJobsSeen = { n: runnerCensus(procs).workers.length, at: Date.now() };
+        // w6411: the same listing counts the CI jobs the commit check reserves room for (runner workers, as the bench drain
+        // does); a bug in the count never fails the listing (w6414)
+        warnOnly('counting CI jobs', () => void (this.ciJobsSeen = { n: runnerCensus(procs).workers.length, at: Date.now() }), log);
         return procs;
       },
       alive: isAlive,
@@ -951,8 +952,8 @@ export class Daemon {
       // w5324: a lower-priority idle editor yields its slot to a waiting higher-priority run, closed through the editor
       preempt: (p, why) => this.slotPreemptClose(p, why),
       ramPct: () => this.ramPct(),
-      ramWords: () => this.commitCheck.words(),
-      onGrant: (r) => void this.commitCheck.check(`a unity-slot grant to "${r.label}" (${r.holder})`, r.count),
+      ramWords: () => warnOnly('reading the commit figure', () => this.commitCheck.words(), log),
+      onGrant: (r) => void warnOnly('a unity-slot grant', () => this.commitCheck.check(`a unity-slot grant to "${r.label}" (${r.holder})`, r.count), log),
       machine: cfg.id,
       // w4620: the queue goes in strict priority order, read live from the bench queue's priorities.json under this root
       root: cfg.root,
@@ -1311,11 +1312,8 @@ export class Daemon {
         liveRun: (id, sandboxPath) => this.liveRunIn(id, sandboxPath),
         log,
         // w1894: no editor starts while a person plays here (the turn closed the others; they reopen after its grace)
-        startGate: () => {
-          const gate = this.guard?.blockReason('editor', { commit: this.commitCheck.words() }) ?? this.personStartGate();
-          if (!gate) this.commitCheck.check('an editor start'); // w6411: warn-only, it refuses nothing
-          return gate;
-        },
+        // w6411: the commit check is warn-only: the gate is the host guard's and a person's, whatever it says (commitCharge.ts)
+        startGate: () => editorStartGate({ base: (commit) => this.guard?.blockReason('editor', { commit }) ?? this.personStartGate(), check: this.commitCheck, log }),
         onChange: () => this.reportSandboxes(),
         onEvent: (e) => {
           log(`sandboxes: ${e.text}`);

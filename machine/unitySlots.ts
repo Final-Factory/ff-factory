@@ -913,7 +913,12 @@ export class UnitySlots {
     const procs = await this.d.procs();
     const now = this.d.now();
     const ramPct = this.d.ramPct();
-    const ramWords = this.d.ramWords?.();
+    let ramWords: string | undefined;
+    try {
+      ramWords = this.d.ramWords?.();
+    } catch {
+      ramWords = undefined; // w6414: only words for a message; a failure changes no wait
+    }
     const a = assess({ platform: this.d.platform, procs, requests: reqs, places: this.places(), limit: this.d.limit(), now, ramPct, ramLimitPct: this.d.ramLimitPct, ramWords, holderWaitMs: this.d.holderWaitMs, ...this.work() });
     if (this.closed) return a;
     this.preempt(a, reqs, now);
@@ -924,7 +929,12 @@ export class UnitySlots {
       const r = byId.get(id)!;
       r.grantedAt = now;
       this.d.log?.(`unity slots: granted ${r.count} to "${r.label}" (${r.holder})`);
-      this.d.onGrant?.({ label: r.label, holder: r.holder, count: r.count });
+      try {
+        this.d.onGrant?.({ label: r.label, holder: r.holder, count: r.count });
+      } catch (e) {
+        // w6414: the commit check is warn-only: a bug in it never skips the grants, denies or events after it
+        this.d.log?.(`unity slots: the grant hook failed, ignored: ${e instanceof Error ? e.message : String(e)}`);
+      }
     }
     for (const x of a.deny) {
       writeAtomic(denyFile(this.d.dir, x.id), JSON.stringify({ id: x.id, why: x.why, at: new Date(now).toISOString() }));

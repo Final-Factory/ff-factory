@@ -56,12 +56,15 @@ export interface CommitCheckDeps {
   mode(): CommitCheckMode;
   log(line: string): void;
   now?(): number;
+  /** Whether this is a Windows machine, where a missing read is worth a line (default: process.platform). */
+  windows?(): boolean;
 }
 
 /** The daemon's check: says what it would refuse (warn-only), and the commit figure for the RAM wait messages. */
 export class CommitCheck {
   private readonly d: CommitCheckDeps;
   private lastSaid = new Map<string, number>();
+  private saidNoRead = false;
 
   constructor(d: CommitCheckDeps) {
     this.d = d;
@@ -84,21 +87,57 @@ export class CommitCheck {
   check(what: string, editors = 1): string | undefined {
     if (this.d.mode() === 'off') return undefined;
     const c = this.d.read();
-    if (!c) return undefined;
+    if (!c) {
+      // w6414 nit A: a read that never works must not pass for "all fine" (no commit lines): said once until a read works
+      if (!this.saidNoRead && (this.d.windows ?? (() => process.platform === 'win32'))()) {
+        this.saidNoRead = true;
+        this.d.log(`commit check: no commit charge read on this Windows machine (the read failed, or is over 2 minutes old); ${what} is checked on RAM only`);
+      }
+      return undefined;
+    }
+    this.saidNoRead = false;
     const jobs = this.d.ciJobs();
     const v = commitVerdict(c, { editors, ciJobs: jobs });
     const line = `${commitWords(c)}: ${v.roomGB.toFixed(1)} GB of room, under the ${v.wantGB.toFixed(0)} GB ${what} wants (${editors} editor${editors === 1 ? '' : 's'} x ${EDITOR_COMMIT_GB} GB, ${COMMIT_RESERVE_GB} GB reserve, ${jobsWords(jobs)} x ${CI_JOB_COMMIT_GB} GB)`;
+    // One line a minute per kind of start and verdict (w6414 nit B: the admitted line too): a start retried in a loop says it once.
+    const key = `${v.short ? 'short' : 'ok'} ${what.replace(/\s*".*$/, '')}`;
+    const at = this.lastSaid.get(key) ?? -Infinity;
+    const say = this.now() - at >= 60_000;
+    if (say) this.lastSaid.set(key, this.now());
     if (!v.short) {
-      this.d.log(`commit check: ${what} admitted, ${commitWords(c)} (${v.roomGB.toFixed(1)} GB of room, ${v.wantGB.toFixed(0)} GB wanted, ${jobsWords(jobs)})`);
+      if (say) this.d.log(`commit check: ${what} admitted, ${commitWords(c)} (${v.roomGB.toFixed(1)} GB of room, ${v.wantGB.toFixed(0)} GB wanted, ${jobsWords(jobs)})`);
       return undefined;
     }
-    // One line a minute per kind of start: an editor start retried in a loop says it once.
-    const key = what.replace(/\s*".*$/, '');
-    const at = this.lastSaid.get(key) ?? -Infinity;
-    if (this.now() - at >= 60_000) {
-      this.lastSaid.set(key, this.now());
-      this.d.log(`commit check (warn-only, nothing refused): would refuse ${what}: ${line}`);
-    }
+    if (say) this.d.log(`commit check (warn-only, nothing refused): would refuse ${what}: ${line}`);
     return line;
   }
+}
+
+/**
+ * Runs a step of the warn-only check so that a bug in it cannot change a start or a grant (w6414): an exception is logged
+ * and the step counts as having said nothing.
+ */
+export function warnOnly<T>(what: string, f: () => T, log: (line: string) => void): T | undefined {
+  try {
+    return f();
+  } catch (e) {
+    try {
+      log(`commit check: ${what} failed, ignored (warn-only, nothing changes): ${e instanceof Error ? e.message : String(e)}`);
+    } catch {
+      // the log itself failed: still nothing changes
+    }
+    return undefined;
+  }
+}
+
+/**
+ * The daemon's editor start gate with the commit check wired in (w6411; pulled out to be tested, w6414). `base` is the
+ * gate as it was before the check (the host guard, then a person playing here), given the commit figure for its RAM
+ * message. The gate returns what `base` returns, whatever the check says or throws: the check only logs.
+ */
+export function editorStartGate(d: { base: (commit: string | undefined) => string | undefined; check: Pick<CommitCheck, 'words' | 'check'>; log: (line: string) => void }): string | undefined {
+  const commit = warnOnly('reading the commit figure', () => d.check.words(), d.log);
+  const gate = d.base(commit);
+  if (!gate) warnOnly('an editor start', () => void d.check.check('an editor start'), d.log);
+  return gate;
 }
