@@ -120,8 +120,8 @@ import { ASK_TOOL, CHAT_MORE_LABEL, DESCRIPTION_CHARS, LABEL_CHARS, LABEL_INPUT_
 import { WAIT_LINE_CHARS, summaryBrief, summaryText, waitSummary } from '../shared/waitSummary.ts';
 import { isMyMove, waitingItemOf } from '../shared/waiting.ts';
 import { checkAsks } from '../shared/questionCard.ts';
-import { DECISIONS, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
-import { cachedPlayerNote, fetchPlayerNote, legacyUnfitWhy, macRefusedScenario, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
+import { DECISIONS, logLine, attachmentsNote, describeItem, doneOf, handoverNote, isFor, isOpen, livePair, pairLegOf, ledgerOrder, names, overlapLine, priorityThenAge, replacedLeg, requestAsFiled, requestLineRule, startProblem } from './work.ts';
+import { cachedPlayerNote, fetchPlayerNote, legacyUnfitWhy, macRefusedScenario, mentionsLegacyPlayer, MAC_REFUSES_SCENARIO, minPriorityText, needsBuild, needsLive, needsOf, needsUi, needsTimed, pairRoom, pairText, cargoShortOf, isCargoRepo, LEG_HOLD_MS, PAIR_HOLD_MS, PAIR_MAX_LEGS, TIMED_HOLD_MS } from '../shared/capacity.ts';
 import { SymbolOwners } from './symbolOwners.ts';
 import { SteamJobs, branchOf, describeJob, parseAsk, readClaim, refuseUpload } from './steamUpload.ts';
 import { BUILD_PLAN_DOC, BuildPlans, NOT_RELEASE, type BuildPlan, type SeatResult } from './buildPlans.ts';
@@ -129,7 +129,8 @@ import { SEAT_GRACE_MS, seatAction, seatNotice } from './releaseSeat.ts';
 import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
-import { desktopLabel, desktopLacks, needsWindow, pairDrivesMenus, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
+import { desktopLabel, desktopLacks, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
+import { dataDirClearedText, gameDataDirAt, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -2287,8 +2288,33 @@ export class Agents {
   }
 
   /** The request_pair tool (w1945, Orchestrators.filePair): a check on several computers at once, filed as one request it waits on. */
-  private requestPair(sessionId: string, a: Record<string, unknown>): string {
+  /**
+   * w6189: does the player at a commit read FF_GAME_DATA_DIR (server/gameDataDir.ts)? Read through GitHub as the system payer,
+   * like the Steam upload's release claim; tests replace it.
+   */
+  gameDataDirAt: (commit: string) => Promise<DataDirVerdict> = (commit) => gameDataDirAt(ghRunner(undefined, 'the FF_GAME_DATA_DIR check of a pair run'), GAME_REPO, commit);
+
+  /**
+   * w6189: the data-folder verdict for a request_pair call that its words or legacy_data would mark pre-w5297, or undefined
+   * when nothing would mark it (no GitHub call) or no commit is known (filePair then keeps the refusal and says so).
+   */
+  private async pairDataDir(a: Record<string, unknown>, player: PairPlayer | undefined): Promise<DataDirVerdict | undefined> {
+    const said = typeof a.legacy_data === 'string' ? a.legacy_data.trim() : '';
+    if (saysNone(said)) return undefined;
+    if (!said && !mentionsLegacyPlayer(typeof a.what === 'string' ? a.what : '', typeof a.brief === 'string' ? a.brief : '')) return undefined;
+    const commit = (typeof a.commit === 'string' ? a.commit.trim().toLowerCase() : '') || player?.key.slice(0, 40);
+    if (!commit || !/^[0-9a-f]{7,40}$/.test(commit)) return undefined;
+    try {
+      return await this.gameDataDirAt(commit);
+    } catch (e) {
+      return { reads: false, checked: false, why: `FF Factory could not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (${clip((e as Error).message, 160)}; w6189)` };
+    }
+  }
+
+  private async requestPair(sessionId: string, a: Record<string, unknown>): Promise<string> {
     refuseInDryRun('request_pair');
+    const player = typeof a.player === 'string' && a.player.trim() ? this.pairPlayer(a.player) : undefined;
+    const dataDir = await this.pairDataDir(a, player);
     const out = this.orchestrators.filePair(sessionId, {
       what: typeof a.what === 'string' ? a.what : '',
       brief: typeof a.brief === 'string' ? a.brief : '',
@@ -2304,7 +2330,8 @@ export class Agents {
       ...(Array.isArray(a.avoid) ? { avoid: a.avoid.filter((x): x is string => typeof x === 'string').slice(0, 6) } : {}),
       ...(typeof a.pr === 'string' && a.pr.trim() ? { pr: a.pr } : {}),
       ...(typeof a.commit === 'string' && a.commit.trim() ? { commit: a.commit } : {}),
-      ...(typeof a.player === 'string' && a.player.trim() ? { player: this.pairPlayer(a.player) } : {}),
+      ...(player ? { player } : {}),
+      ...(dataDir ? { data_dir: dataDir } : {}),
     });
     this.blockerWatch?.kick();
     return out;
@@ -6637,6 +6664,19 @@ A report is for a person who asked for one, and people want very few. File one w
     if (want && refs.length !== want) throw new Error(`${w.id} is ${pairText(w.pair!)}: give ${want} sandboxes (sandbox and ${want - 1} in pair_sandboxes), not ${refs.length}`);
     if (refs.length < 1 || refs.length > PAIR_MAX_LEGS) throw new Error(`a pair run has 1 to ${PAIR_MAX_LEGS} legs, one per computer`);
     if (a.extra_agent) throw new Error('a pair run\'s legs are game work: each goes into a FREE sandbox, never beside another agent (extra_agent)');
+    // w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR (one filed before this check, or by hand) is
+    // decided per commit here too, so start_agent and request_pair agree; a commit that does not, or that cannot be checked,
+    // keeps the refusal below.
+    if (w.pair?.legacyData && w.pair.commit) {
+      const v = await this.gameDataDirAt(w.pair.commit).catch((): undefined => undefined);
+      if (v?.reads) {
+        const cleared = dataDirClearedText(v.commit);
+        const { legacyData: _was, ...rest } = w.pair;
+        w.pair = { ...rest, dataDirChecked: cleared };
+        w.log = [...w.log, logLine(new Date(), `start_agent: ${cleared}; it was marked "${clip(_was ?? '', 120)}"`)].slice(-40);
+        this.store.putWork(w);
+      }
+    }
     // Every leg checked before any starts.
     const legs = refs.map((ref, i) => {
       const t = this.target(ref, i ? undefined : a.machine);

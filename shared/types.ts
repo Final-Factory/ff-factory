@@ -2507,9 +2507,13 @@ export interface WorkPair {
    * player never reads FF_GAME_DATA_DIR and writes the per-OS data folder in the owner's profile (LocalLow on Windows), which
    * a fenced worker cannot write (w5944: lothdesktop's Low-integrity worker, 'no host-ready within 420s'). Its legs then go
    * only on computers whose worker fence is off (shared/capacity.ts unfitWhy), and never on Linux (pre-1.0 has no Linux
-   * multiplayer build).
+   * multiplayer build). w6189: request_pair and start_agent read the player's GameDataPaths.cs at the pair's commit
+   * (server/gameDataDir.ts); a commit that reads FF_GAME_DATA_DIR (game PR #4357's backport) gets no legacyData, and a
+   * commit that does not, or could not be checked, keeps it with that reason appended.
    */
   legacyData?: string;
+  /** w6189: why a pair run that its words or legacy_data called pre-w5297 is not one (its commit reads FF_GAME_DATA_DIR). */
+  dataDirChecked?: string;
   /** The requests its finished result was sent to (w2057, Orchestrators.pairFinished): each told once. */
   told?: string[];
   /**
