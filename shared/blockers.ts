@@ -306,9 +306,9 @@ export function gatesName(gates: readonly WorkBlocker[], now: number = Date.now(
   return names.length <= 2 ? names.join(' and ') : `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
 }
 
-/** Whether two gates are the same wait (the later one replaces the earlier when a request is blocked again, w754). */
+/** Whether two gates are the same wait (the later one replaces the earlier when a request is blocked again, w754). A lock's holder is part of it; a pr gate's holder (w6446) is not. */
 export const sameGate = (a: Pick<WorkBlocker, 'kind' | 'ref' | 'holder'>, b: Pick<WorkBlocker, 'kind' | 'ref' | 'holder'>) =>
-  a.kind === b.kind && (a.ref ?? '').toLowerCase() === (b.ref ?? '').toLowerCase() && (a.holder ?? '').toLowerCase() === (b.holder ?? '').toLowerCase();
+  a.kind === b.kind && (a.ref ?? '').toLowerCase() === (b.ref ?? '').toLowerCase() && (a.kind !== 'lock' || (a.holder ?? '').toLowerCase() === (b.holder ?? '').toLowerCase());
 
 /** The most gates one request may have. */
 export const MAX_GATES = 6;
@@ -382,9 +382,44 @@ const STATUS_DONE_WORDS: Partial<Record<WorkItem['status'], string>> = { rejecte
 
 /** The request a merged one continues as (merges are followed a few steps). */
 function follow(id: string, f: BlockerFacts): WorkItem | undefined {
-  let t = f.work(id);
-  for (let i = 0; i < 5 && t?.status === 'merged' && t.mergedInto; i++) t = f.work(t.mergedInto);
+  return followMerged(id, f.work);
+}
+
+/** w6446: `follow` for any lookup of requests by id. */
+export function followMerged(id: string, work: (id: string) => WorkItem | undefined): WorkItem | undefined {
+  let t = work(id);
+  for (let i = 0; i < 5 && t?.status === 'merged' && t.mergedInto; i++) t = work(t.mergedInto);
   return t;
+}
+
+/**
+ * w6446: the request a gate makes its request wait on: a request gate's ref (done or report), or the request a w5845
+ * merge wait was handed to (Orchestrators.handPrGate: its holder, or "(wN works on it, w5845)" in its words for one set
+ * before the holder was kept). Undefined for every other gate.
+ */
+export function gateWaitsOn(g: WorkBlocker): string | undefined {
+  if (g.kind === 'request') return g.ref;
+  if (g.kind === 'pr' && g.by === 'blocker watch') return g.holder ?? /\((w\d+) works on it, w5845\)/i.exec(g.what)?.[1];
+  return undefined;
+}
+
+/**
+ * w6446: request `w` reviews pull request `ref` (owned by `owner`): its title or brief says review, re-review or independent
+ * check of that PR (its number within the same sentence), or its title says review and it is related to the owner. A
+ * reviewer reads the PR and reports; the PR merges only after it, so it never waits for that merge (w5845 would deadlock it:
+ * w6090 re-reviewing ff-factory #1366 and w6102 reviewing #1368 each waited a day for the PR they review to merge). A
+ * request that owns the PR, or whose words say it addresses or fixes a review, is not a reviewer.
+ */
+export function reviewsPr(w: Pick<WorkItem, 'id' | 'title' | 'brief' | 'relatedIds'>, ref: string, owner?: Pick<WorkItem, 'id'>): boolean {
+  const m = CI_REF.exec(ref);
+  if (!m) return false;
+  const text = `${w.title ?? ''}\n${w.brief ?? ''}`;
+  if (/\b(?:address|fix|apply|answer|act on)\w*\s+(?:the\s+|its\s+|a\s+)?(?:re-?review|review|independent check)/i.test(text)) return false;
+  const REVIEW = String.raw`(?:re-?review|review|independent(?:ly)? check)`;
+  const n = m[2];
+  const named = new RegExp(String.raw`\b${REVIEW}\w*\b[^\n.]{0,100}?(?:#|/pull/)${n}\b|(?:#|/pull/)${n}\b[^\n.]{0,40}?\b${REVIEW}`, 'i').test(text);
+  const related = !!owner && owner.id.toLowerCase() !== w.id.toLowerCase() && (w.relatedIds ?? []).some((r) => r.toLowerCase() === owner.id.toLowerCase()) && new RegExp(String.raw`\b${REVIEW}`, 'i').test(w.title ?? '');
+  return named || related;
 }
 
 const firstLine = (s: string | undefined) => (s ?? '').split('\n').map((l) => l.trim()).find(Boolean)?.slice(0, 160) ?? '';
@@ -552,14 +587,19 @@ export const CI_REF = /^([\w.-]+\/[\w.-]+)#(\d+)$/;
 export function waitCycles(work: Iterable<WorkItem>, saysWaitsOn?: (w: WorkItem) => string | undefined): string[][] {
   const edges = new Map<string, string[]>();
   const all = [...work];
+  const byKey = new Map(all.map((w) => [w.id.toLowerCase(), w]));
+  // w6446: a wait on a merged request is a wait on the one it merged into (w6077 waited on w6105, merged into w6090).
+  const to = (id: string) => followMerged(id, (x) => byKey.get(x.toLowerCase()))?.id.toLowerCase() ?? id.toLowerCase();
   for (const w of all) {
     const id = w.id.toLowerCase();
     if (w.status === 'blocked') {
-      const to = gatesOf(w).filter((g) => g.kind === 'request' && g.ref).map((g) => g.ref!.toLowerCase());
-      if (to.length) edges.set(id, to);
+      // w6446: a w5845 wait for a PR to merge waits on the request that works on it (its holder).
+      const next = [...new Set(gatesOf(w).map(gateWaitsOn).filter((x): x is string => !!x).map(to))].filter((x) => x !== id);
+      if (next.length) edges.set(id, next);
     } else if (w.status === 'active') {
-      const to = saysWaitsOn?.(w)?.toLowerCase();
-      if (to && to !== id) edges.set(id, [to]);
+      const said = saysWaitsOn?.(w);
+      const next = said ? to(said) : undefined;
+      if (next && next !== id) edges.set(id, [next]);
     }
   }
   // w2405: a gate whose words say the request it waits on "needs nothing from" it rules out a wait back read from that
@@ -599,16 +639,24 @@ const byId = (a: string, b: string) => (Number(a.slice(1)) || 0) - (Number(b.sli
  * blocked longest.
  */
 export function cycleBreak(cycle: readonly string[], f: Pick<BlockerFacts, 'work' | 'reportedSince' | 'deliveredSince'>): { id: string; gate: WorkBlocker; why: string } | undefined {
+  const to = (id: string) => followMerged(id, f.work)?.id.toLowerCase() ?? id.toLowerCase();
   const sides = cycle
     .map((id, i) => {
       const w = f.work(id);
       const next = cycle[(i + 1) % cycle.length];
-      const gate = w?.status === 'blocked' ? gatesOf(w).find((g) => g.kind === 'request' && g.ref?.toLowerCase() === next) : undefined;
+      const gates = w?.status === 'blocked' ? gatesOf(w).filter((g) => { const x = gateWaitsOn(g); return !!x && to(x) === next; }) : [];
+      // w6446: the w5845 merge wait first: it is the one FF Factory set, not the worker.
+      const gate = gates.find((g) => g.kind === 'pr') ?? gates[0];
       return w && gate ? { w, gate, next: f.work(next) } : undefined;
     })
     .filter((s): s is { w: WorkItem; gate: WorkBlocker; next: WorkItem | undefined } => !!s);
   if (!sides.length) return undefined;
   const loop = [...cycle, cycle[0]].join(' -> ');
+  // w6446: a wait the blocker watch set for a PR to merge (w5845) because another request works on it, while that request
+  // waits on this one: the PR merges only after this one acts (a review it waits on), so the merge wait goes. w6102, the
+  // review of ff-factory #1368, waited for #1368 to merge while its author w6085 waited on w6102's report, for a day.
+  const handed = sides.find((s) => s.gate.kind === 'pr');
+  if (handed) return { id: handed.w.id, gate: handed.gate, why: `a wait cycle (${loop}): ${handed.w.id} was set to wait for ${handed.gate.ref} to merge because ${handed.next?.id ?? gateWaitsOn(handed.gate)} works on it (w5845), but that request waits on ${handed.w.id} in turn, so the merge wait is dropped and ${handed.w.id} goes on (w6446)` };
   // w2464: a pair run's news is its delivered result (its host leg's "For <waiter>:" line), never a leg's progress line.
   const since = (s: { gate: WorkBlocker }) => Date.parse(s.gate.at) || 0;
   const news = sides.find((s) => s.next && (s.next.pair ? f.deliveredSince?.(s.next, since(s), s.w.id) : f.reportedSince?.(s.next, since(s))));

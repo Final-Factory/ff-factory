@@ -8192,7 +8192,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const i = gates.findIndex((g) => sameGate(g, gate));
     if (i < 0) return false;
     const line = `${gate.ref} is ${to}'s to act on, not ${w.id}'s (${why}); ${w.id} now waits for it to merge (w5845)`;
-    const next: WorkBlocker = { kind: 'pr', ref: gate.ref, what: `${gate.ref} merging (${to} works on it, w5845)`, at: this.now().toISOString(), by: 'blocker watch' };
+    // w6446: the holder is the request it now waits on, so the blocker watch's wait-cycle check sees the wait (waitCycles).
+    const next: WorkBlocker = { kind: 'pr', ref: gate.ref, what: `${gate.ref} merging (${to} works on it, w5845)`, holder: to, at: this.now().toISOString(), by: 'blocker watch' };
     const left = gates.map((g, j) => (j === i ? next : g)).filter((g, j, xs) => xs.findIndex((x) => sameGate(x, g)) === j);
     w.blocked = left[0];
     w.alsoBlocked = left.length > 1 ? left.slice(1) : undefined;
