@@ -43,12 +43,28 @@ test('steam_upload: refuses a Steam branch the release did not name', () => {
   for (const live of ['default', 'beta', 'pre-release', 'Development ', 'public']) {
     assert.match(refuseUpload(ask({ live }), facts())!, /sets development live, not .*no other Steam branch is set by an agent/, live);
   }
-  // pre-1.0 and the demo set nothing live.
-  assert.match(refuseUpload(ask({ live: 'development' }), facts({ branch: 'pre-1.0' }))!, /sets no Steam branch live, not development/);
+  // The demo sets nothing live.
   assert.match(refuseUpload(ask({ app: 'demo', live: 'development' }), facts())!, /sets no Steam branch live/);
-  assert.deepEqual(liveBranchesFor('master', 'main'), ['development']);
-  assert.deepEqual(liveBranchesFor('pre-1.0', 'main'), []);
-  assert.deepEqual(liveBranchesFor('master', 'demo'), []);
+  assert.deepEqual(liveBranchesFor('master', 'main', '1.0.0.50'), ['development']);
+  assert.deepEqual(liveBranchesFor('master', 'demo', '1.0.0.50'), []);
+});
+
+test('steam_upload: a 0.50.x pre-1.0 main release sets pre-release live, and nothing else (w6534)', () => {
+  const pre = (v: string, live: string, app: 'main' | 'demo' = 'main') =>
+    refuseUpload(ask({ version: v, app, live }), facts({ branch: 'pre-1.0', claim: { lane: 'urgent', version: v, machine: 'beast', request: 'w5600' } }));
+  assert.equal(pre('0.50.0.119', 'pre-release'), undefined);
+  for (const live of ['development', 'default', 'public', 'beta']) {
+    assert.match(pre('0.50.0.119', live)!, /sets pre-release live, not /, live);
+  }
+  // Never a 1.0 build onto pre-release, nor a version that only looks like 0.50; never the demo.
+  assert.match(pre('1.0.0.70', 'pre-release')!, /sets no Steam branch live, not pre-release/);
+  assert.match(pre('0.500.0.1', 'pre-release')!, /sets no Steam branch live, not pre-release/);
+  assert.match(pre('0.50.0.119', 'pre-release', 'demo')!, /sets no Steam branch live, not pre-release/);
+  assert.deepEqual(liveBranchesFor('pre-1.0', 'main', '0.50.0.119'), ['pre-release']);
+  assert.deepEqual(liveBranchesFor('pre-1.0', 'main', '1.0.0.70'), []);
+  assert.deepEqual(liveBranchesFor('pre-1.0', 'demo', '0.50.0.119'), []);
+  // A master release never sets pre-release.
+  assert.match(refuseUpload(ask({ version: '0.50.0.119', live: 'pre-release' }), facts({ claim: { lane: 'urgent', version: '0.50.0.119', machine: 'beast', request: 'w5600' } }))!, /sets development live, not pre-release/);
 });
 
 test('steam_upload: a preview sets nothing live and needs no claim', () => {

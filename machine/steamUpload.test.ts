@@ -109,6 +109,13 @@ test('steam upload: a preview copies, checks and runs ffsteam on the copy, then 
   sent.length = 0;
   await runSteamJob({ ...msg, id: 'j3', preview: false, live: 'default' }, { root, allowedRoots: [me], python: 'py', send: (m) => sent.push(m), log: () => {}, run });
   assert.match(sent.at(-1)!.error!, /refusing to set default live/);
+  // w6534: pre-release only for a 0.50.x main release.
+  sent.length = 0;
+  await runSteamJob({ ...msg, id: 'j4', preview: false, live: 'pre-release' }, { root, allowedRoots: [me], python: 'py', send: (m) => sent.push(m), log: () => {}, run });
+  assert.match(sent.at(-1)!.error!, /refusing to set pre-release live for 1\.0\.0\.50/);
+  sent.length = 0;
+  await runSteamJob({ ...msg, id: 'j5', preview: false, app: 'demo', version: '0.50.0.119', live: 'pre-release' }, { root, allowedRoots: [me], python: 'py', send: (m) => sent.push(m), log: () => {}, run });
+  assert.match(sent.at(-1)!.error!, /refusing to set pre-release live for demo/);
 });
 
 test('steam upload: no fence lets a worker write steamcmd\'s folder (w5551)', async () => {
