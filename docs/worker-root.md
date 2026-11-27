@@ -1453,6 +1453,14 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   runs in workers), as nightly is, so it is no more trusted than them: the copy runs with the worker's rights and refuses
   links (machine/workerCopy.ts), into the caller's own slot only, so a file planted there reaches only a worker that chose
   that entry, as running it from the cache would. A launch onto a slot whose player still runs is refused (w6212 L1).
+- **No player slot for a light folder on Windows** (w6348): a light agent folder (`agentN`, machine/lightFolders.ts) asks
+  for `players/agentN-<peer>`, but Windows Firewall rules name one exact program path and the worker install's firewall step
+  (scripts/worker/firewall.ps1) makes them only for `slotK-0`/`slotK-1`, so `player_slots.py` refuses to start a player
+  there (no inbound rule; seen on LothDesktop in w6294). Light folder ids run to agent999 as agents start, so no fixed rule
+  list covers them, and a new rule per folder would need an elevated step per agent start. So on Windows `players/install`
+  and `players/launch` refuse a light folder up front (409, "... is a light agent folder ... Run the player from a game
+  sandbox"); `players/status` and `players/release` still answer. Linux and macOS have no per-path rule and go on (biscuit's
+  `agent1-0` ran five broker launches in w6294).
 - **What `warn` watches**: the seeds, `players`, `seed` and `tools` (`sharedLockedFolders`), each folder and its first level
   (not recursive), one daemon log line per entry an hour: `shared lock (warn): <path> changed and the daemon did not write it`.
 - **What `on` adds** (the enforce PR, separate): those folders become read-only to sandbox workers, a Medium No-Write-Up label
