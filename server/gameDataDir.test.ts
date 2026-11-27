@@ -167,3 +167,13 @@ test('w6485: a separator alone after Steam keeps the mark, and a long run of pun
     assert.ok(ms < 500, `steam followed by 50,000 ${JSON.stringify(c)} took ${ms.toFixed(0)} ms`);
   }
 });
+
+// w6544: excusedBuild's last-word lookup was quadratic on a long run with no whitespace before a match.
+test('w6544: a long run with no whitespace before a match keeps the mark without stalling the event loop', () => {
+  for (const said of ['-'.repeat(50000) + 'steam build', 'steam—'.repeat(8000) + ' build']) {
+    const t0 = performance.now();
+    const r = otherPlayerIn(said, NEW);
+    assert.ok(performance.now() - t0 < 500);
+    assert.ok(r);
+  }
+});
