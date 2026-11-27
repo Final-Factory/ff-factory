@@ -337,7 +337,7 @@ async function disconnectDrain(t: Parameters<typeof setupOnMachine>[0], n: numbe
     const a = await startedFor(env, id);
     sessions.sessions.get(a.id)!.stop(true);
     await until('its process stopped', () => !sessions.sessions.get(a.id)?.live);
-    workers.push(a);
+    workers.push(a.info);
   }
   await pc.stop();
   await until('pc offline', () => !machines.isOnline('pc'));
