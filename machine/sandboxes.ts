@@ -251,7 +251,9 @@ export async function lfsDedup(git: PoolDeps['git'], dir: string, signal?: Abort
   if (ls.code !== 0) return { skipped: `could not list the LFS files: ${tail(ls.stderr || ls.stdout) || `exit ${ls.code}`}` };
   const times = await lfsTimes(dir, ls.stdout);
   const res = await git(['-C', dir, 'lfs', 'dedup'], { timeoutMs: 10 * 60_000, signal }).catch(failed);
-  await restoreLfsTimes(dir, times);
+  // An aborted dedup (the trim's timeout won, and the sandbox may already be back in use) gets no times back: a checkout's
+  // new bytes of the same size would be stamped with the old mtime and hidden from git status (w6453's review).
+  if (!signal?.aborted) await restoreLfsTimes(dir, times, signal);
   if (res.code !== 0) return { skipped: tail(res.stderr || res.stdout) || `exit ${res.code}` };
   const m = /De-duplicated\s+size:\s*(\d+)\s*bytes/i.exec(res.stdout + res.stderr);
   return { bytes: m ? Number(m[1]) : 0 };
@@ -267,9 +269,10 @@ export async function lfsTimes(dir: string, names: string): Promise<Map<string, 
   return out;
 }
 
-/** Put back the times lfsTimes took, on every file whose size is still the same (the dedup's clone is the same bytes). Never throws. */
-export async function restoreLfsTimes(dir: string, times: Map<string, fs.Stats>): Promise<void> {
+/** Put back the times lfsTimes took, on every file whose size is still the same (the dedup's clone is the same bytes); it stops once `signal` aborts. Never throws. */
+export async function restoreLfsTimes(dir: string, times: Map<string, fs.Stats>, signal?: AbortSignal): Promise<void> {
   for (const [name, was] of times) {
+    if (signal?.aborted) return;
     const p = path.join(dir, name);
     const now = await fs.promises.stat(p).catch(() => undefined);
     if (!now || now.size !== was.size || now.mtimeMs === was.mtimeMs) continue;
