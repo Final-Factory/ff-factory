@@ -172,7 +172,23 @@ export function startScript(o: Pick<NewOptions, 'name' | 'project' | 'port' | 'd
     "read -r -d '' PRIO <<'PS'",
     PORTAL_PRIORITY_PS,
     'PS',
-    `FF_PORTAL_PID=$(cat "/proc/$portal/winpid") powershell.exe -NoProfile -NonInteractive -EncodedCommand "$(printf '%s' "$PRIO" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)" >> "${log}" 2>/dev/null || echo "portal priority (w6221): the raise failed (exit $?); the portal runs at its task's priority" >> "${log}"`,
+    // w6542: under Git Bash the job is a forked bash.exe that then starts node.exe as its child, so a winpid read at once
+    // can name that bash (measured on GitHub's windows-latest, PR #1508: 1 of 25 reads, the bash.exe whose child was the
+    // node.exe the same file named a second later), or a process already gone (OpenProcess: error 87). PORTAL_PRIORITY_PS
+    // raises only a node.exe, the named one or that one's node.exe child; when the pid named nothing, or no node.exe,
+    // the winpid is read again, up to 5 times while the portal runs.
+    `enc=$(printf '%s' "$PRIO" | iconv -f UTF-8 -t UTF-16LE | base64 -w0)`,
+    'for try in 1 2 3 4 5; do',
+    '  winpid=$(cat "/proc/$portal/winpid" 2>/dev/null)',
+    `  raised=$(FF_PORTAL_PID="\${winpid:-0}" powershell.exe -NoProfile -NonInteractive -EncodedCommand "$enc" 2>/dev/null) || raised="portal priority (w6221): the raise failed (exit $?); the portal runs at its task's priority"`,
+    '  case "$raised" in',
+    `    *"could not open pid"* | *"not the portal"*) [ "$try" -lt 5 ] && kill -0 "$portal" 2>/dev/null || break`,
+    `      echo "portal priority (w6542): read $try of its winpid, \${winpid:-none}, named no portal node.exe yet; reading it again" >> "${log}"`,
+    '      sleep 1 ;;',
+    '    *) break ;;',
+    '  esac',
+    'done',
+    `printf '%s\\n' "$raised" | tr -d '\\r' >> "${log}"`,
     'wait $portal',
     '',
   ].join('\n');
@@ -214,7 +230,20 @@ export const PORTAL_PRIORITY_PS = [
   '  }',
   '}',
   "'@",
-  '[Console]::Out.WriteLine("portal priority (w6221): " + [FFPortalPrio]::Raise([int]$env:FF_PORTAL_PID))',
+  // w6542: the pid the script read may be the forked bash.exe that starts node.exe as its child: raise only a node.exe,
+  // that pid or its node.exe child (waited for up to 10 s). Named nothing: "could not open", the script reads it again.
+  '$w = [int]$env:FF_PORTAL_PID; $p = $w; $what = ""',
+  'for ($i = 0; $i -lt 40; $i++) {',
+  '  $q = Get-Process -Id $w -ErrorAction SilentlyContinue',
+  '  if (-not $q) { break }',
+  "  if ($q.ProcessName -eq 'node') { $what = ''; break }",
+  "  $c = Get-CimInstance Win32_Process -Filter \"ParentProcessId = $w AND Name = 'node.exe'\" | Select-Object -First 1",
+  "  if ($c) { $p = [int]$c.ProcessId; $what = ' (the node.exe child of ' + $q.ProcessName + '.exe ' + $w + ')'; break }",
+  "  $what = 'not the portal: pid ' + $w + ' is ' + $q.ProcessName + '.exe, with no node.exe child'",
+  '  Start-Sleep -Milliseconds 250',
+  '}',
+  "if ($what.StartsWith('not the portal')) { [Console]::Out.WriteLine('portal priority (w6221): ' + $what); exit 0 }",
+  '[Console]::Out.WriteLine("portal priority (w6221): " + [FFPortalPrio]::Raise($p) + $what)',
 ].join('\n');
 
 const psSingle = (s: string) => `'${s.replace(/'/g, "''")}'`;

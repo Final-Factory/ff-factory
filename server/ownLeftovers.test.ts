@@ -9,7 +9,12 @@ import { cleanupPass, STALE_OUTPUT_DEFAULTS } from './staleOutput.ts';
 import {
   editorFolderOf,
   leaseLive,
+  expandShortNames,
+  expandShortNamesAsync,
   mentions,
+  mentionsKnown,
+  real,
+  realAsync,
   ownRecheck,
   parseWorktreeList,
   planOwnLeftovers,
@@ -318,4 +323,34 @@ test('the pass: own leftovers are planned in a dry run and removed in a real one
   assert.ok(!fs.existsSync(path.join(slots, 'slot0')));
   const broken = await cleanupPass({ ...base, opts: { stale: false, dryRun: false }, own: { plan: async () => Promise.reject(new Error('boom')), run: own.run } });
   assert.deepEqual(broken.failed, []);
+});
+
+test('w6553: expandShortNamesAsync, realAsync and mentionsKnown give exactly what expandShortNames, real and mentions give', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-w6553-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const tilde = path.join(root, 'AB~1', 'in');
+  fs.mkdirSync(tilde, { recursive: true });
+  const target = path.join(root, 'target');
+  fs.mkdirSync(target);
+  const link = path.join(root, 'link');
+  fs.symlinkSync(target, link, 'junction');
+  // w6560: a dangling junction under the link. existsSync calls it missing and walks up past it; so must the async one.
+  const gone = path.join(root, 'gone-target');
+  fs.mkdirSync(gone);
+  fs.symlinkSync(gone, path.join(target, 'dj'), 'junction');
+  fs.rmdirSync(gone);
+  const cmds = [
+    String.raw`node "${path.join(link, 'dj')}\out~1\x.js" --watch`,
+    'node run.js',
+    String.raw`node ${tilde}\x.js --out "${tilde}" ${tilde}/gone/deeper.txt`,
+    String.raw`C:\PROGRA~1\Git\bin\bash.exe -c "Q:\NO~1\x" D:/A~1/b`,
+    `"${path.join(link, 'a~b')}" ${target} ${link}/x`,
+    `${tilde}~ ${tilde}`,
+  ];
+  for (const c of cmds) assert.equal(await expandShortNamesAsync(c), expandShortNames(c), c);
+  for (const p of [root, tilde, target, link, path.join(root, 'missing'), 'rel/x']) assert.equal(await realAsync(p), real(p), p);
+  for (const c of cmds)
+    for (const p of [root, tilde, target, link, path.join(link, 'x'), path.join(root, 'AB'), path.join(root, 'missing')]) {
+      assert.equal(mentionsKnown(await expandShortNamesAsync(c), p, await realAsync(p)), mentions(c, p), `${c} names ${p}`);
+    }
 });

@@ -39,7 +39,7 @@ import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } fr
 import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, within, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheDir, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { makeSharedLockDirs } from './sharedLockPaths.ts';
 import { lockIn } from './lockIn.ts';
-import { playersRpcHandlers } from './playersBroker.ts';
+import { playersRpcHandlers, processStartTimes } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { longRunsRpcHandlers, longRunsSetting } from './longRuns.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -1578,7 +1578,7 @@ export class Daemon {
     return plan;
   }
 
-  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes, warn-only unless ffuBusyRetry is on. */
+  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes; removes when ffuBusyRetry and the stale-output mode are on. */
   private makeFfuRetry(): FfuBusyRetry | undefined {
     if (!this.cfg.root) return undefined;
     const roots = [this.cfg.root, ...(this.cfg.extraRoots ?? [])];
@@ -4110,6 +4110,8 @@ export class Daemon {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) }),
+      // w6549: a lease whose pid a later process took is dead (one Win32_Process or ps query per check of a slot).
+      startedAt: (pids) => processStartTimes(pids),
       // w5615: under "on" workers cannot write players: the copy is staged in the caller's own cache folder, then locked in.
       ...(this.sharedLock === 'on' ? { stageDir: (sb: string) => slotCacheDir(root, sb), lockIn: (dst: string) => this.lockShared(dst) } : {}),
       log: (l) => log(l),
