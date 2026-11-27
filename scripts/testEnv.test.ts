@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SECRET_ENV, secretEnvNames } from '../shared/secretShapes.ts';
-import { KEPT_FF_ENV, sessionEnvNames } from './testEnv.ts';
+import { KEPT_FF_ENV, TEST_GIT_ENV, sessionEnvNames } from './testEnv.ts';
 
 // w1584: a failing assertion printed a worker's vault GitHub token (GH_TOKEN) into its stored transcript. scripts/testEnv.ts,
 // loaded first by `npm test` and `npm run test:coverage`, takes every credential out of the tests' environment.
@@ -70,11 +70,14 @@ test('testEnv: a token planted in the parent environment is not visible inside t
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 const planted = ${JSON.stringify({ ...PLANTED, ...SESSION })};
+const own = ${JSON.stringify(TEST_GIT_ENV)};
 test('probe', () => {
   const child = JSON.parse(execFileSync(process.execPath, ['-e', 'process.stdout.write(JSON.stringify(process.env))'], { encoding: 'utf8' }));
   for (const env of [process.env, child]) {
-    for (const name of Object.keys(planted)) assert.equal(env[name], undefined, 'visible: ' + name + '=' + env[name]);
-    for (const value of Object.values(planted)) assert.ok(!Object.values(env).includes(value), 'a planted value is visible: ' + value);
+    // w6273: the guard's own git entries (no credential helper, no prompt) take the place of the session's.
+    for (const name of Object.keys(planted)) assert.equal(env[name], own[name], 'visible: ' + name + '=' + env[name]);
+    const seen = Object.entries(env).filter(([k, v]) => own[k] !== v).map(([, v]) => v);
+    for (const value of Object.values(planted)) assert.ok(!seen.includes(value), 'a planted value is visible: ' + value);
   }
   // w5915: a program a test starts with process.execArgv (this guard again) keeps an FF_ setting the test hands it.
   const handed = execFileSync(process.execPath, [...process.execArgv, '-e', 'process.stdout.write(String(process.env.FF_HANDED_W5915))'], { encoding: 'utf8', env: { ...process.env, FF_HANDED_W5915: 'kept' } });
@@ -98,4 +101,29 @@ test('probe', () => {
   const guarded = run(['--import', './scripts/testEnv.ts']);
   assert.equal(guarded.status, 0, `the probe saw a planted credential:\n${guarded.stdout.slice(-2000)}\n${guarded.stderr.slice(-1000)}`);
   for (const value of Object.values(PLANTED)) assert.ok(!guarded.stdout.includes(value) && !guarded.stderr.includes(value), 'a planted value was printed');
+});
+
+test('w6273: a git a test starts asks no credential helper the machine names and waits on no prompt', { skip: spawnSync('git', ['--version']).status !== 0 }, (t) => {
+  // On LothDesktop the system's helper was Git for Windows' helper-selector, a picker window nobody sees: remoteGuard.test.ts
+  // hung on it for good. Here a helper in a planted user config stands for the machine's (system or user, both are cleared);
+  // the system file is left out, or the control below would wait on that very picker.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'testenv-cred-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const marker = path.join(dir, 'helper-ran.txt').replace(/\\/g, '/');
+  const global = path.join(dir, 'gitconfig');
+  fs.writeFileSync(global, `[credential]\n\thelper = "!f() { echo ran >> '${marker}'; echo username=planted; echo password=planted; }; f"\n`);
+  for (const [k, v] of Object.entries(TEST_GIT_ENV)) assert.equal(process.env[k], v, `the guard set ${k}`);
+  const fill = (env: NodeJS.ProcessEnv) =>
+    spawnSync('git', ['credential', 'fill'], { input: 'protocol=https\nhost=github.com\npath=Final-Factory/example.git\n\n', env: { ...env, GIT_CONFIG_GLOBAL: global, GIT_CONFIG_NOSYSTEM: '1' }, encoding: 'utf8', timeout: 30_000 });
+  // Control: with the guard's entries taken out, the planted helper answers (the check below is a real one).
+  const bare: NodeJS.ProcessEnv = { ...process.env };
+  for (const k of Object.keys(TEST_GIT_ENV)) delete bare[k];
+  assert.match(fill({ ...bare, GIT_TERMINAL_PROMPT: '0' }).stdout, /password=planted/);
+  assert.ok(fs.existsSync(marker), 'the planted helper ran with no guard');
+  fs.rmSync(marker);
+  const guarded = fill(process.env);
+  assert.equal(guarded.error, undefined, 'git credential fill returned (no prompt held it)');
+  assert.notEqual(guarded.status, 0, 'with no helper and no prompt there is no credential');
+  assert.doesNotMatch(guarded.stdout, /password=/);
+  assert.equal(fs.existsSync(marker), false, 'the planted helper never ran');
 });
