@@ -67,6 +67,11 @@ test('w6085: a Low claude that cannot be checked or made again holds the run, ne
 test('w6085: editorFence checks the Low node launcher before each editor start; one that fails leaves that editor unfenced, never the replaced program', (t) => {
   let ok = true;
   const { d, checked } = daemon(t, (c) => (ok ? `${c}-again` : undefined));
+  // The Low node launcher is Windows' editor fence; macOS and Linux take their own (daemon.ts editorFence), so the
+  // test runs it as Windows does on every CI runner.
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
   const editor: LowEditorFence = { launcher: 'X:/ffw/tools/low/node-1-2.exe', unityDir: 'X:/ffw/tools/unity-low', licensingIpc: 'ipc', env: {} };
   d.low = { claude: 'X:/ffw/tools/low/claude-1-2.exe', editor };
   assert.equal(d.editorFence()?.launcher, 'X:/ffw/tools/low/node-1-2.exe-again');
