@@ -76,9 +76,17 @@ function askStack() {
   }
   s.on('Debugger.scriptParsed', (m) => { if (m.params && m.params.url) urls.set(m.params.scriptId, m.params.url); });
   s.on('Debugger.paused', (m) => {
-    const frames = ((m.params && m.params.callFrames) || []).slice(0, 12).map(where);
-    out('event loop: frozen: ' + who + "'s main thread is in " + (frames.join(' < ') || '(no JavaScript frame)'));
-    s.post('Debugger.resume', () => s.post('Debugger.disable', () => drop(s)));
+    // Resume FIRST: a throw in this listener would leave the main thread paused for good (w6565's review measured it).
+    // The frames are plain data in m, so reading them after the resume is fine.
+    try { s.post('Debugger.resume', () => { try { s.post('Debugger.disable', () => drop(s)); } catch { drop(s); } }); } catch { drop(s); }
+    try {
+      const frames = ((m.params && m.params.callFrames) || []).slice(0, 12).map(where);
+      // A pause asked during one long native call lands on the next JavaScript after it: then the loop is free again.
+      const late = Date.now() - Number(Atomics.load(beat, 0)) < afterMs ? ' (read after the freeze ended)' : '';
+      out('event loop: frozen: ' + who + "'s main thread is in " + (frames.join(' < ') || '(no JavaScript frame)') + late);
+    } catch (e) {
+      out('event loop: frozen: could not read the main thread\\'s stack: ' + ((e && e.message) || e));
+    }
   });
   s.post('Debugger.enable', (e) => {
     if (e) { out('event loop: frozen: could not read the main thread\\'s stack: ' + e.message); drop(s); return; }
