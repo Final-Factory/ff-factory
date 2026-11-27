@@ -63,10 +63,11 @@ $dir = Join-Path $env:ProgramData 'ffsb-helpers'
 $RepairTask = 'ffsb-helper-deduprepair'
 $RepairAccess = 'LCSWRPWPLO'   # SERVICE_QUERY_STATUS, ENUMERATE_DEPENDENTS, START, STOP, INTERROGATE
 function Get-TaskSid([string]$name) {
-  $o = "$(schtasks /showsid /tn $name 2>&1)"
-  $m = [regex]::Match($o, 'S-1-5-87(-\d+)+')
-  if (-not $m.Success) { throw "schtasks /showsid /tn $name gave no task SID: $o" }
-  $m.Value
+  # NT TASK\<name> where Windows resolves it; else computed the way service SIDs are (S-1-5-80 there): SHA-1 of the
+  # upper-case name in UTF-16LE as five 32-bit numbers. (schtasks /showsid printed only its usage on windows-latest, elevated.)
+  try { return (New-Object Security.Principal.NTAccount("NT TASK\$name")).Translate([Security.Principal.SecurityIdentifier]).Value } catch { }
+  $b = [Security.Cryptography.SHA1]::Create().ComputeHash([Text.Encoding]::Unicode.GetBytes($name.ToUpperInvariant()))
+  'S-1-5-87-' + ((0..4 | ForEach-Object { [BitConverter]::ToUInt32($b, $_ * 4) }) -join '-')
 }
 function Get-DedupSvcSddl { (sc.exe sdshow refsdedupsvc | Where-Object { $_ -match '^D:' } | Select-Object -First 1).Trim() }
 function Set-DedupSvcSddl([string]$sddl) {
@@ -123,8 +124,8 @@ function Register-DedupRepair([string]$appSid) {
   $t = $svc.GetFolder('\').GetTask($RepairTask)
   $sd = $t.GetSecurityDescriptor(4)
   if ($sd -notmatch [regex]::Escape(";;;$appSid)")) { $t.SetSecurityDescriptor("$sd(A;;GRGX;;;$appSid)", 0) }
-  $cur = Get-DedupSvcSddl
-  if (-not $cur) { throw 'sc sdshow refsdedupsvc gave no DACL (no ReFS dedup service on this Windows?)' }
+  $cur = if (Get-Service refsdedupsvc -ErrorAction SilentlyContinue) { Get-DedupSvcSddl } else { '' }
+  if (-not $cur) { return "registered $RepairTask (task SID $tsid, -Mode $DedupRepairMode, daily 01:30); this Windows has no refsdedupsvc, so it has nothing to repair and no service right was granted" }
   if ($cur -notmatch [regex]::Escape(";;;$tsid)")) {
     $orig = Join-Path $dir 'refsdedupsvc.sddl.orig'
     if (-not (Test-Path $orig)) { Set-Content -Encoding ascii $orig $cur }

@@ -136,6 +136,17 @@ try {
   const created0 = fs.statSync(vhdx).birthtimeMs;
   const tasks = ps(`@(Get-ScheduledTask -TaskName 'ffsb-helper-*' | ForEach-Object { $_.TaskName }) -join ','`).stdout.trim();
   check(/ffsb-helper-mount/.test(tasks) && /ffsb-helper-trim/.test(tasks) && /ffsb-helper-compact/.test(tasks) && /ffsb-helper-grow/.test(tasks) && /ffsb-helper-dedup/.test(tasks) && /ffsb-helper-deduprepair/.test(tasks), 'the helper tasks are registered', tasks);
+  // The dedup repair task (w6597) runs as LOCAL SERVICE with its own task SID and one privilege: run it and read what it was.
+  const rep = ps(`$d = Join-Path $env:ProgramData 'ffsb-helpers'; $j = Join-Path $d 'results\\dedup-repair\\dedup-repair.json'; Remove-Item $j -ErrorAction SilentlyContinue
+schtasks /run /tn ffsb-helper-deduprepair | Out-Null
+for ($i = 0; $i -lt 60 -and -not (Test-Path $j); $i++) { Start-Sleep -Seconds 2 }
+@{ sid = "$(Get-Content (Join-Path $d 'deduprepair.sid') -ErrorAction SilentlyContinue)".Trim(); result = $(if (Test-Path $j) { Get-Content -Raw $j | ConvertFrom-Json } else { $null }) } | ConvertTo-Json -Depth 4 -Compress`).stdout.trim();
+  let repo: { sid?: string; result?: { ok?: boolean; state?: string; whoami?: string } } = {};
+  try { repo = JSON.parse(rep); } catch { /* checked below */ }
+  const who = repo.result?.whoami ?? '';
+  check(!!repo.result && repo.result.ok === true, 'the dedup repair task runs and writes its result', rep);
+  check(/^S-1-5-87-/.test(repo.sid ?? '') && who.includes(`(${repo.sid})`), 'it runs with the task SID the installer granted', `${repo.sid} / ${who}`);
+  check(/user nt authority\\local service/i.test(who) && /privileges: SeChangeNotifyPrivilege \w+$/.test(who), 'as LOCAL SERVICE with only SeChangeNotifyPrivilege', who);
   const boot = ps(`(Get-ScheduledTask -TaskName ffsb-helper-mount).Triggers | ForEach-Object { $_.CimClass.CimClassName }`).stdout.trim();
   check(/BootTrigger/.test(boot), 'the mount task also runs at boot', boot);
 

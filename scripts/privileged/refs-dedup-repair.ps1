@@ -69,7 +69,7 @@ function WaitService([string]$want, [int]$sec) {
 try {
   # Who this runs as, measured each run: the groups that are enabled and the privileges the token holds.
   try {
-    $g = & $whoami /groups /fo csv | ConvertFrom-Csv | Where-Object { $_.Attributes -match 'Enabled group' } | ForEach-Object { $_.'Group Name' }
+    $g = & $whoami /groups /fo csv | ConvertFrom-Csv | Where-Object { $_.Attributes -match 'Enabled group' } | ForEach-Object { "$($_.'Group Name') ($($_.SID))" }
     $p = & $whoami /priv /fo csv | ConvertFrom-Csv | ForEach-Object { "$($_.'Privilege Name') $($_.State)" }
     $r.whoami = "user $(& $whoami); groups: $($g -join ', '); privileges: $($p -join ', ')"
   } catch { $r.whoami = "whoami failed: $($_.Exception.Message)" }
