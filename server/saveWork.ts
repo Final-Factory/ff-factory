@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { run } from './proc.ts';
+import { clearStaleIndexLock, gitFailure, STATUS_TIMEOUT_MS } from './staleGitLock.ts';
 import { parseStatus } from './gitStatus.ts';
 import { fontAtlasNoise, mayBeDynamicFont, noiseFiles } from './editorNoise.ts';
 import { guardRemote } from './remoteGuard.ts';
@@ -80,7 +81,7 @@ async function git(dir: string, args: string[], timeoutMs = 120_000, net?: NodeJ
 
 async function must(dir: string, args: string[], what: string, timeoutMs?: number, net?: NodeJS.ProcessEnv) {
   const r = await git(dir, args, timeoutMs, net);
-  if (r.code !== 0) throw new Error(`${what} failed: ${(r.stderr || r.stdout).trim().split('\n').slice(-3).join(' ')}`);
+  if (r.code !== 0) throw new Error(`${what} failed: ${gitFailure(r, timeoutMs ?? 120_000)}`);
   return r.stdout;
 }
 
@@ -179,15 +180,18 @@ export const savedBranch = (branch: string, sha: string) => `ff-saved/${branch}-
  */
 export async function saveWork(opts: { dir: string; branch: string; message: string; limits?: typeof SAVE_LIMITS; env?: NodeJS.ProcessEnv; holdPush?: string }): Promise<SaveResult> {
   const { dir, branch } = opts;
-  const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status'));
+  // w6432: a lock a crashed git left would fail the add below, and every retry the same.
+  const unlocked = await clearStaleIndexLock(dir);
+  const st = parseStatus(await must(dir, ['status', '--porcelain=v2', '--branch'], 'git status', STATUS_TIMEOUT_MS));
   if (st.branch !== branch) throw new Error(`the sandbox is on ${st.branch}, not the worker's branch ${branch}: nothing was saved`);
   if (SHARED.test(branch)) throw new Error(`its work is on ${branch}, a shared branch: committing there is a decision for a person`);
-  if (!st.dirty && !st.untracked) return { files: 0, pushed: false, notes: ['nothing to save'] };
+  if (!st.dirty && !st.untracked) return { files: 0, pushed: false, notes: [...(unlocked ? [unlocked] : []), 'nothing to save'] };
   const foreign = st.untracked ? await foreignFiles(dir, branch) : new Set<string>();
   const problem = st.untracked ? await untrackedProblem(dir, opts.limits, foreign) : undefined;
   if (problem) throw new Error(problem);
   const restored = st.dirty ? await restoreEditorNoise(dir) : [];
   const noise = restored.length ? [`restored ${restored.length} file(s) the Unity editor only rewrote by itself (re-serialized materials, w2782; a dynamic font atlas that grew, w5067) to HEAD instead of saving them: ${restored.join(', ')}`] : [];
+  if (unlocked) noise.unshift(unlocked);
   const left = foreign.size ? (await untrackedFiles(dir)).filter((f) => foreign.has(f)) : [];
   if (left.length) noise.push(`left ${left.length} untracked file(s) uncommitted that were already in the sandbox when it was switched to ${branch}, so not this worker's (w2988): ${someFiles(left)}`);
   // w6099: read before the commit (the commit cannot change origin); a refused push still leaves the work committed here.

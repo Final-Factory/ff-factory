@@ -722,3 +722,41 @@ test('w4775: a sandbox run whose Unity lost its parent chain is counted once, no
   const own = assess({ platform: 'win32', procs: [editorProc(10, 'V:\\ffw\\sandboxes\\slot3'), editorProc(13, 'V:\\ffw\\sandboxes\\slot1')], requests: [player], places, limit: 3, now: T0 + 60_000 });
   assert.equal(own.used, 3, 'slot1 interactive editor, its grant not started yet, slot3');
 });
+
+test('w6414: a grant hook that throws or would refuse changes nothing: the grant is written, and a deny in the same tick too', async (t) => {
+  for (const hook of ['throws', 'would refuse'] as const) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-hook-'));
+    t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+    const logs: string[] = [];
+    const hooked: string[] = [];
+    const slots = new UnitySlots({
+      dir,
+      platform: 'win32',
+      procs: async () => [],
+      alive: () => true,
+      now: () => Date.now(),
+      limit: () => 2,
+      places: () => [],
+      ramPct: () => undefined,
+      ramWords: () => (hook === 'throws' ? assert.fail('words broke') : 'commit 127.8 of 127.8 GB'),
+      log: (l) => logs.push(l),
+      onGrant: (r) => {
+        hooked.push(r.label);
+        // the daemon's hook logs a would-refuse (machine/commitCharge.ts) and returns nothing; a bug in it throws
+        if (hook === 'throws') throw new Error('commit check broke');
+      },
+    });
+    await slots.tick();
+    const now = Date.now();
+    const one = { id: 'r-one', holder: 'sandbox:slot1', count: 1, pid: process.pid, label: 'build', createdAt: now };
+    const three = { id: 'r-three', holder: 'sandbox:slot2', count: 3, pid: process.pid, label: 'three editors', createdAt: now + 1 };
+    for (const r of [one, three]) fs.writeFileSync(reqFile(dir, r.id), JSON.stringify(r));
+    await slots.tick();
+    assert.deepEqual(hooked, ['build'], hook);
+    assert.ok(fs.existsSync(grantFile(dir, 'r-one')), `${hook}: the grant is written`);
+    assert.match(JSON.parse(fs.readFileSync(denyFile(dir, 'r-three'), 'utf8')).why, /needs 3 Unity editors at once; this machine allows 2/, `${hook}: the deny after it is written`);
+    assert.deepEqual(slots.report()!.granted.map((g) => g.label), ['build'], `${hook}: the arbiter's report is updated`);
+    if (hook === 'throws') assert.ok(logs.some((l) => /the grant hook failed, ignored: commit check broke/.test(l)));
+    slots.close();
+  }
+});

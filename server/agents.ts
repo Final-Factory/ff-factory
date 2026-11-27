@@ -1,3 +1,4 @@
+import { newCost, timedCost, type Cost } from './placeCost.ts';
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
 import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
@@ -26,7 +27,7 @@ import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
-import { topPriority, type Pressure } from './priorityReclaim.ts';
+import { FAILED_START_MS, failedStartPressure, rankOf, topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, keepWhy, moveBranchOf, occupies, releasedOn, workerBranch, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { GAME_REPO, otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
@@ -131,7 +132,7 @@ import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
-import { dataDirClearedText, gameCommitAt, otherPlayerIn, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, gameCommitAt, otherPlayerInWords, pairAskWords, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -1056,7 +1057,9 @@ export class Agents {
         const h = sessions.sessions.get(id);
         return h ? this.keepIdle(h, true, !!h.info.machineId && machines.canSaveWork(h.info.machineId)) : 'gone';
       },
-      queued: (id) => sessions.queued().some((q) => q.id === id),
+      // w6428: within a page's read (pageRead) the queued ids once: each ask copied the whole send queue, once per released
+      // worker in claims and again in waiting (live 2026-11-27 18:04Z: place{free 62ms x39 claims 49ms x6}).
+      queued: (id) => (this.pageMemo ? (this.pageMemo.queued ??= new Set(sessions.queued().map((q) => q.id))).has(id) : sessions.queued().some((q) => q.id === id)),
       stopLive: (id, why) => {
         const h = sessions.sessions.get(id);
         if (!h) return;
@@ -1075,6 +1078,7 @@ export class Agents {
       saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined, this.pushHold(m, branch)),
       // w3507: game sandboxes go out by priority (server/priorityReclaim.ts).
       pressure: () => this.reclaimPressure(),
+      failedStarts: () => this.failedStartPressure(),
       pairWants: () => this.pairWants(),
       priorityOf: (info) => topPriority(this.openWorkOf(info).map((w) => w.priority)),
       reclaimHold: (info, sb) => this.reclaimHold(info, sb),
@@ -2357,7 +2361,9 @@ export class Agents {
   private async clearLegacyByCommit(w: WorkItem, by: string): Promise<boolean> {
     const commit = w.pair?.commit;
     if (!w.pair?.legacyData || !commit) return false;
-    if (otherPlayerIn(w.pair.legacyData, commit)) return false;
+    // w6451: the run's own what and brief too, for a run marked from them before request_pair kept their reason in the mark.
+    const own = pairAskWords(w);
+    if (otherPlayerInWords(commit, w.pair.legacyData, own.what, own.brief)) return false;
     const v = await this.gameDataDirAt(commit).catch((): undefined => undefined);
     if (!v?.reads || !sameCommit(v.commit, commit)) return false;
     // The read awaited GitHub: act on the request as it is now, and only while it is still marked for that same commit.
@@ -2383,6 +2389,12 @@ export class Agents {
    */
   async recheckLegacyPairs(nowMs = Date.now()): Promise<string[]> {
     const done: string[] = [];
+    // w6451 (w6442's review): forget runs that started, closed or lost their mark, so the map does not grow forever.
+    const live = new Set<string>();
+    for (const w of this.store.work.values()) {
+      if ((w.status === 'new' || w.status === 'queued') && !w.sessionIds.length && w.pair?.legacyData && w.pair.commit) live.add(`${w.id} ${w.pair.commit.toLowerCase()}`);
+    }
+    for (const key of this.legacyRechecked.keys()) if (!live.has(key)) this.legacyRechecked.delete(key);
     for (const w of [...this.store.work.values()]) {
       // Not yet started: filed (new) or waiting for room (queued); a started run's legs already passed start_agent's check.
       if ((w.status !== 'new' && w.status !== 'queued') || w.sessionIds.length || !w.pair?.legacyData || !w.pair.commit) continue;
@@ -3863,6 +3875,16 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w2709's report r36), though the ledger (shared/fleet.ts, by holdsOf) showed it on w2709.
    */
   private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
+    const memo = !bySession ? this.pageMemo?.work : undefined;
+    if (!memo) return this.workIdsNow(info, bySession, byId);
+    const had = memo.get(info.id);
+    if (had && had.rev === this.store.workRev && had.title === info.title) return [...had.ids];
+    const ids = this.workIdsNow(info);
+    memo.set(info.id, { rev: this.store.workRev, title: info.title, ids });
+    return [...ids];
+  }
+
+  private workIdsNow(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
     // w6336: within withPlacesOnce, every worker's requests from one index (a scan of every request per worker was 1-3 s
     // of each blockerWatch tick and state build in the 2026-11-27 stall profiles, under workIdsOf, live and holdsOf).
     const index = bySession ? undefined : this.holdsIndexNow();
@@ -4445,6 +4467,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const entry = { to: d.move.to, texts: [movedText(q)], sends: [q] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
+    this.warnOutranked('room move', info, reqs, d.move.to);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
     this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
     return true;
@@ -4584,6 +4607,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     });
     const entry = { to, texts: q ? [movedText(q)] : [], sends: q ? [q] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
     this.roomMoving.set(info.id, entry);
+    this.warnOutranked('away move', info, reqs, to);
     console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
     this.unmemoized(() => {
       for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
@@ -4882,6 +4906,41 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */
+  /** w6432: requests whose start_agent failed after the sandbox was prepared (w5278), by id: the computer and when. */
+  private readonly failedStarts = new Map<string, { machine: string; at: number }>();
+
+  /**
+   * w6432: each recent failed start (FAILED_START_MS) as pressure on its computer, until its request is started, Queued
+   * (reclaimPressure has it then), or closed. Read by placeAgain.outranking.
+   */
+  private failedStartPressure(): Pressure[] {
+    const out: Pressure[] = [];
+    const now = Date.now();
+    for (const [id, f] of this.failedStarts) {
+      const w = this.store.work.get(id);
+      if (!w || now - f.at > FAILED_START_MS || ['queued', 'merged', 'done', 'rejected', 'cancelled'].includes(w.status) || needsOf(w) !== 'game') {
+        this.failedStarts.delete(id);
+        continue;
+      }
+      out.push(failedStartPressure(w.id, w.title, w.priority, f.machine));
+    }
+    return out;
+  }
+
+  /**
+   * w6432 (warn-only): a room or away move that takes a game sandbox on `to` while higher-priority work is queued for one
+   * there (or its start just failed there) says so. On 2026-11-27 moves off offline m5 and BEAST put w6235 into
+   * lothdesktop/slot1 (15:04Z) and w5479 into slot5 (15:15Z), both normal, while w6431 (frantic) waited for a sandbox there.
+   */
+  private warnOutranked(what: string, info: SessionInfo, reqs: WorkItem[], to: string): void {
+    if (!reqs.some((w) => needsOf(w) === 'game')) return;
+    const mine = topPriority(reqs.map((w) => w.priority));
+    const ahead = this.placeAgain.outranking(rankOf(mine), to);
+    if (!ahead) return;
+    const ids = reqs.map((w) => w.id).join(', ');
+    this.placeAgain.warnOnce(`${what}:${info.id}:${to}:${ahead.work}`, `${what} (w6432, warn-only): worker ${info.id} (${ids}, ${mine ?? 'no open request'}) takes a game sandbox on ${to} while ${ahead.work} (${ahead.priority}) is queued for one there; once enforced it waits`);
+  }
+
   private moveFacts(info: SessionInfo, reqs: WorkItem[]): MoveFacts {
     const m = this.store.machines.get(info.machineId!);
     const r = info.placeReleased;
@@ -6741,15 +6800,40 @@ A report is for a person who asked for one, and people want very few. File one w
   pageRead<T>(fn: () => T): T {
     if (this.freeMemo) return fn();
     this.freeMemo = new Map();
+    // w6428: each worker's requests and the ledger's index are kept from one page build to the next while no request was
+    // saved or dropped (Store.workRev): a burst of reconnects (eight pages in one second, 18:42:51Z on 2026-11-27) built them
+    // for every page alike. Both read the requests only, nothing of the sessions but the id and title workIdsOf keys by.
+    if (this.pageKept?.rev !== this.store.workRev) this.pageKept = { rev: this.store.workRev, work: new Map() };
+    this.pageMemo = { work: this.pageKept.work };
     try {
       return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
     } finally {
       this.freeMemo = undefined;
+      this.pageMemo = undefined;
     }
   }
 
+  /**
+   * w6428: within pageRead (a read that changes nothing), the send queue's ids and each worker's requests (workIdsOf, by
+   * session id and title, at the ledger's workRev), read once: the page's placement asked both per released worker twice.
+   */
+  private pageMemo?: { queued?: Set<string>; work: Map<string, { rev: number; title: string | undefined; ids: string[] }> };
+
+  /** w6428: pageMemo's requests by worker, and the ledger's holdsIndex, kept across page builds at one Store.workRev. */
+  private pageKept?: { rev: number; work: Map<string, { rev: number; title: string | undefined; ids: string[] }>; holds?: { rev: number } & ReturnType<typeof holdsIndex> };
+
   private freeNow(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
     this.freeMade++;
+    return timedCost(this.placeCost.free, () => this.freeWork(x, machineId));
+  }
+
+  /**
+   * w6428: time spent working placement out, by kind, outermost calls only (a free() inside places() counts in both): the
+   * page's 'place' line says where its machines and room phases went (the bench cannot reproduce the live 70-180 ms).
+   */
+  readonly placeCost: { free: Cost; places: Cost } = { free: newCost(), places: newCost() };
+
+  private freeWork(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
     if (x.status !== 'ready') return false;
     // w5924: a light agent folder is one worker's own, never a FREE game sandbox (agent work gets a new one: lightTarget).
     if (isLight(x)) return false;
@@ -7420,7 +7504,12 @@ A report is for a person who asked for one, and people want very few. File one w
   private holdsIndexNow(): ReturnType<typeof holdsIndex> | undefined {
     const pass = this.placesPass ?? this.holdsPass;
     if (!pass) return undefined;
-    if (pass.holds?.rev !== this.store.workRev) pass.holds = { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
+    if (pass.holds?.rev !== this.store.workRev) {
+      // w6428: within a page build, the index the last page build made, while the ledger is unchanged (pageKept).
+      const kept = this.pageMemo && this.pageKept?.rev === this.store.workRev ? this.pageKept : undefined;
+      pass.holds = kept?.holds?.rev === this.store.workRev ? kept.holds : { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
+      if (kept) kept.holds = pass.holds;
+    }
     return pass.holds;
   }
 
@@ -7460,6 +7549,10 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   private placesNow(): Computer[] {
+    return timedCost(this.placeCost.places, () => this.placesWork());
+  }
+
+  private placesWork(): Computer[] {
     const out: Computer[] = [];
     const all = [...this.sessions.sessions.values()].filter((s) => s.info.kind !== 'orchestrator');
     const mem = this.hostMem();
@@ -8138,6 +8231,7 @@ ${w.repo ?? ''}
               if (w) {
                 const why = override ? ` (not a repeat: ${override})` : '';
                 this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
+                this.failedStarts.delete(w.id); // w6432: started now, it holds no sandbox as a failed start any more
                 item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
                 if (ffuShared.length) this.tellFfuShared(w, ffuShared);
               } else {
@@ -8177,6 +8271,7 @@ ${w.repo ?? ''}
             const failed = (e: unknown) => {
               const why = (e as Error)?.message ?? String(e);
               console.log(`start_agent (w5278): ${label} in ${at} did not start: ${why}`);
+              if (w && tgt.machine) this.failedStarts.set(w.id, { machine: tgt.machine, at: Date.now() });
               if (w) this.orchestrators.noteOnRequest(w.id, `its start_agent in ${at} did not start after the sandbox was prepared (w5278): ${why}`);
               this.notifyDispatcher(`[start failed] ${label} did not start in ${at}: ${why}. Nothing was started for it: start_agent it again (another free sandbox if this one is the problem).`, requestedBy);
             };
@@ -8860,7 +8955,7 @@ ${w.repo ?? ''}
     const lights = lightFolders(m.sandboxes);
     const lightPart = lights.length || this.machines.offersLight(m.id) ? `; light agent folders (w5924): ${lightUseText(lights.map((x) => this.lightBusy(x)), this.machines.offersLight(m.id))}` : '';
     const sandboxes = pool
-      ? `  sandboxes: ${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}${lightPart} in ${pool.root} (up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB${pool.librarySeed ? `; Library seed ${pool.librarySeed}${pool.librarySeedCopy === 'clone' ? ' (block clone)' : ''}` : ''}${pool.belowNormal ? '; editors below normal priority' : ''}${pool.slotRepos ? `; slot repos (${pool.slotRepos})` : ''}): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
+      ? `  sandboxes: ${sandboxUseText(sbs.filter((s) => !this.free(s, m.id)).length, pool.maxSandboxes, sbs.length)}${lightPart} in ${pool.root} (up to ${pool.maxAgentsPerSandbox} agents each${pool.maxAgents !== undefined ? `, ${pool.maxAgents} in all` : ''}, ${pool.maxUnity} editors at once; disk guard ${pool.diskWarnGB}/${pool.diskCriticalGB} GB${pool.librarySeed ? `; Library seed ${pool.librarySeed}${pool.librarySeedCopy === 'clone' ? ' (block clone)' : ''}` : ''}${pool.belowNormal ? '; editors below normal priority' : ''}${pool.slotRepos ? `; slot repos (${pool.slotRepos})` : ''}${pool.commitCheck === 'off' ? '; commit check off' : ''}): ${sbs.map((s) => s.id).join(', ') || 'none yet'} (list_sandboxes for details)`
       : '  sandboxes: none (no sandbox_root)';
     // Its standing agents here; a sandbox's are under list_sandboxes.
     const standing = m.sessionIds.filter((id) => this.store.sessions.get(id)?.kind === 'standing');
@@ -9039,6 +9134,7 @@ ${w.repo ?? ''}
           library_seed: z.string().optional().describe('Absolute path of a warm Library folder new sandboxes are seeded from first (else the main clone\'s, else a sandbox\'s). Omitted: kept; "": cleared.'),
           library_seed_copy: z.enum(['robocopy', 'clone']).optional().describe('How a Windows machine copies the seed: "clone" block-clones on a ReFS Dev Drive (seed and sandboxes on one volume), "robocopy" copies. Omitted: kept.'),
           slot_repos: z.enum(['new', 'all', 'off']).optional().describe('w5614: its NEW sandboxes are their own git repos borrowing the objects of the main clone (objects/info/alternates) instead of worktrees of it, so a commit of a worker writes nothing into the clone (docs/machines.md "Slot repos"). "new": new sandboxes only; "all": also each free, idle worktree sandbox, converted one at a time with its files untouched; "off": worktrees again for new ones (slot repos stay). Omitted: kept.'),
+          commit_check: z.enum(['warn', 'off']).optional().describe("w6411: its daemon's commit-charge check on Windows, before an editor start or a unity-slot grant (room in RAM plus page file for an editor, a reserve and each running CI job). \"warn\" (the default): it logs what it would refuse and refuses nothing; \"off\": no check. Takes effect at the portal's next welcome, with nobody at the machine. Omitted: kept."),
           unity_below_normal: z.boolean().optional().describe('Start its sandbox editors at below-normal priority, so a game played on that computer wins. Omitted: kept.'),
           play_only: z.string().max(300).optional().describe('Why this computer is play-only (w1946), quoting who asked: no workers, no standing agents, no sandbox; it only plays the game, running the timed A/B legs other computers build (timed_run) under its own exclusive bench ticket. With join_code it joins with the smallest limits (one player-slot pair). "" makes it an ordinary computer again. Omitted: kept.'),
           no_players: z.string().max(300).optional().describe('Why this computer runs no game players (w4621: no built player, no FFU client), quoting who asked: placement sends it no timed leg and no pair-run leg; its Unity editor, play mode included, still takes work. "" clears it (m3 has one by default: Ben\'s w3740 hold). Omitted: kept.'),
@@ -9112,6 +9208,7 @@ ${w.repo ?? ''}
             librarySeedCopy: a.library_seed_copy,
             unityBelowNormal: a.unity_below_normal,
             slotRepos: a.slot_repos,
+            commitCheck: a.commit_check,
             noTimedRuns: a.no_timed_runs,
             noPlayers: a.no_players,
             playOnly: a.play_only,

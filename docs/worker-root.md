@@ -851,7 +851,19 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
       `tools\low` everything not named as a copy (`LOW_COPY_NAME`, `claude|node|gh-<size>-<mtime>[-<n>].exe`), so no DLL beside a copy
       is loaded by it; a copy's name that cannot be read (a folder, a locked file) is removed and the copy made; in
       `tools\unity-low` everything but the junctions just checked, since the daemon starts `<that folder>\<version>\Unity.exe`
-      (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`).
+      (`fencedEditorBin`). A junction is removed itself, never what it leads to (`removeEntry`). A `tools\unity-low` the
+      sweep cannot read (anything but "not there") says `WARNING ... could not read ... to sweep it` instead of passing
+      in silence (w6085).
+    - A copy has 20 names (`COPY_SLOTS`). When all 20 are held by copies still running from earlier daemon runs, `make`
+      says `WARNING: no free name for the Low copy ... all 20 names are taken` with the names, and nothing of it runs: at
+      the daemon's start the fence fails (`lowFail`, sandbox workers held until a later start finds a free name); in
+      `check` only that run is held. A name frees as its program exits; the copy is not renamed aside, since a running
+      claude, node or gh may start its own `process.execPath` again (w6085).
+    - A copy that could not be made read-only is still run, with its `WARNING`, and hashed before every run like every
+      copy (w6085, item 7 of w5838's reviews, dropped): refusing it would hold every sandbox worker on that machine
+      (`lowFail`) until the lock worked, which only a person at the machine could mend, against a window of milliseconds
+      between the hash and the spawn in a folder no Low worker can add to. No daemon log on LothDesktop showed that
+      `WARNING` (measured 2026-11-26).
     - A junction is made again unless it leads to its Unity (`junctionLeadsTo`) and carries no Low label of its own (w5877:
       a worker could have labelled it while the folder was Low, and turn it later).
     - On Windows the `unity-slot`, `ff-leftovers`, `ff-pr` and `ffu-slot` commands are written to
@@ -1102,6 +1114,13 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     (w5659, PR #1220) and `editorFence: true`: then a fenced editor's EditorPrefs writes are refused, silently to Unity. The daemon's own EditorPrefs (App Nap off, Burst on)
     therefore still apply. That is the cfprefsd hole in docs/worker-fence.md "Known limits": measured on m5, a
     `defaults write` of a new domain from inside the fence created its plist in the real `~/Library/Preferences`.
+    **Measured with both on (m5, 2026-11-27, w6339):** `CFFIXED_USER_HOME=<root>/home` does NOT move EditorPrefs. In
+    a fenced editor, `EditorPrefs.SetInt("w6339probe", 7)` read back 7 in the process (cfprefsd's cache) but
+    reached no plist: not the real `com.unity3d.UnityEditor5.x.plist` and nothing under `<root>/home/Library/Preferences`.
+    The real plist was rewritten only at the editor's start, by the daemon's unfenced `defaults` (`BurstCompilation = 1`,
+    `NSAppSleepDisabled = 1`), and the editor read Burst on. The editor still licensed, compiled, entered play mode and
+    passed `SimulationRateConstantsTest` 31/31. To probe this, use `execute_code` and `defaults read` from outside
+    Unity: `log show` cannot run inside the fence ("log: Cannot run while sandboxed").
   - **Warn-only first** (lothsahn's lockout rule). With `editorFence` unset, the profile's every `(deny ...)` becomes
     `(allow ... (with report))` (`warnOnlyProfile`). Nothing is refused. **On macOS that report is logged nowhere**
     (measured on m5, macOS 26.4, w5659): no `Sandbox:` unified-log line for an allow with report, none for a deny

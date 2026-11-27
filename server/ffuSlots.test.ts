@@ -304,8 +304,9 @@ function biscuitTarget(root: string) {
   const alarms: FakeUnit = { name: 'alarms', hash: 'bdd02d47710ae4cf', fp: 11_000_000_000_000_000_015n, deps: [sim], workspace: true, ageH: 3 };
   const alarmsOld: FakeUnit = { name: 'alarms', hash: 'a0a0a0a0a0a0a0a0', fp: 10_000_000_000_000_000_017n, workspace: true, ageH: 24 * 4 };
   for (const u of [sim, alarms, alarmsOld]) writeCargoUnit(tg, u, NOW);
+  // the test binary cargo links: `<name>-<hash>` with its exec bit, `.exe` on Windows (where Node shows no exec bit; w6475)
   const exe = (name: string, ageH: number) => {
-    const f = path.join(tg, 'debug', 'deps', name);
+    const f = path.join(tg, 'debug', 'deps', process.platform === 'win32' ? `${name}.exe` : name);
     fs.writeFileSync(f, Buffer.alloc(500));
     fs.chmodSync(f, 0o755);
     fs.utimesSync(f, (NOW - ageH * HOUR) / 1000, (NOW - ageH * HOUR) / 1000);

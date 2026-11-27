@@ -106,7 +106,23 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   (`server/gameDataDir.ts` `otherPlayerIn`), and a verdict for another commit than the pair's clears nothing. A queued
   pair run still marked (filed before w6189, or by hand) is re-checked each minute by BlockerWatch before the queue is
   read (`Agents.recheckLegacyPairs`, at most once per 10 minutes per run and commit), so it no longer waits for a
-  `start_agent` call to be placed.
+  `start_agent` call to be placed. The run's own `what` and `brief` are read the same way (w6451, from w6442's review of
+  PR #1477), since a run with no `legacy_data` is marked from them: "the host runs Steam 0.50.0.47" in the brief keeps
+  the mark at all three points (`otherPlayerInWords`; start_agent and the re-check take the worker's part of a filed
+  run's brief, `pairAskWords`, so FF Factory's own words and their hex session id do not count). A sha in a brief that
+  is only context keeps the mark too, failing closed: pass `legacy_data` "none" when no leg runs a pre-w5297 player.
+  A build named without a number counts as another player too (w6458, from w6454's review of PR #1484): "the Steam
+  pre-1.0 build", "installed from Steam", "the published 0.50 player", "the pre-1.0 release" (`INSTALLED_BUILD`). Its
+  words are read only after the pre-1.0 or 0.50 words marked the run, and "a Steam lobby" or "the release branch" are no
+  build; a false match keeps the mark, and `legacy_data` "none" is the way out. newPair joins the worker's brief to its
+  own words with `PAIR_FILED_BY`, the same text `pairAskWords` cuts at.
+  "Steam" followed by pre-1.0 or a short 0.50 version ("the client runs Steam 0.50") counts too (w6467, from w6463's review
+  of PR #1487). A match is no other player when it is the PR's own build (up to two build nouns, then of, at, from, for
+  or on the PR head or build: "a release player of the PR head") or when "release" is the build config ("debug or release",
+  or "build a release player" with no pre-1.0 or 0.50 after it; `excusedBuild`). Never excused (w6469's review of PR
+  #1492): Steam with a version, a match with an installed-type word in it or just before it (published, shipped, live),
+  and a joining word or role before the PR head ("Steam 0.50 and clients on the PR head"). A Steam or a pre-1.0/0.50 release is never the build config either ("the
+  Steam release or debug build", "a debug or pre-1.0 release": w6474's review). Anything else keeps the mark.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 

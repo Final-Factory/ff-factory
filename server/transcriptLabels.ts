@@ -26,6 +26,7 @@ import { findTranscript, projectSlug } from './claudeHome.ts';
 import { sessionIdOf } from './workerFence.ts';
 import { currentAccount, type Exec } from '../machine/lowIntegrity.ts';
 import { isLink, isTrickName, hasTrickName, TRICK_WHY } from './fsLink.ts';
+import { execFileOffThread } from './spawnThread.ts';
 
 /** The folder label (inherited by what is made inside) and the file label. */
 const DIR_LOW = '(OI)(CI)low';
@@ -612,7 +613,26 @@ export const explicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium Ma
  * `env` (w5838: bareEnv, as the copy sits in a folder workers once wrote) is all it gets; else the daemon's own.
  */
 export function probeTranscriptLock(lowNode: string, projects: string, runSync = execFileSync, env?: NodeJS.ProcessEnv): string {
-  const script = [
+  try {
+    return String(runSync(lowNode, ['-e', LOCK_PROBE_SCRIPT, projects], { encoding: 'utf8', timeout: 60_000, windowsHide: true, ...(env ? { env } : {}) })).trim();
+  } catch (e) {
+    return `probe failed: ${(e as Error).message.slice(0, 200)}`;
+  }
+}
+
+/**
+ * w6479: probeTranscriptLock, its Low node run off the daemon's event loop (server/spawnThread.ts): the same script and
+ * answer. A run that exits non-zero or cannot start answers `probe failed: ` and its error, as execFileSync's throw does.
+ */
+export function probeTranscriptLockAsync(lowNode: string, projects: string, env?: NodeJS.ProcessEnv, runAsync: typeof execFileOffThread = execFileOffThread): Promise<string> {
+  return new Promise((resolve) =>
+    runAsync(lowNode, ['-e', LOCK_PROBE_SCRIPT, projects], { encoding: 'utf8', timeout: 60_000, windowsHide: true, ...(env ? { env } : {}) }, (err, stdout) =>
+      resolve(err ? `probe failed: ${err.message.slice(0, 200)}` : String(stdout).trim()),
+    ),
+  );
+}
+
+const LOCK_PROBE_SCRIPT = [
     "const fs=require('fs'),path=require('path');const p=process.argv[1];const out=[];",
     "const tryIt=(what,f)=>{try{f();out.push(what+' WRITTEN')}catch(e){out.push(what+' refused ('+e.code+')')}};",
     "const probe=path.join(p,'ff-lock-probe-'+process.pid+'.jsonl');tryIt('plant in projects',()=>fs.writeFileSync(probe,''));try{fs.unlinkSync(probe)}catch{}",
@@ -622,9 +642,3 @@ export function probeTranscriptLock(lowNode: string, projects: string, runSync =
     "break}",
     'console.log(out.join("; "))',
   ].join('');
-  try {
-    return String(runSync(lowNode, ['-e', script, projects], { encoding: 'utf8', timeout: 60_000, windowsHide: true, ...(env ? { env } : {}) })).trim();
-  } catch (e) {
-    return `probe failed: ${(e as Error).message.slice(0, 200)}`;
-  }
-}
