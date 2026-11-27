@@ -129,7 +129,7 @@ import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { pageAllStats } from './ffuSlotsView.ts';
-import { pageNamedSessions, pageSession, pageSessions, SESSION_REVS_FILE, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
+import { pageNamedSessions, pageSession, pageSessions, PageSessionsCache, SESSION_REVS_FILE, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { dropKeptParts } from '../shared/pageParts.ts';
 import { StallProfiler } from './stallProfile.ts';
 import { drainOf, drainHold } from './machineDrain.ts';
@@ -730,6 +730,8 @@ agents.review = review;
 // Reports (w2541, docs/reports.md): a design, an analysis or a profile a worker filed, kept beside the ledger with copies
 // of the review media it shows, so it outlives the review folder's retention.
 const reports = new ReportStore(cfg.dataDir, () => [review.root]);
+// w6382: the excerpts every page connect lists, worked out before the first one asks.
+void reports.warmExcerpts();
 agents.reports = reports;
 // w5223: every report filed before w5223 gets its audience once: people when asked or a cost, else a worker note.
 {
@@ -1214,13 +1216,16 @@ const sessionRevs = new SessionRevs(undefined, { ready: false });
 // it holds unchanged. Saved in the background once loaded, and at every stop (stopServer) so the last revs a page saw
 // are in it.
 const sessionRevsFile = new SnapshotFile(path.join(cfg.dataDir, SESSION_REVS_FILE), () => JSON.stringify(sessionRevs.saved(store.sessions)), { delayMs: 5_000, intervalMs: 30_000, generations: 0, label: 'session revs' });
+/** What each page connect's pageSessions worked out, kept while a session is unchanged (w6382). */
+const pageSessionsCache = new PageSessionsCache();
 bus.on('event', (e: ServerEvent) => {
   sessionRevs.note(e);
+  pageSessionsCache.note(e);
   if (sessionRevs.isReady && (e.type === 'session' || e.type === 'session_removed')) sessionRevsFile.changed();
 });
 {
   const t0 = performance.now();
-  void sessionRevs.load(readJsonDurable(path.join(cfg.dataDir, SESSION_REVS_FILE), { check: checkObject, generations: 0 }), () => store.sessions.values()).then(({ kept, changed }) => {
+  void sessionRevs.load(readJsonDurable(path.join(cfg.dataDir, SESSION_REVS_FILE), { check: checkObject, generations: 0 }), store.sessions).then(({ kept, changed }) => {
     console.log(`session revs: ${kept} kept, ${changed} changed since the last run (${Math.round(performance.now() - t0)} ms)`);
     sessionRevsFile.changed();
   });
@@ -1271,7 +1276,7 @@ function appStateIn(me: NonNullable<ReturnType<typeof auth.userInfo>>, mine: Ret
   const live = liveHub.viewsFor(me.userId);
   // w5861: without the fields the page never reads; w5907: only the sessions the page shows on open (server/pageState.ts).
   const named = pageNamedSessions({ work, ids: [mine.info.id, agents.dispatcherId], standing: standingAgents, machines: machineList, live });
-  const kept = pageSessions(store.sessions.values(), named, Date.now());
+  const kept = pageSessions(store.sessions.values(), named, Date.now(), pageSessionsCache);
   const sessions = sessionsPart(kept.sessions, sessionRevs, sessionRevs.since(have));
   lap('sessions');
   const delegations = [...store.delegations.values()];

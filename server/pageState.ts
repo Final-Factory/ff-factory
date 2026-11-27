@@ -85,12 +85,56 @@ export function pageNamedSessions(parts: {
   return named;
 }
 
+/**
+ * What pageSessions worked out last time, per session (w6382): which sessions stay off the page, and each page copy.
+ * pageSessions looked at all 13,511 sessions on every page connect (31-52 ms of a 407-728 ms build, by the state build
+ * profile lines of 2026-11-27 12:52Z, and holdsItsPlace's state reading for each stopped one). An entry holds while its
+ * session has had no `session` event since (Store.putSession emits one for every change, the in-place ones included).
+ * Off the page is for good once it is: a stopped session's reasons to stay (a check-in, a queued message, a hold, its
+ * last 3 days) only run out, and a session the state names is kept whatever the entry says.
+ */
+export class PageSessionsCache {
+  private changes = new Map<string, number>();
+  private off = new Map<string, number>();
+  private copies = new Map<string, { at: number; withResult: boolean; copy: SessionInfo }>();
+
+  note(e: { type: string; session?: { id: string }; id?: string }) {
+    const id = e.type === 'session' ? e.session?.id : e.type === 'session_removed' ? e.id : undefined;
+    if (id === undefined) return;
+    this.changes.set(id, (this.changes.get(id) ?? 0) + 1);
+    this.off.delete(id);
+    this.copies.delete(id);
+    if (e.type === 'session_removed') this.changes.delete(id);
+  }
+
+  /** keepsOnPage, remembered while it is false and the session unchanged. */
+  keeps(s: SessionInfo, named: ReadonlySet<string>, now: number): boolean {
+    if (named.has(s.id)) return true;
+    const at = this.changes.get(s.id) ?? 0;
+    if (this.off.get(s.id) === at) return false;
+    const keeps = keepsOnPage(s, named, now);
+    if (!keeps) this.off.set(s.id, at);
+    return keeps;
+  }
+
+  /** pageSession, remembered while the session is unchanged and keeps (or drops) its last report as before. */
+  copy(s: SessionInfo, named: ReadonlySet<string>, now: number): SessionInfo {
+    const at = this.changes.get(s.id) ?? 0;
+    const withResult = s.lastResult !== undefined && (named.has(s.id) || now - (Date.parse(s.lastActivityAt) || 0) < PAGE_RESULT_KEEP_MS);
+    const c = this.copies.get(s.id);
+    if (c && c.at === at && c.withResult === withResult) return c.copy;
+    const copy = pageSession(s, named, now);
+    this.copies.set(s.id, { at, withResult, copy });
+    return copy;
+  }
+}
+
 /** `sessions` as the page gets them on open (keepsOnPage, pageSession), and how many older ones were left on the server. */
-export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet<string>, now: number): { sessions: SessionInfo[]; older: number } {
+export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet<string>, now: number, cache?: PageSessionsCache): { sessions: SessionInfo[]; older: number } {
   const out: SessionInfo[] = [];
   let older = 0;
   for (const s of sessions) {
-    if (keepsOnPage(s, named, now)) out.push(pageSession(s, named, now));
+    if (cache ? cache.keeps(s, named, now) : keepsOnPage(s, named, now)) out.push(cache ? cache.copy(s, named, now) : pageSession(s, named, now));
     else older++;
   }
   return { sessions: out, older };
@@ -116,10 +160,19 @@ export class SessionRevs {
   private past: [string, number][] = [];
   /** Content keys as saved or loaded; a session changed since has none until the next save. */
   private keys = new Map<string, string>();
-  /** Until `load` has checked every session against its content key, no token is taken (the page gets them all). */
+  /** Until `load` has read the saved revs, no token is taken (the page gets them all). */
   private ready: boolean;
-  /** Sessions this run changed while `load` was still checking: their new rev stands. */
+  /** Sessions this run changed while `load` was still reading: their new rev stands. */
   private touched = new Set<string>();
+  /**
+   * Saved revs not yet checked against the session's content key (w6382): checked on first use (`changedSince`, `saved`)
+   * or by `load` in the background, whichever comes first. The 2026-11-27 12:52Z restart's load of 13,511 sessions took
+   * 15.6 s on a busy loop, and both pages that reconnected in it got all 987 of theirs (2.4 MB); now a reconnect checks
+   * only the sessions it would leave out.
+   */
+  private pending = new Map<string, [number, string]>();
+  private store: Pick<ReadonlyMap<string, SessionInfo>, 'get'> | undefined;
+  private counts = { kept: 0, changed: 0 };
 
   constructor(boot: string = Math.random().toString(36).slice(2, 10), o: { ready?: boolean } = {}) {
     this.boot = boot;
@@ -130,15 +183,17 @@ export class SessionRevs {
     if (e.type === 'session' && e.session) {
       this.revs.set(e.session.id, ++this.rev);
       this.keys.delete(e.session.id);
+      this.pending.delete(e.session.id);
       if (!this.ready) this.touched.add(e.session.id);
     } else if (e.type === 'session_removed' && e.id) {
       this.revs.delete(e.id);
       this.keys.delete(e.id);
+      this.pending.delete(e.id);
       this.rev++;
     }
   }
 
-  /** Whether `load` is done (or was never needed): only then are tokens taken and the revs saved. */
+  /** Whether `load` has read the saved revs (or was never needed): only then are tokens taken and the revs saved. */
   get isReady(): boolean {
     return this.ready;
   }
@@ -159,52 +214,73 @@ export class SessionRevs {
   }
 
   changedSince(id: string, rev: number): boolean {
+    this.check(id);
     return (this.revs.get(id) ?? 0) > rev;
+  }
+
+  /** A saved rev, checked: kept when the session's content key is the saved one, else a new rev. */
+  private check(id: string) {
+    const was = this.pending.get(id);
+    if (!was) return;
+    this.pending.delete(id);
+    const x = this.store?.get(id);
+    if (!x) return;
+    const key = contentKey(x);
+    this.keys.set(id, key);
+    if (was[1] === key) {
+      this.revs.set(id, was[0]);
+      this.counts.kept++;
+    } else {
+      this.revs.set(id, ++this.rev);
+      this.counts.changed++;
+    }
   }
 
   /**
    * Take an earlier run's saved revs (`saved` as `saved()` wrote it, or undefined) for the sessions the store holds now.
-   * Yields to the event loop every `sliceMs`, as Store.scrubSecrets does; tokens are taken once it is done. Returns how
-   * many sessions kept their rev and how many got a new one.
+   * Tokens are taken as soon as the file is read; each saved rev is checked against its session's content key on first
+   * use, and the rest in the background, yielding to the event loop every `sliceMs` as Store.scrubSecrets does. Resolves
+   * once all are checked, with how many sessions kept their rev and how many got a new one.
    */
-  async load(saved: unknown, sessions: () => Iterable<SessionInfo>, sliceMs = 20, clock: () => number = Date.now): Promise<{ kept: number; changed: number }> {
+  async load(saved: unknown, sessions: Pick<ReadonlyMap<string, SessionInfo>, 'get' | 'keys'>, sliceMs = 20, clock: () => number = Date.now): Promise<{ kept: number; changed: number }> {
     const s = readSavedRevs(saved);
-    let kept = 0;
-    let changed = 0;
+    this.store = sessions;
     if (s) {
       // This run's revs go on from the file's, so they are above every rev a token of the file's run can carry.
       this.rev += s.rev;
       for (const [id, r] of this.revs) this.revs.set(id, r + s.rev);
       this.past = [...s.past, [s.epoch, s.rev] as [string, number]].slice(-PAST_EPOCHS);
+      const ids = [...sessions.keys()];
+      for (const id of ids) {
+        if (this.touched.has(id)) continue;
+        const was = s.sessions.get(id);
+        if (was) this.pending.set(id, was);
+        else {
+          this.revs.set(id, ++this.rev);
+          this.counts.changed++;
+        }
+      }
+      this.touched.clear();
+      this.ready = true;
       let since = clock();
-      for (const x of [...sessions()]) {
+      for (const id of ids) {
         if (clock() - since >= sliceMs) {
           await new Promise<void>((r) => setImmediate(r));
           since = clock();
         }
-        if (this.touched.has(x.id)) continue;
-        const was = s.sessions.get(x.id);
-        const key = contentKey(x);
-        if (was && was[1] === key) {
-          this.revs.set(x.id, was[0]);
-          this.keys.set(x.id, key);
-          kept++;
-        } else {
-          this.revs.set(x.id, ++this.rev);
-          this.keys.set(x.id, key);
-          changed++;
-        }
+        this.check(id);
       }
     }
     this.touched.clear();
     this.ready = true;
-    return { kept, changed };
+    return { ...this.counts };
   }
 
   /** What session-revs.json holds: the epoch, the rev, the earlier runs, and each session's rev and content key. */
   saved(sessions: ReadonlyMap<string, SessionInfo>): SavedRevs {
     const out: Record<string, [number, string]> = {};
     for (const [id, s] of sessions) {
+      this.check(id);
       let key = this.keys.get(id);
       if (key === undefined) this.keys.set(id, (key = contentKey(s)));
       out[id] = [this.revs.get(id) ?? 0, key];

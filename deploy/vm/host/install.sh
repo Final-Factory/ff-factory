@@ -432,6 +432,12 @@ nightly_min=$((10#${NIGHTLY_TIME%%:*} * 60 + 10#${NIGHTLY_TIME##*:}))
 at_min() { local m=$(((nightly_min - $1 + 1440) % 1440)); printf '%02d:%02d' $((m / 60)) $((m % 60)); }
 upgrade_at=$(at_min "$UPGRADE_LEAD_MIN")
 update_at=$(at_min $((UPGRADE_LEAD_MIN + 30)))
+# The i6300esb watchdog's module. resolute's kernel carries it in linux-modules-<version>-generic, which the cloud image
+# and every kernel linux-image-virtual brings already install. noble's carries it in linux-modules-extra, which only
+# linux-image-extra-virtual follows, and that pulls linux-image-generic: linux-firmware and the microcode, 711 MB nobody
+# in a VM uses, downloaded on the first boot before the guest agent starts (w6402: at 0.3 MB/s from the archive it took
+# longer than install's 20 minute wait). So the extra package is noble's only.
+case "$VM_OS_RELEASE" in noble) kernel_extra=", linux-image-extra-virtual" ;; *) kernel_extra="" ;; esac
 dns_yaml=$(for d in $GUEST_DNS; do printf '%s, ' "$d"; done | sed 's/, $//')
 seed="$FFF_VM_ETC/seed"
 run_cmd install -d -m 0700 "$seed"
@@ -472,9 +478,8 @@ users:
 $keys
 package_update: true
 package_upgrade: true
-# linux-image-extra-virtual: the cloud image's kernel has no i6300esb module (it is in linux-modules-extra). When the
-# upgrade brought a new kernel, cloud-init reboots once into it before runcmd, so the module matches the kernel.
-packages: [qemu-guest-agent, unattended-upgrades, nftables, jq, curl, linux-image-extra-virtual]
+# When the upgrade brought a new kernel, cloud-init reboots once into it before runcmd, so i6300esb matches the kernel.
+packages: [qemu-guest-agent, unattended-upgrades, nftables, jq, curl$kernel_extra]
 package_reboot_if_required: true
 write_files:
   # The i6300esb watchdog (the domain's <watchdog action='reset'>), driven by PID 1: a hung kernel or PID 1 stops
@@ -622,7 +627,10 @@ fi
 if [ "$WAIT" = 1 ] && [ "$DRY_RUN" != 1 ] && [ "$START" = 1 ]; then
   log "waiting for the guest agent (first boot: cloud-init upgrades, installs it and may reboot once; minutes)"
   for _ in $(seq 240); do guest_agent '{"execute":"guest-ping"}' >/dev/null && break; sleep 5; done
-  guest_agent '{"execute":"guest-ping"}' >/dev/null || die "the guest agent did not answer within 20 minutes; look at /var/log/libvirt/qemu/$VM_NAME-serial.log"
+  guest_agent '{"execute":"guest-ping"}' >/dev/null || {
+    first_boot_report
+    die "the guest agent did not answer within 20 minutes (what the first boot was doing is above; all of it: /var/log/libvirt/qemu/$VM_NAME-serial.log)"
+  }
   log "the guest agent answers"
 fi
 
