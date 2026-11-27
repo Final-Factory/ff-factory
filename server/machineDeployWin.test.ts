@@ -841,7 +841,9 @@ $null = [Console]::In.ReadLine()
       state(true);
       const on = await since(from, 'flt_guard', (l) => l.on === true)();
       t.diagnostic(`guard on: ${JSON.stringify(on)}`);
-      const fixed = await since(from, 'flt_guard', (l) => l.live === 0 || l.failing !== undefined, 60_000)();
+      // A failing line is one attempt, not the verdict: the guard tries again every 2 s, and its momentary window waits for
+      // 3 s without input, so an attempt right after the test's own injected key and click reports failing: 1 (w6366).
+      const fixed = await since(from, 'flt_guard', (l) => l.live === 0, 60_000)();
       t.diagnostic(`guard: ${JSON.stringify(fixed)}; its log: ${JSON.stringify(lines.slice(from).filter((l) => l.type === 'log').map((l) => l.text))}`);
       assert.equal(fixed.live, 0, `the guard put 0 back: ${JSON.stringify(fixed)}`);
       assert.equal((await flt()).live, 0, 'the live value read afterwards is 0');
