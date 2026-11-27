@@ -83,7 +83,7 @@ import { hostStats } from '../server/system.ts';
 import { fetchPlanUsage, parseUsage, usageEnv, type AccountIdentity, type UsageReply } from '../server/usage.ts';
 import { onInstallDrive } from '../server/rootFence.ts';
 import { CleanupRunner, DEFAULT_CLEANUP, cleanupHoldFloorGB, appendCleanupLog, staleAtFile, passMarkerFile, biggestConsumers, fenceToRoot, sizePlan, cleanupRules, hostCleanupEnv, neverDelete, planCleanup, rulesOnInstallDrive, runCleanup, sessionTempDir, sessionTempEnv, staleUnityLibraries, volumeStat, type CleanupGuard, type CleanupItem, type CleanupRun } from '../server/cleanup.ts';
-import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLeftovers, runnerBusyNow } from '../server/installLeftovers.ts';
+import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLeftovers, runnerBusyNow, runnerTargetLinksNow } from '../server/installLeftovers.ts';
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
@@ -1389,6 +1389,8 @@ export class Daemon {
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
                 ffuSized: this.ffuSized,
+                // w6291: the warn period of the FFU runners' cargo-target sweep counts its misses here, in the daemon's own folder.
+                ...(this.cfg.root ? { runnerWarnFile: path.join(this.cfg.appDir || path.join(this.cfg.root, 'daemon'), 'ffu-runner-sweep-warn.json') } : {}),
               })),
             );
           },
@@ -1490,7 +1492,7 @@ export class Daemon {
 
   /** Asked right before each removal (runnerBusyNow, ffuSlotBusyNow): a runner's job or a slot taken since the plan keeps it. */
   private cleanupBusyNow() {
-    return anyBusyNow(runnerBusyNow(() => this.procs()), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard()));
+    return anyBusyNow(runnerBusyNow(() => this.procs()), runnerTargetLinksNow(this.cfg.root), ffuSlotBusyNow(this.cfg.root, () => this.procs().catch(() => undefined), () => this.cleanupGuard()));
   }
 
   /** The released ffu slots' first step (w6044), its plan at `low` and its log line; `mid` names a step run apart from a pass. */
