@@ -12,6 +12,8 @@ import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { fenceFor, seatbeltProfile } from './workerFence.ts';
 import { firstUnplain, lockIn } from '../machine/lockIn.ts';
 import { lowRunner } from './lowRunTest.ts';
+import { removeTree } from './proc.ts';
+import { fakeRd } from './fakeRdTest.ts';
 
 // w5615 (stage 2 of w5544): the shared lock "on" keeps the cache seeds, players, seed and tools/node, low and unity-low from
 // sandbox workers on every OS, and "off" gives them back.
@@ -440,12 +442,12 @@ test('Windows: a root whose own name is a trick name is labelled nowhere: the gu
 
 test('lockIn removes an entry holding a name ending in a dot or a device name, and says it (review w6452 M2)', async (t) => {
   const prefix = '\\\\?\\';
-  // As rd /s /q does (measured on LothDesktop): by a plain path it answers 0 and leaves `x.`, `y ` and NUL with all that is
-  // in them; by its \\?\ path it removes them too.
+  // lockIn's removeTree is proc.ts removeTree (machine/daemon.ts lockShared), here over a fake rd that answers as rd does
+  // (server/fakeRdTest.ts): by a plain path it leaves `x.`, `y ` and NUL in place (w6462).
   const rd = (removed: string[]) => async (p: string) => {
-    removed.push(p);
-    if (p.startsWith(prefix)) return fs.rmSync(process.platform === 'win32' ? p : p.slice(prefix.length), { recursive: true, force: true });
-    for (const e of fs.readdirSync(p)) if (!isTrickName(e)) fs.rmSync(path.join(p, e), { recursive: true, force: true });
+    const calls: string[][] = [];
+    await removeTree(p, { run: fakeRd(calls), platform: 'win32' });
+    removed.push(...calls.map((c) => c[5]));
   };
   for (const [n, top] of [['x.', 'pkg'], ['y ', 'pkg'], ['NUL', 'pkg'], ['f', 'pkg.']]) {
     const d = tmp(t);
@@ -463,7 +465,8 @@ test('lockIn removes an entry holding a name ending in a dot or a device name, a
     assert.deepEqual(calls, [], `${n}: nothing labelled`);
     assert.ok(!fs.existsSync(long(entry)), `${n}: removed, ${JSON.stringify(removed)}: ${said.join('\n')}`);
     assert.ok(said.some((l) => l.includes('removed') && l.includes(JSON.stringify(bad))), `${n}: ${said.join('\n')}`);
-    if (isTrickName(n)) assert.deepEqual(removed, [entry, `${prefix}${path.resolve(entry)}`], `${n}: by its \\\\?\\ path once rd left it`);
+    const exactly = `${prefix}${path.resolve(entry)}`;
+    assert.deepEqual(removed, isTrickName(top) ? [exactly] : [entry, exactly], `${n}: by its \\\\?\\ path once rd left it, or at once`);
   }
 });
 

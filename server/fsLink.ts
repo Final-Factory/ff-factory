@@ -45,6 +45,20 @@ export const TRICK_WHY = 'a name ending in a dot or a space, or a device name su
 export const hasTrickName = (p: string) => p.split(/[\\/]/).some((s) => s !== '' && isTrickName(s));
 
 /**
+ * Whether anything (a link included) is at `p`, by its exact name: on Windows an absolute path is looked at by its `\\?\`
+ * path, since the plain one drops a trailing dot or space (`x.` would answer for `x`; w6462).
+ */
+export function presentAt(p: string): boolean {
+  const exact = process.platform === 'win32' && path.isAbsolute(p) && !p.startsWith('\\\\') ? `\\\\?\\${path.resolve(p)}` : p;
+  try {
+    return fs.lstatSync(exact, { throwIfNoEntry: false }) !== undefined;
+  } catch (e) {
+    // Not to be read (EPERM, EBUSY): something is there.
+    return (e as NodeJS.ErrnoException).code !== 'ENOTDIR';
+  }
+}
+
+/**
  * Take link `p` away, never what it leads to. rmSync refuses a junction lstat calls a folder (ERR_FS_EISDIR, and unlink
  * EPERM, measured on BEAST, w5915); rmdir removes the junction only, and refuses a real folder with anything in it.
  */
