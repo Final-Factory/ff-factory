@@ -304,6 +304,8 @@ export interface UvPruneDeps {
   run(uv: string, args: string[], timeoutMs: number): Promise<{ out: string; error?: string }>;
   log(line: string): void;
   now?: () => number;
+  /** Runs the prune as the daemon's own write, for the shared-lock warn watch (w6314: m5 logged its deletes as a worker's). */
+  around?: <T>(f: () => Promise<T>) => Promise<T>;
 }
 
 /** One `uv cache prune` of the machine's shared uv cache at a time, daily (hourly while space is low), never blocking a pass. */
@@ -337,8 +339,8 @@ export class UvCachePruner {
       this.d.log(`uv cache prune: no uv found (PATH, ~/.local/bin, ~/.cargo/bin, Homebrew); ${this.d.dir} not pruned`);
       return undefined;
     }
-    const p = this.d
-      .run(uv, ['cache', 'prune', '--cache-dir', this.d.dir], UV_PRUNE_TIMEOUT_MS)
+    const prune = () => this.d.run(uv, ['cache', 'prune', '--cache-dir', this.d.dir], UV_PRUNE_TIMEOUT_MS);
+    const p = (this.d.around ? this.d.around(prune) : prune())
       .then(({ out, error }) => {
         if (error) {
           this.d.log(`uv cache prune of ${this.d.dir}: ${error.slice(0, 200)}`);

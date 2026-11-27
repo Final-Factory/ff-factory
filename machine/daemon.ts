@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { SlotCaches, idleForRefresh, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { SlotCaches, idleForRefresh, inSharedLocked, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -1318,9 +1318,11 @@ export class Daemon {
       settings: () => sweepSettings(cfg.sessionSweep),
       log,
     });
-    if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
+    // w6314: a prune inside the shared-lock folders (the shared uv seed) is the daemon's own write for the warn watch.
+    const pruneAround = (dir: string) => (cfg.root && inSharedLocked(cfg.root, dir) ? <T>(f: () => Promise<T>) => this.sharedWrite(f) : undefined);
+    if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log, around: pruneAround(workerUvCacheDir(cfg.root)) });
     // w5565: the daemon's and Medium agents' own cache, pruned on its own clock.
-    if (cfg.root) this.mediumUvPruner = new UvCachePruner({ dir: mediumUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
+    if (cfg.root) this.mediumUvPruner = new UvCachePruner({ dir: mediumUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log, around: pruneAround(mediumUvCacheDir(cfg.root)) });
     this.ffuRetry = this.makeFfuRetry();
     this.cleaner = new CleanupRunner({
       // Below the pool's disk_critical_gb a pass may take a live Unity cache, the last resort (w2752).
@@ -1406,6 +1408,8 @@ export class Daemon {
           // w6044: the released ffu slots' targets taken first, before the slow steps a restart cuts off.
           first: this.ffuFirstStep(low, guard, ''),
           busyNow: this.cleanupBusyNow(),
+          // w6314: removals inside the shared-lock folders (a player slot nobody holds, a cache seed) are the daemon's writes.
+          removing: (items, f) => (this.cfg.root && items.some((i) => inSharedLocked(this.cfg.root!, i.path)) ? this.sharedWrite(f) : f()),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
