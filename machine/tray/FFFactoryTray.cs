@@ -86,6 +86,204 @@ namespace FFFactory
         public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
         [DllImport("user32.dll")]
         public static extern bool PrintWindow(IntPtr hWnd, IntPtr hdc, uint flags);
+
+        // The foreground lock guard (w6350, ForegroundLockGuard below).
+        public const uint SPI_GETFOREGROUNDLOCKTIMEOUT = 0x2000, SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001;
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SystemParametersInfo(uint action, uint param, ref uint value, uint winIni);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool SystemParametersInfo(uint action, uint param, IntPtr value, uint winIni);
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern bool AttachThreadInput(uint attach, uint to, bool on);
+        [DllImport("user32.dll")]
+        public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [StructLayout(LayoutKind.Sequential)]
+        public struct LASTINPUTINFO { public uint cbSize; public uint dwTime; }
+        [DllImport("user32.dll")]
+        public static extern bool GetLastInputInfo(ref LASTINPUTINFO info);
+        [StructLayout(LayoutKind.Explicit, Size = 40)]
+        public struct KEYINPUT { [FieldOffset(0)] public uint type; [FieldOffset(8)] public ushort vk; [FieldOffset(10)] public ushort scan; [FieldOffset(12)] public uint flags; [FieldOffset(16)] public uint time; [FieldOffset(24)] public IntPtr extra; }
+        [DllImport("user32.dll", SetLastError = true)]
+        public static extern uint SendInput(uint n, KEYINPUT[] inputs, int size);
+    }
+
+    // w6350: Windows 11 25H2's win32k leaks a kernel token object (pool tag Toke) for every process that creates a process
+    // while the foreground lock is armed: CForegroundLaunch::_CheckAllowForeground references the creator's primary token
+    // and never releases it, so it stays until the next reboot (BEAST and LothDesktop held about 4 million each after 12
+    // days, and process starts slow down as the table NtCreateUserProcess walks grows). The lock is armed for
+    // ForegroundLockTimeout ms after the last input, and Windows sets that live value to 2147483647 (24.9 days) at every
+    // logon and Remote Desktop connect or disconnect. Kept at 0, it is armed only within the clock tick that input arrives,
+    // and the leak stops while nobody is typing. Public trace and the guard this follows: github.com/bentoner/windows-token-
+    // leak (MIT). The cost is the old focus-stealing tweak: any program may bring its window to the front. daemon.json
+    // "foregroundLockGuard": false turns the guard off (docs/machines.md "The foreground lock guard").
+    //
+    // win32k refuses the set with error 87 unless the caller may force the foreground, so the repair steps through: the
+    // direct call; the call with this thread's input attached to the foreground window's thread; and, after 3 s with no input,
+    // the call from a momentary 1x1 window of this app that takes the foreground for about half a second and gives it back.
+    // Only the live value read afterwards counts. HKCU's registry value is never written: Windows ignores it at logon.
+    class ForegroundLockGuard
+    {
+        const int EARLY_EVERY_MS = 2000, EVERY_MS = 10000, EARLY_MINUTES = 15, IDLE_FOR_WINDOW_MS = 3000;
+        readonly Action<string> log;
+        readonly Action<Dictionary<string, object>> send;
+        bool on, busy, warned;
+        DateTime earlyUntil = DateTime.MinValue, next = DateTime.MinValue, wrongSince = DateTime.MinValue;
+        long last = -1;
+        int failures;
+
+        public ForegroundLockGuard(Action<string> log, Action<Dictionary<string, object>> send)
+        {
+            this.log = log;
+            this.send = send;
+            // Windows resets the live value at logon, unlock and Remote Desktop connect or disconnect: look often for a while.
+            try { SystemEvents.SessionSwitch += delegate { Soon(); }; } catch (Exception e) { log("foreground lock guard: no session events: " + e.Message); }
+        }
+
+        void Soon()
+        {
+            earlyUntil = DateTime.UtcNow.AddMinutes(EARLY_MINUTES);
+            next = DateTime.UtcNow;
+        }
+
+        public static long Live()
+        {
+            uint v = 0;
+            return Native.SystemParametersInfo(Native.SPI_GETFOREGROUNDLOCKTIMEOUT, 0, ref v, 0) ? (long)v : -1;
+        }
+
+        static bool Set(uint ms) { return Native.SystemParametersInfo(Native.SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (IntPtr)ms, 0); }
+
+        static long IdleMs()
+        {
+            var l = new Native.LASTINPUTINFO();
+            l.cbSize = 8;
+            if (!Native.GetLastInputInfo(ref l)) return -1;
+            return (long)(uint)Environment.TickCount - l.dwTime;
+        }
+
+        // The daemon's state message says whether the guard runs (every 30 s, so a restarted tray learns it at once).
+        public void Enable(bool want)
+        {
+            if (want == on) return;
+            on = want;
+            if (on) { Soon(); log("foreground lock guard: on; the live ForegroundLockTimeout is " + Live() + " ms"); }
+            else log("foreground lock guard: off (daemon.json foregroundLockGuard); the live ForegroundLockTimeout stays " + Live() + " ms until Windows resets it at the next logon");
+            send(new Dictionary<string, object> { { "type", "flt_guard" }, { "on", on }, { "live", Live() } });
+        }
+
+        // From the tray's 1 s timer on the window thread.
+        public void Tick()
+        {
+            if (!on || busy || DateTime.UtcNow < next) return;
+            next = DateTime.UtcNow.AddMilliseconds(DateTime.UtcNow < earlyUntil ? EARLY_EVERY_MS : EVERY_MS);
+            busy = true;
+            try { Check(); }
+            catch (Exception e) { log("foreground lock guard: " + e.Message); }
+            finally { busy = false; }
+        }
+
+        void Check()
+        {
+            long v = Live();
+            if (v < 0) { if (!warned) log("foreground lock guard: cannot read the live ForegroundLockTimeout: error " + Marshal.GetLastWin32Error()); warned = true; return; }
+            if (v != last && last >= 0) log("foreground lock guard: the live ForegroundLockTimeout changed from " + last + " to " + v + " ms");
+            last = v;
+            if (v == 0) return;
+            if (wrongSince == DateTime.MinValue) wrongSince = DateTime.UtcNow;
+            string how = Repair();
+            long now = Live();
+            last = now;
+            if (now == 0)
+            {
+                log("foreground lock guard: set the live ForegroundLockTimeout from " + v + " to 0 (" + how + ") after " + (int)(DateTime.UtcNow - wrongSince).TotalSeconds + " s");
+                send(new Dictionary<string, object> { { "type", "flt_guard" }, { "on", true }, { "live", 0L }, { "was", v }, { "how", how } });
+                failures = 0;
+                wrongSince = DateTime.MinValue;
+                return;
+            }
+            failures++;
+            if (failures == 1 || failures % 30 == 0)
+            {
+                log("foreground lock guard: still " + now + " ms after attempt " + failures + " (" + how + "), wrong for " + (int)(DateTime.UtcNow - wrongSince).TotalSeconds + " s");
+                send(new Dictionary<string, object> { { "type", "flt_guard" }, { "on", true }, { "live", now }, { "failing", failures }, { "how", how } });
+            }
+        }
+
+        string Repair()
+        {
+            if (Set(0)) return "set directly";
+            int direct = Marshal.GetLastWin32Error();
+            string why = "direct: error " + direct;
+            IntPtr fg = Native.GetForegroundWindow();
+            uint pid, me = Native.GetCurrentThreadId();
+            uint fgThread = fg == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(fg, out pid);
+            if (fgThread != 0 && fgThread != me && Native.AttachThreadInput(me, fgThread, true))
+            {
+                try { if (Set(0)) return "set with its input attached to the foreground thread; " + why; why += ", attached: error " + Marshal.GetLastWin32Error(); }
+                finally { Native.AttachThreadInput(me, fgThread, false); }
+            }
+            else why += ", no foreground thread to attach to";
+            long idle = IdleMs();
+            if (idle >= 0 && idle < IDLE_FOR_WINDOW_MS) return why + "; the momentary window waits for 3 s without input (input " + idle + " ms ago)";
+            return SetViaWindow() + "; " + why;
+        }
+
+        static void Pump(int times, int ms) { for (int i = 0; i < times; i++) { Application.DoEvents(); Thread.Sleep(ms); } }
+
+        // A 1x1, nearly transparent window of this app takes the foreground (the activation finishes only while this thread
+        // pumps), the set is tried attached, detached and after a key-up of the unassigned virtual key 0xE8 (this thread then
+        // received the last input), and the foreground goes back to the window that had it.
+        static string SetViaWindow()
+        {
+            using (var f = new Form())
+            {
+                f.Text = "FF Factory";
+                f.ShowInTaskbar = false;
+                f.FormBorderStyle = FormBorderStyle.None;
+                f.StartPosition = FormStartPosition.Manual;
+                f.Size = new Size(1, 1);
+                f.Location = new Point(0, 0);
+                f.Opacity = 0.01;
+                f.Show();
+                Pump(1, 100);
+                IntPtr prev = Native.GetForegroundWindow();
+                uint pid, me = Native.GetCurrentThreadId();
+                uint fgThread = prev == IntPtr.Zero ? 0 : Native.GetWindowThreadProcessId(prev, out pid);
+                bool attached = fgThread != 0 && fgThread != me && Native.AttachThreadInput(me, fgThread, true);
+                string r = null;
+                try
+                {
+                    bool took = Native.SetForegroundWindow(f.Handle);
+                    for (int i = 0; i < 100 && Native.GetForegroundWindow() != f.Handle; i++) Pump(1, 20);
+                    Pump(10, 30);
+                    bool isFg = Native.GetForegroundWindow() == f.Handle;
+                    string tail = " via a momentary window (SetForegroundWindow " + took + ", foreground " + isFg + ")";
+                    if (Set(0)) r = "set" + tail;
+                    if (r == null && attached) { Native.AttachThreadInput(me, fgThread, false); attached = false; Pump(10, 30); if (Set(0)) r = "set detached" + tail; }
+                    if (r == null)
+                    {
+                        var k = new Native.KEYINPUT[1];
+                        k[0].type = 1;
+                        k[0].vk = 0xE8;
+                        k[0].flags = 2;
+                        Native.SendInput(1, k, 40);
+                        Pump(10, 30);
+                        r = Set(0) ? "set after a key-up" + tail : "refused: error " + Marshal.GetLastWin32Error() + tail;
+                    }
+                }
+                finally
+                {
+                    if (attached) Native.AttachThreadInput(me, fgThread, false);
+                    if (prev != IntPtr.Zero) Native.SetForegroundWindow(prev);
+                    f.Close();
+                }
+                return r;
+            }
+        }
     }
 
     class TrayApp : ApplicationContext
@@ -146,6 +344,7 @@ namespace FFFactory
         string portalUrl;
         Dictionary<string, object> settings;
         ScheduleForm scheduleForm;
+        ForegroundLockGuard fltGuard;
 
         public TrayApp(string dir)
         {
@@ -192,8 +391,9 @@ namespace FFFactory
             icon.Visible = true;
 
             StartHooks();
+            fltGuard = new ForegroundLockGuard(Log, Send);
             tick.Interval = 1000;
-            tick.Tick += delegate { OnTick(); };
+            tick.Tick += delegate { OnTick(); fltGuard.Tick(); };
             tick.Start();
 
             uint session;
@@ -380,7 +580,8 @@ namespace FFFactory
         void OnMessage(Dictionary<string, object> m)
         {
             string type = Str(m, "type");
-            if (type == "state") Render(m);
+            // w6350: the state says whether the foreground lock guard runs (daemon.json foregroundLockGuard, on unless false).
+            if (type == "state") { Render(m); fltGuard.Enable(Equals(m.ContainsKey("fltGuard") ? m["fltGuard"] : null, true)); }
             else if (type == "show_menu") ShowMenuAtIcon();
             else if (type == "hide_menu") menu.Close();
             else if (type == "show_schedule") ShowSchedule();
@@ -406,6 +607,16 @@ namespace FFFactory
                 Thread.Sleep(ms);
             }
             else if (type == "selftest") SelfTest();
+            // For a test (w6350): the live ForegroundLockTimeout, after setting it to "set" ms first when given (as Windows does at
+            // a logon), so a test sees the guard put 0 back and can restore what it found. The daemon never sends it.
+            else if (type == "flt")
+            {
+                uint want;
+                bool did = false;
+                int err = 0;
+                if (uint.TryParse(Str(m, "set"), out want)) { did = Native.SystemParametersInfo(Native.SPI_SETFOREGROUNDLOCKTIMEOUT, 0, (IntPtr)want, 0); if (!did) err = Marshal.GetLastWin32Error(); }
+                Send(new Dictionary<string, object> { { "type", "flt" }, { "live", ForegroundLockGuard.Live() }, { "set", did }, { "error", err } });
+            }
             else if (type == "quit") Quit();
         }
 
