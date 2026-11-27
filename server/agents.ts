@@ -3761,7 +3761,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     // w4608: an agent there on an agent seat (its open work is all not the game's, w1098) works in its own clone, never in
     // this tree, so its turn holds no switch up: w4591's timed leg waited 30 min in lothdesktop/slot2 behind w4397's FFU
     // agent, seated there beside it.
-    const seats = sb.sessionIds.filter((id) => id !== req.callerSessionId && this.onAgentSeat(id));
+    // w6381: in one holds index (withPlacesOnce > holdsIndexNow): onAgentSeat > workIdsOf scanned the whole ledger once per
+    // session the sandbox ever held (a 2.9 s block under switchBranch at 12:04Z on 2026-11-27).
+    const seats = this.withPlacesOnce(() => sb.sessionIds.filter((id) => id !== req.callerSessionId && this.onAgentSeat(id)));
     const b = busy(sb.sessionIds.filter((id) => !seats.includes(id)));
     if (b.length) throw new Error(midTurnRefusal(b, where));
     return async () => {
@@ -3831,7 +3833,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    */
   workInSandbox(machineId: string, sandbox: string): { sessions: string[]; requests: string[] } {
     const here = [...this.store.sessions.values()].filter((s) => s.kind === 'worker' && s.machineId === machineId && s.machineSandbox === sandbox && !!this.sessions.sessions.get(s.id)?.live);
-    return { sessions: here.map((s) => s.id), requests: [...new Set(here.flatMap((s) => this.workIdsOf(s)))].sort() };
+    return { sessions: here.map((s) => s.id), requests: this.withPlacesOnce(() => [...new Set(here.flatMap((s) => this.workIdsOf(s)))].sort()) };
   }
 
   /** A worker session's requests, or undefined when it is not a worker session (w4922: a batch run's tags, by its FF_SESSION_ID). */

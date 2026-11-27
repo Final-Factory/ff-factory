@@ -160,3 +160,35 @@ test('w6381: warmBoardTexts works out every request\'s concepts ahead, so the fi
   assert.deepEqual(o.boardCheck(q, 30), warm, 'the same answer as from a cold cache');
   assert.equal(await o.warmBoardTexts(30, 0), 0, 'a second warm-up makes none');
 });
+
+test('w6381: switch_branch reads its sandbox\'s agent seats from one holds index, not a ledger scan per session', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha'] });
+  const { agents, store } = env;
+  const sb = store.machines.get('pc')!.sandboxes!.find((s) => s.id === 'alpha')!;
+  const T0 = new Date().toISOString();
+  const ids = Array.from({ length: 20 }, (_, i) => `seat${i}`);
+  for (const [i, id] of ids.entries()) {
+    store.putSession({ id, kind: 'worker', title: `w${900 + i}: leg`, status: 'stopped', permissionMode: 'bypassPermissions', createdAt: T0, lastActivityAt: T0, turns: 1, costUsd: 0, pendingPermissions: [], requestedBy: LOTH, machineId: 'pc', machineSandbox: 'alpha' } as never);
+    store.putWork({ id: `w${900 + i}`, title: `leg ${i}`, brief: '', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [LOTH], status: 'active', needs: i % 2 ? 'agent' : 'game', createdAt: T0, updatedAt: T0, sessionIds: [id], overlaps: [], asks: 0, log: [] } as never);
+  }
+  sb.sessionIds = [...ids];
+  const a = agents as unknown as { holdsIndexNow: () => unknown; onAgentSeat: (id: string) => boolean };
+  const seatsAlone = ids.filter((id) => a.onAgentSeat(id));
+  assert.equal(seatsAlone.length, 10, 'the agent-work half sits on agent seats');
+  const real = a.holdsIndexNow.bind(agents);
+  const built = new Set<unknown>();
+  let outside = 0;
+  a.holdsIndexNow = () => {
+    const ix = real();
+    if (ix) built.add(ix);
+    else outside++;
+    return ix;
+  };
+  agents.switchChecked({ sandbox: 'pc/alpha', branch: 'feature/x' });
+  assert.equal(outside, 0, 'every seat check ran inside a pass');
+  assert.equal(built.size, 1, 'one holds index for the whole sandbox');
+  // The same seats as one at a time: seated agents are left out of the busy check and sent to the daemon.
+  a.holdsIndexNow = real;
+  assert.deepEqual(agents.workInSandbox('pc', 'alpha').requests, [], 'no live workers there');
+  assert.deepEqual(ids.filter((id) => a.onAgentSeat(id)), seatsAlone);
+});
