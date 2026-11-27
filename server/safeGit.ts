@@ -82,7 +82,7 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
 
 /** Keys a repository may name a program in, read per call (canonical names: section and key lower case). */
 export const SCANNED_KEYS =
-  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow)$';
+  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow|remotes\\..+|fetch\\.all)$';
 
 /** Scopes no worker writes: the user's and system's config, the caller's own command line (`unknown` is Apple git's Xcode config). */
 const TRUSTED_SCOPES = new Set(['system', 'global', 'command', 'unknown']);
@@ -140,28 +140,85 @@ export function firstWinsArgs(args: string[], rows: { scope: string; key: string
   return [...args.slice(0, sub + 1), `${o.flag}=${back ? back.value : neutral(planted.key)}`, ...args.slice(sub + 1)];
 }
 
-/** Subcommands whose every upload program the option covers: fetch, pull and ls-remote start none but their own (measured). */
-const UPLOAD_COVERED = new Set(['fetch', 'pull', 'ls-remote']);
+/**
+ * Keys scanned only to read, never overridden (w6570 review): a remote group (`remotes.<group>`) and `fetch.all` make a fetch
+ * or pull start one child `git fetch` per remote, and the injected `--upload-pack=` never reaches those children.
+ */
+const isReadOnly = (key: string) => /^remotes\..+$/.test(key) || key === 'fetch.all';
+
+/** fetch and pull options that take their value as the next argument (so it is not read as the remote). */
+const FETCH_VALUE_OPTS = new Set(['-j', '--jobs', '--depth', '--deepen', '--shallow-since', '--shallow-exclude', '-o', '--server-option', '--upload-pack', '--refmap', '--negotiation-tip', '--filter', '--recurse-submodules-default', '--submodule-prefix', '-s', '--strategy', '-X', '--strategy-option', '--cleanup']);
+
+/** The remote (or group) a fetch or pull names, or undefined when it names none. */
+function remoteArg(rest: string[]): string | undefined {
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--') return rest[i + 1];
+    if (!a.startsWith('-')) return a;
+    if (FETCH_VALUE_OPTS.has(a)) i++;
+  }
+  return undefined;
+}
+
+/** git's boolean: true, yes, on, a non-zero number, or a key with no value. */
+const gitTrue = (v: string) => /^(true|yes|on|)$/i.test(v.trim()) || (/^-?\d+$/.test(v.trim()) && Number(v) !== 0);
+/** An argument git reads as `--<long>` (it takes any unique prefix of four or more characters). */
+const isOpt = (a: string, long: string) => a.length >= 4 && long.startsWith(a);
 
 /**
- * What the fence will do once it enforces w6570 (warn-only first, lothsahn's lockout rule), or undefined: a call the option
- * does not cover, in a repository whose own config sets a first-wins key, will be refused, and every other call there will
- * run with lazy fetch off. Not covered: a repository-set uploadpack on any other network call (`push` runs git-lfs's
- * pre-push hook, whose child `git ls-remote origin` starts it, measured on git 2.56.1 with git-lfs from FF Factory's
- * hooks; `remote update`, `submodule`, `lfs`, `clone`, `archive`), core.gitProxy on any network call, and an uploadpack
- * on a partial clone's lazy fetch under any call. A repository-set receivepack is covered: only push's own transport
- * starts it.
+ * Whether a call starts an upload or receive program, and whether the injected option reaches every one (w6570):
+ * - `covered`: ls-remote, push's own transport (receivepack), and a fetch or pull of ONE remote. A fetch or pull of several
+ *   (`--all`, `--multiple`, a remote group, `fetch.all` with no remote named) starts a child `git fetch` per remote, which never
+ *   gets the option (measured by the review of PR #1523 on git 2.56.1): uncovered.
+ * - `uncovered`: also `push` (git-lfs's pre-push hook runs `git ls-remote origin` as a child, measured), `remote show`,
+ *   `remote prune`, `remote update`, `remote set-head --auto`, `remote add --fetch`, `submodule`, and git-lfs's fetch, pull, push,
+ *   pre-push and prune.
+ * - `none`: everything else, `remote -v`, `lfs env`, `clone` (a new repository, none of this one's config) and `archive --remote`
+ *   (it runs the remote's upload-archive, not uploadpack) among them (the review measured these run nothing).
  */
-export function firstWinsWarning(args: string[], rows: { scope: string; key: string }[]): string | undefined {
+export function uploadReach(args: string[], rows: { key: string; value: string }[]): 'covered' | 'uncovered' | 'none' {
+  const { sub } = splitGlobal(args);
+  const name = args[sub] ?? '';
+  const rest = args.slice(sub + 1);
+  if (name === 'ls-remote') return 'covered';
+  if (name === 'fetch' || name === 'pull') {
+    if (rest.some((a) => isOpt(a, '--all') || isOpt(a, '--multiple'))) return 'uncovered';
+    const remote = remoteArg(rest);
+    if (remote === undefined) {
+      const all = rows.filter((r) => r.key === 'fetch.all').at(-1);
+      return all && gitTrue(all.value) && !rest.includes('--no-all') ? 'uncovered' : 'covered';
+    }
+    return rows.some((r) => r.key === `remotes.${remote.toLowerCase()}`) ? 'uncovered' : 'covered';
+  }
+  if (name === 'push' || name === 'submodule') return 'uncovered';
+  const verb = rest[0] ?? '';
+  if (name === 'remote') {
+    if (/^(show|prune|update)$/.test(verb)) return 'uncovered';
+    if (verb === 'set-head' && rest.some((a) => a === '-a' || isOpt(a, '--auto'))) return 'uncovered';
+    if (verb === 'add' && rest.some((a) => a === '-f' || isOpt(a, '--fetch'))) return 'uncovered';
+  }
+  if (name === 'lfs' && /^(fetch|pull|push|pre-push|prune)$/.test(verb)) return 'uncovered';
+  return 'none';
+}
+
+/**
+ * What the fence will do once it enforces w6570 (warn-only first, lothsahn's lockout rule), or undefined: in a repository
+ * whose own config sets uploadpack, an `uncovered` call (uploadReach) will be refused and every `none` call will run with lazy
+ * fetch off (a partial clone's lazy fetch starts the uploadpack too); with core.gitProxy set, every call that reaches a
+ * remote will be refused. A repository-set receivepack needs nothing: only push's own transport starts it, and
+ * `--receive-pack` covers that.
+ */
+export function firstWinsWarning(args: string[], rows: { scope: string; key: string; value: string }[]): string | undefined {
   const name = args[splitGlobal(args).sub] ?? '';
   const planted = rows.filter((r) => !TRUSTED_SCOPES.has(r.scope));
-  const net = NETWORK.has(name);
+  const reach = uploadReach(args, rows);
   const up = planted.find((r) => /^remote\..+\.uploadpack$/.test(r.key));
-  const bad = (net && !UPLOAD_COVERED.has(name) && up) || (net && planted.find((r) => r.key === 'core.gitproxy'));
+  const proxy = planted.find((r) => r.key === 'core.gitproxy');
+  const bad = (reach === 'uncovered' && up) || (reach !== 'none' && proxy);
   const fix = (key: string) => `Remove it with \`git config --local --unset-all ${key}\` in that repository`;
   if (bad)
     return `FF Factory safeGit (w6570) warning: the repository's own config sets ${bad.key}, which git runs ahead of the fence's override (it keeps the first value) on \`git ${name}\`; this call will be refused once the fence enforces w6570. ${fix(bad.key)}`;
-  if (up && !net)
+  if (up && reach === 'none')
     return `FF Factory safeGit (w6570) warning: the repository's own config sets ${up.key}, which a partial clone's lazy fetch would run under \`git ${name}\`; such calls will run with lazy fetch off once the fence enforces w6570. ${fix(up.key)}`;
   return undefined;
 }
@@ -214,7 +271,7 @@ export function scannedOverrides(rows: { scope: string; key: string; value: stri
   const out: [string, string][] = [];
   const seen = new Set<string>();
   for (const r of repo) {
-    if (isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
+    if (isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || isReadOnly(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
     seen.add(r.key);
     const back = trusted.filter((t) => t.key === r.key).at(-1);
     out.push([r.key, back ? back.value : neutral(r.key)]);

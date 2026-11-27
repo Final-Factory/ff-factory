@@ -241,6 +241,34 @@ test('w6570: a repository-set upload or receive program goes to the transport as
   for (const a of [['push', 'origin', 'x'], ['remote', 'update'], ['-C', 'd', 'lfs', 'push', 'origin'], ['submodule', 'update']])
     assert.match(firstWinsWarning(a, up) ?? '', /remote\.origin\.uploadpack.*will be refused.*--unset-all remote\.origin\.uploadpack/, a.join(' '));
   assert.match(firstWinsWarning(['status'], up) ?? '', /lazy fetch off/);
+  // A fetch or pull of several remotes starts a child `git fetch` per remote, which never gets the option (review of PR #1523).
+  const group = [...up, ...parseScan('local\0remotes.origin\nb c\0local\0remotes.both\nb c\0')];
+  const all = [...up, ...parseScan('global\0fetch.all\ntrue\0')];
+  for (const [a, r] of [
+    [['fetch', '--all'], up],
+    [['fetch', '--multiple', 'b', 'c'], up],
+    [['fetch', '--prune', 'both'], group],
+    [['fetch', '--prune', 'origin'], group],
+    [['pull', 'origin', 'master'], group],
+    [['pull', '--all'], up],
+    [['fetch'], all],
+    [['fetch', '--prune'], all],
+  ] as [string[], typeof up][])
+    assert.match(firstWinsWarning(a, r) ?? '', /will be refused/, a.join(' '));
+  for (const [a, r] of [
+    [['fetch', '--prune', 'origin'], all],
+    [['fetch', '--no-all'], all],
+    [['fetch', '--depth', '1', 'b'], group],
+    [['-C', 'd', 'fetch', '--quiet', 'origin', 'master'], up],
+  ] as [string[], typeof up][])
+    assert.equal(firstWinsWarning(a, r), undefined, a.join(' '));
+  // Calls that start no upload program (measured by the review): only the lazy-fetch note, never a refusal.
+  for (const a of [['remote', '-v'], ['remote', 'get-url', 'origin'], ['lfs', 'env'], ['clone', 'x', 'y'], ['archive', '--remote', 'origin', 'HEAD']])
+    assert.match(firstWinsWarning(a, up) ?? '', /lazy fetch off/, a.join(' '));
+  for (const a of [['remote', 'show', 'origin'], ['remote', 'prune', 'origin'], ['remote', 'set-head', 'origin', '--auto'], ['remote', 'add', '-f', 'x', 'u'], ['lfs', 'fetch']])
+    assert.match(firstWinsWarning(a, up) ?? '', /will be refused/, a.join(' '));
+  assert.deepEqual(scannedOverrides(group), [], 'a remote group is read, never overridden');
+  assert.deepEqual(scannedOverrides(parseScan('local\0fetch.all\ntrue\0')), [], 'fetch.all is read, never overridden');
   assert.match(firstWinsWarning(['fetch', 'origin'], rows.filter((r) => r.key === 'core.gitproxy')) ?? '', /core\.gitproxy.*will be refused/);
   assert.equal(firstWinsWarning(['status'], rows.filter((r) => r.key === 'core.gitproxy')), undefined);
   assert.equal(firstWinsWarning(['push', 'origin'], []), undefined);
@@ -512,6 +540,10 @@ test('w6570: a clone’s planted uploadpack and receivepack run on plain git, ne
     fs.rmSync(f.marker, { force: true });
 
     // The fence: the sync wrapper and run() (server/proc.ts) fetch, list, pull and push, and each works.
+    // Each warning prints once per process, so the capture starts here, before the first fenced call.
+    const warns: string[] = [];
+    const warn = console.warn;
+    console.warn = (m: string) => void warns.push(String(m));
     const fetch = gitSpawnSync(['fetch', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
     assert.equal(fetch.status, 0, fetch.stderr);
     const fetchAll = await run('git', ['-C', victim, 'fetch', '--all']);
@@ -521,6 +553,28 @@ test('w6570: a clone’s planted uploadpack and receivepack run on plain git, ne
     const pull = await run('git', ['-C', victim, '-c', 'user.name=t', '-c', 'user.email=t@users.noreply.github.com', 'pull', '-q', '--no-rebase', 'origin', 'master']);
     assert.equal(pull.code, 0, pull.stderr);
     assert.equal(f.ran(), '', 'no planted program ran on a fenced fetch, ls-remote or pull');
+    // Review of PR #1523: with two remotes and a group named origin, `fetch origin` and `fetch --all` start a child fetch per
+    // remote, which never gets the option. The scan reads the group, and the fence warns that the enforcing step refuses it.
+    for (const r of ['b', 'c']) {
+      git(victim, 'remote', 'add', r, slash(bare));
+      git(victim, 'config', `remote.${r}.uploadpack`, pack);
+    }
+    git(victim, 'config', 'remotes.origin', 'b c');
+    try {
+      gitSpawnSync(['fetch', '--prune', 'origin'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
+      await run('git', ['-C', victim, 'pull', '--all', '--ff-only']);
+      gitSpawnSync(['remote', '-v'], { cwd: victim, encoding: 'utf8', timeout: 30_000 });
+    } finally {
+      console.warn = warn;
+    }
+    assert.match(warns.join('\n'), /uploadpack.*`git fetch`; this call will be refused/);
+    assert.match(warns.join('\n'), /uploadpack.*`git pull`; this call will be refused/);
+    assert.doesNotMatch(warns.join('\n'), /`git remote`; this call will be refused/, 'remote -v starts no program');
+    assert.match(f.ran(), /pack /, 'the group fetch still runs it until the enforcing step (why it warns)');
+    fs.rmSync(f.marker, { force: true });
+    git(victim, 'config', '--unset', 'remotes.origin');
+    git(victim, 'remote', 'remove', 'b');
+    git(victim, 'remote', 'remove', 'c');
     // A push passes --receive-pack, but git-lfs's pre-push hook runs `git ls-remote origin`, which starts a planted uploadpack
     // (measured): with only receivepack planted the push runs nothing of the worker's; with uploadpack planted too it is the
     // call the enforcing step refuses (firstWinsWarning says so until then).
