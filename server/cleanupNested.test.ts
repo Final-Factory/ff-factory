@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { dropNested, norm, within } from './cleanup.ts';
+import { dropNested, norm, normKept, within } from './cleanup.ts';
 
 /** The loop dropNested replaces, as it was. */
 const pairwise = <T>(m: Map<string, T>) => {
@@ -62,4 +62,14 @@ test('w6486: dropNested on a large plan takes milliseconds', () => {
   dropNested(m);
   assert.ok(Date.now() - at < 2000, `${Date.now() - at} ms`);
   assert.equal(m.size, 2000 + 10_000);
+});
+
+test('w6508: norm keeps its answer only for paths no working folder changes; a UNC path with no share is worked out each time', () => {
+  const kept = String.raw`F:\ffw|c:/x|F:\|/|/home/u|//server/share|\\server\share|\\server\share\a|\\?\C:\x|\\.\pipe\x`.split('|');
+  const not = String.raw`\\|\\server|\\server\|\\\x|rel|a\b|C:|C:x`.split('|');
+  for (const p of kept) assert.equal(normKept(p), true, p);
+  for (const p of not) assert.equal(normKept(p), false, p);
+  // What it rests on: a kept path's answer is the same from any working folder; a UNC path with no share's is not.
+  for (const p of kept) assert.equal(path.win32.resolve('D:\\one', p) === path.win32.resolve('Q:\\two', p) || !/^[a-zA-Z]:|^\\\\/.test(p), true, p);
+  for (const p of not.slice(0, 4)) assert.notEqual(path.win32.resolve('D:\\one', p), path.win32.resolve('Q:\\two', p), p);
 });

@@ -863,18 +863,33 @@ export class HostedSession implements SessionHandle {
 
   /**
    * The poll's save of how far it read, off the event loop (w6486), one write at a time: the next poll writes what it
-   * read meanwhile. A folder that is gone is never made again (the write fails); kept in memory, the next poll tries
-   * again. A write for an earlier start of the host that lands after the new start's '0' is written over by the next poll.
+   * read meanwhile. A folder that is gone is never made again (the open fails); kept in memory, the next poll tries
+   * again. w6508: a write for an earlier start of the host writes nothing once a new start has come, so it can never put
+   * the old, larger offset over the new start's '0'. The generation is looked at after the open: a file opened before
+   * start() removed the folder is the old one (on Windows the open file makes start() refuse), and one opened after it
+   * finds the generation changed, as start() runs whole before any open's answer comes back. Written then cut to length,
+   * the file never reads empty mid-write.
    */
   private saveOffset() {
     const at = this.tail?.position ?? 0;
     if (at === this.savedOffset || this.offsetWrite) return;
     const gen = this.offsetGen;
-    this.offsetWrite = fs.promises
-      .writeFile(this.files.offset, String(at))
+    const text = String(at);
+    const write = async () => {
+      const file = await fs.promises.open(this.files.offset, fs.constants.O_RDWR | fs.constants.O_CREAT);
+      try {
+        if (gen !== this.offsetGen) return false;
+        await file.write(text, 0);
+        await file.truncate(Buffer.byteLength(text));
+        return true;
+      } finally {
+        await file.close();
+      }
+    };
+    this.offsetWrite = write()
       .then(
-        () => {
-          this.savedOffset = gen === this.offsetGen ? at : -1;
+        (wrote) => {
+          this.savedOffset = wrote && gen === this.offsetGen ? at : -1;
         },
         () => {
           if (gen !== this.offsetGen) this.savedOffset = -1;
