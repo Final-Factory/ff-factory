@@ -1,3 +1,4 @@
+import { newCost, timedCost, type Cost } from './placeCost.ts';
 import { deployLead, deployStayNote, deployWaitLine } from './deployResume.ts';
 import { describePortalPin } from '../machine/portalPin.ts';
 import { crashHoldMark } from './crashHolds.ts';
@@ -6796,6 +6797,16 @@ A report is for a person who asked for one, and people want very few. File one w
 
   private freeNow(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
     this.freeMade++;
+    return timedCost(this.placeCost.free, () => this.freeWork(x, machineId));
+  }
+
+  /**
+   * w6428: time spent working placement out, by kind, outermost calls only (a free() inside places() counts in both): the
+   * page's 'place' line says where its machines and room phases went (the bench cannot reproduce the live 70-180 ms).
+   */
+  readonly placeCost: { free: Cost; places: Cost } = { free: newCost(), places: newCost() };
+
+  private freeWork(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
     if (x.status !== 'ready') return false;
     // w5924: a light agent folder is one worker's own, never a FREE game sandbox (agent work gets a new one: lightTarget).
     if (isLight(x)) return false;
@@ -7506,6 +7517,10 @@ A report is for a person who asked for one, and people want very few. File one w
   }
 
   private placesNow(): Computer[] {
+    return timedCost(this.placeCost.places, () => this.placesWork());
+  }
+
+  private placesWork(): Computer[] {
     const out: Computer[] = [];
     const all = [...this.sessions.sessions.values()].filter((s) => s.info.kind !== 'orchestrator');
     const mem = this.hostMem();
