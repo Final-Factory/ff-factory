@@ -930,6 +930,39 @@ then "Closing Firefox should be off by default"). Code: `machine/firefox.ts` and
   exited with code 0, and the same windows and tabs were running again after a restart; that person's Firefox kept its
   processes. The real tray showed no item by default and the item once allowed.
 
+## The foreground lock guard (w6350)
+
+Windows 11 25H2 leaks a kernel token object (pool tag `Toke`) for every process that creates a process while win32k's
+*foreground lock* is armed: `win32kfull!CForegroundLaunch::_CheckAllowForeground` references the creator's primary token and
+never releases it, so the dead token stays until the next reboot. The public trace, with the reference ledgers, is
+[bentoner/windows-token-leak](https://github.com/bentoner/windows-token-leak). FF Factory starts processes all day (the
+daemon's probes, git, gh, Unity's `bee_backend` chains, the ffu runners' cargo builds), so the leak follows its load: BEAST
+and LothDesktop each held about 4 million dead tokens after 12 days of uptime (2026-11-27), BEAST gaining 1,000 to 1,400 a
+minute after a reboot. Each one holds its slot in the table `NtCreateUserProcess` walks under a lock, so process starts
+slow down and paged pool grows until the reboot.
+
+The lock is armed for `ForegroundLockTimeout` ms after the last input, and Windows sets that live value to 2147483647
+(24.9 days) at every logon and every Remote Desktop connect or disconnect, whatever `HKCU\Control Panel\Desktop` says. At 0
+it is armed only within the clock tick that input arrives, and the leak stops while nobody is typing. So the tray app keeps
+the live value at 0 (`ForegroundLockGuard` in `machine/tray/FFFactoryTray.cs`): it reads it every 10 s (every 2 s for 15
+minutes after it starts and after each logon, unlock or Remote Desktop change) and sets it back when Windows changed it.
+win32k refuses the set with error 87 unless the caller may take the foreground, so a repair tries the direct call, the call
+with its input attached to the foreground window's thread, and, after 3 s with no input, the call from a 1x1 window of its
+own that takes the foreground for about half a second and gives it back. It never writes the registry value.
+
+- **The cost:** the old focus-stealing tweak. Any program may bring its window to the front, for example a Unity editor an
+  agent starts while a person types elsewhere.
+- **Turning it off:** `daemon.json` `"foregroundLockGuard": false`, then restart the daemon. Windows puts its own value
+  back at the next logon. The guard runs only with the tray (`"tray": false` turns off both).
+- **Checking it:** the daemon log's `tray: foreground lock guard:` lines say each change and each repair. The live value and
+  the leak can be read without elevation: `SystemParametersInfo(SPI_GETFOREGROUNDLOCKTIMEOUT)`, and the `Toke` pool tag's
+  paged allocations minus frees from `NtQuerySystemInformation(SystemPoolTagInformation)`.
+- **What it cannot do:** release the tokens already leaked. Only a reboot (a Restart, not a Shut down with Fast Startup)
+  clears them. While a person moves the mouse or types, the lock is armed within those ticks and a few tokens still leak.
+- **Low integrity:** a Low process (an agent's tools) is refused the set with error 5, so agents cannot change it. The guard
+  runs in the tray, a Medium process of the daemon, and changes nothing about the Low fence, the restricted tokens or the
+  read fence.
+
 ## Machine sandboxes
 
 A machine with a `sandbox_root` holds a pool of sandboxes (the portal's own computer included, through its own daemon): each a **git worktree of the
