@@ -26,7 +26,7 @@ import { groupIntake } from '../shared/intake.ts';
 import { describeAutoIntake } from './ffboxAutoIntake.ts';
 import { agentState, agentStateText, holdsItsPlace, holdsSandbox, sortAgents, sortPlaces } from '../shared/agentState.ts';
 import { idleClosedPart } from './liveIdle.ts';
-import { topPriority, type Pressure } from './priorityReclaim.ts';
+import { FAILED_START_MS, failedStartPressure, rankOf, topPriority, type Pressure } from './priorityReclaim.ts';
 import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE_NOTE, handOverBranch, keepWhy, moveBranchOf, occupies, releasedOn, workerBranch, type PairWant } from './placeAgain.ts';
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { GAME_REPO, otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
@@ -1075,6 +1075,7 @@ export class Agents {
       saveWork: (m, sb, branch, message, sessionId) => machines.saveWork(m, sb, branch, message, sessionId ? this.githubTokenFor(m, sessionId, `saving ${sessionId}'s work`) : undefined, this.pushHold(m, branch)),
       // w3507: game sandboxes go out by priority (server/priorityReclaim.ts).
       pressure: () => this.reclaimPressure(),
+      failedStarts: () => this.failedStartPressure(),
       pairWants: () => this.pairWants(),
       priorityOf: (info) => topPriority(this.openWorkOf(info).map((w) => w.priority)),
       reclaimHold: (info, sb) => this.reclaimHold(info, sb),
@@ -4445,6 +4446,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const entry = { to: d.move.to, texts: [movedText(q)], sends: [q] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
+    this.warnOutranked('room move', info, reqs, d.move.to);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
     this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
     return true;
@@ -4584,6 +4586,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     });
     const entry = { to, texts: q ? [movedText(q)] : [], sends: q ? [q] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
     this.roomMoving.set(info.id, entry);
+    this.warnOutranked('away move', info, reqs, to);
     console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
     this.unmemoized(() => {
       for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
@@ -4882,6 +4885,41 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /** What moveDecision reads of a worker whose resume waits for room (w2046). */
+  /** w6432: requests whose start_agent failed after the sandbox was prepared (w5278), by id: the computer and when. */
+  private readonly failedStarts = new Map<string, { machine: string; at: number }>();
+
+  /**
+   * w6432: each recent failed start (FAILED_START_MS) as pressure on its computer, until its request is started, Queued
+   * (reclaimPressure has it then), or closed. Read by placeAgain.outranking.
+   */
+  private failedStartPressure(): Pressure[] {
+    const out: Pressure[] = [];
+    const now = Date.now();
+    for (const [id, f] of this.failedStarts) {
+      const w = this.store.work.get(id);
+      if (!w || now - f.at > FAILED_START_MS || ['queued', 'merged', 'done', 'rejected', 'cancelled'].includes(w.status) || needsOf(w) !== 'game') {
+        this.failedStarts.delete(id);
+        continue;
+      }
+      out.push(failedStartPressure(w.id, w.title, w.priority, f.machine));
+    }
+    return out;
+  }
+
+  /**
+   * w6432 (warn-only): a room or away move that takes a game sandbox on `to` while higher-priority work is queued for one
+   * there (or its start just failed there) says so. On 2026-11-27 moves off offline m5 and BEAST put w6235 into
+   * lothdesktop/slot1 (15:04Z) and w5479 into slot5 (15:15Z), both normal, while w6431 (frantic) waited for a sandbox there.
+   */
+  private warnOutranked(what: string, info: SessionInfo, reqs: WorkItem[], to: string): void {
+    if (!reqs.some((w) => needsOf(w) === 'game')) return;
+    const mine = topPriority(reqs.map((w) => w.priority));
+    const ahead = this.placeAgain.outranking(rankOf(mine), to);
+    if (!ahead) return;
+    const ids = reqs.map((w) => w.id).join(', ');
+    this.placeAgain.warnOnce(`${what}:${info.id}:${to}:${ahead.work}`, `${what} (w6432, warn-only): worker ${info.id} (${ids}, ${mine ?? 'no open request'}) takes a game sandbox on ${to} while ${ahead.work} (${ahead.priority}) is queued for one there; once enforced it waits`);
+  }
+
   private moveFacts(info: SessionInfo, reqs: WorkItem[]): MoveFacts {
     const m = this.store.machines.get(info.machineId!);
     const r = info.placeReleased;
@@ -8138,6 +8176,7 @@ ${w.repo ?? ''}
               if (w) {
                 const why = override ? ` (not a repeat: ${override})` : '';
                 this.orchestrators.linkWorker(w.id, s.info, `started ${this.orchestrators.workerLine(s.info.id)}${picked.note}${why}`, { overrideGate: a.override_gate });
+                this.failedStarts.delete(w.id); // w6432: started now, it holds no sandbox as a failed start any more
                 item = ` for ${w.id}; ${names(w.requesters)}'s orchestrator is told`;
                 if (ffuShared.length) this.tellFfuShared(w, ffuShared);
               } else {
@@ -8177,6 +8216,7 @@ ${w.repo ?? ''}
             const failed = (e: unknown) => {
               const why = (e as Error)?.message ?? String(e);
               console.log(`start_agent (w5278): ${label} in ${at} did not start: ${why}`);
+              if (w && tgt.machine) this.failedStarts.set(w.id, { machine: tgt.machine, at: Date.now() });
               if (w) this.orchestrators.noteOnRequest(w.id, `its start_agent in ${at} did not start after the sandbox was prepared (w5278): ${why}`);
               this.notifyDispatcher(`[start failed] ${label} did not start in ${at}: ${why}. Nothing was started for it: start_agent it again (another free sandbox if this one is the problem).`, requestedBy);
             };
