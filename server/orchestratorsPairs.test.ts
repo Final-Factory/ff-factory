@@ -43,7 +43,7 @@ import { PR2395_DIFF, W1958_0459, W1958_1632, W2651_0457, W2651_2051 } from './p
 import { startTestMachine, type TestMachineOptions } from './testMachine.ts';
 import { afterMergeReason } from './ledgerRules.ts';
 import { doneIdsIn, legDoneIdsIn } from './ledgerRules.ts';
-import type { CommitVerdict, DataDirVerdict } from './gameDataDir.ts';
+import { PAIR_FILED_BY, pairAskWords, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { legacyFit, roomForWork, timedLine, type Computer, type RoomNow } from './placement.ts';
 import type { Occupant } from './timedLegPlace.ts';
 import { decisionsOn } from '../shared/waiting.ts';
@@ -1064,6 +1064,64 @@ test('w6235: the queue re-check clears a queued marked pair run whose commit rea
   assert.equal(asked.length, 2);
   await agents.recheckLegacyPairs(t0 + 11 * 60_000);
   assert.deepEqual(asked, ['20786882d8', 'ac80d7b0', 'ac80d7b0']);
+});
+
+// w6451 (w6442's review of PR #1477): a run marked from its what or brief (no legacy_data) whose words name another player
+// was cleared by its commit's file at request_pair, start_agent and the queue re-check, which read only legacy_data.
+test('w6451: what and brief that name another player keep the mark at request_pair, start_agent and the queue re-check', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, dispatcher, call, machines } = env;
+  agentsRoom(agents, []);
+  putRequests(store, [{ id: 'w6452', by: LOTH }]);
+  machines.update('pc', { platform: 'win32', fence: { state: 'on', kind: 'low', agentIntegrity: 'low' } });
+  agents.gameDataDirAt = fakeDataDir;
+  const before = store.work.size;
+  const s = await startedFor(env, 'w6452');
+  await assert.rejects(
+    async () => s.h.request_pair!({ what: 'MP determinism check of PR #4382', brief: 'The host runs the Steam pre-1.0 0.50.0.47 build; the client runs the PR head.', commit: '20786882d8' }),
+    /^Error: Nothing filed: no computer fits a pair run of a pre-w5297 player \(read from its words.*its brief names build 0\.50\.0\.47, but FF Factory checked only 20786882d8/,
+  );
+  // When another reason leads (the read failed), the other player's reason is kept in the mark too.
+  putRequests(store, [{ id: 'w6457', by: LOTH }]);
+  const s2 = await startedFor(env, 'w6457');
+  await assert.rejects(
+    async () => s2.h.request_pair!({ what: 'MP determinism check of PR #4382', brief: 'The host runs the Steam pre-1.0 0.50.0.47 build.', commit: 'cafef00d12' }),
+    /GitHub knows no commit cafef00d12.*; its brief names build 0\.50\.0\.47/,
+  );
+  assert.equal(store.work.size, before + 1, 'nothing filed (w6457 is the request, put above)');
+  // Runs marked from their words before this fix: the mark is the plain LEGACY_READ, the other player is only in the brief
+  // (newPair's shape: the worker's brief, then FF Factory's own words, whose session id is hex and must not count).
+  const filed = (id: string, what: string, brief: string) => ({ id, by: LOTH, status: 'queued' as const, queuedFor: { at: T0 }, title: `Pair run for w6452: ${what}`, brief: `${brief}\n\nFF Factory filed this for worker e425e43b on w6452 (w1945, request_pair): 1 leg.`, pair: { legs: 1, legacyData: LEGACY_READ, commit: '20786882d8' } });
+  putRequests(store, [
+    filed('w6453', 'MP check of PR #4382 on pre-1.0', 'The client runs ac80d7b0bb, the Steam build.'),
+    filed('w6454', 'MP check of PR #4382 on pre-1.0', 'Run the MP scenarios at the PR head.'),
+    filed('w6455', 'MP check of 0.50.0.47 against PR #4382', 'Run the MP scenarios.'),
+  ]);
+  const r = await call(dispatcher().info, 'start_agent', { work_id: 'w6453', prompt: 'Run the MP scenarios on the 0.50 line.', title: 'pair', sandbox: 'pc/alpha' });
+  assert.equal(r.isError, true);
+  assert.ok(store.work.get('w6453')!.pair?.legacyData, 'start_agent: the brief names another commit');
+  assert.deepEqual(await agents.recheckLegacyPairs(Date.parse(T0)), ['w6454'], 'only the run whose words name no other player is cleared; the session id in FF Factory\'s words does not count');
+  assert.ok(store.work.get('w6455')!.pair?.legacyData, 'the re-check: the what names another build');
+});
+
+test('w6451: the queue re-check forgets runs that are no longer queued and marked', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  const asked: string[] = [];
+  agents.gameDataDirAt = (c) => (asked.push(c), fakeDataDir(c));
+  putRequests(store, [{ id: 'w6456', by: LOTH, status: 'queued', queuedFor: { at: T0 }, pair: { legs: 1, legacyData: 'ac80d7b0 is 0.50', commit: 'ac80d7b0' } }]);
+  const t0 = Date.parse(T0);
+  await agents.recheckLegacyPairs(t0);
+  const map = (agents as unknown as { legacyRechecked: Map<string, number> }).legacyRechecked;
+  assert.deepEqual([...map.keys()], ['w6456 ac80d7b0']);
+  store.work.get('w6456')!.status = 'done';
+  await agents.recheckLegacyPairs(t0 + 60_000);
+  assert.deepEqual([...map.keys()], [], 'a closed run is dropped');
+  assert.deepEqual(asked, ['ac80d7b0']);
+});
+
+test('w6451: pairAskWords keeps the worker\'s own words of a filed pair run', () => {
+  assert.deepEqual(pairAskWords({ title: 'Pair run for w12: MP check', brief: `Run it.${PAIR_FILED_BY}e425e43b on w12.` }), { what: 'MP check', brief: 'Run it.' });
 });
 
 test('w5965: the words that mark a pre-w5297 player', () => {

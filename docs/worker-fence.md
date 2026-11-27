@@ -106,7 +106,11 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   (`server/gameDataDir.ts` `otherPlayerIn`), and a verdict for another commit than the pair's clears nothing. A queued
   pair run still marked (filed before w6189, or by hand) is re-checked each minute by BlockerWatch before the queue is
   read (`Agents.recheckLegacyPairs`, at most once per 10 minutes per run and commit), so it no longer waits for a
-  `start_agent` call to be placed.
+  `start_agent` call to be placed. The run's own `what` and `brief` are read the same way (w6451, from w6442's review of
+  PR #1477), since a run with no `legacy_data` is marked from them: "the host runs Steam 0.50.0.47" in the brief keeps
+  the mark at all three points (`otherPlayerInWords`; start_agent and the re-check take the worker's part of a filed
+  run's brief, `pairAskWords`, so FF Factory's own words and their hex session id do not count). A sha in a brief that
+  is only context keeps the mark too, failing closed: pass `legacy_data` "none" when no leg runs a pre-w5297 player.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 
