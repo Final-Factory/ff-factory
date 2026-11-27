@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { ghConfigFolder, ghLoginStorage, machineGhStatusEnv, OWNER_LABEL_ON_SYSTEM_DRIVE, ownerLabelTargets, sayOwnerLabels, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, ghLoginToFile, ghLoginToKeyring, ghLoginAccounts, ghKeyringTargets, OWNER_GH_MOVED_NOTE, type GhRun, type TokenRun } from '../machine/ownerSecrets.ts';
+import { ghConfigFolder, ghLoginStorage, machineGhStatusEnv, OWNER_LABEL_ON_SYSTEM_DRIVE, OWNER_LABEL_WARN_ONLY, OWNER_LABEL_GH_ONLY, ownerLabelMode, ownerLabelTargets, sayOwnerLabels, hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerReadMore, ownerRunWiring, ownerSecretPaths, ownerSecretPathsMore, ownerToolLegs, sayOwnerRules, ghLoginToFile, ghLoginToKeyring, ghLoginAccounts, ghKeyringTargets, OWNER_GH_MOVED_NOTE, type GhRun, type TokenRun } from '../machine/ownerSecrets.ts';
 import { NO_READ_UP } from '../machine/lowIntegrity.ts';
 
 const kinds = (l: { kind: string }[]) => new Set(l.map((x) => x.kind));
@@ -297,8 +297,9 @@ test('ownerLabelTargets (w5749): every other machine and OS looks at nothing on 
   let calls = 0;
   const exists = () => (calls++, true);
   for (const o of [
-    { platform: 'win32' as const, machineId: 'beast' },
+    { platform: 'win32' as const, machineId: 'biscuit' },
     { platform: 'win32' as const, machineId: undefined },
+    { platform: 'darwin' as const, machineId: 'beast' },
     { platform: 'darwin' as const, machineId: 'lothdesktop' },
     { platform: 'linux' as const, machineId: 'lothdesktop' },
   ])
@@ -333,6 +334,39 @@ test('sayOwnerLabels (w5749): warn says what on would label, the gh move, and wh
   assert.match(line, /left open: Chrome \(AppContainer\)$/);
   assert.match(sayOwnerLabels('on', plan, 'file'), /rules label No-Read-Up on .*hosts\.yml/);
   assert.match(sayOwnerLabels('warn', { label: [], left: [] }, undefined), /none on this Windows machine .*only on lothdesktop/);
+});
+
+// w6569 (lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as w5749 did on LothDesktop").
+test('ownerLabelTargets (w6569): BEAST plans the gh folder only, held at warn; ~/.ssh and browsers are never looked at', () => {
+  const home = w.join('C:', 'Users', 'rydin');
+  const env = { APPDATA: w.join(home, 'AppData', 'Roaming'), LOCALAPPDATA: w.join(home, 'AppData', 'Local') };
+  const gh = w.join(env.APPDATA, 'GitHub CLI');
+  const ssh = w.join(home, '.ssh');
+  const looked: string[] = [];
+  const plan = ownerLabelTargets({ platform: 'win32', home, env, machineId: 'BEAST', exists: (p) => (looked.push(p), true) });
+  assert.deepEqual(plan.label, [{ path: gh, sddl: NO_READ_UP.dir }]);
+  assert.deepEqual(plan.left.map((l) => l.path), [ssh]);
+  assert.match(plan.left[0].why, /gh login move only, w6569/);
+  assert.equal(plan.warnOnly, true);
+  assert.deepEqual(looked, [gh], 'only the gh folder is checked on its system drive');
+  assert.ok(OWNER_LABEL_WARN_ONLY.has('beast') && OWNER_LABEL_GH_ONLY.has('beast') && !OWNER_LABEL_ON_SYSTEM_DRIVE.has('beast'));
+});
+
+test('ownerLabelMode (w6569): on is held at warn on a warn-only machine; off, warn and LothDesktop keep the fence mode', () => {
+  assert.equal(ownerLabelMode('on', { warnOnly: true }), 'warn');
+  assert.equal(ownerLabelMode('off', { warnOnly: true }), 'off');
+  assert.equal(ownerLabelMode('warn', { warnOnly: true }), 'warn');
+  assert.equal(ownerLabelMode('on', {}), 'on');
+  const ld = ownerLabelTargets({ platform: 'win32', home: w.join('C:', 'Users', 'L'), env: {}, machineId: 'lothdesktop', exists: () => true });
+  assert.equal(ownerLabelMode('on', ld), 'on', 'LothDesktop stays enforced');
+});
+
+test('sayOwnerLabels (w6569): a warn-only machine under an on fence says it would label, and why it is held', () => {
+  const gh = w.join('C:', 'U', 'GitHub CLI');
+  const plan = { label: [{ path: gh, sddl: NO_READ_UP.dir }], left: [], warnOnly: true };
+  const line = sayOwnerLabels('on', plan, 'keyring');
+  assert.ok(line.startsWith(`read fence (on): owner-secret rules would label (warn only: no label set (held at warn on this machine: OWNER_LABEL_WARN_ONLY, w6569)) No-Read-Up on ${gh};`), line);
+  assert.match(line, /Credential Manager \(keyring\).*on moves it/);
 });
 
 /** A fake gh for the w5749 move: keeps where the login is and its token, and answers status, token and login as gh does. */

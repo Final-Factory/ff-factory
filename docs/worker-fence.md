@@ -515,6 +515,16 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
     back needs nobody at the machine: set the read fence to `warn` (or `off`). To revert this code, set `warn` first and
     let the daemon start once: a build without `applyOwnerLabels` leaves the labels and the login where they are (gh
     still works from `hosts.yml`; only Low workers lose the folders).
+  - **BEAST's go** (w6569; lothsahn, 2026-11-27: "File it: move BEAST's gh login out of Credential Manager, as w5749 did
+    on LothDesktop"; "Write only inside F:\ffw, except for the gh login move itself"). Measured from a Low sandbox worker
+    on BEAST (w5932, again by w6569): `GH_CONFIG_DIR` at an empty folder whose `hosts.yml` names bryding with no token,
+    `GH_TOKEN` unset, `gh auth status` said `bryding (keyring)` and `gh api user` answered. BEAST is in
+    `OWNER_LABEL_GH_ONLY`: its plan is the gh folder alone (`~\.ssh` left open as outside the go, never looked at; browsers
+    never looked at). Warn stage: BEAST's fence is already `on`, so it sits in `OWNER_LABEL_WARN_ONLY`, where
+    `ownerLabelMode` holds `on` at `warn` for the owner labels only: the probe line says `would label (warn only: no label
+    set (held at warn on this machine ...))` and `applyOwnerLabels` runs the warn branch (the way back, a no-op with no
+    label and no note). The enforce stage moves `beast` into `OWNER_LABEL_ON_SYSTEM_DRIVE`; its way back is the same:
+    the read fence to `warn`, or a revert of the enforce change (BEAST back in the warn-only set runs the way back).
   - Runs with no vault token get the machine login's token as `GH_TOKEN` (`machineGh`, read by the Medium daemon from
     `hosts.yml` once moved), never the labelled folder. `lowGhSelfTest` now tests that same route at Low.
   - **Browser profiles stay open, even on LothDesktop**: Chrome and Edge grant their network service's AppContainer
