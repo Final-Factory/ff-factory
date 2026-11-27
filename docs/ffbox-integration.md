@@ -158,7 +158,8 @@ this subsection and in section 6 are in that repo.
   `ffgithubrunners` (`runners/README.md`). A version bump merged into `master` (the game repo's one trunk; `develop` is
   retired, w1137) builds, checks and uploads both apps to Steam and sets the main app live on
   `development` (`scripts/release_lane.py` `SETLIVE`; the game repo's `scripts/release-status.py`
-  checks it). Nothing sets `pre-release` or the default (public) branch: Ben or Lothsahn move those by hand.
+  checks it). A version bump merged into `pre-1.0` sets its main app live on `pre-release`, for a 0.50.x version only
+  (`SETLIVE_VERSIONS`, w6522). Nothing sets the default (public) branch: Ben or Lothsahn move it by hand.
 - **`ffintake`**: section 6.
 
 ### Where they differ, and why it matters here
