@@ -1559,6 +1559,8 @@ export class MachineManager {
    * process up or not, take no slot.
    */
   runningIn(id: string, sandbox: string | undefined | '*') {
+    const c = this.liveCountsOf(id);
+    if (c) return sandbox === '*' ? c.inSandboxes : (c.bySandbox.get(sandbox) ?? 0);
     return [...this.sessions.sessions.values()].filter((s) => s.info.machineId === id && (sandbox === '*' ? !!s.info.machineSandbox : s.info.machineSandbox === sandbox) && (isMidTurn(s.info) || this.isStarting(s))).length;
   }
 
@@ -1662,10 +1664,67 @@ export class MachineManager {
 
   /** Agents mid-turn on a machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */
   midTurnTotal(id: string) {
+    const c = this.liveCountsOf(id);
+    if (c) return c.total;
     // w6381: its sandboxes ('*') and its standing agents (no sandbox) are every agent mid-turn there: one pass, not two.
     let n = 0;
     for (const s of this.sessions.sessions.values()) if (s.info.machineId === id && s.info.machineSandbox !== '' && (isMidTurn(s.info) || this.isStarting(s))) n++;
     return n;
+  }
+
+  /**
+   * w6513: within a drain pass (SessionManager.placementPass, wired by Agents), the mid-turn counts of runningIn and
+   * midTurnTotal for every machine, counted in one walk of the sessions the first time a pass asks and kept until what
+   * changes placement runs (withoutLiveCounts from placementFree, liveCountsChanged from placementChanged, or a turn sent). After a daemon disconnect at 15:44Z
+   * on 2026-11-27 the drain asked them of every held message, each a walk of every session (runningIn, capFull and isLive
+   * in lothdesktop's 5.0 s block).
+   */
+  private liveCounts?: { of?: Map<string, LiveCounts> };
+
+  /** Runs `fn` with the live counts kept (liveCounts); one inside another runs as it is. */
+  withLiveCounts<T>(fn: () => T): T {
+    if (this.liveCounts) return fn();
+    this.liveCounts = {};
+    try {
+      return fn();
+    } finally {
+      this.liveCounts = undefined;
+    }
+  }
+
+  /** Within withLiveCounts, the next ask counts afresh (Agents.placementChanged). */
+  liveCountsChanged(): void {
+    if (this.liveCounts) this.liveCounts = {};
+  }
+
+  /** Runs `fn`, which changes placement, as outside withLiveCounts; within one, the next ask after it counts afresh. */
+  withoutLiveCounts<T>(fn: () => T): T {
+    const pass = this.liveCounts;
+    this.liveCounts = undefined;
+    try {
+      return fn();
+    } finally {
+      if (pass) this.liveCounts = {};
+    }
+  }
+
+  private liveCountsOf(id: string): LiveCounts | undefined {
+    const pass = this.liveCounts;
+    if (!pass) return undefined;
+    if (!pass.of) {
+      pass.of = new Map();
+      for (const s of this.sessions.sessions.values()) {
+        const mid = s.info.machineId;
+        if (!mid || !(isMidTurn(s.info) || this.isStarting(s))) continue;
+        let c = pass.of.get(mid);
+        if (!c) pass.of.set(mid, (c = { total: 0, inSandboxes: 0, bySandbox: new Map() }));
+        const sb = s.info.machineSandbox;
+        c.bySandbox.set(sb, (c.bySandbox.get(sb) ?? 0) + 1);
+        if (sb) c.inSandboxes++;
+        if (sb !== '') c.total++;
+      }
+    }
+    return pass.of.get(id) ?? NO_LIVE;
   }
 
   /** Why `m` is at its agent cap (agentCap), or undefined. */
@@ -2246,7 +2305,10 @@ export class MachineManager {
     this.handedAccounts.set(s.info.id, handed);
     this.post(m.id, { type: 'send', info: s.info, lastSeq: this.store.lastSeq(s.info.id), spec, text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), ...(files.length ? { attachments: files } : {}) });
     // w3597: it takes a slot from now, and its message is kept in case the daemon refuses it at an agent cap.
-    if (!isMidTurn(s.info)) this.starting.set(s.info.id, { at: Date.now(), text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), attachments });
+    if (!isMidTurn(s.info)) {
+      this.starting.set(s.info.id, { at: Date.now(), text: said, from, uuid, images: withIds, ...(requestedBy ? { requestedBy } : {}), attachments });
+      this.liveCountsChanged();
+    }
     if (moved || saved || lost) {
       delete s.info.movedFrom;
       delete s.info.savedWork;
@@ -3850,3 +3912,11 @@ export function fenceReportOf(raw: unknown): WorkerFenceReport | undefined {
   if (typeof r.agentIntegrityAt === 'string' && !Number.isNaN(Date.parse(r.agentIntegrityAt))) out.agentIntegrityAt = r.agentIntegrityAt;
   return out;
 }
+
+/** w6513: one machine's mid-turn agents (MachineManager.liveCountsOf): per sandbox (undefined: standing agents), in any sandbox, and all. */
+interface LiveCounts {
+  total: number;
+  inSandboxes: number;
+  bySandbox: Map<string | undefined, number>;
+}
+const NO_LIVE: LiveCounts = { total: 0, inSandboxes: 0, bySandbox: new Map() };
