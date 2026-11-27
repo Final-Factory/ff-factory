@@ -352,6 +352,8 @@ export async function cleanupPass(o: {
   /** Ends the plan's strays, before its items go (a deleted file's space comes back only when its writer ends); not in a dry run. */
   /** Asked right before an item's removal: a reason to keep it now, or undefined (w5502: a runner's job started since the plan). */
   busyNow?: (it: CleanupItem) => Promise<string | undefined>;
+  /** Wraps each removal (w6314: the daemon counts one inside the shared-lock folders as its own write). */
+  removing?: <T>(items: CleanupItem[], f: () => Promise<T>) => Promise<T>;
   endStrays?: (strays: NonNullable<StalePlan['strays']>) => Promise<void>;
   /**
    * The machine's worker install folder (root.json's root; w896, lothsahn: "in general we should only be clearing data in the
@@ -388,6 +390,7 @@ export async function cleanupPass(o: {
     }
   };
   const none: OwnLeftoverPlan = { items: [], listed: [] };
+  const remove = (items: CleanupItem[]) => (o.removing ? o.removing(items, () => runCleanup(items, o.guard, o.busyNow)) : runCleanup(items, o.guard, o.busyNow));
   // What a step's removal has tried so far: own's removal keeps clear of it (withoutOverlap).
   const attempted: CleanupItem[] = [];
   // The first step's items: removed before own was planned, so an own item inside one is dropped outright (withoutOverlap
@@ -404,7 +407,7 @@ export async function cleanupPass(o: {
     if (o.mode === 'on' && items.length) {
       attempted.push(...items);
       firstTaken.push(...items);
-      run = await timed('ffu firstRemove', () => runCleanup(items, o.guard, o.busyNow).catch((e) => ({ removed: [], failed: items.map((i) => ({ path: i.path, why: (e as Error).message })), bytes: 0 }) as CleanupRun));
+      run = await timed('ffu firstRemove', () => remove(items).catch((e) => ({ removed: [], failed: items.map((i) => ({ path: i.path, why: (e as Error).message })), bytes: 0 }) as CleanupRun));
       add(run);
     }
     try {
@@ -425,7 +428,7 @@ export async function cleanupPass(o: {
     if (dry || !items.length) return;
     const { first } = withoutOverlap(items, own);
     attempted.push(...first);
-    if (first.length) add(await timed(name, () => runCleanup(first, o.guard, o.busyNow)));
+    if (first.length) add(await timed(name, () => remove(first)));
   };
   const regular = fence(await timed('regular', o.regular));
   await removeNow('remove', regular);
