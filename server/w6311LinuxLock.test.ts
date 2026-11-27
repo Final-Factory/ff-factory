@@ -1,7 +1,8 @@
 // w6311 (lothsahn, 2026-11-26): w6282, a 1-leg windowed pair run filed "only on computers whose screen is unlocked", went on
 // biscuit/slot3 while biscuit's GNOME desktop was locked (GetActive answered (true,), loginctl showed session 2 idle 4 days),
 // and its player drew no frames (/v1/screenshot 409 no_frame_available). A Linux daemon reported no desktop session, which
-// locked nothing out. It now reads GNOME's ScreenSaver, else loginctl's hints; placement only warns until LINUX_LOCK_ENFORCED.
+// locked nothing out. It now reads GNOME's ScreenSaver, else loginctl's hints; placement warned first (#1432), and now refuses
+// windowed work there (LINUX_LOCK_ENFORCED).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { unfitWhy, type RoomFit } from '../shared/capacity.ts';
@@ -53,22 +54,31 @@ test('w6311: without GNOME it reads loginctl LockedHint and IdleHint of the grap
   assert.deepEqual(await readLinuxDesktop(linux({ 'gdbus call': ok('garbage') }), SESSION), { checkedAt: AT, via: 'none' });
 });
 
-test('w6311 warn-only: a Linux reading changes no placement yet; it says what it would refuse', () => {
-  assert.equal(LINUX_LOCK_ENFORCED, false, 'the enforce step is its own PR');
+test('w6311 enforced: a locked or unreadable Linux desktop takes no windowed work or menus pair leg; headless work still goes', () => {
+  assert.equal(LINUX_LOCK_ENFORCED, true, 'enforced after the warn-only step (#1432) read biscuit locked');
   const LOCKED = { checkedAt: AT, via: 'gnome' as const, locked: true };
+  const IDLE = { checkedAt: AT, via: 'loginctl' as const, locked: true };
   const UNKNOWN = { checkedAt: AT, via: 'none' as const };
   const OPEN = { checkedAt: AT, via: 'gnome' as const };
-  const fit: Record<string, RoomFit> = { biscuit: { platform: 'linux', desktop: LOCKED } };
   const pair = { title: 'Pair run for w6241: CLIP-W6241-route-line before/after', brief: 'Record the clips.', pair: { legs: 1, menus: 'its windowed player' } };
-  assert.equal(unfitWhy(pair, 'biscuit', fit), undefined);
-  assert.equal(desktopLacks('biscuit', LOCKED), undefined);
-  assert.equal(windowLacks('biscuit', UNKNOWN), undefined);
-  assert.equal(linuxLockWarn('biscuit', LOCKED), 'would not place: biscuit screen locked (gnome; w6311, warn-only)');
-  assert.match(linuxLockWarn('biscuit', UNKNOWN) ?? '', /^would not place: biscuit screen lock unknown/);
-  assert.equal(linuxLockWarn('biscuit', OPEN), undefined);
-  assert.equal(linuxLockWarn('m3', { checkedAt: AT, locked: true }), undefined, 'a Mac or Windows reading already refuses; no warning');
-  assert.equal(desktopLabel(LOCKED), 'locked (gnome, warn-only)');
-  assert.equal(desktopLabel(OPEN), 'unlocked (gnome, warn-only)');
+  const CAPTURE = { needs: 'agent' as const, title: 'Take screenshots of the route line', brief: 'Record a clip of the windowed player.' };
+  const HEADLESS = { needs: 'game' as const, title: 'Fix the belt splitter test', brief: 'Change the splitter and run its EditMode tests in batchmode.' };
+  const on = (desktop: object): Record<string, RoomFit> => ({ biscuit: { platform: 'linux', desktop } as RoomFit });
+  // w6282 as it went: a windowed pair leg on biscuit behind a locked GNOME desktop.
+  assert.match(unfitWhy(pair, 'biscuit', on(LOCKED)) ?? '', /biscuit's screen is locked \(read by gnome\)/);
+  assert.match(unfitWhy(CAPTURE, 'biscuit', on(LOCKED)) ?? '', /^screen locked on biscuit \(read by gnome\)/);
+  assert.match(unfitWhy(CAPTURE, 'biscuit', on(IDLE)) ?? '', /^screen locked on biscuit \(read by loginctl\)/);
+  assert.match(unfitWhy(CAPTURE, 'biscuit', on(UNKNOWN)) ?? '', /can't be read/, "can't tell counts as locked for a window");
+  assert.match(desktopLacks('biscuit', UNKNOWN) ?? '', /can't be read/);
+  for (const d of [LOCKED, IDLE, UNKNOWN]) assert.equal(unfitWhy(HEADLESS, 'biscuit', on(d)), undefined, 'headless work still goes there');
+  assert.equal(unfitWhy(pair, 'biscuit', on(OPEN)), undefined, 'unlocked at the next reading: it takes the leg, nobody at the machine');
+  assert.equal(unfitWhy(CAPTURE, 'biscuit', on(OPEN)), undefined);
+  assert.equal(windowLacks('biscuit', OPEN), undefined);
+  // Once enforced, no warning: the refusal says it.
+  assert.equal(linuxLockWarn('biscuit', LOCKED), undefined);
+  assert.equal(linuxLockWarn('biscuit', UNKNOWN), undefined);
+  assert.equal(desktopLabel(LOCKED), 'locked (gnome)');
+  assert.equal(desktopLabel(OPEN), 'unlocked (gnome)');
   // Mac and Windows readings are unchanged.
   assert.equal(desktopLacks('m3', { checkedAt: AT, locked: true }), "m3's screen is locked");
   assert.equal(desktopLabel({ checkedAt: AT, locked: true }), 'locked');

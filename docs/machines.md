@@ -869,10 +869,13 @@ offscreen Metal renders run; on a locked Windows session GDI capture fails or is
   (`/run/user/<uid>/bus` when its environment names none), else `loginctl` for the user's graphical session
   (`show-user <uid> -p Display`), whose `LockedHint` or `IdleHint` `yes` counts as locked; neither answering is
   `via: "none"`, which counts as locked for work that draws a window only (`readLinuxDesktop`, `machine/steamClient.ts`).
-  The daemon log line reads `steam client: ...; screen: locked (gnome, warn-only)`. While `LINUX_LOCK_ENFORCED`
-  (`shared/desktop.ts`) is false, a Linux reading changes no placement: `start_agent` logs `would not place: <machine>
-  screen locked` to the portal log where it would refuse. Recovery needs nobody: the reading is taken again every 2
-  minutes, so an unlocked desktop takes windowed work at the next one.
+  The daemon log line reads `steam client: ...; screen: locked (gnome)`. `LINUX_LOCK_ENFORCED` (`shared/desktop.ts`) is
+  on: a locked or unreadable Linux desktop takes no work that draws a window and no pair leg that clicks the game's
+  menus (they wait Queued for an unlocked computer), while headless work still goes there. It shipped warn-only first
+  (#1432), and biscuit's live daemon read `screen locked (gnome, warn-only)`. Recovery needs nobody: the reading is
+  taken again every 2 minutes, so an unlocked desktop takes windowed work at the next one; setting the flag false goes
+  back to warn-only, where the portal log says `would not place: <machine> screen locked`. Without GNOME, an idle
+  (`IdleHint`) but unlocked session counts as locked: such work waits for another computer rather than risk drawing nothing.
 
 Tests: `server/w4868LockedScreen.test.ts`, `server/w6311LinuxLock.test.ts`.
 
