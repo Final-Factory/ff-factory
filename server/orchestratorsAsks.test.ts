@@ -1352,6 +1352,79 @@ test('w5577: unfiled handed-up follow-ups are sent again at 2 h, become one card
   assert.equal(o.handUpStep(w2()), undefined);
 });
 
+test('w6581: the person’s orchestrator drops handed-up follow-ups with file_follow_ups drop and a reason: one item, then the rest, or all at once after the card', async (t) => {
+  const { store, machines, sessions, dispatcher, chat, call, heard, o } = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta'] });
+  const ben = chat(BEN).info;
+  const clock = o as unknown as { now: () => Date };
+  const m = store.machines.get('pc')!;
+  const handedUp = async (name: string, sandbox: string) => {
+    const f = await call(ben, 'request_work', { title: `${name} design`, brief: `Design the ${name}.` });
+    const id = /Filed (w\d+)/.exec(f.text)![1];
+    const s = await call(dispatcher().info, 'start_agent', { sandbox, prompt: 'Design it', title: `${id}: ${name}`, work_id: id });
+    assert.equal(s.isError, false, s.text);
+    const wid = /Started agent (\w+)/.exec(s.text)![1];
+    const info = store.sessions.get(wid)!;
+    await until('its first turn', () => info.status === 'idle');
+    const told = heard(ben.id, '[follow-ups to file]').length;
+    await machines.hooks!.handlersFor(info, m).hand_up_requests!({
+      items: [
+        { title: `Compose the ${name} loop`, brief: `Compose the looping section of the ${name}, the part that repeats through the fight.` },
+        { title: `Record the ${name} roar set`, brief: `Record and mix twelve roar variations for the ${name}.` },
+      ],
+    });
+    await until('Ben’s orchestrator hears the briefs', () => heard(ben.id, '[follow-ups to file]').length === told + 1);
+    sessions.events.emit('turnEnd', sessions.get(wid), `Design done, PR merged.\n\nDONE: ${id}\nLearned: nothing new`);
+    await new Promise((r) => setTimeout(r, 200));
+    assert.notEqual(store.work.get(id)!.status, 'done');
+    return id;
+  };
+  const id = await handedUp('boss music', 'pc/alpha');
+  const w = () => store.work.get(id)!;
+  assert.match(heard(ben.id, '[follow-ups to file]').at(-1)!.text, /drop them: file_follow_ups request "w\d+" drop true, reason quoting Ben's words/);
+  assert.equal(handUpLive(w(), clock.now().getTime())!.state, 'working', 'its orchestrator has it, not Ben');
+
+  // A drop needs a reason, and only the person's own orchestrator drops.
+  const bare = await call(ben, 'file_follow_ups', { request: id, drop: true });
+  assert.equal(bare.isError, true);
+  assert.match(bare.text, /say why they are dropped in reason/);
+  const lothChat = chat(LOTH).info;
+  const theirs = await call(lothChat, 'file_follow_ups', { request: id, drop: true, reason: 'Lothsahn: "not wanted"' });
+  assert.equal(theirs.isError, true);
+  assert.equal(handUpsPending(w()), 2);
+
+  // One item dropped: the other is still to file, and filing all files only that one.
+  const before = new Set(store.work.keys());
+  const one = await call(ben, 'file_follow_ups', { request: id, drop: true, items: [2], reason: 'Ben: "skip the roars, we keep the old set"' });
+  assert.equal(one.isError, false, one.text);
+  assert.match(one.text, /dropped 1 handed-up follow-up .*1 still to file or drop/);
+  assert.equal(handUpsPending(w()), 1);
+  assert.ok(w().log.some((l) => /Ben's orchestrator dropped handed-up follow-up 2 "Record the boss music roar set": "Ben: \"skip the roars, we keep the old set\""/.test(l)), w().log.join('\n'));
+  const again = await call(ben, 'file_follow_ups', { request: id, drop: true, items: [2], reason: 'Ben: "skip the roars"' });
+  assert.equal(again.isError, true, 'dropped already');
+  const filed = await call(ben, 'file_follow_ups', { request: id });
+  assert.match(filed.text, /2\. "Record the boss music roar set": dropped already, not filed/);
+  const made = [...store.work.values()].filter((x) => !before.has(x.id));
+  assert.deepEqual(made.map((x) => x.title), ['Compose the boss music loop']);
+  assert.equal(handUpsPending(w()), 0);
+  await until('the request closes on its kept DONE', () => w().status === 'done');
+
+  // After the card (12 h): drop all of them at once; the card goes, nothing is filed, the request closes.
+  const id2 = await handedUp('dragon roar', 'pc/beta');
+  const w2 = () => store.work.get(id2)!;
+  clock.now = () => new Date(Date.parse(w2().handedUp!.at) + 13 * 3_600_000);
+  assert.equal(o.handUpStep(w2()), 'card');
+  assert.equal(handUpLive(w2(), clock.now().getTime())!.state, 'waiting', 'at 12 h it is Ben’s card');
+  const before2 = new Set(store.work.keys());
+  const all = await call(ben, 'file_follow_ups', { request: id2, drop: true, reason: 'outdated: w6600 already composed the dragon roar' });
+  assert.equal(all.isError, false, all.text);
+  assert.match(all.text, /dropped 2 handed-up follow-ups .*none left/);
+  assert.equal(handUpsPending(w2()), 0);
+  assert.equal(handUpLive(w2(), clock.now().getTime()), undefined, 'the card is gone');
+  assert.deepEqual({ by: w2().handedUp!.dropped!.by, note: w2().handedUp!.dropped!.note }, { by: "Ben's orchestrator", note: 'outdated: w6600 already composed the dragon roar' });
+  assert.deepEqual([...store.work.keys()].filter((k) => !before2.has(k)), [], 'a drop files nothing');
+  await until('the dropped request closes on its kept DONE', () => w2().status === 'done');
+});
+
 test('w4468: request_pair split lets a Mac host with no w3697 sentence in the brief; decide_work pair_allow and pair_split widen a queued pair and re-place it; a pair\'s named needs never hide room; a person\'s game ending pings capacity', async (t) => {
   const env = await twoComputers(t);
   const { store, agents, dispatcher, call } = env;

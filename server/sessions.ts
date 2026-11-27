@@ -2231,6 +2231,11 @@ export class SessionManager {
     };
     // A session whose first waiting message cannot go keeps the rest waiting too, so its messages go in order (w496).
     const held = new Set<string>();
+    // w6513: machines a send of this pass found offline (deliver). The next sends there throw the same at once
+    // (MachineManager.dispatchSend's first check) and change no placement, so they run inside the memo: each free() emptied
+    // it, and the next message for an online machine built claims and places again (lothdesktop's 5.0 s block at 15:44Z on
+    // 2026-11-27, its daemon away). The same deliver runs: the same holds, lastError and give-ups.
+    const offline = new Set<string>();
     for (const q of [...this.queue]) {
       if (held.has(q.id)) continue;
       const s = this.sessions.get(q.id);
@@ -2345,13 +2350,19 @@ export class SessionManager {
         drop();
         continue;
       }
-      if (free(() => this.deliver(s, q, now, held, drop))) sent++;
+      const mid = s.info.machineId;
+      if (mid && offline.has(mid) ? this.deliver(s, q, now, held, drop) : free(() => this.deliver(s, q, now, held, drop))) sent++;
+      else if (mid && OFFLINE.test(this.deliverError ?? '') && this.deliverError!.startsWith(`machine ${mid} `)) offline.add(mid);
     }
     return sent;
   }
 
+  /** w6513: why the last deliver's send failed (drainOnce's offline machines), or undefined once it went. */
+  private deliverError?: string;
+
   /** One queued message nothing holds goes to its session's process (drainOnce): true once sent, else kept or given up. */
   private deliver(s: SessionHandle, q: QueuedSend, now: number, held: Set<string>, drop: () => void): boolean {
+    this.deliverError = undefined;
     try {
       this.lastResumeOf.set(q.id, q.resumeOf);
       s.send(q.text, q.from, q.uuid, q.images, q.requestedBy, q.attachments, !!q.relay);
@@ -2361,6 +2372,7 @@ export class SessionManager {
       // Removed only once delivered (w496: a worker's brief was dropped when LothDesktop's daemon was outdated):
       // tried again on the next pass, given up only after QUEUE_HOLD_MS, or POOL_HOLD_MS while only its pool holds it (w1129).
       const why = (e as Error).message;
+      this.deliverError = why;
       // w5921: the dispatcher waits for its pool's reset like a worker (a weekly reset can be days away), but parks nothing.
       const pool = (s.info.kind === 'worker' || (s.info.kind === 'orchestrator' && s.info.orchestratorRole === 'dispatcher')) && poolHeld(e);
       if (pool !== (q.on === 'pool')) {
