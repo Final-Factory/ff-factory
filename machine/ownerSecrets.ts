@@ -575,7 +575,9 @@ export function ownerSocketPaths(o: { runtimeDir?: string; env: NodeJS.ProcessEn
   const out: string[] = [];
   if (o.runtimeDir) {
     const r = (...s: string[]) => path.posix.join(o.runtimeDir!, ...s);
-    out.push(r('bus'), r('keyring'), r('gcr'), r('gnupg'), r('openssh_agent'));
+    // w6443: systemd, the user manager's own sockets (`private`, `notify`...), through which `systemd-run --user` starts a
+    // job outside the lock and every read rule (w5463): the worst of them, so the probe counts it.
+    out.push(r('bus'), r('systemd'), r('keyring'), r('gcr'), r('gnupg'), r('openssh_agent'));
   }
   if (o.env.SSH_AUTH_SOCK) out.push(path.posix.resolve(o.env.SSH_AUTH_SOCK));
   return [...new Set(out)];
@@ -616,7 +618,8 @@ function statOr(p: string): fs.Stats | undefined {
  * siblings there at start). Effective from Landlock ABI 9; the probe tells whether they are (probeOwnerSockets).
  */
 export function ownerSocketDenyArgs(runtimeDir: string | undefined): string[] {
-  return ownerSocketPaths({ runtimeDir, env: {} }).flatMap((p) => ['--deny-unix', p]);
+  // systemd's folder is denied to every locked run already (writeLockArgs, w5562); it is only probed here (w6443).
+  return ownerSocketPaths({ runtimeDir, env: {} }).filter((p) => p !== path.posix.join(runtimeDir ?? '', 'systemd')).flatMap((p) => ['--deny-unix', p]);
 }
 
 /**

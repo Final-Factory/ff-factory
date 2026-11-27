@@ -206,6 +206,10 @@ test('w6434: Linux enforces on only behind the code link; read-fence-off takes t
   assert.equal(readRulesForNewRun(dir, true, 'darwin'), true, 'macOS has no such hold');
   fs.rmSync(path.join(dir, 'app'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'code', 'app'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'elsewhere'));
+  fs.symlinkSync('elsewhere', path.join(dir, 'app'));
+  assert.match(readFenceOnHeld(dir, 'linux') ?? '', /not the code link yet/, 'a link to anything but code/app: held (w6443)');
+  fs.rmSync(path.join(dir, 'app'));
   fs.symlinkSync(path.join('code', 'app'), path.join(dir, 'app'));
   assert.equal(readFenceOnHeld(dir, 'linux'), undefined, 'the code link: not held');
   assert.equal(readRulesForNewRun(dir, true, 'linux'), true, 'on, the link and a passing probe: the next run gets the read rules');

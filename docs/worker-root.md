@@ -1192,8 +1192,8 @@ Then trial E on one machine as the stricter variant, if the holes or Low's quirk
     and made one level at a time, a link or non-folder logged and left (`editor fence: WARNING: left the editor's home
     as it is ...`), the copy `COPYFILE_EXCL`, the Burst write `O_NOFOLLOW`. `"editorFence":
     true` enforces; `false` starts editors unfenced. Read once per daemon run; the log says `editor fence: ...`.
-  - **The kernel hold** (w5748/w5562: the owner-socket denies take effect only from kernel 7.1; since w6434 the read
-    fence's file rules enforce in `on` below it) covers the owner-socket denies, not the write lock, which agents already run enforced on ABI 8 (biscuit's daemon log,
+  - **The kernel hold** (w5748/w5562: Linux fences stay warn-only until kernel 7.1) covers the read fence and the
+    owner-socket denies, not the write lock, which agents already run enforced on ABI 8 (biscuit's daemon log,
     2026-11-27T06:55Z: "write lock: landlock is on for sandbox agents"). The editor's rules are
     write rules, so enforcing them is not held by it. As for agents, `--deny-unix` is a no-op below ABI 9, so an editor
     (and `execute_code` in it) could still reach `systemd-run --user` and start a job outside the rules until 7.1. The

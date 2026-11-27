@@ -4484,9 +4484,11 @@ export class Daemon {
    */
   private readFenceEnforced(): boolean {
     // w6434: on Linux only once the daemon's code sits behind the code link (scripts/worker/linuxCode.ts), so an update leaves
-    // runs already going their code. The owner sockets (w5748) no longer hold the file rules back: below Landlock ABI 9 they
-    // stay reachable, and the probe says so in the log.
-    return !!this.cfg.root && readRulesForNewRun(appDirOfConfig(this.cfg), !this.readProbeBlocks);
+    // runs already going their code. w5748: and only once the probe found every owner socket refused. Below Landlock ABI 9
+    // a run reaches systemd's (`systemd-run --user` starts a job outside every rule, w5463) and the Secret Service, so the
+    // file rules would claim the Claude and gh logins closed while one command reads them (w6443's review, B1).
+    const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
+    return !!this.cfg.root && sockets && readRulesForNewRun(appDirOfConfig(this.cfg), !this.readProbeBlocks);
   }
 
   /**
@@ -4574,9 +4576,9 @@ export class Daemon {
         return;
       }
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
-      if (mode === 'on' && !this.readProbeBlocks && !readFenceOnHeld(appDir) && process.platform === 'linux' && this.ownerSocketsOpen.length)
-        log(`read fence (on): runs start with the read rules; a fenced run still reaches ${this.ownerSocketsOpen.length} owner socket(s) (the line above says which), which only Landlock ABI 9 (Linux 7.1) can close (w5748, w6434)`);
       if (mode === 'on' && readFenceOnHeld(appDir)) log(`read fence (on): not enforced here, warn only: ${readFenceOnHeld(appDir)}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length)
+        log(`read fence (on): not enforced here, warn only: a fenced run still reaches ${this.ownerSocketsOpen.length} owner socket(s) (the line above says which; systemd's starts a job outside the lock), which only Landlock ABI 9 (Linux 7.1) can refuse; runs start without read rules until a probe finds every one refused (w5748, w6443)`);
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
@@ -4584,7 +4586,7 @@ export class Daemon {
     }
   }
 
-  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run (logged; w6434: `on` no longer waits for none). */
+  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
   private ownerSocketsOpen: string[] = ['(not probed)'];
   /** w5773: counts read fence probes, so one that ends after a newer one started leaves its verdict unused. */
   private readProbeGen = 0;

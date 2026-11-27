@@ -169,13 +169,16 @@ export function isGhAppShim(exe: string): boolean {
 /**
  * The shim folder the helper skips (lockout re-review B5 of #1193): the one the new shim names (FF_GH_APP_BIN), else the one
  * beside an older run's tokens file (FF_GH_APP_FILE, before w5547), else the one beside the helper itself
- * (`<app dir>/app/machine/ghApp.ts` -> `<app dir>/gh-app/bin`). So a shim and a helper from different builds (a rollback, a
+ * (`<app dir>/app/machine/ghApp.ts` -> `<app dir>/gh-app/bin`; on Linux the helper's real path is
+ * `<app dir>/code/app/machine/ghApp.ts`, w6434). So a shim and a helper from different builds (a rollback, a
  * revert, the window between a code swap and the daemon's restart) never pick the shim as the real gh.
  */
 export function ghShimSkipDir(env: Record<string, string | undefined>, helper = import.meta.filename): string {
   if (env.FF_GH_APP_BIN) return env.FF_GH_APP_BIN;
   if (env.FF_GH_APP_FILE) return path.join(path.dirname(env.FF_GH_APP_FILE), 'bin');
-  return ghAppPaths(path.resolve(path.dirname(helper), '..', '..')).bin;
+  const app = path.resolve(path.dirname(helper), '..');
+  const appDir = path.basename(path.dirname(app)) === 'code' ? path.dirname(path.dirname(app)) : path.dirname(app);
+  return ghAppPaths(appDir).bin;
 }
 
 /** How deep gh shims may call each other (a gh alias or extension that runs gh again) before the helper refuses (B5). */

@@ -536,18 +536,18 @@ rules, so `read-fence-off` takes them off live. While a socket answers, `on` log
 | Option | Closes | Cost |
 |---|---|---|
 | Deny the sockets to fenced runs | All of them, where the kernel can: only Landlock ABI 9 | On ABI 8 nothing unprivileged can. seccomp cannot tell one socket path from another. A mount namespace to hide them is refused (`unshare -Urm true`: "write failed /proc/self/uid_map: Operation not permitted"; `kernel.apparmor_restrict_unprivileged_userns = 1`). Unsetting `DBUS_SESSION_BUS_ADDRESS` is no fence: the worker sets it back, and `systemd-run --user` reaches `$XDG_RUNTIME_DIR/systemd/private` without it. Where it works, workers lose nothing they need. With the bus pointed at nothing and `SSH_AUTH_SOCK` empty, these all passed: `gh api user` (token and an empty gh folder, as fenced runs get), `git ls-remote` over HTTPS, Node and Python HTTPS, and `claude --version`. The bus deny has shipped in `writeLockArgs` since w5562. |
-| Refuse to enforce owner secrets below ABI 9 | Nothing on biscuit. It stops `on` from claiming the gh login is closed while the keyring hands it out | No worker loses anything; Linux below 7.1 keeps no read rules (w5748's pick until w6434) |
+| Refuse to enforce owner secrets below ABI 9 | Nothing on biscuit. It stops `on` from claiming the gh login is closed while the keyring hands it out | No worker loses anything; Linux below 7.1 keeps no read rules (the pick) |
 | Move the daemon's gh login off the keyring (`gh auth login --insecure-storage`, into `~/.config/gh/hosts.yml`, which the fence closes) | The gh token only | Changes the machine's own setup (a person's step). Leaves 8 other keyring items, the ssh and gpg agents and the systemd escape open, so the route to `org.freedesktop.secrets` stays |
 
-**The pick: deny the sockets where the kernel can, and enforce the file rules everywhere** (w6434). A run in `on` mode
-denies the bus, keyring and agent sockets (`--deny-unix`; the bus and systemd were already denied to every locked run since
-w5562), which takes effect from ABI 9. Below it the file rules (the daemon's folder, secrets, `~/.ssh`, the gh folders,
-the browsers, the keyrings' files) are enforced all the same, and once the probe passes `on` logs `read fence (on): runs
-start with the read rules; a fenced run still reaches N owner socket(s) ..., which only Landlock ABI 9 (Linux 7.1) can
-close`. A fenced run with no gh folder of its own finds no gh login to ask the keyring for, but a run that talks to the
-Secret Service itself (`secret-tool`, `busctl`) still can, until 7.1. From w5748 to w6434 `on` waited for every socket
-refused, so biscuit (ABI 8) could never enforce anything; lothsahn's call then (w5562, 2026-11-25: "Leave it until
-Ubuntu's normal updates bring 7.1") still holds for the kernel: no upgrade by hand.
+**The pick: deny the sockets where the kernel can, and refuse `on` where it cannot** (w5748, kept by w6443's review of
+#1478). A run in `on` mode denies the bus, keyring and agent sockets (`--deny-unix`; the bus and systemd's were already
+denied to every locked run since w5562), which takes effect from ABI 9. Below it `on` enforces nothing and logs `read
+fence (on): not enforced here, warn only: a fenced run still reaches N owner socket(s) ...`. w6434 first lifted this so
+biscuit would enforce the file rules alone; the review found that an empty claim. `systemd-run --user` starts a job
+outside the lock and every read rule (w5463), from which `~/.claude/.credentials.json`, `~/.config/gh/hosts.yml` and the
+daemon's secrets are one `cat` away, against lothsahn's w5559 rule ("fenced workers can't read the machine's own Claude
+login anywhere"). The probe now counts systemd's folder too (`ownerSocketPaths`), so the line names that route.
+lothsahn's call (w5562, 2026-11-25: "Leave it until Ubuntu's normal updates bring 7.1") holds: no upgrade by hand.
 
 **The READ_DIR limit** (#1193's documented limit, kept): Landlock rights are inherited down the tree, and every parent on
 the chain to a closed path keeps READ_DIR so its other children stay listable. That READ_DIR reaches the closed folder
@@ -636,11 +636,12 @@ commands that read a temp folder through the parser. All 13 writes were seen and
 
 ## Known limits
 
-- **Linux below Landlock ABI 9 (Linux 7.1) leaves the owner sockets open** (w5748, w6434). `on` enforces the file read
-  rules there, but a fenced run still reaches the session bus (the Secret Service, where the gh login is kept), GNOME
-  keyring and the ssh and gpg agents: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8) measured all 12 reachable. Once Ubuntu
-  ships 7.1 the denies take effect by themselves. `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check
-  to run there first: it skips below ABI 9 and has never run.
+- **Linux is warn-only until its kernel has Landlock ABI 9 (Linux 7.1)** (w5748, w6443). Below it a fenced run reaches
+  systemd's own sockets (`systemd-run --user` runs a job outside the lock), the session bus (the Secret Service, where
+  the gh login is kept), GNOME keyring and the ssh and gpg agents: biscuit (Ubuntu 26.04, 7.0.0-38, ABI 8) measured all
+  12 reachable. So `on` enforces nothing there and says why. Once Ubuntu ships 7.1 the denies take effect and `on` with
+  them. `live w5748 enforce` (server/w5748OwnerSockets.test.ts) is the check to run there first: it skips below ABI 9
+  and has never run.
 - **Linux without Landlock**: the write lock's probe fails and sandbox workers are held (w5555), and the read probe has
   no fence to run under, so it logs `no worker fence runs here ...` and `on` enforces nothing (a warn, never a lockout).
 - **Preferences through cfprefsd** (EditorPrefs, PlayerPrefs, `defaults write`) are written by cfprefsd, outside the

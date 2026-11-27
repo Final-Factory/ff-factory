@@ -4,8 +4,9 @@
   folder, so a run already going keeps git push, gh, ff-pr and unity-slot across a daemon update under Landlock (B4 of
   #1193, which refused `on` on Linux until now). The installer moves an old `app` folder over at the next update, the
   rollback swaps inside `code/`, and the stop script's agent-host match takes both layouts. `on` is held at warn, with a
-  logged reason, until the link is there (`readFenceOnHeld`). Below Landlock ABI 9 (Linux 7.1) `on` now enforces the
-  file rules and logs that the owner sockets stay reachable, where it used to enforce nothing (w5748). Off by default;
+  logged reason, until the link is there (`readFenceOnHeld`). Below Landlock ABI 9 (Linux 7.1) `on` still enforces
+  nothing (w5748): `systemd-run --user` would start a job outside every rule (w6443's review), and the owner-socket
+  probe now counts systemd's sockets too. Off by default;
   `read-fence-off` still takes the rules off the next run with nobody at the machine. Docs: worker-fence.md. Tests:
   `scripts/worker/linuxCode.test.ts` (with a live Landlock leg across both swaps), workerFence, machineLink. The daemon's entry points (daemon, agent host, gh helper, ff-pr,
   unity-slot, leftovers, ffu slots) tell they are the script node started by real path (`machine/isMain.ts`), so they still

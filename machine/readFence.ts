@@ -38,7 +38,8 @@ export function readFenceMode(appDir: string): ReadFenceMode {
 export function readFenceOnHeld(appDir: string, platform: string = process.platform): string | undefined {
   if (platform !== 'linux') return undefined;
   try {
-    if (fs.lstatSync(path.join(appDir, 'app')).isSymbolicLink()) return undefined;
+    // The link scripts/worker/linuxCode.ts makes, not any link: one set by hand elsewhere would bring B4 back (w6443).
+    if (fs.lstatSync(path.join(appDir, 'app')).isSymbolicLink() && fs.readlinkSync(path.join(appDir, 'app')) === path.join('code', 'app')) return undefined;
   } catch {
     // no app at all: held, as below
   }
