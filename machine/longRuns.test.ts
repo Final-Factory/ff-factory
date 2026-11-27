@@ -22,6 +22,7 @@ function world() {
   const calls: string[] = [];
   const plans: LongRunPlan[] = [];
   const sent: Record<string, string>[] = [];
+  const exits: ((code: number | null) => void)[] = [];
   const d: LongRunsDeps = {
     platform: 'win32',
     root,
@@ -45,14 +46,16 @@ function world() {
           sent.push(env);
         },
         kill: () => calls.push('kill'),
+        stop: () => {
+          calls.push('stop');
+          return true;
+        },
+        onExit: (cb) => exits.push(cb),
       };
     },
     joinJob: async (_h, pid, mode) => {
       calls.push(`job ${pid} ${mode}`);
       return true;
-    },
-    endTree: async (pid) => {
-      calls.push(`end ${pid}`);
     },
     log: (l) => lines.push(l),
   };
@@ -62,7 +65,7 @@ function world() {
     fs.writeFileSync(f, JSON.stringify(o));
     return f;
   };
-  return { root, sandbox, bash, d, lines, calls, plans, sent, envFile };
+  return { root, sandbox, bash, d, lines, calls, plans, sent, exits, envFile };
 }
 
 const night = { session: 'night', sandbox: 'sb1' };
@@ -271,16 +274,44 @@ test('runs/start on: refused off Windows, with no job helper, and past the live 
   assert.equal(w.calls.filter((c) => c === 'go').length, 2);
 });
 
-test('runs/stop ends only a live run of the caller\'s own sandbox', async () => {
+test('runs/stop reaches only a keeper this daemon started for the caller\'s sandbox, through its stdin (finding 7)', async () => {
   const w = world();
   w.d.mode = () => 'on';
   const h = longRunsRpcHandlers(w.d);
   const r = (await h['runs/start'](night, { name: 'nightly', envFile: w.envFile({}) })) as { id: string };
-  await refused(h['runs/stop']({ session: 'x', sandbox: 'sb2' }, { id: r.id }) as Promise<unknown>, 404);
-  await refused(h['runs/stop'](night, { id: 'lr-none' }) as Promise<unknown>, 404);
-  assert.deepEqual(await h['runs/stop'](night, { id: r.id }), { stopped: r.id });
-  assert.equal(w.calls.at(-1), 'end 4242');
+  await refused(() => h['runs/stop']({ session: 'x', sandbox: 'sb2' }, { id: r.id }), 404);
+  await refused(() => h['runs/stop'](night, { id: 'lr-none' }), 404);
+  assert.deepEqual(await h['runs/stop'](night, { id: r.id }), { stopping: r.id });
+  assert.equal(w.calls.at(-1), 'stop');
+  // The keeper's exit drops the run and its record, and says why.
+  w.exits[0](143);
   assert.deepEqual(liveRuns(w.d), []);
+  assert.ok(w.lines.at(-1)!.startsWith(`long runs: ${r.id} (nightly) of sb1 ended: keeper pid 4242 exit 143 (runs/stop)`), String(w.lines.at(-1)));
+  await refused(() => h['runs/stop'](night, { id: r.id }), 404);
+  // A record left by an earlier daemon (or a pid reused since) is never a target: only the keepers in this process are.
+  fs.writeFileSync(path.join(w.d.dir, 'lr-old.json'), JSON.stringify({ id: 'lr-old', pid: 4242, sandbox: 'sb1' }));
+  await refused(() => longRunsRpcHandlers(w.d)['runs/stop'](night, { id: 'lr-old' }), 404, /20 h limit/);
+  assert.equal(w.calls.filter((c) => c === 'stop').length, 1);
+});
+
+test('a junction is followed: the script or the sandbox through one is refused (review w6379 finding 6)', async () => {
+  const w = world();
+  const elsewhere = path.join(w.root, 'elsewhere');
+  fs.mkdirSync(elsewhere);
+  fs.writeFileSync(path.join(elsewhere, 'nightly_run.sh'), 'echo out\n');
+  const nightly = path.join(w.sandbox, path.dirname(SANCTIONED.nightly.script));
+  fs.rmSync(nightly, { recursive: true });
+  fs.symlinkSync(elsewhere, nightly, 'junction');
+  await refused(() => planOf(w.d, night, { name: 'nightly', envFile: w.envFile({}) }, 'id'), 403, /plain file of your sandbox/);
+  // A sandbox path that is itself a junction to a folder holding a file of the fixed name.
+  const secrets = path.join(w.root, 'secrets');
+  fs.mkdirSync(secrets);
+  const target = path.join(secrets, 'long-run-env-5.json');
+  fs.writeFileSync(target, '{"A":"1"}');
+  const fake = path.join(w.root, 'sandboxes', 'sbj');
+  fs.symlinkSync(secrets, fake, 'junction');
+  await refused(() => readEnvFile(fake, path.join(fake, 'long-run-env-5.json')), 403, ENV_REFUSAL);
+  assert.equal(fs.readFileSync(target, 'utf8'), '{"A":"1"}', 'the file behind the junction is kept');
 });
 
 test('liveRuns forgets the records of runs that ended', () => {
@@ -324,4 +355,17 @@ test('the keeper ends the run at its time limit (exit 124)', async () => {
   const t0 = Date.now();
   assert.equal(await keeper(['-e', 'setTimeout(()=>{},60000)'], go(), 1), 124);
   assert.ok(Date.now() - t0 < 20_000);
+});
+
+test('the keeper ends its run on stop, and ignores stop before go and stdin closing after go', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keeper-'));
+  const out = path.join(dir, 'done.txt');
+  assert.equal(await keeper(['-e', 'process.exit(7)'], 'stop\n'), 2, 'stop before go: nothing started');
+  // stop after go: the run (which would write the file after 5 s) is ended at once.
+  const run = `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(out)},'ran');process.exit(9)},5000)`;
+  const t0 = Date.now();
+  assert.equal(await keeper(['-e', run], `${go()}stop\n`), 143);
+  assert.ok(Date.now() - t0 < 4500, 'ended before the run would have');
+  assert.equal(fs.existsSync(out), false);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

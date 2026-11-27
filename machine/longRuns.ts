@@ -21,7 +21,8 @@
  *   run's environment comes to it over stdin with "go".
  * - Carrying no FF_SESSION_ID or FF_FOR_PERSON, so the leftovers sweep (machine/leftovers.ts) does not count it as its
  *   worker's leftovers, and the worker's own `ff-leftovers end` leaves it; FF_LONG_RUN names it instead.
- * - Bounded: the keeper ends the run's whole tree after MAX_RUN_S, and `runs/stop` ends it sooner (its own sandbox's only).
+ * - Bounded: the keeper ends the run's whole tree after MAX_RUN_S, and `runs/stop` ends it sooner (its own sandbox's
+ *   only, through the keeper's stdin, never a pid).
  * Only one route runs (SANCTIONED): `nightly`, the game repo's scripts/nightly/nightly_run.sh in the caller's own sandbox,
  * and only for a session the portal marks exempt "nightly" (it works an open nightly-run request; the same mark the bench
  * uses, w1832). Nothing else a worker names is run. What that script does is the nightly worker's own code, as it is
@@ -59,14 +60,23 @@ export const SANCTIONED = {
 export type LongRunName = keyof typeof SANCTIONED;
 
 /**
- * The keeper (run by the Low node copy): `node -e KEEPER_SCRIPT <exe> <cwd> <args JSON> <limit s>`. It waits for one line
- * `go <env JSON>` on stdin (the daemon sends it once the keeper is in the run's job, so everything the run starts is in the
- * job), then starts the run as its child with that environment and exits with its code. After "go" its stdin may close
- * (the daemon restarts): it keeps running. No "go" in a minute, or stdin closed first: it exits without starting anything.
- * At the limit it ends the run's whole tree (taskkill /T /F on Windows) and exits 124.
+ * The keeper (run by the Low node copy): `node -e KEEPER_SCRIPT <exe> <cwd> <args JSON> <limit s>`. It reads lines on
+ * stdin. The first must be `go <env JSON>` (the daemon sends it once the keeper is in the run's job, so everything the run
+ * starts is in the job): it then starts the run as its child with that environment and exits with its code. No "go" in a
+ * minute, a first line that is not "go", or stdin closed first: it exits without starting anything. After "go":
+ * - `stop` ends the run's whole tree (taskkill /T /F on Windows) and exits 143. Only the daemon process that started the
+ *   keeper holds its stdin, so a stop never reaches a process that reused a pid (review w6379 finding 7).
+ * - stdin closing (the daemon restarts) changes nothing: the run goes on, to its end or its limit.
+ * - At the limit it ends the run's whole tree the same way and exits 124.
  */
-export const KEEPER_SCRIPT =
-  "const{spawn}=require('node:child_process');const[,b,c,a,l]=process.argv;let go=false,buf='',cut=false;const t=setTimeout(()=>process.exit(3),60000);process.stdin.on('error',()=>{});process.stdin.on('end',()=>{if(!go)process.exit(2)});process.stdin.on('data',(d)=>{if(go)return;buf+=d;const n=buf.indexOf('\\n');if(n<0)return;go=true;clearTimeout(t);const line=buf.slice(0,n);if(!line.startsWith('go '))process.exit(2);let env;try{env=JSON.parse(line.slice(3))}catch{process.exit(2)}const p=spawn(b,JSON.parse(a),{cwd:c,env,stdio:'ignore',windowsHide:true});p.on('error',()=>process.exit(4));p.on('exit',(code)=>process.exit(cut?124:code??1));setTimeout(()=>{cut=true;if(process.platform==='win32'){const tk=(process.env.SystemRoot||'C:\\\\Windows')+'\\\\System32\\\\taskkill.exe';const k=spawn(tk,['/PID',String(p.pid),'/T','/F'],{stdio:'ignore',windowsHide:true});k.on('exit',()=>process.exit(124));k.on('error',()=>process.exit(124))}else{try{p.kill('SIGKILL')}catch{}process.exit(124)}},Number(l)*1000).unref()});";
+export const KEEPER_SCRIPT = [
+  String.raw`const{spawn}=require('node:child_process');const[,b,c,a,l]=process.argv;let p=null,buf='',cut=0;`,
+  String.raw`const t=setTimeout(()=>process.exit(3),60000);`,
+  String.raw`const tree=(code)=>{if(cut)return;cut=code;if(process.platform==='win32'){const tk=(process.env.SystemRoot||'C:\\Windows')+'\\System32\\taskkill.exe';const k=spawn(tk,['/PID',String(p.pid),'/T','/F'],{stdio:'ignore',windowsHide:true});k.on('exit',()=>process.exit(code));k.on('error',()=>process.exit(code))}else{try{p.kill('SIGKILL')}catch{}process.exit(code)}};`,
+  String.raw`const line=(s)=>{if(p){if(s==='stop')tree(143);return}if(!s.startsWith('go '))process.exit(2);let env;try{env=JSON.parse(s.slice(3))}catch{process.exit(2)}clearTimeout(t);p=spawn(b,JSON.parse(a),{cwd:c,env,stdio:'ignore',windowsHide:true});p.on('error',()=>process.exit(4));p.on('exit',(code)=>process.exit(cut||(code??1)));setTimeout(()=>tree(124),Number(l)*1000).unref()};`,
+  String.raw`process.stdin.on('error',()=>{});process.stdin.on('end',()=>{if(!p)process.exit(2)});`,
+  String.raw`process.stdin.on('data',(d)=>{buf+=d;let n;while((n=buf.indexOf('\n'))>=0){const s=buf.slice(0,n).replace(/\r$/,'');buf=buf.slice(n+1);line(s)}});`,
+].join('');
 
 /** Variables a long run never carries: what ties a process to its worker for the sweep and the caps' kills. */
 export const DROPPED_ENV = ['FF_SESSION_ID', 'FF_FOR_PERSON', 'FF_TIMED_RUN', 'FF_UNITY_MCP'];
@@ -110,7 +120,12 @@ export interface LongRunPlan {
 export interface Keeper {
   pid: number;
   go: (env: Record<string, string>) => void;
+  /** Kill the keeper before "go" (no run started). */
   kill: () => void;
+  /** Tell the keeper to end its run's tree; false once its stdin is gone. */
+  stop: () => boolean;
+  /** Called once, when the keeper exits, with its exit code. */
+  onExit: (cb: (code: number | null) => void) => void;
 }
 
 export interface LongRunsDeps {
@@ -138,8 +153,6 @@ export interface LongRunsDeps {
   startKeeper?: (node: string, plan: LongRunPlan) => Promise<Keeper>;
   /** Tests: put a pid in a job of its own; resolves true once it is in. */
   joinJob?: (helper: string, pid: number, mode: CapsMode) => Promise<boolean>;
-  /** Tests: end a pid's whole tree. */
-  endTree?: (pid: number) => Promise<void>;
   log: (line: string) => void;
 }
 
@@ -164,8 +177,9 @@ function scriptOf(sandbox: string): string {
   const p = path.join(sandbox, SANCTIONED.nightly.script);
   const no = () => refuse(403, `nightly: ${SANCTIONED.nightly.script} must be a plain file of your sandbox`);
   try {
-    const real = fs.realpathSync(p);
-    if (!inside(fs.realpathSync(sandbox), real) || !fs.lstatSync(real).isFile()) throw no();
+    // .native: the JS realpath leaves a Windows junction unresolved (review w6379 finding 6, measured on BEAST).
+    const real = fs.realpathSync.native(p);
+    if (!inside(fs.realpathSync.native(sandbox), real) || !fs.lstatSync(real).isFile()) throw no();
     return real;
   } catch (e) {
     if (e instanceof RpcRefused) throw e;
@@ -187,7 +201,7 @@ export function readEnvFile(sandbox: string, file: unknown): Record<string, stri
   let fd: number | undefined;
   try {
     // The sandbox folder is itself (no link or junction standing for it).
-    if (!same(fs.realpathSync(sandbox), path.resolve(sandbox))) throw no();
+    if (!same(fs.realpathSync.native(sandbox), path.resolve(sandbox))) throw no();
     const st = fs.lstatSync(given);
     if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1 || st.size > MAX_ENV_FILE) throw no();
     fd = fs.openSync(given, 'r');
@@ -258,13 +272,29 @@ function startKeeperReal(node: string, plan: LongRunPlan): Promise<Keeper> {
     const c = spawn(node, ['-e', KEEPER_SCRIPT, plan.exe, plan.cwd, JSON.stringify(plan.argv), String(plan.limitS)], { cwd: plan.cwd, env: plan.keeperEnv, detached: true, stdio: ['pipe', 'ignore', 'ignore'], windowsHide: true });
     c.once('error', reject);
     c.stdin!.on('error', () => undefined);
+    const exited: ((code: number | null) => void)[] = [];
+    let code: number | null | undefined;
+    c.once('exit', (x) => {
+      code = x;
+      for (const cb of exited) cb(x);
+    });
     c.once('spawn', () => {
       c.unref();
+      (c.stdin as unknown as { unref?: () => void }).unref?.();
       if (!c.pid) return reject(new Error('no pid'));
       resolve({
         pid: c.pid,
         go: (env) => {
-          c.stdin!.end(`go ${JSON.stringify(env)}\n`);
+          c.stdin!.write(`go ${JSON.stringify(env)}\n`);
+        },
+        stop: () => {
+          if (code !== undefined || !c.stdin || c.stdin.destroyed || !c.stdin.writable) return false;
+          c.stdin.write('stop\n');
+          return true;
+        },
+        onExit: (cb) => {
+          if (code !== undefined) cb(code);
+          else exited.push(cb);
         },
         kill: () => {
           try {
@@ -318,16 +348,6 @@ function joinJobReal(helper: string, pid: number, mode: CapsMode): Promise<boole
   });
 }
 
-/** taskkill /T /F of a keeper: it and the run it started. */
-function endTreeReal(pid: number): Promise<void> {
-  const taskkill = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
-  return new Promise((resolve) => {
-    const k = spawn(taskkill, ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
-    k.once('error', () => resolve());
-    k.once('exit', () => resolve());
-  });
-}
-
 /** The runs this daemon started that are still alive, from their records. */
 export function liveRuns(d: Pick<LongRunsDeps, 'dir' | 'alive'>): LongRun[] {
   const alive = d.alive ?? pidAlive;
@@ -355,6 +375,8 @@ const said = (p: LongRunPlan) => `${p.exe} ${p.argv.map((a) => JSON.stringify(a)
 /** The routes: `runs/start` {name, args, envFile}, `runs/stop` {id} and `runs/status`. */
 export function longRunsRpcHandlers(d: LongRunsDeps): Record<string, RpcHandler> {
   const platform = d.platform ?? process.platform;
+  /** The keepers this daemon process started and that have not exited: the only ones runs/stop can reach. */
+  const mine = new Map<string, { keeper: Keeper; sandbox: string }>();
   return {
     'runs/start': async (c, b) => {
       const mode = d.mode();
@@ -381,16 +403,22 @@ export function longRunsRpcHandlers(d: LongRunsDeps): Record<string, RpcHandler>
       const rec: LongRun = { id, name: plan.name, session: c.session, sandbox: c.sandbox!, pid: keeper.pid, startedAt: new Date().toISOString(), job: true };
       fs.mkdirSync(d.dir, { recursive: true });
       fs.writeFileSync(path.join(d.dir, `${id}.json`), JSON.stringify(rec));
+      mine.set(id, { keeper, sandbox: c.sandbox! });
+      keeper.onExit((code) => {
+        mine.delete(id);
+        fs.rmSync(path.join(d.dir, `${id}.json`), { force: true });
+        d.log(`long runs: ${id} (${plan.name}) of ${c.sandbox} ended: keeper pid ${keeper.pid} exit ${code ?? 'unknown'}${code === 124 ? ' (its time limit)' : code === 143 ? ' (runs/stop)' : ''} (w6367)`);
+      });
       d.log(`long runs: started ${id} (${plan.name}) for ${c.session} in ${c.sandbox}: keeper pid ${keeper.pid}, ${said(plan)}, ${how} (w6367)`);
       return { mode: 'on', started: true, id, pid: keeper.pid, job: true };
     },
-    'runs/stop': async (c, b) => {
-      const run = liveRuns(d).find((r) => r.id === b.id && r.sandbox === c.sandbox);
-      if (!run) throw refuse(404, `runs/stop: no live long run ${String(b.id)} of your sandbox`);
-      await (d.endTree ?? endTreeReal)(run.pid);
-      fs.rmSync(path.join(d.dir, `${run.id}.json`), { force: true });
-      d.log(`long runs: stopped ${run.id} (${run.name}) for ${c.session} in ${c.sandbox}: keeper pid ${run.pid} and its tree ended (w6367)`);
-      return { stopped: run.id };
+    'runs/stop': (c, b) => {
+      // Through the keeper's own stdin, never a pid: a record outlives its process, and Windows reuses pids (finding 7).
+      const run = typeof b.id === 'string' ? mine.get(b.id) : undefined;
+      if (!run || run.sandbox !== c.sandbox) throw refuse(404, `runs/stop: no live long run ${String(b.id)} this daemon started for your sandbox (one from before the daemon's last start ends at its ${MAX_RUN_S / 3600} h limit)`);
+      if (!run.keeper.stop()) throw refuse(409, `runs/stop: ${String(b.id)} can no longer be told to stop; it ends at its ${MAX_RUN_S / 3600} h limit`);
+      d.log(`long runs: stop sent to ${String(b.id)} for ${c.session} in ${c.sandbox}: keeper pid ${run.keeper.pid} ends its run's tree (w6367)`);
+      return { stopping: b.id };
     },
     'runs/status': (c) => ({ mode: d.mode(), runs: liveRuns(d).filter((r) => r.sandbox === c.sandbox) }),
   };
