@@ -118,7 +118,7 @@ export const INSTALLED_BUILD: readonly RegExp[] = [
 ];
 
 /** The last word of text when text ends in whitespace, else '' (a backwards scan: /(\S+)\s+$/ is quadratic on a long run). */
-const lastWordOf = (text: string): string => {
+export const lastWordOf = (text: string): string => {
   let end = text.length;
   while (end > 0 && /\s/.test(text[end - 1])) end--;
   if (end === text.length) return '';

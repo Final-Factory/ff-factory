@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
+import { forgetDataDirChecks, gameDataDirAt, GAME_DATA_PATHS, lastWordOf, otherPlayerIn, readsDataDirSource } from './gameDataDir.ts';
 import type { Runner } from './githubTokens.ts';
 
 const REPO = 'Final-Factory/FinalFactory';
@@ -168,12 +168,18 @@ test('w6485: a separator alone after Steam keeps the mark, and a long run of pun
   }
 });
 
-// w6544: excusedBuild's last-word lookup was quadratic on a long run with no whitespace before a match.
-test('w6544: a long run with no whitespace before a match keeps the mark without stalling the event loop', () => {
-  for (const said of ['-'.repeat(50000) + 'steam build', 'steam—'.repeat(8000) + ' build']) {
-    const t0 = performance.now();
-    const r = otherPlayerIn(said, NEW);
-    assert.ok(performance.now() - t0 < 500);
-    assert.ok(r);
-  }
+// w6544: excusedBuild's last-word lookup was a quadratic regex on a long run with no whitespace before a match; it is a
+// backwards scan now. No wall-clock bound here (CI keeps no timing assertions): a quadratic one would show as a stalled run.
+test('w6544: a long run with no whitespace before a match keeps the mark', () => {
+  for (const said of ['-'.repeat(50000) + 'steam build', 'steam—'.repeat(8000) + ' build']) assert.ok(otherPlayerIn(said, NEW));
+});
+
+test('w6544: lastWordOf is the word before trailing whitespace, else empty', () => {
+  assert.equal(lastWordOf('the published '), 'published');
+  assert.equal(lastWordOf('a  b 
+'), 'b');
+  assert.equal(lastWordOf('the published'), '');
+  assert.equal(lastWordOf(''), '');
+  assert.equal(lastWordOf('   '), '');
+  assert.equal(lastWordOf('-'.repeat(50000) + ' '), '-'.repeat(50000));
 });
