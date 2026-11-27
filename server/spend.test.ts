@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { ContextMeter, nextPhase, toolKind, stripCd, listUsd, priceOf, zeroTok, type ModelTok, type PhaseDay, type TurnUsage } from '../shared/spend.ts';
@@ -9,6 +8,7 @@ import { SpendStore, aboutIds, addPhaseDay, attribute, buildReport, costLine, es
 import { DATA_GUARD_DEFAULTS, dataGuardSettings, footprint, gzipFile, planGuard, runDataGuard, type TranscriptFile } from './dataGuard.ts';
 import { Store } from './store.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** What a request costs (w859): the categories of tool output, the context meter, attribution, the store, the backfill and the data guard. */
 
@@ -208,7 +208,7 @@ test('kindOfWork: release, review, ops, bug fix, investigation, feature', () => 
 // ---------------------------------------------------------------------------------------------------------------------
 
 function world(items: WorkItem[], sessions: SessionInfo[], results: Record<string, number> = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spend-test-'));
+  const dir = tmpDir('spend-test-');
   const now = { t: T0 + 10 * 60_000 };
   const ctx: SpendContext = { work: () => items, session: (id) => sessions.find((s) => s.id === id), priorResults: (id) => results[id] ?? 1, now: () => now.t };
   const spend = new SpendStore(dir, ctx);
@@ -503,7 +503,7 @@ test('dataGuardSettings: defaults, clamping and the order of the steps', () => {
 });
 
 test('gzipFile: a transcript compressed and read back; a file that grew meanwhile is left alone', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'guard-test-'));
+  const dir = tmpDir('guard-test-');
   const f = path.join(dir, 's.jsonl');
   const text = '{"seq":1,"kind":"system","text":"' + 'hello '.repeat(500) + '"}\n';
   fs.writeFileSync(f, text);
@@ -514,7 +514,7 @@ test('gzipFile: a transcript compressed and read back; a file that grew meanwhil
 });
 
 test('the store reads a compressed transcript, and writes to it again after unzipping it', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'store-gz-'));
+  const dir = tmpDir('store-gz-');
   const store = new Store(dir);
   store.append('s1', { kind: 'system', text: 'one' });
   store.append('s1', { kind: 'result', ok: true, text: 'done', costUsd: 1, turns: 1, durationMs: 1 });

@@ -15,6 +15,7 @@ import type { Machine } from '../shared/types.ts';
 import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type OldLayout } from './worker/migrate.ts';
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
+import { tmpDir } from '../server/testTmp.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
 import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyHostRestage, hostRestageFlag, applyLongRuns, longRunsFlag, applyLiveRunGuard, liveRunGuardFlag, applyEditorGitPackages, editorGitPackagesFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
@@ -961,8 +962,8 @@ test("w1596: the installer's Mac probe searches the home folder for clones only 
   assert.equal(planUpdate(l.root, m, { ...cfg, leftovers: undefined }, 'ffm_t_x', {}).noCleanup, undefined, 'a real install is never made one');
 });
 
-test('exec: lines come as they are printed, and a run past its limit is answered even when its child holds the output (w1993)', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffexec-'));
+test('exec: lines come as they are printed, and a run past its limit is answered even when its child holds the output (w1993)', async (t) => {
+  const dir = tmpDir('ffexec-', t);
   const js = (name: string, body: string) => {
     fs.writeFileSync(path.join(dir, name), body);
     return path.join(dir, name);

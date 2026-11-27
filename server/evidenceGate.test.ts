@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -10,6 +9,7 @@ import { evidenceGated, installPythonShim, evidencePython, evidenceVerdict, fetc
 import { prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { ghMerge } from './blockerWatch.ts';
 import { checkShell, type EvidenceResolver } from './guard.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w3088: no merge path skips the game repo's Evidence check. #3180 (w3080, the rejoin census fix) merged on green CI with its
@@ -230,9 +230,9 @@ test('w3088: findPrEvidence picks the newest copy by plugin.json version (sort -
  * #3187 and ffu #237 (2026-11-04, workers on BEAST) were refused on green with "no pr_evidence.py found". The portal now
  * keeps its own checkout of final-factory-agents (portalPrEvidence) and runs the script from it.
  */
-test('w3110: the merge-on-green pilot on the portal runs pr_evidence.py from its own checkout: refuses a FAIL, merges a PASS', async () => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w3110-data-'));
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'w3110-home-'));
+test('w3110: the merge-on-green pilot on the portal runs pr_evidence.py from its own checkout: refuses a FAIL, merges a PASS', async (t) => {
+  const dataDir = tmpDir('w3110-data-', t);
+  const home = tmpDir('w3110-home-', t);
   const co = path.join(dataDir, 'tools', 'final-factory-agents');
   const script = path.join(co, 'plugins', 'ff-agents', 'skills', 'evidence-gate', 'pr_evidence.py');
   // The bug: the portal's own environment finds no script.
@@ -296,6 +296,7 @@ test("w3190: the portal's merge-on-green hands pr_evidence.py the game repo's HU
   let pinsRead = '';
   let base = 'master';
   let api = { code: 0, stdout: PINS, stderr: '' };
+  const hudDirs: string[] = [];
   const run = async (cmd: string, args: string[], opts?: { env?: NodeJS.ProcessEnv }) => {
     calls.push([cmd, ...args]);
     if (cmd === 'gh' && args.includes('baseRefName')) return { code: 0, stdout: JSON.stringify({ baseRefName: base }), stderr: '' } as never;
@@ -305,12 +306,14 @@ test("w3190: the portal's merge-on-green hands pr_evidence.py the game repo's HU
     const dir = opts?.env?.FF_HUD_DATA;
     if (!dir || !fs.existsSync(path.join(dir, 'hud-pins.json'))) return { code: 1, stdout: '', stderr: W2998 } as never;
     pinsRead = fs.readFileSync(path.join(dir, 'hud-pins.json'), 'utf8');
+    hudDirs.push(dir);
     return { code: 0, stdout: PASS, stderr: '' } as never;
   };
 
   // #3229 (w3156, the Power Distributor window): checked with master's pins, then merged.
   await ghMerge('Final-Factory/FinalFactory#3229', SHA, run, () => 'pe.py');
   assert.equal(pinsRead, PINS, "the script read the base branch's hud-pins.json");
+  assert.deepEqual(hudDirs.filter((d) => fs.existsSync(d)), [], 'w6476: the fetched pins folder is gone once the script ran');
   assert.ok(calls.some((c) => c.join(' ') === `gh api -H Accept: application/vnd.github.raw+json repos/Final-Factory/FinalFactory/contents/scripts/nightly/ui_layout/hud-pins.json?ref=master`));
   assert.deepEqual(calls.at(-1), ['gh', 'pr', 'merge', '3229', '-R', 'Final-Factory/FinalFactory', '--merge', '--match-head-commit', SHA]);
 
@@ -413,8 +416,8 @@ test('w4926: other refusals never update the plugin', () => {
   assert.equal(updates, 0);
 });
 
-test('w5836: a python shim runs python3 where a macOS or Linux machine has only python3, and nowhere else', { skip: process.platform === 'win32' && 'POSIX shim' }, () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pyshim-'));
+test('w5836: a python shim runs python3 where a macOS or Linux machine has only python3, and nowhere else', { skip: process.platform === 'win32' && 'POSIX shim' }, (t) => {
+  const dir = tmpDir('pyshim-', t);
   const bin = path.join(dir, 'bin');
   const usr = path.join(dir, 'usr');
   fs.mkdirSync(usr);

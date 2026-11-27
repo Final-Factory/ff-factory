@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { SpendStore, type SpendContext } from './spend.ts';
 import { backfillSpend, repairSpend } from './spendJobs.ts';
 import type { SessionInfo } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w2026: the spend jobs after a start never hold the event loop, whatever the transcripts grew to. On 2026-10-24 the backfill read
@@ -22,7 +22,7 @@ const session = (id: string): SessionInfo =>
 
 /** A data folder of `n` sessions whose transcripts hold `mb` megabytes of tool output each and no result (the shape that blocked). */
 function grown(n: number, mb: number) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spend-jobs-'));
+  const dir = tmpDir('spend-jobs-');
   const store = new Store(dir);
   const line = JSON.stringify({ seq: 0, t: new Date(T0).toISOString(), kind: 'tool_result', id: 't', text: 'x'.repeat(16_000) });
   fs.mkdirSync(path.join(dir, 'transcripts'), { recursive: true });

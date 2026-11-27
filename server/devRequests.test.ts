@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { randomBytes, createHash } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { Store, bus } from './store.ts';
@@ -26,6 +25,7 @@ import type { GitStatus, Requester, ServerEvent, SessionInfo, TranscriptEvent, U
 import { fakeQuery } from '../e2e/fakeAgent.ts';
 import { startTestMachine, type TestMachine } from './testMachine.ts';
 import { useFakeVault } from './testVault.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 
 // Every Claude process runs on a vault token (w1078): these tests start orchestrators, workers or standing agents.
 useFakeVault();
@@ -64,7 +64,7 @@ async function until(what: string, cond: () => boolean, ms = 8000) {
 }
 
 async function setup(t: { after: (fn: () => void | Promise<void>) => void }, extra: { devRequests?: Record<string, unknown>; attachmentsMB?: number; onMachine?: boolean } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-devreq-'));
+  const dir = tmpDir('ffsb-devreq-');
   const token = mintProviderToken();
   const cfg = {
     dataDir: dir,
@@ -101,6 +101,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   }
   const o = agents.orchestrators;
   let pm = new ProviderManager(cfg);
+  const managers = [pm];
   // A 100 MB hand-over is ~2300 frames: the tests send them as fast as the socket takes them.
   pm.rate = { perSecond: 1e6, burst: 1e6 };
   agents.providers = pm;
@@ -141,6 +142,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
   const restart = () => {
     pm.close();
     pm = new ProviderManager(cfg);
+    managers.push(pm);
     pm.rate = { perSecond: 1e6, burst: 1e6 };
     agents.providers = pm;
     wire(pm);
@@ -157,7 +159,9 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }, ext
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    // w6476: the links' close events (after pm.close) arm a 2 s save that would write providers/ffbox.json into the removed folder.
+    for (const p of managers) p.flush();
+    removeTmp(dir);
   });
   const call = async (info: SessionInfo, name: string, args: Record<string, unknown>) => {
     const tool = agents.orchestratorBelt(info).find((x) => x.name === name);

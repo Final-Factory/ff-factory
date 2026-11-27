@@ -16,6 +16,7 @@
 // It also flags requests queued for capacity while a computer that could take them has room (flagQueuedWithRoom).
 // A deploy blocker the ledger cleanup set itself (a merged request whose only step left is a deploy) is the cleanup's:
 // it closes the request when the deploy runs the merge (server/ledgerSweep.ts), so this watch leaves it alone.
+import fs from 'node:fs';
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
@@ -1185,7 +1186,13 @@ export async function ghEvidenceRefusal(ref: string, run: Runner = runProc, evid
   const hud = await fetchHudData(m[1], m[2], run, opts);
   if (hud && 'error' in hud) return `the Evidence check could not run for ${m[1]}#${m[2]}: ${hud.error}`;
   const env = hud ? { ...opts.env, FF_HUD_DATA: hud.dir } : opts.env;
-  const e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, env, timeoutMs: 5 * 60_000 });
+  // w6476: the fetched pins' folder goes once the script has read it (it was left in the temp folder on every check).
+  let e: RunResult;
+  try {
+    e = await run(evidencePython(), evidenceArgs(script, m[1], m[2]), { ...opts, env, timeoutMs: 5 * 60_000 });
+  } finally {
+    if (hud) fs.rmSync(hud.dir, { recursive: true, force: true, maxRetries: 5 });
+  }
   const v = evidenceVerdict(e.code, e.stdout, e.stderr);
   return v.ok ? undefined : evidenceRefusal(m[1], m[2], e.code, v);
 }

@@ -4,9 +4,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { FrameParser, LiveSession, ProcessBirths, agentControlDir, agentControlDirs, readGameChannel, type CommandReply, type GameChannel, type LiveState } from '../machine/live.ts';
+import { tmpDir } from './testTmp.ts';
 
 const msg = (kind: string, payload: Buffer) => {
   const h = Buffer.alloc(5);
@@ -25,25 +25,25 @@ test('live: the frame parser joins and splits TCP chunks', () => {
   assert.throws(() => new FrameParser().push(Buffer.from([0x46, 0xff, 0xff, 0xff, 0xff])), /not a frame/);
 });
 
-test('live: the game channel file and its folder per OS', () => {
+test('live: the game channel file and its folder per OS', (t) => {
   assert.match(agentControlDir('win32', 'C:/Users/x'), /AppData[\\/]LocalLow[\\/]Never Games[\\/]finalfactory[\\/]AgentControl$/);
   assert.match(agentControlDir('darwin', '/Users/x'), /Library[\\/]Application Support[\\/]Never Games/);
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-'));
+  const dir = tmpDir('live-', t);
   fs.writeFileSync(path.join(dir, 'session-42.json'), JSON.stringify({ port: 5123, token: 't', tier: 'all', pid: 42 }));
   assert.deepEqual(readGameChannel(42, dir), { port: 5123, token: 't', tier: 'all', pid: 42 });
   assert.equal(readGameChannel(43, dir), undefined);
 });
 
-test('w5306: the session file is read in FF_GAME_DATA_DIR first, then in the old folder (a branch from before game PR #4237)', () => {
+test('w5306: the session file is read in FF_GAME_DATA_DIR first, then in the old folder (a branch from before game PR #4237)', (t) => {
   // w5915: an empty folder of its own: '/ffw/gamedata' is the real game data folder on a Windows worker (F:\ffw\gamedata on
   // BEAST), and its sandboxes' folders were read in too (machine/gameData.ts sandboxGameDataDirs).
-  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'live-data-'));
+  const data = tmpDir('live-data-', t);
   const env = { FF_GAME_DATA_DIR: `${data} ` };
   assert.deepEqual(agentControlDirs(env, 'linux', '/home/b'), [path.join(data, 'AgentControl'), path.join('/home/b', '.config', 'unity3d', 'Never Games', 'finalfactory', 'AgentControl')]);
   assert.deepEqual(agentControlDirs({}, 'linux', '/home/b'), [agentControlDir('linux', '/home/b')]);
   assert.deepEqual(agentControlDirs({ FF_GAME_DATA_DIR: '  ' }, 'win32', 'C:/Users/x'), [agentControlDir('win32', 'C:/Users/x')]);
-  const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'live-new-'));
-  const old = fs.mkdtempSync(path.join(os.tmpdir(), 'live-old-'));
+  const fresh = tmpDir('live-new-', t);
+  const old = tmpDir('live-old-', t);
   fs.writeFileSync(path.join(old, 'session-7.json'), JSON.stringify({ port: 1, token: 'old', tier: 'all' }));
   assert.equal(readGameChannel(7, [fresh, old])?.token, 'old', 'an older editor that ignores the variable is still found');
   fs.writeFileSync(path.join(fresh, 'session-7.json'), JSON.stringify({ port: 2, token: 'new', tier: 'all' }));
@@ -131,8 +131,8 @@ test('live: no editor or no play mode holds, with the reason', async () => {
   assert.equal((await s.command('look.material.list|X')).ok, false);
 });
 
-test('w2255: a session file older than its process is another process\'s under a reused pid, and is not its channel', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'live-'));
+test('w2255: a session file older than its process is another process\'s under a reused pid, and is not its channel', async (t) => {
+  const dir = tmpDir('live-', t);
   const file = path.join(dir, 'session-2044.json');
   fs.writeFileSync(file, JSON.stringify({ port: 64289, token: 't', tier: 'all', pid: 2044 }));
   // lothdesktop/slot1, 2026-10-26: the file was the 2026-10-14 game's; the editor with that pid started at 06:29Z.

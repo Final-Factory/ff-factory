@@ -139,6 +139,17 @@ Two from the Windows whole-suite run (w1758):
   stand-in polled forever with its pipe holding the test file open (`benchQueue.test.ts`). And Node spawns no `.cmd`
   without a shell: run a node script as `[process.execPath, script]`.
 
+One from a temp folder that filled up (w6476):
+
+- **A test's temp folder comes from `tmpDir(prefix, t?)` (`server/testTmp.ts`), never a bare `mkdtempSync`.** One Windows
+  run of the suite left 547 entries in `os.tmpdir()`, and a worker's temp folder held 12,899 after a dozen runs. Factories made
+  a folder per call and never removed it. Removals ran inside the test body and were skipped when an assert threw. A teardown
+  removed the folder, and then a late async write made it again: a provider manager's save, or a session's transcript seal.
+  With a test context the folder goes in `t.after`. Without one it goes when the file's process exits, after every hook. A
+  removal that fails there fails the file and names the folder, so close what holds it (a sqlite database, a child process).
+  A child that writes its own temp files (npm's compile cache, PowerShell's `Add-Type`) gets `TEMP`/`TMP`/`TMPDIR` inside
+  the test's folder, or is turned off in `scripts/testEnv.ts`.
+
 Two from replacing a page's cards (w1597):
 
 - **Grep every e2e spec for each test id and text a replaced component gave.** The Intake tab's rows (`work-<id>`) became

@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { BenchRunners, holdsJob, RELEASE_LOOKS, STALE_JOB_MS, isOpsRunner, listenerLog, OPS_RUNNER_MARK, readListenerLog, runnerCensus, SETTLE_MS, type BenchRunnersDeps, type RunnersState } from '../machine/benchRunners.ts';
 import type { Proc } from '../machine/unity.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w3112: on m3 on 2026-11-04 w3108 timed FFU under exclusive ticket t00001116 while the Mac's GitHub Actions runners
@@ -255,7 +255,7 @@ test('w3195: a listener whose log cannot be read is not paused (a job it holds c
 });
 
 test('w3195: readListenerLog reads the tail of the newest Runner_*.log in <root>/_diag', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-'));
+  const root = tmpDir('runner-');
   assert.equal(readListenerLog(root), undefined);
   fs.mkdirSync(path.join(root, '_diag'));
   fs.writeFileSync(path.join(root, '_diag', 'Runner_20261104-060908-utc.log'), IDLE_LOG);
@@ -283,7 +283,7 @@ const FFU_RUNNER = [
 ].join('\n');
 
 test('w3195: the log read is the one the live listener writes, not a --version run newer by name', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'runner-'));
+  const root = tmpDir('runner-');
   const diag = path.join(root, '_diag');
   fs.mkdirSync(diag);
   const live = path.join(diag, 'Runner_20261106-084734-utc.log');
@@ -316,7 +316,7 @@ test('w3424: an operations runner (ff-ops-runner in its root) is never paused fo
 });
 
 test('w3424: isOpsRunner reads the mark file in the runner root', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ops-runner-'));
+  const root = tmpDir('ops-runner-');
   assert.equal(isOpsRunner(root), false);
   fs.writeFileSync(path.join(root, OPS_RUNNER_MARK), 'w3424: the shared FFU world deploy only\n');
   assert.equal(isOpsRunner(root), true);

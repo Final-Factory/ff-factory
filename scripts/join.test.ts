@@ -11,19 +11,19 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { JoinCodes } from '../server/machineJoin.ts';
 import { machineJoinHttp, windowsInstaller } from '../server/machineJoinHttp.ts';
 import { powershell } from '../server/testPowershell.ts';
+import { tmpDir } from '../server/testTmp.ts';
 
 const ROOT = path.join(import.meta.dirname, '..');
 const isWin = process.platform === 'win32';
 
 /** A throwaway portal: the join routes for real, /api/health, and whoami and the ssh check for the credential it issued. */
 async function testPortal(o: { sshReachable?: boolean } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-e2e-'));
+  const dir = tmpDir('ffjoin-e2e-');
   const codes = new JoinCodes(path.join(dir, 'machine-joins.json'));
   const issued: string[] = [];
   const records = new Map<string, { root?: string; awaitingInstall?: string }>();
@@ -117,7 +117,7 @@ const psArgs = (file: string, ...rest: string[]) => ['-NoProfile', '-NonInteract
 test('join.ps1: a dry run changes nothing; the join hands the installer a private credential file, never shows it, deletes it; then the code is spent', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async (t) => {
   const portal = await testPortal();
   t.after(portal.close);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-ps-'));
+  const tmp = tmpDir('ffjoin-ps-');
   const f = fakes(tmp, 'ps');
   const { code } = portal.codes.create({ machineId: 'testpc', tailnetName: 'testpc', limits: { maxUnity: 1 }, by: 'Lothsahn' });
   const script = path.join(tmp, 'join.ps1');
@@ -172,7 +172,7 @@ test('join.ps1: a dry run changes nothing; the join hands the installer a privat
 });
 
 test('join.ps1: a portal it cannot reach exits 3 (the one failure the Tailscale hint is for), names the step, and logs it (w1603)', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-ps3-'));
+  const tmp = tmpDir('ffjoin-ps3-');
   const f = fakes(tmp, 'ps');
   const log = path.join(tmp, 'join.log');
   const closed = http.createServer();
@@ -214,7 +214,7 @@ test('no installer starts PowerShell with a command line that downloads and runs
 test('join.ps1: run again on an installed PC, it updates the install with no code, keeping its ssh; a new join asks for no ssh or tailnet tag (w1596)', { skip: !powershell && 'no PowerShell here (pwsh not on PATH)' }, async (t) => {
   const portal = await testPortal({ sshReachable: false });
   t.after(portal.close);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-ps2-'));
+  const tmp = tmpDir('ffjoin-ps2-');
   const f = fakes(tmp, 'ps');
   const script = path.join(ROOT, 'scripts', 'worker', 'join.ps1');
   const env = { TMPDIR: tmp, TEMP: tmp, PATH: `${path.dirname(powershell!)}${path.delimiter}${process.env.PATH}` };
@@ -243,7 +243,7 @@ test('join.ps1: run again on an installed PC, it updates the install with no cod
 test('join.sh: a dry run changes nothing; the join hands install.sh a 0600 credential file, never shows it, deletes it; an installed computer is updated', { skip: isWin && 'bash bootstrap: Mac and Linux' }, async (t) => {
   const portal = await testPortal();
   t.after(portal.close);
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-sh-'));
+  const tmp = tmpDir('ffjoin-sh-');
   const f = fakes(tmp, 'sh');
   const { code } = portal.codes.create({ machineId: 'testpc', tailnetName: 'testpc', limits: {}, by: 'Ben' });
   const script = path.join(tmp, 'join.sh');
@@ -284,7 +284,7 @@ test('join.sh: a dry run changes nothing; the join hands install.sh a 0600 crede
 });
 
 test('join.cmd: double-clicked (cmd.exe), the download runs the portal\'s bootstrap in Windows PowerShell with its code; an unreachable portal says what to check', { skip: !isWin && 'cmd.exe: Windows' }, async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-cmd-'));
+  const dir = tmpDir('ffjoin-cmd-');
   const seen = path.join(dir, 'seen.txt');
   // A portal whose bootstrap only records what it was given, marks its start as join.ps1 does, and exits `exit`: the
   // wrapper is what is tested here. 'blocked' never starts (as when Windows refuses to start PowerShell).

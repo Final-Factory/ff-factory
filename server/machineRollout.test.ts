@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { MachineRollout, ROLLOUT_FILE, VERIFIED_FILE, changedSettings, installerSummary, timedRunText, toolsLine, toolsResult, type RolloutHost, type RolloutMachine } from './machineRollout.ts';
 import { workerToolsRemote, workerUpdateRemote } from './opsWorker.ts';
 import type { BenchState, Requester } from '../shared/types.ts';
 import type { LinkUpdateReport } from './machineProtocol.ts';
 import { UpdateNotReached } from './machineLink.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** The rollout after a verified portal deploy (w887, docs/ops-worker.md "After a verified deploy"). */
 
@@ -56,7 +56,7 @@ const mac = (id: string, over: Partial<FakeMachine> = {}): FakeMachine => ({
 });
 
 function world(machines: FakeMachine[], o: { requester?: Requester; enabled?: boolean; tools?: boolean; limits?: Record<string, number> } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rollout-'));
+  const dir = tmpDir('rollout-');
   let clock = Date.parse('2026-10-10T18:00:00Z');
   const calls: { target: string; remote: string }[] = [];
   /** The agent tools runs (w1476), apart from the daemon updates in calls. */

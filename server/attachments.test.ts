@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
+import { tmpDir } from './testTmp.ts';
 import { execFileSync } from 'node:child_process';
 import { Readable } from 'node:stream';
 import { AttachmentError, AttachmentStore, attachmentForMachine, downloadDisposition, machineAttachment, prepareInbox, publicRef, publishableFile, publishedFilesBlock, uploadForMachine, pairPlayerIds } from './attachments.ts';
@@ -17,8 +17,7 @@ import { attachmentBlock, attachmentKind, attachmentName, fmtBytes, inboxName } 
 const DAY = 86_400_000;
 
 function setup(t: { after: (fn: () => void) => void }, cfg: { maxMB?: number; retentionDays?: number } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-att-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const dir = tmpDir('ffsb-att-', t);
   const clock = { now: Date.parse('2026-10-02T10:00:00Z') };
   const store = new AttachmentStore(path.join(dir, 'data'), () => cfg, () => clock.now);
   return { dir, store, clock };
@@ -118,7 +117,7 @@ test('size cap: refused before upload past attachments.maxMB; a chunk past the a
   store.cancel(uploadId);
   assert.throws(() => store.status(uploadId), /no such upload/);
   // The default: 200 MB (big saves exist).
-  assert.equal(new AttachmentStore(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-att2-'))).settings.maxBytes, 200 * 1024 * 1024);
+  assert.equal(new AttachmentStore(tmpDir('ffsb-att2-', t)).settings.maxBytes, 200 * 1024 * 1024);
 });
 
 test('names are made safe and kinds come from the name alone', () => {
@@ -324,8 +323,7 @@ test('publishableFile: only a file inside the given folders, links followed; nev
 
 // w2417: the files a request's workers published, by session; older records name the session only in their source.
 test('w2417: publishedBy lists what these sessions published, oldest first, from the session field or an older record\'s source', async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-att-pub-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffsb-att-pub-', t);
   let at = Date.parse('2026-10-27T10:00:00Z');
   const store = new AttachmentStore(path.join(dir, 'data'), () => undefined, () => (at += 1000));
   const add = async (name: string, origin: { source?: string; session?: string }) => {

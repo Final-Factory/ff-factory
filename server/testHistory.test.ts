@@ -1,7 +1,6 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import {
   TestHistory,
@@ -25,13 +24,29 @@ import {
 import { BATCH_ARTIFACT, EDITMODE_ARTIFACT, TestHistoryCi, prDiffFrom, sourceOf, type ArtifactRef, type TestHistoryGh } from './testHistoryCi.ts';
 import { DatabaseSync } from 'node:sqlite';
 import { ROOT_SPOOL_DIR, STALE_MS, TestHistorySpool, SPOOL_DIR, sandboxOfProject } from '../machine/testHistorySpool.ts';
+import { tmpDir } from './testTmp.ts';
 
 // The per-test history (w4922, docs/test-history.md): what goes in, how failures are labelled, the queries.
 
 const T0 = Date.parse('2026-11-20T12:00:00Z');
 const iso = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
-const tmp = (what: string) => fs.mkdtempSync(path.join(os.tmpdir(), `test-history-${what}-`));
-const history = (now = T0 + 3 * 86_400_000) => new TestHistory({ dataDir: tmp('db'), now: () => now });
+const tmp = (what: string) => tmpDir(`test-history-${what}-`);
+// w6476: an open database holds its folder on Windows; every one is closed when the file's tests are done, before the folder goes.
+const opened: TestHistory[] = [];
+const history = (now = T0 + 3 * 86_400_000) => {
+  const h = new TestHistory({ dataDir: tmp('db'), now: () => now });
+  opened.push(h);
+  return h;
+};
+after(() => {
+  for (const h of opened) {
+    try {
+      h.close();
+    } catch {
+      // closed by its test
+    }
+  }
+});
 const tc = (name: string, outcome: TestCase['outcome'], ms = 10, extra: Partial<TestCase> = {}): TestCase => ({ name, outcome, ms, ...extra });
 const labelOf = (h: TestHistory, test: string) => h.all('SELECT f.label, f.reason FROM failures f JOIN tests t ON t.id = f.test_id WHERE t.name = ? ORDER BY f.id', test);
 

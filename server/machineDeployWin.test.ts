@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
@@ -15,6 +14,7 @@ import { editorBinary, editorLogPath, editorTree, editorsFor, parseWinProcs, rep
 import { ROOT } from './config.ts';
 import { powershell } from './testPowershell.ts';
 import { listArchives, maintainLogs } from '../machine/logRetention.ts';
+import { tmpDir } from './testTmp.ts';
 
 // Windows machines (docs/machines.md, "Windows machines"): the scripts the portal sends over ssh, the platform
 // branching, and (on a Windows CI runner only) the scripts run for real by Windows PowerShell.
@@ -210,7 +210,7 @@ test('windows: a deploy that knows its clone does not search for one; the probe 
 test('windows (real PowerShell): a reinstall or restart stops the daemon and its other children but leaves the agent hosts and what they run; a stop or uninstall ends them too (w605)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
   // Only stand-ins of its own, under a throwaway folder, and a task name that does not exist: so it runs on any Windows
   // box, never touching the computer's real daemon (service.only: no other daemon folder is looked at).
-  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-stop-'));
+  const appDir = tmpDir('ffwin-stop-');
   const service = { task: 'FFW605StopTest', only: true };
   const daemonMark = path.join(appDir, 'app', 'machine', 'daemon.ts');
   const hostMark = path.join(appDir, 'app', 'machine', 'agentHost.ts');
@@ -290,8 +290,7 @@ require('fs').writeFileSync(out, JSON.stringify({ daemon: process.pid, shell: sh
 test('windows (real PowerShell): the probe survives a repo without an origin, and without a slug it searches nothing',{ skip: process.platform !== 'win32' && 'Windows only' }, async (t) => {
   // Read-only, so it runs on any Windows box, not only CI: a throwaway home with the clone and a repo that has no
   // origin (as BEAST has), searched as the home folder; the drives' own repos may show up too and are ignored.
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-probe-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const home = tmpDir('ffwin-probe-', t);
   const clone = path.join(home, 'games', 'SomeGame');
   const bare = path.join(home, 'scratch', 'no-origin');
   for (const d of [clone, bare]) execFileSync('git', ['init', '-q', d]);
@@ -472,7 +471,7 @@ function withoutCoverage(env: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 test('withoutCoverage: a node started with it writes no coverage, though node copies NODE_V8_COVERAGE into every child (w906)', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-nocov-'));
+  const dir = tmpDir('ffwin-nocov-');
   const before = process.env.NODE_V8_COVERAGE;
   process.env.NODE_V8_COVERAGE = before || dir;
   try {
@@ -521,7 +520,7 @@ test('windows (real PowerShell): every script parses', { skip: !onWindowsCi && '
     win.controlScript('restart'),
     win.uninstallScript(),
   ];
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-parse-'));
+  const dir = tmpDir('ffwin-parse-');
   try {
     all.forEach((s, i) => fs.writeFileSync(path.join(dir, `${i}.ps1`), s));
     const check =
@@ -572,7 +571,7 @@ test('remote failures say the exit code, whether the timeout killed it, and both
 
 test('windows (real PowerShell): probe, unpack, npm ci, install into an app_dir, the daemon says hello as win32, stop, uninstall', { skip: !onWindowsCi && 'Windows CI only', timeout: 12 * 60_000 }, async (t) => {
   // A user folder with a non-ASCII name, as a Björn would have.
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ffwin-hömé-'));
+  const home = tmpDir('ffwin-hömé-');
   const env = { USERPROFILE: home };
   // The daemon's folder elsewhere than %USERPROFILE%\.ff-factory (add_machine app_dir, e.g. D:\work\.ff-factory).
   const appDir = path.join(home, 'work drive', '.ff-factory');
@@ -671,7 +670,7 @@ function logs(appDir: string) {
 // injected (an agent driving the game, a test) as injected and never as a person's, sends no `input` for it, and ends on quit.
 test('windows (real tray app): built with the in-box csc, it starts, counts a SendInput key as injected (never a person), keeps the foreground lock timeout at 0 (w6350), and quits (w1532)', { skip: process.platform !== 'win32' && 'Windows only', timeout: 3 * 60_000 }, async (t) => {
   const { buildTray, traySourceDir, trayInstance } = await import('../machine/tray.ts');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-tray-'));
+  const dir = tmpDir('ff-tray-');
   // One hook, the tray ended before its folder goes (w1758): Windows refuses to delete the exe of a running process, and a
   // throwing after hook skips the ones after it, so a failed test left the tray running with its pipes holding the file's
   // process open until the run's deadline.
@@ -869,7 +868,7 @@ test('logs: the real supervisor block, run by PowerShell over many restarts, kee
   const s = win.supervisorScript('C:\\nodejs\\node.exe', false);
   const block = /  # Each run's output is kept[\s\S]*?\n  \}\n(?=  \$started)/.exec(s)?.[0];
   assert.ok(block, 'the rotation block of supervisorScript');
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fflogs-'));
+  const dir = tmpDir('fflogs-');
   // The same second twice (a fast crash loop) must not overwrite either.
   const script = `$logs = $env:FFLOGS\n${block}`;
   for (let i = 0; i < 6; i++) {
@@ -902,7 +901,7 @@ test('w5980 (Windows): app.new labelled before tar keeps its files given back un
   const ps = (script: string, env: NodeJS.ProcessEnv = process.env) => execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(`$ProgressPreference = 'SilentlyContinue'\n${script}`, 'utf16le').toString('base64')], { encoding: 'utf8', env });
   // Windows names are any case (Git Bash passes SYSTEMDRIVE): one key, or the first one wins.
   const withSystemDrive = (v: string) => ({ ...Object.fromEntries(Object.entries(process.env).filter(([k]) => k.toLowerCase() !== 'systemdrive')), SystemDrive: v });
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w5980-stage-'));
+  const d = tmpDir('ff-w5980-stage-');
   try {
     assert.match(ps(labelScript([{ path: d, sddl: NO_READ_UP.dir }])), /^ok 0/m);
     const stage = path.join(d, 'app.new');

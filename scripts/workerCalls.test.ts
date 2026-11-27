@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { kindOf, summarize } from './worker-calls.ts';
+import { tmpDir } from '../server/testTmp.ts';
 
 /** scripts/worker-calls.ts (w1478): counts a worker session's model calls by message id, main thread only. */
 
@@ -20,7 +20,7 @@ test('kindOf: the buckets docs/spend.md reports', () => {
 });
 
 test('summarize: one call per message id, sidechain lines left out, read runs and parallel calls counted', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'wcalls-'));
+  const root = tmpDir('wcalls-');
   const dir = path.join(root, 'F--ffw-sandboxes-slot9');
   fs.mkdirSync(dir);
   const lines: object[] = [{ type: 'user', message: { content: 'You are on request w1 for x' }, timestamp: '2026-10-18T10:00:00Z' }];

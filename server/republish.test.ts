@@ -2,9 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { ROOT } from './config.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * scripts/republish-public.ps1 end to end, the REAL path as well as the dry run, against a fake GitHub:
@@ -58,12 +58,17 @@ process.stderr.write('fake gh: unhandled ' + a.join(' ') + '\n'); process.exit(2
 const onWindows = process.platform === 'win32';
 
 test('republish: the dry run changes nothing; the real run publishes, moves the checkout, and resumes cleanly', { skip: !onWindows && 'Windows only', timeout: 240_000 }, async (t) => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'republish-'));
+  // w6476: removed at process exit, after the hook below has ended every child that holds it.
+  const tmp = tmpDir('republish-');
   const children: ChildProcess[] = [];
-  t.after(() => {
+  t.after(async () => {
+    const ended = children.filter((c) => c.exitCode === null && c.signalCode === null).map((c) => new Promise((r) => c.once('exit', r)));
     for (const c of children) c.kill();
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5 });
+    await Promise.all(ended);
   });
+  // w6476: the children's own temp folder (npm's node-compile-cache, PowerShell's policy-test files) is inside tmp, not os.tmpdir().
+  const scratch = path.join(tmp, 'scratch');
+  fs.mkdirSync(scratch);
   const hub = path.join(tmp, 'github');
   const bin = path.join(tmp, 'bin');
   const app = path.join(tmp, 'app');
@@ -84,6 +89,9 @@ test('republish: the dry run changes nothing; the real run publishes, moves the 
     FFSB_TASK_NAME: 'ffsb-test-never-run',
     // This machine's names, injected (w434): the test passes or fails the same on any runner, BEAST included.
     FFSB_REPUBLISH_LOCAL_NAMES: 'ffsbtesthost,ffsbtestuser',
+    TEMP: scratch,
+    TMP: scratch,
+    TMPDIR: scratch,
   };
   const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, env, encoding: 'utf8' }).trim();
   const bareOf = (slug: string) => path.join(hub, ...slug.split('/')) + '.git';
@@ -164,7 +172,7 @@ test('republish: the dry run changes nothing; the real run publishes, moves the 
   assert.equal(meta('Final-Factory/ff-factory-private'), undefined);
 
   // A stand-in supervisor: a process whose command line names supervise.ps1, and the update loop.
-  const sup = spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep 600 # supervise.ps1'], { stdio: 'ignore' });
+  const sup = spawn('powershell.exe', ['-NoProfile', '-Command', 'Start-Sleep 600 # supervise.ps1'], { env, stdio: 'ignore' });
   children.push(sup);
   fs.writeFileSync(path.join(app, 'data', 'supervisor.pid'), String(sup.pid));
   let updates = 0;

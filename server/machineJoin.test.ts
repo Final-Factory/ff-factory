@@ -2,11 +2,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { JoinCodes, defaultLimits, joinRefusal, newJoinCode, normalizeJoinCode, parseFacts, parseWhois, tailnetShortName } from './machineJoin.ts';
+import { tmpDir } from './testTmp.ts';
 
-const scratch = () => path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoin-')), 'machine-joins.json');
+const scratch = () => path.join(tmpDir('ffjoin-'), 'machine-joins.json');
 
 test('join codes: 20 characters of Crockford base32 in four groups; typing slips are forgiven, anything else refused', () => {
   const c = newJoinCode();

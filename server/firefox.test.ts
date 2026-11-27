@@ -23,6 +23,7 @@ import {
   type FirefoxDeps,
   type FirefoxProc,
 } from '../machine/firefox.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * The tray's Close Firefox (w1593, machine/firefox.ts; docs/machines.md "Closing Firefox to free RAM"): WM_CLOSE to the
@@ -200,8 +201,8 @@ test('never a kill: the close code ends no process (no taskkill, Stop-Process, T
   assert.match(ts, /PostMessage\(h, 0x0010,/, 'WM_CLOSE, posted, as the title bar X');
 });
 
-test('a profile: open only while its parent.lock is held; once closed, prefs.js gains the restore-once line', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-firefox-'));
+test('a profile: open only while its parent.lock is held; once closed, prefs.js gains the restore-once line', (t) => {
+  const dir = tmpDir('ff-firefox-', t);
   assert.equal(profileInUse(dir), false, 'no parent.lock');
   fs.writeFileSync(path.join(dir, 'parent.lock'), '');
   assert.equal(profileInUse(dir), false, 'a parent.lock nobody holds (Firefox leaves the file when it ends)');
@@ -270,8 +271,8 @@ $a.Show(); $b.Show(); $b.Activate()
   assert.equal(await w.exited, 0, 'the process ended on its own, with code 0');
 });
 
-test('off by default (lothsahn: "Closing Firefox should be off by default"): nothing closes until the machine turns it on', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-firefox-setting-'));
+test('off by default (lothsahn: "Closing Firefox should be off by default"): nothing closes until the machine turns it on', async (t) => {
+  const dir = tmpDir('ff-firefox-setting-', t);
   const file = firefoxFile(dir);
   const sent: Record<string, unknown>[] = [];
   let closes = 0;

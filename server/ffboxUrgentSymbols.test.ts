@@ -8,7 +8,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -18,12 +17,13 @@ import { FfboxSymbolUploads, checkSymbolUpload, describeSymbolUpload } from './f
 import { SYMBOLS_UPLOAD, mintProviderToken, tokenSha256 } from './providerProtocol.ts';
 import { CATALOG } from './launch.ts';
 import { MockConnector } from '../e2e/mockConnector.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 import type { Config } from './config.ts';
 
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
 
 async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffbox-urgent-symbols-'));
+  const dataDir = tmpDir('ffbox-urgent-symbols-');
   const token = mintProviderToken();
   const cfg = { dataDir, providers: { ffbox: { enabled: true, tokenSha256: tokenSha256(token) } } } as unknown as Config;
   const pm = new ProviderManager(cfg);
@@ -38,7 +38,7 @@ async function setup(t: { after: (fn: () => Promise<void> | void) => void }) {
     c.close();
     pm.close();
     server.close();
-    fs.rmSync(dataDir, { recursive: true, force: true });
+    removeTmp(dataDir);
   });
   return { pm, store, c, dataDir };
 }

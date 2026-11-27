@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { type Deps, type InstanceList, followSelf, listProblem, readState, settingsDiff, stableTarget, tick } from './instance/update-all.ts';
+import { tmpDir } from '../server/testTmp.ts';
 
 const A = 'a'.repeat(40);
 const B = 'b'.repeat(40);
@@ -11,7 +11,7 @@ const LEAD = 'https://lead.test';
 
 /** A computer with instances: each portal answers its commit on its port; git moves HEAD; the portal drains on request. */
 function world(names: string[], o: { headOf?: Record<string, string>; failBuild?: (sha: string) => boolean; noHealth?: Set<string>; onMain?: boolean; ahead?: Set<string>; noControl?: Set<string> } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w14-'));
+  const root = tmpDir('w14-');
   const port: Record<string, number> = {};
   const head: Record<string, string> = {};
   const up: Record<string, boolean> = {};

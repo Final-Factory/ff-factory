@@ -161,3 +161,99 @@ test('w1688: the CliScrubber masks what is already on disk once a value is learn
   await s.sweep();
   assert.ok(lines.length >= 2 && lines.every((l) => !l.includes(v)), 'the log names files and counts, never the value');
 });
+
+test('w6479: a file replaced by a shorter one under its name is scanned whole, and a gone file is forgotten at the sweep', async (t) => {
+  t.after(reset);
+  reset();
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const v = fake(30);
+  addSecretValues([v]);
+  // in an extra folder (swept, not watched): no watch event forgets the old file before the sweep
+  const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliextra-'));
+  t.after(() => fs.rmSync(extra, { recursive: true, force: true }));
+  const f = path.join(extra, 'tasks', 'a.txt');
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.writeFileSync(f, JSON.stringify({ pad: 'x'.repeat(2_000) }) + '\n');
+  const s = new CliScrubber({ root, extraRoots: () => [extra], log: () => undefined, sweepMs: 3_600_000 }).start();
+  t.after(() => s.stop());
+  await s.sweep();
+  const read = (s as unknown as { read: Map<string, number> }).read;
+  assert.ok((read.get(f) ?? 0) > 2_000, 'the long file was read');
+  // replaced by a shorter file whose value sits before the old size: a scan from the old size would miss it
+  fs.rmSync(f);
+  fs.writeFileSync(f, JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(1_000) }) + '\n');
+  await s.sweep();
+  assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the shorter file is scanned from its start');
+  s.stop();
+  fs.rmSync(f);
+  await s.sweep();
+  assert.equal(read.has(f), false, 'the sweep forgets a file the walk no longer finds');
+});
+
+for (const known of ['scanned', 'listed at the start'] as const) {
+  test(`w6479 review: a file made again longer under its name, ${known}, is scanned whole at the sweep`, async (t) => {
+    t.after(reset);
+    reset();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const v = fake(30);
+    addSecretValues([v]);
+    // unwatched (an extra root): its deletion is never seen as it happens
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliextra-'));
+    t.after(() => fs.rmSync(extra, { recursive: true, force: true }));
+    const f = path.join(extra, 'tasks', 'a.txt');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({ pad: 'x'.repeat(2_000) }) + '\n');
+    const s = new CliScrubber({ root, extraRoots: () => [extra], log: () => undefined, sweepMs: 3_600_000 });
+    t.after(() => s.stop());
+    // 'listed at the start': the portal's start lists it by size and identity, and its back-scan never comes in this test
+    s.start(known === 'scanned' ? {} : { backScanAfter: new Promise(() => undefined) });
+    if (known === 'scanned') await s.sweep();
+    const read = (s as unknown as { read: Map<string, number> }).read;
+    assert.ok((read.get(f) ?? 0) > 2_000, 'the old file is known');
+    fs.rmSync(f);
+    await s.pass('watch');
+    // made again longer, its value before the old size: a scan from the old size would miss it
+    fs.writeFileSync(f, JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(3_000) }) + '\n');
+    await s.sweep();
+    assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the new file is scanned from its start');
+  });
+}
+
+for (const how of ['made again at the same size', 'cut shorter in place'] as const) {
+  test(`w6494 review: a file ${how} under its name is scanned whole at the sweep`, async (t) => {
+    t.after(reset);
+    reset();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const v = fake(30);
+    addSecretValues([v]);
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliextra-'));
+    t.after(() => fs.rmSync(extra, { recursive: true, force: true }));
+    const f = path.join(extra, 'tasks', 'a.txt');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    const old = JSON.stringify({ pad: 'x'.repeat(2_000) }) + '\n';
+    fs.writeFileSync(f, old);
+    const s = new CliScrubber({ root, extraRoots: () => [extra], log: () => undefined, sweepMs: 3_600_000 });
+    t.after(() => s.stop());
+    s.start({});
+    await s.sweep();
+    const read = (s as unknown as { read: Map<string, number> }).read;
+    assert.equal(read.get(f), Buffer.byteLength(old), 'the old file is known');
+    let made: string;
+    if (how === 'made again at the same size') {
+      fs.rmSync(f);
+      await s.pass('watch');
+      const head = JSON.stringify({ stdout: `now ${v}`, pad: '' });
+      made = JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(Buffer.byteLength(old) - Buffer.byteLength(head) - 1) }) + '\n';
+      assert.equal(Buffer.byteLength(made), Buffer.byteLength(old));
+    } else {
+      // the same file (its identity kept), cut and written again shorter: a scan from the old size would read nothing
+      made = JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(500) }) + '\n';
+    }
+    fs.writeFileSync(f, made);
+    await s.sweep();
+    assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the file is scanned from its start');
+  });
+}

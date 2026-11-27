@@ -4,12 +4,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { TimedRuns } from './timedRuns.ts';
 import { BIG_TIMED_RUNS, SMALL_TIMED_MAX_AGENTS, timedRunSize } from './timedAsk.ts';
 import type { AttachmentStore } from './attachments.ts';
 import type { Machine } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 test('w2442: a big computer takes timed runs only when BIG_TIMED_RUNS names it (LothDesktop)', () => {
   assert.ok(BIG_TIMED_RUNS.lothdesktop);
@@ -20,7 +20,7 @@ test('w2442: a big computer takes timed runs only when BIG_TIMED_RUNS names it (
   assert.equal(timedRunSize('lothdesktop', 0), false, 'no agent slot: no worker install to run it');
 });
 
-test('w2442: LothDesktop is a timed_run target, after every small computer; asked by name it is taken', () => {
+test('w2442: LothDesktop is a timed_run target, after every small computer; asked by name it is taken', (t) => {
   const machines = [
     { id: 'beast', platform: 'win32', sandboxRoot: 'F:/ffw/sandboxes' },
     { id: 'lothdesktop', platform: 'win32', sandboxRoot: 'V:/ffw/sandboxes' },
@@ -31,7 +31,7 @@ test('w2442: LothDesktop is a timed_run target, after every small computer; aske
   const online = new Set(['beast', 'lothdesktop', 'lothlaptop']);
   const holds: Record<string, string> = {};
   const tr = new TimedRuns({
-    dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'w2442big-')),
+    dataDir: tmpDir('w2442big-', t),
     store: {} as AttachmentStore,
     machines: () => machines,
     isOnline: (id) => online.has(id),
