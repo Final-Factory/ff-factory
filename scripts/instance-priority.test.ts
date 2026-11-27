@@ -115,7 +115,7 @@ test('w6542: a winpid naming the forked bash.exe raises its node.exe child, neve
 });
 
 test('w6542: a winpid naming a process that is no node and starts none is not raised', { skip }, () => {
-  const other = spawn(msysBash(), ['-c', 'sleep 20; :'], { windowsHide: true });
+  const other = spawn(msysBash(), ['-c', '/usr/bin/sleep 20; :'], { windowsHide: true });
   try {
     const out = raise(other.pid as number);
     assert.match(out, new RegExp(`^portal priority \\(w6221\\): not the portal: pid ${other.pid} is bash.exe, with no node.exe child\\r?\\n$`), out);
