@@ -203,8 +203,9 @@ test('lockTranscripts and unlockTranscripts skip names ending in a dot or a spac
     fs.utimesSync(path.join(slug, 'old.jsonl'), week, week);
     fs.utimesSync(path.join(slug, 'old'), week, week);
     if (tricks) {
-      for (const p of [path.join(projects, 'F--work.'), path.join(projects, 'F--work '), path.join(slug, 'old.'), path.join(slug, 'old ')]) fs.mkdirSync(long(p));
+      for (const p of [path.join(projects, 'F--work.'), path.join(projects, 'F--work '), path.join(slug, 'old.'), path.join(slug, 'old '), path.join(slug, 'old', 'NUL'), path.join(slug, 'old', 'sub.')]) fs.mkdirSync(long(p));
       fs.writeFileSync(long(path.join(slug, 'old.jsonl.')), '');
+      fs.utimesSync(path.join(slug, 'old'), week, week);
     }
     return projects;
   };
@@ -228,10 +229,48 @@ test('lockTranscripts and unlockTranscripts skip names ending in a dot or a spac
   assert.ok(!after.unlock.some((c) => hasTrickName(c[0]) || c[0].endsWith('*')), JSON.stringify(after.unlock));
   const expand = (c: string[]) => (c[0] === '*' ? [] : c[0].endsWith('*') ? [[path.join(path.dirname(c[0]), 'old.jsonl'), ...c.slice(1)]] : [c]);
   assert.deepEqual(after.unlock.map((c) => c.join('|')).sort(), before.unlock.flatMap(expand).map((c) => c.join('|')).sort());
+  // One WARNING for the lock and one for the way back, each naming every one, those inside a conversation folder too
+  // (review w6452 L3).
   const warn = after.said.filter((l) => /WARNING: skipped .*w6380/.test(l));
-  assert.equal(warn.length, 1, after.said.join('\n'));
-  for (const n of ['F--work.', 'F--work ', 'old.', 'old ', 'old.jsonl.']) assert.ok(warn[0].includes(`${n}"`), `${n}: ${warn[0]}`);
+  assert.equal(warn.length, 2, after.said.join('\n'));
+  for (const w of warn) for (const n of ['F--work.', 'F--work ', 'old.', 'old ', 'old.jsonl.', 'NUL', 'sub.']) assert.ok(w.includes(`${n}"`), `${n}: ${w}`);
   assert.deepEqual(after.said.filter((l) => !/w6380/.test(l)), before.said);
+});
+
+// Review w6452 L3: a trick name inside a folder the spawner or a returning pin walks is said, not skipped silently.
+test('the spawner and a pin taken back to Medium say each trick name in a conversation folder they walk', async () => {
+  const long = (p: string) => (process.platform === 'win32' ? `\\\\?\\${p}` : p);
+  // The spawner: a resumed conversation's folder holding `t.` and NUL.
+  const home = tmp();
+  const cwd = path.join(home, 'work');
+  const own = ownFiles({ args: ['--session-id', SID], cwd, env: { CLAUDE_CONFIG_DIR: home } })!;
+  for (const n of ['t.', 'NUL']) fs.mkdirSync(long(path.join(own.dir, n)), { recursive: true });
+  const r = recorder();
+  const logs: string[] = [];
+  const f = fakeChild();
+  lowTranscriptSpawner({ run: f.run, icacls: r.icacls, log: (l) => void logs.push(l) })({ command: 'claude', args: ['--session-id', SID], cwd, env: { CLAUDE_CONFIG_DIR: home }, signal: new AbortController().signal });
+  assert.ok(!r.calls.some((c) => hasTrickName(c[0])), JSON.stringify(r.calls));
+  for (const n of ['t.', 'NUL']) assert.ok(logs.some((l) => /WARNING: skipped/.test(l) && l.includes(`${n}"`)), `${n}: ${logs.join('\n')}`);
+  f.child.emit('exit', 0, null);
+  // A pinned conversation folder no longer running, taken back to Medium.
+  const root = tmp();
+  const projects = path.join(root, 'projects');
+  const conv = path.join(projects, 'F--work', SID);
+  fs.mkdirSync(conv, { recursive: true });
+  fs.writeFileSync(path.join(conv, 'f'), '');
+  const pins = path.join(root, 'transcript-pins.json');
+  let label = '';
+  const exec: Exec = async () => ({ code: 0, stdout: label, stderr: '' });
+  assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: recorder().icacls, account: 'HOST\\me', live: new Set([SID]), pins }), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(pins, 'utf8')), [conv]);
+  fs.mkdirSync(long(path.join(conv, 'p.')));
+  label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
+  const later = recorder(() => ({ code: 0, out: '(DENY)(DC)' }));
+  const said: string[] = [];
+  await lockTranscripts(projects, exec, (l) => said.push(l), { icacls: later.icacls, account: 'HOST\\me', live: new Set(), pins, now: Date.now() + 2 * 3600_000 });
+  assert.ok(!later.calls.some((c) => hasTrickName(c[0])), JSON.stringify(later.calls));
+  assert.ok(later.calls.some((c) => c[0] === conv && c[1] === '/setintegritylevel'), JSON.stringify(later.calls));
+  assert.ok(said.some((l) => /WARNING: skipped/.test(l) && l.includes('p."')), said.join('\n'));
 });
 
 test('lockTranscripts and unlockTranscripts leave the event loop free between icacls calls, and run icacls through exec by default', async () => {

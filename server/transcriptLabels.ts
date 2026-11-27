@@ -25,7 +25,7 @@ import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sd
 import { findTranscript, projectSlug } from './claudeHome.ts';
 import { sessionIdOf } from './workerFence.ts';
 import { currentAccount, type Exec } from '../machine/lowIntegrity.ts';
-import { isLink, isTrickName, hasTrickName } from './fsLink.ts';
+import { isLink, isTrickName, hasTrickName, TRICK_WHY } from './fsLink.ts';
 
 /** The folder label (inherited by what is made inside) and the file label. */
 const DIR_LOW = '(OI)(CI)low';
@@ -131,7 +131,7 @@ function* labelledLow(p: string): Steps<boolean> {
  */
 function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string | undefined, found?: string[], odd?: string[]): Steps<number> {
   if (isLink(root)) throw new Error(`${root} is a junction or link; not labelled (w5703)`);
-  if (hasTrickName(root)) throw new Error(`${JSON.stringify(root)} has a name ending in a dot or a space; not labelled (w6380)`);
+  if (hasTrickName(root)) throw new Error(`${JSON.stringify(root)} has a name ending in a dot or a space, or a device name such as NUL; not labelled (w6380, w6452)`);
   const dirLabel = `(OI)(CI)${level}`;
   let links = 0;
   /** Labels what is inside `dir` (Medium while this runs), not `dir` itself. */
@@ -278,9 +278,13 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
   const log = d.log ?? ((l: string) => console.warn(l));
   const label = (p: string, l: string, tree = false) => {
     try {
-      if (hasTrickName(p)) throw new Error(`${JSON.stringify(p)} has a name ending in a dot or a space; not labelled (w6380)`);
+      if (hasTrickName(p)) throw new Error(`${JSON.stringify(p)} has a name ending in a dot or a space, or a device name such as NUL; not labelled (w6380, w6452)`);
       if (!tree) setLabelSync(p, l, icacls);
-      else if (labelTreeSync(p, l === DIR_LOW ? 'low' : 'medium', icacls)) log(`transcript labels: skipped a junction or link in ${p}; it is not labelled (w5703)`);
+      else {
+        const odd: string[] = [];
+        if (labelTreeSync(p, l === DIR_LOW ? 'low' : 'medium', icacls, undefined, undefined, odd)) log(`transcript labels: skipped a junction or link in ${p}; it is not labelled (w5703)`);
+        if (odd.length) log(oddWarning(odd.map((o) => JSON.stringify(o))));
+      }
       return true;
     } catch (e) {
       log(`transcript labels: ${(e as Error).message}`);
@@ -293,7 +297,7 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
     // (claudeHome.ts), so this is only a guard: such a conversation is not labelled and its own writes fail, as for a label
     // that could not be set.
     const own = own0 && hasTrickName(own0.file) ? undefined : own0;
-    if (own0 && !own) log(`transcript labels: WARNING: ${JSON.stringify(own0.file)} has a name ending in a dot or a space; its files are not labelled (w6380)`);
+    if (own0 && !own) log(`transcript labels: WARNING: ${JSON.stringify(own0.file)} has a name ending in a dot or a space, or a device name such as NUL; its files are not labelled (w6380, w6452)`);
     if (own) {
       const folder = path.dirname(own.file);
       const projects = path.dirname(folder);
@@ -438,7 +442,10 @@ export async function liveSessionIds(exec: Exec): Promise<Set<string> | undefine
 const projectFolders = (projects: string) =>
   fs.readdirSync(projects, { withFileTypes: true }).filter((s) => !isTrickName(s.name)).map((s) => path.join(projects, s.name)).filter((p) => !isLink(p) && fs.statSync(p).isDirectory());
 
-/** The names in `dir` that end in a dot or a space (review w6380), quoted for a log line. */
+/** The WARNING for trick names skipped (review w6380, w6452), each quoted. */
+const oddWarning = (odd: string[]) => `transcript labels: WARNING: skipped ${odd.join(', ')}: ${TRICK_WHY}; not labelled (w6380, w6452)`;
+
+/** The names in `dir` that are trick names (review w6380, w6452), quoted for a log line. */
 const trickNames = (dir: string) => fs.readdirSync(dir).filter(isTrickName).map((n) => JSON.stringify(path.join(dir, n)));
 
 /** The conversation a transcript or conversation folder belongs to, or undefined for anything else (`memory\`, a stray). */
@@ -499,6 +506,7 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
       }
       const pins = readPins(o.pins);
       const left: string[] = [];
+      const inPins: string[] = [];
       let back = 0;
       for (const p of pins) {
         const dir = !p.endsWith('.jsonl');
@@ -507,12 +515,13 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
         if (keep(p, sid)) left.push(p);
         else if (isLink(p)) continue;
         else {
-          if (dir) await labelTree(p, 'medium', ic, account);
+          if (dir) await labelTree(p, 'medium', ic, account, undefined, inPins);
           else await setLabel(p, 'medium', ic, account);
           back++;
         }
       }
       if (o.pins && left.length !== pins.length) fs.writeFileSync(o.pins, JSON.stringify(left));
+      if (inPins.length) say(oddWarning(inPins.map((x) => JSON.stringify(x))));
       if (denied || back)
         say(`transcript labels: ${back} pinned conversation entr${back === 1 ? 'y' : 'ies'} no longer running labelled Medium, ${denied} new project folder${denied === 1 ? '' : 's'} given the delete-child deny; ${left.length} still pinned (w5774)`);
       return true;
@@ -551,14 +560,18 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
           await setLabel(p, dir ? DIR_LOW : 'low', ic, account);
           pins.push(p);
         } else {
-          if (dir) links += await labelTree(p, 'medium', ic, account);
+          if (dir) {
+            const inside: string[] = [];
+            links += await labelTree(p, 'medium', ic, account, undefined, inside);
+            odd.push(...inside.map((x) => JSON.stringify(x)));
+          }
           else await setLabel(p, 'medium', ic, account);
           locked++;
         }
       }
     }
     if (o.pins) fs.writeFileSync(o.pins, JSON.stringify(pins));
-    if (odd.length) say(`transcript labels: WARNING: skipped ${odd.join(', ')}: a name ending in a dot or a space, which icacls would open as another path; not labelled (w6380)`);
+    if (odd.length) say(oddWarning(odd));
     say(`transcript labels: labelled ${projects} Medium (w5703), with ${slugs.length} project folder${slugs.length === 1 ? '' : 's'} and ${locked} transcript${locked === 1 ? '' : 's'} and folders in them; ${pins.length} running or written in the last ${o.live ? `${Math.round(recentMs / 60_000)} min` : "3 days"} kept Low until they stop${links ? `; ${links} junction${links === 1 ? '' : 's'} or link${links === 1 ? '' : 's'} skipped` : ''}`);
     return true;
   } catch (e) {
@@ -580,7 +593,9 @@ export async function unlockTranscripts(projects: string, exec: Exec, say: (line
     const now = await exec('icacls', [projects], { timeoutMs: 60_000 });
     if (now.code !== 0 || !explicitMedium(now.stdout)) return;
     for (const p of [path.dirname(projects), projects, ...projectFolders(projects)]) await undeny(p, ic, account);
-    const links = await labelTree(projects, 'low', ic, account);
+    const odd: string[] = [];
+    const links = await labelTree(projects, 'low', ic, account, undefined, odd);
+    if (odd.length) say(oddWarning(odd.map((x) => JSON.stringify(x))));
     if (pins) fs.rmSync(pins, { force: true });
     say(`transcript labels: off; labelled ${projects} and everything in it Low again (w5703)${links ? `; ${links} junction${links === 1 ? '' : 's'} or link${links === 1 ? '' : 's'} skipped` : ''}`);
   } catch (e) {

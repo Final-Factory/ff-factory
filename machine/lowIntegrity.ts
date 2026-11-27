@@ -450,7 +450,7 @@ export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium 
  * Exported for tests.
  */
 export const trickWarning = (p: string) =>
-  `worker integrity: WARNING: ${JSON.stringify(p)} has a name ending in a dot or a space, skipped: not labelled, since icacls would open the path without it (perhaps a junction beside it) (w6380)`;
+  `worker integrity: WARNING: ${JSON.stringify(p)} has a name ending in a dot or a space, or a device name such as NUL, skipped: not labelled, since icacls would open another path (perhaps a junction beside it) or fail on it (w6380, w6452)`;
 
 /**
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
@@ -572,7 +572,7 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
       }
       try {
         if (!fs.existsSync(g)) continue;
-        if (hasTrickName(g)) throw new Error('its name, or a name on the way to it, ends in a dot or a space, so icacls would open another path (w6380)');
+        if (hasTrickName(g)) throw new Error('its name, or a name on the way to it, ends in a dot or a space or is a device name such as NUL, so icacls would open another path or fail on it (w6380, w6452)');
         if (isLink(g) || linkedOnTheWay(path.dirname(g))) throw new Error('it is (or lies below) a junction or symlink now');
         const now = await exec('icacls', [g], { timeoutMs: 60_000 });
         if (now.code === 0 && isExplicitMedium(now.stdout)) continue;
@@ -592,7 +592,7 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
   for (const p of t.medium ?? []) {
     try {
       if (!fs.existsSync(p) || open.some((o) => inside(p, o))) continue;
-      if (hasTrickName(p)) throw new Error('its name, or a name on the way to it, ends in a dot or a space, so icacls would open another path (w6380)');
+      if (hasTrickName(p)) throw new Error('its name, or a name on the way to it, ends in a dot or a space or is a device name such as NUL, so icacls would open another path or fail on it (w6380, w6452)');
       if (linkedOnTheWay(p)) throw new Error('it is (or lies below) a junction or symlink now (w6377)');
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       // w5615: a shared-lock folder until it carries Medium of its own (its parent's Medium reaches it inherited, not its files).

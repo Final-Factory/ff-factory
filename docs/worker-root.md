@@ -1579,6 +1579,15 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     space, skipped` (not a failure, as for a link); the walk (transcriptLabels.ts `labelTree`) skips such an entry, never
     labels its folder with `<dir>\*` (which would open it too), and refuses such a root; the transcript lock skips such
     project folders and entries with one WARNING. The skipped folder keeps what it inherits; only a `\\?\` path reaches it.
+    A Windows device name counts as one too (review w6452 M1: NUL, CON, PRN, AUX, COM0-9, LPT0-9, COM and LPT with a
+    superscript 1-3, CONIN$, CONOUT$, any case, with or without an extension): icacls on `<dir>\NUL`, or `<dir>\*` with a
+    NUL in it, fails with exit 87, which failed the whole pass under on and off alike, so a worker could hold every worker
+    with one file; skipped, the way back to off still recovers (tested with a fake icacls that fails as the real one).
+    Every walk that skips one says it: the spawner's, a pin taken back to Medium, the lock and the unlock (review w6452 L3).
+    lockIn (machine/lockIn.ts `firstUnplain`) counts such a name in a moved-in entry as bad: labelTree would skip it, so it
+    would keep the worker's own Low label; the entry is removed and said (review w6452 M2). `rd /s /q` answers 0 and leaves
+    `x.`, `y ` and NUL in place with all that is in them (measured on LothDesktop), so lockIn removes again by the entry's
+    `\\?\` path, which removes them too, and a junction in them without its target (measured).
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
     made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
