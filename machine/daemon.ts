@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { SlotCaches, idleForRefresh, inSharedLocked, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -938,6 +938,8 @@ export class Daemon {
         send: (m) => this.send(m),
         log: (line) => log(line),
         personBusy: () => this.personStartGate(),
+        // w6316 finding 2: its layouts and leases in players/<slot> are the daemon's writes for the shared-lock watch.
+        daemonWrites: (folders) => this.sharedWrites.begin(folders),
         lastInputAt: () => this.personInputAt,
         // w1996: on a worker computer the run queues like any timed leg and borrows a free sandbox's player slots
         worker: {
@@ -1319,7 +1321,7 @@ export class Daemon {
       log,
     });
     // w6314: a prune inside the shared-lock folders (the shared uv seed) is the daemon's own write for the warn watch.
-    const pruneAround = (dir: string) => (cfg.root && inSharedLocked(cfg.root, dir) ? <T>(f: () => Promise<T>) => this.sharedWrite(f) : undefined);
+    const pruneAround = (dir: string) => <T>(f: () => Promise<T>) => asDaemonWrite(this.sharedWrites, cfg.root, [dir], f);
     if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log, around: pruneAround(workerUvCacheDir(cfg.root)) });
     // w5565: the daemon's and Medium agents' own cache, pruned on its own clock.
     if (cfg.root) this.mediumUvPruner = new UvCachePruner({ dir: mediumUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log, around: pruneAround(mediumUvCacheDir(cfg.root)) });
@@ -1411,7 +1413,8 @@ export class Daemon {
           first: this.ffuFirstStep(low, guard, ''),
           busyNow: this.cleanupBusyNow(),
           // w6314: removals inside the shared-lock folders (a player slot nobody holds, a cache seed) are the daemon's writes.
-          removing: (items, f) => (this.cfg.root && items.some((i) => inSharedLocked(this.cfg.root!, i.path)) ? this.sharedWrite(f) : f()),
+          // w6316 finding 3: only the batch's locked items are marked, each its own path.
+          removing: (items, f) => asDaemonWrite(this.sharedWrites, this.cfg.root, items.map((i) => i.path), f),
           endStrays: async (strays) => {
             for (const st of strays) {
               log(`clean-up: ending process ${st.pid} of a stopped session (${st.why}): ${st.cmd.slice(0, 120)}`);
@@ -2135,7 +2138,7 @@ export class Daemon {
     // w5615: each sandbox's own clones of the tool caches, made, merged back and refreshed while it is idle.
     if (this.slotCaches) {
       // w6274: a tick's merge-back and clones are the daemon's writes for the shared-lock watch, its in-process steps too.
-      const tick = () => void this.sharedWrite(() => this.slotCaches?.tick());
+      const tick = () => void this.sharedWrite(() => this.slotCaches?.tick(), this.cacheSeeds());
       tick();
       this.timers.push(setInterval(loopLabel('timer slotCaches.tick', tick), SLOT_CACHES_EVERY_MS));
     }
@@ -2177,7 +2180,7 @@ export class Daemon {
       const root = this.cfg.root;
       void (async () => {
         for (const [dir, forWhom] of [[mediumUvCacheDir(root), 'Medium agents'], [workerUvCacheDir(root), 'sandbox agents']] as const) {
-          const m = await warmUvCache(command, uvWarmRuns({ command, args }), dir, runQuietEnv, {}, forWhom, { root, appDir: appDirOfConfig(this.cfg) }).catch((e) => `unity mcp: filling the uv cache for ${forWhom} failed: ${(e as Error).message}`);
+          const m = await this.uvWarmAsDaemon(dir, () => warmUvCache(command, uvWarmRuns({ command, args }), dir, runQuietEnv, {}, forWhom, { root, appDir: appDirOfConfig(this.cfg) })).catch((e) => `unity mcp: filling the uv cache for ${forWhom} failed: ${(e as Error).message}`);
           if (m) log(m);
         }
       })();
@@ -3812,23 +3815,28 @@ export class Daemon {
       this.sharedLockMemo = asked === 'on' && blockers.length ? 'warn' : asked;
       const line = sharedLockLine(asked, blockers);
       if (line) log(line);
-      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonBusy: () => this.sharedBusy > 0, lastDaemonWrite: () => this.sharedDoneAt });
+      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonOwns: (file, t) => this.sharedWrites.owns(file, t) });
     }
     return this.sharedLockMemo;
   }
   private stopSharedWatch?: () => void;
-  /** Writes the daemon itself makes in the locked folders right now (a merge-back, a player install): the watch skips them. */
-  private sharedBusy = 0;
-  /** When the last of them ended: macOS reports their events late, so the watch skips a grace after it too (w6274). */
-  private sharedDoneAt = -Infinity;
-  private async sharedWrite<T>(f: () => T | Promise<T>): Promise<T> {
-    this.sharedBusy++;
-    try {
-      return await f();
-    } finally {
-      this.sharedBusy--;
-      this.sharedDoneAt = Date.now();
-    }
+  /**
+   * Writes the daemon itself makes in the locked folders (a merge-back, a player install, a prune), per folder: the watch
+   * skips changes inside the folders a write names while it runs and for DAEMON_GRACE_MS after (macOS reports them late,
+   * w6274), and still logs a worker's write to any other locked folder meanwhile (w6314, review w6316 finding 3).
+   */
+  private readonly sharedWrites = new DaemonWrites();
+  private sharedWrite<T>(f: () => T | Promise<T>, folders: string[]): Promise<T> {
+    return this.sharedWrites.run(folders, f);
+  }
+  /** A uv cache warm, as the daemon's own write when its cache is a shared-lock folder (w6314, review w6316 finding 1). */
+  private uvWarmAsDaemon<T>(dir: string, f: () => Promise<T>): Promise<T> {
+    return asDaemonWrite(this.sharedWrites, this.cfg.root, [dir], f);
+  }
+  /** The seeds of the cloned tool caches: what a slot caches tick merges back into and clones from. */
+  private cacheSeeds(): string[] {
+    const root = this.cfg.root;
+    return root ? sharedLockedFolders(root).filter((f) => inFolder(path.join(root, 'cache'), f)) : [];
   }
 
   private slotCachesMemo?: SlotCaches | null;
@@ -3870,9 +3878,10 @@ export class Daemon {
       macFence: () => this.workerFence,
       linuxLock: () => this.writeLock && [...this.writeLock, ...this.readLock],
       lowNode: () => this.lowCopies?.make(process.execPath),
-      run: (cmd, argv) => this.sharedWrite(() => run(cmd, argv, { timeoutMs: 30 * 60_000 })),
+      // Its callers mark their own folders (the slot caches tick its seeds, the broker's calls players; w6314).
+      run: (cmd, argv) => run(cmd, argv, { timeoutMs: 30 * 60_000 }),
       removeTree: async (dir) => {
-        await this.sharedWrite(() => removeTree(dir));
+        await removeTree(dir);
       },
     });
   }
@@ -3891,12 +3900,12 @@ export class Daemon {
       tempDir: this.cfg.tempDir || path.join(root, 'tmp'),
       playerCache: playerCacheRoot(root),
       removeTree: async (dir) => {
-        await this.sharedWrite(() => removeTree(dir));
+        await this.sharedWrite(() => removeTree(dir), [dir]);
       },
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowCopies?.make(process.execPath) }),
       log: (l) => log(l),
     });
-    return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b))]));
+    return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b), [path.join(root, 'players')])]));
   }
 
   private fenceMemo?: { fence?: WorkerFence; why?: string };
@@ -4146,7 +4155,7 @@ export class Daemon {
       // w6284: the slot caches' first tick may have run before the Low node copy its copies need; try what it lacks again now.
       if (this.slotCaches) {
         this.slotCaches.retryNow();
-        void this.sharedWrite(() => this.slotCaches?.tick());
+        void this.sharedWrite(() => this.slotCaches?.tick(), this.cacheSeeds());
       }
       const claude = this.lowCopies.make(sdkClaude);
       if (!claude) {
@@ -4187,7 +4196,8 @@ export class Daemon {
       const mcp = resolveUnityMcpServer(this.cfg.unityMcpServer, this.cfg.repoPath);
       if (mcp.server) {
         const { APPDATA, LOCALAPPDATA } = lowEnv(root, undefined, 'PATH', undefined);
-        void warmUvCache(mcp.server.command, uvWarmRuns(mcp.server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) }).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
+        const server = mcp.server;
+        void this.uvWarmAsDaemon(workerUvCacheDir(root), () => warmUvCache(server.command, uvWarmRuns(server), workerUvCacheDir(root), runQuietEnv, { APPDATA, LOCALAPPDATA }, 'Low agents', { root, appDir: appDirOfConfig(this.cfg) })).then((m) => m && log(m)).catch((e) => log(`unity mcp: filling the uv cache for Low agents failed: ${(e as Error).message}`));
       }
       // w5347: a Low compiler server on an install's own path takes every Medium compile on the machine; end it at once.
       // w5938: off the event loop (compilerServersAsync), and one look at a time.

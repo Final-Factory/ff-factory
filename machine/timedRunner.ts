@@ -38,6 +38,11 @@ export interface TimedRunnerDeps {
   log: (line: string) => void;
   /** Why no leg may start now (a person plays here), or undefined. */
   personBusy: () => string | undefined;
+  /**
+   * Marks folders the run writes in players/ (a slot's layout, a borrowed pair's links and leases) as the daemon's own for
+   * the shared-lock warn watch; the answer ends the mark (w6314, review w6316 finding 2).
+   */
+  daemonWrites?: (folders: string[]) => () => void;
   /** A person's last key or click here (epoch ms), when the tray reports it. */
   lastInputAt?: () => number | undefined;
   /** The game's saves folder, for every build (default: each build's own, savesDirsFor). */
@@ -713,7 +718,13 @@ export class TimedRunner {
         builds.set(key, i);
         const dir = worker ? path.join(root, 'timing', 'builds', `b${i}`) : path.join(root, 'players', TIMED_SLOTS[i], 'player');
         buildDirs.push(dir);
-        const how = await layOut(v, dir, cache);
+        const end = worker ? undefined : this.d.daemonWrites?.([path.dirname(dir)]);
+        let how: Awaited<ReturnType<typeof layOut>>;
+        try {
+          how = await layOut(v, dir, cache);
+        } finally {
+          end?.();
+        }
         this.status(o.id, 'fetching', `${v.name}: ${how === 'kept' ? 'already' : 'laid out'} in ${worker ? `timing/builds/b${i}` : TIMED_SLOTS[i]}`);
       }
       buildOf.set(v.name, i);
@@ -898,6 +909,7 @@ export class TimedRunner {
           for (let waited = 0; ; waited++) {
             pair = borrowPair(slotsRoot, w.sandboxIds().filter((id) => !busy.has(id)), x.buildDirs.length, { ownerPid: owner.pid, run: o.id, session: o.session });
             if (pair) {
+              const end = this.d.daemonWrites?.(pair.slots);
               try {
                 for (let i = 0; i < x.buildDirs.length; i++) linkInto(x.buildDirs[i], pair.slots[i], x.buildFiles.get(i)!, fs.readFileSync(path.join(x.buildDirs[i], '.timed-build'), 'utf8').trim(), o.id);
                 break;
@@ -907,6 +919,8 @@ export class TimedRunner {
                 this.status(o.id, 'waiting', `turn ${turn}: ${pair.sandbox}'s player slots are in use (${(e as Error).message.slice(0, 120)}); trying another`);
                 pair = undefined;
                 continue;
+              } finally {
+                end?.();
               }
             }
             if (waited * x.poll > 5 * 60_000) throw new Error(`no sandbox's player-slot pair here came free within 5 minutes of the turn (${w.sandboxIds().join(', ')})`);
@@ -945,7 +959,9 @@ export class TimedRunner {
             }
           }
         } finally {
+          const end = this.d.daemonWrites?.(pair?.slots ?? []);
           for (const f of pair?.leases ?? []) fs.rmSync(f, { force: true });
+          end?.();
           ticket.release();
         }
         if (next < order.length) this.status(o.id, 'waiting', `turn ${turn} gave its ticket back after ${next} of ${order.length} legs (a turn is at most 30 minutes, w1832); queued again for the rest`);
