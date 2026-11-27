@@ -97,8 +97,8 @@ per rolling 24 hours; operators are not capped.
   and uploaded the same way and sets its main app live on `pre-release`, only for a 0.50.x version (`SETLIVE_VERSIONS`:
   a 1.0 build never goes there; ffbox e42c3c7, w6522, 2026-11-27; lothsahn: "Can it set that whenever a .50 release is
   made?"). A failed or skipped upload leaves `pre-release` where it was, and FFBox's notice in #release-build-announce
-  says so. Nothing sets the default branch: Ben or Lothsahn move it by hand. The urgent lane (`steam_upload`) still sets
-  nothing for a pre-1.0 release. `ff-agents:ci-release` drives it. A requested
+  says so. Nothing sets the default branch: Ben or Lothsahn move it by hand. The urgent lane (`steam_upload`) sets the same:
+  development for master, pre-release for a 0.50.x pre-1.0 main release (w6534; `docs/steam-upload.md`). `ff-agents:ci-release` drives it. A requested
   release is done only when it is live on its branch (landed on the branch the lane sets: `development` for master,
   `pre-release` for a 0.50.x hotfix; the notes never wait for the default, nor a master release's for `pre-release`, w2444) and its patch notes are posted once, as Max,
   in #dev-patch-notes (from any machine, with `post_as_max`: FFBox posts, [Posting as Max](#posting-as-max-w901)).

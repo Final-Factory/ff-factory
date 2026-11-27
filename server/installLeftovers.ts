@@ -128,6 +128,15 @@ export interface InstallLeftoverSettings {
    */
   runnerTargetMode: 'off' | 'warn' | 'on';
   /**
+   * The rule ffu-runner-work in the first step of a LOW pass (scope 'ffu-slots', w6524): an idle FFU runner's job folders,
+   * untouched lowCacheSettleMinutes, taken before the slow steps, and so also by the low or asked step that runs alone while
+   * a pass that is not low is in flight (server/cleanup.ts midPassLow). On LothDesktop, 2026-11-27, runner 2's 13.8 GB job
+   * folder stayed while an hourly pass ran 45+ min and four low or asked steps each planned 0 items. 'warn' (the default)
+   * lists what 'on' would take ("warn-only (runnerFirstMode warn, w6524)"), 'on' takes it, 'off' leaves the step as it was.
+   * lothsahn's lockout rule: warn-only first, 'on' in a separate PR. Not wired to daemon.json yet (as runnerTargetMode).
+   */
+  runnerFirstMode: 'off' | 'warn' | 'on';
+  /**
    * An idle FFU runner's cargo target keeps what its workspace built within this many hours of its newest build, and everything
    * that build used (server/cargoGraphSweep.ts, w6291); the window narrows to 24, 6, 1 h and 15 min only while the target is over
    * runnerTargetCapGB. Measured on ffu-lothdesktop-1 (2026-11-27, 2049 units): a 48 h window kept all of them (frees 0), 24 h freed
@@ -167,6 +176,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
   ffuSlotKeepHours: 48,
   ffuSlotReleasedKeepHours: 1,
   runnerTargetMode: 'warn',
+  runnerFirstMode: 'warn',
   runnerTargetKeepHours: 48,
   runnerTargetCapGB: 24,
 };
@@ -175,7 +185,7 @@ export const INSTALL_LEFTOVER_DEFAULTS: InstallLeftoverSettings = {
 export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
   const r = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   const d = INSTALL_LEFTOVER_DEFAULTS;
-  const n = (k: Exclude<keyof InstallLeftoverSettings, 'runnerTargetMode'>, min: number, max: number) => (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) >= min && (r[k] as number) <= max ? (r[k] as number) : d[k]);
+  const n = (k: Exclude<keyof InstallLeftoverSettings, 'runnerTargetMode' | 'runnerFirstMode'>, min: number, max: number) => (typeof r[k] === 'number' && Number.isFinite(r[k]) && (r[k] as number) >= min && (r[k] as number) <= max ? (r[k] as number) : d[k]);
   return {
     keepBuilds: n('keepBuilds', 1, 20),
     buildUntouchedHours: n('buildUntouchedHours', 1, 24 * 30),
@@ -198,6 +208,7 @@ export function installLeftoverSettings(raw: unknown): InstallLeftoverSettings {
     ffuSlotKeepHours: n('ffuSlotKeepHours', 0, 24 * 365),
     ffuSlotReleasedKeepHours: n('ffuSlotReleasedKeepHours', 0, 24 * 365),
     runnerTargetMode: r.runnerTargetMode === 'off' || r.runnerTargetMode === 'warn' || r.runnerTargetMode === 'on' ? r.runnerTargetMode : d.runnerTargetMode,
+    runnerFirstMode: r.runnerFirstMode === 'off' || r.runnerFirstMode === 'warn' || r.runnerFirstMode === 'on' ? r.runnerFirstMode : d.runnerFirstMode,
     runnerTargetKeepHours: n('runnerTargetKeepHours', 0, 24 * 365),
     runnerTargetCapGB: n('runnerTargetCapGB', 0, 10_000),
   };
@@ -1661,10 +1672,47 @@ export async function planInstallLeftovers(o: {
     }
   };
 
+  /**
+   * The FFU runners' job folders (rule ffu-runner-work) and, outside a low pass, their cargo targets (ffu-runner-target).
+   * firstStep (w6524): the low first step's run, job folders only, by runnerFirstMode ('warn' lists, 'on' takes).
+   */
+  const runnerJobs = async (firstStep: boolean) => {
+    const runners = path.join(root, 'ffu-runners');
+    for (const r of await children(runners)) {
+      if (!r.isDirectory()) continue;
+      const runner = path.join(runners, r.name);
+      const work = path.join(runner, '_work');
+      const entries = (await children(work)).filter((e) => !RUNNER_KEPT.test(e.name));
+      if (!entries.length) continue;
+      const busy = runnerJobWhy(runner, o.procs, now, o.runnerLog);
+      if (busy) {
+        if (!firstStep) await keptBig(work, `an FFU runner's job folders kept: ${busy}`);
+        continue;
+      }
+      const age = o.low ? settleMs : s.runnerWorkDays * DAY;
+      for (const e of entries) {
+        const p = path.join(work, e.name);
+        const why = `FFU runner ${r.name}'s job folder (${e.name}), no job running, untouched for ${o.low ? `${age / 60_000} min (the disk is low)` : `${s.runnerWorkDays} days`}; the next job recreates it`;
+        if (firstStep && s.runnerFirstMode === 'warn') {
+          await take(p, runner, 'ffu-runner-work', why, age, true);
+          const it = items.get(p);
+          if (it) {
+            items.delete(p);
+            listed.set(p, `warn-only (runnerFirstMode warn, w6524): the low first step would take ${why}`);
+          }
+        } else await take(p, runner, 'ffu-runner-work', why, age, true);
+      }
+      // A low pass keeps today's rule: the whole job folder goes after the settle time, target and all.
+      if (!firstStep && !o.low && s.runnerTargetMode !== 'off') await runnerTargets(runner, r.name, work, entries);
+    }
+  };
+
   if (o.scope === 'ffu-slots') {
+    if (o.low && s.runnerFirstMode !== 'off') await runnerJobs(true);
     await ffuSlotTargets();
     dropNested(items);
     plan.items = [...items.values()];
+    if (listed.size) plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
     return plan;
   }
 
@@ -1832,25 +1880,7 @@ export async function planInstallLeftovers(o: {
       else items.set(target, { path: target, rule: 'ffu-runner-target', why, base: runner, runner, ...(members ? { members } : {}) });
     }
   };
-  const runners = path.join(root, 'ffu-runners');
-  for (const r of await children(runners)) {
-    if (!r.isDirectory()) continue;
-    const runner = path.join(runners, r.name);
-    const work = path.join(runner, '_work');
-    const entries = (await children(work)).filter((e) => !RUNNER_KEPT.test(e.name));
-    if (!entries.length) continue;
-    const busy = runnerJobWhy(runner, o.procs, now, o.runnerLog);
-    if (busy) {
-      await keptBig(work, `an FFU runner's job folders kept: ${busy}`);
-      continue;
-    }
-    const age = o.low ? settleMs : s.runnerWorkDays * DAY;
-    for (const e of entries) {
-      await take(path.join(work, e.name), runner, 'ffu-runner-work', `FFU runner ${r.name}'s job folder (${e.name}), no job running, untouched for ${o.low ? `${age / 60_000} min (the disk is low)` : `${s.runnerWorkDays} days`}; the next job recreates it`, age, true);
-    }
-    // A low pass keeps today's rule: the whole job folder goes after the settle time, target and all.
-    if (!o.low && s.runnerTargetMode !== 'off') await runnerTargets(runner, r.name, work, entries);
-  }
+  await runnerJobs(false);
   if (warnDirty && o.runnerWarnFile) {
     for (const t of Object.keys(runnerWarn)) if (!fs.existsSync(t)) delete runnerWarn[t]; // a target a job folder's removal took
     writeRunnerWarn(o.runnerWarnFile, runnerWarn);

@@ -53,7 +53,7 @@ itself, never from the caller's word:
 | The caller builds a release here | `BuildPlans.building(machine, session)`: a started plan whose builder is this session | "you are not building a release on ..." |
 | The build is the caller's own release | `cicd/release-lane.json` at `sha` (GitHub contents API): lane `urgent`, this `version`, this machine, and a request among the caller's open ones | "... another release's build", "... not one of your requests" |
 | The commit is a merged bump | compare API: `sha` is behind or at master or pre-1.0 | "not on master or pre-1.0" |
-| The live branch is the release's | `liveBranchesFor`: `development` for a master main release; nothing for pre-1.0 or the demo | "sets development live, not ...", "sets no Steam branch live" |
+| The live branch is the release's | `liveBranchesFor`: `development` for a master main release; `pre-release` for a pre-1.0 main release whose version starts `0.50.` (w6534); nothing for the demo or any other | "sets development live, not ...", "sets no Steam branch live" |
 | Once per version and app | the daemon's `<root>/steam/uploads.json` | "uploaded already" |
 
 A preview (`--preview`: manifests only, nothing uploaded, nothing set live) skips the build, claim and branch checks and may
@@ -63,7 +63,8 @@ not name").
 The daemon checks again (`machine/steamUpload.ts` `runSteamJob`): each run folder must resolve inside the caller's sandbox or
 temp folder; it copies the players without links into `<root>/steam/staging/`, runs FFBox's `ffrelease-check.py` on the copy,
 then `ffsteam.py upload` on the copy with only the job's secrets in its environment (no GitHub or Claude tokens), refuses any
-live branch but `development`, never a live branch with a preview, and one Steam job at a time a computer
+live branch but `development` and `pre-release`, `pre-release` for a version other than 0.50.x (ffsteam.py refuses that
+too), never a live branch with a preview, and one Steam job at a time a computer
 (`<root>/steam/job.lock`). FFBox's scripts come from its own clone in `<root>/steam/ffbox`, which workers cannot write.
 
 Setting `default` or any other branch live stays a person's act on the Steam partner site: no agent path does it.
