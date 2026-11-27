@@ -174,7 +174,9 @@ export interface SlotCachesDeps {
   root: string;
   setting: SharedLockSetting;
   /** Every sandbox the pool knows, and whether nothing runs in it now (no agent, no editor, no build). */
-  sandboxes: () => { id: string; idle: boolean }[];
+  sandboxes: () =>
+    | { id: string; idle: boolean }[]
+    | Promise<{ id: string; idle: boolean }[]>;
   /**
    * The copy with a worker's rights (machine/workerCopy.ts workerCopier; a block clone where the disk has one): the seed
    * and the clones are folders workers can change under "warn", so the daemon never reads them with its own (w6212 B1).
@@ -348,7 +350,7 @@ export class SlotCaches {
     if (this.d.setting === "off" || this.busy) return undefined;
     this.busy = true;
     try {
-      const all = this.d.sandboxes().filter((s) => okSandboxId(s.id));
+      const all = (await this.d.sandboxes()).filter((s) => okSandboxId(s.id));
       // First the sandboxes with no clone, idle or not (a clone of a seed nobody else writes is safe while a worker runs:
       // its own folder is made beside, renamed in, and named in the environment only from its next run on).
       const none = all.find(
@@ -494,10 +496,38 @@ export function sharedLockBlockers(
     : [];
 }
 
+/** How long after the daemon's own write the watch still counts a change as the daemon's (w6213). */
+export const WATCH_GRACE_MS = 2_000;
+
+/** The daemon's own writes in the locked folders: busy while one runs and for WATCH_GRACE_MS after the last one ends. */
+export class DaemonWrites {
+  private n = 0;
+  private ended = -Infinity;
+  private readonly now: () => number;
+  constructor(now: () => number = Date.now) {
+    this.now = now;
+  }
+  async run<T>(f: () => Promise<T>): Promise<T> {
+    this.n++;
+    try {
+      return await f();
+    } finally {
+      this.n--;
+      this.ended = this.now();
+    }
+  }
+  busy(): boolean {
+    return this.n > 0 || this.now() - this.ended < WATCH_GRACE_MS;
+  }
+}
+
 /**
  * Watch the locked folders ("warn", or "on" held off) and log each write the daemon did not make, at most one line per
  * folder and top entry per hour. Not recursive (w5764's lesson: an inotify watch per folder): each folder and its first level.
- * `daemonBusy` says a write now is the daemon's own (a merge-back, an install).
+ * `daemonBusy` says a write now is the daemon's own (a merge-back, an install): DaemonWrites, which stays busy for
+ * WATCH_GRACE_MS after the write ends, since macOS's file events reach fs.watch tens of ms late (w6213, measured on m5: a
+ * line 28 ms after the broker's own slot.json write, five 33 ms after a clone). A random temp name (uv's `.tmpXXXXXX`
+ * build folders) counts as one name per folder, so a `uv run` on the shared cache logs once an hour, not once a run.
  */
 export function watchShared(
   folders: string[],
@@ -520,7 +550,7 @@ export function watchShared(
           n === "pool.lock"
         )
           return;
-        const key = `${top}/${n}`;
+        const key = `${top}|${dir}/${n.startsWith(".tmp") ? ".tmp*" : n}`;
         const t = now();
         if ((said.get(key) ?? -Infinity) > t - 3600_000) return;
         said.set(key, t);

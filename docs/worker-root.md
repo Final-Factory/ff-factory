@@ -1418,12 +1418,18 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   `-logFile` folder the player may write. A launch onto a slot whose player still runs is refused (w6212 L1).
 - **What `warn` watches**: the seeds, `players`, `seed` and `tools` (`sharedLockedFolders`), each folder and its first level
   (not recursive), one daemon log line per entry an hour: `shared lock (warn): <path> changed and the daemon did not write it`.
+  A random temp name (`.tmp*`, uv's build folders) counts as one name per folder. The daemon's own writes (the clone tick
+  and its merge-back, every players broker call, a removal) are skipped while they run and for 2 s after
+  (`DaemonWrites`, `WATCH_GRACE_MS`): on m5 macOS's file events reached `fs.watch` 28-33 ms after the daemon's write ended
+  and were logged as a worker's (w6213, measured 2026-11-27). A worker write within those 2 s is not logged.
 - **What `on` adds** (the enforce PR, separate): those folders become read-only to sandbox workers, a Medium No-Write-Up label
   on Windows (never an ACE on a folder a Low worker uses, w5599) and out of the Seatbelt and Landlock write sets on macOS and
   Linux. `on` with a sandbox that has no clones yet holds to `warn` for that daemon run and logs why. In this release `on`
   enforces nothing and runs as `warn`, and its log line says so (w6212 M2).
-- **Not watched yet** (w6212 L4): a sandbox counts as idle with no live agent and no editor; a `unity-slot run` batch job
-  running in it is not counted, so a clone can be made or refreshed while one runs; the enforce change counts them.
+- **Idle for a refresh** (w6212 L4): a sandbox counts as idle with no live agent, no editor and nothing else holding its
+  tree, as `switch_branch` judges it (`switchHold`: a `unity-slot run` holding slots for it, a batchmode Unity with its
+  project open, a night running in it). A first clone is made idle or not (its folder is renamed in and named only in the
+  next run's environment).
 - **Left shared and writable**: `cache/uv-tools`, `cache/uv-bin`, `cache/xdg` and `cache/cargo` (cargo is the next stage).
 - **Way back**: `shared_lock off` and the daemon restart the update makes (the link job and installer run outside every fence,
   4.3). The clones stay on disk, unused; the env goes back to the shared caches at the next agent start.

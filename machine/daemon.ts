@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { SlotCaches, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { DaemonWrites, SlotCaches, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -2079,8 +2079,10 @@ export class Daemon {
     if (this.procsBroker) this.timers.push(setInterval(loopLabel('timer procsBroker.tick', () => void this.procsBroker?.tick()), PROCS_POLL_MS));
     // w5615: each sandbox's own clones of the tool caches, made, merged back and refreshed while it is idle.
     if (this.slotCaches) {
-      void this.slotCaches.tick();
-      this.timers.push(setInterval(loopLabel('timer slotCaches.tick', () => void this.slotCaches?.tick()), SLOT_CACHES_EVERY_MS));
+      // The tick's merge-back writes the seeds: the shared watch counts the whole tick as the daemon's (w6213).
+      const tick = () => (this.slotCaches ? this.sharedWrite(() => this.slotCaches!.tick()) : undefined);
+      void tick();
+      this.timers.push(setInterval(loopLabel('timer slotCaches.tick', () => void tick()), SLOT_CACHES_EVERY_MS));
     }
     // What stopped workers left running (w1196, w1197): looked at once a minute.
     // w1894: each look also feeds the person's-game watch (machine/personPlay.ts)
@@ -3745,20 +3747,15 @@ export class Daemon {
       this.sharedLockMemo = asked === 'on' && blockers.length ? 'warn' : asked;
       const line = sharedLockLine(asked, blockers);
       if (line) log(line);
-      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonBusy: () => this.sharedBusy > 0 });
+      if (this.sharedLockMemo !== 'off' && this.cfg.root) this.stopSharedWatch = watchShared(sharedLockedFolders(this.cfg.root), (l) => log(l), { daemonBusy: () => this.sharedWrites.busy() });
     }
     return this.sharedLockMemo;
   }
   private stopSharedWatch?: () => void;
-  /** Writes the daemon itself makes in the locked folders right now (a merge-back, a player install): the watch skips them. */
-  private sharedBusy = 0;
-  private async sharedWrite<T>(f: () => Promise<T>): Promise<T> {
-    this.sharedBusy++;
-    try {
-      return await f();
-    } finally {
-      this.sharedBusy--;
-    }
+  /** Writes the daemon itself makes in the locked folders (a merge-back, a player install), and a grace after: the watch skips them. */
+  private readonly sharedWrites = new DaemonWrites();
+  private sharedWrite<T>(f: () => Promise<T>): Promise<T> {
+    return this.sharedWrites.run(f);
   }
 
   private slotCachesMemo?: SlotCaches | null;
@@ -3771,7 +3768,15 @@ export class Daemon {
           ? new SlotCaches({
               root,
               setting: this.sharedLock,
-              sandboxes: () => this.pool.list().map((sb) => ({ id: sb.id, idle: this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) })),
+              // Idle: no live agent, no editor, and nothing else holding its tree: a unity-slot run, a batchmode Unity or a
+              // night (switchHold, as switch_branch refuses; review w6212 L4).
+              sandboxes: () =>
+                Promise.all(
+                  this.pool.list().map(async (sb) => ({
+                    id: sb.id,
+                    idle: this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) && !(await this.switchHold(sb.id).catch(() => 'unknown')),
+                  })),
+                ),
               copy: this.workerCopy(),
               removeTree: async (dir) => {
                 await removeTree(dir);
@@ -3804,7 +3809,7 @@ export class Daemon {
     const root = this.cfg.root;
     if (!root || this.sharedLock === 'off') return {};
     let fence: PlayerFence | undefined;
-    return playersRpcHandlers({
+    const hs = playersRpcHandlers({
       root,
       host: os.hostname().toLowerCase(),
       sandboxPath: (id) => this.pool.list().find((sb) => sb.id === id)?.path,
@@ -3816,6 +3821,10 @@ export class Daemon {
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowCopies?.make(process.execPath) }),
       log: (l) => log(l),
     });
+    // The broker's own writes (the copy, slot.json, a release) are the daemon's: the shared watch skips them (w6213: on m5
+    // a slot.json write was logged as a worker's 28 ms after the broker made it).
+    const own = (h: RpcHandler): RpcHandler => (c, body) => this.sharedWrite(async () => h(c, body));
+    return Object.fromEntries(Object.entries(hs).map(([k, h]) => [k, own(h)]));
   }
 
   private fenceMemo?: { fence?: WorkerFence; why?: string };
