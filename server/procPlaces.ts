@@ -24,13 +24,13 @@ export interface ProcPlace {
   cwd?: string;
 }
 
-const run = (cmd: string, args: string[], timeoutMs = 60_000) =>
-  new Promise<{ code: number; stdout: string }>((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 256 * 1024 ** 2, windowsHide: true }, (err, stdout) => {
-      const code = err ? (typeof (err as { code?: unknown }).code === 'number' ? ((err as { code: number }).code) : -1) : 0;
-      resolve({ code, stdout: String(stdout ?? '') });
-    });
-  });
+const OPTS = { timeout: 60_000, maxBuffer: 256 * 1024 ** 2, windowsHide: true };
+type Done = (r: { code: number; stdout: string }) => void;
+const answer = (resolve: Done) => (err: Error | null, stdout: string | Buffer) =>
+  resolve({ code: err ? (typeof (err as { code?: unknown }).code === 'number' ? (err as unknown as { code: number }).code : -1) : 0, stdout: String(stdout ?? '') });
+// Each program named literally (server/safeGit.test.ts, w5541: no spawn of a program a variable names).
+const lsof = (args: string[]) => new Promise<{ code: number; stdout: string }>((resolve) => void execFile('lsof', args, OPTS, answer(resolve)));
+const powershell = (args: string[]) => new Promise<{ code: number; stdout: string }>((resolve) => void execFile('powershell.exe', args, OPTS, answer(resolve)));
 
 /** lsof's -F output (`p<pid>`, `f<fd>`, `n<name>` lines) as places: the first txt is the executable. */
 export function parseLsof(out: string): ProcPlace[] {
@@ -69,14 +69,14 @@ async function linuxPlaces(): Promise<ProcPlace[] | undefined> {
 async function macPlaces(): Promise<ProcPlace[] | undefined> {
   const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
   // lsof exits 1 when any one file could not be read; its output still holds every process it could.
-  const r = await run('lsof', ['-n', '-P', '-w', '-a', '-d', 'cwd,txt', ...(uid === undefined ? [] : ['-u', String(uid)]), '-Fpfn']);
+  const r = await lsof(['-n', '-P', '-w', '-a', '-d', 'cwd,txt', ...(uid === undefined ? [] : ['-u', String(uid)]), '-Fpfn']);
   const places = parseLsof(r.stdout);
   return places.length ? places : undefined;
 }
 
 async function windowsPlaces(): Promise<ProcPlace[] | undefined> {
   const ps = 'Get-CimInstance Win32_Process -Property ProcessId, ExecutablePath | ForEach-Object { [pscustomobject]@{ pid = $_.ProcessId; exe = [string]$_.ExecutablePath } } | ConvertTo-Json -Compress';
-  const r = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps]);
+  const r = await powershell(['-NoProfile', '-NonInteractive', '-Command', ps]);
   if (r.code !== 0 || !r.stdout.trim()) return undefined;
   try {
     const j = JSON.parse(r.stdout) as { pid: number; exe?: string } | { pid: number; exe?: string }[];
