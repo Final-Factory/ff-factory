@@ -89,8 +89,8 @@ export function batchUnityIn(procs: UnityProcess[], checkout: string, platform: 
 
 const hhmm = (t: number) => new Date(t).toISOString().slice(11, 16);
 
-/** The refusal naming every holder, or undefined when none holds the tree. */
-export function switchHoldRefusal(id: string, h: { nights: NightState[]; runs: SlotRequest[]; batch: UnityProcess[] }): string | undefined {
+/** Each holder of the tree in words (a night, a unity-slot run, a loose batchmode Unity); empty when none holds it. */
+export function holdParts(h: { nights: NightState[]; runs: SlotRequest[]; batch: UnityProcess[] }): string[] {
   const parts: string[] = [];
   for (const n of h.nights) {
     const since = typeof n.started === 'number' ? ` since ${hhmm(n.started * 1000)} UTC` : '';
@@ -103,6 +103,12 @@ export function switchHoldRefusal(id: string, h: { nights: NightState[]; runs: S
   }
   const loose = h.batch.filter((u) => !counted.has(u.ppid) && !counted.has(u.pid));
   if (loose.length && !h.runs.length) parts.push(`a batchmode Unity has its project open (pid ${loose.map((u) => u.pid).join(', ')})`);
+  return parts;
+}
+
+/** The refusal naming every holder, or undefined when none holds the tree. */
+export function switchHoldRefusal(id: string, h: { nights: NightState[]; runs: SlotRequest[]; batch: UnityProcess[] }): string | undefined {
+  const parts = holdParts(h);
   if (!parts.length) return undefined;
   return `switch refused: ${parts.join('; ')}. A switch now would change the tree under that build (w3626: on 2026-11-08 one moved a nightly's build in lothdesktop/slot1 onto another commit). Wait until it ends (wake_me), then switch; nothing was switched.`;
 }

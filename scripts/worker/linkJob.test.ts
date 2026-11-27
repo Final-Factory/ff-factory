@@ -124,6 +124,9 @@ test('w5554: the worker caps mode goes through to the installer update as named;
   // w6367: long runs, off, warn or on from the wire; anything else is dropped.
   for (const m of ['off', 'warn', 'on'] as const) assert.deepEqual(updateFlagsOf('/src', { longRuns: m }), { source: '/src', longRuns: m });
   assert.deepEqual(updateFlagsOf('/src', { longRuns: 'enforce' as never }), { source: '/src' });
+  // w6378: live-run guard, off or warn from the wire; anything else is dropped.
+  for (const m of ['off', 'warn'] as const) assert.deepEqual(updateFlagsOf('/src', { liveRunGuard: m }), { source: '/src', liveRunGuard: m });
+  assert.deepEqual(updateFlagsOf('/src', { liveRunGuard: 'on' as never }), { source: '/src' });
   assert.deepEqual(updateFlagsOf('/src', { workerCaps: 'on' as never }), { source: '/src' });
 });
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Session } from 'node:inspector';
-import { summarizeProfile, type CpuProfile } from './stallProfile.ts';
+import { StallProfiler, summarizeProfile, type CpuProfile } from './stallProfile.ts';
 
 function busyLoopForStallTest(ms: number) {
   const end = Date.now() + ms;
@@ -45,4 +45,30 @@ test('w2044: a block\'s own line counts only the samples taken in it, not the re
   const minute = summarizeProfile(profile);
   assert.equal(block.totalMs, minute.totalMs - 3, 'the save\'s three samples are left out');
   assert.deepEqual(minute.under.map((x) => x.fn).sort(), ['places (server/agents.ts:21)', 'save (server/agents.ts:11)']);
+});
+
+test('w6382: a slow state build gets a line of its own from its samples, with no stall in the window', () => {
+  const frame = (functionName: string, lineNumber: number) => ({ functionName, url: 'file:///srv/fff/server/agents.ts', lineNumber, columnNumber: 0 });
+  // Placement at 0-4 ms of the window, then the build's accounts at 5-9 ms (one sample a millisecond).
+  const profile: CpuProfile = {
+    nodes: [
+      { id: 1, callFrame: { functionName: '(root)', url: '', lineNumber: 0, columnNumber: 0 }, children: [2, 3] },
+      { id: 2, callFrame: frame('places', 20) },
+      { id: 3, callFrame: frame('accountsNow', 30) },
+    ],
+    startTime: 0,
+    endTime: 10_000,
+    samples: [2, 2, 2, 2, 3, 3, 3, 3, 3],
+    timeDeltas: [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000],
+  };
+  const lines: string[] = [];
+  const p = new StallProfiler({ dataDir: '.', worstLagSince: () => 0, log: (l) => lines.push(l) });
+  const from = Date.parse('2026-11-27T12:00:00Z');
+  p.logSpans(profile, from, [{ what: 'state build', end: from + 10, ms: 5.5 }]);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^stall profile: state build of 6 ms ending 2026-11-27T12:00:00\.010Z\. Own time: accountsNow \(server\/agents\.ts:31\) \d+ ms\. In the portal's functions: accountsNow/);
+  assert.doesNotMatch(lines[0], /places/);
+  // A span under PROFILE_SLOW_SPAN_MS, or one noted while the profiler is off, is not kept.
+  p.noteSpan('state build', 10_000);
+  assert.equal((p as unknown as { spans: unknown[] }).spans.length, 0);
 });

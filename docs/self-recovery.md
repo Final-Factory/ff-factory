@@ -1457,6 +1457,20 @@ two files when a lock file appears. **Failure**: a hung, failing or slow trim is
 back to `ready` and the pool logs why (and tells the orchestrator when it stopped early); a daemon restart reads `cleanup` back
 as `ready`. `daemon.json` `sandboxCacheTrim` sets the limits or `false` for never.
 
+**A run of its worker still there** (w6378, `machine/liveRunGuard.ts`): "no live agent" is the trim's only test of the
+worker, and a run the worker started in the background (a nightly e2e, `nohup ... & disown`; a unity-slot batch build; a
+loose batchmode Unity) is no agent. On 2026-11-27 the nightly of w6357 waited for its bench turn in lothdesktop/slot2 when its
+worker's check-in came at 10:00:56Z: the portal restarted the idle worker on the machine's new code (w1166 codeMove), the old
+host closed, and the next look trimmed slot2 (`cleanup`, the new host refused at 10:00:59Z) and its release sweep removed
+`Builds/cache/b19302c0...-win`, the night's own player build, at 10:01:57Z. Now every trim, pool release and delete first looks
+for such runs (`Daemon.liveRunIn`: `nightsIn`, `slotRunsFor`, `batchUnityIn`, the same looks as a branch switch's refusal,
+`machine/switchHolds.ts`) and logs `WARNING sandbox <id>: <what> while a run of its worker still lives there: <runs>.
+liveRunGuard warn: it goes ahead as before`. Warn only (lothsahn's lockout rule): nothing waits for the look (it is cut off
+after 30 s; a failed look is logged) and the trim, sweep and release go ahead unchanged. `daemon.json` `liveRunGuard`: `warn`
+(unset: the default) or `off` (no look; the way back, set remotely with `ops_worker machine_update live_run_guard off` or the
+installer's `--live-run-guard` / `-LiveRunGuard`). The later, separately reviewed step keeps the sandbox (no trim, sweep or
+release, the trim kept pending) while a run lives there.
+
 **Backstop** (`cleanupRules`, for sandboxes nobody releases): `sandbox-lib-cache-stale` takes the same stale entries in every
 pass, once nothing in the two caches was written for an hour, no `Temp/UnityLockfile` is there and no agent uses the sandbox.
 **Last resort**, `sandbox-lib-cache-last-resort`: only while free space is below the critical line (the pool's

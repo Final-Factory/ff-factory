@@ -7400,8 +7400,11 @@ A report is for a person who asked for one, and people want very few. File one w
       const lights = lightFolders(m.sandboxes);
       const offersLight = this.machines.offersLight(m.id);
       const mine = placed.get(m.id) ?? [];
-      const midTurnIn = new Map<string, number>();
-      for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
+      // w5985, config placementAgentCount "on": counted as its agent cap counts (turns sent, not yet reported, and standing
+      // agents too), and the larger of that and its daemon's fresh census, which refuses a start past it.
+      const counted = this.machines.placementCount(m.id, sbs.map((x) => x.id));
+      const midTurnIn = new Map<string, number>(counted?.inSandbox);
+      if (!counted) for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
       // Its daemon reports its load; this host's own daemon's is this host's.
       const st = this.machines.statsOf(m.id);
       const used = st ? (st.memUsedBytes ?? st.memTotalBytes - st.memFreeBytes) : m.local ? mem.total - mem.free : undefined;
@@ -7420,7 +7423,7 @@ A report is for a person who asked for one, and people want very few. File one w
         ...(m.fence?.agentIntegrity ? { agentIntegrity: m.fence.agentIntegrity } : {}),
         ...(m.fence?.agentIntegrityWhy ? { agentIntegrityWhy: m.fence.agentIntegrityWhy } : {}),
         live: mine.filter((s) => s.live).length,
-        midTurn: mine.filter((s) => isMidTurn(s.info)).length,
+        midTurn: counted?.midTurn ?? mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),
         sandboxes: sbs.length,
         maxSandboxes: pool.maxSandboxes,
@@ -8329,10 +8332,11 @@ ${w.repo ?? ''}
             shared_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the shared-cache lock (w5615, docs/worker-root.md \"Per-slot caches and the players broker\"): each sandbox gets its own copy-on-write clone of the tool caches (uv, pip, npm, NuGet, UPM, .NET, Playwright) and players are installed and launched by the daemon; warn changes the env and logs worker writes to the shared caches, players, seed and tools; on makes those read-only to workers. Unset: as daemon.json has it."),
             host_restage: z.enum(['warn', 'on']).optional().describe("action machine_update: w6305: what the daemon does with an idle agent whose host was adopted across a sharedLock switch (w6287, docs/worker-root.md \"After a sharedLock switch\"): warn (the default, and the recovery) logs one line per such host; on ends that agent between turns, never mid-turn, so its next message starts a new host on the new mode's cache paths and FF_PLAYER_BROKER. Written as daemon.json hostRestage; takes effect at the daemon's next start, which this update makes. Send on only with a person's go, after the warn lines of a real switch were read (lothsahn's lockout rule; docs/worker-root.md 4.4); warn needs none."),
             long_runs: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6367: the long-run route (machine/longRuns.ts) that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back, though off does not end runs already live (they end at their 20 h limit or by runs/stop). Written as daemon.json longRuns; takes effect at the daemon's next start, which this update makes. Send on only with a person's go (lothsahn's lockout rule; docs/worker-fence.md 'Long runs'); warn and off need none."),
+            live_run_guard: z.enum(['off', 'warn']).optional().describe("action machine_update: w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off stops the look. The way back with nobody at the machine."),
             runner_priority: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: w6163, Windows only: the ffu CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): warn only logs what it reads (the default everywhere but the machines in RUNNER_PRIORITY_ENFORCE, and the recovery), enforce sets the tasks to priority 4 and raises the listeners to Normal, off stops it. Written as daemon.json runnerPriority; takes effect at the daemon's next start. Unset leaves it as it is."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, tools_disk_lock, win_ci_first, shared_lock, runner_priority, host_restage, long_runs, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, tools_disk_lock, win_ci_first, shared_lock, runner_priority, host_restage, long_runs, live_run_guard, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -8340,7 +8344,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir, toolsDiskLock: tools_disk_lock, winCiFirst: win_ci_first, sharedLock: shared_lock, runnerPriority: runner_priority, hostRestage: host_restage, longRuns: long_runs });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir, toolsDiskLock: tools_disk_lock, winCiFirst: win_ci_first, sharedLock: shared_lock, runnerPriority: runner_priority, hostRestage: host_restage, longRuns: long_runs, liveRunGuard: live_run_guard });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);
