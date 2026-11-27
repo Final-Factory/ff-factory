@@ -1648,13 +1648,23 @@ export class MachineManager {
    */
   placementCount(id: string, sandboxes: readonly string[], now = Date.now()): (PlacementCount & { daemon?: number }) | undefined {
     if (placementCountMode(this.cfg.placementAgentCount) !== 'on') return undefined;
-    const portal: PlacementCount = { midTurn: this.midTurnTotal(id), inSandbox: new Map(sandboxes.map((sb) => [sb, this.runningIn(id, sb)])) };
+    // w6381: one pass over the sessions for every sandbox, not one per sandbox (the same counts as runningIn).
+    const inSandbox = new Map(sandboxes.map((sb) => [sb, 0]));
+    for (const s of this.sessions.sessions.values()) {
+      const sb = s.info.machineSandbox;
+      if (s.info.machineId !== id || sb === undefined || !inSandbox.has(sb) || !(isMidTurn(s.info) || this.isStarting(s))) continue;
+      inSandbox.set(sb, inSandbox.get(sb)! + 1);
+    }
+    const portal: PlacementCount = { midTurn: this.midTurnTotal(id), inSandbox };
     return placementCountOf(portal, this.census.lastOf(id), now);
   }
 
   /** Agents mid-turn on a machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */
   midTurnTotal(id: string) {
-    return this.runningIn(id, '*') + this.runningIn(id, undefined);
+    // w6381: its sandboxes ('*') and its standing agents (no sandbox) are every agent mid-turn there: one pass, not two.
+    let n = 0;
+    for (const s of this.sessions.sessions.values()) if (s.info.machineId === id && s.info.machineSandbox !== '' && (isMidTurn(s.info) || this.isStarting(s))) n++;
+    return n;
   }
 
   /** Why `m` is at its agent cap (agentCap), or undefined. */

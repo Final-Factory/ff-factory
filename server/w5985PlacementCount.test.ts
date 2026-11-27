@@ -198,3 +198,26 @@ test('w5985: turning it "off" again (the recovery switch) puts back the old coun
   (s.machines as unknown as { cfg: Config }).cfg.placementAgentCount = undefined;
   assert.equal(s.beastNow().midTurn, 2);
 });
+
+test('w6381: midTurnTotal and placementCount count in one pass what runningIn counts per sandbox and for standing agents', async (t) => {
+  const s = await setup(t, 'on');
+  const store = (s.machines as unknown as { store: Store }).store;
+  const sessions = (s.machines as unknown as { sessions: SessionManager }).sessions;
+  const add = (id: string, machineId: string, sandbox: string | undefined, status: SessionInfo['status']) => {
+    const info = { id, kind: sandbox ? 'worker' : 'standing', title: id, status, permissionMode: 'default', createdAt: OLD, lastActivityAt: OLD, turns: 1, costUsd: 0, pendingPermissions: [], machineId, ...(sandbox ? { machineSandbox: sandbox } : {}) } as SessionInfo;
+    store.putSession(info);
+    const h = { info, live: true, stops: 0, stop() {} };
+    sessions.sessions.set(id, h as never);
+    s.fakes.push(h as never);
+  };
+  add('st1', 'beast', undefined, 'running'); // a standing agent mid-turn: the cap counts it, no sandbox does
+  add('st2', 'beast', undefined, 'idle');
+  add('w2', 'beast', 'slot1', 'running');
+  add('other', 'm5', 'slot1', 'running'); // another computer's
+  const old = (id: string) => s.machines.runningIn(id, '*') + s.machines.runningIn(id, undefined);
+  for (const id of ['beast', 'm5', 'nowhere']) assert.equal(s.machines.midTurnTotal(id), old(id), id);
+  assert.equal(s.machines.midTurnTotal('beast'), 5, '11a84ee9, 828bacfa, the start sent to c1e9dd0c, st1 and w2');
+  const p = s.machines.placementCount('beast', SLOTS)!;
+  for (const sb of SLOTS) assert.equal(p.inSandbox.get(sb), s.machines.runningIn('beast', sb), sb);
+  assert.equal(p.inSandbox.get('slot1'), 2);
+});
