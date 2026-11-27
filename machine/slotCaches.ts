@@ -496,38 +496,10 @@ export function sharedLockBlockers(
     : [];
 }
 
-/** How long after the daemon's own write the watch still counts a change as the daemon's (w6213). */
-export const WATCH_GRACE_MS = 2_000;
-
-/** The daemon's own writes in the locked folders: busy while one runs and for WATCH_GRACE_MS after the last one ends. */
-export class DaemonWrites {
-  private n = 0;
-  private ended = -Infinity;
-  private readonly now: () => number;
-  constructor(now: () => number = Date.now) {
-    this.now = now;
-  }
-  async run<T>(f: () => Promise<T>): Promise<T> {
-    this.n++;
-    try {
-      return await f();
-    } finally {
-      this.n--;
-      this.ended = this.now();
-    }
-  }
-  busy(): boolean {
-    return this.n > 0 || this.now() - this.ended < WATCH_GRACE_MS;
-  }
-}
-
 /**
  * Watch the locked folders ("warn", or "on" held off) and log each write the daemon did not make, at most one line per
  * folder and top entry per hour. Not recursive (w5764's lesson: an inotify watch per folder): each folder and its first level.
- * `daemonBusy` says a write now is the daemon's own (a merge-back, an install): DaemonWrites, which stays busy for
- * WATCH_GRACE_MS after the write ends, since macOS's file events reach fs.watch tens of ms late (w6213, measured on m5: a
- * line 28 ms after the broker's own slot.json write, five 33 ms after a clone). A random temp name (uv's `.tmpXXXXXX`
- * build folders) counts as one name per folder, so a `uv run` on the shared cache logs once an hour, not once a run.
+ * `daemonBusy` says a write now is the daemon's own (a merge-back, an install).
  */
 export function watchShared(
   folders: string[],
@@ -550,7 +522,7 @@ export function watchShared(
           n === "pool.lock"
         )
           return;
-        const key = `${top}|${dir}/${n.startsWith(".tmp") ? ".tmp*" : n}`;
+        const key = `${top}/${n}`;
         const t = now();
         if ((said.get(key) ?? -Infinity) > t - 3600_000) return;
         said.set(key, t);

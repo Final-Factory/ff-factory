@@ -21,8 +21,6 @@ import {
   slotCacheDir,
   slotCacheEnv,
   watchShared,
-  DaemonWrites,
-  WATCH_GRACE_MS,
   type SharedLockSetting,
 } from "./slotCaches.ts";
 
@@ -227,7 +225,8 @@ function pool(
   const caches = new SlotCaches({
     root,
     setting: o.setting ?? "warn",
-    sandboxes: () => sandboxes,
+    // Async, as the daemon's is (it asks switchHold per sandbox: review w6212 L4).
+    sandboxes: async () => sandboxes,
     copy: o.copy ?? copyTree,
     removeTree,
     log: (l) => log.push(l),
@@ -704,42 +703,6 @@ test("watchShared logs a write the daemon did not make, once, and skips .ff- nam
       lines.some((l) => l.includes(path.join("sub", "inner.txt"))),
     ),
   );
-});
-
-test("DaemonWrites stays busy while a write runs and for the grace after it (w6213: macOS events arrive tens of ms late)", async () => {
-  let t = 1_000;
-  const w = new DaemonWrites(() => t);
-  assert.equal(w.busy(), false);
-  let inside = false;
-  await w.run(async () => {
-    inside = w.busy();
-    t += 5_000;
-  });
-  assert.ok(inside);
-  t += 28; // m5: the broker's slot.json event came 28 ms after its write
-  assert.equal(w.busy(), true);
-  t += WATCH_GRACE_MS;
-  assert.equal(w.busy(), false);
-  // A failed write ends the busy span too.
-  await assert.rejects(w.run(async () => { throw new Error("x"); }));
-  assert.equal(w.busy(), true);
-  t += WATCH_GRACE_MS;
-  assert.equal(w.busy(), false);
-});
-
-test("watchShared counts uv's random .tmp names as one name per folder (w6213: one line per uv run before)", async (t) => {
-  const folder = path.join(tmp(t), "uv");
-  fs.mkdirSync(path.join(folder, "builds-v0"), { recursive: true });
-  await wait(300);
-  const lines: string[] = [];
-  const stop = watchShared([folder], (l) => lines.push(l));
-  t.after(stop);
-  fs.mkdirSync(path.join(folder, "builds-v0", ".tmpwmaJho"));
-  assert.ok(await until(() => lines.some((l) => l.includes(".tmpwmaJho"))));
-  fs.mkdirSync(path.join(folder, "builds-v0", ".tmpL5VhkQ"));
-  fs.mkdirSync(path.join(folder, "builds-v0", ".tmpXGjqS8"));
-  await wait(350);
-  assert.equal(lines.filter((l) => l.includes(".tmp")).length, 1, lines.join("\n"));
 });
 
 test("watchShared: stop closes the watchers", async (t) => {
