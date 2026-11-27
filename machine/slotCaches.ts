@@ -32,6 +32,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { sharedCacheDir } from "./sharedCaches.ts";
 import { plainDirAt, writeFileSafe, type WorkerCopy } from "./workerCopy.ts";
+import { sharedLockParents, sharedLockRel } from "./sharedLockPaths.ts";
+import { isLink } from "../server/fsLink.ts";
 
 export type SharedLockSetting = "off" | "warn" | "on";
 
@@ -208,6 +210,11 @@ export interface SlotCachesDeps {
    */
   copy: WorkerCopy;
   removeTree: (dir: string) => Promise<void>;
+  /**
+   * w5615: the shared lock is on: each entry merged back into a seed is locked in place (machine/lockIn.ts), or removed
+   * again. Missing under off and warn.
+   */
+  lockIn?: (dst: string) => Promise<boolean>;
   log: (l: string) => void;
   now?: () => number;
   /** How old a clone gets before an idle sandbox's is made again (default a day). */
@@ -359,6 +366,7 @@ export async function mergeBack(
   now = Date.now(),
   quietMs = QUIET_MS,
   stage = path.join(path.dirname(clone), ".ff-merge"),
+  lock?: (dst: string) => Promise<boolean>,
 ): Promise<number> {
   let n = 0;
   for (const e of mergeEntries(clone, rule, now, quietMs)) {
@@ -377,6 +385,8 @@ export async function mergeBack(
         fs.linkSync(tmp, dst);
         fs.rmSync(tmp, { force: true });
       }
+      // w5615: under "on" the moved entry is still a worker's (its own labels, a link swapped in): lockIn, or it goes again.
+      if (lock && !(await lock(dst))) continue;
       n++;
     } catch {
       // the next pass tries again
@@ -519,6 +529,7 @@ export class SlotCaches {
             this.now(),
             QUIET_MS,
             path.join(dir, ".ff-merge"),
+            this.d.lockIn,
           );
       }
       // Not refreshed: a clone already there stays (the slot may use it). Refreshed or new: made beside, renamed in.
@@ -538,7 +549,12 @@ export class SlotCaches {
         for (const p of [fresh, gone])
           if (fs.existsSync(p)) await this.d.removeTree(p);
         fs.mkdirSync(path.dirname(own), { recursive: true });
-        if (fs.existsSync(seed)) await this.d.copy(seed, fresh, { links: "keep" });
+        if (fs.existsSync(seed)) {
+          // Review w6374: like the merge-back above, never through a link a worker planted under off or warn.
+          if (!plainDirAt(seed, seedRoot, t.dir))
+            throw new Error(`${seed} is a link or junction, or lies below one; not cloned from (w6374)`);
+          await this.d.copy(seed, fresh, { links: "keep" });
+        }
         else fs.mkdirSync(fresh, { recursive: true });
         if (fs.existsSync(own)) fs.renameSync(own, gone);
         fs.renameSync(fresh, own);
@@ -679,7 +695,7 @@ export function sharedLockLine(
     return `shared lock: warn only (w5615); each sandbox gets its own clones of the tool caches and players go through the daemon, nothing is refused, and worker writes to the shared caches, players, seed and tools are logged${blockers.length ? `. With "on" it would stay off: ${blockers.join("; ")}` : ""}`;
   return blockers.length
     ? `shared lock: on asked, but held off (writes the daemon did not make are logged instead): ${blockers.join("; ")}`
-    : 'shared lock: "on" asked, but this release enforces nothing yet and runs as warn (w6212 M2; the enforcing change is its own pull request): worker writes to the shared caches, players, seed and tools are logged, never refused';
+    : "shared lock: on (w5615); the shared cache seeds, players, seed and tools/node, low and unity-low are read-only to sandbox workers (Windows: labelled Medium; Linux: Landlock; macOS: Seatbelt), each sandbox writes its own cache clones, merged back by the daemon daily, and players go through the daemon. Undo: shared_lock off and a daemon restart";
 }
 
 /**
@@ -693,6 +709,12 @@ export function sharedLockBlockers(
   platform: NodeJS.Platform = process.platform,
 ): string[] {
   if (!root) return ["this install has no worker root"];
+  // Review w6374: a locked folder or one on the way that is a link (a worker could plant one under off or warn) is never
+  // labelled, fenced or cloned from, so "on" would leave it open: it holds "on" off until it is removed.
+  const linked = [...sharedLockParents().keys(), ...sharedLockRel()].filter((rel) => {
+    const p = path.join(root, ...rel.split("/"));
+    return isLink(p);
+  });
   const all = slotCacheTools(platform).length;
   const ids = sandboxes.filter((s) => okSandboxId(s));
   const none = ids.filter((s) => !readMarker(slotCacheDir(root, s)));
@@ -701,6 +723,10 @@ export function sharedLockBlockers(
     .map((s) => ({ s, miss: missingSlotCaches(root, s, platform) }))
     .filter((x) => x.miss.length > 0);
   return [
+    ...linked.map(
+      (rel) =>
+        `${path.join(root, ...rel.split("/"))} is a junction or symlink, not a folder (planted before "on"?): remove the link (its target is not the cache) and restart the daemon`,
+    ),
     ...(none.length
       ? [
           `sandbox${none.length === 1 ? "" : "es"} ${none.join(", ")} without their own cache clones yet (made within minutes of the daemon's start)`,
