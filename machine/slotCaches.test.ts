@@ -25,6 +25,9 @@ import {
   slotCacheEnv,
   watchShared,
   inSharedLocked,
+  DaemonWrites,
+  asDaemonWrite,
+  inFolder,
   sharedEventHandler,
   DAEMON_GRACE_MS,
   STALE_MS,
@@ -1031,4 +1034,92 @@ test("inSharedLocked: the cache seeds, players, seed and tools and what is in th
   assert.ok(!inSharedLocked(root, path.join(root, "cache", "slots", "slot1", "uv")));
   assert.ok(!inSharedLocked(root, path.join(root, "players-old")));
   assert.ok(!inSharedLocked(root, path.join(root, "tmp", "x")));
+});
+
+// w6314, review w6316 finding 3: a daemon write marks only the folder it writes, so a worker's write elsewhere still counts.
+test("DaemonWrites: a mark covers its folder and what is in it, during the write and the grace, and nothing else", async () => {
+  let clock = 1000;
+  const w = new DaemonWrites({ graceMs: DAEMON_GRACE_MS, now: () => clock });
+  const root = path.resolve("/ffw");
+  const uv = path.join(root, "cache", "uv");
+  const end = w.begin([uv]);
+  assert.ok(w.owns(path.join(uv, "archive-v0", "x")), "inside the folder, during the write");
+  assert.ok(w.owns(uv));
+  assert.ok(w.owns(path.join(root, "cache")), "an ancestor's event (the folder itself went) is the daemon's too");
+  assert.ok(!w.owns(path.join(root, "players", "slot1", "a.txt")), "another locked folder is not covered");
+  assert.ok(!w.owns(path.join(root, "cache", "uv-old", "x")), "a look-alike is not covered");
+  // Nested marks of the same folder: it stays the daemon's until the last one ends.
+  const end2 = w.begin([uv, uv]);
+  end();
+  end(); // ending twice is harmless
+  assert.ok(w.owns(path.join(uv, "y")));
+  end2();
+  clock += DAEMON_GRACE_MS - 1;
+  assert.ok(w.owns(path.join(uv, "late")), "a late event within the grace");
+  clock += 1;
+  assert.ok(!w.owns(path.join(uv, "late")), "after the grace a write there is a worker's");
+  assert.ok(inFolder(uv, path.join(uv, "a")) && !inFolder(uv, path.join(root, "cache")) && !inFolder(uv, path.join(root, "cache", "uvx")));
+});
+
+test("sharedEventHandler with daemonOwns: a daemon write to players hides only players; a worker write to cache/uv at the same time is logged", async () => {
+  let clock = 5000;
+  const w = new DaemonWrites({ now: () => clock });
+  const root = path.resolve("/ffw");
+  const players = path.join(root, "players");
+  const uv = path.join(root, "cache", "uv");
+  const lines: string[] = [];
+  const on = sharedEventHandler((l) => lines.push(l), { daemonOwns: (f, t) => w.owns(f, t), now: () => clock });
+  await w.run([players], async () => {
+    on(path.join(players, "slot1"), players, "slot.json");
+    on(path.join(uv, "archive-v0"), uv, "worker-wrote");
+  });
+  assert.equal(lines.length, 1, lines.join("\n"));
+  assert.match(lines[0], /worker-wrote/);
+});
+
+// w6316 finding 1: the uv warm of the shared seed writes cache/uv; run as the daemon's write, its events are not logged.
+test("a uv warm of the shared seed run through asDaemonWrite is the daemon's; a warm of a folder outside the locked set is not marked", async (t) => {
+  const root = tmp(t);
+  let clock = Date.now();
+  const w = new DaemonWrites({ now: () => clock });
+  const uv = path.join(root, "cache", "uv");
+  const lines: string[] = [];
+  const on = sharedEventHandler((l) => lines.push(l), { daemonOwns: (f, tt) => w.owns(f, tt), now: () => clock });
+  const warm = async () => {
+    on(path.join(uv, "wheels-v5"), uv, "numpy.whl");
+    return "warmed";
+  };
+  assert.equal(await asDaemonWrite(w, root, [uv], warm), "warmed");
+  clock += 44;
+  on(path.join(uv, "wheels-v5"), uv, "late.whl");
+  assert.deepEqual(lines, []);
+  let marked = false;
+  await asDaemonWrite(w, root, [path.join(root, "cache", "slots", "slot1", "uv")], async () => {
+    marked = w.owns(path.join(root, "cache", "slots", "slot1", "uv", "x"));
+  });
+  assert.ok(!marked, "a slot's own uv cache is not a shared-lock folder");
+});
+
+// w6316 finding 3: a clean-up batch marks only its locked items, not the batch's other paths or the other locked folders.
+test("asDaemonWrite for a clean-up batch marks only the batch's items inside the shared-lock folders", async (t) => {
+  const root = tmp(t);
+  const w = new DaemonWrites();
+  const slot = path.join(root, "players", "slot9-0");
+  const build = path.join(root, "sandboxes", "s1", "Builds", "old");
+  let seen: Record<string, boolean> = {};
+  await asDaemonWrite(w, root, [slot, build], async () => {
+    seen = {
+      slot: w.owns(path.join(slot, "Player.exe")),
+      otherSlot: w.owns(path.join(root, "players", "slot1-0", "x")),
+      uv: w.owns(path.join(root, "cache", "uv", "x")),
+      build: w.owns(path.join(build, "x")),
+    };
+  });
+  assert.deepEqual(seen, { slot: true, otherSlot: false, uv: false, build: false });
+  let ran = false;
+  await asDaemonWrite(w, root, [build], async () => {
+    ran = true;
+    assert.ok(!w.owns(path.join(root, "players", "x")));
+  });
+  assert.ok(ran);
 });
