@@ -34,7 +34,7 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { SlotCaches, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { SlotCaches, idleForRefresh, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -3772,13 +3772,13 @@ export class Daemon {
               root,
               setting: this.sharedLock,
               // Idle: no live agent, no editor, and nothing else holding its tree: a unity-slot run, a batchmode Unity or a
-              // night (switchHold, as switch_branch refuses; review w6212 L4).
+              // night (switchHoldIn, as switch_branch refuses; review w6212 L4). One holds() read per tick; one that fails or
+              // does not answer counts every sandbox busy (review w6281).
               sandboxes: () =>
-                Promise.all(
-                  this.pool.list().map(async (sb) => ({
-                    id: sb.id,
-                    idle: this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) && !(await this.switchHold(sb.id).catch(() => 'unknown')),
-                  })),
+                idleForRefresh(
+                  this.pool.list(),
+                  () => this.slots.holds(),
+                  (sb, holds) => this.liveIn(sb.id) === 0 && !this.pool.editorUp(sb.id) && !this.switchHoldIn(sb, holds),
                 ),
               copy: this.workerCopy(),
               removeTree: async (dir) => {
@@ -4851,11 +4851,15 @@ export class Daemon {
   private async switchHold(sandbox: string): Promise<string | undefined> {
     const sb = this.pool.list().find((x) => x.id === sandbox);
     if (!sb) return undefined;
+    return this.switchHoldIn(sb, await this.slots.holds().catch(() => ({ reqs: [], unity: [] })));
+  }
+
+  /** switchHold's check from holds already read (the slot cache refresh reads them once per tick and fails closed). */
+  private switchHoldIn(sb: { id: string; path: string }, holds: Awaited<ReturnType<UnitySlots['holds']>>): string | undefined {
     const platform = machinePlatformOf(process.platform);
     const roots = staleOutputSettings(this.cleanupSettings.staleOutput).nightlyRoots ?? defaultNightlyRoots(this.cfg.root);
     const nights = nightsIn({ roots, checkout: sb.path, platform, alive: isAlive, now: Date.now() });
-    const { reqs, unity } = await this.slots.holds().catch(() => ({ reqs: [], unity: [] }));
-    return switchHoldRefusal(sandbox, { nights, runs: slotRunsFor(reqs, sandbox, sb.path, platform), batch: batchUnityIn(unity, sb.path, platform) });
+    return switchHoldRefusal(sb.id, { nights, runs: slotRunsFor(holds.reqs, sb.id, sb.path, platform), batch: batchUnityIn(holds.unity, sb.path, platform) });
   }
 
   /** Live agents in one place: a sandbox, or outside sandboxes (standing agents, sandbox undefined). */

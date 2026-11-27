@@ -187,11 +187,44 @@ export interface SlotCachesDeps {
   now?: () => number;
   /** How old a clone gets before an idle sandbox's is made again (default a day). */
   refreshMs?: number;
+  /** How long tick waits for `sandboxes` before it gives up for this tick (default SANDBOXES_MS). */
+  sandboxesMs?: number;
 }
 
 export const REFRESH_MS = 24 * 3600_000;
 /** An entry touched this recently may still be being written: merge-back leaves it for the next pass. */
 export const QUIET_MS = 60_000;
+/** How long tick waits for the pool's answer: one that never comes must not leave `busy` set and stop every refresh. */
+export const SANDBOXES_MS = 120_000;
+/** How long the idle check waits for what holds the trees (machine/unitySlots.ts holds; its Windows listing may take 60 s). */
+export const HOLDS_MS = 90_000;
+
+/** `p`, or a rejection naming `what` once `ms` pass with no answer. */
+export function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} did not answer in ${Math.round(ms / 1000)} s`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Each sandbox's idleness for a refresh, from one read of what holds the trees (review w6281): a `holds` that fails or does
+ * not answer within `ms` counts every sandbox busy, so a refresh can only wait for it, never start under a batch run.
+ */
+export async function idleForRefresh<S extends { id: string }, H>(
+  list: S[],
+  holds: () => Promise<H>,
+  quiet: (s: S, h: H) => boolean,
+  ms = HOLDS_MS,
+): Promise<{ id: string; idle: boolean }[]> {
+  const h = await within(holds(), ms, "the holds").then(
+    (v) => ({ v }),
+    () => undefined,
+  );
+  return list.map((s) => ({ id: s.id, idle: h !== undefined && quiet(s, h.v) }));
+}
 
 /** Every entry of `tool` in `src` (a clone) that `rule` names, as paths relative to the tool folder, with their kind. */
 export function mergeEntries(
@@ -350,7 +383,9 @@ export class SlotCaches {
     if (this.d.setting === "off" || this.busy) return undefined;
     this.busy = true;
     try {
-      const all = (await this.d.sandboxes()).filter((s) => okSandboxId(s.id));
+      const all = (
+        await within(Promise.resolve(this.d.sandboxes()), this.d.sandboxesMs ?? SANDBOXES_MS, "the pool's sandboxes")
+      ).filter((s) => okSandboxId(s.id));
       // First the sandboxes with no clone, idle or not (a clone of a seed nobody else writes is safe while a worker runs:
       // its own folder is made beside, renamed in, and named in the environment only from its next run on).
       const none = all.find(
