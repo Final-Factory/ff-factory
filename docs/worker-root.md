@@ -1469,23 +1469,31 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
   (machine/sharedLockPaths.ts `sharedLockRel`, one list for the three fences). `on` with a sandbox that lacks a clone holds
   to `warn` for that daemon run and logs why (`sharedLockBlockers`); every check below reads the effective mode.
   - **Windows** (machine/lowIntegrity.ts `lowTargets`, `sharedLockLabels`): each locked folder gets a Medium No-Write-Up
-    label, all of it (`icacls /setintegritylevel (OI)(CI)medium /T /C /Q`: a file a Low worker made carries an explicit Low
-    label of its own, which a folder's label never reaches). Never an ACE (w5599). A folder on the way (`cache`,
+    label, all of it (a file a Low worker made carries an explicit Low label of its own, which a folder's label never
+    reaches). The walk is server/transcriptLabels.ts `labelTree`, folder by folder, never `icacls /T`: `/T` follows
+    junctions, with or without `/L` (review w6355 H1, measured), so a junction a worker planted in a seed before `on`
+    would get its target relabelled. `labelTree` skips every link, labels a folder Medium before it reads its entries (no
+    worker can add one meanwhile), and the daemon log counts the links it skipped (`worker integrity: WARNING: <path>
+    holds N links ... skipped`). Never an ACE (w5599). A folder on the way (`cache`,
     `cache/nuget`) is kept Medium too, with each of its other children Low on its own: in a Low `cache` a worker holds
     FILE_DELETE_CHILD and could rename `cache/uv` aside and write it there. A Medium `cache` also means a worker can no
     longer make a new child of it, so the daemon makes the ones workers use (`WORKER_CACHE_CHILDREN`: slots, uv-tools,
     uv-bin, cargo, asset-store, determinism-audit, xdg) at each start before it labels (`makeSharedLockDirs`). `tools`
-    already ran this way (w5717). `off` and `warn` label all of them Low again, whole.
+    already ran this way (w5717). `off` and `warn` label the locked folders Low again, whole, with the same walk, and
+    `cache` and `cache/nuget` alone: workers write the rest of `cache` (`cache/slots`), and a walk of it could meet a
+    junction they planted (review w6355 H1).
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
-    made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too).
+    made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
+    built, review w6355 M2).
   - **macOS** (server/workerFence.ts `fenceFor` `sharedLocked`): a `(deny file-write* (subpath ...))` per locked path in
     the read-only block, after the root's allow (later Seatbelt rules win). Paths are matched, so renaming a parent needs
     no extra rule: a rename of `cache` is a write to the paths under it.
   - **What the daemon moves in** (machine/lockIn.ts): a merge-back entry and a broker install are copied with a worker's
-    rights into a folder workers write, so the moved entry is the worker's until `lockIn` has run on it: on Windows it is
-    labelled Medium, all of it, and on every OS every entry must be a plain folder or a file with one name (a symlink, a
-    junction or a hard link the worker planted would leave it a way in); otherwise the whole entry is removed again and
+    rights into a folder workers write, so the moved entry is the worker's until `lockIn` has run on it. First, on every
+    OS, every entry must be a plain folder or a file with one name (a symlink, a junction or a hard link the worker
+    planted would leave it a way in); then on Windows it is labelled Medium with `labelTree` (never `/T`, review w6355
+    M1) and checked again; otherwise the whole entry is removed again and
     the daemon log says `shared lock: removed <path> again: ... (w5615)`. Under `on` the broker copies into
     `cache/slots/<sandbox>/.ff-player-<pid>-<t>`, moves it to `players/<slot>/player` and locks it; a refused lock answers
     500 and leaves no build. A launch checks the slot again (`players/launch` refuses a file with a second name, 409).

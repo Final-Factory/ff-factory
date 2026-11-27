@@ -6,10 +6,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { SHARED_LOCK_TOOLS, SHARED_SEED_DIRS, WORKER_CACHE_CHILDREN, makeSharedLockDirs, sharedLockParents, sharedLockPaths } from '../machine/sharedLockPaths.ts';
 import { SLOT_CACHE_TOOLS, mergeBack } from '../machine/slotCaches.ts';
-import { MEDIUM_TOOLS, LowCopies, isExplicitMedium, isLabelledLow, labelLow, lowTargets, type Exec } from '../machine/lowIntegrity.ts';
+import { MEDIUM_TOOLS, isExplicitMedium, isLabelledLow, labelLow, lowTargets, type Exec } from '../machine/lowIntegrity.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { fenceFor, seatbeltProfile } from './workerFence.ts';
 import { firstUnplain, lockIn } from '../machine/lockIn.ts';
+import { lowRunner } from './lowRunTest.ts';
 
 // w5615 (stage 2 of w5544): the shared lock "on" keeps the cache seeds, players, seed and tools/node, low and unity-low from
 // sandbox workers on every OS, and "off" gives them back.
@@ -108,10 +109,12 @@ test('Windows: "on" keeps cache and cache/nuget Medium with their other children
   assert.ok(on.medium.includes(path.join(W, 'cache', 'dotnet')));
 });
 
-test('Windows: off (and warn) labels the locked folders and the folders on the way Low again, whole, where "on" left them Medium', () => {
+test('Windows: off (and warn) labels the locked folders Low again whole and the folders on the way alone, where "on" left them Medium', () => {
   const off = targets(false);
   for (const rel of ['cache', 'cache/uv', 'cache/nuget', 'cache/nuget/packages', 'players', 'seed']) assert.ok(off.dirs.includes(path.join(W, ...rel.split('/'))), `off: ${rel} Low`);
   for (const rel of ['cache/uv', 'players', 'seed']) assert.ok(off.trees.includes(path.join(W, ...rel.split('/'))), `off: ${rel} whole`);
+  // Review w6355 H1: workers write the rest of cache (cache/slots); a walk of all of it could meet a junction they planted.
+  for (const rel of ['cache', 'cache/nuget']) assert.ok(!off.trees.includes(path.join(W, ...rel.split('/'))), `off: ${rel} alone, not whole`);
   assert.ok(!off.medium.some((m) => m.startsWith(path.join(W, 'cache'))));
   assert.ok(!off.medium.includes(path.join(W, 'players')));
 });
@@ -143,13 +146,46 @@ test('firstUnplain finds a symlink or a file with a second name; lockIn removes 
   assert.equal(await lockIn(path.join(d, 'sym'), deps), false);
   assert.ok(fs.existsSync(path.join(d, 'target')), 'the link goes, not what it pointed at');
   assert.match(said.join('\n'), /removed .*hard again/);
-  // Windows: the entry is labelled Medium whole first; a failed icacls removes it.
+  // Windows: the entry is labelled Medium whole, folder by folder and never with /T (review w6355 M1); a failed icacls
+  // removes it.
   const calls: string[][] = [];
-  put(path.join(d, 'win', 'f'));
-  assert.equal(await lockIn(path.join(d, 'win'), { ...deps, platform: 'win32', exec: async (_c, a) => (calls.push(a), { code: 0, stdout: '', stderr: '' }) }), true);
-  assert.deepEqual(calls[0].slice(1), ['/setintegritylevel', '(OI)(CI)medium', '/T', '/C', '/Q']);
+  const winExec = async (_c: string, a: string[]) => (calls.push(a), { code: 0, stdout: '', stderr: '' });
+  put(path.join(d, 'win', 'sub', 'f'));
+  assert.equal(await lockIn(path.join(d, 'win'), { ...deps, platform: 'win32', exec: winExec }), true);
+  assert.deepEqual(calls[0], [path.join(d, 'win'), '/setintegritylevel', '(OI)(CI)medium']);
+  assert.ok(calls.some((a) => a[0] === path.join(d, 'win', 'sub') && a[2] === '(OI)(CI)medium'), JSON.stringify(calls));
+  assert.ok(!calls.flat().includes('/T'), JSON.stringify(calls));
+  // A link is found before anything is labelled: icacls would label what a junction points at.
+  calls.length = 0;
+  fs.mkdirSync(path.join(d, 'winj'));
+  fs.symlinkSync(path.join(d, 'target'), path.join(d, 'winj', 'l'), 'junction');
+  assert.equal(await lockIn(path.join(d, 'winj'), { ...deps, platform: 'win32', exec: winExec }), false);
+  assert.deepEqual(calls, [], 'no icacls call at all');
+  assert.ok(!fs.existsSync(path.join(d, 'winj')) && fs.existsSync(path.join(d, 'target')));
   assert.equal(await lockIn(path.join(d, 'win'), { ...deps, platform: 'win32', exec: async () => ({ code: 5, stdout: '', stderr: 'Access is denied.' }) }), false);
   assert.ok(!fs.existsSync(path.join(d, 'win')));
+});
+
+test('Windows: labelLow walks a locked folder entry by entry, never with /T, and never follows a junction planted in it (review w6355 H1)', { skip: process.platform !== 'win32' && 'junctions are Windows only' }, async (t) => {
+  const d = tmp(t);
+  const seed = path.join(d, 'cache', 'uv');
+  put(path.join(seed, 'a', 'f'));
+  const outside = path.join(d, 'secrets');
+  put(path.join(outside, 's'));
+  fs.symlinkSync(outside, path.join(seed, 'a', 'j'), 'junction');
+  for (const on of [true, false]) {
+    const calls: string[][] = [];
+    const said: string[] = [];
+    // Nothing reads Low or Medium of its own: every folder gets labelled.
+    const exec: Exec = async (_c, a) => (calls.push(a), { code: 0, stdout: '', stderr: '' }) as never;
+    const tg = on ? { dirs: [], files: [], medium: [seed], trees: [seed] } : { dirs: [seed], files: [], trees: [seed] };
+    assert.equal(await labelLow(tg, exec, (l) => void said.push(l), 'acct'), true, said.join('\n'));
+    const set = calls.filter((a) => a.includes('/setintegritylevel'));
+    assert.ok(set.some((a) => a[0] === seed) && set.some((a) => a[0] === path.join(seed, 'a')), `${on}: ${JSON.stringify(set)}`);
+    assert.ok(!calls.flat().includes('/T'), `${on}: no /T`);
+    assert.ok(!calls.some((a) => a[0].startsWith(outside) || a[0] === path.join(seed, 'a', 'j')), `${on}: the junction and its target untouched: ${JSON.stringify(calls)}`);
+    assert.match(said.join('\n'), /1 link .*skipped/);
+  }
 });
 
 test('mergeBack under "on" counts an entry only once it is locked in; one lockIn refuses is not counted', async (t) => {
@@ -181,8 +217,6 @@ const realExec: Exec = async (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8', windowsHide: true });
   return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' } as never;
 };
-/** A Low cmd.exe running one line (storeLock.test.ts lowShell: windowsVerbatimArguments, or every line fails). */
-const lowShell = (cmd: string) => (line: string) => spawnSync(cmd, ['/d', '/s', '/c', `"${line}"`], { encoding: 'utf8', windowsHide: true, windowsVerbatimArguments: true });
 const runsLow = process.platform === 'win32' && /S-1-16-4096/.test(spawnSync(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe'), ['/groups'], { encoding: 'utf8', windowsHide: true }).stdout ?? '');
 
 test('live (Windows): "on" refuses a Low process in cache/uv (its own earlier file too), players and seed and a rename of cache/uv, while it writes cache/slots; off gives them back', { skip: process.platform !== 'win32' ? 'needs Windows' : runsLow && 'needs a Medium process: this one runs Low' }, async (t) => {
@@ -195,15 +229,38 @@ test('live (Windows): "on" refuses a Low process in cache/uv (its own earlier fi
   const tg = (sharedLock: boolean) => lowTargets({ root, appDir: path.join(root, 'daemon'), children, toolsChildren, sharedLock });
   const said: string[] = [];
   assert.equal(await labelLow(tg(false), realExec, (l) => void said.push(l)), true, said.join('\n'));
-  const cmd = new LowCopies(base, (l: string) => void said.push(l)).make(path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe'));
-  assert.ok(cmd, said.join('\n'));
-  const low = lowShell(cmd!);
+  // A worker's token (LOWRUN): the runner's own token at Low keeps SeBackup and SeRestore, which pass any label (CI run
+  // 45959235451: its Low cmd renamed cache\uv under "on").
+  const run = lowRunner(path.join(base, 'bin'));
+  const low = (line: string) => {
+    const r = run(line);
+    assert.equal(r.launch, undefined, `the launcher ran: ${line}`);
+    return r;
+  };
+  // Junctions planted before the switch (review w6355 H1): one in a seed to a Low folder, one in cache/slots to a Medium
+  // one. Neither target may change label, on or off.
+  const outLow = path.join(base, 'outside-low');
+  const outMed = path.join(base, 'outside-medium');
+  fs.mkdirSync(outLow);
+  fs.mkdirSync(outMed);
+  assert.equal((await realExec('icacls', [outLow, '/setintegritylevel', '(OI)(CI)low'])).code, 0);
+  fs.symlinkSync(outLow, path.join(root, 'cache', 'uv', 'planted'), 'junction');
+  fs.mkdirSync(path.join(root, 'cache', 'slots'), { recursive: true });
+  fs.symlinkSync(outMed, path.join(root, 'cache', 'slots', 'planted'), 'junction');
+  const targetsKept = async (when: string) => {
+    const low1 = (await realExec('icacls', [outLow])).stdout;
+    assert.ok(isLabelledLow(low1) && !isExplicitMedium(low1), `${when}: the seed junction's target still Low: ${low1}`);
+    const med = (await realExec('icacls', [outMed])).stdout;
+    assert.ok(!isLabelledLow(med), `${when}: the cache/slots junction's target still Medium: ${med}`);
+  };
+  await targetsKept('off');
   const uvOld = path.join(root, 'cache', 'uv', 'old.txt');
   assert.equal(low(`echo x> "${uvOld}"`).status, 0, 'off: a Low write into cache/uv');
   assert.ok(fs.existsSync(uvOld), 'the shell really ran the line');
 
   assert.equal(await labelLow(tg(true), realExec, (l) => void said.push(l)), true, said.join('\n'));
   assert.ok(isExplicitMedium((await realExec('icacls', [path.join(root, 'cache', 'uv')])).stdout));
+  await targetsKept('on');
   const refusedLines = [
     `echo y>> "${uvOld}"`,
     `echo x> "${path.join(root, 'cache', 'uv', 'new.txt')}"`,
@@ -218,7 +275,7 @@ test('live (Windows): "on" refuses a Low process in cache/uv (its own earlier fi
   assert.ok(fs.existsSync(path.join(root, 'cache', 'uv')) && !fs.existsSync(path.join(root, 'cache', 'uv2')));
   for (const p of ['cache/slots/s.txt', 'cache/uv-tools/t.txt', 'sandboxes/s.txt', 'tools/git/g.txt']) {
     const r = low(`echo x> "${path.join(root, ...p.split('/'))}"`);
-    assert.equal(r.status, 0, `on: a Low write into ${p}: ${r.stderr}`);
+    assert.equal(r.status, 0, `on: a Low write into ${p}: ${r.out}`);
   }
   // lockIn: what a Low copy put in a stage, moved into the seed by the daemon, turns Medium whole.
   const stage = path.join(root, 'cache', 'slots', 'h9');
@@ -232,9 +289,10 @@ test('live (Windows): "on" refuses a Low process in cache/uv (its own earlier fi
   // The way back: shared_lock off and the next labelling.
   assert.equal(await labelLow(tg(false), realExec, (l) => void said.push(l)), true, said.join('\n'));
   assert.ok(isLabelledLow((await realExec('icacls', [path.join(root, 'cache', 'uv')])).stdout));
+  await targetsKept('off again');
   for (const line of [`echo y>> "${uvOld}"`, `echo y>> "${path.join(dst, 'f')}"`, `echo x> "${path.join(root, 'players', 'slot1-0', 'player', 'Game.exe')}"`, `echo x> "${path.join(root, 'seed', 'x.txt')}"`, `echo x> "${path.join(root, 'cache', 'new.txt')}"`]) {
     const r = low(line);
-    assert.equal(r.status, 0, `off again: ${line}: ${r.stderr}`);
+    assert.equal(r.status, 0, `off again: ${line}: ${r.out}`);
   }
 });
 

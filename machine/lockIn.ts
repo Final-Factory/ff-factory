@@ -3,11 +3,13 @@
  * seed's new entry from mergeBack, a player the broker installed). Both are copied with a worker's rights into a folder
  * workers write (machine/workerCopy.ts, review w6212 B1), so the moved entry is still a worker's until this has run:
  *
- * - Windows: the files a Low process made carry an explicit Low label of their own, which the Medium seed folder's label does
- *   not reach, so a worker could still write them. They are labelled Medium, all of them (/T).
  * - every OS: a worker could have swapped an entry of the stage for a link (a symlink or a junction to its own folder) or a
  *   hard link (one name in the seed, one where it writes) before the move. Every entry must be a plain folder or a file with
- *   one name; otherwise the whole entry is removed again.
+ *   one name; otherwise the whole entry is removed again. Checked before anything is labelled (review w6355 M1).
+ * - Windows: the files a Low process made carry an explicit Low label of their own, which the Medium seed folder's label does
+ *   not reach, so a worker could still write them. They are labelled Medium, all of them, by transcriptLabels.ts labelTree:
+ *   never icacls /T, which follows a junction and would label its target. labelTree labels each folder before it reads its
+ *   entries, so once a folder is Medium no worker can add a link to it; the check runs again after, for one made meanwhile.
  *
  * Left (docs/worker-root.md): a write handle a worker opened on a stage file before the move and keeps open. macOS: whether
  * Seatbelt's deny holds for a hard link a worker makes to a seed file from a folder it writes is a per-OS proof leg.
@@ -50,12 +52,14 @@ export function firstUnplain(p: string): string | undefined {
 export async function lockIn(p: string, d: LockInDeps): Promise<boolean> {
   const say = d.log ?? (() => {});
   try {
-    if ((d.platform ?? process.platform) === 'win32') {
-      const dir = fs.lstatSync(p).isDirectory();
-      const r = await d.exec('icacls', [p, '/setintegritylevel', dir ? '(OI)(CI)medium' : 'medium', ...(dir ? ['/T', '/C', '/Q'] : [])], { timeoutMs: 30 * 60_000 });
-      if (r.code !== 0) throw new Error(`icacls exit ${r.code}: ${(r.stderr || r.stdout).trim().slice(-200)}`);
+    let bad = firstUnplain(p);
+    if (!bad && (d.platform ?? process.platform) === 'win32') {
+      // Imported here: transcriptLabels.ts pulls in the server side, which the other OSes never need.
+      const { icaclsOf, labelTree, setLabel } = await import('../server/transcriptLabels.ts');
+      const icacls = icaclsOf(d.exec);
+      const links = fs.lstatSync(p).isDirectory() ? await labelTree(p, 'medium', icacls) : (await setLabel(p, 'medium', icacls), 0);
+      bad = links ? `${p} (a link in it)` : firstUnplain(p);
     }
-    const bad = firstUnplain(p);
     if (!bad) return true;
     say(`shared lock: removed ${p} again: ${bad} is a link or has a second name (w5615)`);
   } catch (e) {

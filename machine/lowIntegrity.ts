@@ -218,9 +218,12 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
   const under = (p: string) => dirs.some((d) => inside(p, d)) || medium.some((m) => same(m, p));
   const locked = sharedLockRel(false).map(abs).filter((p) => under(p));
   if (!i.sharedLock) {
-    // Back to Low where "on" left them Medium (labelLow touches one only when it does not read Low).
-    const back = [...locked, ...[...sharedLockParents(false).keys()].map(abs).filter((p) => under(p) || at(p) >= 0)].filter((p) => exists(p));
-    for (const p of back) if (at(p) < 0) dirs.push(p);
+    // Back to Low where "on" left them Medium (labelLow touches one only when it does not read Low). Only the locked folders
+    // are walked whole; the parents are labelled alone (review w6355 H1): workers write the rest of `cache` (cache/slots),
+    // and a walk of it could meet a junction they planted.
+    const back = locked.filter((p) => exists(p));
+    const parents = [...sharedLockParents(false).keys()].map(abs).filter((p) => (under(p) || at(p) >= 0) && exists(p));
+    for (const p of [...back, ...parents]) if (at(p) < 0) dirs.push(p);
     return back;
   }
   // Parents first, from the top: each leaves `dirs` for `medium`, its other children join `dirs` on their own.
@@ -408,16 +411,24 @@ export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium 
  */
 export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[]; trees?: string[] }, exec: Exec, say: (line: string) => void, account = currentAccount()): Promise<boolean> {
   let ok = true;
-  // w5615: a shared-lock folder is labelled whole (/T): files a Low worker made there carry a Low label of their own.
+  // w5615: a shared-lock folder is labelled whole: files a Low worker made there carry a Low label of their own. Never with
+  // icacls /T, which follows junctions with or without /L (review w6355 H1, measured): a junction a worker planted in the
+  // seed before "on" would get its target relabelled. transcriptLabels.ts labelTree walks it and skips every link.
   const tree = (p: string) => (t.trees ?? []).some((x) => same(x, p));
   const setLabel = async (p: string, label: string) => {
-    const all = tree(p) ? ['/T', '/C', '/Q'] : [];
-    let r = await exec('icacls', [p, '/setintegritylevel', label, ...all], { timeoutMs: 30 * 60_000 });
+    if (tree(p)) {
+      // Imported here: transcriptLabels.ts imports this file.
+      const { icaclsOf, labelTree } = await import('../server/transcriptLabels.ts');
+      const links = await labelTree(p, label === LOW_LABEL ? 'low' : 'medium', icaclsOf(exec), account);
+      if (links) say(`worker integrity: WARNING: ${p} holds ${links} link${links === 1 ? '' : 's'} (a junction or symlink), skipped: not followed, not labelled (w5615)`);
+      return;
+    }
+    let r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
     if (r.code !== 0 && account && /access is denied/i.test(r.stderr + r.stdout)) {
       const g = await exec('icacls', [p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
       if (g.code === 0) {
         say(`worker integrity: gave ${account} Full on ${p}, which setting its label needs (WRITE_OWNER)`);
-        r = await exec('icacls', [p, '/setintegritylevel', label, ...all], { timeoutMs: 30 * 60_000 });
+        r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
       }
     }
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
