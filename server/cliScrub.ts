@@ -22,11 +22,16 @@ export const inPlaceMask = (n: number) => Buffer.from(n >= 10 ? `[redacted${'*'.
  * Overwrite every match of `m` in `file` from byte `from` on (a little before it, so a value cut by the last scan's end is
  * found), in place: same length, nothing else touched. How many it found (on a dry run: would mask), and the size it read to.
  */
-export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number }, from = 0, o: { dryRun?: boolean } = {}): Promise<{ count: number; size: number }> {
+/** w6479: which file this is under its name: its inode (Windows' file index) and its birth time, as ext4 reuses inodes. */
+const fileId = (st: fs.Stats) => `${st.ino}:${st.birthtimeMs}`;
+
+export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number }, from = 0, o: { dryRun?: boolean } = {}): Promise<{ count: number; size: number; id: string }> {
   // w3855: read by the thread pool, CHUNK at a time, so a chunk's scan is the event loop's only long piece (it was 8 MB read here)
   const fh = await fs.promises.open(file, o.dryRun ? 'r' : 'r+');
   try {
-    const size = (await fh.stat()).size;
+    const st = await fh.stat();
+    const size = st.size;
+    const id = fileId(st);
     const overlap = m.maxLen - 1;
     let pos = Math.max(0, Math.min(from, size) - overlap);
     let count = 0;
@@ -50,14 +55,14 @@ export async function scrubInPlace(file: string, m: { re: RegExp; maxLen: number
       pos += upTo;
       await new Promise((r) => setImmediate(r));
     }
-    return { count, size };
+    return { count, size, id };
   } finally {
     await fh.close();
   }
 }
 
 /** Every text file below `root`, with its size, never following a link. */
-function textFiles(root: string): Map<string, number> {
+function textFiles(root: string, ids?: Map<string, string>): Map<string, number> {
   const out = new Map<string, number>();
   // w5702: the root itself may be a link (a locked Linux worker's `projects` links to `<root>/transcripts`); links below it are skipped.
   const walk = (p: string) => {
@@ -76,7 +81,10 @@ function textFiles(root: string): Map<string, number> {
         return;
       }
       for (const n of names) walk(path.join(p, n));
-    } else if (st.isFile() && TEXT.test(p)) out.set(p, st.size);
+    } else if (st.isFile() && TEXT.test(p)) {
+      out.set(p, st.size);
+      ids?.set(p, fileId(st));
+    }
   };
   walk(root);
   return out;
@@ -149,6 +157,8 @@ export interface CliScrubOptions {
 export class CliScrubber {
   /** Bytes of each file already scanned with the values of `version`. */
   private read = new Map<string, number>();
+  /** w6479: each scanned file's identity (scrubInPlace's id), so a file made again under its name is scanned whole. */
+  private ids = new Map<string, string>();
   private version = secretValuesVersion();
   private dirty = new Set<string>();
   private watcher: fs.FSWatcher | undefined;
@@ -182,7 +192,8 @@ export class CliScrubber {
       // 2026-11-26) ran beside the resumed coordinators' first turns; the bytes already there were scanned by the process
       // before, so they wait for the resumes, the new bytes do not
       this.version = secretValuesVersion();
-      for (const [f, size] of this.files()) this.read.set(f, size);
+      // w6479: with each file's identity, so one made again under its name before its first scan is scanned whole
+      for (const [f, size] of this.files(this.ids)) this.read.set(f, size);
       void o.backScanAfter.then(backScan, backScan);
     }
     this.watch();
@@ -200,9 +211,9 @@ export class CliScrubber {
   }
 
   /** Every text file below the projects folder and the extra folders, with its size. */
-  private files(): Map<string, number> {
-    const out = textFiles(this.o.root);
-    for (const r of this.o.extraRoots?.() ?? []) for (const [f, size] of textFiles(r)) out.set(f, size);
+  private files(ids?: Map<string, string>): Map<string, number> {
+    const out = textFiles(this.o.root, ids);
+    for (const r of this.o.extraRoots?.() ?? []) for (const [f, size] of textFiles(r, ids)) out.set(f, size);
     return out;
   }
 
@@ -255,6 +266,7 @@ export class CliScrubber {
         await fs.promises.access(f);
       } catch {
         this.read.delete(f);
+        this.ids.delete(f);
       }
     }
     await this.pass('sweep');
@@ -304,10 +316,13 @@ export class CliScrubber {
         // values learnt now: every byte already read, for them only; then the new bytes for every value
         if (back && prev > 0) count += (await scrubInPlace(f, back, 0)).count;
         let r = await scrubInPlace(f, all, prev);
-        // w6479: shorter than what was read, it is another file by that name (forgotten only at the next sweep now): all of it
-        if (prev > 0 && r.size < prev) r = await scrubInPlace(f, all, 0);
+        // w6479: shorter than what was read, or not the file read (made again under its name, which is forgotten only at the
+        // next sweep now, or never seen gone in an unwatched folder): all of it
+        const was = this.ids.get(f);
+        if (prev > 0 && (r.size < prev || (was !== undefined && r.id !== was))) r = await scrubInPlace(f, all, 0);
         count += r.count;
         this.read.set(f, r.size);
+        this.ids.set(f, r.id);
         report.scanned++;
         if (count) {
           report.files.push({ file: f, count });
@@ -315,7 +330,10 @@ export class CliScrubber {
         }
       } catch (e) {
         const code = (e as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT') this.read.delete(f);
+        if (code === 'ENOENT') {
+          this.read.delete(f);
+          this.ids.delete(f);
+        }
         else report.errors.push({ file: f, error: code ?? (e as Error).name });
       }
     }

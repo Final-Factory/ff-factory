@@ -190,3 +190,33 @@ test('w6479: a file replaced by a shorter one under its name is scanned whole, a
   await s.sweep();
   assert.equal(read.has(f), false, 'the sweep forgets a file the walk no longer finds');
 });
+
+for (const known of ['scanned', 'listed at the start'] as const) {
+  test(`w6479 review: a file made again longer under its name, ${known}, is scanned whole at the sweep`, async (t) => {
+    t.after(reset);
+    reset();
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliroot-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const v = fake(30);
+    addSecretValues([v]);
+    // unwatched (an extra root): its deletion is never seen as it happens
+    const extra = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-cliextra-'));
+    t.after(() => fs.rmSync(extra, { recursive: true, force: true }));
+    const f = path.join(extra, 'tasks', 'a.txt');
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({ pad: 'x'.repeat(2_000) }) + '\n');
+    const s = new CliScrubber({ root, extraRoots: () => [extra], log: () => undefined, sweepMs: 3_600_000 });
+    t.after(() => s.stop());
+    // 'listed at the start': the portal's start lists it by size and identity, and its back-scan never comes in this test
+    s.start(known === 'scanned' ? {} : { backScanAfter: new Promise(() => undefined) });
+    if (known === 'scanned') await s.sweep();
+    const read = (s as unknown as { read: Map<string, number> }).read;
+    assert.ok((read.get(f) ?? 0) > 2_000, 'the old file is known');
+    fs.rmSync(f);
+    await s.pass('watch');
+    // made again longer, its value before the old size: a scan from the old size would miss it
+    fs.writeFileSync(f, JSON.stringify({ stdout: `now ${v}`, pad: 'y'.repeat(3_000) }) + '\n');
+    await s.sweep();
+    assert.ok(!fs.readFileSync(f, 'utf8').includes(v), 'the new file is scanned from its start');
+  });
+}
