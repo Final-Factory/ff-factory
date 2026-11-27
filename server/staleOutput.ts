@@ -48,6 +48,12 @@ export interface StaleOutputSettings {
    */
   ffuBusyRetry: 'off' | 'warn' | 'on';
   ffuBusyRetryMinutes: number;
+  /**
+   * w6484: a stale ffu slot (its holder finished, stopped or idle past its limit; machine/ffuSlots.ts slotFree) is freed by the
+   * daemon's own `ffu-slot sweep` after the slot report names it (machine/ffuSlotAutoSweep.ts), not only by the next take.
+   * warn: log what it would free, free nothing (docs/worker-fence.md: warn-only first); on: sweep; off: nothing.
+   */
+  ffuSlotSweep: 'off' | 'warn' | 'on';
 }
 
 export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
@@ -61,6 +67,7 @@ export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
   nightlyKeep: 2,
   ffuBusyRetry: 'warn',
   ffuBusyRetryMinutes: 5,
+  ffuSlotSweep: 'warn',
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -78,6 +85,7 @@ export function staleOutputSettings(raw: unknown): StaleOutputSettings {
     nightlyKeep: n('nightlyKeep', 1, 20),
     ffuBusyRetry: r.ffuBusyRetry === 'off' || r.ffuBusyRetry === 'warn' || r.ffuBusyRetry === 'on' ? r.ffuBusyRetry : STALE_OUTPUT_DEFAULTS.ffuBusyRetry,
     ffuBusyRetryMinutes: n('ffuBusyRetryMinutes', 1, 60),
+    ffuSlotSweep: r.ffuSlotSweep === 'off' || r.ffuSlotSweep === 'warn' || r.ffuSlotSweep === 'on' ? r.ffuSlotSweep : STALE_OUTPUT_DEFAULTS.ffuSlotSweep,
     ...(Array.isArray(r.nightlyRoots) ? { nightlyRoots: r.nightlyRoots.filter((x): x is string => typeof x === 'string' && x.trim() !== '') } : {}),
   };
 }
