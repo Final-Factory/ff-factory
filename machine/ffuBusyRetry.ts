@@ -93,7 +93,7 @@ export class FfuBusyRetry {
   }
 
   /** One re-check of the watched slots. Answers what it did, for tests. */
-  async tick(): Promise<{ slots: string[]; planned: number; removed: number } | undefined> {
+  async tick(): Promise<{ slots: string[]; planned: number; removed: number; deferred?: boolean } | undefined> {
     const s = this.d.settings();
     if (s.mode === 'off') {
       this.watch.clear();
@@ -130,6 +130,9 @@ export class FfuBusyRetry {
         this.d.record({ at, trigger: 'ffu-busy-retry', ffuBusyRetry: 'warn', removed: 0, freedBytes: 0, planned, plannedBytes: bytes });
         return { slots, planned: items.length, removed: 0 };
       }
+      // w6304 point 4: the plan can take minutes, and an hourly pass may have started meanwhile. It judges the same slots
+      // itself (and notes them again), so nothing is removed beside it: the slots stay watched for the next tick.
+      if (this.d.passRunning()) return { slots, planned: items.length, removed: 0, deferred: true };
       const run = await this.d.remove(items);
       // Removed and no longer kept: done. Still kept (written within the settle time, say): watched until the next pass.
       for (const id of acted) if (!stillBusy.has(id)) this.watch.delete(id);
