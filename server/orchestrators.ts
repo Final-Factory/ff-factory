@@ -4541,9 +4541,30 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (input.action === 'merge') {
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
+      // w6288: a worker moved off t that comes back with w is never shifted past t's hand-back below (w2079).
+      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => !t.sessionIds.includes(sid)));
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
       // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
       if (w.links) t.links = { ...w.links, ...t.links };
+      // w6271 (the w6269 review): workers merged onto a request handed back since their own links join t after that hand-back,
+      // or answerNeedsYou takes them for gone and an answer on t goes only into the old hand-off. Their links all shift by one
+      // offset, so the newest of them lands just after the hand-back (w6277: keeping their order among themselves, and a worker
+      // placed on t after the hand-back stays the newest, w1696). Only a worker that still exists counts (a gone one could not
+      // take an answer: the hand-off keeps it), only one whose link came with w (t's own stands), and one with no link keeps
+      // none (it ranks last, as before) unless none of them has one.
+      const hbAt = Date.parse(t.handedBack?.at ?? '') || 0;
+      const joined = hbAt ? w.sessionIds.filter((sid) => !offT.has(sid) && this.store.sessions.get(sid) && (!t.links?.[sid] || t.links[sid] === w.links?.[sid])) : [];
+      const linkAt = (sid: string) => Date.parse(t.links?.[sid]?.at ?? '');
+      const timed = joined.filter((sid) => Number.isFinite(linkAt(sid)));
+      const newest = timed.length ? Math.max(...timed.map(linkAt)) : -Infinity;
+      if (joined.length && newest <= hbAt) {
+        const shift = timed.length ? hbAt + 1 - newest : 0;
+        const moved = timed.length ? timed : joined;
+        for (const sid of moved) {
+          const at = new Date(timed.length ? linkAt(sid) + shift : hbAt + 1).toISOString();
+          t.links = { ...t.links, [sid]: { ...(t.links?.[sid] ?? { how: 'sent' as const }), at } };
+        }
+      }
       this.stamp(t, `merged ${w.id} from ${names(w.requesters)}: ${note}`);
       this.store.putWork(t);
       w.mergedInto = t.id;
