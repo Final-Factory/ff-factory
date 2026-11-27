@@ -1096,6 +1096,7 @@ const blockerWatch = new BlockerWatch({
   nightlyAt: () => nightlyAt,
   room: () => agents.roomNow(),
   roomFacts: () => agents.roomFacts(),
+  legacyPairs: () => agents.recheckLegacyPairs(),
   // w2079: a worker whose work a resume's move is carrying away is not lost: the sweep leaves it be.
   queued: (id) => sessions.queued().some((q) => q.id === id) || agents.isMoving(id),
   // w2422: a worker whose own check-in is pending comes back by itself; its reported wait is not recorded for it.
