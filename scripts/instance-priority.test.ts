@@ -96,9 +96,9 @@ function raise(pid: number): string {
 const msysBash = () => path.join(path.dirname(path.dirname(bash)), 'usr', 'bin', 'bash.exe');
 
 test('w6542: a winpid naming the forked bash.exe raises its node.exe child, never the bash', { skip }, async () => {
-  // what an early read named on windows-latest (PR #1508): a bash.exe whose child is the node.exe started in it. Here a
-  // bash that does not exec its node (the `; :` after it), so node.exe stays its child as there.
-  const stub = spawn(msysBash(), ['-c', `'${process.execPath.replace(/\\/g, '/')}' -e 'console.log(process.pid); setTimeout(() => {}, 30_000)'; :`], { windowsHide: true });
+  // what an early read named on windows-latest (PR #1508): the forked bash.exe of `node ... &`, which on its exec of the
+  // native node.exe stays as that node.exe's parent. Here a bash that execs its node, as that job does.
+  const stub = spawn(msysBash(), ['-c', `exec '${process.execPath.replace(/\\/g, '/')}' -e 'console.log(process.pid); setTimeout(() => {}, 30_000)'`], { windowsHide: true });
   let node = 0;
   try {
     node = await new Promise<number>((resolve, reject) => {
