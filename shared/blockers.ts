@@ -253,10 +253,20 @@ export function offSince(w: Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>,
 }
 
 /**
- * w6309 (the w6320 review): whether worker `sid` is on request `w`: listed, and not off it since a move (offSince). The one
- * test of "on the request" for every route that picks a worker of it (newestFirst, isWith, servedBy, gateOwner, deployHeld).
- * A merged-back worker stays listed only so a person's [answer] or [note] to it still goes (staleResume, w2495).
+ * w6309: what a worker of request `w` may do, settled here and read by every route (the w6318..w6329 reviews of #1430).
+ * A worker moved off `w` that a merge listed again (offSince while listed) is heard, not on it:
+ * - heardOn (listed): a person's [answer] or [note] to it still goes (staleResume, w2495), and what it says back is kept
+ *   with `w` (itemsOf: Findings, outcome, orchestratorStep, unfiledInReport, intakeMarkers). Its DONE is refused with why.
+ * - onRequest (listed and not offSince): it holds `w` (holdsOf, servedBy), is its newest worker (newestFirst, isWith),
+ *   is woken for it (gateOwner, deployHeld, resumeAfterDeploy, held check-ins), carries it in a move (movableWorkOf),
+ *   uses a worker tool on it (workerRequest), closes it with DONE, and its reports clear `w`'s gates (BlockerWatch
+ *   reportedSince, deliveredSince). None of these for a merged-back moved-off worker (w2079).
  */
+export function heardOn(w: Pick<WorkItem, 'sessionIds'>, sid: string): boolean {
+  return w.sessionIds.includes(sid);
+}
+
+/** w6309: worker `sid` is on request `w` (see heardOn above): listed, and not off it since a move (offSince). */
 export function onRequest(w: Pick<WorkItem, 'sessionIds' | 'links'> & Partial<Pick<WorkItem, 'movedOff'>>, sid: string): boolean {
   return w.sessionIds.includes(sid) && !(w.movedOff && offSince(w as Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>, sid));
 }

@@ -9,7 +9,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, offSince, onRequest, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, heardOn, newestFirst, offSince, onRequest, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
@@ -2013,7 +2013,7 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /** The open ledger items a worker works on (a closed one no longer hears from it, even if the worker is reused). */
   itemsOf(sessionId: string): WorkItem[] {
-    return [...this.store.work.values()].filter((w) => onRequest(w, sessionId) && isOpen(w));
+    return [...this.store.work.values()].filter((w) => heardOn(w, sessionId) && isOpen(w));
   }
 
   /**
@@ -7521,6 +7521,12 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!(isOpen(w) || w.status === 'stalled')) continue;
       // w2045: a DONE while its after-merge report waits on green CI is that report's, filed when FF Factory merges.
       if (!ops && w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
+      // w6309 (the w6329 review): a worker moved off it that a merge listed again is heard (its report is kept in Findings),
+      // but its DONE does not close it: the worker on it now, or the dispatcher, does.
+      if (!ops && heardOn(w, s.id) && !onRequest(w, s.id)) {
+        refused.push(`${id}: you were moved off it at ${w.movedOff?.[s.id]?.slice(11, 16) ?? '?'} UTC, so your DONE does not close it; your report is kept with it, and ${latestWorker(w) ? `its worker ${latestWorker(w)}` : 'the dispatcher'} carries it on`);
+        continue;
+      }
       if (!onRequest(w, s.id)) {
         const by = ops ? undefined : this.namedBy(s.id, id);
         if (ops?.workIds.has(id)) {

@@ -13,6 +13,7 @@ import type { Config } from './config.ts';
 import type { Requester, SessionInfo, UserInfo, WorkItem } from '../shared/types.ts';
 import { isWith, latestWorker } from '../shared/blockers.ts';
 import { holdsOf } from '../shared/workState.ts';
+import { BlockerWatch } from './blockerWatch.ts';
 
 /**
  * w6047 (the w6253 review asked for it): one table of where answerNeedsYou sends a person's [answer], over every shape the
@@ -412,13 +413,14 @@ const aloneMergedBack = (env: Awaited<ReturnType<typeof setup>>) => {
   return env.store.work.get('w5869')!;
 };
 
-test('w6323 PROBE1 a moved-off worker merged back alone holds nothing of it (holdsOf, servedBy)', async (t) => {
+test('w6323 PROBE1 a moved-off worker merged back alone holds nothing of it (holdsOf, servedBy), but is heard (itemsOf)', async (t) => {
   const env = await setup(t, 'on');
   aloneMergedBack(env);
   const items = [...env.store.work.values()];
   const h = holdsOf(E, items);
   assert.ok(!h.held.has('w5869') && !h.served.has('w5869'));
-  assert.ok(!env.agents.orchestrators.itemsOf(E).some((x) => x.id === 'w5869'));
+  // Heard, not on it (w6329): what it says back to a person's answer is still kept with the request.
+  assert.ok(env.agents.orchestrators.itemsOf(E).some((x) => x.id === 'w5869'));
 });
 
 test('w6323 PROBE2 a moved-off worker merged back alone is refused a worker tool on it (workerRequest)', async (t) => {
@@ -448,4 +450,55 @@ test('w6323 the merge notice names no moved-off worker it listed again (Low)', a
   const said = env.agents.orchestrators.decide({ id: 'w5871', action: 'merge', into: 'w5869', note: 'it repeats w5869 (test)' });
   assert.match(said, /merged into w5869/);
   assert.ok(!said.includes(E), said);
+});
+
+// w6329 (round-4 review of #1430): the w6323 shapes with a hand-back, as its report ran them.
+const handedBackMergedBack = (env: Awaited<ReturnType<typeof setup>>) => {
+  const k = kit(env);
+  const w = k.req([E], 'w5869', { [E]: 2 * H });
+  k.moveOff(w, E);
+  k.handBack(w, E);
+  k.merge(w, [E], { [E]: -1000 });
+  return env.store.work.get('w5869')!;
+};
+type OI = { workerRequest: (s: string, r: string | undefined, tool: string) => WorkItem };
+
+test('R4-A with a hand-back: holdsOf, itemsOf, blocked_on (workerRequest) and the room move leave it off', async (t) => {
+  const env = await setup(t, 'on');
+  handedBackMergedBack(env);
+  const h = holdsOf(E, [...env.store.work.values()]);
+  assert.ok(!h.held.has('w5869') && !h.served.has('w5869'), 'holdsOf');
+  const o = env.agents.orchestrators as unknown as OI;
+  assert.throws(() => o.workerRequest(E, 'w5869', 'blocked_on'), /not on w5869/);
+  const a = env.agents as unknown as { movableWorkOf: (i: SessionInfo) => { reqs: WorkItem[]; gone: WorkItem[] }; openWorkOf: (i: SessionInfo) => WorkItem[] };
+  const m = a.movableWorkOf(env.store.sessions.get(E)!);
+  assert.deepEqual([m.reqs.map((x) => x.id), m.gone.map((x) => x.id)], [[], ['w5869']]);
+  assert.ok(!a.openWorkOf(env.store.sessions.get(E)!).some((x) => x.id === 'w5869') || m.gone.length, 'openWorkOf');
+});
+test('R4-B a person\'s [answer] reaches the merged-back worker (P9): its reply is kept in Findings, and its DONE does not close it', async (t) => {
+  const env = await setup(t, 'on');
+  aloneMergedBack(env);
+  const o = env.agents.orchestrators;
+  assert.equal(o.staleResume('w5869', E, '[answer] yes, ship it'), undefined, 'the answer goes to it (w2495)');
+  o.workerTurnEnded(env.store.sessions.get(E)!, 'Shipped it as you said: PR #9 merged.\n\nDONE: w5869');
+  const w = env.store.work.get('w5869')!;
+  const kept = (w.findings ?? []).some((f) => f.by === E && /Shipped it/.test(f.text));
+  assert.ok(kept, 'the reply to a person\'s answer is kept in its Findings record');
+  assert.ok(!w.done?.[E], 'its DONE does not close it (w2079)');
+  assert.notEqual(w.status, 'done');
+});
+test('R4-C a report of its merged-back moved-off worker does not count as the request reporting (blockerWatch reportedSince, w6329)', async (t) => {
+  const env = await setup(t, 'on');
+  const w = aloneMergedBack(env);
+  const bw = (new BlockerWatch({ store: env.store, orchestrators: env.agents.orchestrators } as unknown as ConstructorParameters<typeof BlockerWatch>[0]) as unknown as { facts: (a: Map<string, unknown>, b: Map<string, unknown>, c: Map<string, unknown>) => { reportedSince: (w: WorkItem, since: number, o?: { notCheckIn?: boolean }) => boolean; deliveredSince: (w: WorkItem, since: number) => boolean } });
+  assert.ok(bw, 'blockerWatch');
+  const since = Date.now() - 60_000;
+  const s = env.store.sessions.get(E)!;
+  s.status = 'idle' as SessionInfo['status'];
+  s.lastResult = 'my turn on some other request\n\nDONE: w5869';
+  s.lastActivityAt = new Date().toISOString();
+  env.store.putSession(s);
+  const f = bw!.facts(new Map(), new Map(), new Map());
+  assert.equal(f.reportedSince(w, since, { notCheckIn: true }), false, 'a worker off w5869 since its move does not count as its worker reporting');
+  assert.equal(f.deliveredSince(w, since), false, 'nor as its worker delivering (deliveredSince)');
 });
