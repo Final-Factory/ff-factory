@@ -41,7 +41,10 @@ test('w6206: a mistyped sha is unknown, and the refusal names it and the branch 
   assert.equal(v.why, `commit ${TYPO} is not in ${REPO}: GitHub has no such commit; it looks like ${HEAD}, the head of w6129-strut-reduction-050, which shares its first 10 characters. Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)`);
   // Nothing near it: the refusal names only the commit.
   const far = await gameCommitAt(fakeGh({ [HEAD]: [] }).gh, REPO, 'deadbeef12');
-  assert.deepEqual(far, { known: false, why: `commit deadbeef12 is not in ${REPO}: GitHub has no such commit. Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)` });
+  assert.deepEqual(far, { known: false, why: `commit deadbeef12 is not in ${REPO}: GitHub finds no single commit that starts with it (none, or more than one: pass the full 40-character sha). Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)` });
+  // A short sha that starts two commits is no pass: GitHub answers it 422 too, and the refusal asks for the full sha.
+  const two = await gameCommitAt(fakeGh({ [HEAD]: [], [`2078688${'0'.repeat(33)}`]: [] }).gh, REPO, '2078688');
+  assert.match(two.known === false ? two.why : '', /no single commit that starts with it \(none, or more than one: pass the full 40-character sha\)/);
   // A commit that heads no branch is named without one.
   const lone = await gameCommitAt(fakeGh({ [HEAD]: [] }).gh, REPO, TYPO);
   assert.match(lone.known === false ? lone.why : '', new RegExp(`it looks like ${HEAD}, which shares its first 10 characters`));
@@ -54,6 +57,10 @@ test('w6206: a GitHub read that fails is never a pass: it says it could not chec
   assert.deepEqual(v, { known: undefined, why: `FF Factory could not read commit ${HEAD} from GitHub to check that it exists in ${REPO} (error connecting to api.github.com; w6206)` });
   // A failed read is not kept: GitHub answers next time.
   assert.equal((await gameCommitAt(fakeGh({ [HEAD]: [] }).gh, REPO, HEAD)).known, true);
+  // w6289: a 404 is a repo the token cannot see, not a missing commit: it warns, it never refuses.
+  forgetCommitChecks();
+  const hidden = await gameCommitAt(fakeGh({}, 'gh: Not Found (HTTP 404)').gh, REPO, HEAD);
+  assert.deepEqual(hidden, { known: undefined, why: `FF Factory could not read commit ${HEAD} from GitHub to check that it exists in ${REPO} (gh: Not Found (HTTP 404); w6206)` });
   // An answer for another commit than asked is no pass either.
   const odd: Runner = async () => ({ code: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' });
   forgetCommitChecks();

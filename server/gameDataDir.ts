@@ -31,13 +31,14 @@ const tail = (r: { stdout: string; stderr: string; code: number }) => (r.stderr 
 
 /**
  * The full sha GitHub resolves `commit` (7 to 40 hex) to in `repo`: missing when GitHub answers that no such commit exists
- * (HTTP 404 or 422, "No commit found"; an ambiguous short sha answers so too), else the read's error.
+ * (HTTP 422 "No commit found"; an ambiguous short sha answers so too), else the read's error. A 404 is the repo the token
+ * cannot see (w6289's review measured both), not a missing commit, so it is an error: it must not refuse every pair run.
  */
 async function shaOf(gh: Runner, repo: string, commit: string): Promise<{ full: string } | { missing: true } | { missing: false; error: string }> {
   const c = await gh('gh', ['api', `repos/${repo}/commits/${commit}`, '--jq', '.sha'], { timeoutMs: 30_000 });
   const full = c.stdout.trim().toLowerCase();
   if (c.code === 0 && /^[0-9a-f]{40}$/.test(full) && full.startsWith(commit.toLowerCase())) return { full };
-  if (/HTTP 404|HTTP 422|No commit found/i.test(c.stderr + c.stdout)) return { missing: true };
+  if (/HTTP 422|No commit found/i.test(c.stderr + c.stdout)) return { missing: true };
   return { missing: false, error: c.code === 0 ? `GitHub answered "${clip(full, 60)}" for it` : tail(c) };
 }
 
@@ -113,5 +114,7 @@ export async function gameCommitAt(gh: Runner, repo: string, commit: string): Pr
     near = `; it looks like ${p.full}${heads.length ? `, the head of ${heads.join(', ')}` : ''}, which shares its first ${n} characters`;
     break;
   }
-  return { known: false, why: `commit ${c0} is not in ${repo}: GitHub has no such commit${near}. Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)` };
+  // GitHub answers a short sha that starts more than one commit the same way as one that starts none.
+  const none = c0.length < 40 ? 'GitHub finds no single commit that starts with it (none, or more than one: pass the full 40-character sha)' : 'GitHub has no such commit';
+  return { known: false, why: `commit ${c0} is not in ${repo}: ${none}${near}. Pass the sha the legs must run (git rev-parse HEAD on the pushed branch; w6206)` };
 }
