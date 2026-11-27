@@ -961,7 +961,8 @@ test("brokerLauncher: a start that throws is a refusal with the reason", async (
 });
 
 test("w5615: logDirOf opens a -logFile folder only inside the caller's own temp folder (w6212 M1)", () => {
-  const root = fs.realpathSync(
+  // .native, as the broker's real(): it expands an 8.3 short name (RUNNER~1 in the CI runner's temp path); JS realpathSync does not
+  const root = fs.realpathSync.native(
     fs.mkdtempSync(path.join(os.tmpdir(), "logdir-")),
   );
   fs.mkdirSync(path.join(root, "tmp", "ffa-1"), { recursive: true });
