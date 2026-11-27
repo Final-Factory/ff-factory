@@ -34,8 +34,14 @@ my own inference.
   - The root's own clone, `V:\ffw\repo`. It is protected from workers. Its `.git/lfs` store holds at least one more copy
     of the 8.5 GB of LFS files.
   - BEAST. This worker had no route there.
-- **Scripts:** in the w1576 worker's temp folder (`Phys.cs`, `dups.py`). They are not kept, and can be rewritten from
-  the bullets above.
+- **Scripts:** in the w1576 worker's temp folder (`Phys.cs`, `dups.py`). They were not kept. w6291 rewrote the
+  cluster-map measurement and kept it: `scripts/disk-usage/diskuse.ps1` (with `DiskUse.cs`). It is read-only. It prints
+  logical, physical (the union of the clusters) and exclusive GB per folder, plus their union. Usage:
+  `powershell -File scripts\disk-usage\diskuse.ps1 -Children V:\ffw` (it skips `steam` and `secrets`), or
+  `-Folders a,b`. On LothDesktop on 2026-11-27 it walked all of `V:\ffw` (4.0 M files) in 391 to 642 s, measured.
+  `du` of `V:\ffw\tmp` alone ran past 500 s, and it counts every clone again: 502.7 GB logical against 314.1 GB
+  physical. `players` was 9.56 GB physical but only 2.55 GB exclusive, because its slots hard-link the builds in
+  `player-cache`.
 
 ## Where a sandbox's disk goes
 

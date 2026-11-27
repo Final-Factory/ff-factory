@@ -208,3 +208,42 @@ export async function planCargoSweep(target: string, o: CargoSweepOptions): Prom
   for (const prof of await cargoProfiles(target)) await sweepProfile(prof, o, out);
   return out;
 }
+
+/**
+ * A unit's key as `<crate>-<16 hex>` from the basename of one of its entries (a `deps/lib<crate>-<hash>.rlib`, a
+ * `.fingerprint/<crate>-<hash>` folder, `incremental/<crate>-<hash>-<id>`), or undefined for a name with no unit hash (w6291). The
+ * `lib` prefix is dropped as the sweep drops it, so a crate whose own name starts with `lib` is named differently by its rlib and
+ * its fingerprint folder: compare keys by their last 16 characters, the hash.
+ */
+export const unitKeyOf = (name: string): string | undefined => {
+  const m = HASHED.exec(name);
+  return m ? `${m[1]}-${m[2]}` : undefined;
+};
+
+/** The units a plan would sweep, one key each (a superseded object file is a live unit's, not a unit swept). */
+export function sweptUnits(sweep: CargoSweep): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of sweep.paths) {
+    const base = path.basename(p);
+    if (base.endsWith('.rcgu.o')) continue;
+    const key = unitKeyOf(base);
+    if (key && !seen.has(key.slice(-16))) {
+      seen.add(key.slice(-16));
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+/** The hashes of the units a target still has a fingerprint folder for: what a build can reuse (w6291). */
+export async function cargoUnitHashes(target: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const prof of await cargoProfiles(target)) {
+    for (const u of await list(path.join(prof, '.fingerprint'))) {
+      const m = UNIT_DIR.exec(u.name);
+      if (u.isDirectory() && m) out.add(m[2]);
+    }
+  }
+  return out;
+}

@@ -1373,6 +1373,8 @@ export class Daemon {
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
                 ffuSized: this.ffuSized,
+                // w6291: the warn period of the FFU runners' cargo-target sweep counts its misses here, in the daemon's own folder.
+                ...(this.cfg.root ? { runnerWarnFile: path.join(this.cfg.appDir || path.join(this.cfg.root, 'daemon'), 'ffu-runner-sweep-warn.json') } : {}),
               }),
             );
           },
