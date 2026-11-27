@@ -107,7 +107,8 @@ import { movedRequestsOf, type SessionOwner } from '../server/resumable.ts';
 import { LeftoverReaper, answerProcsAsk, installLeftoversShim, readEnvs, readLeases, realInspect, type LeftoverDeps } from './leftovers.ts';
 import { POLL_MS as PROCS_POLL_MS, ProcsBroker, procsMailbox } from './procsBroker.ts';
 import { installPrShim } from './prFlow.ts';
-import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport } from './ffuSlots.ts';
+import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport, runFfuSlotSweep } from './ffuSlots.ts';
+import { FfuSlotAutoSweep } from './ffuSlotAutoSweep.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
 import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
@@ -835,6 +836,12 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
+  /** w6484: frees the stale slots each report names (warn-only unless staleOutput.ffuSlotSweep is on). */
+  private readonly ffuAutoSweep = new FfuSlotAutoSweep({
+    mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
+    sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
+    log,
+  });
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
   private ffuRetry?: FfuBusyRetry;
@@ -1569,7 +1576,7 @@ export class Daemon {
     return plan;
   }
 
-  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes, warn-only unless ffuBusyRetry is on. */
+  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes; removes when ffuBusyRetry and the stale-output mode are on. */
   private makeFfuRetry(): FfuBusyRetry | undefined {
     if (!this.cfg.root) return undefined;
     const roots = [this.cfg.root, ...(this.cfg.extraRoots ?? [])];
@@ -1602,8 +1609,13 @@ export class Daemon {
   /** The released ffu slots' first step (w6044), its plan at `low` and its log line; `mid` names a step run apart from a pass. */
   private ffuFirstStep(low: boolean, guard: CleanupGuard, mid: string) {
     return {
-      plan: async () =>
-        planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low }),
+      plan: async () => {
+        const p = await planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard, procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-slots', low });
+        // w6524: what the low first step would take of the FFU runners' job folders, in warn mode, said where the log shows it.
+        const warned = (p.listed ?? []).filter((l) => l.why.startsWith('warn-only (runnerFirstMode'));
+        if (warned.length) log(`clean-up: ffu slots first${mid} (w6524): ${warned.length} runner job folder(s) listed, none removed: ${warned.slice(0, 4).map((l) => `${l.path} (${l.why.slice(0, 200)})`).join('; ')}`);
+        return p;
+      },
       report: (items: CleanupItem[], ms: number, run?: CleanupRun) =>
         log(
           `clean-up: ffu slots first${mid} (w6044): ${items.length} item(s) planned in ${(ms / 1000).toFixed(1)} s${run ? `, ${run.removed.length} removed (${(run.bytes / 1024 ** 3).toFixed(1)} GB)${run.failed.length ? `, ${run.failed.length} kept: ${run.failed.slice(0, 4).map((f) => `${f.path} (${f.why.slice(0, 160)})`).join('; ')}` : ''}` : items.length ? ', none removed (stale-output mode is not on)' : ''}${items.length ? `: ${items.slice(0, 8).map((i) => `${i.path} (${i.why.slice(0, 160)})`).join('; ')}` : ''}`,
@@ -2715,8 +2727,11 @@ export class Daemon {
    * and one file sent by hash over an upload the portal opened. Read-only; answered even with no fixtures folder (a refusal).
    */
   private async labFixture(msg: Extract<ToDaemon, { type: 'lab_fixture' | 'lab_fixture_upload' }>) {
-    const dir = offeredDir(this.cfg.root);
     try {
+      // w6486: looked at off the event loop (BEAST: 55.8 s in the synchronous realpath). A look that fails is refused
+      // to the portal like the other errors here, where the synchronous one threw out of onMessage and answered nothing.
+      const dir = await offeredDir(this.cfg.root);
+      this.labFixturesOffered = !!dir;
       if (!dir) throw new Error('this computer holds no lab fixtures (no <worker root>/nightly-history/fixtures off drive C:)');
       if (msg.type === 'lab_fixture') {
         const files = msg.op === 'find' ? await findFixtures(dir, String(msg.sha256 ?? '')) : await listFixtures(dir);
@@ -2749,10 +2764,46 @@ export class Daemon {
 
   /** The OS and claude version probes of the last hello (w970): a reconnect within an hour reuses them. */
   private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string } };
+  /** Whether this computer offers the lab's fixtures, as last looked (w6486: offeredDir runs off the event loop). */
+  private labFixturesOffered?: boolean;
+  private labFixturesLooking?: Promise<boolean>;
+
+  /**
+   * offeredDir for the hello (w6486). The first hello waits for the look, as it waited on the synchronous one before, for
+   * up to LAB_FIXTURES_HELLO_WAIT_MS: a disk that never answers must not hold the hello (lockout rule), and that hello
+   * says no fixtures. A later hello says the last answer at once and looks again behind it. A look that fails offers
+   * nothing (the synchronous one threw out of hello, and no hello was sent).
+   */
+  private async labFixturesLook(): Promise<boolean> {
+    this.labFixturesLooking ??= offeredDir(this.cfg.root)
+      .then(
+        (dir) => (this.labFixturesOffered = !!dir),
+        (e: Error) => {
+          log(`lab fixtures: could not look at the fixtures folder: ${e.message}`);
+          return (this.labFixturesOffered = false);
+        },
+      )
+      .finally(() => (this.labFixturesLooking = undefined));
+    if (this.labFixturesOffered !== undefined) return this.labFixturesOffered;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        log(`lab fixtures: the fixtures folder gave no answer in ${LAB_FIXTURES_HELLO_WAIT_MS / 1000} s; this hello offers none, the next says what it finds`);
+        resolve(false);
+      }, LAB_FIXTURES_HELLO_WAIT_MS);
+    });
+    try {
+      return await Promise.race([this.labFixturesLooking, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private async hello() {
     // w970: beast's hello came ~20 s after its link (the 15 s `claude --version` probe on a busy Windows machine), and the
     // portal's rollout read the commit as unknown in that window. A reconnect says hello at once with the earlier probes.
+    // w6486: looked at beside the probes, off the event loop
+    const fixtures = this.labFixturesLook();
     let probed = this.helloProbes;
     if (!probed || Date.now() - probed.at > HELLO_PROBE_TTL_MS) {
       const [osv, claude] = await Promise.all([
@@ -2764,6 +2815,7 @@ export class Daemon {
       probed = { at: Date.now(), osv, claude };
     }
     const { osv, claude } = probed!;
+    const labFixtures = await fixtures;
     const selfUpdate = this.selfUpdate.offered();
     this.selfUpdateOffered = selfUpdate;
     this.send({
@@ -2793,7 +2845,7 @@ export class Daemon {
       // w1946: it plays timed runs for workers elsewhere (a worker install), and the ones it holds now.
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
-      ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      ...(labFixtures ? { labFixtures: true } : {}),
       // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
       lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
@@ -2898,7 +2950,11 @@ export class Daemon {
     this.ffuReporting = true;
     this.ffuReportAt = Date.now();
     void readFfuSlotsReport({ root: this.cfg.root, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX, sizes: this.ffuSizes, log })
-      .then((r) => void (this.ffuReport = r))
+      .then(async (r) => {
+        this.ffuReport = r;
+        // w6484: a stale slot is freed here (or, warn-only, said), not only by the next worker's take; then read again.
+        if ((await this.ffuAutoSweep.onReport(r)).length && staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep === 'on') this.ffuReportAt = 0;
+      })
       .finally(() => void (this.ffuReporting = false));
   }
 
@@ -5756,6 +5812,8 @@ export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string
 
 /** How long a hello's OS and claude probes are reused by the next one. */
 const HELLO_PROBE_TTL_MS = 60 * 60_000;
+/** How long the first hello waits for the lab fixtures' folder look (w6486). */
+const LAB_FIXTURES_HELLO_WAIT_MS = 15_000;
 
 function readVersion() {
   try {

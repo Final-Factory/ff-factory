@@ -6,7 +6,8 @@
 //   in.jsonl     the daemon's commands, numbered (send, interrupt, stop, mode, decide, tool answers, the editor's state)
 //   out.jsonl    everything the session records, in order (its record, transcript events with their seq set here,
 //                images, deltas, signals, tool calls); the daemon forwards each line to the portal and keeps how far
-//                it got in daemon.offset, so a new daemon forwards exactly what the last one had not
+//                it got in daemon.offset, so a new daemon forwards exactly what the last one had not (with
+//                daemon.offset.stop, which a daemon going away writes when its poll's write may still land: the larger)
 //   host.json    the host's protocol, pid and start time; beat: its heartbeat, written every few seconds
 //   state.json   the session's latest record, for a daemon that adopts the host
 //   place.json   (the daemon's) the agent's folder and sandbox, without secrets
@@ -138,9 +139,14 @@ export class LineTail {
   }
 }
 
+/** Digits of every offset written (w6519): the largest safe integer has 16. */
+export const OFFSET_WIDTH = 16;
+/** An offset as it is written in daemon.offset and daemon.offset.stop: zero-padded, which Number() and every older daemon read as it. */
+export const offsetText = (at: number) => String(at).padStart(OFFSET_WIDTH, '0');
+
 export function hostFiles(dir: string) {
   const f = (n: string) => path.join(dir, n);
-  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
+  return { dir, in: f('in.jsonl'), out: f('out.jsonl'), host: f('host.json'), state: f('state.json'), place: f('place.json'), offset: f('daemon.offset'), offsetStop: f('daemon.offset.stop'), beat: f('beat'), log: f('host.log'), creds: f('creds.sha'), lockEnv: f('lockenv.sha'), scope: f('scope'), progress: f('daemon.progress') };
 }
 
 const CREDENTIAL_ENV = ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY', 'GH_TOKEN'] as const;
@@ -396,6 +402,12 @@ export class HostedSession implements SessionHandle {
   private launchedAt = 0;
   private timer?: NodeJS.Timeout;
   private savedOffset = -1;
+  /**
+   * The poll's write of daemon.offset still in flight (w6486: BEAST's daemon held its loop 6-10 s in this write on
+   * 2026-11-27), and which start of the host it is for: a write for an earlier start never counts as saved.
+   */
+  private offsetWrite?: Promise<void>;
+  private offsetGen = 0;
   private disposed = false;
   /** The host process's pid as launched (host.json says it too once written). */
   private pid?: number;
@@ -475,7 +487,8 @@ export class HostedSession implements SessionHandle {
     const state = readJson<Extract<HostMessage, { op: 'state' }>>(f.state);
     if (state) this.applyState(state, false);
     this.creds = readFileOr(f.creds, '').trim() || undefined;
-    const offset = Number(readFileOr(f.offset, '0')) || 0;
+    // The larger: a poll's write that landed after a going daemon's own is older (w6486), and offsets only grow.
+    const offset = Math.max(Number(readFileOr(f.offset, '0')) || 0, Number(readFileOr(f.offsetStop, '0')) || 0);
     this.n = countLines(f.in);
     // Its process runs: taken back even with a late heartbeat (w799); the poll looks at it again.
     const look = hostLook(f.dir);
@@ -620,7 +633,7 @@ export class HostedSession implements SessionHandle {
   detach() {
     clearInterval(this.timer);
     this.timer = undefined;
-    this.saveOffset();
+    this.saveOffsetNow();
   }
 
   /** Removed for good: once its host has closed, its folder goes. */
@@ -633,6 +646,7 @@ export class HostedSession implements SessionHandle {
   /** Starts its host with `first`; false when no host process could be started (the portal is told, and the record says so). */
   private start(first: Omit<Extract<HostCommand, { op: 'send' }>, 'n'>): boolean {
     const f = this.files;
+    this.offsetGen++;
     try {
       fs.rmSync(f.dir, { recursive: true, force: true });
     } catch (e) {
@@ -647,7 +661,7 @@ export class HostedSession implements SessionHandle {
     fs.writeFileSync(f.creds, this.creds);
     if (this.deps.lockEnv) fs.writeFileSync(f.lockEnv, lockEnvOf(this.deps.lockEnv()));
     this.restaged = undefined;
-    fs.writeFileSync(f.offset, '0');
+    fs.writeFileSync(f.offset, offsetText(0));
     this.n = 0;
     this.savedOffset = 0;
     this.sends = [this.command(first) as Extract<HostCommand, { op: 'send' }>];
@@ -852,11 +866,54 @@ export class HostedSession implements SessionHandle {
     });
   }
 
+  /**
+   * The poll's save of how far it read, off the event loop (w6486), one write at a time: the next poll writes what it
+   * read meanwhile. A folder that is gone is never made again (the open fails); kept in memory, the next poll tries
+   * again. w6508: a write for an earlier start of the host writes nothing once a new start has come, so it can never put
+   * the old, larger offset over the new start's '0'. The generation is looked at after the open: a file opened before
+   * start() removed the folder is the old one (on Windows the open file may make start() refuse), and one opened after
+   * it finds the generation changed, as start() runs whole before any open's answer comes back. Every write is
+   * OFFSET_WIDTH digits from byte 0 (offsetText) over the file, never cut short: it never reads empty mid-write, and a
+   * shorter, older offset landing on a longer one can never leave its digits followed by the longer one's (999 over 1000
+   * read 9990 until the truncate, w6519), whenever the daemon exits.
+   */
   private saveOffset() {
+    const at = this.tail?.position ?? 0;
+    if (at === this.savedOffset || this.offsetWrite) return;
+    const gen = this.offsetGen;
+    const text = offsetText(at);
+    const write = async () => {
+      const file = await fs.promises.open(this.files.offset, fs.constants.O_RDWR | fs.constants.O_CREAT);
+      try {
+        if (gen !== this.offsetGen) return false;
+        await file.write(text, 0);
+        return true;
+      } finally {
+        await file.close();
+      }
+    };
+    this.offsetWrite = write()
+      .then(
+        (wrote) => {
+          this.savedOffset = wrote && gen === this.offsetGen ? at : -1;
+        },
+        () => {
+          if (gen !== this.offsetGen) this.savedOffset = -1;
+        },
+      )
+      .finally(() => (this.offsetWrite = undefined));
+  }
+
+  /**
+   * The save when the daemon goes (detach): synchronous, as the process exits right after. A poll's write still in flight
+   * may land after it with an older offset, so then it goes to daemon.offset.stop as well, which adopt() reads too.
+   */
+  private saveOffsetNow() {
     const at = this.tail?.position ?? 0;
     if (at === this.savedOffset || !fs.existsSync(this.files.dir)) return;
     try {
-      fs.writeFileSync(this.files.offset, String(at));
+      fs.writeFileSync(this.files.offset, offsetText(at));
+      if (this.offsetWrite) fs.writeFileSync(this.files.offsetStop, offsetText(at));
       this.savedOffset = at;
     } catch {
       // kept in memory; the next poll tries again
@@ -1032,6 +1089,8 @@ export class HostedSession implements SessionHandle {
           return;
         }
       }
+      // The poll's offset write ends first (w6486): its open file would keep the folder on Windows.
+      await this.offsetWrite;
       const err = await removeHostDir(this.files.dir);
       if (err) this.deps.log(`agent host ${id}: could not remove ${this.files.dir}: ${err}`);
     };

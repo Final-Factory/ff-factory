@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { FfuBusyRetry, busySlotsOf, type FfuBusyRetryMode } from './ffuBusyRetry.ts';
 import type { CleanupItem, CleanupRun } from '../server/cleanup.ts';
-import type { StalePlan } from '../server/staleOutput.ts';
+import { STALE_OUTPUT_DEFAULTS, type StalePlan } from '../server/staleOutput.ts';
 
 const ROOT = path.resolve('/ffw');
 const tgt = (slot: string) => path.join(ROOT, 'ffu-sandboxes', slot, 'target');
@@ -81,6 +81,42 @@ test('w6290: on (with stale-output on) removes through runCleanup; with stale-ou
   await dry.r.tick();
   assert.deepEqual(dry.removed, []);
   assert.equal(dry.records[0].ffuBusyRetry, 'warn');
+});
+
+test('w6290 (w6304 point 4): a pass that starts while the re-check plans: nothing is removed beside it, the slot stays watched', async () => {
+  let inPass = false;
+  let passStartsDuringPlan = true;
+  const plans: StalePlan[] = [{ items: [inc('slot3')], listed: [] }, { items: [inc('slot3')], listed: [] }];
+  const removed: CleanupItem[][] = [];
+  const r = new FfuBusyRetry({
+    root: () => ROOT,
+    settings: () => ({ mode: 'on', staleMode: 'on', everyMinutes: 60, retryMinutes: 5 }),
+    plan: async () => {
+      if (passStartsDuringPlan) inPass = true; // the hourly pass starts during the (slow) plan
+      return plans.shift()!;
+    },
+    remove: async (items) => {
+      removed.push(items);
+      return { removed: items.map((i) => ({ path: i.path, bytes: 1e9, rule: i.rule, why: i.why })), failed: [], bytes: 1e9 };
+    },
+    size: async () => [],
+    passRunning: () => inPass,
+    log: () => {},
+    record: () => {},
+  });
+  r.note({ held: [busy('slot3')] });
+  assert.deepEqual(await r.tick(), { slots: ['slot3'], planned: 1, removed: 0, deferred: true });
+  assert.deepEqual(removed, [], 'no removal beside a pass');
+  assert.deepEqual(r.watched(), ['slot3'], 'still watched');
+  // The pass ended without judging it away: the next tick, with no pass running, removes.
+  passStartsDuringPlan = false;
+  inPass = false;
+  assert.deepEqual(await r.tick(), { slots: ['slot3'], planned: 1, removed: 1 });
+  assert.equal(removed.length, 1);
+});
+
+test('w6290 enforce: the default mode is on', () => {
+  assert.equal(STALE_OUTPUT_DEFAULTS.ffuBusyRetry, 'on');
 });
 
 test('w6290: a slot found idle and within the cap is dropped; the watch ends when the next pass is due; off and a running pass do nothing', async () => {

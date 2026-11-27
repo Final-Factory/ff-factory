@@ -238,8 +238,9 @@ test('orchestrator options: each its own memory folder, Write and Edit behind th
   assert.ok(FFBOX_BRIEF.startsWith("FFBox (repo Final-Factory/ffbox; docs/ffbox.md) is Lothsahn's Linux build server."));
   assert.ok(FFBOX_BRIEF.endsWith("Agents' box access is limited to its config and secrets."));
   assert.ok(FFBOX_BRIEF.includes('workers push changes straight to ffbox master (no PRs needed), one at a time'));
-  // w1137: a bump merged into master sets development live; pre-release and the default branch are moved by hand.
-  assert.ok(FFBOX_BRIEF.includes('a version bump merged into master builds both apps, uploads them and sets the main app live on Steam development by itself; nothing sets pre-release or the default (public) branch: Ben or Lothsahn move those by hand'));
+  // w1137: a bump merged into master sets development live; w6522: a 0.50.x pre-1.0 one sets pre-release; the default
+  // branch is moved by hand.
+  assert.ok(FFBOX_BRIEF.includes("a version bump merged into master builds both apps, uploads them and sets the main app live on Steam development by itself, and one merged into pre-1.0 sets a 0.50.x release's main app live on pre-release (w6522; never a 1.0 build there); nothing sets the default (public) branch: Ben or Lothsahn move it by hand"));
   assert.ok(!/bump on develop|bump on master/.test(FFBOX_BRIEF));
   // w1158: the paragraph is read on demand (read_rules ffbox), verbatim; the brief keeps FFBox's hard rules and the trigger.
   // Posting the patch notes goes through post_as_max (w901), as the release rule says, not a machine's ffdiscord config.
