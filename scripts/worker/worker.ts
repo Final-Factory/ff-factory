@@ -1974,6 +1974,8 @@ export interface UpdateFlags {
   runnerPriority?: 'off' | 'warn' | 'enforce';
   /** What an idle agent adopted across a sharedLock switch gets (w6305, w6287, docs/worker-root.md "After a sharedLock switch"), every OS: written as daemon.json's `hostRestage`; unset carries daemon.json's (absent: warn). */
   hostRestage?: 'warn' | 'on';
+  /** w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off looks at nothing (the way back). Unset carries daemon.json's. */
+  liveRunGuard?: 'off' | 'warn';
   /** The Dev Drive (w900): "on" makes one if the install has none; unset keeps the one it has (an update never makes one on its own). */
   devDrive?: 'on' | 'off';
   devDriveMaxGB?: number;
@@ -2147,6 +2149,18 @@ export function applyHostRestage(config: Record<string, unknown>, setting: 'warn
   return setting ? { ...config, hostRestage: setting } : config;
 }
 
+/** `--live-run-guard off|warn` (w6378): anything else is refused, never guessed at. Exported for tests. */
+export function liveRunGuardFlag(v: string | undefined): 'off' | 'warn' | undefined {
+  if (v === undefined) return undefined;
+  if (v !== 'off' && v !== 'warn') throw new Error(`--live-run-guard is off or warn, not "${v}"`);
+  return v;
+}
+
+/** daemon.json with liveRunGuard set (w6378); every platform. Exported for tests. */
+export function applyLiveRunGuard(config: Record<string, unknown>, setting: 'off' | 'warn' | undefined): Record<string, unknown> {
+  return setting ? { ...config, liveRunGuard: setting } : config;
+}
+
 /** `--runner-priority off|warn|enforce` (w6163): anything else is refused, never guessed at. Exported for tests. */
 export function runnerPriorityFlag(v: string | undefined): 'off' | 'warn' | 'enforce' | undefined {
   if (v === undefined) return undefined;
@@ -2207,7 +2221,7 @@ export function planUpdate(root: string, m: Manifest, config: Record<string, unk
     ...(f.devDriveMaxGB !== undefined ? { devDriveMaxGB: f.devDriveMaxGB } : {}),
     ...(f.devDriveSkip ? { devDriveSkip: f.devDriveSkip } : {}),
     ...(f.moveToDevDrive ? { moveToDevDrive: true, devDrive: 'on' as const } : {}),
-    carry: { ...applyHostRestage(applySharedLock(applyRunnerPriority(applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), f.runnerPriority, platform), f.sharedLock), f.hostRestage), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
+    carry: { ...applyLiveRunGuard(applyHostRestage(applySharedLock(applyRunnerPriority(applyWinCiFirst(applyToolsDiskLock(applyDaemonTmpdirSetting(applyMediumAgentFolders(applyPathFence(applyEditorTmpdir(applyStoreLock(applyTranscriptLock(applyWorkerCaps(applyWorkerFence(config, f.workerFence, platform), f.workerCaps), f.transcriptLock, platform), f.storeLock), f.editorTmpdir, platform), f.pathFence, platform), f.mediumAgentFolders), f.daemonTmpdir), f.toolsDiskLock, platform), f.winCiFirst, platform), f.runnerPriority, platform), f.sharedLock), f.hostRestage), f.liveRunGuard), sandboxes: { ...pool, maxSandboxes, maxAgentsPerSandbox, maxUnity } },
     // A test install stays one through its updates (w1596): daemon.json says so (daemonJson, --no-cleanup).
     ...(config.leftovers === false ? { noCleanup: true } : {}),
     update: true,
@@ -2453,6 +2467,7 @@ export async function update(root: string, f: UpdateFlags): Promise<boolean> {
   if (f.sharedLock) say(`shared lock: ${f.sharedLock}`);
   if (f.runnerPriority) say(`runner priority: ${f.runnerPriority}`);
   if (f.hostRestage) say(`host restage: ${f.hostRestage}`);
+  if (f.liveRunGuard) say(`live-run guard: ${f.liveRunGuard}`);
   // Every prerequisite first (w629), before anything is fetched, stopped or restarted: m5's update over ssh found no
   // git-lfs, and its refused run still restarted the daemon and then reported the old one as current.
   say('Checking prerequisites (nothing changes until they all pass)...');
@@ -3067,6 +3082,9 @@ const USAGE = `node scripts/worker/worker.ts <install|update|reinstall|uninstall
             [--host-restage warn|on] (w6305, every OS: on ends an idle agent adopted across a sharedLock switch between turns, so its
              next message starts a host on the new mode; warn only logs it, the default and the recovery; daemon.json hostRestage;
              default: as daemon.json has it, warn if it has none; docs/worker-root.md "After a sharedLock switch")
+            [--live-run-guard off|warn] (w6378, every OS: warn, the default, logs a WARNING when a sandbox trim, release or delete would hit
+             a sandbox where a run of its worker still lives; off looks at nothing, the way back; daemon.json liveRunGuard;
+             default: as daemon.json has it, warn if it has none)
             [--runner-priority off|warn|enforce] (w6163, Windows: enforce sets the ffu CI runners' scheduled tasks to priority 4 and raises
              their listeners to Normal, warn only logs what it reads, the recovery, off stops it; daemon.json runnerPriority;
              default: as daemon.json has it, the daemon's own default if it has none)
@@ -3178,6 +3196,7 @@ export async function main(argv = process.argv.slice(2)) {
     const sharedLock = flags.has('shared-lock') ? sharedLockFlag('') : sharedLockFlag(opts['shared-lock']);
     const runnerPriority = flags.has('runner-priority') ? runnerPriorityFlag('') : runnerPriorityFlag(opts['runner-priority']);
     const hostRestage = flags.has('host-restage') ? hostRestageFlag('') : hostRestageFlag(opts['host-restage']);
+    const liveRunGuard = flags.has('live-run-guard') ? liveRunGuardFlag('') : liveRunGuardFlag(opts['live-run-guard']);
     await update(opts.root, {
       maxSandboxes: opt('max-sandboxes'),
       maxAgentsPerSandbox: opt('max-agents-per-sandbox'),
@@ -3201,6 +3220,7 @@ export async function main(argv = process.argv.slice(2)) {
       ...(sharedLock ? { sharedLock } : {}),
       ...(runnerPriority ? { runnerPriority } : {}),
       ...(hostRestage ? { hostRestage } : {}),
+      ...(liveRunGuard ? { liveRunGuard } : {}),
       ...devDriveFlags(opts, flags),
     });
   } else if (cmd === 'reinstall') {

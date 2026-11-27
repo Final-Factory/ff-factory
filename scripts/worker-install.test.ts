@@ -16,7 +16,7 @@ import { carryExclude, claudeSlug, plan, rehome, sameVolume, stopOldScript, type
 import { cloneRepo, credentialId, daemonJson, mergePath, planUpdate, plistPathOf, settingsDiff, update, updateVerdict, withPlistPath, withStandardPaths, gitVersion, holdRedeploys, layoutOf, writeMacSlotConfig, nightlyTaskProblem, playerFolders, supervisorProblems, syncPlayerFolders, noteOutside, parseArgs, preflightProblems, removeSlotsPointer, writeSlotsPointer, type Facts, type InstallOptions, type Manifest } from './worker/worker.ts';
 import { slotsPointer } from '../machine/unitySlots.ts';
 import { adminFromProbe, authorizeIn, authorizedKeysFile, fetchPortalKey, inAdministrators, keyBlob, parseKeyscan, registerSsh, revokeIn, tailnetNameOf, withAuthorizedKey, withoutAuthorizedKey } from './worker/portalSsh.ts';
-import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyHostRestage, hostRestageFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
+import { applyDaemonTmpdirSetting, daemonTmpdirFlag, applyToolsDiskLock, toolsDiskLockFlag, applyWinCiFirst, winCiFirstFlag, applyRunnerPriority, runnerPriorityFlag, applyHostRestage, hostRestageFlag, applyLiveRunGuard, liveRunGuardFlag, applyEditorTmpdir, applyMediumAgentFolders, applyPathFence, applyStoreLock, applySharedLock, applyTranscriptLock, applyWorkerCaps, applyWorkerFence, dropStaleSlotsNote, cloneEnv, devDriveFailure, editorTmpdirFlag, exec, main, manifestFor, mediumAgentFoldersFlag, pathFenceFlag, runElevatedSteps, storeLockFlag, sharedLockFlag, transcriptLockFlag, workerCapsFlag, workerFenceFlag, workerFenceLine } from './worker/worker.ts';
 
 const TOKEN = `ffm_lothdesktop_${'A'.repeat(43)}`;
 const OPTS = { root: 'D:\\work\\ffw', portalUrl: 'https://portal.example', maxSandboxes: 3, maxAgentsPerSandbox: 2, maxUnity: 2 };
@@ -1089,6 +1089,23 @@ test('w6305: worker update --host-restage writes hostRestage to daemon.json on e
   assert.equal(hostRestageFlag(undefined), undefined);
   for (const m of ['warn', 'on']) assert.equal(hostRestageFlag(m), m);
   for (const bad of ['off', 'ON', 'enforce', '']) assert.throws(() => hostRestageFlag(bad), /--host-restage is warn or on/);
+});
+
+test('w6378: worker update --live-run-guard writes liveRunGuard to daemon.json on every OS; unset carries it; anything but off or warn is refused', () => {
+  const root = path.join(os.tmpdir(), `ffw-update-lrg-${process.pid}`);
+  const l = layoutOf(root);
+  const written = (config: Record<string, unknown>, f: { liveRunGuard?: 'off' | 'warn' }, platform: NodeJS.Platform = 'win32') => daemonJson(planUpdate(root, BEAST_ROOT, config, BEAST_TOKEN, f, platform), l, 'beast', undefined);
+  assert.equal('liveRunGuard' in written(BEAST_CONFIG, {}), false, 'no key unless asked (absent: warn)');
+  for (const p of ['win32', 'linux', 'darwin'] as const) for (const m of ['off', 'warn'] as const) assert.equal(written(BEAST_CONFIG, { liveRunGuard: m }, p).liveRunGuard, m, `${p} ${m}`);
+  const had = { ...BEAST_CONFIG, liveRunGuard: 'off' };
+  assert.equal(written(had, {}).liveRunGuard, 'off', 'unset carries it');
+  assert.equal(written(had, { liveRunGuard: 'warn' }).liveRunGuard, 'warn', 'the way back replaces it');
+  const cfg = { a: 1 };
+  assert.equal(applyLiveRunGuard(cfg, undefined), cfg, 'unset: the very config');
+  assert.deepEqual(applyLiveRunGuard(cfg, 'off'), { a: 1, liveRunGuard: 'off' });
+  assert.equal(liveRunGuardFlag(undefined), undefined);
+  for (const m of ['off', 'warn']) assert.equal(liveRunGuardFlag(m), m);
+  for (const bad of ['on', 'OFF', 'enforce', '']) assert.throws(() => liveRunGuardFlag(bad), /--live-run-guard is off or warn/);
 });
 
 test('w6000: worker update --daemon-tmpdir writes daemonTmpdir to daemon.json on every OS; unset carries it; anything but on or off is refused', () => {

@@ -1124,6 +1124,16 @@ test('w855: machine_update opens a job in a harness turn, for the person\'s own 
   assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['-HostRestage on']);
   assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'on'), ['--host-restage on'], 'every OS');
   assert.deepEqual(workerUpdateFlags('darwin', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined), [], 'unset: no flag');
+  // w6378: live-run guard, off or warn and nothing else, every OS; the link and ssh routes both carry it.
+  for (const bad of ['on', 'enforce', '']) assert.throws(() => ops.machineInstall(ben, { machine: 'beast', workId: 'w847', liveRunGuard: bad as never }), /live_run_guard: off or warn/);
+  for (const m of ['off', 'warn'] as const) {
+    ops.machineInstall(ben, { machine: 'beast', workId: 'w847', liveRunGuard: m });
+    await new Promise((r) => setTimeout(r, 300));
+    const lrWin = store.readTranscript(OPS_ID, 360).filter((e) => e.kind === 'user').at(-1) as { text: string };
+    assert.ok(lrWin.text.includes(`-LiveRunGuard ${m}"'`), lrWin.text);
+  }
+  assert.deepEqual(workerUpdateFlags('win32', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'off'), ['-LiveRunGuard off']);
+  assert.deepEqual(workerUpdateFlags('linux', {}, {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'warn'), ['--live-run-guard warn'], 'every OS');
   ops.close();
 });
 
@@ -1194,6 +1204,14 @@ test('w1596: machine_update of a machine whose daemon updates over its own link:
   assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', workerCaps: 'on' as never }), /worker_caps: off, warn or enforce/);
   assert.equal(asked.length, beforeCaps, 'a refused value asks nothing');
   assert.equal(recorded.length, 0, 'the caps switch is no limit: the record is left alone');
+  // w6378: the live-run guard alone is a valid update over the link on every OS; a value off the list never goes.
+  for (const [id, m] of [['coosego', 'off'], ['penguin', 'warn']] as const) {
+    ops.machineInstall(ben, { machine: id, workId: 'w847', liveRunGuard: m });
+    assert.deepEqual(asked.at(-1), { id, flags: { liveRunGuard: m } });
+  }
+  const beforeLrg = asked.length;
+  assert.throws(() => ops.machineInstall(ben, { machine: 'coosego', workId: 'w847', liveRunGuard: 'on' as never }), /live_run_guard: off or warn/);
+  assert.equal(asked.length, beforeLrg, 'a refused value asks nothing');
   // w5702: the transcript lock alone is a valid update over the link; a value off the list, or a machine that is not Linux, never goes.
   ops.machineInstall(ben, { machine: 'penguin', workId: 'w847', transcriptLock: 'off' });
   assert.deepEqual(asked.at(-1), { id: 'penguin', flags: { transcriptLock: 'off' } });

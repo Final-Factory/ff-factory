@@ -56,7 +56,8 @@ import { RELEASE_SANDBOX } from '../server/releaseSeat.ts';
 import { isLightId, LightFolders } from './lightFolders.ts';
 import { SandboxPool, realPoolDeps, totalAgentsRefusal, type PoolDeps } from './sandboxes.ts';
 import { describeCounted, type AgentCensus, type CensusAgent } from '../server/agentCensus.ts';
-import { batchUnityIn, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
+import { batchUnityIn, holdParts, nightsIn, slotRunsFor, switchHoldRefusal } from './switchHolds.ts';
+import { liveRunGuardModeOf } from './liveRunGuard.ts';
 import { UnitySlots, editorInstancePid, gamePlayers, unityProcesses, writeShims, isAlive, runsIn, slotRpcHandlers, slotsDir, type Preempt } from './unitySlots.ts';
 import { McpScopes, mcpHomeStatusDir, mcpStatusDir, resolveUnityMcpServer, scopedUnityMcp, uvWarmRuns, mcpPlaces, workerEditorStatusDir, type StdioServer } from './unityMcp.ts';
 import { addSecretEnv, addSecretValues, redactSecrets, redactValue, skippedSecrets } from '../server/secrets.ts';
@@ -349,6 +350,11 @@ export interface DaemonConfig {
    * FF_PLAYER_BROKER): "warn" (default) logs it; "on" ends its agent between turns so its next message starts a new host.
    */
   hostRestage?: 'warn' | 'on';
+  /**
+   * w6378: a trim, release or delete of a sandbox where a run of its worker still lives (a night, a unity-slot run, a
+   * batchmode Unity): "warn" (default) logs a WARNING and goes ahead; "off" looks at nothing (machine/liveRunGuard.ts).
+   */
+  liveRunGuard?: 'off' | 'warn';
   /** The sandbox pool (add_machine sandbox_root and limits; docs/machines.md "Machine sandboxes"); the portal's welcome overrides it. */
   sandboxes?: SandboxPoolSettings;
   /** Stop a sandbox editor after this long without agent activity there (default 120; 0: never). */
@@ -1270,6 +1276,7 @@ export class Daemon {
         // w1668: urgent releases build in slot1 of a build computer (placement.build's default list): its caches stay warm.
         warm: DEFAULT_BUILD.includes(cfg.id.toLowerCase()) ? [RELEASE_SANDBOX] : [],
         releaseSweep: (sandboxPath) => this.releaseSweep(sandboxPath),
+        liveRun: (id, sandboxPath) => this.liveRunIn(id, sandboxPath),
         log,
         // w1894: no editor starts while a person plays here (the turn closed the others; they reopen after its grace)
         startGate: () => this.guard?.blockReason('editor') ?? this.personStartGate(),
@@ -5006,6 +5013,19 @@ export class Daemon {
 
   private liveCount() {
     return [...this.entries.values()].filter((e) => e.s.live).length;
+  }
+
+  /**
+   * w6378: the runs still living in a sandbox's tree, in words (the holders switch_branch refuses for: a night, a unity-slot
+   * run, a batchmode Unity), for the pool's warn-only look before a trim, release or delete. Empty with liveRunGuard off.
+   */
+  private async liveRunIn(id: string, sandboxPath: string): Promise<string[]> {
+    if (liveRunGuardModeOf(this.cfg.liveRunGuard) === 'off') return [];
+    const platform = machinePlatformOf(process.platform);
+    const roots = staleOutputSettings(this.cleanupSettings.staleOutput).nightlyRoots ?? defaultNightlyRoots(this.cfg.root);
+    const nights = nightsIn({ roots, checkout: sandboxPath, platform, alive: isAlive, now: Date.now() });
+    const holds = await this.slots.holds();
+    return holdParts({ nights, runs: slotRunsFor(holds.reqs, id, sandboxPath, platform), batch: batchUnityIn(holds.unity, sandboxPath, platform) });
   }
 
   /**

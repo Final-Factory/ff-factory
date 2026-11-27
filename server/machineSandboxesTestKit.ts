@@ -81,7 +81,7 @@ export function deps(repoPath: string, o: { free?: () => number | undefined; cop
 
 export const SETTINGS = (root: string, over: Partial<SandboxPoolSettings> = {}): SandboxPoolSettings => ({ root, maxSandboxes: 2, maxAgentsPerSandbox: 2, maxUnity: 1, diskWarnGB: 50, diskCriticalGB: 20, ...over });
 
-export function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean; awaitConfigure?: boolean; storeLocked?: () => boolean } = {}) {
+export function pool(r: ReturnType<typeof repos>, o: { free?: () => number | undefined; copyBytes?: number; settings?: Partial<SandboxPoolSettings>; activity?: (id: string) => { busy: boolean; lastActivityMs: number }; idle?: number; slots?: () => UnitySlots; liveAgents?: (id: string) => number; trim?: PoolOptions['trim']; trimmer?: PoolOptions['trimmer']; releaseSweep?: PoolOptions['releaseSweep']; log?: (l: string) => void; reseedIdleDays?: number; bootTicket?: PoolOptions['bootTicket']; warm?: string[]; bridge?: (project: string, since: number | undefined, running: Set<string>) => boolean; awaitConfigure?: boolean; storeLocked?: () => boolean; liveRun?: PoolOptions['liveRun'] } = {}) {
   const events: { text: string; checkpoint?: boolean }[] = [];
   /** The status of each sandbox at every change the portal would be sent, consecutive repeats dropped (w898: the cleanup state's order). */
   const statuses: string[] = [];
@@ -103,6 +103,7 @@ export function pool(r: ReturnType<typeof repos>, o: { free?: () => number | und
       ...(o.trim !== undefined ? { trim: o.trim } : {}),
       ...(o.trimmer ? { trimmer: o.trimmer } : {}),
       ...(o.releaseSweep ? { releaseSweep: o.releaseSweep } : {}),
+      ...(o.liveRun ? { liveRun: o.liveRun } : {}),
       ...(o.log ? { log: o.log } : {}),
       ...(o.reseedIdleDays !== undefined ? { reseedIdleDays: o.reseedIdleDays } : {}),
       ...(o.warm ? { warm: o.warm } : {}),
