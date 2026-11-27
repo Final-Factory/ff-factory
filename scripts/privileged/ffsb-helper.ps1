@@ -43,27 +43,32 @@ function Done([bool]$ok, [string]$detail) {
   [IO.File]::WriteAllText((Join-Path $ResultDir "$Action.json"), ($r | ConvertTo-Json -Compress))
   exit ([int](!$ok))
 }
-# w6573: after the drive is detached and attached again, the ReFS dedup service (refsdedupsvc) may stop deduplicating it
-# until the service restarts. On LothDesktop's V: it happened twice (measured from the ReFS and ReFsDedupSvc logs):
-# a remount on 2026-11-08 20:33Z, then the 11-09 job never finished and none ran until the 11-11 reboot; and the grow's
-# remount on 11-26 05:00Z, then the 11-26 job failed after 2 s with 0x80070015 (not ready) and none started after it. Each
-# time the service logged no event 6 ("started monitoring a volume") for the drive after the remount, while every service
-# start (boot) logs one. Warn first (lothsahn's lockout rule): say so in the result and name the recovery, which an
-# administrator runs (`Restart-Service refsdedupsvc`); restarting it here comes in a later change. '' when dedup is not
-# enabled on the drive, or the service did log event 6 for it since $since.
+# w6573: after the drive is detached and attached again, the ReFS dedup service (refsdedupsvc, demand-start) may stop
+# deduplicating it until the service restarts. On LothDesktop's V: both remounts since dedup was enabled did that
+# (measured from the ReFS and ReFsDedupSvc logs): after 2026-11-08 20:33Z the 11-09 job never finished and none ran until
+# the 11-11 reboot; after 11-26 05:00Z the 11-26 job failed after 2 s with 0x80070015 (not ready), none started after it,
+# and the volume's task stayed Running. Event 6 ("started monitoring a volume") has only ever been logged at a service
+# start, so its absence after a remount is the sign. Warn first (lothsahn's lockout rule): say so in the result and name
+# the recovery, which an administrator runs; restarting it here comes in a later change. Reads only the event log (no
+# dedup cmdlet: they talk to the service this checks for being stuck). '' when the service never ran a job on the drive,
+# or it logged event 6 for the drive since $since.
+function Get-DedupMountPoints($e) {
+  try { @((([xml]$e.ToXml()).Event.EventData.Data.'#text' | ConvertFrom-Json).Volume.MountPoints) } catch { @() }
+}
 function Test-DedupWatch([datetime]$since) {
   try {
-    if (-not (Get-Command Get-ReFSDedupStatus -ErrorAction SilentlyContinue)) { return '' }
-    $vol = "$($Letter):"
-    $en = Get-ReFSDedupStatus -Volume $vol -ErrorAction Stop
-    if (-not $en.Enabled) { return '' }
+    $log = 'Microsoft-Windows-ReFsDedupSvc/Operational'
+    $mp = "$($Letter):\"
+    $jobs = Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 3 } -MaxEvents 60 -ErrorAction SilentlyContinue |
+      Where-Object { (Get-DedupMountPoints $_) -contains $mp }
+    if (-not $jobs) { return '' }
     for ($i = 0; $i -lt 12; $i++) {
-      $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-ReFsDedupSvc/Operational'; Id = 6; StartTime = $since } -ErrorAction SilentlyContinue |
-        Where-Object { $_.Message.Contains("$($Letter):\") }
+      $ev = Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 6; StartTime = $since } -ErrorAction SilentlyContinue |
+        Where-Object { (Get-DedupMountPoints $_) -contains $mp }
       if ($ev) { return '' }
-      Start-Sleep -Seconds 5
+      if ($i -lt 11) { Start-Sleep -Seconds 5 }
     }
-    return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $vol since $($since.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: Restart-Service refsdedupsvc)"
+    return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $($Letter): since $($since.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: stop the volume's task under \Microsoft\Windows\ReFsDedupSvc\ if it is Running, then Restart-Service refsdedupsvc)"
   } catch { return "; dedup watch not checked (w6573): $($_.Exception.Message)" }
 }
 
