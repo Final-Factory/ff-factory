@@ -32,6 +32,15 @@ import { PREFER_TOOLS } from './bashNudge.ts';
  * lifetime.
  */
 
+/**
+ * w6287: the reply of machine_update shared_lock. A sharedLock switch restarts the daemon, which adopts the running agent
+ * hosts (w605), and a host keeps its environment, so those agents keep the old mode's cache paths and FF_PLAYER_BROKER
+ * until their next host start. daemon.json `hostRestage` "on" ends each idle one between turns so its next message starts
+ * a new host on the new mode; its default "warn" only logs them (docs/worker-root.md "After a sharedLock switch").
+ */
+export const SHARED_LOCK_DELAY_NOTE =
+  "Agents already running there keep the old shared-lock mode (their cache paths and FF_PLAYER_BROKER) until their next agent host start (a stop, the idle reap after an hour, a code update): sessions started after the switch get the new mode at once. The daemon logs each such agent (hostRestage warn, w6287; docs/worker-root.md \"After a sharedLock switch\")."
+
 /** Its one, fixed session id. Never a pool, never a configurable kind (lothsahn, 2026-10-07: "it's hardcoded"). */
 export const OPS_ID = 'ops-worker';
 export const OPS_TITLE = 'Orchestration worker (portal VM)';
@@ -1097,6 +1106,8 @@ export class OpsWorker {
     }
     // Over the machine's own daemon link (w1596) when it takes one: the portal runs it, no ssh and no worker job.
     const flags: LinkUpdateFlags = Object.fromEntries(Object.entries({ ...nums, ...dev, workerFence: o.workerFence, workerCaps: o.workerCaps, transcriptLock: o.transcriptLock, storeLock: o.storeLock, editorTmpdir: o.editorTmpdir, pathFence: o.pathFence, mediumAgentFolders: o.mediumAgentFolders, daemonTmpdir: o.daemonTmpdir, toolsDiskLock: o.toolsDiskLock, winCiFirst: o.winCiFirst, sharedLock: o.sharedLock, runnerPriority: o.runnerPriority }).filter(([, v]) => v !== undefined && v !== false));
+    // w6287: the agents the new daemon adopts keep the environment their host started with.
+    const lockNote = o.sharedLock !== undefined ? ` ${SHARED_LOCK_DELAY_NOTE}` : '';
     const viaLink = this.d.linkUpdate?.(m.id, flags);
     if (viaLink) {
       const named = Object.entries(flags).map(([k, v]) => `${k} ${v}`).join(', ');
@@ -1105,7 +1116,7 @@ export class OpsWorker {
         (r) => this.d.tellOrchestrator(person, linkUpdateMessage(m.id, id, r)),
         (e) => this.d.tellOrchestrator(person, `[machine update for ${id}] ${m.id}'s update over its daemon's link did not run: ${(e as Error).message}. Nothing was changed unless the line says it was; ask again once that is fixed (a daemon offline is updated when it is back, by the next machine_update).`),
       );
-      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.${recorded}`;
+      return `Updating ${m.id}'s worker install over its daemon's own link (w1596; no ssh, no worker job)${named ? ` with ${named}` : ' with no setting changed'}. The portal sends its update job's report to you as a [machine update] message when it ends (a few minutes; the new daemon takes the agents back, and a daemon that does not come back is put back by the job itself). It does not close ${id}: tell ${person.displayName} what it says, and close the request with update_work once it is done.${lockNote}${recorded}`;
     }
     // A connected daemon is never sent to ssh (w1918: LothLaptop joined without it; port 22 timed out and nothing said why).
     const why = this.d.linkProblem?.(m.id);
@@ -1117,7 +1128,7 @@ export class OpsWorker {
     const command = `ssh ${m.target} '${workerUpdateRemote({ root: m.root, platform: m.platform }, commit, extra)}'`;
     const what = extra ? `with these settings changed: ${extra}` : 'with no setting changed';
     const text = `[machine update for ${id}, approved by ${person.displayName} through that request] Update ${m.id}'s worker install ${what}. Run exactly this, once, and nothing else on the machine (docs/worker-install.md, "Updating"; it asks nothing, keeps every other setting, the machine's own credential and the PATH, restarts the daemon; never issue a credential for it):\n\n${command}\n\nThen check with list_machines that ${m.id} is online again${extra ? ' and shows the new limits' : ''}, and report what the update printed (the \`~ key: before -> after\` lines) and what the portal sees.${dev.moveToDevDrive ? ` This one moves the sandboxes onto a Dev Drive (docs/worker-install.md, "The Dev Drive"): it refuses, naming them, while an agent is in a sandbox or a Unity editor runs from one, and then nothing has changed: report which and stop. When it can go ahead it takes an hour or more (it saves each sandbox's work on its branch first, moves the Library seed, and re-creates each sandbox): run it in the background and read its output until it ends, never twice at once, and never interrupt it; if it stops half way, run the same command again (it picks up where it stopped). Report the free space on the root's drive before and after (\`Get-PSDrive <letter>\` on the machine) and the sandboxes it moved.` : dev.devDrive ? ' This one also makes the Dev Drive (docs/worker-install.md, "The Dev Drive") but moves no sandbox; report the letter it chose and the size it printed.' : ''}`;
-    return `${this.send(caller, text, false, [id], true)}${recorded}`;
+    return `${this.send(caller, text, false, [id], true)}${lockNote}${recorded}`;
   }
 
   /**
