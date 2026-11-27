@@ -42,7 +42,10 @@ test('linux: systemctl lines; a stop or uninstall ends the agent hosts, a restar
   assert.doesNotMatch(linuxControlScript('restart', 'com.fffactory.daemon'), /pkill/);
   const stop = linuxControlScript('stop', 'com.fffactory.daemon', '/home/u/ffw/daemon');
   assert.match(stop, /systemctl --user stop com\.fffactory\.daemon\.service/);
-  assert.match(stop, /pkill -f '\/home\/u\/ffw\/daemon\/app\/machine\/agentHost\.ts'/);
+  // w6434: a host started on the code link runs from code/app; the pattern finds both layouts.
+  assert.ok(stop.includes(`pkill -f '/home/u/ffw/daemon/(code/)?app/machine/agentHost\\.ts'`), stop);
+  const pattern = new RegExp(/'([^']+)'/.exec(stop)![1]);
+  assert.ok(pattern.test('node /home/u/ffw/daemon/code/app/machine/agentHost.ts /x') && pattern.test('node /home/u/ffw/daemon/app/machine/agentHost.ts /x'));
   const un = linuxControlScript('uninstall', 'com.fffactory.daemon');
   assert.match(un, /systemctl --user disable --now com\.fffactory\.daemon\.service/);
   assert.match(un, /rm -f "\$HOME\/\.config\/systemd\/user\/com\.fffactory\.daemon\.service"/);
