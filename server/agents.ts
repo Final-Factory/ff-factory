@@ -9873,11 +9873,13 @@ ${w.repo ?? ''}
       ),
       tool(
         'file_follow_ups',
-        'File the follow-ups a worker handed up on a request ([follow-ups to file], w2969) in one call, each with its title and brief as the worker wrote it and related to that request, through request_work and its limits. Only when your person asked for that next step or has a standing decision to file them; otherwise ask them first (w5222).',
+        'File the follow-ups a worker handed up on a request ([follow-ups to file], w2969) in one call, each with its title and brief as the worker wrote it and related to that request, through request_work and its limits. Only when your person asked for that next step or has a standing decision to file them; otherwise ask them first (w5222). With drop true it files nothing and drops them instead (w6581): when your person already decided against them or they are outdated, with reason quoting your person’s words or naming that fact; the request then no longer waits on them, and their card goes.',
         {
           request: z.string().min(2).max(16).describe('The request they were handed up on, e.g. "w5196".'),
           items: z.array(z.number().int().min(1)).max(10).optional().describe('Which, by their number in the message (default: all).'),
           priority: priority.optional().describe('For all of them; default normal.'),
+          drop: z.boolean().optional().describe('Drop them instead of filing them (w6581); needs reason.'),
+          reason: z.string().max(300).optional().describe('With drop: your person’s words, quoted, or the fact that makes them outdated.'),
         },
         wrap(async (a) => o.fileFollowUps(chat(), a)),
       ),

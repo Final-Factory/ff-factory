@@ -3000,8 +3000,13 @@ export interface WorkHandedUp {
    * request_work limit included) or Drop them. Nothing files them by itself.
    */
   card?: string;
-  /** w5577: the person dropped them (the card's Drop, Orchestrators.dropHandUps): nothing is pending after it. */
+  /**
+   * w5577: the person dropped them (the card's Drop, Orchestrators.dropHandUps), or w6581 their orchestrator did
+   * (file_follow_ups drop, with a reason quoting the person or naming what made them outdated): nothing is pending after it.
+   */
   dropped?: { at: string; by: string; note?: string };
+  /** w6581: single items (by their number) their person's orchestrator dropped with file_follow_ups drop, the rest still to file. */
+  droppedItems?: { n: number; at: string; by: string; why: string }[];
 }
 
 /** One pull request linked to a request: where it is, and what it did. */
