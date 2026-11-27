@@ -191,6 +191,8 @@ export class Store {
   assistantText?: (sessionId: string, text: string) => string;
   /** The work ledger (docs/orchestrators.md), kept in its own file, data/work.json. */
   readonly work = new Map<string, WorkItem>();
+  /** Counts putWork and dropWork: an index of the requests built at one count holds until the next (w6336). */
+  workRev = 0;
   /** The number of the last work item ("w12" is 12). */
   workSeq = 0;
   /** The dispatcher's session id (the key keeps its old name: it was the one shared orchestrator). */
@@ -331,6 +333,7 @@ export class Store {
     // Its log lines, DONE reports, [needs you] text and notes: never a secret in work.json or on screen (w1584).
     redactInPlace(w);
     this.work.set(w.id, w);
+    this.workRev++;
     this.saveWork();
     emit({ type: 'work', item: w });
   }
@@ -338,6 +341,7 @@ export class Store {
   /** Forget work items (pruning closed ones); no event: pages drop them at their next state. */
   dropWork(ids: string[]) {
     for (const id of ids) this.work.delete(id);
+    if (ids.length) this.workRev++;
     if (ids.length) this.saveWork();
   }
 

@@ -31,7 +31,7 @@ import { HOLD_PLACE_MS, LIVE_HOLD_MS, PlaceAgain, RELEASE_AFTER_MS, RELEASE_WAKE
 import { agentQueueAll, agentQueueFacts, editorSlotRefusal, queueWaitsAll } from '../shared/queueWaits.ts';
 import { GAME_REPO, otherComputerOf, pairStepLine, pairWaitLine, pairWaitNotice } from './pairRuns.ts';
 import { applyPairRaises, type PairState } from './pairRaise.ts';
-import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
+import { WORK_LIVE_LABEL, queuedNeeds, WORK_LIVE_STATES, asksAPerson, benchWaitOf, lastOpenLine, liveCounts, otherWorkWait, outsideDeclared, outsideWaitOf, ownWorkWait, noTimedWaitOf, orchestratorAskIn, restartWait, personWaitIn, reportWaitKey, holdsIndex, holdsOf, servedBy, workLiveAll, type WorkLive, type WorkLiveState } from '../shared/workState.ts';
 import { prsIn, reportTail, whoOf, type NeedsYouWait } from './needsYou.ts';
 import { addedLines, asksLookOk, decidedRefusal, notesSettle, personNotes, quoteCovered, quotedPhrases, relatedRequests, settledRefusal } from './priorDecisions.ts';
 import { statusLinesIn, stillOpenIn } from './ledgerRules.ts';
@@ -3808,6 +3808,10 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
    * w2709's report r36), though the ledger (shared/fleet.ts, by holdsOf) showed it on w2709.
    */
   private workIdsOf(info: SessionInfo, bySession?: Map<string, WorkItem[]>, byId?: ReadonlyMap<string, WorkItem>): string[] {
+    // w6336: within withPlacesOnce, every worker's requests from one index (a scan of every request per worker was 1-3 s
+    // of each blockerWatch tick and state build in the 2026-11-27 stall profiles, under workIdsOf, live and holdsOf).
+    const index = bySession ? undefined : this.holdsIndexNow();
+    if (index) ({ of: bySession, byId } = index);
     const ids = new Set(holdsOf(info.id, bySession ? (bySession.get(info.id) ?? []) : [...this.store.work.values()], byId).held);
     const named = /^(w\d+):/.exec(info.title ?? '')?.[1];
     if (named) ids.add(named);
@@ -7307,13 +7311,21 @@ A report is for a person who asked for one, and people want very few. File one w
     }
   }
 
+  /** Within withPlacesOnce: holdsIndex of the ledger, built again once a request is saved or dropped (Store.workRev). */
+  private holdsIndexNow(): ReturnType<typeof holdsIndex> | undefined {
+    const pass = this.placesPass;
+    if (!pass) return undefined;
+    if (pass.holds?.rev !== this.store.workRev) pass.holds = { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
+    return pass.holds;
+  }
+
   /** Within withPlacesOnce: the next places() computes afresh (a timed leg started, moved or was re-queued). */
   placesChanged(): void {
     if (this.placesPass) this.placesPass = {};
   }
 
   /** places(), and per machine preemptOccupants and benchPriorities (w6336), each computed once within withPlacesOnce. */
-  private placesPass?: { places?: Computer[]; occupants?: Map<string, Occupant[]>; bench?: Map<string, Record<string, BenchPriority>> };
+  private placesPass?: { places?: Computer[]; occupants?: Map<string, Occupant[]>; bench?: Map<string, Record<string, BenchPriority>>; holds?: { rev: number } & ReturnType<typeof holdsIndex> };
 
   /** w3843: within withPlacesOnce and a claims memo, the next asks compute afresh (placesChanged and PlaceAgain.claimsChanged). */
   private placementChanged(): void {

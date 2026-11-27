@@ -435,6 +435,27 @@ test('w6336: one timedLegBound pass reads each machine’s occupants and bench p
   assert.equal(starts.length, 0);
 });
 
+// w6336: within one placement pass every worker's requests come from one index of the ledger (a scan of every request per
+// worker was 1-3 s of each blockerWatch tick, 2026-11-27 stall profiles under workIdsOf); a request saved or dropped in the
+// pass is seen at the next ask.
+test('w6336: a worker’s requests read the same inside a placement pass as outside it, and a request saved or dropped mid-pass shows at once', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', title: 'Belt tooltip', brief: 'Fix it.' }, { id: 'w2', title: 'Other', brief: 'Not its.' }]);
+  const { info } = await startedFor(env, 'w1');
+  const outside = agents.sessionWork(info.id);
+  assert.deepEqual(outside, ['w1']);
+  agents.withPlacesOnce(() => {
+    assert.deepEqual(agents.sessionWork(info.id), outside);
+    const w2 = store.work.get('w2')!;
+    store.putWork({ ...w2, sessionIds: [...w2.sessionIds, info.id], links: { ...w2.links, [info.id]: { at: new Date(Date.now() + 1000).toISOString(), how: 'linked' } } });
+    assert.deepEqual(agents.sessionWork(info.id)?.sort(), ['w1', 'w2'], 'a request saved in the pass is seen');
+    store.dropWork(['w2']);
+    assert.deepEqual(agents.sessionWork(info.id), ['w1'], 'a dropped one goes');
+  });
+  assert.deepEqual(agents.sessionWork(info.id), ['w1']);
+});
+
 test('w2057: request_pair records the pull request and commit; for a pull request whose pair run is open (one filed by hand included) it joins that run and files nothing', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents } = env;
