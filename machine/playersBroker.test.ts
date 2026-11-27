@@ -59,6 +59,7 @@ function broker(
       l: BrokerLaunch,
     ) => Promise<{ pid: number } | { refused: string }>;
     copy?: (s: string, d: string) => Promise<void>;
+    platform?: NodeJS.Platform;
     /** w5615: more of the deps (the shared lock's stageDir and lockIn). */
     deps?: Partial<PlayersBrokerDeps>;
   } = {},
@@ -66,6 +67,8 @@ function broker(
   const root = tmp(t);
   const sandbox = path.join(root, "sandboxes", "slot3");
   fs.mkdirSync(sandbox, { recursive: true });
+  const light = path.join(root, "sandboxes", "agent-work", "agent3");
+  fs.mkdirSync(light, { recursive: true });
   const copies: [string, string][] = [];
   const launches: BrokerLaunch[] = [];
   const log: string[] = [];
@@ -74,7 +77,8 @@ function broker(
   const h = playersRpcHandlers({
     root,
     host: "hostA",
-    sandboxPath: (id) => (id === "slot3" ? sandbox : undefined),
+    sandboxPath: (id) => (id === "slot3" ? sandbox : id === "agent3" ? light : undefined),
+    ...(o.platform ? { platform: o.platform } : {}),
     copy:
       o.copy ??
       (async (s, d) => {
@@ -95,7 +99,7 @@ function broker(
     ...o.deps,
   });
   const slot = (peer = 0) => path.join(root, "players", `slot3-${peer}`);
-  return { root, sandbox, h, copies, launches, log, state, slot };
+  return { root, sandbox, light, h, copies, launches, log, state, slot };
 }
 
 /** What the handler throws, sync or async; undefined when it answers. */
@@ -429,6 +433,33 @@ test("install refuses a caller with no sandbox (403), a bad peer or player (400)
   );
   assert.equal(b.copies.length, 0);
   assert.equal(fs.existsSync(path.join(b.root, "players")), false);
+});
+
+test("w6348: on Windows a light folder's install and launch are refused up front, saying to use a game sandbox; elsewhere they go on", async (t) => {
+  const LIGHT: Caller = { session: "s1", sandbox: "agent3" };
+  const w = broker(t, { platform: "win32" });
+  const exe = winBuild(path.join(w.light, "build"));
+  for (const peer of [0, 1]) {
+    await refused(
+      () => w.h["players/install"](LIGHT, { player: exe, peer }),
+      409,
+      new RegExp(`agent3 is a light agent folder, and on Windows its slot agent3-${peer} can start no player: .*slotK-0/-1.*from a game sandbox.*w6348`),
+    );
+    await refused(() => w.h["players/launch"](LIGHT, { peer }), 409, /light agent folder.*game sandbox/);
+  }
+  assert.equal(w.copies.length, 0);
+  assert.equal(w.launches.length, 0);
+  assert.ok(!fs.existsSync(path.join(w.root, "players", "agent3-0")), "no slot folder made");
+  // status still answers (a slot an earlier daemon filled stays visible), and a game sandbox on Windows goes on
+  const st = (await w.h["players/status"](LIGHT, {})) as { slots: { slot: string }[] };
+  assert.deepEqual(st.slots.map((x) => x.slot), ["agent3-0", "agent3-1"]);
+  const g = (await w.h["players/install"](ME, { player: winBuild(path.join(w.sandbox, "build")) })) as { slot: string };
+  assert.equal(g.slot, "slot3-0");
+  for (const platform of ["linux", "darwin"] as const) {
+    const l = broker(t, { platform });
+    const r = (await l.h["players/install"](LIGHT, { player: winBuild(path.join(l.light, "build")) })) as { slot: string };
+    assert.equal(r.slot, "agent3-0", platform);
+  }
 });
 
 test("install while a live lease holds the slot is refused (409); once its process is gone it goes through", async (t) => {

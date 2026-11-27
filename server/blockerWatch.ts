@@ -19,7 +19,7 @@
 import type { Store } from './store.ts';
 import type { Orchestrators } from './orchestrators.ts';
 import { run as runProc, type RunOptions, type RunResult } from './proc.ts';
-import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, ownsPr, partOfPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerVerdict, CI_REF, cycleBreak, FULL_SHA, gateSetter, gatesOf, newestFirst, onRequest, ownsPr, partOfPr, prLabel, RESUME_SWEEP_MS, sameCommit, waitCycles, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { conditionalVerdict } from '../shared/conditional.ts';
 import { ghRunner, isRateLimitText } from './githubTokens.ts';
 import { budgetOf, ghGet, GH_LOW_EVERY_MS, GH_LOW_REMAINING } from './ghBudget.ts';
@@ -597,6 +597,7 @@ export class BlockerWatch {
     const said = Date.parse(s.lastResultAt ?? s.lastActivityAt) || 0;
     const t = this.d.store.work.get(on.toLowerCase());
     const actedSince = t?.sessionIds.some((sid) => {
+      if (!onRequest(t, sid)) return false;
       const x = this.d.store.sessions.get(sid);
       return x?.kind === 'worker' && (Date.parse(x.lastResultAt ?? '') || 0) > said;
     });
@@ -608,8 +609,9 @@ export class BlockerWatch {
     return {
       now: this.now(),
       work: (id) => store.work.get(id.toLowerCase()),
+      // w6309 (the w6329 review): only a worker on it (onRequest) reports for it; a merged-back moved-off one clears no gate.
       reportedSince: (w: WorkItem, since: number, o?: { notCheckIn?: boolean }) =>
-        w.sessionIds.some((sid) => {
+        w.sessionIds.filter((sid) => onRequest(w, sid)).some((sid) => {
           const s = store.sessions.get(sid);
           if (o?.notCheckIn && this.d.checkInPending?.(sid)) return false;
           return !!s && !BUSY.has(s.status) && !!s.lastResult && (Date.parse(s.lastActivityAt) || 0) > since;
@@ -621,7 +623,7 @@ export class BlockerWatch {
           const fresh = legs.some((s) => !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since);
           return fresh && pairDelivers(legs.map((s) => (s && !BUSY.has(s.status) ? s.lastResult : undefined)), w.id, waiter);
         }
-        return w.sessionIds.some((sid) => {
+        return w.sessionIds.filter((sid) => onRequest(w, sid)).some((sid) => {
           const s = store.sessions.get(sid);
           return !!s && !BUSY.has(s.status) && (Date.parse(s.lastActivityAt) || 0) > since && reportDelivers(s.lastResult, w.id, waiter);
         });

@@ -13,6 +13,7 @@ import type { Config } from './config.ts';
 import type { SessionInfo, WorkItem, WorkPr } from '../shared/types.ts';
 import { inPilot } from './autoCompact.ts';
 import { isOpen } from './work.ts';
+import { onRequest } from '../shared/blockers.ts';
 import { isMidTurn } from './sessions.ts';
 import { noteLine, type PriorNote } from './priorDecisions.ts';
 
@@ -52,7 +53,7 @@ export function mergedSince(w: Pick<WorkItem, 'prs'>, since: string): WorkPr[] {
  */
 export function freshAfterMergeDue(s: Pick<SessionInfo, 'id' | 'kind' | 'status' | 'createdAt'>, items: Iterable<WorkItem>, cfg: Partial<Pick<Config, 'worker'>>): { w: WorkItem; merged: WorkPr[] } | undefined {
   if (s.kind !== 'worker' || isMidTurn(s) || freshAfterMergePercent(cfg) <= 0) return undefined;
-  const open = [...items].filter((w) => isOpen(w) && w.sessionIds.includes(s.id));
+  const open = [...items].filter((w) => isOpen(w) && onRequest(w, s.id));
   if (open.length !== 1) return undefined;
   const w = open[0];
   if (freshAfterMergeArm(w.id, cfg) !== 'pilot') return undefined;

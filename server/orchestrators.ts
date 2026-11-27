@@ -9,7 +9,7 @@ import path from 'node:path';
 import { band, concepts, DEFAULT_THRESHOLDS, entryMatch, indexOf, type MatchThresholds } from './boardMatch.ts';
 import { LOOP_GUARD_RANGE, type Config } from './config.ts';
 import type { Store } from './store.ts';
-import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, newestFirst, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
+import { blockerName, blockerProblem, blockerVerdict, gateSetter, latestWorker, heardOn, newestFirst, offSince, onRequest, RESUME_SWEEP_MS, DISK_RESUME_MARGIN_GB, diskAboveLine, gatesName, gatesOf, MAX_GATES, othersGates, prRefOf, sameGate, type BlockerFacts, type PrHealth } from '../shared/blockers.ts';
 import { workerBranch } from './placeAgain.ts';
 import { COORD_TURN_MAX_CALLS, COORD_TURN_MAX_TOKENS_READ, type OptionsFactory, type SessionHandle, type SessionManager, type TurnBudgetHit } from './sessions.ts';
 import { actingFor, asRequester, type Identity } from './identity.ts';
@@ -1510,7 +1510,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     // the answer in its hand-off, which its next worker reads when it starts. Each worker hears it once, naming only the
     // requests it holds.
     const asker = r.worker;
-    const holds = (x: WorkItem) => !!asker && x.sessionIds.includes(asker);
+    // w6309 (the w6335 review): an asker moved off it that a merge listed again does not hold it (onRequest).
+    const holds = (x: WorkItem) => !!asker && onRequest(x, asker);
     // The w6248 and w6253 reviews: a request's newest worker other than the asker is on it now unless the request was handed
     // back after that worker's link (a hand-back leaves it with nobody, and sessionIds keeps every worker it ever had): such an
     // earlier worker is never resumed on it (w2079). A worker with no link time counts only when there is no hand-back (a
@@ -1522,7 +1523,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     const hbAt = (x: WorkItem) => at(x.handedBack?.at);
     const onNow = (x: WorkItem): string | undefined => {
       const now = latestWorker(x);
-      if (!now || now === asker) return undefined;
+      // w6309 (R1): nor one moved off it and back only through a merge (latestWorker ranks it last, w6318 F2).
+      if (!now || now === asker || offSince(x, now)) return undefined;
       const link = x.links?.[now]?.at;
       return !x.handedBack || (link && at(link) >= hbAt(x)) ? now : undefined;
     };
@@ -1949,9 +1951,10 @@ It is for your part of the work, not an answer to another worker's question.`;
    */
   runningLegs(w: WorkItem): string[] {
     const gated = new Set(gatesOf(w).map((g) => g.by));
+    // w6309 (the w6331 review): a worker moved off it that a merge listed again runs no leg of it (onRequest).
     return w.sessionIds.filter((sid) => {
       const s = this.store.sessions.get(sid);
-      if (!s || s.kind !== 'worker' || w.done?.[sid]) return false;
+      if (!s || s.kind !== 'worker' || w.done?.[sid] || !onRequest(w, sid)) return false;
       if (w.setAside?.[sid]) return false;
       return BUSY.includes(s.status) || !!this.d.pendingWake?.(sid) || gated.has(sid);
     });
@@ -2012,7 +2015,7 @@ It is for your part of the work, not an answer to another worker's question.`;
 
   /** The open ledger items a worker works on (a closed one no longer hears from it, even if the worker is reused). */
   itemsOf(sessionId: string): WorkItem[] {
-    return [...this.store.work.values()].filter((w) => w.sessionIds.includes(sessionId) && isOpen(w));
+    return [...this.store.work.values()].filter((w) => heardOn(w, sessionId) && isOpen(w));
   }
 
   /**
@@ -2123,7 +2126,7 @@ It is for your part of the work, not an answer to another worker's question.`;
       w.heldCheckIns = undefined;
       if (isOpen(w) || w.status === 'stalled') {
         for (const h of held) {
-          if (this.store.sessions.get(h.session) && w.sessionIds.includes(h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
+          if (this.store.sessions.get(h.session) && onRequest(w, h.session)) this.wakeNow(h.session, `${w.id}'s block ended (${clip(line, 200)}). This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`, w.id);
         }
       }
     }
@@ -2408,7 +2411,8 @@ It is for your part of the work, not an answer to another worker's question.`;
   }
 
   private workersOf(w: WorkItem): SessionInfo[] {
-    return w.sessionIds.map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker');
+    // w6309 (the w6331 sweep): its workers are the ones on it (onRequest), not one moved off it that a merge listed again.
+    return w.sessionIds.filter((id) => onRequest(w, id)).map((id) => this.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && s.kind === 'worker');
   }
 
   /** Its latest worker's last turn, when it ended in an error or an interrupt instead of a report (w1870), and which worker. */
@@ -3184,7 +3188,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     if (settledFor) this.toPeople(settledFor.asked, dispatchNotice(w, `${owner.displayName} answered its question; ${settledFor.line}`, note));
     // Closing as done needs nothing from the dispatcher; anything else may.
     if (input.close !== 'done') {
-      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const live = w.sessionIds.filter((sid) => onRequest(w, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(owner, updateNotice(w, owner, `${what.join('; ')}.${hint}`));
     }
@@ -3988,7 +3992,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const how = `by ${d.by.displayName}'s decision of ${utcShort(d.at)} ("${clip(d.words, 160)}"), once ${why}`;
     if (others.length) this.toPeople(others, dispatchNotice(w, `${verb} ${how}${own ? '' : ' (it is your request; owners close each other\'s, w677)'}`, d.note));
     if (close === 'cancelled') {
-      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const live = w.sessionIds.filter((sid) => onRequest(w, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(d.by, updateNotice(w, d.by, `${verb} ${how}.${hint}`));
     }
@@ -4250,7 +4254,7 @@ It is for your part of the work, not an answer to another worker's question.`;
     const how = turn.words ? `${by.displayName}, who answered the proposal with ${turn.words}` : own ? `${by.displayName}, who asked for it in their own words` : `${by.displayName}'s orchestrator, on its own judgment (owners close each other's requests as their own, w677)`;
     this.toPeople(w.requesters, dispatchNotice(w, `${verb} by ${how} (it is your request)`, note));
     if (input.close !== 'done') {
-      const live = w.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const live = w.sessionIds.filter((sid) => onRequest(w, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const hint = input.close === 'cancelled' && live.length ? ` Its workers ${live.join(', ')} are still working: stop or redirect them.` : '';
       this.gatherForDispatcher(by, updateNotice(w, by, `${verb} for ${names(w.requesters)} (an owner's close or reopen of another person's request): ${note}.${hint}`));
     }
@@ -4485,7 +4489,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // passed) could not be dropped: start_agent refuses a pair run of two or more legs started one at a time, and a queued request cannot be queued again. pair_legs 0
     // clears the mark of a pair run whose legs never started; done closes one that never had a worker as a repeat of the run
     // that finished (finishedTwinOf), with that run's result as its outcome, so whoever waited on it is resumed with it.
-    const twin = input.action === 'done' && w.pair && !w.pair.started && !w.sessionIds.length ? this.finishedTwinOf(w) : undefined;
+    const twin = input.action === 'done' && w.pair && !w.pair.started && !w.sessionIds.some((sid) => onRequest(w, sid)) ? this.finishedTwinOf(w) : undefined;
     if (input.pair_legs === 0) {
       if (!w.pair) throw new Error(`${w.id} is not a pair run: pair_legs 0 clears the mark of one`);
       if (w.pair.started) throw new Error(`${w.id}'s legs started together at ${w.pair.started.at.slice(11, 16)} UTC: it stays a pair run until they end`);
@@ -4542,10 +4546,15 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       const t = into!;
       for (const r of w.requesters) if (!isFor(t, r.userId)) t.requesters.push(r);
       // w6288: a worker moved off t that comes back with w is never shifted past t's hand-back below (w2079).
-      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => !t.sessionIds.includes(sid)));
+      // w6309 (the w6318 review, F1): and one an earlier merge listed again, still off t since its move (offSince).
+      const offT = new Set(Object.keys(t.movedOff ?? {}).filter((sid) => offSince(t, sid)));
+      // w6309 (the w6302 review, R1 and R2): such a worker stays listed, so the merge takes no running worker off its work
+      // (keep rather than kill) and a person's answer or note still reaches it (w2495), but it keeps its moved-off mark and its
+      // link on w does not come with it: it is off t since its move (offSince), so it is never t's worker now (answerNeedsYou)
+      // and its own stale resumes are refused (staleResume). Linking it to w after the move does not put it back on t.
       t.sessionIds = [...new Set([...t.sessionIds, ...w.sessionIds])];
       // When each was given it travels with it, so its newest worker stays the newest (latestWorker, w1696).
-      if (w.links) t.links = { ...w.links, ...t.links };
+      if (w.links) t.links = { ...Object.fromEntries(Object.entries(w.links).filter(([sid]) => !offT.has(sid))), ...t.links };
       // w6271 (the w6269 review): workers merged onto a request handed back since their own links join t after that hand-back,
       // or answerNeedsYou takes them for gone and an answer on t goes only into the old hand-off. Their links all shift by one
       // offset, so the newest of them lands just after the hand-back (w6277: keeping their order among themselves, and a worker
@@ -4570,7 +4579,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.mergedInto = t.id;
       // w2610: a gate of t on w now names t itself (w2607 Blocked on w2608, its own copy): it can never clear, so it goes.
       this.dropSelfGates(t, w.id);
-      const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid)).map((sid) => this.workerLine(sid));
+      const workers = t.sessionIds.filter((sid) => this.store.sessions.get(sid) && onRequest(t, sid)).map((sid) => this.workerLine(sid));
       what = `merged into ${t.id} "${clip(t.title, 80)}" (${t.status}${workers.length ? `: ${workers.join(', ')}` : ''}), which ${names(t.requesters)} will hear about`;
     } else if (input.action === 'link') {
       const ids = (input.session_ids ?? []).map((x) => x.trim()).filter(Boolean);
@@ -4681,7 +4690,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       // w1863: a leg for named computers of a request whose own worker carries on elsewhere ("queued for capacity on m5 … I
       // start a timing worker there when a slot frees"). It was the request's status, so the next message to that worker
       // (linkWorker: active) dropped it, and w1789's and w1785's m5 legs waited 8 hours unseen. Now it is its own entry.
-      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid));
+      const worker = w.status === 'active' && w.sessionIds.some((sid) => this.store.sessions.get(sid) && onRequest(w, sid));
       if (needs.length && worker) {
         const at = this.now().toISOString();
         w.legs = [...(w.legs ?? []).filter((l) => !sameNeeds(l.needs, needs)), { at, needs, what: clip(note, 200) }].slice(-MAX_LEGS);
@@ -4714,7 +4723,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
         const room = this.pairRoomNow(w);
         if (room.length) throw new Error(`${w.id} is ${pairText(w.pair)}, and ${room.join(', ')} ${room.length > 1 ? 'have' : 'has'} room for it now: a pair run waits for no named computer or time (w4925; strict priority, any OS). Start ${w.pair.legs === 1 ? `its one leg (start_agent with work_id "${w.id}" and sandbox alone)` : `its ${w.pair.legs} legs together (start_agent with work_id "${w.id}", sandbox for leg 1 and pair_sandboxes for the others)`} on ${room.join(' or ')}. Only if a person asked it to wait for ${parked.map((b) => b.ref ?? b.until ?? b.what).join(', ')}, block again with override_gate quoting their words.`);
       }
-      const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => sid.startsWith(x)));
+      const strangers = (input.session_ids ?? []).map((x) => x.trim().toLowerCase()).filter((x) => x && !w.sessionIds.some((sid) => onRequest(w, sid) && sid.startsWith(x)));
       if (strangers.length) throw new Error(`block's session_ids name the workers the blocker is about, and ${strangers.join(', ')} ${strangers.length > 1 ? 'are not workers' : 'is not a worker'} of ${w.id} (its workers: ${w.sessionIds.map((x) => x.slice(0, 8)).join(', ') || 'none'})`);
       const fresh = keepMergeOnGreen(kept, asked.map((b) => this.makeGate(this.usageGateOf(b), now.toISOString(), 'dispatcher')));
       // Without a new gate, it blocks again on the ones it kept through a hold (w754). A single blocker replaces what it
@@ -4807,7 +4816,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       }
       if (o.kind === 'session') {
         const s = this.store.sessions.get(o.ref);
-        return !!s && s.status !== 'stopped' && s.status !== 'error' && !w.sessionIds.includes(s.id);
+        return !!s && s.status !== 'stopped' && s.status !== 'error' && !onRequest(w, s.id);
       }
       if (o.kind === 'delegation') return this.store.delegations.get(o.ref)?.status === 'pending';
       // A commit is work already merged: the dispatcher judges whether the request is still needed.
@@ -4894,7 +4903,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const back: string[] = [];
     const skip = typeof except === 'string' ? [except] : (except ?? []);
     for (const h of w.heldCheckIns ?? []) {
-      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !w.sessionIds.includes(h.session)) continue;
+      if (skip.includes(h.session) || !this.store.sessions.get(h.session) || !onRequest(w, h.session)) continue;
       const note = h.resume
         ? `${lead}. An earlier resume reached you only after ${w.id} was blocked again, so it was kept until now; carry on from it: ${h.note}`
         : `${lead}. This is your own check-in, which the block cancelled; carry on from it. Its note was: ${h.note}`;
@@ -4922,7 +4931,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * not 0b5f813d that set the gate, and nobody merged the PR.
    */
   private gateOwner(w: WorkItem, gates: readonly WorkBlocker[]): { sid: string; gone?: string } | undefined {
-    const exists = (sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const exists = (sid: string) => !!this.store.sessions.get(sid) && onRequest(w, sid);
     const setters = [...new Set(gates.map(gateSetter).filter((x): x is string => !!x))];
     const setter = setters.find(exists);
     if (setter) return { sid: setter };
@@ -5049,13 +5058,15 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!isOpen(w) && w.status !== 'stalled' && !answer) return `${w.id} is ${w.status}`;
     // w2079: a worker its request was moved off does not take it up again beside the new one. eca53c32 was moved off w1903 at
     // 19:34Z on 2026-10-24 (to c62e5ad1 on m5/slot3); the sweep's resume reached it at 19:40Z, and both pushed to PR #2369.
-    if (w.movedOff?.[sessionId] && !w.sessionIds.includes(sessionId)) {
+    // w6309 (the w6302 review, R2): one a merge listed on it again is off it too, unless a placement linked it since; it is
+    // on the merged work, so a person's answer or note to it still goes (w2495), but none of its own resumes.
+    if (offSince(w, sessionId) && (!w.sessionIds.includes(sessionId) || !answer)) {
       const left = (w.gateResumes ?? []).filter((r) => r.session !== sessionId);
       if (left.length !== (w.gateResumes ?? []).length) {
         w.gateResumes = left.length ? left : undefined;
         this.store.putWork(w);
       }
-      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
+      return `${w.id} was moved off worker ${sessionId} at ${w.movedOff?.[sessionId]}; it is with ${latestWorker(w) ?? 'no worker yet'} now`;
     }
     return undefined;
   }
@@ -5194,7 +5205,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (changed || fresh) this.store.putWork(w);
     }
     if (!newly.length) return { told: [], resumed: [] };
-    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && w.sessionIds.includes(sid);
+    const exists = (w: WorkItem, sid: string) => !!this.store.sessions.get(sid) && onRequest(w, sid);
     const repoOk = (r: string) => (h.repo ? r.toLowerCase() === h.repo.toLowerCase() : /\/ff-factory$/i.test(r));
     const merged = [...this.store.work.values()].filter((w) => (w.prs ?? []).some((p) => h.prs.includes(p.number) && repoOk(p.repo)));
     const prsText = h.prs.length ? `pull request ${h.prs.map((n) => `#${n}`).join(', ')}` : 'a pull request';
@@ -5601,7 +5612,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     p.outcome = `FAIL: ${why}. No player was run: fix the build, push, and request_pair again with the new commit (w4925).`;
     this.stamp(p, `closed as done: ${why} (w4925: a pair run of a commit that does not compile stops before its players run)`);
     this.store.putWork(p);
-    for (const sid of p.sessionIds) {
+    for (const sid of p.sessionIds.filter((x) => onRequest(p, x))) {
       const s = this.store.sessions.get(sid);
       if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || doneOf(p)[sid]) continue;
       try {
@@ -5622,7 +5633,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     old.outcome = `superseded by ${retry.id}, a retry (${why})`;
     this.stamp(old, `cancelled: ${why}; ${old.pair?.for ?? 'its asker'} asked again, so ${retry.id} runs it with fresh legs${retry.pair?.avoid?.length ? `, not on ${retry.pair.avoid.join(' or ')}` : ''} (w2041)`);
     this.store.putWork(old);
-    for (const sid of old.sessionIds) {
+    for (const sid of old.sessionIds.filter((x) => onRequest(old, x))) {
       const s = this.store.sessions.get(sid);
       if (!s || s.kind !== 'worker' || s.status === 'stopped' || s.status === 'error' || doneOf(old)[sid]) continue;
       try {
@@ -6394,7 +6405,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    */
   private recordReportedWorker(w: WorkItem | undefined, sessionId: string, a: { worker: string; line: string; at: number; key: string }): boolean {
     const ref = a.worker.trim();
-    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !w.sessionIds.includes(ref)) return false;
+    if (!w || (w.status !== 'active' && w.status !== 'stalled') || gatesOf(w).length || ref === sessionId || !onRequest(w, ref)) return false;
     const gate = this.makeGate({ kind: 'worker', ref, what: `worker ${ref}'s part (its DONE or final report)` }, new Date(a.at).toISOString(), `worker ${sessionId}`);
     w.blocked = gate;
     w.alsoBlocked = undefined;
@@ -6452,7 +6463,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       for (const id of holdsOf(sid, items).held) {
         const w = this.store.work.get(id);
         if (!w || (w.status !== 'active' && w.status !== 'stalled')) continue;
-        const running = w.sessionIds.filter((o) => o !== sid).map((o) => this.store.sessions.get(o)).some((o) => o && BUSY.includes(o.status) && o.machineId?.toLowerCase() !== m);
+        const running = w.sessionIds.filter((o) => o !== sid && onRequest(w, o)).map((o) => this.store.sessions.get(o)).some((o) => o && BUSY.includes(o.status) && o.machineId?.toLowerCase() !== m);
         if (running) continue;
         const gate = this.makeGate({ kind: 'machine', ref: m, what: `its worker ${sid} was stopped mid-turn when ${m} went offline` }, at, `worker ${sid}`);
         w.blocked = gate;
@@ -6498,7 +6509,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const by = `worker ${sid}`;
     let dropped = 0;
     for (const w of this.store.work.values()) {
-      if (w.status !== 'blocked' || !w.sessionIds.includes(sid)) continue;
+      if (w.status !== 'blocked' || !onRequest(w, sid)) continue;
       const gates = gatesOf(w);
       const rest = gates.filter((g) => !(g.kind === 'machine' && g.by === by && !g.pause));
       if (rest.length === gates.length) continue;
@@ -6703,7 +6714,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * on 2026-11-03: "it requires a `DONE: w2895` line, and that would close the whole fan-out request, not just my row".
    */
   private legOffer(w: WorkItem, sessionId: string): string {
-    const others = w.sessionIds.filter((id) => id !== sessionId && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
+    const others = w.sessionIds.filter((id) => id !== sessionId && onRequest(w, id) && this.store.sessions.get(id)?.kind === 'worker' && !doneOf(w)[id]);
     const leg = `end it with "LEG DONE: ${w.id} <your leg>" in place of the DONE line: that records your leg as done and leaves ${w.id} open for the rest; only a "DONE: ${w.id}" closes it, once no other worker is on it. `;
     if (others.length || standingTargetOf(w)) return `You are one leg of ${w.id} (${others.length ? `other workers on it: ${others.slice(0, 6).join(', ')}` : 'its people keep several legs running'}): ${leg}`;
     return `If your work is one leg of ${w.id} (one row of a fan-out), ${leg}`;
@@ -6720,7 +6731,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     for (const id of legDoneIdsIn(text)) {
       if (full.has(id)) continue;
       const w = this.store.work.get(id);
-      if (!w || !(isOpen(w) || w.status === 'stalled') || !w.sessionIds.includes(s.id)) continue;
+      // w6309 (the w6331 review): a worker moved off it that a merge listed again closes no leg of it, as its DONE closes nothing.
+      if (!w || !(isOpen(w) || w.status === 'stalled') || !onRequest(w, s.id)) continue;
       // Held as the pilot's report while its merge waits on green CI, as a DONE is (doneMarkers).
       if (w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
       const prior = doneOf(w)[s.id];
@@ -6864,7 +6876,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (opts.moved) {
       for (const g of gatesOf(w)) {
         const by = gateSetter(g);
-        if (by && by !== s.id && !w.sessionIds.includes(by) && w.movedOff?.[by]) g.by = `worker ${s.id}`;
+        if (by && by !== s.id && offSince(w, by)) g.by = `worker ${s.id}`;
       }
     }
     const exempt = opts.moved ? gatesOf(w).filter((g) => this.gateOpen(g)) : w.pair ? othersGates(w, s.id) : [];
@@ -6875,7 +6887,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (opts.overrideGate?.trim() && gatesOf(w).length) what += ` (gate overridden: "${clip(opts.overrideGate.trim(), 200)}")`;
     // w2566: a new worker started over the wait of one stopped on its paused or offline computer is the request's move: that
     // one is taken off it, so it no longer counts as still on it (w2542's e6d3dfe1, left on LothLaptop when c59d84ed started).
-    if (!w.sessionIds.includes(s.id)) {
+    // w6309: a worker moved off it that a merge listed again is placed on it anew (onRequest; it is linked below).
+    if (!onRequest(w, s.id)) {
       const waits = gatesOf(w).filter((g) => g.kind === 'machine' && g.ref);
       this.releaseStoppedAway(
         w,
@@ -6886,7 +6899,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     // After the release above: a gate the worker taken off set is no longer another worker's to keep.
     const others = !opts.moved && !w.pair && opts.overrideGate?.trim() ? othersGates(w, s.id) : exempt;
     // w3615: a new worker started on it settles the question it waited on (a message to one already on it does not).
-    const settled = !w.sessionIds.includes(s.id) ? this.settleQuestion(w, 'the dispatcher') : undefined;
+    const settled = !onRequest(w, s.id) ? this.settleQuestion(w, 'the dispatcher') : undefined;
     if (settled) what += `; ${settled.line}`;
     w.sessionIds = [...new Set([...w.sessionIds, s.id])];
     w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'sent' } };
@@ -6924,7 +6937,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
    * Nothing is recorded twice: a worker already on a request is left alone. Returns the item's id.
    */
   recordStart(s: Pick<SessionInfo, 'id' | 'title'>, prompt: string, by: Requester, how: string, humanAsked: boolean): string {
-    const on = [...this.store.work.values()].find((w) => w.sessionIds.includes(s.id));
+    const on = [...this.store.work.values()].find((w) => onRequest(w, s.id));
     if (on) return on.id;
     const now = this.now();
     const w: WorkItem = {
@@ -7191,7 +7204,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     if (!live || live.status !== 'idle' || holdsItsPlace(live, now) || this.sessions.queued().length) return;
     const ask = ids
       .map((id) => this.store.work.get(id))
-      .filter((w): w is WorkItem => !!w && isOpen(w) && w.sessionIds.includes(s.id) && w.approval?.state !== 'pending' && !w.question && !w.flag)
+      .filter((w): w is WorkItem => !!w && isOpen(w) && onRequest(w, s.id) && w.approval?.state !== 'pending' && !w.question && !w.flag)
       .filter((w) => now - (this.statusAsked.get(`${s.id}:${w.id}`) ?? -Infinity) >= STATUS_ASK_EVERY_MS);
     if (!ask.length) return;
     for (const w of ask) {
@@ -7428,7 +7441,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const re = new RegExp(`\\b${id}\\b`, 'i');
     const text = (x: WorkItem) => [x.title, x.brief, x.constraints ?? '', ...(x.notes ?? []).map((n) => n.text)].join('\n');
     return [...this.store.work.values()]
-      .filter((x) => x.id !== id && x.sessionIds.includes(sid) && x.status !== 'merged')
+      .filter((x) => x.id !== id && onRequest(x, sid) && x.status !== 'merged')
       .filter((x) => (x.relatedIds ?? []).some((r) => r.trim().toLowerCase() === id) || re.test(text(x)))
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
   }
@@ -7442,7 +7455,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   workerEnded(s: Pick<SessionInfo, 'id'>) {
     for (const w of [...this.store.work.values()]) {
       const done = doneOf(w);
-      if (!isOpen(w) || !w.sessionIds.includes(s.id) || !Object.keys(done).length || done[s.id]) continue;
+      if (!isOpen(w) || !onRequest(w, s.id) || !Object.keys(done).length || done[s.id]) continue;
       if (this.releaseAfterDone(w).includes(s.id)) {
         this.recheckDone(w.id, `its worker ${s.id} ended on a paused or offline computer after another worker's DONE (w2566)`);
         continue;
@@ -7513,13 +7526,19 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       if (!(isOpen(w) || w.status === 'stalled')) continue;
       // w2045: a DONE while its after-merge report waits on green CI is that report's, filed when FF Factory merges.
       if (!ops && w.status === 'blocked' && gatesOf(w).some((g) => g.mergeOnGreen?.session === s.id)) continue;
-      if (!w.sessionIds.includes(s.id)) {
+      // w6309 (the w6329 review): a worker moved off it that a merge listed again is heard (its report is kept in Findings),
+      // but its DONE does not close it: the worker on it now, or the dispatcher, does.
+      if (!ops && heardOn(w, s.id) && !onRequest(w, s.id)) {
+        refused.push(`${id}: you were moved off it at ${w.movedOff?.[s.id]?.slice(11, 16) ?? '?'} UTC, so your DONE does not close it; your report is kept with it, and ${latestWorker(w) ? `its worker ${latestWorker(w)}` : 'the dispatcher'} carries it on`);
+        continue;
+      }
+      if (!onRequest(w, s.id)) {
         const by = ops ? undefined : this.namedBy(s.id, id);
         if (ops?.workIds.has(id)) {
           also.set(id, [ops.by]);
           this.stamp(w, `the orchestration worker said DONE for it (the job ${ops.by.displayName} sent it for ${id})`);
         } else if (by) {
-          w.sessionIds = [...w.sessionIds, s.id];
+          if (!w.sessionIds.includes(s.id)) w.sessionIds = [...w.sessionIds, s.id];
           w.links = { ...w.links, [s.id]: { at: this.now().toISOString(), how: 'linked' } };
           also.set(id, by.requesters);
           this.stamp(w, `worker ${s.id} said DONE for it from ${by.id} "${clip(by.title, 80)}" (${names(by.requesters)}'s), which names ${id}: now one of its workers`);
@@ -7629,8 +7648,10 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private supersede(s: SessionInfo, id: string, by: string) {
     const w = this.store.work.get(id);
     if (!w || !(isOpen(w) || w.status === 'stalled')) return;
-    const own = w.sessionIds.includes(s.id);
-    const from = own ? undefined : this.namedBy(s.id, id);
+    // w6309 (the w6331 review): a worker moved off it that a merge listed again is heard, not on it: its SUPERSEDED closes
+    // nothing, as its DONE does not (doneMarkers); the request goes to the dispatcher to decide.
+    const own = onRequest(w, s.id);
+    const from = own || heardOn(w, s.id) ? undefined : this.namedBy(s.id, id);
     const open = (w.prs ?? []).find((p) => p.state === 'open');
     if (open) {
       this.stamp(w, `worker ${s.id} says it is superseded by ${by}, not closed: PR #${open.number} is still open (w3248)`);
@@ -7639,7 +7660,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     }
     const others = this.stillOn(w, s.id);
     if ((own || from) && !others.length) return this.closeSuperseded(w, s, by, from);
-    const why = others.length ? `${others.map((x) => this.workerLine(x)).join(', ')} ${others.length > 1 ? 'are' : 'is'} still on it` : `no request of worker ${s.id}'s names it`;
+    const why = others.length ? `${others.map((x) => this.workerLine(x)).join(', ')} ${others.length > 1 ? 'are' : 'is'} still on it` : heardOn(w, s.id) && !own ? `worker ${s.id} was moved off it at ${w.movedOff?.[s.id]?.slice(11, 16) ?? '?'} UTC` : `no request of worker ${s.id}'s names it`;
     const hands = this.handsOf(s.id).map((h) => h.id).filter((x) => x !== id);
     this.stamp(w, `worker ${s.id} says it is superseded by ${by}; sent to the dispatcher to decide (${why}) (w3248)`);
     this.store.putWork(w);
@@ -8014,7 +8035,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.priority = 'urgent';
     }
     this.store.putWork(w);
-    for (const sid of w.sessionIds) {
+    for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
       const s = this.store.sessions.get(sid);
       if (!s || !BUSY.includes(s.status)) continue;
       try {
@@ -8037,7 +8058,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.stamp(w, a.line);
     this.store.putWork(w);
     if (isOpen(w)) {
-      for (const sid of w.sessionIds) {
+      for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
         const s = this.store.sessions.get(sid);
         if (!s || !BUSY.includes(s.status)) continue;
         try {
@@ -8074,7 +8095,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     this.store.putWork(w);
     if (reopen) this.gatherForDispatcher(w.requestedBy, updateNotice(w, w.requestedBy, `reopened by FF Factory: ${a.text}`));
     else {
-      for (const sid of w.sessionIds) {
+      for (const sid of w.sessionIds.filter((x) => onRequest(w, x))) {
         const s = this.store.sessions.get(sid);
         if (!s || !BUSY.includes(s.status)) continue;
         try {
@@ -8231,7 +8252,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const closed: WorkItem[] = [];
     for (const { id, closed: how } of batch) {
       const w = this.store.work.get(id);
-      if (!w || !isOpen(w) || w.status === 'active' || w.sessionIds.length) continue;
+      if (!w || !isOpen(w) || w.status === 'active' || w.sessionIds.some((sid) => onRequest(w, sid))) continue;
       const at = this.now().toISOString();
       w.status = 'done';
       w.autoClosed = { ...how, at };
@@ -8326,7 +8347,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.store.putWork(w);
       this.store.dropWork(pruneIds(this.store.work.values(), undefined, this.now().getTime()));
       // A worker already on it hears about the new thread.
-      for (const sid of target.sessionIds) {
+      for (const sid of target.sessionIds.filter((x) => onRequest(target, x))) {
         const s = this.store.sessions.get(sid);
         if (!s || !BUSY.includes(s.status)) continue;
         try {
@@ -8410,7 +8431,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   }
 
   private crashFactsOf(w: WorkItem) {
-    const live = w.sessionIds.filter((sid) => ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+    const live = w.sessionIds.filter((sid) => onRequest(w, sid) && ['running', 'starting', 'waiting_permission', 'idle'].includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
     return crashFacts(w, live);
   }
 
@@ -8871,7 +8892,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       this.takeOver(target, person, `${person.displayName} joined it from FFBox (dev request ${f.ref})`);
       target.ffboxDev = [...(target.ffboxDev ?? []), link('covered')].slice(-20);
       this.store.putWork(target);
-      const busy = target.sessionIds.filter((sid) => BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
+      const busy = target.sessionIds.filter((sid) => onRequest(target, sid) && BUSY.includes(this.store.sessions.get(sid)?.status ?? 'stopped'));
       const matches = [{ id: target.id, status: target.status, score: highOpen?.score ?? 1, why }, ...ranked.filter((x) => x.w.id !== target.id).map(wire)].slice(0, 5);
       return {
         outcome: 'covered',
@@ -9355,7 +9376,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private attachFollowUp(worker: SessionInfo, about: readonly WorkItem[], by: string) {
     const serving = servedBy(worker.id, [...this.store.work.values()]).size > 0;
     const first = about[0];
-    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' ? { id: first.id, at: this.now().toISOString(), by } : undefined;
+    // w6309 (the w6335 review): a worker moved off it that a merge listed again hears the follow-up but never reopens it.
+    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' && onRequest(first, worker.id) ? { id: first.id, at: this.now().toISOString(), by } : undefined;
     if (!next && !worker.followUpOn) return;
     if (next) {
       worker.followUpOn = next;
@@ -9373,7 +9395,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const f = this.store.sessions.get(sessionId)?.followUpOn;
     if (!f || this.now().getTime() - Date.parse(f.at) > FOLLOW_UP_TIMED_MS) return undefined;
     const w = this.store.work.get(f.id);
-    if (!w || isOpen(w) || !w.sessionIds.includes(sessionId)) return undefined;
+    if (!w || isOpen(w) || !onRequest(w, sessionId)) return undefined;
     if (servedBy(sessionId, [...this.store.work.values()]).size) return undefined;
     return w;
   }

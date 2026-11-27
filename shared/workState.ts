@@ -43,7 +43,7 @@
 import { needsAwayText } from './availability.ts';
 import { asWorkPriority, questionFor, type BenchLock, type BuildHold, type Requester, type SessionInfo, type WorkItem } from './types.ts';
 import { agentState, holdsSandbox, hostFailureText } from './agentState.ts';
-import { gatesName, gatesOf } from './blockers.ts';
+import { gatesName, gatesOf, onRequest } from './blockers.ts';
 import { admitsPriority, needsOf, pairRoom, pairText, reservedText, ROOM_STAND_MS, unfitWhy, type ReservedRoom, type RoomFit } from './capacity.ts';
 import type { QueueWait } from './queueWaits.ts';
 
@@ -184,7 +184,7 @@ function linkOf(w: WorkItem, sessionId: string): { at: number; how: 'sent' | 'li
  * who a request waits on (stillOn) read this one.
  */
 export function servedBy(sessionId: string, items: readonly WorkItem[]): Set<string> {
-  const mine = items.filter((w) => live(w) && w.sessionIds.includes(sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
+  const mine = items.filter((w) => live(w) && onRequest(w, sessionId)).map((w) => ({ w, l: linkOf(w, sessionId) }));
   const lastSent = Math.max(-1, ...mine.filter((x) => x.l.how === 'sent').map((x) => x.l.at));
   return new Set(mine.filter((x) => (x.l.how === 'sent' ? x.l.at === lastSent : x.l.at >= lastSent)).map((x) => x.w.id));
 }
@@ -215,7 +215,7 @@ export function holdsOf(sessionId: string, items: readonly WorkItem[], byId?: Re
   const paused = new Map<string, string>();
   let all = byId;
   for (const w of items) {
-    if (served.has(w.id) || !live(w) || !w.sessionIds.includes(sessionId) || w.done?.[sessionId]) continue;
+    if (served.has(w.id) || !live(w) || !onRequest(w, sessionId) || w.done?.[sessionId]) continue;
     const a = w.setAside?.[sessionId];
     if (a && (Date.parse(a.at) || 0) > linkOf(w, sessionId).at) {
       if (a.kind === 'released') continue;
@@ -1047,7 +1047,8 @@ export function workLive(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: s
 function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string) => Holds): WorkLive | undefined {
   if (!live(w)) return undefined;
   const holds = holdsFor ?? ((sid: string) => holdsOf(sid, f.items));
-  const workers = w.sessionIds.map((id) => f.session(id)).filter((s): s is SessionInfo => !!s);
+  // w6309: its workers are the ones on it (onRequest), not one moved off it that a merge listed again.
+  const workers = w.sessionIds.filter((id) => onRequest(w, id)).map((id) => f.session(id)).filter((s): s is SessionInfo => !!s);
   // Mine: the workers that hold it, serving it now or not (w915). Only the report- and message-based signals below read
   // `serving`: what a worker said last, and what waits to be sent it, is about the request it is on now.
   const mine = workers.filter((s) => holds(s.id).held.has(w.id));
@@ -1106,7 +1107,7 @@ function workLiveOf(w: WorkItem, f: WorkLiveFacts, holdsFor?: (sessionId: string
   // w1841: another worker of the request reported after a time and this one did not: what came then went to that one.
   const waiting = (s: SessionInfo): WaitingWorker => ({ id: s.id, elsewhere: (t) => reportAt(s) <= t && workers.some((o) => o.id !== s.id && reportAt(o) > t) });
   const team = [...new Set([w.requestedBy, ...w.requesters].map((r) => r.displayName))];
-  const heldWith = (s: SessionInfo) => f.items.filter((x) => x.id !== w.id && live(x) && x.sessionIds.includes(s.id) && !x.done?.[s.id]);
+  const heldWith = (s: SessionInfo) => f.items.filter((x) => x.id !== w.id && live(x) && onRequest(x, s.id) && !x.done?.[s.id]);
 
   // Waiting on a person, declared (w691): the worker says only a person can move it on, and who. A check-in it set as
   // well does not make it Working: no wake-up moves a person.
