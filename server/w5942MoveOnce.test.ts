@@ -260,3 +260,27 @@ test('w5942 (warn only): a worker whose work moved elsewhere and that its daemon
   assert.equal(reports.length, 1);
   assert.match(reports[0]!, /^\[machines\] beast: 2 worker\(s\) whose work moved elsewhere: still runs: d732483b \(its work moved to biscuit at 06:09:46Z\), 847ebd50 .*\(w5942, warn only\)\.$/);
 });
+
+test('w6432: a room move takes no game sandbox where higher-priority work is queued for one: it goes elsewhere, or waits while every computer with room is held', async (t) => {
+  const { store, agents, starts, worker, request, queued, roomMove, settled } = await setup(t);
+  store.putWork({ id: 'w6431', title: 'Release 0.50.0.118', brief: 'Release.', priority: 'frantic', keys: [], requestedBy: LOTH, requesters: [], humanAsked: true, status: 'active', createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] } as unknown as WorkItem);
+  const failed = (agents as unknown as { failedStarts: Map<string, { machine: string; at: number }> }).failedStarts;
+  failed.set('w6431', { machine: 'lothdesktop', at: Date.now() });
+  failed.set('w6432x', { machine: 'beast', at: Date.now() }); // no such request: dropped, it holds nothing
+  t.mock.method(console, 'warn', () => undefined);
+  const s = worker('5449aaaa', { machineId: 'biscuit', machineSandbox: 'slot1', turns: 0, placeReleased: { at: OLD, sandbox: 'slot1', branch: 'w5449-fix', why: 'idle' } });
+  request(['5449aaaa']);
+  assert.equal(roomMove(s, queued('5449aaaa', 'go', Date.now() - 60_000), BISCUIT_FULL, Date.now()), true);
+  await settled('5449aaaa');
+  assert.deepEqual(starts.map((x) => x.split(':')[0]), ['beast'], 'normal w5869 passes over lothdesktop, held for frantic w6431');
+  // Both computers with room held: it waits, and says why.
+  failed.set('w6431', { machine: 'lothdesktop', at: Date.now() });
+  store.putWork({ id: 'w6433', title: 'Urgent fix', brief: 'Fix.', priority: 'urgent', keys: [], requestedBy: LOTH, requesters: [], humanAsked: true, status: 'active', createdAt: OLD, updatedAt: OLD, sessionIds: [], overlaps: [], asks: 0, log: [] } as unknown as WorkItem);
+  failed.set('w6433', { machine: 'beast', at: Date.now() });
+  const s2 = worker('5449bbbb', { title: 'w5870: Another fix', machineId: 'biscuit', machineSandbox: 'slot2', turns: 0, placeReleased: { at: OLD, sandbox: 'slot2', branch: 'w5449-two', why: 'idle' } });
+  store.putWork({ id: 'w5870', title: 'Another fix', brief: 'Do it.', priority: 'normal', keys: [], requestedBy: LOTH, requesters: [], humanAsked: true, status: 'active', createdAt: OLD, updatedAt: OLD, sessionIds: ['5449bbbb'], overlaps: [], asks: 0, log: [] } as unknown as WorkItem);
+  const kept = roomMove(s2, queued('5449bbbb', 'go', Date.now() - 60_000), BISCUIT_FULL, Date.now());
+  assert.equal(typeof kept, 'string', 'it waits');
+  assert.match(String(kept), /w6431 \(frantic\)|w6433 \(urgent\)/);
+  assert.equal(starts.length, 1);
+});

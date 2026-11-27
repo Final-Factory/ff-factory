@@ -4454,7 +4454,6 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const entry = { to: d.move.to, texts: [movedText(q)], sends: [q] };
     this.roomMoving.set(info.id, entry);
     const waited = Math.round((now - (Date.parse(q.at) || now)) / 1000);
-    this.warnOutranked('room move', info, reqs, d.move.to);
     console.log(`room move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}) moves to ${d.move.to} ${waited} s after its message was queued: ${hold}; ${d.move.why}`);
     this.unmemoized(() => void this.track(this.moveForRoom(info, reqs, d.move.to, d.move.why, hold, entry, q).finally(() => this.roomMoving.delete(info.id))));
     return true;
@@ -4572,8 +4571,8 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       this.roomKept.set(info.id, why);
       return 'stay' in d ? stayLine(hold, d.stay) : `${hold}; ${NONE_MARK}: ${d.none}`;
     }
-    this.roomKept.delete(info.id);
     const to = d.move.to;
+    this.roomKept.delete(info.id);
     const sb = this.store.machines.get(m)?.sandboxes?.find((x) => x.id === info.machineSandbox);
     const branch = info.placeReleased?.branch ?? this.branchNow(info);
     const ids = reqs.map((w) => w.id).join(', ');
@@ -4594,7 +4593,6 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     });
     const entry = { to, texts: q ? [movedText(q)] : [], sends: q ? [q] : [], how: `moved by FF Factory: ${a.line} (w2544)`, lead, reason: `${a.line}, and ${to} has room (w2544)`, away: a.line };
     this.roomMoving.set(info.id, entry);
-    this.warnOutranked('away move', info, reqs, to);
     console.log(`away move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${ids}) moves to ${to}: ${a.line}; ${d.move.why}`);
     this.unmemoized(() => {
       for (const w of reqs) this.orchestrators.dropAwayGates(w, m, a.line);
@@ -4915,17 +4913,19 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
   }
 
   /**
-   * w6432 (warn-only): a room or away move that takes a game sandbox on `to` while higher-priority work is queued for one
-   * there (or its start just failed there) says so. On 2026-11-27 moves off offline m5 and BEAST put w6235 into
-   * lothdesktop/slot1 (15:04Z) and w5479 into slot5 (15:15Z), both normal, while w6431 (frantic) waited for a sandbox there.
+   * w6432: why a room or away move of a worker on game work takes no game sandbox on `to` (moveFacts holds that computer, so
+   * the move goes elsewhere or waits and is tried again), or undefined: higher-priority work is queued for one there (or its
+   * start just failed there). On 2026-11-27 moves off offline m5 and BEAST put w6235 into lothdesktop/slot1 (15:04Z) and
+   * w5479 into slot5 (15:15Z), both normal, while w6431 (frantic) waited for a sandbox there. Journalled once per worker,
+   * computer and work in 10 minutes.
    */
-  private warnOutranked(what: string, info: SessionInfo, reqs: WorkItem[], to: string): void {
-    if (!reqs.some((w) => needsOf(w) === 'game')) return;
+  private outrankedThere(info: SessionInfo, reqs: WorkItem[], to: string): string | undefined {
     const mine = topPriority(reqs.map((w) => w.priority));
     const ahead = this.placeAgain.outranking(rankOf(mine), to);
-    if (!ahead) return;
-    const ids = reqs.map((w) => w.id).join(', ');
-    this.placeAgain.warnOnce(`${what}:${info.id}:${to}:${ahead.work}`, `${what} (w6432, warn-only): worker ${info.id} (${ids}, ${mine ?? 'no open request'}) takes a game sandbox on ${to} while ${ahead.work} (${ahead.priority}) is queued for one there; once enforced it waits`);
+    if (!ahead) return undefined;
+    const why = `higher-priority ${ahead.work} (${ahead.priority}) is queued for a game sandbox on ${to}, so it goes first (w6432)`;
+    this.placeAgain.warnOnce(`move:${info.id}:${to}:${ahead.work}`, `move: worker ${info.id} on ${info.machineId}/${info.machineSandbox} (${reqs.map((w) => w.id).join(', ')}, ${mine ?? 'no open request'}) takes no game sandbox on ${to}: ${why}`);
+    return why;
   }
 
   private moveFacts(info: SessionInfo, reqs: WorkItem[]): MoveFacts {
@@ -4941,7 +4941,7 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     for (const p of places) {
       if (p.id === placeId(info.machineId!)) continue;
       // w5860: work that needs only an agent seat leaves another request's older leg its seat there too.
-      const why = !game.length ? reqs.map((w) => this.legHoldProblem(p.id, w, 'seat')).find(Boolean) : p.freeSandboxes < 1 ? undefined : game.map((w) => this.heldFor(p.id, w)).find(Boolean);
+      const why = !game.length ? reqs.map((w) => this.legHoldProblem(p.id, w, 'seat')).find(Boolean) : p.freeSandboxes < 1 ? undefined : (game.map((w) => this.heldFor(p.id, w)).find(Boolean) ?? this.outrankedThere(info, reqs, p.id));
       if (why) held[p.id] = why.split(/\. Start /)[0]!;
     }
     // w5942: a computer whose daemon just refused a start at its cap is no target, whatever the portal's count says.
