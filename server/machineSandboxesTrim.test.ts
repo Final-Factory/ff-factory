@@ -323,11 +323,32 @@ test('w1576: lfsDedup reads the bytes git lfs dedup shared, and never throws', a
   const ok = await lfsDedup(said(0, 'Success:\n  De-duplicated  size: 9103132700 bytes\n                count: 5026\n'), 'X');
   assert.deepEqual(ok, { bytes: 9103132700 });
   assert.equal(lfsDedupWords(ok), 'LFS files shared with the store: 8.5 GB');
-  assert.deepEqual(await lfsDedup(said(2, '', 'Working tree is dirty. Please commit or reset your change.'), 'X'), { skipped: 'Working tree is dirty. Please commit or reset your change.' });
-  assert.deepEqual(await lfsDedup(async () => Promise.reject(new Error('spawn git ENOENT')), 'X'), { skipped: 'spawn git ENOENT' });
-  let args: string[] = [];
-  await lfsDedup(async (a) => ((args = a), { code: 0, stdout: '', stderr: '' }), path.join('sb', 'x'));
-  assert.deepEqual(args, ['-C', path.join('sb', 'x'), 'lfs', 'dedup']);
+  const dirty = async (a: string[]) => (a.includes('ls-files') ? { code: 0, stdout: '', stderr: '' } : { code: 2, stdout: '', stderr: 'Working tree is dirty. Please commit or reset your change.' });
+  assert.deepEqual(await lfsDedup(dirty, 'X'), { skipped: 'Working tree is dirty. Please commit or reset your change.' });
+  assert.deepEqual(await lfsDedup(said(2, '', 'fatal: not a git repository'), 'X'), { skipped: 'could not list the LFS files: fatal: not a git repository' });
+  assert.deepEqual(await lfsDedup(async () => Promise.reject(new Error('spawn git ENOENT')), 'X'), { skipped: 'could not list the LFS files: spawn git ENOENT' });
+  const args: string[][] = [];
+  await lfsDedup(async (a) => (args.push(a), { code: 0, stdout: '', stderr: '' }), path.join('sb', 'x'));
+  assert.deepEqual(args, [['-C', path.join('sb', 'x'), 'lfs', 'ls-files', '--name-only'], ['-C', path.join('sb', 'x'), 'lfs', 'dedup']]);
+});
+
+test('w6432: lfsDedup puts back the times git lfs dedup changed, so the next git status re-hashes nothing', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lfs-times-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'Art'));
+  for (const f of ['Art/a.png', 'b.wav', 'grew.bin']) fs.writeFileSync(path.join(dir, f), 'same bytes');
+  const old = new Date('2026-11-01T10:00:00Z');
+  for (const f of ['Art/a.png', 'b.wav', 'grew.bin']) fs.utimesSync(path.join(dir, f), old, old);
+  const git = async (a: string[]) => {
+    if (a.includes('ls-files')) return { code: 0, stdout: 'Art/a.png\nb.wav\r\ngrew.bin\ngone.psd\n', stderr: '' };
+    // the dedup's clone: the same bytes, new times (git-lfs restores only the mode); one file that changed size is left alone
+    for (const f of ['Art/a.png', 'b.wav']) fs.writeFileSync(path.join(dir, f), 'same bytes');
+    fs.writeFileSync(path.join(dir, 'grew.bin'), 'other, longer bytes');
+    return { code: 0, stdout: '  De-duplicated  size: 20 bytes\n', stderr: '' };
+  };
+  assert.deepEqual(await lfsDedup(git, dir), { bytes: 20 });
+  for (const f of ['Art/a.png', 'b.wav']) assert.equal(fs.statSync(path.join(dir, f)).mtimeMs, old.getTime(), f);
+  assert.notEqual(fs.statSync(path.join(dir, 'grew.bin')).mtimeMs, old.getTime(), 'a file whose size changed keeps its new time');
 });
 
 test('w1576: the release trim runs git lfs dedup in the sandbox and logs what it did', async (t) => {
