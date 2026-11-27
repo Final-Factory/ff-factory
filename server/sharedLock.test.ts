@@ -6,7 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { SHARED_LOCK_TOOLS, SHARED_SEED_DIRS, WORKER_CACHE_CHILDREN, makeSharedLockDirs, sharedLockParents, sharedLockPaths } from '../machine/sharedLockPaths.ts';
 import { SLOT_CACHE_TOOLS, mergeBack } from '../machine/slotCaches.ts';
-import { MEDIUM_TOOLS, isExplicitMedium, isLabelledLow, labelLow, lowTargets, type Exec } from '../machine/lowIntegrity.ts';
+import { MEDIUM_TOOLS, isExplicitMedium, isLabelledLow, labelLow, lowTargets, trickWarning, type Exec } from '../machine/lowIntegrity.ts';
+import { hasTrickName, isTrickName } from './fsLink.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
 import { fenceFor, seatbeltProfile } from './workerFence.ts';
 import { firstUnplain, lockIn } from '../machine/lockIn.ts';
@@ -269,6 +270,102 @@ test('Windows: "on" turns cache and cache/nuget Medium before their children go 
   assert.match(said.join('\n'), /cache.slots is \(or lies below\) a junction or symlink now, not labelled/);
   // The first of them refused, the other children of cache/nuget are labelled as before.
   assert.ok(set.includes(path.join(d, 'cache', 'uv')), JSON.stringify(set));
+});
+
+// Review w6380: `cache\evil.` beside a junction `cache\evil`. Node lists `evil.` as a plain folder, so every link check
+// passes, but Windows drops the trailing dot (or space) and icacls handed `cache\evil.` opens the junction. Such a name is
+// skipped with a WARNING and never reaches icacls; the pass does not fail, and the rest is labelled as before. Name-based,
+// so it runs on every OS.
+const long = (p: string) => (process.platform === 'win32' ? `\\\\?\\${p}` : p);
+const mkTrick = (p: string) => fs.mkdirSync(long(p), { recursive: true });
+const putTrick = (dir: string, file = 'f') => {
+  mkTrick(dir);
+  fs.writeFileSync(long(path.join(dir, file)), 'x');
+};
+
+test('names ending in a dot or a space are trick names; others, a drive and . and .. are not (review w6380)', () => {
+  assert.ok(isTrickName('evil.') && isTrickName('evil ') && isTrickName('...') && isTrickName('a. '));
+  assert.ok(!isTrickName('evil') && !isTrickName('a.b') && !isTrickName('.') && !isTrickName('..') && !isTrickName('.git'));
+  assert.ok(hasTrickName('V:\\ffw\\cache\\evil.') && hasTrickName('V:\\ffw\\cache\\evil \\f') && hasTrickName('/ffw/cache/evil./f'));
+  assert.ok(!hasTrickName('V:\\ffw\\cache\\evil') && !hasTrickName('V:\\') && !hasTrickName('/home/x/./y/../z') && !hasTrickName('\\\\server\\share\\a.b'));
+});
+
+test('Windows: under "on" a folder ending in a dot or a space beside a junction is skipped with a WARNING, and the rest is labelled as before (review w6380)', async (t) => {
+  const layout = (d: string, tricks: boolean) => {
+    put(path.join(d, 'daemon', 'src', 'main.ts'));
+    put(path.join(d, 'cache', 'slots', 'f'));
+    put(path.join(d, 'cache', 'uv', 'f'));
+    put(path.join(d, 'cache', 'nuget', 'mine', 'f'));
+    fs.symlinkSync(path.join(d, 'daemon', 'src'), path.join(d, 'cache', 'evil'), 'junction');
+    if (!tricks) return;
+    putTrick(path.join(d, 'cache', 'evil.'));
+    putTrick(path.join(d, 'cache', 'evil '));
+    putTrick(path.join(d, 'cache', 'nuget', 'evil.'));
+  };
+  const run = async (d: string) => {
+    const calls: string[][] = [];
+    const said: string[] = [];
+    const exec: Exec = async (_c, a) => {
+      calls.push(a);
+      return { code: 0, stdout: '', stderr: '' } as never;
+    };
+    const ok = await labelLow(realTargets(d, true), exec, (l) => void said.push(l), 'acct');
+    const rel = (p: string) => path.relative(d, p);
+    return { ok, said, calls: calls.map((a) => [rel(a[0]), ...a.slice(1)]) };
+  };
+  const plain = tmp(t);
+  layout(plain, false);
+  const before = await run(plain);
+  const d = tmp(t);
+  layout(d, true);
+  const tricks = [path.join(d, 'cache', 'evil.'), path.join(d, 'cache', 'evil '), path.join(d, 'cache', 'nuget', 'evil.')];
+  // Each is listed as a plain folder, so it reaches labelLow's list: the check there is what keeps it from icacls.
+  const tg = realTargets(d, true);
+  for (const p of tricks) assert.ok(tg.dirs.includes(p), `${JSON.stringify(p)} in ${JSON.stringify(tg.dirs)}`);
+  const after = await run(d);
+  assert.equal(after.ok, true, `the pass does not fail: ${after.said.join('\n')}`);
+  const odd = (a: string[]) => hasTrickName(a[0]);
+  assert.deepEqual(after.calls.filter(odd), [], 'no icacls call, read or write, names a trick path');
+  for (const p of tricks) assert.equal(after.said.filter((l) => l === trickWarning(p)).length, 1, `one WARNING for ${JSON.stringify(p)}: ${after.said.join('\n')}`);
+  // The rest: the same icacls calls, in the same order, as the same layout without them.
+  assert.deepEqual(after.calls, before.calls);
+  const lines = (r: typeof after, root: string) => r.said.filter((l) => !/w6380/.test(l)).map((l) => l.split(root).join('<root>'));
+  assert.deepEqual(lines(after, d), lines(before, plain));
+  assert.ok(after.calls.some((a) => a[0] === path.join('cache', 'uv') && a.includes('/setintegritylevel')), JSON.stringify(after.calls));
+});
+
+test('Windows: labelTree never hands icacls a name ending in a dot or a space, alone or by <dir>\\*, and names each in `odd` (review w6380)', async (t) => {
+  const { labelTree } = await import('./transcriptLabels.ts');
+  for (const level of ['medium', 'low'] as const) {
+    const d = tmp(t);
+    const seed = path.join(d, 'seed');
+    put(path.join(seed, 'sub', 'f'));
+    put(path.join(seed, 'top'));
+    put(path.join(d, 'outside', 's'));
+    fs.symlinkSync(path.join(d, 'outside'), path.join(seed, 'sub', 'j'), 'junction');
+    putTrick(path.join(seed, 'sub', 'j.'));
+    putTrick(path.join(seed, 'sub', 'j '));
+    putTrick(path.join(seed, 'odd.'));
+    const calls: string[][] = [];
+    const icacls = (a: string[]) => {
+      calls.push(a);
+      return { code: 0, out: '' };
+    };
+    const found: string[] = [];
+    const odd: string[] = [];
+    assert.equal(await labelTree(seed, level, icacls, 'acct', found, odd), 1, level);
+    assert.deepEqual(found, [path.join(seed, 'sub', 'j')], level);
+    assert.deepEqual(odd.sort(), [path.join(seed, 'odd.'), path.join(seed, 'sub', 'j '), path.join(seed, 'sub', 'j.')].sort(), level);
+    const named = calls.map((a) => a[0]);
+    assert.ok(!named.some((p) => hasTrickName(p) || p.startsWith(path.join(d, 'outside'))), `${level}: ${JSON.stringify(named)}`);
+    // A folder holding one is labelled entry by entry, never `<dir>\*`; the rest is labelled as before.
+    assert.ok(!named.includes(path.join(seed, '*')) && !named.includes(path.join(seed, 'sub', '*')), `${level}: ${JSON.stringify(named)}`);
+    for (const p of [path.join(seed, 'top'), path.join(seed, 'sub', 'f'), path.join(seed, 'sub'), seed]) assert.ok(named.includes(p), `${level}: ${p} in ${JSON.stringify(named)}`);
+  }
+  // A root with such a name is refused, as a link is.
+  const d = tmp(t);
+  putTrick(path.join(d, 'seed.'));
+  await assert.rejects(labelTree(path.join(d, 'seed.'), 'medium', () => ({ code: 0, out: '' }), 'acct'), /ending in a dot or a space/);
 });
 
 test('Windows: under "on" a folder on the way that cannot turn Medium first leaves its children as they are (review w6377 A)', async (t) => {

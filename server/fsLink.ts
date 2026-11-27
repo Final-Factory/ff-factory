@@ -24,6 +24,17 @@ export function isLink(p: string): boolean {
 }
 
 /**
+ * Review w6380: a name ending in a dot or a space. Windows drops those from a path it opens without the \\?\ prefix, so
+ * icacls handed `cache\evil.` opens `cache\evil`, a junction beside it, while Node lists `evil.` as a plain folder and every
+ * link check passes (measured on BEAST). A Low worker can make such a name (through \\?\); nothing of ours ever does. On
+ * Linux and macOS such a name is just a name, and skipping it there too keeps the tests one on every OS.
+ */
+export const isTrickName = (name: string) => name !== '.' && name !== '..' && /[. ]$/.test(name);
+
+/** Whether any part of path `p` is a trick name (isTrickName). A drive (`V:`) is not one. */
+export const hasTrickName = (p: string) => p.split(/[\\/]/).some((s) => s !== '' && isTrickName(s));
+
+/**
  * Take link `p` away, never what it leads to. rmSync refuses a junction lstat calls a folder (ERR_FS_EISDIR, and unlink
  * EPERM, measured on BEAST, w5915); rmdir removes the junction only, and refuses a real folder with anything in it.
  */

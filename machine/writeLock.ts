@@ -137,7 +137,9 @@ export function writeLockArgs(p: WriteLockPaths): string[] {
   // without it.
   if (p.home) {
     const tmp = p.tmp ?? '/tmp';
-    args.push('--create', tmp, '--rw', path.join(tmp, DOTNET_DIR));
+    // w6437: never through a link. /tmp is everyone's: a process outside the fence (another account, a worker under off or
+    // warn) may make /tmp/.dotnet a symlink first, and a plain --rw would follow it and grant the write where it leads.
+    args.push('--create', tmp, '--rw-nofollow', path.join(tmp, DOTNET_DIR));
   }
   for (const e of (p.extra ?? []).filter(keep)) args.push('--rw', e);
   return args;
@@ -156,7 +158,7 @@ export function writeLockSpawner(args: string[], o: { python?: string; script?: 
     for (let i = 0; i < args.length - 1; i++) {
       try {
         if (args[i] === '--sock') fs.mkdirSync(args[i + 1], { recursive: true, mode: 0o700 });
-        else if (args[i] === '--rw' && path.basename(args[i + 1]) === DOTNET_DIR) makeDotnetShm(args[i + 1]);
+        else if ((args[i] === '--rw' || args[i] === '--rw-nofollow') && path.basename(args[i + 1]) === DOTNET_DIR) makeDotnetShm(args[i + 1]);
       } catch {
         /* the rule is skipped and the write refused: the agent says so */
       }

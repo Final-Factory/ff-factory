@@ -8,6 +8,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { deniesDeleteChild, explicitMedium, isLink, labelTree, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
 import { projectSlug } from './claudeHome.ts';
+import { hasTrickName } from './fsLink.ts';
 import type { Exec } from '../machine/lowIntegrity.ts';
 import { removePrivileges } from './winPrivileges.fixtures.ts';
 
@@ -188,6 +189,49 @@ test('lockTranscripts keeps recent conversations Low, labels projects Medium las
   const denied = recorder(() => ({ code: 0, out: 'F--work HOST\\me:(DENY)(DC)\r\n' }));
   assert.equal(await lockTranscripts(projects, exec, () => {}, { icacls: denied.icacls, account: 'HOST\\me' }), true);
   assert.deepEqual(denied.calls.length, 1);
+});
+
+// Review w6380: Windows opens `x.` and `x ` as `x`, perhaps a junction beside them, so such a name never reaches icacls.
+test('lockTranscripts and unlockTranscripts skip names ending in a dot or a space with a WARNING, and label the rest as before', async () => {
+  const long = (p: string) => (process.platform === 'win32' ? `\\\\?\\${p}` : p);
+  const layout = (tricks: boolean) => {
+    const projects = path.join(tmp(), 'projects');
+    const slug = path.join(projects, 'F--work');
+    fs.mkdirSync(path.join(slug, 'old'), { recursive: true });
+    fs.writeFileSync(path.join(slug, 'old.jsonl'), '');
+    const week = (Date.now() - 7 * 24 * 3600_000) / 1000;
+    fs.utimesSync(path.join(slug, 'old.jsonl'), week, week);
+    fs.utimesSync(path.join(slug, 'old'), week, week);
+    if (tricks) {
+      for (const p of [path.join(projects, 'F--work.'), path.join(projects, 'F--work '), path.join(slug, 'old.'), path.join(slug, 'old ')]) fs.mkdirSync(long(p));
+      fs.writeFileSync(long(path.join(slug, 'old.jsonl.')), '');
+    }
+    return projects;
+  };
+  const run = async (projects: string) => {
+    let label = '';
+    const exec: Exec = async () => ({ code: 0, stdout: label, stderr: '' });
+    const r = recorder();
+    const said: string[] = [];
+    assert.equal(await lockTranscripts(projects, exec, (l) => said.push(l), { icacls: r.icacls, account: 'HOST\\me' }), true);
+    const locked = r.calls.length;
+    label = `${projects} Mandatory Label\\Medium Mandatory Level:(OI)(CI)(NW)`;
+    await unlockTranscripts(projects, exec, (l) => said.push(l), r.icacls, 'HOST\\me');
+    const rel = (c: string[]) => [path.relative(projects, c[0]), ...c.slice(1)];
+    return { said: said.map((l) => l.split(projects).join('<projects>')), lock: r.calls.slice(0, locked).map(rel), unlock: r.calls.slice(locked).map(rel) };
+  };
+  const before = await run(layout(false));
+  const after = await run(layout(true));
+  assert.deepEqual(after.lock, before.lock, 'the lock: the same icacls calls as without them, none naming one');
+  // The way back: none named either, and never `<dir>\*` (it would open them too): the folder holding one is labelled entry
+  // by entry, so each call of before is made, its `<dir>\*` as the files in it.
+  assert.ok(!after.unlock.some((c) => hasTrickName(c[0]) || c[0].endsWith('*')), JSON.stringify(after.unlock));
+  const expand = (c: string[]) => (c[0] === '*' ? [] : c[0].endsWith('*') ? [[path.join(path.dirname(c[0]), 'old.jsonl'), ...c.slice(1)]] : [c]);
+  assert.deepEqual(after.unlock.map((c) => c.join('|')).sort(), before.unlock.flatMap(expand).map((c) => c.join('|')).sort());
+  const warn = after.said.filter((l) => /WARNING: skipped .*w6380/.test(l));
+  assert.equal(warn.length, 1, after.said.join('\n'));
+  for (const n of ['F--work.', 'F--work ', 'old.', 'old ', 'old.jsonl.']) assert.ok(warn[0].includes(`${n}"`), `${n}: ${warn[0]}`);
+  assert.deepEqual(after.said.filter((l) => !/w6380/.test(l)), before.said);
 });
 
 test('lockTranscripts and unlockTranscripts leave the event loop free between icacls calls, and run icacls through exec by default', async () => {

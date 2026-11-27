@@ -795,7 +795,7 @@ export function realDeps(platform: UnityPlatform = 'darwin', log: (line: string)
           if (seed.burst) log(seed.burst);
         }
         // The .NET runtime's IPC folder the rules grant; the agents' spawner makes it too (writeLock.ts).
-        const dotnet = fence.args.find((a, i) => fence.args[i - 1] === '--rw' && path.posix.basename(a) === DOTNET_DIR);
+        const dotnet = fence.args.find((a, i) => (fence.args[i - 1] === '--rw' || fence.args[i - 1] === '--rw-nofollow') && path.posix.basename(a) === DOTNET_DIR);
         if (dotnet) makeDotnetShm(dotnet);
         return launch('python3', [FF_LANDLOCK, ...fence.args, '--', bin, ...args], cwd, { ...fence.env, ...env });
       },

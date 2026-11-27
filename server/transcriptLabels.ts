@@ -25,7 +25,7 @@ import type { SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sd
 import { findTranscript, projectSlug } from './claudeHome.ts';
 import { sessionIdOf } from './workerFence.ts';
 import { currentAccount, type Exec } from '../machine/lowIntegrity.ts';
-import { isLink } from './fsLink.ts';
+import { isLink, isTrickName, hasTrickName } from './fsLink.ts';
 
 /** The folder label (inherited by what is made inside) and the file label. */
 const DIR_LOW = '(OI)(CI)low';
@@ -129,8 +129,9 @@ function* labelledLow(p: string): Steps<boolean> {
  * left as it is (nothing Medium is inside one, and walking it could race a worker). A folder with no link in it is labelled
  * with one `<dir>\*` call; its sub-folders get their inheritable label after that.
  */
-function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string | undefined, found?: string[]): Steps<number> {
+function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string | undefined, found?: string[], odd?: string[]): Steps<number> {
   if (isLink(root)) throw new Error(`${root} is a junction or link; not labelled (w5703)`);
+  if (hasTrickName(root)) throw new Error(`${JSON.stringify(root)} has a name ending in a dot or a space; not labelled (w6380)`);
   const dirLabel = `(OI)(CI)${level}`;
   let links = 0;
   /** Labels what is inside `dir` (Medium while this runs), not `dir` itself. */
@@ -139,12 +140,16 @@ function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string 
     const entries = fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
       const p = path.join(dir, e.name);
       const link = e.isSymbolicLink() || isLink(p);
-      return { p, link, dir: !link && e.isDirectory() };
+      // Review w6380: `evil.` (or `evil `) opens as `evil`, perhaps a junction beside it: never handed to icacls, alone or
+      // by `<dir>\*` (which would open it the same way), and not walked. Not a link: not counted, never removed.
+      const trick = isTrickName(e.name);
+      return { p, link: link || trick, trick, dir: !link && !trick && e.isDirectory() };
     });
     const dirs = entries.filter((e) => !e.link && e.dir).map((e) => e.p);
     const skipped = entries.filter((e) => e.link).length;
-    links += skipped;
-    found?.push(...entries.filter((e) => e.link).map((e) => e.p));
+    links += entries.filter((e) => e.link && !e.trick).length;
+    found?.push(...entries.filter((e) => e.link && !e.trick).map((e) => e.p));
+    odd?.push(...entries.filter((e) => e.trick).map((e) => e.p));
     if (level === 'medium') {
       if (!entries.length) return;
       if (skipped) for (const e of entries.filter((x) => !x.link && !x.dir)) yield* icaclsLabel(e.p, level, account);
@@ -184,16 +189,16 @@ function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string 
 }
 
 /** labelTreeSteps with a synchronous icacls (the spawner: one conversation's files). Answers the links skipped. */
-export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: IcaclsSync = realIcacls, account = currentAccount(), found?: string[]): number {
-  return runSteps(labelTreeSteps(root, level, account, found), icacls);
+export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: IcaclsSync = realIcacls, account = currentAccount(), found?: string[], odd?: string[]): number {
+  return runSteps(labelTreeSteps(root, level, account, found, odd), icacls);
 }
 
 /**
  * labelTreeSync, without holding the event loop (the daemon's lock and unlock of every transcript). `found`, given, gets
  * the path of each link skipped.
  */
-export const labelTree = (root: string, level: 'low' | 'medium', icacls: Icacls, account = currentAccount(), found?: string[]): Promise<number> =>
-  runStepsAsync(labelTreeSteps(root, level, account, found), icacls);
+export const labelTree = (root: string, level: 'low' | 'medium', icacls: Icacls, account = currentAccount(), found?: string[], odd?: string[]): Promise<number> =>
+  runStepsAsync(labelTreeSteps(root, level, account, found, odd), icacls);
 
 /**
  * Takes delete-child back from the account on folder `p` (this folder only, not inherited). A Low process that has it on a
@@ -273,6 +278,7 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
   const log = d.log ?? ((l: string) => console.warn(l));
   const label = (p: string, l: string, tree = false) => {
     try {
+      if (hasTrickName(p)) throw new Error(`${JSON.stringify(p)} has a name ending in a dot or a space; not labelled (w6380)`);
       if (!tree) setLabelSync(p, l, icacls);
       else if (labelTreeSync(p, l === DIR_LOW ? 'low' : 'medium', icacls)) log(`transcript labels: skipped a junction or link in ${p}; it is not labelled (w5703)`);
       return true;
@@ -282,7 +288,12 @@ export function lowTranscriptSpawner(d: LabelSpawnerDeps = {}) {
     }
   };
   return (o: SpawnOptions): SpawnedProcess => {
-    const own = ownFiles(o);
+    const own0 = ownFiles(o);
+    // Review w6380: a name ending in a dot or a space opens as another path. The slug and the session id never end so
+    // (claudeHome.ts), so this is only a guard: such a conversation is not labelled and its own writes fail, as for a label
+    // that could not be set.
+    const own = own0 && hasTrickName(own0.file) ? undefined : own0;
+    if (own0 && !own) log(`transcript labels: WARNING: ${JSON.stringify(own0.file)} has a name ending in a dot or a space; its files are not labelled (w6380)`);
     if (own) {
       const folder = path.dirname(own.file);
       const projects = path.dirname(folder);
@@ -420,9 +431,15 @@ export async function liveSessionIds(exec: Exec): Promise<Set<string> | undefine
   return new Set([...r.stdout.matchAll(/--(?:resume|session-id)[ =]"?([A-Za-z0-9_-]{8,80})/g)].map((m) => m[1]));
 }
 
-/** The project folders in `projects`: real folders only, never a junction or link. */
+/**
+ * The project folders in `projects`: real folders only, never a junction or link, nor one whose name ends in a dot or a
+ * space (review w6380: icacls would open the path without it, perhaps a junction beside it).
+ */
 const projectFolders = (projects: string) =>
-  fs.readdirSync(projects, { withFileTypes: true }).map((s) => path.join(projects, s.name)).filter((p) => !isLink(p) && fs.statSync(p).isDirectory());
+  fs.readdirSync(projects, { withFileTypes: true }).filter((s) => !isTrickName(s.name)).map((s) => path.join(projects, s.name)).filter((p) => !isLink(p) && fs.statSync(p).isDirectory());
+
+/** The names in `dir` that end in a dot or a space (review w6380), quoted for a log line. */
+const trickNames = (dir: string) => fs.readdirSync(dir).filter(isTrickName).map((n) => JSON.stringify(path.join(dir, n)));
 
 /** The conversation a transcript or conversation folder belongs to, or undefined for anything else (`memory\`, a stray). */
 const conversationOf = (name: string, dir: boolean) => (dir ? (name === 'memory' ? undefined : name) : name.endsWith('.jsonl') ? name.slice(0, -'.jsonl'.length) : undefined);
@@ -486,7 +503,7 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
       for (const p of pins) {
         const dir = !p.endsWith('.jsonl');
         const sid = conversationOf(path.basename(p), dir);
-        if (!sid || !fs.existsSync(p) || path.dirname(path.dirname(p)) !== projects) continue;
+        if (!sid || hasTrickName(p) || !fs.existsSync(p) || path.dirname(path.dirname(p)) !== projects) continue;
         if (keep(p, sid)) left.push(p);
         else if (isLink(p)) continue;
         else {
@@ -502,6 +519,8 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
     }
     let locked = 0;
     let links = 0;
+    // Review w6380: never handed to icacls; said, not counted as a failure.
+    const odd = trickNames(projects);
     // Every entry gets its own label: what was there before carries an explicit Low (the root's labelLow /T) that a label
     // on `projects` alone does not change (measured on the Windows CI runner).
     const slugs = projectFolders(projects);
@@ -518,6 +537,10 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
     for (const folder of slugs) {
       for (const e of fs.readdirSync(folder, { withFileTypes: true })) {
         const p = path.join(folder, e.name);
+        if (isTrickName(e.name)) {
+          odd.push(JSON.stringify(p));
+          continue;
+        }
         if (isLink(p)) {
           links++;
           continue;
@@ -535,6 +558,7 @@ export async function lockTranscripts(projects: string, exec: Exec, say: (line: 
       }
     }
     if (o.pins) fs.writeFileSync(o.pins, JSON.stringify(pins));
+    if (odd.length) say(`transcript labels: WARNING: skipped ${odd.join(', ')}: a name ending in a dot or a space, which icacls would open as another path; not labelled (w6380)`);
     say(`transcript labels: labelled ${projects} Medium (w5703), with ${slugs.length} project folder${slugs.length === 1 ? '' : 's'} and ${locked} transcript${locked === 1 ? '' : 's'} and folders in them; ${pins.length} running or written in the last ${o.live ? `${Math.round(recentMs / 60_000)} min` : "3 days"} kept Low until they stop${links ? `; ${links} junction${links === 1 ? '' : 's'} or link${links === 1 ? '' : 's'} skipped` : ''}`);
     return true;
   } catch (e) {
