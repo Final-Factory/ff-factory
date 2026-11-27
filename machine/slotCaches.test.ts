@@ -1177,3 +1177,39 @@ test("a daemon write under tools marks only that child: the old shims' drop and 
   assert.equal(lines.length, 1, lines.join("\n"));
   assert.match(lines[0], /node\.exe/);
 });
+
+test("ensure (w6393): a new light folder gets its clones at once; nothing to do answers undefined; off does nothing", async (t) => {
+  const p = pool(t, []);
+  const line = await p.caches.ensure("agent5");
+  assert.match(line!, /slot caches: agent5: made from the shared seed/);
+  const dir = slotCacheDir(p.root, "agent5");
+  assert.equal(fs.readFileSync(path.join(dir, "uv", "archive-v0", "seed1", "file"), "utf8"), "seed one");
+  assert.equal(await p.caches.ensure("agent5"), undefined, "a young, whole clone is left");
+  assert.equal(await p.caches.ensure("../evil"), undefined);
+  const off = pool(t, [], { setting: "off" });
+  assert.equal(await off.caches.ensure("agent5"), undefined);
+  assert.equal(fs.existsSync(path.join(off.root, "cache", "slots")), false);
+});
+
+test("ensure (w6393): a cold cache a worker filled before any clone is merged back and replaced by the seed's clone", async (t) => {
+  const p = pool(t, []);
+  const dir = slotCacheDir(p.root, "agent5");
+  put(path.join(dir, "uv", "archive-v0", "cold1", "file"), "cold");
+  p.clock.t += 10 * 60_000; // past the quiet time, so the worker's entry goes back to the seed
+  const line = await p.caches.ensure("agent5");
+  assert.match(line!, /agent5: made again from the shared seed/);
+  assert.equal(fs.readFileSync(path.join(dir, "uv", "archive-v0", "seed1", "file"), "utf8"), "seed one");
+  assert.ok(fs.existsSync(seedDir(p.root, "uv", "archive-v0", "cold1", "file")), "the cold entry reached the seed");
+});
+
+test("ensure (w6393): an old clone (a deleted folder's id made again) is made again; it waits for a tick in progress", async (t) => {
+  const p = pool(t, [{ id: "agent5", idle: true }]);
+  await p.caches.ensure("agent5");
+  p.clock.t += REFRESH_MS + 1_000;
+  assert.match((await p.caches.ensure("agent5"))!, /made again/);
+  // A tick and an ensure at once: the ensure waits, and the two never clone at the same time.
+  const q = pool(t, [{ id: "slot1", idle: true }]);
+  const [a, b] = await Promise.all([q.caches.tick(), q.caches.ensure("agent6")]);
+  assert.match(a!, /slot1: made/);
+  assert.match(b!, /agent6: made/);
+});

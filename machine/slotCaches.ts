@@ -447,6 +447,35 @@ export class SlotCaches {
     }
   }
 
+  /**
+   * w6393: one sandbox's clones now, for a light agent folder the portal just made: its worker starts at once, and under
+   * "on" its env names its slot folder from the first run, so a clone made at a later tick finds the worker's own cold
+   * cache there and keeps it (make never replaces a cache that is there unless refreshing). The caller says nobody runs in
+   * it yet. A slot with a missing cache or a clone older than refreshMs (the id of a deleted folder made again) gets its
+   * clones made; any cache folder already there (a cold one a worker filled before this ran) is merged back and replaced,
+   * as an idle refresh does. Waits up to `waitMs` for a tick in progress; undefined when there was nothing to do.
+   */
+  async ensure(sandbox: string, waitMs = 5 * 60_000): Promise<string | undefined> {
+    if (this.d.setting === "off" || !okSandboxId(sandbox)) return undefined;
+    const until = this.now() + waitMs;
+    while (this.busy) {
+      if (this.now() > until) throw new Error(`a tick still ran after ${Math.round(waitMs / 1000)} s; ${sandbox} is cloned at a later tick`);
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    this.busy = true;
+    try {
+      const dir = slotCacheDir(this.d.root, sandbox);
+      const due =
+        missingSlotCaches(this.d.root, sandbox).length > 0 ||
+        this.now() - (readMarker(dir)?.made ?? 0) > (this.d.refreshMs ?? REFRESH_MS);
+      if (!due) return undefined;
+      const any = this.seeds().some((t) => fs.existsSync(path.join(dir, t.dir)));
+      return await this.attempt(sandbox, any);
+    } finally {
+      this.busy = false;
+    }
+  }
+
   /** One sandbox at most: the first that lacks a cache, else the first idle one due its refresh. */
   private async pass(): Promise<string | undefined> {
     try {
