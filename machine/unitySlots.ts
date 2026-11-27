@@ -26,6 +26,7 @@ import { personHoldReason } from './personPlay.ts';
 import { batchUnityLogFile } from './sharedCaches.ts';
 import { beeAccessDenied, compilerServerAdvice, compilerServers, logFileArg, logTail } from './compilerServer.ts';
 import { rpcAvailable, rpcCall, RpcRefused, RpcUnavailable, type Caller } from './daemonRpc.ts';
+import { isMainModule } from './isMain.ts';
 
 /**
  * The pointer a worker-root install (w513, scripts/worker/worker.ts) leaves for scripts outside the daemon: its mailbox
@@ -1966,7 +1967,7 @@ export function writeShims(bin: string, node = process.execPath, nodeArgs = proc
 }
 
 // Run when started directly (the shim, or node machine/unitySlots.ts ...).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (e) => {

@@ -20,6 +20,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { gitSpawnSync } from '../server/safeGit.ts';
 import { appNamesOf, appTokenFor, ghRepoOf, gitRemoteRepo, repoKey, type GhAppToken } from '../shared/githubAppRoute.ts';
+import { isMainModule } from './isMain.ts';
 
 export const GH_APP_DIR = 'gh-app';
 export const GH_APP_FILE = 'tokens.json';
@@ -299,7 +300,7 @@ function main(argv: string[]): number {
 /** The shims' folder beside a tokens' file (both under <app dir>/gh-app). */
 
 // Run when started directly (the gh shim, or git's credential helper).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   try {
     process.exit(main(process.argv.slice(2)));
   } catch (e) {

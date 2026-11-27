@@ -7,4 +7,6 @@
   logged reason, until the link is there (`readFenceOnHeld`). Below Landlock ABI 9 (Linux 7.1) `on` now enforces the
   file rules and logs that the owner sockets stay reachable, where it used to enforce nothing (w5748). Off by default;
   `read-fence-off` still takes the rules off the next run with nobody at the machine. Docs: worker-fence.md. Tests:
-  `scripts/worker/linuxCode.test.ts` (with a live Landlock leg across both swaps), workerFence, machineLink.
+  `scripts/worker/linuxCode.test.ts` (with a live Landlock leg across both swaps), workerFence, machineLink. The daemon's entry points (daemon, agent host, gh helper, ff-pr,
+  unity-slot, leftovers, ffu slots) tell they are the script node started by real path (`machine/isMain.ts`), so they still
+  run through the link.

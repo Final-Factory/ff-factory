@@ -37,6 +37,7 @@ import { scopeEndCause, scoped } from './linuxScope.ts';
 import { HOST_WATCH, endHostTree, hostIdentity, pidAlive, realHostProcs, removeHostDir, type HostProcs } from './hostWatch.ts';
 import { capNote, capsFor, capsModeOf, startWorkerCaps, type CapHit, type CapsMode } from './workerCaps.ts';
 import { pushCapNote } from '../server/workerCapNotes.ts';
+import { isMainModule } from './isMain.ts';
 
 export { pidAlive };
 
@@ -1369,7 +1370,7 @@ async function readStdin(): Promise<string> {
 }
 
 // Run when started directly (by the daemon), not when imported.
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   const dir = process.argv[2];
   // host.log never holds a secret either (w1688): every line, an error's message included, redacted as it is written
   for (const k of ['log', 'warn', 'error'] as const) {

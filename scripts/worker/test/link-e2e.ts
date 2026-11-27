@@ -198,7 +198,7 @@ try {
 
   // 3. An update to a commit whose daemon exits at start (C): the job puts B back by itself.
   const daemonTs = path.join(P, 'machine', 'daemon.ts');
-  fs.writeFileSync(daemonTs, fs.readFileSync(daemonTs, 'utf8').replace("if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {", "if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {\n  console.error('link-e2e: this daemon exits at start');\n  process.exit(3);"));
+  fs.writeFileSync(daemonTs, fs.readFileSync(daemonTs, 'utf8').replace("if (isMainModule(import.meta.filename)) {", "if (isMainModule(import.meta.filename)) {\n  console.error('link-e2e: this daemon exits at start');\n  process.exit(3);"));
   git(P, 'commit', '-qam', 'link-e2e: C, a daemon that exits at start');
   const C = git(P, 'rev-parse', 'HEAD');
   // w5516: C is not on the published main yet, so the daemon refuses it and changes nothing.
