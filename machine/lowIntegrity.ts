@@ -236,7 +236,12 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
     const all = [...sharedLockParents(false).keys()].map(abs);
     for (const p of all.filter(viaLink)) if (at(p) >= 0) dirs.splice(at(p), 1);
     const parents = all.filter((p) => (under(p) || at(p) >= 0) && exists(p) && !viaLink(p));
-    for (const p of [...back, ...parents]) if (at(p) < 0) dirs.push(p);
+    // Review w6374: the locked folders first, then the folders on the way, deepest first (cache/nuget before cache). A
+    // parent Low while a locked child is still Medium lets a worker rename that child aside and plant a junction in its
+    // place before the walk reaches it; a child labelled Low under a Medium parent cannot be swapped.
+    for (const p of parents) if (at(p) >= 0) dirs.splice(at(p), 1);
+    for (const p of back) if (at(p) < 0) dirs.push(p);
+    dirs.push(...[...parents].sort((a, b) => b.length - a.length));
     return back;
   }
   // Parents first, from the top: each leaves `dirs` for `medium`, its other children join `dirs` on their own.
@@ -252,7 +257,10 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
     const k = at(p);
     if (k >= 0) dirs.splice(k, 1);
     medium.push(p);
-    for (const c of list(p)) if (c.dir && !names.has(c.name) && !link(path.join(p, c.name))) dirs.push(path.join(p, c.name));
+    const kids = list(p).filter((c) => c.dir && !names.has(c.name) && !link(path.join(p, c.name))).map((c) => path.join(p, c.name));
+    // Review w6374: swapped for a link while it was listed, the names came from wherever that leads: none is labelled.
+    if (viaLink(p)) continue;
+    dirs.push(...kids);
   }
   for (const p of locked) {
     const k = at(p);

@@ -32,6 +32,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { sharedCacheDir } from "./sharedCaches.ts";
 import { plainDirAt, writeFileSafe, type WorkerCopy } from "./workerCopy.ts";
+import { sharedLockParents, sharedLockRel } from "./sharedLockPaths.ts";
+import { isLink } from "../server/fsLink.ts";
 
 export type SharedLockSetting = "off" | "warn" | "on";
 
@@ -547,7 +549,12 @@ export class SlotCaches {
         for (const p of [fresh, gone])
           if (fs.existsSync(p)) await this.d.removeTree(p);
         fs.mkdirSync(path.dirname(own), { recursive: true });
-        if (fs.existsSync(seed)) await this.d.copy(seed, fresh, { links: "keep" });
+        if (fs.existsSync(seed)) {
+          // Review w6374: like the merge-back above, never through a link a worker planted under off or warn.
+          if (!plainDirAt(seed, seedRoot, t.dir))
+            throw new Error(`${seed} is a link or junction, or lies below one; not cloned from (w6374)`);
+          await this.d.copy(seed, fresh, { links: "keep" });
+        }
         else fs.mkdirSync(fresh, { recursive: true });
         if (fs.existsSync(own)) fs.renameSync(own, gone);
         fs.renameSync(fresh, own);
@@ -702,6 +709,12 @@ export function sharedLockBlockers(
   platform: NodeJS.Platform = process.platform,
 ): string[] {
   if (!root) return ["this install has no worker root"];
+  // Review w6374: a locked folder or one on the way that is a link (a worker could plant one under off or warn) is never
+  // labelled, fenced or cloned from, so "on" would leave it open: it holds "on" off until it is removed.
+  const linked = [...sharedLockParents().keys(), ...sharedLockRel()].filter((rel) => {
+    const p = path.join(root, ...rel.split("/"));
+    return isLink(p);
+  });
   const all = slotCacheTools(platform).length;
   const ids = sandboxes.filter((s) => okSandboxId(s));
   const none = ids.filter((s) => !readMarker(slotCacheDir(root, s)));
@@ -710,6 +723,10 @@ export function sharedLockBlockers(
     .map((s) => ({ s, miss: missingSlotCaches(root, s, platform) }))
     .filter((x) => x.miss.length > 0);
   return [
+    ...linked.map(
+      (rel) =>
+        `${path.join(root, ...rel.split("/"))} is a junction or symlink, not a folder (planted before "on"?): remove the link (its target is not the cache) and restart the daemon`,
+    ),
     ...(none.length
       ? [
           `sandbox${none.length === 1 ? "" : "es"} ${none.join(", ")} without their own cache clones yet (made within minutes of the daemon's start)`,

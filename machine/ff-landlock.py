@@ -159,6 +159,13 @@ def main(argv):
     # Review w6362: a symlink a worker planted under off or warn, at a --rw-children folder (cache) or among its children,
     # must not carry the write rule to where it leads. Neither is granted, and a child is opened O_NOFOLLOW.
     nofollow = set()
+
+    def landed_at(fd, p):
+        # Where the open of p landed: /proc/self/fd/<fd> names the real path, so a symlink on the way shows as a difference.
+        try:
+            return os.readlink(f'/proc/self/fd/{fd}') == os.path.abspath(p)
+        except OSError:
+            return False
     tops = [d for d, _ in children]
 
     def via_link(d):
@@ -174,10 +181,21 @@ def main(argv):
         if via_link(d):
             sys.stderr.write(f'ff-landlock: {d} is (or is under) a symlink; none of its children are writable\n')
             continue
+        # Review w6374: listed through the folder itself, not its name: O_NOFOLLOW refuses d swapped for a symlink since
+        # via_link, and the fd's own path shows a folder above it swapped (/proc/self/fd names where the open landed).
         try:
-            names = sorted(os.listdir(d))
+            dfd = os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except OSError:
             continue
+        try:
+            if not landed_at(dfd, d):
+                sys.stderr.write(f'ff-landlock: {d} turned into (or under) a symlink; none of its children are writable\n')
+                continue
+            names = sorted(os.listdir(dfd))
+        except OSError:
+            continue
+        finally:
+            os.close(dfd)
         for name in names:
             full = os.path.join(d, name)
             if name not in skip and not os.path.islink(full):
@@ -212,8 +230,10 @@ def main(argv):
             fd = os.open(p, os.O_PATH | os.O_CLOEXEC | (os.O_NOFOLLOW if p in nofollow else 0))
         except (FileNotFoundError, PermissionError):
             continue
-        if p in nofollow and stat.S_ISLNK(os.fstat(fd).st_mode):
-            os.close(fd)  # swapped for a symlink since the listing: O_PATH|O_NOFOLLOW opened the link itself
+        if p in nofollow and (stat.S_ISLNK(os.fstat(fd).st_mode) or not landed_at(fd, p)):
+            # Swapped for a symlink since the listing (O_PATH|O_NOFOLLOW opened the link itself), or a folder above it was
+            # (review w6374): the rule would land wherever that leads.
+            os.close(fd)
             continue
         if kind == 'unix':
             allowed = RESOLVE_UNIX

@@ -67,6 +67,10 @@ export function sharedLockParents(withTools = true): Map<string, Set<string>> {
 export function makeSharedLockDirs(root: string, mkdir: (p: string) => void = (p) => fs.mkdirSync(p), link: (p: string) => boolean = isLink): void {
   for (const rel of [...WORKER_CACHE_CHILDREN.map((c) => `cache/${c}`), ...sharedLockParents().keys()]) {
     let q = root;
+    const viaLink = (p: string) => {
+      for (let x = p; x.length > root.length; x = path.dirname(x)) if (link(x)) return true;
+      return false;
+    };
     for (const part of rel.split('/')) {
       q = path.join(q, part);
       if (link(q)) break;
@@ -76,6 +80,9 @@ export function makeSharedLockDirs(root: string, mkdir: (p: string) => void = (p
       } catch {
         break; // the next start makes it
       }
+      // Review w6374: the folder above may have been swapped for a link between its check and this mkdir, which then made
+      // an empty folder wherever that leads. Nothing more is made below it; that one stays (removing it could race too).
+      if (viaLink(q)) break;
     }
   }
 }

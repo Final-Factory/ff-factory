@@ -181,6 +181,68 @@ test('Windows: off (and warn) labels the locked folders Low again whole and the 
   assert.ok(!off.medium.includes(path.join(W, 'players')));
 });
 
+test('Windows: off labels the locked folders Low before the folders on the way, deepest first (review w6374)', () => {
+  const off = targets(false);
+  const at = (rel: string) => off.dirs.indexOf(path.join(W, ...rel.split('/')));
+  for (const rel of ['cache', 'cache/nuget']) assert.ok(at(rel) >= 0, rel);
+  // A parent Low while a locked child is still Medium lets a worker rename the child aside and plant a junction there.
+  for (const p of off.trees) assert.ok(off.dirs.indexOf(p) < at('cache/nuget'), `${p} before cache/nuget: ${JSON.stringify(off.dirs)}`);
+  assert.ok(at('cache/nuget') < at('cache'), JSON.stringify(off.dirs));
+});
+
+test('Windows: under "on" cache/nuget swapped for a link while it is listed names none of its children (review w6374)', () => {
+  const nuget = path.join(W, 'cache', 'nuget');
+  let listed = false;
+  const tg = lowTargets({
+    root: W,
+    appDir: path.join(W, 'daemon'),
+    children: kids,
+    toolsChildren: ['node', 'low', 'git'].map((name) => ({ name, dir: true })),
+    exists: () => true,
+    sharedLock: true,
+    list: (d) => {
+      if (d === nuget) listed = true;
+      return list(d);
+    },
+    isLink: (p) => listed && p === nuget,
+  });
+  assert.ok(listed);
+  assert.ok(!tg.dirs.some((p) => p.startsWith(nuget + path.sep)), JSON.stringify(tg.dirs));
+  assert.ok(tg.dirs.includes(path.join(W, 'cache', 'slots')), 'the rest of cache still Low');
+});
+
+test('Windows: labelTree to Low reads its root again after the first icacls call and refuses one swapped meanwhile (review w6374)', { skip: process.platform !== 'win32' && 'junctions are Windows only' }, async (t) => {
+  const { labelTree } = await import('./transcriptLabels.ts');
+  const d = tmp(t);
+  const outside = path.join(d, 'outside');
+  put(path.join(outside, 'deep', 's'));
+  const seed = path.join(d, 'seed');
+  put(path.join(seed, 'f'));
+  const calls: string[][] = [];
+  const swap = (a: string[]) => {
+    calls.push(a);
+    if (a[0] === seed && !fs.lstatSync(seed).isSymbolicLink()) {
+      fs.rmSync(seed, { recursive: true });
+      fs.symlinkSync(outside, seed, 'junction');
+    }
+    return { code: 0, out: '' };
+  };
+  await assert.rejects(labelTree(seed, 'low', swap, 'acct'), /turned into a junction/);
+  assert.equal(calls.length, 1, JSON.stringify(calls));
+});
+
+test('makeSharedLockDirs makes nothing more below a folder swapped for a link as it was made (review w6374)', (t) => {
+  const root = tmp(t);
+  const made: string[] = [];
+  const cache = path.join(root, 'cache');
+  makeSharedLockDirs(root, (p) => {
+    made.push(p);
+    fs.mkdirSync(p);
+  }, (p) => made.includes(cache) && p === cache);
+  assert.ok(made.includes(cache));
+  assert.ok(!made.some((p) => p.startsWith(cache + path.sep)), JSON.stringify(made));
+});
+
 test('a shared-lock folder counts as locked only with a Medium label of its own, not one it inherits', () => {
   const p = path.join(W, 'players');
   assert.equal(isExplicitMedium(`${p} Mandatory Label\\Medium Mandatory Level:(I)(OI)(CI)(NW)`), false);

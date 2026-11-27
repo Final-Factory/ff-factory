@@ -1543,13 +1543,20 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     too: its parent may be Low). Under `on`, a link the walk finds inside a locked folder is removed (fsLink.ts
     `removeLink`, the link only, never its target; the log says `worker integrity: removed link <path> from the locked
     <seed>`): its folder is Medium by then, so it stays gone. `makeSharedLockDirs` makes one folder at a time and stops at a
-    link.
+    link, read again after each folder it makes. Under off the locked folders go back to Low before the folders on the way,
+    deepest first (review w6374): a Low `cache` over a still-Medium `cache\uv` would let a worker rename the seed aside and
+    plant a junction before the walk reaches it. The walk reads its root again after its first icacls call, in both
+    directions, and `cache\nuget` is read again after it is listed. A locked folder or one on the way that is already a
+    link holds "on" off (`sharedLockBlockers` names it: remove the link and restart the daemon), and no slot clone copies
+    from a seed that is, or lies below, a link.
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
     made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
     built, review w6355 M2). A `--rw-children` folder that is, or sits under, a symlink opens none of its children, a
     symlink child is not granted, and each child is opened `O_NOFOLLOW` (review w6362: the write rule would otherwise land
-    on the link's target).
+    on the link's target). The folder is listed through an `O_DIRECTORY|O_NOFOLLOW` descriptor, and that descriptor and
+    each child's must have landed at the path asked for (`/proc/self/fd`), so a folder above swapped for a symlink in
+    between opens nothing (review w6374).
   - **macOS** (server/workerFence.ts `fenceFor` `sharedLocked`): a `(deny file-write* (subpath ...))` per locked path in
     the read-only block, after the root's allow (later Seatbelt rules win), and a `(deny file-write* (literal ...))` on
     each folder on the way (`cache`, `cache/nuget`, `tools`; `sharedLockParents`), so a rename or removal of one is

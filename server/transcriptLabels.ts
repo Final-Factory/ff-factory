@@ -175,6 +175,8 @@ function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string 
     if (isLink(root)) throw new Error(`${root} turned into a junction or link while it was labelled; not walked (w6362)`);
     yield* inside(root);
   } else if (!(yield* labelledLow(root))) {
+    // Review w6374: likewise here, after the icacls read; a root under a Low parent could have been swapped since.
+    if (isLink(root)) throw new Error(`${root} turned into a junction or link before it was walked; not labelled (w6374)`);
     yield* inside(root);
     yield* icaclsLabel(root, dirLabel, account);
   }
