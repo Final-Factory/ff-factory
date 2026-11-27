@@ -152,8 +152,8 @@ export interface LinkUpdateFlags {
   runnerPriority?: 'off' | 'warn' | 'enforce';
   /** What an idle agent adopted across a sharedLock switch gets, warn or on (w6305, w6287), any OS: daemon.json `hostRestage`; unset: carried. A daemon that predates it ignores it. */
   hostRestage?: 'warn' | 'on';
-  /** w6378: daemon.json `liveRunGuard`, off or warn (the default): whether a sandbox trim, release or delete logs a WARNING when a run of its worker still lives; any OS; unset: carried. A daemon that predates it ignores it. */
-  liveRunGuard?: 'off' | 'warn';
+  /** The long-run route (w6367, machine/longRuns.ts), off, warn or on, any OS: daemon.json `longRuns`; unset: carried. A daemon that predates it ignores it. */
+  longRuns?: 'off' | 'warn' | 'on';
 }
 
 /**
