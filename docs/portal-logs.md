@@ -192,6 +192,10 @@ is back, the same worker session's calls work again with nothing restarted. Read
    state build of 300 ms or more gets its own line at its window's end, stall or none (w6382): `stall profile: state build
    of 711 ms ending … Own time: … In the portal's functions: …`, from that build's samples alone (10 ms apart, so a
    function under 10 ms may be missed); match it to the `page socket open` line whose phases it explains by the time.
+   The windows overlap (w6416): the next one starts before the last one ends, since a start with no profile running makes
+   V8 rebuild its code map by walking the whole heap (1.1-1.7 s on the portal, once a minute, which the loop watch then
+   called a stall the profiler named itself by). A roll of 250 ms or more says where its time went: `stall profile: the
+   window's roll took … ms (next start … ms, end … ms, summaries … ms; N nodes, M samples)`.
 3. `regex: "review:|attachments:"` after that: a worker's publish landing (`publishes N file(s) … from <machine>`) is
    the proof that machine's path works again.
 

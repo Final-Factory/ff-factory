@@ -28,6 +28,10 @@ const KEEP = 6;
 export const PROFILE_SLOW_SPAN_MS = 300;
 /** Slow spans of a window that get a line, the longest first. */
 const SPAN_LINES = 3;
+/** w6416: a roll at least this long gets a line saying where its time went and how big the profile was. */
+const ROLL_LINE_MS = 250;
+/** w6416: the console profiles' titles (console.profile), so a profile of anyone else's is left alone. */
+const TITLE = 'ff-stall-window-';
 
 type CallFrame = { functionName: string; url: string; lineNumber: number; columnNumber: number };
 type ProfileNode = { id: number; callFrame: CallFrame; hitCount?: number; children?: number[] };
@@ -101,6 +105,13 @@ export class StallProfiler {
   private readonly log: (line: string) => void;
   /** Slow spans noted in this window (noteSpan): what, when it ended (epoch ms) and how long. */
   private spans: { what: string; end: number; ms: number }[] = [];
+  /** w6416: windows overlap as console profiles (true), or stop and start the session's own profile (false, older Node). */
+  overlap = false;
+  private current?: string;
+  private seq = 0;
+  private finished?: { title: string; profile: CpuProfile };
+  /** w6416: the last roll's cost in ms and its profile's size, for tests and the roll line. */
+  lastRoll?: { startMs: number; endMs: number; summaryMs: number; totalMs: number; nodes: number; samples: number };
 
   constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void }) {
     this.dir = path.join(o.dataDir, 'profiles');
@@ -115,6 +126,11 @@ export class StallProfiler {
       this.session.connect();
       this.session.post('Profiler.enable');
       this.session.post('Profiler.setSamplingInterval', { interval: SAMPLE_US });
+      this.session.on('Profiler.consoleProfileFinished', (m) => {
+        const title = (m.params as { title?: string }).title;
+        if (title?.startsWith(TITLE)) this.finished = { title, profile: (m.params as { profile: CpuProfile }).profile };
+      });
+      this.overlap = this.probeOverlap();
       this.begin();
       this.timer = setInterval(() => this.roll(), PROFILE_WINDOW_MS);
       this.timer.unref();
@@ -125,9 +141,33 @@ export class StallProfiler {
     return this;
   }
 
+  /**
+   * w6416: whether this Node gives a console profile back to our session (console.profile is the inspector's; without it the
+   * windows fall back to Profiler.stop/start, which cost a cold start each minute).
+   */
+  private probeOverlap(): boolean {
+    this.finished = undefined;
+    try {
+      console.profile(`${TITLE}probe`);
+      console.profileEnd(`${TITLE}probe`);
+    } catch {
+      return false;
+    }
+    const f = this.finished as { title: string } | undefined;
+    const ok = f?.title === `${TITLE}probe`;
+    this.finished = undefined;
+    return ok;
+  }
+
   stop() {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    try {
+      if (this.overlap && this.current) console.profileEnd(this.current);
+    } catch {
+      // already ended
+    }
+    this.current = undefined;
     try {
       this.session?.disconnect();
     } catch {
@@ -143,26 +183,62 @@ export class StallProfiler {
 
   private begin() {
     this.windowStart = Date.now();
-    this.session?.post('Profiler.start');
+    if (this.overlap) {
+      this.current = `${TITLE}${++this.seq}`;
+      console.profile(this.current);
+    } else this.session?.post('Profiler.start');
   }
 
-  /** End the window: keep and summarize its profile when the loop stalled in it, then start the next one. */
-  private roll() {
+  /**
+   * End the window: keep and summarize its profile when the loop stalled in it, then start the next one. The next window starts
+   * BEFORE this one ends (w6416): when no profile runs, V8 drops its code map and the next start rebuilds it by walking the
+   * whole heap, measured at 0.9-1.1 s on a 460 MB heap on a desktop and 1.1-1.7 s on the portal, once a minute (the loop watch then called it a
+   * stall, and the profiler named itself). With one always running, a start costs nothing (0-1 ms measured on that heap) and the roll is only
+   * the ended profile's serialization.
+   */
+  roll() {
     const s = this.session;
     if (!s || this.busy) return;
     this.busy = true;
+    const t0 = performance.now();
     const from = this.windowStart;
     const lag = this.worstLagSince(from);
     const blocks = this.blocksSince(from).filter(([, l]) => l >= PROFILE_STALL_MS);
     const spans = this.spans;
     this.spans = [];
-    s.post('Profiler.stop', (err, res) => {
-      this.begin();
+    const done = (profile: CpuProfile | undefined, tStart: number, tEnd: number) => {
       this.busy = false;
-      if (err || !res?.profile) return;
-      this.logSpans(res.profile as unknown as CpuProfile, from, spans);
-      if (lag < PROFILE_STALL_MS) return;
-      void this.keep(res.profile as unknown as CpuProfile, lag, from, blocks);
+      if (!profile) return;
+      const t2 = performance.now();
+      this.logSpans(profile, from, spans);
+      if (lag >= PROFILE_STALL_MS) void this.keep(profile, lag, from, blocks);
+      const t3 = performance.now();
+      this.lastRoll = { startMs: tStart, endMs: tEnd, summaryMs: t3 - t2, totalMs: t3 - t0, nodes: profile.nodes.length, samples: profile.samples?.length ?? 0 };
+      if (t3 - t0 >= ROLL_LINE_MS)
+        this.log(`stall profile: the window's roll took ${Math.round(t3 - t0)} ms (next start ${Math.round(tStart)} ms, end ${Math.round(tEnd)} ms, summaries ${Math.round(t3 - t2)} ms; ${profile.nodes.length} nodes, ${profile.samples?.length ?? 0} samples)`);
+    };
+    if (this.overlap && this.current) {
+      const ending = this.current;
+      try {
+        this.begin();
+        const t1 = performance.now();
+        this.finished = undefined;
+        console.profileEnd(ending);
+        const t2 = performance.now();
+        const f = this.finished as { title: string; profile: CpuProfile } | undefined;
+        this.finished = undefined;
+        done(f?.title === ending ? f.profile : undefined, t1 - t0, t2 - t1);
+      } catch (e) {
+        this.busy = false;
+        this.log(`stall profile: roll failed (${(e as Error).message})`);
+      }
+      return;
+    }
+    s.post('Profiler.stop', (err, res) => {
+      const t1 = performance.now();
+      this.begin();
+      const t2 = performance.now();
+      done(err ? undefined : (res?.profile as unknown as CpuProfile | undefined), t2 - t1, t1 - t0);
     });
   }
 
