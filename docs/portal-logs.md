@@ -215,6 +215,10 @@ message:
   (live, chats, named by a shown request or a sandbox's newest 12, or active in the last 3 days; the older finished ones
   stay on the server and a view fetches one from `GET /api/sessions?ids=`), and with `changed` a reconnect within
   10 minutes that got only the sessions changed since the state it held (the page sends its `sessionsRev` as `have`).
+  Since w6382 that holds across a portal restart too: the revs are saved in `session-revs.json` with a content key per
+  session (server/pageState.ts `SessionRevs`), and the start logs `session revs: <n> kept, <n> changed since the last
+  run`. `(build <ms> [<phase> <ms>, ...] json <ms>)` (w6382) names the build's slowest phases of 5 ms or more
+  (server/index.ts `appStateIn`; `kept` is leaving out the parts the page holds unchanged).
 - `page socket first state sent: <login> via <path>, <ms>ms after the open` (w5861): only when handing the first state to
   the network took a second or more, which on a slow path means the page was still taking it in.
 - `page state sizes: <top fields with KB>; <n> sessions, by field: <session fields with KB>` (w5861): where the first
