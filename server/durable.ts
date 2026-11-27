@@ -217,17 +217,57 @@ export function writeFileDurable(file: string, data: string | Buffer, o: Durable
 export const writeJsonDurable = (file: string, value: unknown, o: DurableOptions & { indent?: number } = {}) =>
   writeFileDurable(file, JSON.stringify(value, null, o.indent) + (o.indent ? '\n' : ''), o);
 
+/** How many UTF-16 units of a big text writeFileDurableAsync encodes at a time. */
+export const WRITE_PIECE_CHARS = 1 << 20;
+
+/** A text's pieces (stringifyPrettyPieces) gathered into writes of about `size` UTF-16 units; a bigger piece is cut (textPieces). */
+export function* joinedPieces(pieces: readonly string[], size = WRITE_PIECE_CHARS): Generator<string> {
+  let group: string[] = [];
+  let n = 0;
+  for (const p of pieces) {
+    if (p.length > size) {
+      if (group.length) yield group.join('');
+      group = [];
+      n = 0;
+      yield* textPieces(p, size);
+      continue;
+    }
+    group.push(p);
+    n += p.length;
+    if (n >= size) {
+      yield group.join('');
+      group = [];
+      n = 0;
+    }
+  }
+  if (group.length) yield group.join('');
+}
+
+/** The text in pieces of about `size` UTF-16 units, never splitting a surrogate pair (w6381). */
+export function* textPieces(text: string, size = WRITE_PIECE_CHARS): Generator<string> {
+  for (let i = 0; i < text.length; ) {
+    let end = Math.min(text.length, i + size);
+    const last = text.charCodeAt(end - 1);
+    // The pair goes whole into this piece or the next; a piece of one unit holds the whole pair.
+    if (end < text.length && last >= 0xd800 && last <= 0xdbff) end += end - 1 > i ? -1 : 1;
+    yield text.slice(i, end);
+    i = end;
+  }
+}
+
 /**
  * The same, with the write and the fsync (the slow part) off the main thread. `stillWanted` is asked once the data is
  * on disk: false (a newer version was written meanwhile) drops this one. The rename runs on the main thread, so a
  * synchronous write in between cannot be overtaken by an older one; it is tried once, never slept on: a refused rename
  * throws, and the caller writes again later. Returns whether it was committed.
  */
-export async function writeFileDurableAsync(file: string, data: string | Buffer, o: DurableOptions & { stillWanted?: () => boolean } = {}): Promise<boolean> {
+export async function writeFileDurableAsync(file: string, data: string | Buffer | readonly string[], o: DurableOptions & { stillWanted?: () => boolean } = {}): Promise<boolean> {
   const tmp = `${file}.async.tmp`;
   const h = await fs.promises.open(tmp, 'w', o.mode ?? 0o666);
   try {
-    await h.writeFile(data);
+    // A big text goes in pieces (w6381): encoding all of it at once held the event loop 0.4 s (stall profile 2026-11-27
+    // 10:47Z: utf8Write under writeFileDurableAsync). Each piece is encoded and written whole before the next.
+    await h.writeFile(typeof data === 'string' ? (data.length > WRITE_PIECE_CHARS ? textPieces(data) : data) : Buffer.isBuffer(data) ? data : joinedPieces(data));
     await h.sync();
   } finally {
     await h.close();
@@ -396,6 +436,65 @@ export async function stringifyObjectSliced<T>(entries: [string, T][], value: (v
   return `{${out.join(',')}}`;
 }
 
+/** A plain object or array JSON.stringify writes member by member (no toJSON, not a Date, Map or boxed value). */
+const descends = (v: unknown): v is object => {
+  if (typeof v !== 'object' || v === null) return false;
+  if (Array.isArray(v)) return true;
+  const proto = Object.getPrototypeOf(v);
+  return (proto === Object.prototype || proto === null) && typeof (v as { toJSON?: unknown }).toJSON !== 'function';
+};
+
+/**
+ * `JSON.stringify(value, null, 2)`, byte for byte, in slices: the event loop runs every sliceMs (w6381). state.json's and
+ * work.json's one-go pretty serialize held the portal 0.5-1.7 s every few seconds after the 0966c33 restart (stall
+ * profiles 2026-11-27 10:42-10:52Z: Store.stateFile and Store.workFile's SnapshotFile). It walks plain objects and arrays
+ * `depth` levels down (the snapshot, then its lists) and writes each value there (a session, a request) in one go with
+ * JSON.stringify, indented where it sits (a JSON text has no raw newline inside a string, so the indent goes after each
+ * newline). It may yield only between two such values, so each is whole as it was at one moment; one changed meanwhile
+ * is written as it is then. The one difference: a toJSON below the top is called with key "" (Date's ignores it). Throws
+ * where JSON.stringify would (a cycle, a BigInt).
+ */
+export async function stringifyPrettySliced(value: unknown, sliceMs = STRINGIFY_SLICE_MS, depth = 2): Promise<string> {
+  return (await stringifyPrettyPieces(value, sliceMs, depth)).join('');
+}
+
+/**
+ * stringifyPrettySliced's text as the pieces it is made of, in order, never joined (w6381): writeFileDurableAsync writes them
+ * as they are, so a 70 MB work.json is never one string on the main thread (its join alone held the loop 70 ms in
+ * scripts/bench-loop-blocks.ts).
+ */
+export async function stringifyPrettyPieces(value: unknown, sliceMs = STRINGIFY_SLICE_MS, depth = 2): Promise<string[]> {
+  let start = performance.now();
+  const out: string[] = [];
+  const leaf = (v: unknown, pad: string): string | undefined => {
+    const j = JSON.stringify(v, null, 2);
+    return j === undefined || !pad || !j.includes('\n') ? j : j.replace(/\n/g, `\n${pad}`);
+  };
+  const walk = async (v: object, pad: string, level: number): Promise<void> => {
+    const inner = `${pad}  `;
+    const arr = Array.isArray(v);
+    const [open, close] = arr ? ['[', ']'] : ['{', '}'];
+    let n = 0;
+    for (const k of arr ? (v as unknown[]).keys() : Object.keys(v)) {
+      if (performance.now() - start >= sliceMs) {
+        await new Promise((r) => setImmediate(r));
+        start = performance.now();
+      }
+      const x = (v as Record<string | number, unknown>)[k];
+      const deeper = level + 1 < depth && descends(x);
+      const j = deeper ? '' : leaf(x, inner);
+      if (j === undefined && !arr) continue;
+      out.push(`${n++ ? ',' : open}\n${inner}${arr ? '' : `${JSON.stringify(k)}: `}`);
+      if (deeper) await walk(x as object, inner, level + 1);
+      else out.push(j ?? 'null');
+    }
+    out.push(n ? `\n${pad}${close}` : `${open}${close}`);
+  };
+  if (depth < 1 || !descends(value)) out.push(leaf(value, '') as string);
+  else await walk(value, '', 0);
+  return out;
+}
+
 /**
  * One JSON file saved in the background. Changes are coalesced: a write starts at most delayMs after the first change
  * (a steady stream of changes can no longer postpone it, as the old trailing debounce did) and at most once per
@@ -418,9 +517,9 @@ export class SnapshotFile {
   private readonly serialize: () => string;
   private readonly o: SnapshotOptions;
   /** The same text built in slices, for the background write (w3855); flushSync still uses serialize. */
-  private readonly serializeAsync?: () => Promise<string>;
+  private readonly serializeAsync?: () => Promise<string | readonly string[]>;
 
-  constructor(file: string, serialize: () => string, o: SnapshotOptions, serializeAsync?: () => Promise<string>) {
+  constructor(file: string, serialize: () => string, o: SnapshotOptions, serializeAsync?: () => Promise<string | readonly string[]>) {
     this.file = file;
     this.serialize = serialize;
     this.o = o;

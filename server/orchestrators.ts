@@ -8635,6 +8635,25 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   /** How many requests' concepts were worked out (w2044), for the tests. */
   boardTextsMade = 0;
 
+  /**
+   * w6381: works out the concepts of every request a board_check over `lookbackDays` reads, in slices of sliceMs, so the
+   * first board_check after a start finds them made: it made them all in one go and held the portal 3.5 s at 10:42Z on
+   * 2026-11-27, minutes after the 0966c33 restart (stall profile: onBoardCheck > concepts, stem). Returns how many it made.
+   */
+  async warmBoardTexts(lookbackDays: number, sliceMs = 25): Promise<number> {
+    const before = this.boardTextsMade;
+    let start = performance.now();
+    for (const e of this.pool(undefined, lookbackDays * 86_400_000)) {
+      const w = e.kind === 'work' ? this.store.work.get(e.ref) : undefined;
+      if (w) this.boardTextOf(w);
+      if (performance.now() - start >= sliceMs) {
+        await new Promise((r) => setImmediate(r));
+        start = performance.now();
+      }
+    }
+    return this.boardTextsMade - before;
+  }
+
   private boardTextOf(w: WorkItem): { doc: string[]; title: string[] } {
     const src = `${w.title}\n${w.brief.slice(0, 1500)}`;
     const kept = this.boardTexts.get(w.id);

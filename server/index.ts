@@ -71,7 +71,7 @@ import { diskCriticalNotice } from '../shared/blockers.ts';
 import { UNIT_WATCHDOG_FILE, UnitWatchdogMonitor, fileUnitWatchdog } from './unitWatchdog.ts';
 import { backupStatusLines } from './backupStatus.ts';
 import { ActScope, NOT_YOURS, type ActPolicy } from '../shared/actAccess.ts';
-import { dataRecoveries, describeRecovery } from './durable.ts';
+import { checkObject, dataRecoveries, describeRecovery, readJsonDurable, SnapshotFile } from './durable.ts';
 import { DispatcherChatRefused, PermissionAnswerRefused } from './orchestrators.ts';
 import { OPS_LIMITS, OPS_PEOPLE, OPS_REFUSED } from './opsWorker.ts';
 import { backupMemory, healMemory, MEMORY_TRASH_DAYS, memoryDirFor, memoryRootOf, pruneMemoryTrash } from './orchestratorMemory.ts';
@@ -129,7 +129,7 @@ import { cleanMediaTrouble, mediaTroubleLine } from '../shared/mediaTrouble.ts';
 import { LoopWatch } from './loopWatch.ts';
 import { PageSockets, PAGE_MAX_PAYLOAD, fromThisMachine } from './pageSockets.ts';
 import { pageAllStats } from './ffuSlotsView.ts';
-import { pageNamedSessions, pageSession, pageSessions, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
+import { pageNamedSessions, pageSession, pageSessions, SESSION_REVS_FILE, SessionRevs, sessionsPart, stateSizes } from './pageState.ts';
 import { dropKeptParts } from '../shared/pageParts.ts';
 import { StallProfiler } from './stallProfile.ts';
 import { drainOf, drainHold } from './machineDrain.ts';
@@ -542,6 +542,7 @@ const agents = new Agents(cfg, store, sessions, machines, identity);
 observeAsk = (sid, e) => agents.orchestrators.observeAsk(sid, e);
 // Each machine's bench queue orders tickets by their worker's request priority first (w1628): at connect and each minute.
 machines.benchPrioritiesFor = (id) => agents.benchPriorities(id);
+machines.benchPass = (fn) => agents.placementRead(fn);
 machines.timedAskFor = (id) => agents.timedAskFor(id);
 setInterval(() => machines.pushBenchPriorities(), 60_000).unref();
 // A holder warned that its bench turn ends (w1832, server/benchWarnings.ts): its worker is messaged once per deadline.
@@ -1105,6 +1106,8 @@ const blockerWatch = new BlockerWatch({
   // w4925: a pair run of a commit whose CI failed to compile ends with the errors before its legs run players.
   compile: (repo, sha, person) => ghCompileVerdict(repo, sha, ghRunner(person, `the compile of ${sha.slice(0, 10)}`)),
 });
+// w6381: the board check's concepts made in slices soon after a start, before FFBox's first board_check needs them all at once.
+setTimeout(() => void agents.orchestrators.warmBoardTexts(intake.settings.lookbackDays).catch((e) => console.warn(`board check warm-up failed: ${(e as Error).message}`)), 5_000).unref();
 agents.blockerWatch = blockerWatch;
 // A usage gate keeps the pool's own name for its ref and the hold's end (w1126: "vault-lothsahn-1" never matched and never cleared).
 agents.usageRef = (ref) => usageRefOf(ref);
@@ -1204,59 +1207,118 @@ function poolPeople(): PoolPerson[] {
 }
 
 /** When each session last changed, for a reconnecting page's state (w5907, server/pageState.ts). */
-const sessionRevs = new SessionRevs();
-bus.on('event', (e: ServerEvent) => sessionRevs.note(e));
+const sessionRevs = new SessionRevs(undefined, { ready: false });
+// w6382: kept across restarts with a content key per session, so a page that reconnects after one keeps the sessions
+// it holds unchanged. Saved in the background once loaded, and at every stop (stopServer) so the last revs a page saw
+// are in it.
+const sessionRevsFile = new SnapshotFile(path.join(cfg.dataDir, SESSION_REVS_FILE), () => JSON.stringify(sessionRevs.saved(store.sessions)), { delayMs: 5_000, intervalMs: 30_000, generations: 0, label: 'session revs' });
+bus.on('event', (e: ServerEvent) => {
+  sessionRevs.note(e);
+  if (sessionRevs.isReady && (e.type === 'session' || e.type === 'session_removed')) sessionRevsFile.changed();
+});
+{
+  const t0 = performance.now();
+  void sessionRevs.load(readJsonDurable(path.join(cfg.dataDir, SESSION_REVS_FILE), { check: checkObject, generations: 0 }), () => store.sessions.values()).then(({ kept, changed }) => {
+    console.log(`session revs: ${kept} kept, ${changed} changed since the last run (${Math.round(performance.now() - t0)} ms)`);
+    sessionRevsFile.changed();
+  });
+}
+/** Flush the session revs at a stop; not before they are loaded, which would save over the last run's. */
+const flushSessionRevs = () => {
+  if (sessionRevs.isReady) sessionRevsFile.flushSync();
+};
 
 /**
  * The app as `user` (a login name) sees it: their own orchestrator is the home chat (made on first sight). `have`: the
  * sessionsRev of the state a reconnecting page holds (w5907): its sessions part then holds only what changed since.
  */
-function appState(user: string | undefined, have?: string | null): AppState {
+function appState(user: string | undefined, have?: string | null, phases?: [string, number][]): AppState {
   // w5533: only a signed-in login gets a state; a page whose login is gone is closed before it gets here (openPages).
   const me = auth.userInfo(user);
   if (!me) throw new HttpError(401, 'login required');
+  const lap = phaseLap(phases);
   const mine = agents.orchestrators.personalFor(me);
+  lap('personal');
   // w6336: one placement pass for the whole build (it changes no placement). Outside one, each machine's free() rebuilt
   // every sandbox's claims over all sessions, and roomNow/roomExtras computed places() three times: 0.6-1.2 s of the
   // page's connect (stall profiles 2026-11-27, appState > free > claimedBy > claims).
-  return agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(() => appStateIn(me, mine, have)));
+  return agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(() => appStateIn(me, mine, have, lap)));
 }
 
-function appStateIn(me: NonNullable<ReturnType<typeof auth.userInfo>>, mine: ReturnType<typeof agents.orchestrators.personalFor>, have: string | null | undefined): AppState {
+/**
+ * w6382: times the phases of a state's build for the 'page socket open' line (pageSockets.ts phasesOf): each call ends
+ * the phase begun at the call before. A no-op without `phases` (/api/state).
+ */
+function phaseLap(phases: [string, number][] | undefined): (name: string) => void {
+  if (!phases) return () => undefined;
+  let t = performance.now();
+  return (name) => {
+    const now = performance.now();
+    phases.push([name, now - t]);
+    t = now;
+  };
+}
+
+function appStateIn(me: NonNullable<ReturnType<typeof auth.userInfo>>, mine: ReturnType<typeof agents.orchestrators.personalFor>, have: string | null | undefined, lap: (name: string) => void): AppState {
   const work = agents.orchestrators.forPage();
+  lap('work');
   const standingAgents = agents.standing.list();
+  lap('standing');
   const machineList = machines.list().map(machineView);
+  lap('machines');
   const live = liveHub.viewsFor(me.userId);
   // w5861: without the fields the page never reads; w5907: only the sessions the page shows on open (server/pageState.ts).
   const named = pageNamedSessions({ work, ids: [mine.info.id, agents.dispatcherId], standing: standingAgents, machines: machineList, live });
   const kept = pageSessions(store.sessions.values(), named, Date.now());
+  const sessions = sessionsPart(kept.sessions, sessionRevs, sessionRevs.since(have));
+  lap('sessions');
+  const delegations = [...store.delegations.values()];
+  const app = appNow();
+  const provider = providers.summary();
+  const maxSummary = max.summary();
+  const hostNow = hostForUser({ ...host, drain: drainer.status }, me.userId);
+  lap('summaries');
+  const accounts = accountsNow();
+  lap('accounts');
+  const machineStats = pageAllStats(machines.allStats());
+  lap('machineStats');
+  const reportList = reports.all();
+  lap('reports');
+  const room = agents.roomNow();
+  lap('room');
+  const roomExtras = agents.roomExtras();
+  lap('roomExtras');
+  const intakeSummary = intake.summary();
+  const ledger = ledgerSweep.state();
+  const people = poolPeople();
+  lap('rest');
   return {
-    app: appNow(),
-    ...sessionsPart(kept.sessions, sessionRevs, sessionRevs.since(have)),
+    app,
+    ...sessions,
     olderSessions: kept.older,
     standingAgents,
-    delegations: [...store.delegations.values()],
+    delegations,
     machines: machineList,
-    providers: providers.enabled || providers.summary().tokenSet ? [providers.summary()] : [],
-    ffbox: providers.summary(),
-    max: max.summary(),
+    providers: providers.enabled || provider.tokenSet ? [provider] : [],
+    ffbox: provider,
+    max: maxSummary,
     system: lastSystem,
-    host: hostForUser({ ...host, drain: drainer.status }, me.userId),
+    host: hostNow,
     usage: usage.usage,
-    accounts: accountsNow(),
-    machineStats: pageAllStats(machines.allStats()),
+    accounts,
+    machineStats,
     orchestratorId: mine.info.id,
     dispatcherId: agents.dispatcherId,
     me,
     work,
-    reports: reports.all(),
-    room: agents.roomNow(),
-    ...agents.roomExtras(),
-    intake: intake.summary(),
-    ledger: ledgerSweep.state(),
+    reports: reportList,
+    room,
+    ...roomExtras,
+    intake: intakeSummary,
+    ledger,
     config: { defaultModel: cfg.defaultModel, models: cfg.models, defaultBase: cfg.defaultBase, attachments: attachments.settings, live: { enabled: cfg.live?.enabled === true }, project: projectView(cfg) },
     settings: store.settings,
-    poolPeople: poolPeople(),
+    poolPeople: people,
     live,
     // w4238: an owner's page offers the buttons of another owner's waiting question; a member's page never needs the list.
     ...(me.role === 'owner' ? { owners: identity.list().filter((x) => x.role === 'owner').map((x) => ({ userId: x.userId, displayName: x.displayName })) } : {}),
@@ -2793,15 +2855,19 @@ server.on('upgrade', (req, socket, head) => {
     const t0 = performance.now();
     const q = new URL(req.url ?? '/', 'http://x').searchParams;
     // w6336: a reconnecting page's parts it holds unchanged are left out (shared/pageParts.ts).
-    const state = dropKeptParts(appState(user, q.get('have')), q.get('parts'));
+    const phases: [string, number][] = [];
+    const whole = appState(user, q.get('have'), phases);
+    const tKeep = performance.now();
+    const state = dropKeptParts(whole, q.get('parts'));
     const t1 = performance.now();
+    phases.push(['kept', t1 - tKeep]);
     const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
     const built = performance.now() - t0;
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));
@@ -2866,7 +2932,10 @@ function hostForUser(h: HostStatus, user: string): HostStatus {
  * "1/3 sandboxes" counts in use as the agents' tools do and never works it out a second way.
  */
 function machineView(m: Machine): Machine {
-  return m.sandboxes?.length ? { ...m, sandboxes: m.sandboxes.map((sb) => ({ ...sb, free: agents.sandboxFree(m.id, sb) })) } : m;
+  if (!m.sandboxes?.length) return m;
+  // w6381: one claims pass for the machine's sandboxes (Agents.sandboxesFree), not one per sandbox.
+  const free = agents.sandboxesFree(m.id, m.sandboxes);
+  return { ...m, sandboxes: m.sandboxes.map((sb, i) => ({ ...sb, free: free[i] })) };
 }
 /**
  * What makes a sandbox free changes without a machine event (a worker's turn ends, a claim lapses, a bench lock goes):
@@ -2875,7 +2944,9 @@ function machineView(m: Machine): Machine {
 const freeSent = new Map<string, string>();
 const freeKey = (v: Machine) => (v.sandboxes ?? []).map((sb) => `${sb.id}:${sb.free ? 1 : 0}`).join(',');
 setInterval(() => {
-  for (const m of machines.list()) if (freeSent.get(m.id) !== freeKey(machineView(m))) emit({ type: 'machine', machine: m });
+  // w6381: every machine's FREE read in one claims memo, then the moved ones sent (each send builds its own view).
+  const moved = agents.placeAgain.withClaimsMemo(() => machines.list().filter((m) => freeSent.get(m.id) !== freeKey(machineView(m))));
+  for (const m of moved) emit({ type: 'machine', machine: m });
 }, 5_000).unref();
 function broadcast(e: ServerEvent) {
   if (e.type === 'machine') {
@@ -2989,6 +3060,7 @@ function stopServer(req: RestartRequest, drained: ReadonlySet<string> = new Set(
   gateTuning.close();
   agents.rollout.close();
   store.flush();
+  flushSessionRevs();
   spend.flush();
   usage.flush();
   process.exit(0);
@@ -3733,6 +3805,7 @@ setTimeout(() => {
       writeResumeFile(cfg.dataDir, { ...f, reason: pending.reason, update: true });
       fs.writeFileSync(path.join(cfg.dataDir, 'update.request'), new Date().toISOString());
       store.flush();
+      flushSessionRevs();
       spend.flush();
       usage.flush();
       process.exit(0);

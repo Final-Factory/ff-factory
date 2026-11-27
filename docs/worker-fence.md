@@ -132,11 +132,15 @@ worker:
   worker chose, such as NODE_OPTIONS. The run's own environment reaches the keeper over stdin with "go".
 - **No FF_SESSION_ID or FF_FOR_PERSON**, so the leftovers sweep and the worker's own `ff-leftovers end` leave it alone.
   `FF_LONG_RUN=<id>` names it instead. The record of each run is in `<appDir>/long-runs/<id>.json`, and the daemon log has
-  "long runs: started <id> ...". No sweep ends a run by `FF_LONG_RUN` yet.
+  "long runs: started <id> ..." and, when the keeper exits, "long runs: <id> (nightly) of <sandbox> ended: keeper pid <pid>
+  exit <code>" (124 for its time limit, 143 for `runs/stop`). No sweep ends a run by `FF_LONG_RUN` yet.
 - **Bounded**: the keeper ends the run's whole tree (taskkill /T /F) after 20 hours and exits 124. `runs/stop {id}` ends a
-  live run of the caller's own sandbox sooner.
+  live run of the caller's own sandbox sooner: the daemon writes "stop" to that keeper's stdin, which only the daemon
+  process that started it holds, so a stop never reaches a process that reused the pid (review w6379 finding 7). A run
+  from before the daemon's last start can no longer be stopped this way and ends at its limit.
 - **Only one route**, a sandbox worker's only, at most 2 live per sandbox: `nightly` runs the game repo's
-  `scripts/nightly/nightly_run.sh` in the caller's own sandbox, as a plain file there (no link out). It is allowed only for
+  `scripts/nightly/nightly_run.sh` in the caller's own sandbox, as a plain file there (no link out; junctions included, through
+  `fs.realpathSync.native`, since the JS realpath leaves a Windows junction unresolved, review w6379 finding 6). It is allowed only for
   a session the portal marks exempt "nightly", meaning it works an open nightly-run request. Nothing else a worker names is
   run. (A `probe` route open to any sandbox worker was dropped in review w6376; the proof on a machine belongs to the
   change that turns the route on.)
@@ -150,8 +154,8 @@ daemon.json `longRuns` (`ops_worker machine_update long_runs off|warn|on`):
 
 - `warn` is the default (lothsahn's lockout rule). Every check is made and the daemon logs "long runs (warn): would start
   ... ready" (or "could not now: <why>"). It then answers `started: false`, and the caller starts the run itself as before.
-- `on` starts the run.
-- `off` refuses at once.
+- `on` starts the run. Send it only with a person's go (lothsahn's lockout rule).
+- `off` refuses at once. It does not end runs already live: they end at their limit or by `runs/stop`.
 
 The game's client falls back to its old start on any refusal or error, so `warn` or `off` is the way back, with nobody at the
 machine. On macOS and Linux the route refuses for now and the caller starts the run itself (only the Windows case was

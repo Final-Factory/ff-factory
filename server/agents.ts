@@ -6690,6 +6690,23 @@ A report is for a person who asked for one, and people want very few. File one w
     return this.free(sb, machineId);
   }
 
+  /**
+   * sandboxFree of each of a machine's sandboxes, with the machine's claims worked out once (w6381): the page's machine view
+   * asked each sandbox alone, each ask placing every released worker of the machine again (1.1-1.8 s portal blocks at
+   * 10:44-10:51Z on 2026-11-27, stall profile: machineView > sandboxFree > free > claimedBy > claims).
+   */
+  sandboxesFree(machineId: string, sbs: readonly MachineSandbox[]): boolean[] {
+    return this.placeAgain.withClaimsMemo(() => sbs.map((sb) => this.free(sb, machineId)));
+  }
+
+  /**
+   * w6381: runs read-only `fn` (every machine's bench priorities) with places() and each machine's claims computed once: the
+   * minute's pushBenchPriorities asked them per machine, a 5.8 s portal block at 10:43Z on 2026-11-27.
+   */
+  placementRead<T>(fn: () => T): T {
+    return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
+  }
+
   /** " (spoken for: …)" when a released worker is being placed again there or its resume waits for it (w640), else "". */
   private claimLine(machineId: string, sandbox: string): string {
     const by = this.placeAgain.claimedBy(machineId, sandbox);
@@ -7686,7 +7703,8 @@ A report is for a person who asked for one, and people want very few. File one w
   describeAllSandboxes(detail = false): string {
     // w6336: one placement pass for the whole list, so every agent line reads its requests from one index (workOf): list_sandboxes
     // blocked the portal 9.2 s at 10:06Z on 2026-11-27, under describeAllSandboxes > agentsPart > workOver's scan of every request.
-    return this.withPlacesOnce(() => this.describeAllSandboxesNow(detail));
+    // w6381: and each machine's claims and placement facts once, not per agent line (1.8 s at 10:44Z on 2026-11-27: facts).
+    return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(() => this.describeAllSandboxesNow(detail)));
   }
 
   private describeAllSandboxesNow(detail: boolean): string {
@@ -8310,7 +8328,7 @@ ${w.repo ?? ''}
             win_ci_first: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: w6110, Windows only: CI jobs go first on a Windows CI-first machine (machine/ciFirstWin.ts): warn (the default, and the recovery) only logs what the agents' processes take beside a CI job; enforce lowers the processes agents' tools start to BelowNormal while a job runs and raises them back when it is off or warn again; off stops it. Written as daemon.json winCiFirst; takes effect at the daemon's next start. Unset leaves it as it is."),
             shared_lock: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: the shared-cache lock (w5615, docs/worker-root.md \"Per-slot caches and the players broker\"): each sandbox gets its own copy-on-write clone of the tool caches (uv, pip, npm, NuGet, UPM, .NET, Playwright) and players are installed and launched by the daemon; warn changes the env and logs worker writes to the shared caches, players, seed and tools; on makes those read-only to workers. Unset: as daemon.json has it."),
             host_restage: z.enum(['warn', 'on']).optional().describe("action machine_update: w6305: what the daemon does with an idle agent whose host was adopted across a sharedLock switch (w6287, docs/worker-root.md \"After a sharedLock switch\"): warn (the default, and the recovery) logs one line per such host; on ends that agent between turns, never mid-turn, so its next message starts a new host on the new mode's cache paths and FF_PLAYER_BROKER. Written as daemon.json hostRestage; takes effect at the daemon's next start, which this update makes. Send on only with a person's go, after the warn lines of a real switch were read (lothsahn's lockout rule; docs/worker-root.md 4.4); warn needs none."),
-            long_runs: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6367: the long-run route (machine/longRuns.ts) that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back. Written as daemon.json longRuns; takes effect at the daemon's next start, which this update makes."),
+            long_runs: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6367: the long-run route (machine/longRuns.ts) that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back, though off does not end runs already live (they end at their 20 h limit or by runs/stop). Written as daemon.json longRuns; takes effect at the daemon's next start, which this update makes. Send on only with a person's go (lothsahn's lockout rule; docs/worker-fence.md 'Long runs'); warn and off need none."),
             live_run_guard: z.enum(['off', 'warn']).optional().describe("action machine_update: w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off stops the look. The way back with nobody at the machine."),
             runner_priority: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: w6163, Windows only: the ffu CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): warn only logs what it reads (the default everywhere but the machines in RUNNER_PRIORITY_ENFORCE, and the recovery), enforce sets the tasks to priority 4 and raises the listeners to Normal, off stops it. Written as daemon.json runnerPriority; takes effect at the daemon's next start. Unset leaves it as it is."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),

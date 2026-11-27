@@ -2,6 +2,7 @@
 // on 2026-11-25), and the page's first state had reached 18 MB of JSON: lothsahn waited 5-10 s for the page to connect
 // over Funnel, and a socket whose first message was still downloading missed its pong and was dropped. The page reads
 // only some of each session's fields; the rest stay on the server (store.sessions) and in its session events.
+import { createHash } from 'node:crypto';
 import { holdsItsPlace, holdsSandbox } from '../shared/agentState.ts';
 import type { AppState, Machine, SessionInfo, StandingAgent, WorkItem } from '../shared/types.ts';
 
@@ -97,42 +98,153 @@ export function pageSessions(sessions: Iterable<SessionInfo>, named: ReadonlySet
 
 /**
  * When each session last changed (w5907), so a page that reconnects gets only the sessions that changed while it was
- * away. A token is `<boot>.<rev>`: a page's token from another run of the server is no use (every rev starts again).
- * Every change of a session goes through Store.putSession/removeSession, which emit the `session` and
- * `session_removed` events this counts; a session the server has not changed since it started has rev 0.
+ * away. A token is `<epoch>.<rev>`. Every change of a session goes through Store.putSession/removeSession, which emit the
+ * `session` and `session_removed` events this counts.
+ *
+ * w6382: the revs outlive a restart. Each run saves them (`saved()`, server/index.ts session-revs.json) with a content key
+ * per session, a hash of its JSON; the next run loads them (`load`), and a session whose content key no longer matches,
+ * or that the file does not know, gets a new rev. Revs are one sequence across runs, each run under its own epoch: a token
+ * of an earlier run is taken up to the rev its file was saved at (`past`), since every change after that either reached
+ * the file with a higher rev or shows as a changed content key. A token past that saw changes the file never got: sent whole.
+ * Before w6382 every restart resent all 977 sessions (2.4 MB) to each reconnecting page.
  */
 export class SessionRevs {
   readonly boot: string;
   private rev = 0;
   private revs = new Map<string, number>();
+  /** Earlier runs' epochs, and the rev each one's file was saved at, oldest first (at most PAST_EPOCHS). */
+  private past: [string, number][] = [];
+  /** Content keys as saved or loaded; a session changed since has none until the next save. */
+  private keys = new Map<string, string>();
+  /** Until `load` has checked every session against its content key, no token is taken (the page gets them all). */
+  private ready: boolean;
+  /** Sessions this run changed while `load` was still checking: their new rev stands. */
+  private touched = new Set<string>();
 
-  constructor(boot: string = Math.random().toString(36).slice(2, 10)) {
+  constructor(boot: string = Math.random().toString(36).slice(2, 10), o: { ready?: boolean } = {}) {
     this.boot = boot;
+    this.ready = o.ready ?? true;
   }
 
   note(e: { type: string; session?: { id: string }; id?: string }) {
-    if (e.type === 'session' && e.session) this.revs.set(e.session.id, ++this.rev);
-    else if (e.type === 'session_removed' && e.id) {
+    if (e.type === 'session' && e.session) {
+      this.revs.set(e.session.id, ++this.rev);
+      this.keys.delete(e.session.id);
+      if (!this.ready) this.touched.add(e.session.id);
+    } else if (e.type === 'session_removed' && e.id) {
       this.revs.delete(e.id);
+      this.keys.delete(e.id);
       this.rev++;
     }
+  }
+
+  /** Whether `load` is done (or was never needed): only then are tokens taken and the revs saved. */
+  get isReady(): boolean {
+    return this.ready;
   }
 
   get token(): string {
     return `${this.boot}.${this.rev}`;
   }
 
-  /** The rev a page's token stands for, when it is this run's and not ahead of it; else undefined (send them all). */
+  /** The rev a page's token stands for, when it is this run's (not ahead of it) or an earlier saved run's; else undefined (send them all). */
   since(token: string | null | undefined): number | undefined {
+    if (!this.ready) return undefined;
     const m = /^([a-z0-9]+)\.(\d+)$/.exec(token ?? '');
-    if (!m || m[1] !== this.boot) return undefined;
+    if (!m) return undefined;
     const rev = Number(m[2]);
-    return Number.isSafeInteger(rev) && rev <= this.rev ? rev : undefined;
+    if (!Number.isSafeInteger(rev)) return undefined;
+    const upTo = m[1] === this.boot ? this.rev : this.past.find(([e]) => e === m[1])?.[1];
+    return upTo !== undefined && rev <= upTo ? rev : undefined;
   }
 
   changedSince(id: string, rev: number): boolean {
     return (this.revs.get(id) ?? 0) > rev;
   }
+
+  /**
+   * Take an earlier run's saved revs (`saved` as `saved()` wrote it, or undefined) for the sessions the store holds now.
+   * Yields to the event loop every `sliceMs`, as Store.scrubSecrets does; tokens are taken once it is done. Returns how
+   * many sessions kept their rev and how many got a new one.
+   */
+  async load(saved: unknown, sessions: () => Iterable<SessionInfo>, sliceMs = 20, clock: () => number = Date.now): Promise<{ kept: number; changed: number }> {
+    const s = readSavedRevs(saved);
+    let kept = 0;
+    let changed = 0;
+    if (s) {
+      // This run's revs go on from the file's, so they are above every rev a token of the file's run can carry.
+      this.rev += s.rev;
+      for (const [id, r] of this.revs) this.revs.set(id, r + s.rev);
+      this.past = [...s.past, [s.epoch, s.rev] as [string, number]].slice(-PAST_EPOCHS);
+      let since = clock();
+      for (const x of [...sessions()]) {
+        if (clock() - since >= sliceMs) {
+          await new Promise<void>((r) => setImmediate(r));
+          since = clock();
+        }
+        if (this.touched.has(x.id)) continue;
+        const was = s.sessions.get(x.id);
+        const key = contentKey(x);
+        if (was && was[1] === key) {
+          this.revs.set(x.id, was[0]);
+          this.keys.set(x.id, key);
+          kept++;
+        } else {
+          this.revs.set(x.id, ++this.rev);
+          this.keys.set(x.id, key);
+          changed++;
+        }
+      }
+    }
+    this.touched.clear();
+    this.ready = true;
+    return { kept, changed };
+  }
+
+  /** What session-revs.json holds: the epoch, the rev, the earlier runs, and each session's rev and content key. */
+  saved(sessions: ReadonlyMap<string, SessionInfo>): SavedRevs {
+    const out: Record<string, [number, string]> = {};
+    for (const [id, s] of sessions) {
+      let key = this.keys.get(id);
+      if (key === undefined) this.keys.set(id, (key = contentKey(s)));
+      out[id] = [this.revs.get(id) ?? 0, key];
+    }
+    return { v: 1, epoch: this.boot, rev: this.rev, past: this.past, sessions: out };
+  }
+}
+
+/** The file in the data folder the revs are saved in (server/index.ts). */
+export const SESSION_REVS_FILE = 'session-revs.json';
+
+/** How many earlier runs' tokens a server still takes: a page sends its token only after a gap of at most 10 minutes. */
+export const PAST_EPOCHS = 8;
+
+export interface SavedRevs {
+  v: 1;
+  epoch: string;
+  rev: number;
+  past: [string, number][];
+  sessions: Record<string, [number, string]>;
+}
+
+/** A session's content key (w6382): a hash of its JSON, so a change the saved revs missed still reads as a change. */
+export function contentKey(s: SessionInfo): string {
+  return createHash('sha1').update(JSON.stringify(s)).digest('base64url').slice(0, 16);
+}
+
+/** session-revs.json read, or undefined when it is not one this server wrote (then every session counts as changed). */
+function readSavedRevs(v: unknown): { epoch: string; rev: number; past: [string, number][]; sessions: Map<string, [number, string]> } | undefined {
+  if (typeof v !== 'object' || v === null) return undefined;
+  const o = v as Partial<SavedRevs>;
+  if (o.v !== 1 || typeof o.epoch !== 'string' || !/^[a-z0-9]+$/.test(o.epoch) || !Number.isSafeInteger(o.rev) || (o.rev as number) < 0) return undefined;
+  if (!Array.isArray(o.past) || typeof o.sessions !== 'object' || o.sessions === null) return undefined;
+  const past = o.past.filter((p): p is [string, number] => Array.isArray(p) && typeof p[0] === 'string' && Number.isSafeInteger(p[1]) && p[1] <= (o.rev as number));
+  const sessions = new Map<string, [number, string]>();
+  for (const [id, e] of Object.entries(o.sessions)) {
+    // A rev above the file's own is not one it could have given: such a session counts as changed.
+    if (Array.isArray(e) && Number.isSafeInteger(e[0]) && e[0] >= 0 && e[0] <= (o.rev as number) && typeof e[1] === 'string') sessions.set(id, [e[0], e[1]]);
+  }
+  return { epoch: o.epoch, rev: o.rev as number, past, sessions };
 }
 
 /**

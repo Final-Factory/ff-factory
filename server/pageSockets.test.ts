@@ -78,3 +78,10 @@ test('w6336: a ready message is only its numbers: anything odd is dropped, not l
   // A bad `load` is left out, the rest kept.
   assert.deepEqual(readyOf('{"type":"ready","open":1,"state":2,"parse":3,"render":4,"load":"x"}'), { open: 1, state: 2, parse: 3, render: 4 });
 });
+
+test("w6382: the open line names a build's slowest phases, leaving out the quick ones", () => {
+  const lines: string[] = [];
+  const p = new PageSockets<object>((l) => lines.push(l), () => 0);
+  p.opened({}, 'lothsahn', req('127.0.0.1', {}, '/ws?why=closed'), { ms: 700, bytes: 2048, buildMs: 640, jsonMs: 60, phases: [['work', 20.4], ['sessions', 310.2], ['reports', 1], ['accounts', 300]] });
+  assert.equal(lines[0], 'page socket open: lothsahn from 127.0.0.1 via local, why=closed, state 700ms (build 640ms [sessions 310, accounts 300, work 20] json 60ms) 2KB (1 open)');
+});
