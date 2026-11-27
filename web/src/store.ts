@@ -6,6 +6,7 @@ import { initNotifications, onNotice } from './notify';
 import { noteMachineStats } from './util';
 import { SOCKET_FAILURE_CHECK_MS, SOCKET_STATE_REFRESH_MS } from '../../shared/socketPolicy';
 import { mergeSessions, sessionsHave } from '../../shared/pageSessions';
+import { fillKeptParts, partsHave } from '../../shared/pageParts';
 
 export type AuthState = 'unknown' | 'needed' | 'ok';
 
@@ -403,6 +404,7 @@ function startSocket() {
       for (const id of openSessions.keys()) void loadTranscript(id);
     },
     have: (gapMs) => sessionsHave(state.app ?? undefined, gapMs),
+    parts: () => partsHave(state.app),
     onFailure: async () => {
       try {
         // Bounded: a path that hangs (w5318) must not hold the next attempt. w6336: a page whose state is fresh only asks
@@ -433,10 +435,12 @@ setUnauthorizedHandler(() => {
  * A whole state, from the socket or a fetch: the page is signed in. The first one starts its notifications. Not after a
  * logout: a state still on its way from the old socket does not sign the page back in.
  */
-function gotState(app: AppState) {
+function gotState(next: AppState) {
   if (state.auth === 'needed') return;
-  if (app.sessionsDelta && !state.app) {
-    // Only what changed, and nothing to lay it on (cannot happen: the page sends its rev only with a state): fetch it all.
+  // w6336: the parts a reconnect left out as unchanged come from the page's own copy (shared/pageParts.ts).
+  const app = fillKeptParts(state.app, next);
+  if (!app || (app.sessionsDelta && !state.app)) {
+    // Only what changed, and nothing to lay it on (cannot happen: the page sends its rev and hashes only with a state): fetch it all.
     void api.state(SOCKET_FAILURE_CHECK_MS).then(gotState, () => {});
     return;
   }

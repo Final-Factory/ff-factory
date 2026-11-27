@@ -3676,6 +3676,13 @@ export interface AppState {
    * (it drops the others and asks for any it lacks). Absent: `sessions` is the whole list.
    */
   sessionsDelta?: { since: number; ids: string[] };
+  /**
+   * w6336 (shared/pageParts.ts): the whole parts a reconnecting page said it holds unchanged, left out of this state; the
+   * page keeps its own. Absent: every part is here.
+   */
+  partsKept?: ('reports' | 'machines' | 'delegations' | 'accounts' | 'standingAgents')[];
+  /** w6336: set when `work` holds only the requests changed since the page's copy; `ids` are all of them, in order. */
+  workDelta?: { ids: string[] };
   /** How many finished sessions older than the page's window the server left out (a view asks for one by id). */
   olderSessions?: number;
   standingAgents: StandingAgent[];
