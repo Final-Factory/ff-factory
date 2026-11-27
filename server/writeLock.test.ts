@@ -240,7 +240,7 @@ test('w5559: readLockArgs closes a Claude login file given with the secrets', ()
   assert.ok(a.join(' ').includes(`--no-read ${login}`), a.join(' '));
 });
 
-test('w6358 (review of w5631): makeDotnetShm makes both folders 1777 and never chmods through a link a worker put there', () => {
+test('w6358 (review of w5631): makeDotnetShm makes both folders 1777 and never chmods through a link a worker put there', { skip: process.platform !== 'linux' && 'needs Linux: it makes shm through /proc/self/fd' }, () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'w6358-'));
   const own = path.join(base, 'own');
   fs.mkdirSync(own, { mode: 0o700 });
