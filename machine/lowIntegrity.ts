@@ -20,7 +20,8 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sharedLockParents, sharedLockRel } from './sharedLockPaths.ts';
-import { isLink as isLinkFs, removeLink } from '../server/fsLink.ts';
+import { hasTrickName, isLink as isLinkFs, removeLink } from '../server/fsLink.ts';
+import { execFileOffThread } from '../server/spawnThread.ts';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES, TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
@@ -445,9 +446,18 @@ export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandat
 export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium Mandatory Level:(?!\(I\))/i.test(icaclsOut);
 
 /**
+ * Review w6380: the WARNING for a path labelLow leaves alone because a name in it ends in a dot or a space (fsLink.ts
+ * isTrickName): Windows would open the path without it, perhaps a junction beside it. Quoted, so a trailing space shows.
+ * Exported for tests.
+ */
+export const trickWarning = (p: string) =>
+  `worker integrity: WARNING: ${JSON.stringify(p)} has a name ending in a dot or a space, or a device name such as NUL, skipped: not labelled, since icacls would open another path (perhaps a junction beside it) or fail on it (w6380, w6452)`;
+
+/**
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
  * the files already in it (measured, w5333). Never throws: a target it cannot label is reported, and the caller runs its
- * agents unfenced when any failed.
+ * agents unfenced when any failed. A target with a name ending in a dot or a space is skipped with a WARNING, not a
+ * failure (review w6380), as a link is.
  *
  * Setting a mandatory label needs WRITE_OWNER on the path. An owner has only READ_CONTROL and WRITE_DAC by right, so where
  * the account's write comes from a group ACE (BEAST's F:\ffw inherits Authenticated Users:(M) from the drive, and the
@@ -478,8 +488,10 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
       // Imported here: transcriptLabels.ts imports this file.
       const { icaclsOf, labelTree } = await import('../server/transcriptLabels.ts');
       const found: string[] = [];
+      const odd: string[] = [];
       const low = label === LOW_LABEL;
-      const links = await labelTree(p, low ? 'low' : 'medium', icaclsOf(exec), account, found);
+      const links = await labelTree(p, low ? 'low' : 'medium', icaclsOf(exec), account, found, odd);
+      for (const o of odd) say(trickWarning(o));
       if (!links) return;
       if (low) {
         say(`worker integrity: WARNING: ${p} holds ${links} link${links === 1 ? '' : 's'} (a junction or symlink), skipped: not followed, not labelled (w5615)`);
@@ -508,7 +520,15 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
   // Medium with its parent.
   const own = (p: string) => (t.medium ?? []).some((m) => same(path.dirname(p), m));
   const failed: string[] = [];
+  const tricked = new Set<string>();
   const one = async (p: string, label: string) => {
+    if (hasTrickName(p)) {
+      // Review w6380: not a failure either, or a worker could turn the fence off by planting such a name. Said once, though
+      // a child of a folder kept Medium comes here twice.
+      if (!tricked.has(p)) say(trickWarning(p));
+      tricked.add(p);
+      return;
+    }
     if (linkedOnTheWay(p)) {
       // Not a failure: a worker could otherwise turn the fence off by planting a link. Its own folder is not labelled.
       say(`worker integrity: WARNING: ${p} is (or lies below) a junction or symlink now, not labelled: icacls would label where it leads (w6377)`);
@@ -553,6 +573,7 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
       }
       try {
         if (!fs.existsSync(g)) continue;
+        if (hasTrickName(g)) throw new Error('its name, or a name on the way to it, ends in a dot or a space or is a device name such as NUL, so icacls would open another path or fail on it (w6380, w6452)');
         if (isLink(g) || linkedOnTheWay(path.dirname(g))) throw new Error('it is (or lies below) a junction or symlink now');
         const now = await exec('icacls', [g], { timeoutMs: 60_000 });
         if (now.code === 0 && isExplicitMedium(now.stdout)) continue;
@@ -572,6 +593,7 @@ export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) =>
   for (const p of t.medium ?? []) {
     try {
       if (!fs.existsSync(p) || open.some((o) => inside(p, o))) continue;
+      if (hasTrickName(p)) throw new Error('its name, or a name on the way to it, ends in a dot or a space or is a device name such as NUL, so icacls would open another path or fail on it (w6380, w6452)');
       if (linkedOnTheWay(p)) throw new Error('it is (or lies below) a junction or symlink now (w6377)');
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       // w5615: a shared-lock folder until it carries Medium of its own (its parent's Medium reaches it inherited, not its files).
@@ -685,6 +707,26 @@ export const execSync: ExecSync = (cmd, args) => {
   const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, windowsHide: true });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr || (r.error ? r.error.message : '') };
 };
+
+export type ExecAsync = (cmd: string, args: string[]) => Promise<Ran>;
+
+/**
+ * w6479: execSync's answer without holding the daemon's event loop: the program starts from the spawn thread
+ * (server/spawnThread.ts) and the loop runs on while it does (PowerShell's lock of a Low copy took 7.8 s of a 14.9 s
+ * block on LothDesktop). The same timeout; a program that did not exit (a timeout, a kill) or could not start answers code
+ * null and the error's message, as spawnSync's does.
+ */
+export const execOffThread: ExecAsync = (cmd, args) =>
+  new Promise((resolve) =>
+    execFileOffThread(cmd, args, { timeout: 60_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+      const code = !err ? 0 : typeof err.code === 'number' ? err.code : null;
+      resolve({ code, stdout: stdout ?? '', stderr: stderr || (err && code === null ? err.message : '') });
+    }),
+  );
+
+/** One program a LowCopies step runs: run by `exec` (make, check) or `execAsync` (makeAsync). */
+type Step = { cmd: string; args: string[] };
+const powershell = (script: string): Step => ({ cmd: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')] });
 
 /** A file's SHA-256, read in 1 MB pieces: about 250 ms for claude.exe's 300 MB (measured on BEAST, w5838). */
 export function fileHash(p: string): string {
@@ -882,14 +924,55 @@ export class LowCopies {
   private remove: (p: string) => void;
   /** w6321: the old copies already said kept (still running) in this daemon run. */
   private keptSaid = new Set<string>();
+  private execAsync: ExecAsync;
+  /**
+   * w6479: the names a make still in flight (makeAsync, awaiting its PowerShell or icacls) has taken for its copy: a make
+   * that runs meanwhile neither picks one, nor removes it or its `.part` as an old copy or a stray. Empty between makes,
+   * so a make that runs alone does exactly what it did before.
+   */
+  private busy = new Set<string>();
 
-  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash, remove: (p: string) => void = removeEntry) {
+  constructor(root: string, say: (line: string) => void, exec: ExecSync = execSync, account: string | undefined = currentAccount(), hash: (p: string) => string = fileHash, remove: (p: string) => void = removeEntry, execAsync?: ExecAsync) {
     this.root = root;
     this.say = say;
     this.exec = exec;
     this.account = account;
     this.hash = hash;
     this.remove = remove;
+    // A test's own exec answers makeAsync's steps too, so both runs see the same programs.
+    this.execAsync = execAsync ?? (exec === execSync ? execOffThread : async (cmd, args) => exec(cmd, args));
+  }
+
+  /** Runs a step body with `exec`, each program in turn: a throw from it is thrown into the body, where a call was. */
+  private drive<T>(g: Generator<Step, T, Ran>): T {
+    let n = g.next();
+    while (!n.done) {
+      let r: Ran;
+      try {
+        r = this.exec(n.value.cmd, n.value.args);
+      } catch (e) {
+        n = g.throw(e);
+        continue;
+      }
+      n = g.next(r);
+    }
+    return n.value;
+  }
+
+  /** drive's twin for makeAsync: each program runs off the event loop (execAsync), the same programs in the same order. */
+  private async driveAsync<T>(g: Generator<Step, T, Ran>): Promise<T> {
+    let n = g.next();
+    while (!n.done) {
+      let r: Ran;
+      try {
+        r = await this.execAsync(n.value.cmd, n.value.args);
+      } catch (e) {
+        n = g.throw(e);
+        continue;
+      }
+      n = g.next(r);
+    }
+    return n.value;
   }
 
   private sourceHash(exe: string): string {
@@ -910,11 +993,26 @@ export class LowCopies {
    * be removed, so the copy goes to the next free name (`<base>-<size>-<mtime>-<n>`) instead of holding the fence.
    */
   make(exe: string): string | undefined {
+    return this.drive(this.makeSteps(exe));
+  }
+
+  /**
+   * w6479: make, with its programs (PowerShell's lock and removals, icacls) run off the daemon's event loop: the same
+   * programs in the same order, so the same copy, label and access list. The daemon's start (lowSetup) makes its copies so.
+   */
+  makeAsync(exe: string): Promise<string | undefined> {
+    return this.driveAsync(this.makeSteps(exe));
+  }
+
+  /** make's body: each program it runs is a step (yield), answered by drive or driveAsync. */
+  private *makeSteps(exe: string): Generator<Step, string | undefined, Ran> {
+    // Copies made by another make while this one waits on a program (makeAsync) are that make's: never pruned by this one.
+    const before = new Set(this.copies.keys());
     try {
       const st = fs.statSync(exe);
       const dir = lowToolsDir(this.root);
       fs.mkdirSync(dir, { recursive: true });
-      this.folderCheck(dir);
+      yield* this.folderCheck(dir);
       this.sweep(dir);
       const base = path.basename(exe, path.extname(exe));
       const stem = `${base}-${st.size}-${Math.floor(st.mtimeMs)}`;
@@ -923,52 +1021,64 @@ export class LowCopies {
       for (const p of names) if (this.copies.get(p)?.source === exe && fs.existsSync(p) && this.sameAs(p, want)) return p;
       // w6321: every taken name is an earlier run's copy or not its source's bytes, so all of them go in one pass (one
       // PowerShell call where Node cannot remove them, removeCopies); one still running is kept and its name skipped.
-      const taken = names.filter((p) => fs.existsSync(p));
+      const taken = names.filter((p) => fs.existsSync(p) && !this.busy.has(p));
       for (const p of taken) {
         if (!this.sameAs(p, want)) this.say(`worker integrity: WARNING: the Low copy ${p} is not ${exe} (its bytes differ, or it cannot be read); made again (w5838)`);
         else this.say(`worker integrity: ${p} was made by an earlier daemon run; made again, never taken over (w5838)`);
       }
-      const kept = this.removeCopies(taken);
+      const kept = yield* this.removeCopies(taken);
       for (const [p, why] of kept) {
         this.keptSaid.add(p);
         this.say(`worker integrity: could not remove ${p} (${why}); its name is skipped (w6321)`);
       }
-      const copy = names.find((p) => !fs.existsSync(p));
+      const copy = names.find((p) => !fs.existsSync(p) && !this.busy.has(p));
       if (!copy) {
         // w6085 (item 1 of the w5838 reviews): every name is held by a copy still running from an earlier daemon run.
         // Said loudly: at the daemon's start this turns the Low fence off and holds sandbox runs until the next start;
         // before a run (check) that run is held and the next one tries again. A name frees as its program exits.
-        const held = names.filter((p) => fs.existsSync(p)).map((p) => path.basename(p));
+        const held = names.filter((p) => fs.existsSync(p) || this.busy.has(p)).map((p) => path.basename(p));
         this.say(`worker integrity: WARNING: no free name for the Low copy of ${exe} in ${dir}: all ${COPY_SLOTS} names are taken by copies still running from earlier daemon runs (${held.join(', ')}); a name frees as its program exits, and nothing of it is run until then (w6085)`);
       }
       if (!copy) throw new Error(`no free name for it in ${dir}: ${COPY_SLOTS} copies of it could not be removed; the last said: ${[...kept.values()].pop() ?? 'nothing'} (w6321)`);
+      this.busy.add(copy);
+      try {
+        return yield* this.place(exe, copy, want, dir, before);
+      } finally {
+        this.busy.delete(copy);
+      }
+    } catch (e) {
+      this.say(`worker integrity: WARNING: could not make a Low copy of ${exe}: ${(e as Error).message}`);
+      return undefined;
+    }
+  }
+
+  /** makeSteps' copy, lock and check of `exe` at the free name `copy` (held in busy meanwhile); throws why it could not. */
+  private *place(exe: string, copy: string, want: string, dir: string, before: Set<string>): Generator<Step, string, Ran> {
+    {
       const part = `${copy}.part`;
       fs.rmSync(part, { force: true });
       fs.copyFileSync(exe, part);
       // w5904: the access list and the Low label in one call, while the `.part` is still Medium (no label: a Low worker
       // cannot open it for writing), and only then its name. icacls' two calls are the fallback, with a WARNING.
-      const ps = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(lockCopyScript(part), 'utf16le').toString('base64')]);
+      const ps = yield powershell(lockCopyScript(part));
       const locked = ps.code === 0 && /^ok$/m.test(ps.stdout);
       if (!locked) this.say(`worker integrity: WARNING: could not lock the Low copy ${copy} in one call (${(ps.stderr || ps.stdout).trim().slice(-200) || 'no answer'}); labelled and made read-only in two, so a Low worker may write it in between (w5904)`);
       fs.renameSync(part, copy);
       let g: Ran | undefined;
       if (!locked) {
-        const r = this.exec('icacls', [copy, '/setintegritylevel', 'low']);
+        const r = yield { cmd: 'icacls', args: [copy, '/setintegritylevel', 'low'] };
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
-        g = this.account ? this.exec('icacls', [copy, ...readOnlyGrants(this.account)]) : undefined;
+        g = this.account ? (yield { cmd: 'icacls', args: [copy, ...readOnlyGrants(this.account)] }) : undefined;
       }
-      const now = this.exec('icacls', [copy]);
+      const now = yield { cmd: 'icacls', args: [copy] };
       if (now.code !== 0 || !isExplicitLow(now.stdout)) throw new Error(`it is not labelled Low (${(now.stderr || now.stdout).trim().slice(-200)})`);
       const readOnly = (locked || g?.code === 0) && isReadOnlyCopy(now.stdout);
       if (!readOnly) this.say(`worker integrity: WARNING: could not make the Low copy ${copy} read-only (${g ? (g.stderr || g.stdout).trim().slice(-200) || 'its access list still lets someone write it' : locked ? 'its access list still lets someone write it' : 'no account name'}); it is hashed in full before every run, as every copy is (w5838)`);
       // Checked once it is labelled and read-only, so nothing written before that is run.
       if (this.hash(copy) !== want) throw new Error(`its bytes differ from ${exe} after copying`);
       this.copies.set(copy, { source: exe, readOnly });
-      this.prune(dir, copy);
+      yield* this.prune(dir, copy, before);
       return copy;
-    } catch (e) {
-      this.say(`worker integrity: WARNING: could not make a Low copy of ${exe}: ${(e as Error).message}`);
-      return undefined;
     }
   }
 
@@ -978,11 +1088,12 @@ export class LowCopies {
    * on LothDesktop: Node's rmSync and .NET's File.Delete both, EPERM / access denied), so one still running stays and is
    * tried again after the next copy is made; it is said once per daemon run, not at every make.
    */
-  private prune(dir: string, keep: string): void {
+  private *prune(dir: string, keep: string, before: Set<string>): Generator<Step, void, Ran> {
     // This run's copies of other programs stay (each still its program's copy); its own older one of `keep`'s program goes.
-    const current = new Set([...this.copies].filter(([p, c]) => p !== keep && c.source !== this.copies.get(keep)?.source).map(([p]) => p));
-    const old = fs.readdirSync(dir).filter((n) => LOW_COPY_NAME.test(n)).map((n) => path.join(dir, n)).filter((p) => p !== keep && !current.has(p));
-    for (const [p, why] of this.removeCopies(old)) {
+    // w6479: so do the copies another make made or is making while this one waited (not in `before`, or busy).
+    const current = new Set([...this.copies].filter(([p, c]) => p !== keep && (c.source !== this.copies.get(keep)?.source || !before.has(p))).map(([p]) => p));
+    const old = fs.readdirSync(dir).filter((n) => LOW_COPY_NAME.test(n)).map((n) => path.join(dir, n)).filter((p) => p !== keep && !current.has(p) && !this.busy.has(p));
+    for (const [p, why] of yield* this.removeCopies(old)) {
       if (this.keptSaid.has(p)) continue;
       this.keptSaid.add(p);
       this.say(`worker integrity: kept the old Low copy ${p} (${why}); tried again after the next copy is made (w6321)`);
@@ -996,7 +1107,7 @@ export class LowCopies {
    * (DeleteFileW) asks for DELETE alone, which the folder's delete-child right gives, so those go in one PowerShell call.
    * A copy a live process runs is refused by Windows either way (measured), so it is never removed.
    */
-  private removeCopies(paths: readonly string[]): Map<string, string> {
+  private *removeCopies(paths: readonly string[]): Generator<Step, Map<string, string>, Ran> {
     const kept = new Map<string, string>();
     const retry: { p: string; why: string }[] = [];
     for (const p of paths) {
@@ -1024,7 +1135,7 @@ export class LowCopies {
     for (const batch of deleteBatches(retry.map((x) => x.p))) {
       let r: Ran;
       try {
-        r = this.exec('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(deleteFilesScript(batch), 'utf16le').toString('base64')]);
+        r = yield powershell(deleteFilesScript(batch));
       } catch (e) {
         r = { code: null, stdout: '', stderr: (e as Error).message };
       }
@@ -1049,8 +1160,8 @@ export class LowCopies {
    * w5838 re-review (w5877): whether `tools/low` really is Medium. If labelLow could not keep it so, a Low worker can plant
    * a DLL beside the copies at any time, so the folder is swept before every run too, with a WARNING once.
    */
-  private folderCheck(dir: string): void {
-    const r = this.exec('icacls', [dir]);
+  private *folderCheck(dir: string): Generator<Step, void, Ran> {
+    const r = yield { cmd: 'icacls', args: [dir] };
     const open = r.code !== 0 || isLabelledLow(r.stdout);
     if (open && !this.folderOpen) this.say(`worker integrity: WARNING: ${dir} is not labelled Medium, so Low workers may write it; it is swept before every run of a copy (w5838)`);
     this.folderOpen = open;
@@ -1073,6 +1184,8 @@ export class LowCopies {
     for (const n of fs.readdirSync(dir)) {
       if (LOW_COPY_NAME.test(n)) continue;
       const p = path.join(dir, n);
+      // w6479: a make still in flight's `.part` (makeAsync) is its copy being made, not a stray.
+      if (n.endsWith('.part') && this.busy.has(p.slice(0, -'.part'.length))) continue;
       try {
         removeEntry(p);
         this.say(`worker integrity: WARNING: removed ${p}: it is not a copy the daemon made (planted while the folder was Low?) (w5838)`);

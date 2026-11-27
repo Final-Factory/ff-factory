@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
@@ -17,9 +16,10 @@ import { Daemon, type Probes } from '../machine/daemon.ts';
 import { fetchAttachment, fetchAttachments } from '../machine/attachments.ts';
 import type { Config } from './config.ts';
 import type { AttachmentRef, DeliveredAttachment, ImageInput, MachineSandbox, PermissionMode, Requester, SessionInfo } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 // Daemons started here keep their Unity slots mailbox in a folder of their own, not the real one in the home folder.
-process.env.FF_UNITY_SLOTS = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
+process.env.FF_UNITY_SLOTS = tmpDir('ff-slots-');
 
 /**
  * Attachments on a machine (docs/attachments.md): the daemon fetches each file from the portal over HTTP with its
@@ -78,8 +78,7 @@ async function filePortal(t: { after: (fn: () => void) => void }, data: Buffer, 
 }
 
 const tmp = (t: { after: (fn: () => void) => void }) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-matt-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const dir = tmpDir('ffsb-matt-', t);
   return dir;
 };
 

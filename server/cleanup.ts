@@ -156,10 +156,52 @@ export interface CleanupRun {
 // Windows paths ("C:/x", "\\\\server\\x") are judged as Windows paths and "/x" as POSIX paths on any OS (CI runs
 // on Linux and Windows).
 const P = (p: string) => (/^[a-zA-Z]:[\\/]|^\\\\/.test(p) ? path.win32 : p.startsWith('/') ? path.posix : path);
+const normOf = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+/**
+ * norm's answers for the paths P judges as Windows or POSIX paths (absolute ones, which no working folder changes). w6486:
+ * BEAST's daemon spent 13 s of one block in norm and within, called pairwise by planInstallLeftovers. Emptied when it
+ * grows past NORM_CACHE_MAX.
+ */
+const ABSOLUTE = /^[a-zA-Z]:[\\/]|^\\\\|^\//;
+const normCache = new Map<string, string>();
+const NORM_CACHE_MAX = 50_000;
 /** A path as compared: resolved, forward slashes, no trailing slash, lower case. */
-export const norm = (p: string) => P(p).resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+export const norm = (p: string) => {
+  if (!ABSOLUTE.test(p)) return normOf(p);
+  let n = normCache.get(p);
+  if (n === undefined) {
+    if (normCache.size >= NORM_CACHE_MAX) normCache.clear();
+    normCache.set(p, (n = normOf(p)));
+  }
+  return n;
+};
 /** Whether `p` is `root` or inside it. */
-export const within = (p: string, root: string) => norm(p) === norm(root) || norm(p).startsWith(norm(root) + '/');
+export const within = (p: string, root: string) => {
+  const n = norm(p);
+  const r = norm(root);
+  return n === r || n.startsWith(r + '/');
+};
+
+/**
+ * Drops each key that is within another key still there, in the map's order: the keys
+ * `for (const p of [...m.keys()]) if ([...m.keys()].some((q) => q !== p && within(p, q))) m.delete(p)` drops (of two keys
+ * that name one path, the first), without comparing every pair (w6486).
+ */
+export function dropNested<T>(m: Map<string, T>): void {
+  const keys = [...m.keys()];
+  const normed = keys.map((k) => norm(k));
+  const alive = new Map<string, number>();
+  for (const n of normed) alive.set(n, (alive.get(n) ?? 0) + 1);
+  keys.forEach((k, i) => {
+    const n = normed[i];
+    let inside = alive.get(n)! > 1;
+    // within(p, q) for another q: q's form is p's cut at one of p's '/' (the empty form, a POSIX root's, included)
+    for (let at = n.indexOf('/'); !inside && at !== -1; at = n.indexOf('/', at + 1)) inside = (alive.get(n.slice(0, at)) ?? 0) > 0;
+    if (!inside) return;
+    m.delete(k);
+    alive.set(n, alive.get(n)! - 1);
+  });
+}
 const glob = (pattern: string) => new RegExp(`^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`, 'i');
 
 /** Folder names that mark what is never removed, wherever they are. */

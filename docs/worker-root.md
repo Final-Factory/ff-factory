@@ -1591,7 +1591,22 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     junction to the daemon's folder in its place. Each path inside them is read for a link just before icacls labels it,
     and one that is a link is left alone with a WARNING (not a failure, which would turn the fence off). One that cannot
     turn Medium first leaves its children as they are that pass. Under off a folder on the way stays Medium while a locked
-    folder inside it could not be labelled Low, so the next pass walks that one under a Medium parent.
+    folder inside it could not be labelled Low, so the next pass walks that one under a Medium parent. A name ending in a
+    dot or a space (review w6380, w6437: fsLink.ts `isTrickName`) is never handed to icacls: Windows opens `cache\evil.` as
+    `cache\evil`, perhaps a junction beside it, while Node lists `evil.` as a plain folder and every link check passes.
+    labelLow skips any path holding such a name with `worker integrity: WARNING: "<path>" has a name ending in a dot or a
+    space, skipped` (not a failure, as for a link); the walk (transcriptLabels.ts `labelTree`) skips such an entry, never
+    labels its folder with `<dir>\*` (which would open it too), and refuses such a root; the transcript lock skips such
+    project folders and entries with one WARNING. The skipped folder keeps what it inherits; only a `\\?\` path reaches it.
+    A Windows device name counts as one too (review w6452 M1: NUL, CON, PRN, AUX, COM0-9, LPT0-9, COM and LPT with a
+    superscript 1-3, CONIN$, CONOUT$, any case, with or without an extension): icacls on `<dir>\NUL`, or `<dir>\*` with a
+    NUL in it, fails with exit 87, which failed the whole pass under on and off alike, so a worker could hold every worker
+    with one file; skipped, the way back to off still recovers (tested with a fake icacls that fails as the real one).
+    Every walk that skips one says it: the spawner's, a pin taken back to Medium, the lock and the unlock (review w6452 L3).
+    lockIn (machine/lockIn.ts `firstUnplain`) counts such a name in a moved-in entry as bad: labelTree would skip it, so it
+    would keep the worker's own Low label; the entry is removed and said (review w6452 M2). `rd /s /q` answers 0 and leaves
+    `x.`, `y ` and NUL in place with all that is in them (measured on LothDesktop), so lockIn removes again by the entry's
+    `\\?\` path, which removes them too, and a junction in them without its target (measured).
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
     made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
@@ -1600,7 +1615,9 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     on the link's target). The folder is listed through an `O_DIRECTORY|O_NOFOLLOW` descriptor, and that descriptor and
     each child's must have landed at the path asked for (`/proc/self/fd`), so a folder above swapped for a symlink in
     between opens nothing (review w6374). The path asked for is the worker root's real path plus the rest, so a root that
-    sits under a symlinked folder (a symlinked home) still opens its children (review w6377).
+    sits under a symlinked folder (a symlinked home) still opens its children (review w6377). `/tmp/.dotnet` is granted
+    with `--rw-nofollow` (w6437): /tmp is everyone's, so a process outside the fence may make it a symlink first, and a
+    plain `--rw` follows one. Trailing dots and spaces are plain names on Linux and macOS (no equivalent trick).
   - **macOS** (server/workerFence.ts `fenceFor` `sharedLocked`): a `(deny file-write* (subpath ...))` per locked path in
     the read-only block, after the root's allow (later Seatbelt rules win), and a `(deny file-write* (literal ...))` on
     each folder on the way (`cache`, `cache/nuget`, `tools`; `sharedLockParents`), so a rename or removal of one is

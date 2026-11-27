@@ -1,15 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { LOG_RETENTION, listArchives, logStamp, maintainLogs, maintenanceLine } from '../machine/logRetention.ts';
+import { tmpDir } from './testTmp.ts';
 
 // w2038: two daemon restarts on beast (08:30Z, 11:10Z) erased its 08:15-08:30Z log; one daemon.log.prev was all it kept.
 
-const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'fflogs-'));
 const MB = 1024 * 1024;
 const at = (iso: string) => new Date(iso);
 
@@ -26,7 +25,7 @@ test('logs: the stamp is the supervisor\'s yyyyMMdd\'T\'HHmmssfff\'Z\' in UTC', 
 });
 
 test('logs: thirty Windows restarts keep every run, gzip all but the newest, and the text survives', () => {
-  const dir = tmpDir();
+  const dir = tmpDir('fflogs-');
   let t = Date.parse('2026-10-24T00:00:00Z');
   for (let i = 0; i < 30; i++) {
     supervisorRotate(dir, new Date(t));
@@ -43,7 +42,7 @@ test('logs: thirty Windows restarts keep every run, gzip all but the newest, and
 });
 
 test('logs: a .prev an older supervisor left is adopted under its mtime, so the next restart overwrites nothing', () => {
-  const dir = tmpDir();
+  const dir = tmpDir('fflogs-');
   const prev = path.join(dir, 'daemon.log.prev');
   fs.writeFileSync(prev, 'old run\n');
   const mtime = at('2026-10-24T08:30:49Z');
@@ -59,7 +58,7 @@ test('logs: a .prev an older supervisor left is adopted under its mtime, so the 
 });
 
 test('logs: the total cap prunes the oldest first, live files counted', () => {
-  const dir = tmpDir();
+  const dir = tmpDir('fflogs-');
   const retention = { maxTotalBytes: 10 * MB, rollBytes: 100 * MB };
   // Random bytes do not compress, so each archive keeps its 1 MB after gzip.
   for (let i = 0; i < 12; i++) fs.writeFileSync(path.join(dir, `daemon.log.${logStamp(new Date(Date.UTC(2026, 9, 24, i)))}`), randomBytes(MB));
@@ -74,7 +73,7 @@ test('logs: the total cap prunes the oldest first, live files counted', () => {
 });
 
 test('logs: archives past keepDays go only beyond the newest keepAtLeast', () => {
-  const dir = tmpDir();
+  const dir = tmpDir('fflogs-');
   const day = 86_400_000;
   const now = Date.parse('2026-10-24T12:00:00Z');
   for (let i = 0; i < 30; i++) fs.writeFileSync(path.join(dir, `daemon.log.${logStamp(new Date(now - (30 - i) * day))}`), 'x');
@@ -87,7 +86,7 @@ test('logs: archives past keepDays go only beyond the newest keepAtLeast', () =>
 
 test('logs: on macOS and Linux a big appended daemon.log is copied out and truncated; on Windows it is left to the supervisor', () => {
   for (const platform of ['linux', 'darwin', 'win32'] as const) {
-    const dir = tmpDir();
+    const dir = tmpDir('fflogs-');
     const live = path.join(dir, 'daemon.log');
     fs.writeFileSync(live, 'a'.repeat(2048));
     fs.writeFileSync(path.join(dir, 'supervisor.log'), 'b'.repeat(2048));
@@ -105,7 +104,7 @@ test('logs: on macOS and Linux a big appended daemon.log is copied out and trunc
 });
 
 test('logs: only log names in the folder are touched, and a missing folder is no error', () => {
-  const dir = tmpDir();
+  const dir = tmpDir('fflogs-');
   fs.writeFileSync(path.join(dir, 'notes.txt'), 'keep');
   fs.writeFileSync(path.join(dir, 'daemon.json'), '{}');
   const m = maintainLogs(dir, { platform: 'win32', retention: { maxTotalBytes: 0 } });

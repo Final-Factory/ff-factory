@@ -1,19 +1,27 @@
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { TestHistory, readyQuery, type TestCase } from './testHistory.ts';
 import { CROWN_JEWEL, GateTuningJob, OUT_RULE, findMisses, findProposals, gateTuningSettings, latestGateTuning, type PrHead } from './gateTuning.ts';
 import { identityKeys, workerRules } from './intakeRules.ts';
 import type { Config } from './config.ts';
+import { tmpDir } from './testTmp.ts';
 
 // The daily merge-gate tuning (w4928, docs/gate-tuning.md): the gate's misses, the move-out proposals, the daily row.
 
 const DAY = 86_400_000;
 const T0 = Date.parse('2026-11-20T12:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'gate-tuning-'));
+const tmp = () => tmpDir('gate-tuning-');
+// w6476: an open database holds its folder on Windows; each is closed when the file's tests are done, before the folder goes.
+const opened: TestHistory[] = [];
+const history = (now: number) => {
+  const h = new TestHistory({ dataDir: tmp(), now: () => now });
+  opened.push(h);
+  return h;
+};
+after(() => {
+  for (const h of opened) h.close();
+});
 const tc = (name: string, outcome: TestCase['outcome'], ms = 100): TestCase => ({ name, outcome, ms });
 const cfg = (extra: Partial<Config> = {}) => ({ dataDir: tmp(), ...extra }) as Config;
 const heads: PrHead = async (_repo, pr) => ({ ref: `sandbox/pr${pr}`, sha: `head${pr}` });
@@ -26,7 +34,7 @@ function missOn(h: TestHistory, pr: number, gateRan: string[], broken: string, a
 }
 
 test("findMisses tells a test the culprit's gate never ran from one it ran and passed", async () => {
-  const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
+  const h = history(T0);
   missOn(h, 11, ['Tests.A.Other.x'], 'Tests.A.Leech.bites', T0 - 2 * DAY);
   missOn(h, 12, ['Tests.A.Belt.moves'], 'Tests.A.Belt.moves', T0 - DAY);
   const { runId } = h.addRun({ source: 'master-batch', key: 'mb13', sha: 'tip13', branch: 'master', finished: iso(T0) }, [tc('Tests.A.Gone.y', 'fail')]);
@@ -41,7 +49,7 @@ test("findMisses tells a test the culprit's gate never ran from one it ran and p
 });
 
 test('the first run records the baseline and files nothing from it; a later miss is filed once, in one request', async () => {
-  const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
+  const h = history(T0);
   missOn(h, 21, [], 'Tests.A.Old.t', T0 - 5 * DAY);
   const filings: { title: string; source: unknown; approved: boolean }[] = [];
   const store = { work: new Map() } as never;
@@ -74,7 +82,7 @@ test('the first run records the baseline and files nothing from it; a later miss
 });
 
 test('a filing that cannot be made is kept pending and tried again', async () => {
-  const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
+  const h = history(T0);
   h.setMeta('gate_tuning_baseline', '0');
   missOn(h, 31, [], 'Tests.A.New.t', T0 - DAY);
   const job = new GateTuningJob({ cfg: cfg(), history: h, prHead: heads, now: () => T0 });
@@ -86,7 +94,7 @@ test('a filing that cannot be made is kept pending and tried again', async () =>
 
 test('findProposals: only an always-run class with enough runs, days, no gate failure, no detect and no Performance tag', async () => {
   const now = T0;
-  const h = new TestHistory({ dataDir: tmp(), now: () => now });
+  const h = history(now);
   const runs = 320;
   for (let i = 0; i < runs; i++) {
     const at = now - 20 * DAY + Math.floor((i * 19 * DAY) / runs);
@@ -108,7 +116,7 @@ test('findProposals: only an always-run class with enough runs, days, no gate fa
   assert.equal(quiet.crownJewel, false);
   assert.equal(out.proposals[1]!.crownJewel, true);
   assert.ok(CROWN_JEWEL.test('Tests.Multiplayer.PerFrameSystemCensusTest'));
-  assert.equal((await findProposals(new TestHistory({ dataDir: tmp(), now: () => now }), now)).proposals.length, 0);
+  assert.equal((await findProposals(history(now), now)).proposals.length, 0);
   // w6370: read apart (a worker on its own read-only connection) it answers what the portal's own connection answers.
   const onMain = (sql: string, ...args: (string | number | null)[]) => Promise.resolve(h.all(sql, ...args));
   assert.deepEqual(out, await findProposals(h, now, onMain));
@@ -118,7 +126,7 @@ test('findProposals: only an always-run class with enough runs, days, no gate fa
 // w6370: the daily tuning's queries ran on the portal's own connection and held its loop 22.9 s (2026-11-27 09:17Z). Run
 // apart, a whole tuning over the same history gives the same result, and the loop keeps turning while its queries run.
 test('w6370: a gate-tuning run reads the history apart from the loop and gives the same result as on the main connection', async () => {
-  const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
+  const h = history(T0);
   h.setMeta('gate_tuning_baseline', '0');
   for (let i = 0; i < 320; i++) h.addRun({ source: 'pr-gate', key: `g${i}`, repo: 'o/r', branch: `b${i}`, sha: `s${i}`, finished: iso(T0 - 20 * DAY + i * 3600_000) }, [tc('Tests.G.Quiet.a', 'pass', 2000), tc('Tests.G.Other.a', 'pass')]);
   missOn(h, 41, ['Tests.A.Other.x'], 'Tests.A.Leech.bites', T0 - 2 * DAY);
@@ -141,7 +149,7 @@ test('w6370: a gate-tuning run reads the history apart from the loop and gives t
 });
 
 test('the gate_tuning query answers the newest summary and its proposals; the request has its own key and rules', async () => {
-  const h = new TestHistory({ dataDir: tmp(), now: () => T0 });
+  const h = history(T0);
   assert.match((await readyQuery(h, { query: 'gate_tuning' }, T0)).title, /no run yet/);
   await new GateTuningJob({ cfg: cfg(), history: h, prHead: heads, now: () => T0 }).run();
   const q = await readyQuery(h, { query: 'gate_tuning' }, T0);

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { hasLocalWork, localWorkWhy, neverDelete, unpushedWorkWhy, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
+import { dropNested, hasLocalWork, localWorkWhy, neverDelete, unpushedWorkWhy, norm, sessionRelaxed, sizeOf, touchedSince, touchedWhy, within, type CleanupGuard, type CleanupItem } from './cleanup.ts';
 import { CONTEXT_MAX_AGE_HOURS, requestIdsIn, type StaleContext, type StalePlan } from './staleOutput.ts';
 import { mentions, real } from './ownLeftovers.ts';
 import { procPlaces, type ProcPlace } from './procPlaces.ts';
@@ -1663,7 +1663,7 @@ export async function planInstallLeftovers(o: {
 
   if (o.scope === 'ffu-slots') {
     await ffuSlotTargets();
-    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+    dropNested(items);
     plan.items = [...items.values()];
     return plan;
   }
@@ -1672,7 +1672,7 @@ export async function planInstallLeftovers(o: {
   // kept (plan.held) so the re-check knows a slot is still busy.
   if (o.scope === 'ffu-busy-retry') {
     await ffuSlotTargets();
-    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+    dropNested(items);
     plan.items = [...items.values()];
     const kept = held.filter((h) => !plan.items.some((i) => within(h.path, i.path)));
     if (kept.length) plan.held = kept;
@@ -1691,7 +1691,7 @@ export async function planInstallLeftovers(o: {
       }
     }
     await ffuSlotTargets();
-    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+    dropNested(items);
     plan.items = [...items.values()];
     for (const l of [...listed.keys()]) if (plan.items.some((i) => within(l, i.path))) listed.delete(l);
     if (listed.size) plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
@@ -1902,7 +1902,7 @@ export async function planInstallLeftovers(o: {
 
   for (const p of items.keys()) for (const l of [...listed.keys()]) if (within(l, p)) listed.delete(l);
   // An old build inside a folder that goes whole goes with it.
-  for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+  dropNested(items);
   plan.items = [...items.values()];
   plan.listed = [...listed].map(([p, why]) => ({ path: p, why }));
   // A folder that goes whole (its session stopped long enough) is not also said to be kept.

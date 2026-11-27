@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import {
@@ -39,6 +38,7 @@ import { fleetOf, unitySlotsLine } from '../shared/fleet.ts';
 import { machineLoadLine } from './system.ts';
 import { capacityLines, type Computer } from './placement.ts';
 import type { Machine, MachineStats, UnitySlotsReport } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * Unity slots (w469, docs/unity-lifecycle.md "Unity slots"): every top-level Unity process counts toward a machine's
@@ -269,8 +269,7 @@ test('unity slots: over the limit by processes started outside the gate, or RAM 
 // ---------------------------------------------------------------- the mailbox, the arbiter and the client, on disk
 
 function arbiter(t: { after: (fn: () => void) => void }, over: Partial<ArbiterDeps> & { procs?: () => Promise<Proc[]> } = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const dir = tmpDir('ff-slots-', t);
   const events: string[] = [];
   const dead = new Set<number>();
   const slots = new UnitySlots({
@@ -394,8 +393,7 @@ test('unity slots: a refused request ends the client with the reason; no arbiter
   p.catch(() => undefined); // refused before assert.rejects looks
   await assert.rejects(p, (e: Error) => e instanceof SlotRefused && /refused: needs 3 Unity editors at once; this machine allows 2/.test(e.message));
   assert.equal(fs.readdirSync(dir).filter((f) => /^(req|grant|deny)-/.test(f)).length, 0, 'the client removed its files');
-  const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-noarb-'));
-  t.after(() => fs.rmSync(empty, { recursive: true, force: true }));
+  const empty = tmpDir('ff-noarb-', t);
   const said: string[] = [];
   const h = await acquire(client(empty, process.pid, said), { count: 1, label: 'x' });
   assert.match(h.ungated!, /no slot arbiter on this machine/);
@@ -488,8 +486,7 @@ test('unity slots: CLI arguments, the shims and the mailbox folder', () => {
 });
 
 test('unity slots: a worker-root install\'s mailbox is found through its pointer by scripts outside the daemon', (t) => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slothome-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const home = tmpDir('ff-slothome-', t);
   const rootSlots = path.join(home, 'ff-worker', 'daemon', 'unity-slots');
   fs.mkdirSync(path.dirname(slotsPointer(home)), { recursive: true });
   fs.writeFileSync(slotsPointer(home), JSON.stringify({ dir: rootSlots }));
@@ -546,8 +543,7 @@ test('unity slots: a second arbiter answering the same mailbox is reported once 
 });
 
 test("w1918: of two daemons of one machine on one mailbox, the older ends for the newer (LothLaptop had three); another machine's or one that does not say when it started is only reported", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+  const dir = tmpDir('ff-slots-', t);
   const yielded: string[] = [];
   const events: string[] = [];
   const mk = (name: string, machine: string, startedAt?: number) =>
@@ -597,7 +593,7 @@ test('w1874: a run records its session in the mailbox, read back by runsIn', asy
 });
 
 test('w1874: a run whose caller is killed ends its command (the biscuit wrapper that outlived its worker\'s shell; real processes)', { timeout: 60_000, skip: process.platform === 'win32' ? 'Windows ends the tree with the task' : false }, async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-orphan-'));
+  const dir = tmpDir('ff-orphan-');
   const script = path.join(import.meta.dirname, '..', 'machine', 'unitySlots.ts');
   const jobPid = path.join(dir, 'job.pid');
   const callerPid = path.join(dir, 'caller.pid');
@@ -725,8 +721,7 @@ test('w4775: a sandbox run whose Unity lost its parent chain is counted once, no
 
 test('w6414: a grant hook that throws or would refuse changes nothing: the grant is written, and a deny in the same tick too', async (t) => {
   for (const hook of ['throws', 'would refuse'] as const) {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-slots-hook-'));
-    t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 }));
+    const dir = tmpDir('ff-slots-hook-', t);
     const logs: string[] = [];
     const hooked: string[] = [];
     const slots = new UnitySlots({

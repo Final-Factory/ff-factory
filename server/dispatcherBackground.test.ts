@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { Store } from './store.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
@@ -42,7 +42,7 @@ async function until(what: string, cond: () => boolean, ms = 30_000) {
 type UserEv = Extract<TranscriptEvent, { kind: 'user' }>;
 
 async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-dispbg-'));
+  const dir = tmpDir('ffsb-dispbg-');
   const cfg = {
     dataDir: dir,
     sandboxRoot: dir,
@@ -78,7 +78,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    removeTmp(dir);
   });
   const call = async (info: SessionInfo, name: string, args: Record<string, unknown>) => {
     const tool = agents.orchestratorBelt(info).find((x) => x.name === name);

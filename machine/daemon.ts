@@ -14,12 +14,12 @@ import WebSocket from 'ws';
 import { AgentSession, isMidTurn, midTurnRefusal, othersMidTurn, type OptionsFactory, type SessionHandle, type SessionSink } from '../server/sessions.ts';
 import { bus, type DistributiveOmit } from '../server/store.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, type WorkerFence } from '../server/workerFence.ts';
-import { probeFence } from './fenceProbe.ts';
+import { probeFence, probeFenceAsync } from './fenceProbe.ts';
 import { integrityArgv, measureAgentIntegrity } from './agentIntegrity.ts';
 import { bareEnv, maxProbeArgv, probeMaxEvents } from './maxEventsFence.ts';
 import { FenceGate, fenceKindFor, fenceWanted } from './fenceGate.ts';
 import { installShellGroups, readShellGroups, shellGroupEnv, shellGroupsDir } from './shellGroups.ts';
-import { liveSessionIds, lockTranscripts, probeTranscriptLock, unlockTranscripts } from '../server/transcriptLabels.ts';
+import { liveSessionIds, lockTranscripts, probeTranscriptLockAsync, unlockTranscripts } from '../server/transcriptLabels.ts';
 import { deleteGenericCreds, ghConfigDirFor, isLabelledMedium, labelLow, labelNoReadUp, unlabelNoReadUp, noReadUpTargets, onSystemDrive, openNoReadUp, relabelInside, NO_READ_UP, type Exec, LowCopies, lowCopiesWanted, ownerGameDataLock, lowDiskImages, toolsDiskPlan, type ToolsDiskLockMode, pickEnv, PROBE_ENV_KEYS, removeEntry, toolsShimsDir, windowsShims, windowsShimsDir, dropOldToolsShims, lowToolsDir, quarantineStrayShims, lowEnv, lowRunners, lowTargets, lowUnityDir, lowUnityJunctions, strayLowServers } from './lowIntegrity.ts';
 import { compilerServersAsync } from './compilerServer.ts';
 import { agentGitBash, agentGitPathDir } from '../server/agentGit.ts';
@@ -793,6 +793,21 @@ export class Daemon {
   private lowMake(exe: string): string | undefined {
     const copies = this.lowCopiesNow();
     return copies && this.cfg.root ? this.asLowWrite([lowToolsDir(this.cfg.root)], () => copies.make(exe)) : undefined;
+  }
+  /**
+   * w6479: lowMake with the copy's programs (PowerShell, icacls) run off the event loop (LowCopies.makeAsync), its write to
+   * tools/low held until it is done. The daemon's start (lowSetup) makes its copies so: one held the loop 7.8 s of a 14.9 s
+   * block on LothDesktop (2026-11-27 18:10 UTC).
+   */
+  private async lowMakeAsync(exe: string): Promise<string | undefined> {
+    const copies = this.lowCopiesNow();
+    if (!copies || !this.cfg.root) return undefined;
+    const end = this.sharedWrites.begin([lowToolsDir(this.cfg.root)]);
+    try {
+      return await copies.makeAsync(exe);
+    } finally {
+      end?.();
+    }
   }
   private lowCheck(copy: string): string | undefined {
     const copies = this.lowCopiesNow();
@@ -2700,8 +2715,11 @@ export class Daemon {
    * and one file sent by hash over an upload the portal opened. Read-only; answered even with no fixtures folder (a refusal).
    */
   private async labFixture(msg: Extract<ToDaemon, { type: 'lab_fixture' | 'lab_fixture_upload' }>) {
-    const dir = offeredDir(this.cfg.root);
     try {
+      // w6486: looked at off the event loop (BEAST: 55.8 s in the synchronous realpath). A look that fails is refused
+      // to the portal like the other errors here, where the synchronous one threw out of onMessage and answered nothing.
+      const dir = await offeredDir(this.cfg.root);
+      this.labFixturesOffered = !!dir;
       if (!dir) throw new Error('this computer holds no lab fixtures (no <worker root>/nightly-history/fixtures off drive C:)');
       if (msg.type === 'lab_fixture') {
         const files = msg.op === 'find' ? await findFixtures(dir, String(msg.sha256 ?? '')) : await listFixtures(dir);
@@ -2734,10 +2752,46 @@ export class Daemon {
 
   /** The OS and claude version probes of the last hello (w970): a reconnect within an hour reuses them. */
   private helloProbes?: { at: number; osv: { code: number; stdout: string }; claude: { code: number; stdout: string } };
+  /** Whether this computer offers the lab's fixtures, as last looked (w6486: offeredDir runs off the event loop). */
+  private labFixturesOffered?: boolean;
+  private labFixturesLooking?: Promise<boolean>;
+
+  /**
+   * offeredDir for the hello (w6486). The first hello waits for the look, as it waited on the synchronous one before, for
+   * up to LAB_FIXTURES_HELLO_WAIT_MS: a disk that never answers must not hold the hello (lockout rule), and that hello
+   * says no fixtures. A later hello says the last answer at once and looks again behind it. A look that fails offers
+   * nothing (the synchronous one threw out of hello, and no hello was sent).
+   */
+  private async labFixturesLook(): Promise<boolean> {
+    this.labFixturesLooking ??= offeredDir(this.cfg.root)
+      .then(
+        (dir) => (this.labFixturesOffered = !!dir),
+        (e: Error) => {
+          log(`lab fixtures: could not look at the fixtures folder: ${e.message}`);
+          return (this.labFixturesOffered = false);
+        },
+      )
+      .finally(() => (this.labFixturesLooking = undefined));
+    if (this.labFixturesOffered !== undefined) return this.labFixturesOffered;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(() => {
+        log(`lab fixtures: the fixtures folder gave no answer in ${LAB_FIXTURES_HELLO_WAIT_MS / 1000} s; this hello offers none, the next says what it finds`);
+        resolve(false);
+      }, LAB_FIXTURES_HELLO_WAIT_MS);
+    });
+    try {
+      return await Promise.race([this.labFixturesLooking, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   private async hello() {
     // w970: beast's hello came ~20 s after its link (the 15 s `claude --version` probe on a busy Windows machine), and the
     // portal's rollout read the commit as unknown in that window. A reconnect says hello at once with the earlier probes.
+    // w6486: looked at beside the probes, off the event loop
+    const fixtures = this.labFixturesLook();
     let probed = this.helloProbes;
     if (!probed || Date.now() - probed.at > HELLO_PROBE_TTL_MS) {
       const [osv, claude] = await Promise.all([
@@ -2749,6 +2803,7 @@ export class Daemon {
       probed = { at: Date.now(), osv, claude };
     }
     const { osv, claude } = probed!;
+    const labFixtures = await fixtures;
     const selfUpdate = this.selfUpdate.offered();
     this.selfUpdateOffered = selfUpdate;
     this.send({
@@ -2778,7 +2833,7 @@ export class Daemon {
       // w1946: it plays timed runs for workers elsewhere (a worker install), and the ones it holds now.
       ...(this.timed ? { timedRuns: true, timedActive: this.timed.active() } : {}),
       // w3939: it holds the nightly lab's fixtures (<root>/nightly-history/fixtures, never on C:) for the portal to copy.
-      ...(offeredDir(this.cfg.root) ? { labFixtures: true } : {}),
+      ...(labFixtures ? { labFixtures: true } : {}),
       // w5924: it makes, reports and deletes light agent folders (machine/lightFolders.ts).
       lightFolders: true,
       ...(this.cfg.root ? { steamUpload: true, steamInstall: true } : {}),
@@ -3813,6 +3868,14 @@ export class Daemon {
    * variables (PROBE_ENV_KEYS: PATH, the profile and temp folders; never the vault tokens or daemon.json `env`, w5838
    * review) and said as a WARNING.
    */
+  /** w6479: bareProbe with its runs off the event loop (probeFenceAsync), for the daemon's start. */
+  private async bareProbeAsync(argv: string[], what: string): Promise<ReturnType<typeof probeFence>> {
+    const bare = await probeFenceAsync(argv, { timeoutMs: 60_000, env: bareEnv() });
+    if (bare.ok) return bare;
+    const more = await probeFenceAsync(argv, { timeoutMs: 60_000, env: { ...bareEnv(), ...pickEnv(PROBE_ENV_KEYS) } });
+    if (more.ok) log(`worker integrity: WARNING: ${what} did not run with a bare environment (${bare.why}) but did with Windows' own variables; its probe keeps those (w5838)`);
+    return more;
+  }
   private bareProbe(argv: string[], what: string): ReturnType<typeof probeFence> {
     const bare = probeFence(argv, { timeoutMs: 60_000, env: bareEnv() });
     if (bare.ok) return bare;
@@ -4350,11 +4413,11 @@ export class Daemon {
         this.slotCaches.retryNow();
         void this.sharedWrite(() => this.slotCaches?.tick(), this.cacheSeeds());
       }
-      const claude = this.lowMake(sdkClaude);
+      const claude = await this.lowMakeAsync(sdkClaude);
       if (!claude) {
         return this.lowFail('no Low claude copy');
       }
-      const probe = this.bareProbe([claude, '--version'], 'the Low claude');
+      const probe = await this.bareProbeAsync([claude, '--version'], 'the Low claude');
       if (!probe.ok) {
         return this.lowFail(`the Low claude could not run (${probe.why})`);
       }
@@ -4434,8 +4497,8 @@ export class Daemon {
       return false;
     }
     if (!(await lockTranscripts(projects, exec, say, { live: await liveSessionIds(exec), pins }))) return false;
-    const node = this.lowMake(process.execPath);
-    const probe = node ? probeTranscriptLock(node, projects, undefined, bareEnv()) : 'no Low node copy';
+    const node = await this.lowMakeAsync(process.execPath);
+    const probe = node ? await probeTranscriptLockAsync(node, projects, bareEnv()) : 'no Low node copy';
     log(/WRITTEN|failed|no Low/.test(probe) ? `worker integrity: WARNING: transcript lock self-test: ${probe}; Low workers may still write other conversations' transcripts (w5703)` : `transcript labels: self-test at Low: ${probe}`);
     return true;
   }
@@ -4446,9 +4509,9 @@ export class Daemon {
    * run. Its bridge status folder is read by the daemon from now on (addMcpStatusDir).
    */
   private async lowEditorFence(root: string, exec: (cmd: string, args: string[], o?: { timeoutMs?: number }) => Promise<{ code: number | null; stdout: string; stderr: string }>, say: (l: string) => void): Promise<LowEditorFence | undefined> {
-    const launcher = this.lowMake(process.execPath);
+    const launcher = await this.lowMakeAsync(process.execPath);
     if (!launcher) return undefined;
-    const probe = this.bareProbe([launcher, '-e', '0'], 'the Low node launcher');
+    const probe = await this.bareProbeAsync([launcher, '-e', '0'], 'the Low node launcher');
     if (!probe.ok) {
       log(`worker integrity: the Low node launcher could not run (${probe.why}); sandbox editors stay Medium`);
       return undefined;
@@ -4476,7 +4539,7 @@ export class Daemon {
       const where = await exec('where.exe', ['gh'], { timeoutMs: 30_000 });
       const exe = where.code === 0 ? where.stdout.split(/\r?\n/).map((l) => l.trim()).find((l) => /\.exe$/i.test(l)) : undefined;
       if (!exe) return loud("gh is not on the daemon's PATH");
-      const copy = this.lowMake(exe);
+      const copy = await this.lowMakeAsync(exe);
       if (!copy) return loud('no Low copy of gh to test with');
       // w5838: nothing of the daemon's environment but the system's folders and the Low worker's gh login (bareEnv).
       // w5749: test the route a run with no vault token takes (ownerRunWiring): the machine login's token as GH_TOKEN when
@@ -4594,7 +4657,7 @@ export class Daemon {
           mode,
           labels,
           t,
-          lowNode: this.lowMake(process.execPath),
+          lowNode: await this.lowMakeAsync(process.execPath),
           mirrorDir: path.join(appDir, 'read-fence-precheck'),
           skip: this.labelSystemDrive,
           run: exec,
@@ -5242,6 +5305,9 @@ export class Daemon {
    * or the daemon exits (keepAwakeCommand). Both end with the daemon, so a crash cannot leave the machine awake.
    */
   private awake() {
+    // w6476: none in the tests (scripts/testEnv.ts): a daemon there ends within seconds, its holder killed mid-Add-Type, and
+    // csc's files were left in the temp folder.
+    if (process.env.FF_KEEP_AWAKE === 'off') return;
     // Not after shutdown: its agents are detached but still live, and a holder started then was never killed (w3337).
     const live = !this.stopped && this.liveCount() > 0;
     const cmd = live && !this.caffeinate ? keepAwakeCommand(process.platform, process.pid) : undefined;
@@ -5730,6 +5796,8 @@ export function keepAwakeCommand(platform: NodeJS.Platform, pid: number): string
 
 /** How long a hello's OS and claude probes are reused by the next one. */
 const HELLO_PROBE_TTL_MS = 60 * 60_000;
+/** How long the first hello waits for the lab fixtures' folder look (w6486). */
+const LAB_FIXTURES_HELLO_WAIT_MS = 15_000;
 
 function readVersion() {
   try {

@@ -4,17 +4,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { JoinCodes, type JoinLimits, type TailnetDevice } from './machineJoin.ts';
 import { joinPage, machineJoinHttp, windowsInstaller, type MachineJoinDeps } from './machineJoinHttp.ts';
+import { tmpDir } from './testTmp.ts';
 
 const FAKE_CRED = `ffm_coosego_${'FAKE'.repeat(11)}`;
 const CMD = fs.readFileSync(new URL('../scripts/worker/join.cmd', import.meta.url), 'utf8');
 
 async function serve(over: Partial<MachineJoinDeps> = {}, device: TailnetDevice | null = { name: 'desktop-coosego', tags: [] }) {
-  const codes = new JoinCodes(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffjoinhttp-')), 'machine-joins.json'));
+  const codes = new JoinCodes(path.join(tmpDir('ffjoinhttp-'), 'machine-joins.json'));
   const records = new Map<string, { root?: string; awaitingInstall?: string; playOnly?: string }>();
   const enrolled: { machineId: string; tailnetName: string; limits: Required<JoinLimits>; portalUrl: string; by: string; platform?: string }[] = [];
   const reports: string[] = [];

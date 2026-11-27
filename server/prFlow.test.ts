@@ -6,6 +6,7 @@ import path from 'node:path';
 import { atlasWarning, ciVerdict, ghAuthProblem, ghAvailableFields, installPrShim, parseArgs, prMain, type PrDeps, type Ran } from '../machine/prFlow.ts';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { tmpFont } from './tmpFontFixture.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * ff-pr (w1478, machine/prFlow.ts): a worker's push, PR, landed check (w907) and merge on green, one command each. The
@@ -105,11 +106,11 @@ test('push: a merge conflict stops before the push and names the files', () => {
   assert.match(d.said, /conflicts in:\nserver\/a\.ts/);
 });
 
-test('push: no PR and no title asks for one; with a title it opens it on the base and checks it landed', () => {
+test('push: no PR and no title asks for one; with a title it opens it on the base and checks it landed', (t) => {
   const none = fake({ ...base, 'gh pr view': fail('no pull requests found') });
   assert.equal(prMain(['push', '--base', 'master'], none), 1);
   assert.match(none.said, /has no open PR/);
-  const body = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ffpr-')), 'body.md');
+  const body = path.join(tmpDir('ffpr-', t), 'body.md');
   fs.writeFileSync(body, 'Request: w1478\n');
   const d = fake({ ...base, 'gh pr view': [fail('no pull requests found'), ok(pr())], 'gh pr create': ok('https://github.com/Final-Factory/ff-factory/pull/7\n') });
   assert.equal(prMain(['push', '--base', 'master', '--title', 'w1478: x', '--body-file', body], d), 0);
@@ -222,8 +223,8 @@ test('merge: a PR with no run whose files are all under the base workflows\' pat
   assert.doesNotMatch(pushed.said, /blocked_on/);
 });
 
-test('installPrShim writes ff-pr for sh and cmd, pointing at the script', () => {
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'ffpr-bin-'));
+test('installPrShim writes ff-pr for sh and cmd, pointing at the script', (t) => {
+  const bin = tmpDir('ffpr-bin-', t);
   installPrShim(bin, '/usr/bin/node', ['--experimental-strip-types'], '/app/machine/prFlow.ts');
   assert.match(fs.readFileSync(path.join(bin, 'ff-pr'), 'utf8'), /exec "\/usr\/bin\/node" "--experimental-strip-types" "\/app\/machine\/prFlow\.ts" "\$@"/);
   assert.match(fs.readFileSync(path.join(bin, 'ff-pr.cmd'), 'utf8'), /"\/app\/machine\/prFlow\.ts" %\*/);
@@ -325,8 +326,7 @@ test('w5836: ghAvailableFields reads gh\'s field list only from an Unknown JSON 
 });
 
 test("w6038: push and merge refuse in an ffu slot another session holds, naming its holder and branch; the holder's own run goes on", (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6038-pr-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ff-w6038-pr-', t);
   const slot = path.join(dir, 'ffu-sandboxes', 'slot2');
   const wt = path.join(slot, 'ffu');
   fs.mkdirSync(path.join(wt, '.git'), { recursive: true });

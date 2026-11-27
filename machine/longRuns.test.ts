@@ -8,9 +8,10 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { DROPPED_ENV, KEEPER_SCRIPT, MAX_RUN_S, RUN_ENV, SANCTIONED, liveRuns, longRunsRpcHandlers, longRunsSetting, planOf, readEnvFile, runEnv, type LongRunsDeps, type LongRunPlan } from './longRuns.ts';
 import { RpcRefused } from './daemonRpc.ts';
+import { tmpDir } from '../server/testTmp.ts';
 
 function world() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'longruns-'));
+  const root = tmpDir('longruns-');
   const sandbox = path.join(root, 'sandboxes', 'sb1');
   fs.mkdirSync(path.join(sandbox, path.dirname(SANCTIONED.nightly.script)), { recursive: true });
   fs.writeFileSync(path.join(sandbox, SANCTIONED.nightly.script), '#!/bin/bash\n');
@@ -341,14 +342,13 @@ test('the keeper starts nothing before go, then exits with the run\'s code', asy
   assert.equal(await keeper(['-e', 'process.exit(7)'], 'run {}\n'), 2);
 });
 
-test('the keeper keeps the run going after its stdin closes, and the run has the env it was sent', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keeper-'));
+test('the keeper keeps the run going after its stdin closes, and the run has the env it was sent', async (t) => {
+  const dir = tmpDir('keeper-', t);
   const out = path.join(dir, 'done.txt');
   // The run outlives the closed stdin by 1.5 s, writes what it was given, and exits 9.
   const run = `setTimeout(()=>{require('fs').writeFileSync(${JSON.stringify(out)},process.env.LR_MARK||'none');process.exit(9)},1500)`;
   assert.equal(await keeper(['-e', run], go({ PATH: process.env.PATH ?? '', SystemRoot: process.env.SystemRoot ?? '', LR_MARK: 'sent' })), 9);
   assert.equal(fs.readFileSync(out, 'utf8'), 'sent');
-  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('the keeper ends the run at its time limit (exit 124)', async () => {
@@ -357,8 +357,8 @@ test('the keeper ends the run at its time limit (exit 124)', async () => {
   assert.ok(Date.now() - t0 < 20_000);
 });
 
-test('the keeper ends its run on stop, and ignores stop before go and stdin closing after go', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keeper-'));
+test('the keeper ends its run on stop, and ignores stop before go and stdin closing after go', async (t) => {
+  const dir = tmpDir('keeper-', t);
   const out = path.join(dir, 'done.txt');
   assert.equal(await keeper(['-e', 'process.exit(7)'], 'stop\n'), 2, 'stop before go: nothing started');
   // stop after go: the run (which would write the file after 5 s) is ended at once.
@@ -367,5 +367,4 @@ test('the keeper ends its run on stop, and ignores stop before go and stdin clos
   assert.equal(await keeper(['-e', run], `${go()}stop\n`), 143);
   assert.ok(Date.now() - t0 < 4500, 'ended before the run would have');
   assert.equal(fs.existsSync(out), false);
-  fs.rmSync(dir, { recursive: true, force: true });
 });

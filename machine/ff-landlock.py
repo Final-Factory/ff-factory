@@ -127,16 +127,20 @@ def die(msg):
 
 def main(argv):
     if '--' not in argv:
-        die('usage: ff-landlock.py [--rw PATH]... [--rw-children DIR [--except NAME]...]... [--sock DIR]... [--create DIR]... -- CMD [ARGS]')
+        die('usage: ff-landlock.py [--rw PATH]... [--rw-nofollow PATH]... [--rw-children DIR [--except NAME]...]... [--sock DIR]... [--create DIR]... -- CMD [ARGS]')
     i = argv.index('--')
     opts, cmd = argv[:i], argv[i + 1:]
     if not cmd:
         die('no command')
-    rw, socks, creates, children, cur, log, deny_unix, no_read, back = [], [], [], [], None, False, [], [], []
+    rw, socks, creates, children, cur, log, deny_unix, no_read, back, nofollow_rw = [], [], [], [], None, False, [], [], [], []
     it = iter(opts)
     for a in it:
         if a == '--rw':
             rw.append(next(it))
+        elif a == '--rw-nofollow':
+            # w6437: a --rw that is never granted where a symlink leads (/tmp/.dotnet: anyone unfenced may make it first).
+            rw.append(next(it))
+            nofollow_rw.append(rw[-1])
         elif a == '--rw-children':
             cur = [next(it), set()]
             children.append(cur)
@@ -158,7 +162,7 @@ def main(argv):
             die(f'unknown option {a}')
     # Review w6362: a symlink a worker planted under off or warn, at a --rw-children folder (cache) or among its children,
     # must not carry the write rule to where it leads. Neither is granted, and a child is opened O_NOFOLLOW.
-    nofollow = set()
+    nofollow = set(nofollow_rw)
 
     tops = [d for d, _ in children]
 

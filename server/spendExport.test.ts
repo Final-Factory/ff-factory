@@ -2,12 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { zeroTok, type ModelTok, type TurnUsage } from '../shared/spend.ts';
 import { SpendStore, inferredEffort, WORKER_MEDIUM_FROM, type SpendContext, type TurnLine } from './spend.ts';
 import { readTurns, spendExport } from './spendExport.ts';
 import type { Requester, SessionInfo, TranscriptEvent, WorkItem } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 const T0 = Date.parse('2026-10-30T12:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
@@ -25,7 +25,7 @@ let seq = 0;
 const result = (t: number, usage: TurnUsage, costUsd: number): TranscriptEvent => ({ seq: ++seq, t: iso(t), kind: 'result', ok: true, text: 'done', costUsd, turns: 3, durationMs: 30_000, usage });
 
 function world(items: WorkItem[], sessions: SessionInfo[], extra: Partial<SpendContext> = {}) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'spend-export-test-'));
+  const dir = tmpDir('spend-export-test-');
   const ctx: SpendContext = { work: () => items, session: (id) => sessions.find((s) => s.id === id), priorResults: () => 1, now: () => T0 + 86_400_000, ...extra };
   return { dir, spend: new SpendStore(dir, ctx) };
 }

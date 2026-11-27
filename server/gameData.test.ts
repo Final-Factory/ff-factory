@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { buildReadsGameDataDir, exeReadsGameDataDir, gameDataRoots, legacyGameDataRoot, sandboxGameDataDir, sandboxGameDataDirs, sandboxGameDataEnv, playerHomeEnv, preparePlayerHome, savesDirsFor, workerGameDataDir, workerPlayerHomeDir } from '../machine/gameData.ts';
 import { rootEnv } from '../machine/daemon.ts';
+import { tmpDir } from './testTmp.ts';
 
 test('w5306: the game data roots, the override first; the old root per OS as GameDataPaths.ResolveRoot has it', () => {
   assert.equal(workerGameDataDir('/ffw'), path.join('/ffw', 'gamedata'));
@@ -17,8 +17,8 @@ test('w5306: the game data roots, the override first; the old root per OS as Gam
   assert.deepEqual(gameDataRoots({}, 'linux', '/home/x'), [legacyGameDataRoot('linux', '/home/x')]);
 });
 
-test('w5306: a build reads FF_GAME_DATA_DIR when its FFCore.dll carries the literal (UTF-16, Mono) or its IL2CPP metadata does (UTF-8)', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'gamedata-build-'));
+test('w5306: a build reads FF_GAME_DATA_DIR when its FFCore.dll carries the literal (UTF-16, Mono) or its IL2CPP metadata does (UTF-8)', (t) => {
+  const d = tmpDir('gamedata-build-', t);
   const managed = path.join(d, 'finalfactory_Data', 'Managed');
   fs.mkdirSync(managed, { recursive: true });
   assert.equal(buildReadsGameDataDir(d), undefined, 'no code file: unknown');
@@ -26,7 +26,7 @@ test('w5306: a build reads FF_GAME_DATA_DIR when its FFCore.dll carries the lite
   assert.equal(buildReadsGameDataDir(d), false, 'a build from before game PR #4237');
   fs.writeFileSync(path.join(managed, 'FFCore.dll'), Buffer.concat([Buffer.from('MZ junk'), Buffer.from('FF_GAME_DATA_DIR', 'utf16le'), Buffer.from('tail')]));
   assert.equal(buildReadsGameDataDir(d), true);
-  const il = fs.mkdtempSync(path.join(os.tmpdir(), 'gamedata-il2cpp-'));
+  const il = tmpDir('gamedata-il2cpp-', t);
   fs.mkdirSync(path.join(il, 'finalfactory_Data', 'il2cpp_data', 'Metadata'), { recursive: true });
   fs.writeFileSync(path.join(il, 'finalfactory_Data', 'il2cpp_data', 'Metadata', 'global-metadata.dat'), Buffer.from('xxFF_GAME_DATA_DIRyy'));
   assert.equal(buildReadsGameDataDir(il), true);
@@ -63,8 +63,8 @@ test('w5344: a player gets a home of its own under FF_PLAYER_HOME (Linux XDG_CON
   assert.deepEqual(playerHomeEnv({ ...given, XDG_CONFIG_HOME: '/tour' }, true, 'linux'), {}, "a caller's own stays");
 });
 
-test('w5344: the build of an exe reads FF_GAME_DATA_DIR from its folder or a Mac .app; preparePlayerHome makes the folders', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'w5344-'));
+test('w5344: the build of an exe reads FF_GAME_DATA_DIR from its folder or a Mac .app; preparePlayerHome makes the folders', (t) => {
+  const d = tmpDir('w5344-', t);
   try {
     const managed = path.join(d, 'win', 'finalfactory_Data', 'Managed');
     fs.mkdirSync(managed, { recursive: true });

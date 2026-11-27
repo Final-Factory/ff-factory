@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { PlaceAgain } from './placeAgain.ts';
@@ -15,6 +14,7 @@ import { MachineManager } from './machines.ts';
 import { gzipFile } from './dataGuard.ts';
 import type { Config } from './config.ts';
 import type { Machine, MachineSandbox, SessionInfo } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w2026: what the portal's own stall profiles named on 2026-10-24 (735683ea0, rolled back at 11:37Z after missing /api/health
@@ -76,8 +76,8 @@ test('w2026: a release pass reads a machine\'s sessions and sorts its waiting wo
   assert.equal(reads, 1, 'outside a pass claims are computed fresh');
 });
 
-test('w2026: a daemon connecting is welcomed without unzipping a compressed transcript on the main thread', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-gz-'));
+test('w2026: a daemon connecting is welcomed without unzipping a compressed transcript on the main thread', async (t) => {
+  const dir = tmpDir('attach-gz-', t);
   const cfg = { dataDir: dir, port: 0, limits: { maxSessions: 30, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false }, worker: { permissionMode: 'bypassPermissions', effort: 'low' }, unity: {} } as unknown as Config;
   const store = new Store(dir);
   store.putSession({ id: 's1', kind: 'worker', machineId: 'pc', title: 'w1: x', status: 'stopped', permissionMode: 'default', createdAt: iso(NOW), lastActivityAt: iso(NOW), turns: 1, costUsd: 0, pendingPermissions: [] } as SessionInfo);
@@ -143,8 +143,8 @@ test('w2026: the per-pass index of requests by worker holds every request workOv
   for (const sid of Object.keys(owners)) assert.deepEqual(owners[sid].requests.map((r) => r.id), work.filter((w) => w.sessionIds.includes(sid) || !!w.movedOff?.[sid] || ownGate(w, sid)).map((w) => w.id.toLowerCase()).sort((a, b) => a.localeCompare(b)), sid);
 });
 
-test('w2026: connects after a start unzip one compressed transcript at a time, by a stream, and a big one gets a tail file that is not whole', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'unzip-stream-'));
+test('w2026: connects after a start unzip one compressed transcript at a time, by a stream, and a big one gets a tail file that is not whole', async (t) => {
+  const dir = tmpDir('unzip-stream-', t);
   const tr = path.join(dir, 'transcripts');
   fs.mkdirSync(tr, { recursive: true });
   // 12 MB unzipped: more than a tail file (8 MB)
@@ -200,8 +200,8 @@ test('w2026: connects after a start unzip one compressed transcript at a time, b
   assert.equal(tailReads, 0);
 });
 
-test('w2026: a daemon with thousands of sessions is welcomed after its last seqs are looked up a slice per loop turn', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'attach-slices-'));
+test('w2026: a daemon with thousands of sessions is welcomed after its last seqs are looked up a slice per loop turn', async (t) => {
+  const dir = tmpDir('attach-slices-', t);
   const cfg = { dataDir: dir, port: 0, limits: { maxSessions: 30, maxUnity: 2, maxSandboxes: 4, minFreeGB: 0, minFreeRamGB: 0 }, orchestrator: { model: 'opus', effort: 'low', notifyOnWorkerEvents: false }, worker: { permissionMode: 'bypassPermissions', effort: 'low' }, unity: {} } as unknown as Config;
   const store = new Store(dir);
   const ids = Array.from({ length: 1000 }, (_, i) => `s${i}`);

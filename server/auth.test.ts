@@ -1,16 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import type http from 'node:http';
 import { Auth, COOKIE } from './auth.ts';
+import { tmpDir } from './testTmp.ts';
 
 /** The web login and API keys: the page drives agents with a shell, so this is the front door. */
 
 function dataDir(t: { after: (fn: () => void) => void }) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffsb-auth-', t);
   return dir;
 }
 
@@ -65,14 +64,14 @@ test('rate limit: five failures per client lock it out for a while; others are u
 });
 
 test('client address: X-Forwarded-For is believed only from a local proxy, and only with trustProxy', () => {
-  const trusting = new Auth(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-')), { trustProxy: true });
+  const trusting = new Auth(tmpDir('ffsb-auth-'), { trustProxy: true });
   // The last entry is the one the proxy added; the client wrote the ones before it (w5535).
   const fwd = { 'x-forwarded-for': '10.0.0.1, 198.51.100.1' };
   assert.equal(trusting.clientIp(req({ ip: '127.0.0.1', headers: fwd })), '198.51.100.1');
   assert.equal(trusting.clientIp(req({ ip: '::1', headers: fwd })), '198.51.100.1');
   // A remote peer cannot pick its own address for the rate limiter.
   assert.equal(trusting.clientIp(req({ ip: '203.0.113.7', headers: fwd })), '203.0.113.7');
-  const strict = new Auth(fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-auth-')), { trustProxy: false });
+  const strict = new Auth(tmpDir('ffsb-auth-'), { trustProxy: false });
   assert.equal(strict.clientIp(req({ ip: '127.0.0.1', headers: fwd })), '127.0.0.1');
   assert.equal(strict.isHttps(req()), false);
 });

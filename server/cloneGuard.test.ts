@@ -1,10 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { checkGameRepoClone } from './cloneGuard.ts';
 import { sandboxGuard } from './guard.ts';
+import { tmpDir } from './testTmp.ts';
 
 // w3703: w3683's pair-run leg cloned the game repo into its temp folder (43 GB on LothDesktop's V:, 8 GB of LFS on BEAST's F:),
 // w3682's --library scratch clone took 48 GB. A player of another commit is built in the sandbox, one commit at a time.
@@ -51,8 +51,8 @@ test('a sparse clone of the game repo, and clones of other repos, still pass', (
   }
 });
 
-test('a folder that is a Unity project counts as the game repo by default', () => {
-  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'clone-guard-'));
+test('a folder that is a Unity project counts as the game repo by default', (t) => {
+  const d = tmpDir('clone-guard-', t);
   fs.mkdirSync(path.join(d, 'ProjectSettings'));
   fs.writeFileSync(path.join(d, 'ProjectSettings', 'ProjectVersion.txt'), 'm_EditorVersion: 6000.3.0f1\n');
   assert.ok(checkGameRepoClone(`git clone --shared ${d} ${d}-copy`, { gameRepos: [] }));

@@ -15,6 +15,10 @@ process.env.FF_MEASURE_INTEGRITY ??= 'off';
 // w6206: request_pair and start_agent never ask the real GitHub whether a pair run's commit exists; the tests of that
 // check replace Agents.gameCommitAt (server/gameCommit.test.ts, orchestratorsPairs.test.ts).
 process.env.FF_COMMIT_CHECK ??= 'off';
+// w6476: no test daemon starts a keep-awake holder (machine/daemon.ts awake); server/machines.test.ts's w3337 test turns it on.
+process.env.FF_KEEP_AWAKE ??= 'off';
+// w6476: npm, which some tests run for real, turns on node's compile cache, kept in <temp>/node-compile-cache: not in a test.
+process.env.NODE_DISABLE_COMPILE_CACHE ??= '1';
 // w5545: a test's unity-slot or bench ticket never asks the worker's real daemon (its token would file a real request).
 delete process.env.FF_DAEMON_RPC;
 delete process.env.FF_DAEMON_TOKEN;
@@ -30,6 +34,7 @@ export const KEPT_FF_ENV = new Set([
   'FF_CLI_SCRUB',
   'FF_MEASURE_INTEGRITY',
   'FF_COMMIT_CHECK',
+  'FF_KEEP_AWAKE',
   'FF_TIMING_TESTS',
   'FF_NETWORK_TESTS',
   'FF_TEST_FILE_TIMES',
