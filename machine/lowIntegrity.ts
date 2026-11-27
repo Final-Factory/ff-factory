@@ -117,8 +117,25 @@ const inside = (child: string, parent: string) => {
 };
 const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
+/** What labelLow labels (lowTargets). */
+export interface LowTargets {
+  dirs: string[];
+  files: string[];
+  medium?: string[];
+  /** w5615: the locked folders, labelled whole (labelTree). */
+  trees?: string[];
+  /**
+   * Review w6377: the shared lock's folders on the way (cache, cache/nuget) that hold workers' folders. Nothing inside one
+   * is labelled through a link (a worker could swap a child for a junction while its parent is Low). Under "on"
+   * (`guardFirst`) they turn Medium before anything inside them goes Low, from the top; under off one is left Medium while
+   * a locked folder inside it could not be labelled Low.
+   */
+  guard?: string[];
+  guardFirst?: boolean;
+}
+
 /** The folders and files to label Low. Exported for tests. */
-export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[]; trees: string[] } {
+export function lowTargets(i: LowTargetsInput): LowTargets & { medium: string[]; trees: string[]; guard: string[] } {
   const exists = i.exists ?? fs.existsSync;
   // The daemon's and the secrets' folders, and the daemon's own where it sits in the root: never labelled, either way.
   const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
@@ -198,8 +215,8 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // are kept Medium (labelLow relabels only one that reads Low).
   const tm = i.children.find((c) => c.dir && c.name.toLowerCase() === TOOLS_MEDIUM_CHILD);
   if (tm) medium.push(path.join(i.root, tm.name), path.join(i.root, tm.name, 'shims'));
-  const trees = sharedLockLabels(i, dirs, medium);
-  return { dirs, files, medium, trees };
+  const { trees, guard } = sharedLockLabels(i, dirs, medium);
+  return { dirs, files, medium, trees, guard, guardFirst: !!i.sharedLock };
 }
 
 /**
@@ -207,7 +224,7 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
  * and answers the ones labelLow labels all of (`trees`). Only folders under a worker child the fence labels (`dirs`).
  * tools is left to lowTargets' own rule above: it already keeps node, low and unity-low Medium.
  */
-function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]): string[] {
+function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]): { trees: string[]; guard: string[] } {
   const exists = i.exists ?? fs.existsSync;
   const link = i.isLink ?? isLinkFs;
   const list = i.list ?? ((d: string) => {
@@ -242,8 +259,9 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
     for (const p of parents) if (at(p) >= 0) dirs.splice(at(p), 1);
     for (const p of back) if (at(p) < 0) dirs.push(p);
     dirs.push(...[...parents].sort((a, b) => b.length - a.length));
-    return back;
+    return { trees: back, guard: parents };
   }
+  const guard: string[] = [];
   // Parents first, from the top: each leaves `dirs` for `medium`, its other children join `dirs` on their own.
   for (const [rel, names] of [...sharedLockParents(false)].sort((a, b) => a[0].length - b[0].length)) {
     const p = abs(rel);
@@ -257,6 +275,7 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
     const k = at(p);
     if (k >= 0) dirs.splice(k, 1);
     medium.push(p);
+    guard.push(p);
     const kids = list(p).filter((c) => c.dir && !names.has(c.name) && !link(path.join(p, c.name))).map((c) => path.join(p, c.name));
     // Review w6374: swapped for a link while it was listed, the names came from wherever that leads: none is labelled.
     if (viaLink(p)) continue;
@@ -267,7 +286,7 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
     if (k >= 0) dirs.splice(k, 1);
     medium.push(p);
   }
-  return locked;
+  return { trees: locked, guard };
 }
 
 /** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
@@ -436,8 +455,20 @@ export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium 
  * still change the DACL, so labelLow then grants the account Full on the path and labels it again (measured on BEAST,
  * w5402: denied, then the grant, then the label succeeds and reaches the files inside).
  */
-export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[]; trees?: string[] }, exec: Exec, say: (line: string) => void, account = currentAccount()): Promise<boolean> {
+export async function labelLow(t: LowTargets, exec: Exec, say: (line: string) => void, account = currentAccount(), isLink: (p: string) => boolean = isLinkFs): Promise<boolean> {
   let ok = true;
+  // Review w6377: a path inside a guarded folder (cache, cache/nuget), or one on the way to it, that is a link now: icacls
+  // would label where it leads (the daemon's folder, when a worker moved cache/slots aside and planted a junction there).
+  const guard = t.guard ?? [];
+  const tops = guard.filter((g) => !guard.some((h) => !same(h, g) && inside(g, h)));
+  const linkedOnTheWay = (p: string) => {
+    const top = tops.find((g) => inside(p, g));
+    if (!top) return false;
+    for (let q = p; inside(q, top); q = path.dirname(q)) if (isLink(q)) return true;
+    return false;
+  };
+  // Under "on", guarded folders that could not turn Medium first: nothing inside one is labelled Low this pass.
+  const open: string[] = [];
   // w5615: a shared-lock folder is labelled whole: files a Low worker made there carry a Low label of their own. Never with
   // icacls /T, which follows junctions with or without /L (review w6355 H1, measured): a junction a worker planted in the
   // seed before "on" would get its target relabelled. transcriptLabels.ts labelTree walks it and skips every link.
@@ -478,6 +509,24 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
   const own = (p: string) => (t.medium ?? []).some((m) => same(path.dirname(p), m));
   const failed: string[] = [];
   const one = async (p: string, label: string) => {
+    if (linkedOnTheWay(p)) {
+      // Not a failure: a worker could otherwise turn the fence off by planting a link. Its own folder is not labelled.
+      say(`worker integrity: WARNING: ${p} is (or lies below) a junction or symlink now, not labelled: icacls would label where it leads (w6377)`);
+      return;
+    }
+    if (open.some((g) => inside(p, g))) {
+      say(`worker integrity: WARNING: left ${p} as it is: the folder above it could not turn Medium first (w6377)`);
+      return;
+    }
+    // Review w6377, off: a folder on the way stays Medium while a locked folder inside it is not Low yet, so the next pass
+    // walks that one under a Medium parent, where no worker can swap it for a junction.
+    if (!t.guardFirst && guard.some((g) => same(g, p))) {
+      const stuck = failed.filter((f) => inside(f, p));
+      if (stuck.length) {
+        say(`worker integrity: WARNING: left ${p} Medium: ${stuck.join(', ')} could not be labelled Low (w6377)`);
+        return;
+      }
+    }
     try {
       if (!fs.existsSync(p)) {
         if (label === LOW_LABEL) fs.mkdirSync(p, { recursive: true });
@@ -493,6 +542,28 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
       say(`worker integrity: could not label ${p} Low: ${(e as Error).message}`);
     }
   };
+  // Review w6377: under "on" the folders on the way turn Medium before their children go Low, from the top. While cache is
+  // Low a worker can move a child of it aside and plant a junction in its place; once cache is Medium it cannot, and each
+  // child is read for a link (linkedOnTheWay) just before it is labelled.
+  if (t.guardFirst) {
+    for (const g of [...guard].sort((a, b) => a.length - b.length)) {
+      if (open.some((o) => inside(g, o))) {
+        open.push(g);
+        continue;
+      }
+      try {
+        if (!fs.existsSync(g)) continue;
+        if (isLink(g) || linkedOnTheWay(path.dirname(g))) throw new Error('it is (or lies below) a junction or symlink now');
+        const now = await exec('icacls', [g], { timeoutMs: 60_000 });
+        if (now.code === 0 && isExplicitMedium(now.stdout)) continue;
+        await setLabel(g, MEDIUM_LABEL);
+        say(`worker integrity: kept ${g} Medium`);
+      } catch (e) {
+        open.push(g);
+        say(`worker integrity: WARNING: could not keep ${g} Medium before its children, so they are left as they are: ${(e as Error).message} (w6377)`);
+      }
+    }
+  }
   for (const d of t.dirs) await one(d, LOW_LABEL);
   for (const f of t.files) await one(f, 'low');
   // Folders kept Medium inside a Low one (lowTargets' medium): only those that exist and inherited Low. A failure here is
@@ -500,7 +571,8 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
   // whose LowCopies then sweeps it before every run), the Unity junctions and the shims every agent runs (w5877).
   for (const p of t.medium ?? []) {
     try {
-      if (!fs.existsSync(p)) continue;
+      if (!fs.existsSync(p) || open.some((o) => inside(p, o))) continue;
+      if (linkedOnTheWay(p)) throw new Error('it is (or lies below) a junction or symlink now (w6377)');
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
       // w5615: a shared-lock folder until it carries Medium of its own (its parent's Medium reaches it inherited, not its files).
       if (now.code !== 0 || (tree(p) ? isExplicitMedium(now.stdout) : !isLabelledLow(now.stdout))) continue;

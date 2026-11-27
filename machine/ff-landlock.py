@@ -160,13 +160,25 @@ def main(argv):
     # must not carry the write rule to where it leads. Neither is granted, and a child is opened O_NOFOLLOW.
     nofollow = set()
 
+    tops = [d for d, _ in children]
+
+    def expected(p):
+        # Review w6377 (C): the path p should land at. The folder above the outermost --rw-children folder holding p (the
+        # worker root) is resolved, since it may itself sit under a symlink (a symlinked home); below it nothing may be one.
+        p = os.path.abspath(p)
+        outer = [t for t in tops if is_under(p, os.path.abspath(t).rstrip('/'))]
+        if not outer:
+            return os.path.realpath(p)
+        top = min((os.path.abspath(t).rstrip('/') for t in outer), key=len)
+        base = os.path.dirname(top)
+        return os.path.join(os.path.realpath(base), os.path.relpath(p, base))
+
     def landed_at(fd, p):
         # Where the open of p landed: /proc/self/fd/<fd> names the real path, so a symlink on the way shows as a difference.
         try:
-            return os.readlink(f'/proc/self/fd/{fd}') == os.path.abspath(p)
+            return os.readlink(f'/proc/self/fd/{fd}') == expected(p)
         except OSError:
             return False
-    tops = [d for d, _ in children]
 
     def via_link(d):
         # d, or a folder above it that is (or is under) another --rw-children folder: cache/nuget through a symlinked cache.

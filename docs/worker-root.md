@@ -1556,7 +1556,12 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     plant a junction before the walk reaches it. The walk reads its root again after its first icacls call, in both
     directions, and `cache\nuget` is read again after it is listed. A locked folder or one on the way that is already a
     link holds "on" off (`sharedLockBlockers` names it: remove the link and restart the daemon), and no slot clone copies
-    from a seed that is, or lies below, a link.
+    from a seed that is, or lies below, a link. Under "on" `cache` and `cache\nuget` turn Medium before any child of
+    theirs goes Low, from the top (review w6377): while `cache` is Low a worker can move `cache\slots` aside and plant a
+    junction to the daemon's folder in its place. Each path inside them is read for a link just before icacls labels it,
+    and one that is a link is left alone with a WARNING (not a failure, which would turn the fence off). One that cannot
+    turn Medium first leaves its children as they are that pass. Under off a folder on the way stays Medium while a locked
+    folder inside it could not be labelled Low, so the next pass walks that one under a Medium parent.
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
     made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
@@ -1564,7 +1569,8 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     symlink child is not granted, and each child is opened `O_NOFOLLOW` (review w6362: the write rule would otherwise land
     on the link's target). The folder is listed through an `O_DIRECTORY|O_NOFOLLOW` descriptor, and that descriptor and
     each child's must have landed at the path asked for (`/proc/self/fd`), so a folder above swapped for a symlink in
-    between opens nothing (review w6374).
+    between opens nothing (review w6374). The path asked for is the worker root's real path plus the rest, so a root that
+    sits under a symlinked folder (a symlinked home) still opens its children (review w6377).
   - **macOS** (server/workerFence.ts `fenceFor` `sharedLocked`): a `(deny file-write* (subpath ...))` per locked path in
     the read-only block, after the root's allow (later Seatbelt rules win), and a `(deny file-write* (literal ...))` on
     each folder on the way (`cache`, `cache/nuget`, `tools`; `sharedLockParents`), so a rename or removal of one is

@@ -231,6 +231,86 @@ test('Windows: labelTree to Low reads its root again after the first icacls call
   assert.equal(calls.length, 1, JSON.stringify(calls));
 });
 
+// Review w6377: a real layout, labelled by labelLow with a fake icacls.
+const realTargets = (d: string, sharedLock: boolean) =>
+  lowTargets({ root: d, appDir: path.join(d, 'daemon'), children: [{ name: 'cache', dir: true }], toolsChildren: [], sharedLock });
+const setCalls = (calls: string[][]) => calls.filter((a) => a.includes('/setintegritylevel')).map((a) => a[0]);
+
+test('Windows: "on" turns cache and cache/nuget Medium before their children go Low, and labels none swapped for a junction (review w6377 A)', { skip: process.platform !== 'win32' && 'junctions are Windows only' }, async (t) => {
+  const d = tmp(t);
+  put(path.join(d, 'daemon', 'src', 'main.ts'));
+  put(path.join(d, 'cache', 'slots', 'f'));
+  put(path.join(d, 'cache', 'nuget', 'evil', 'f'));
+  put(path.join(d, 'cache', 'uv', 'f'));
+  const tg = realTargets(d, true);
+  const slots = path.join(d, 'cache', 'slots');
+  const evil = path.join(d, 'cache', 'nuget', 'evil');
+  assert.ok(tg.dirs.includes(slots) && tg.dirs.includes(evil), JSON.stringify(tg.dirs));
+  const calls: string[][] = [];
+  const said: string[] = [];
+  let swapped = false;
+  const exec: Exec = async (_c, a) => {
+    calls.push(a);
+    if (a.includes('/setintegritylevel') && !swapped) {
+      // What a Low worker could do while cache is still Low: move a child aside and plant a junction to the daemon there.
+      swapped = true;
+      fs.renameSync(slots, path.join(d, 'aside1'));
+      fs.symlinkSync(path.join(d, 'daemon'), slots, 'junction');
+      fs.renameSync(evil, path.join(d, 'aside2'));
+      fs.symlinkSync(path.join(d, 'daemon', 'src'), evil, 'junction');
+    }
+    return { code: 0, stdout: '', stderr: '' } as never;
+  };
+  assert.equal(await labelLow(tg, exec, (l) => void said.push(l), 'acct'), true, said.join('\n'));
+  const set = setCalls(calls);
+  assert.equal(set[0], path.join(d, 'cache'), JSON.stringify(set));
+  assert.equal(set[1], path.join(d, 'cache', 'nuget'), JSON.stringify(set));
+  assert.ok(!set.includes(slots) && !set.includes(evil), `nothing labelled through the junctions: ${JSON.stringify(set)}`);
+  assert.match(said.join('\n'), /cache.slots is \(or lies below\) a junction or symlink now, not labelled/);
+  // The first of them refused, the other children of cache/nuget are labelled as before.
+  assert.ok(set.includes(path.join(d, 'cache', 'uv')), JSON.stringify(set));
+});
+
+test('Windows: under "on" a folder on the way that cannot turn Medium first leaves its children as they are (review w6377 A)', async (t) => {
+  const d = tmp(t);
+  put(path.join(d, 'cache', 'slots', 'f'));
+  put(path.join(d, 'cache', 'nuget', 'mine', 'f'));
+  const tg = realTargets(d, true);
+  const calls: string[][] = [];
+  const said: string[] = [];
+  const exec: Exec = async (_c, a) => {
+    calls.push(a);
+    const fail = a.includes('/setintegritylevel') && a[0] === path.join(d, 'cache');
+    return { code: fail ? 1 : 0, stdout: '', stderr: fail ? 'The media is write protected.' : '' } as never;
+  };
+  await labelLow(tg, exec, (l) => void said.push(l), 'acct');
+  const set = setCalls(calls);
+  assert.ok(!set.some((p) => p.startsWith(path.join(d, 'cache') + path.sep)), JSON.stringify(set));
+  assert.match(said.join('\n'), /could not keep .*cache Medium before its children/);
+});
+
+test('Windows: off leaves cache and cache/nuget Medium while a locked folder in them could not be labelled Low (review w6377 B)', async (t) => {
+  const d = tmp(t);
+  put(path.join(d, 'cache', 'slots', 'f'));
+  put(path.join(d, 'cache', 'uv', 'f'));
+  put(path.join(d, 'cache', 'nuget', 'packages', 'f'));
+  const tg = realTargets(d, false);
+  const uv = path.join(d, 'cache', 'uv');
+  assert.ok(tg.trees.includes(uv) && tg.guard.includes(path.join(d, 'cache')), JSON.stringify(tg));
+  const calls: string[][] = [];
+  const said: string[] = [];
+  const exec: Exec = async (_c, a) => {
+    calls.push(a);
+    const fail = a.includes('/setintegritylevel') && a[0] === uv;
+    return { code: fail ? 1 : 0, stdout: '', stderr: fail ? 'The media is write protected.' : '' } as never;
+  };
+  assert.equal(await labelLow(tg, exec, (l) => void said.push(l), 'acct'), false, said.join('\n'));
+  const set = setCalls(calls);
+  assert.ok(!set.includes(path.join(d, 'cache')), `cache left Medium: ${JSON.stringify(set)}`);
+  assert.ok(set.includes(path.join(d, 'cache', 'nuget')), `cache/nuget holds no failed folder: ${JSON.stringify(set)}`);
+  assert.match(said.join('\n'), /left .*cache Medium: .*uv could not be labelled Low/);
+});
+
 test('makeSharedLockDirs makes nothing more below a folder swapped for a link as it was made (review w6374)', (t) => {
   const root = tmp(t);
   const made: string[] = [];
