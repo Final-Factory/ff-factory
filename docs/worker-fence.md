@@ -523,7 +523,8 @@ fenced worker's `env -u GH_TOKEN gh auth status` said "Logged in to github.com a
     never looked at). Warn stage: BEAST's fence is already `on`, so it sits in `OWNER_LABEL_WARN_ONLY`, where
     `ownerLabelMode` holds `on` at `warn` for the owner labels only: the probe line says `would label (warn only: no label
     set (held at warn on this machine ...))` and `applyOwnerLabels` runs the warn branch (the way back, a no-op with no
-    label and no note). The enforce stage moves `beast` into `OWNER_LABEL_ON_SYSTEM_DRIVE`; its way back is the same:
+    label and no note). The enforce stage (w6569's second PR) moved `beast` into `OWNER_LABEL_ON_SYSTEM_DRIVE` and emptied
+    `OWNER_LABEL_WARN_ONLY`: in `on` BEAST runs w5749's move on its gh folder alone. Its way back is the same:
     the read fence to `warn`, or a revert of the enforce change (BEAST back in the warn-only set runs the way back).
   - Runs with no vault token get the machine login's token as `GH_TOKEN` (`machineGh`, read by the Medium daemon from
     `hosts.yml` once moved), never the labelled folder. `lowGhSelfTest` now tests that same route at Low.
