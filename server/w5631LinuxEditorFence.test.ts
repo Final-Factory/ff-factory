@@ -12,12 +12,17 @@ const ROOT = '/home/u/ffw';
 const REPO = `${ROOT}/sandboxes/slot1`;
 const BIN = '/home/u/Unity/Hub/Editor/6000.3.19f1/Editor/Unity';
 const RULES = writeLockArgs({ root: ROOT, runtimeDir: '/run/user/1000', home: `${ROOT}/home` });
+/**
+ * w6475: the Linux editor fence and its home seeding run only on Linux; on Windows writeLockArgs resolves these Linux
+ * paths to drive paths, the seeding joins with '/', and a folder symlink needs a privilege the test run lacks.
+ */
+const LINUX_ONLY = { skip: process.platform === 'win32' && 'the Linux editor fence (Landlock) and its home seeding run only on Linux' };
 
 test('w5631: no editor fence while the workers\' write lock is off', () => {
   assert.equal(linuxEditorFenceFor(undefined, ROOT, 'enforce'), undefined);
 });
 
-test('w5631: the enforced rules are the workers\' with <root>/home as the home; the editor\'s home and bridge folder are set', () => {
+test('w5631: the enforced rules are the workers\' with <root>/home as the home; the editor\'s home and bridge folder are set', LINUX_ONLY, () => {
   const f = linuxEditorFenceFor(RULES, ROOT, 'enforce')!;
   assert.equal(f.kind, 'landlock');
   assert.equal(f.warn, false);
@@ -61,7 +66,7 @@ test('w5631: under the enforced rules the editor cannot make a folder outside th
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs once; a prefs file already there is kept', () => {
+test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs once; a prefs file already there is kept', LINUX_ONLY, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631seed-'));
   const real = path.join(tmp, 'real');
   const home = path.join(tmp, 'ffw', 'home');
@@ -76,7 +81,7 @@ test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs 
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('w6354 (review of w5631): the seeding follows no link a worker planted in the editor\'s home, and writes nothing outside it', () => {
+test('w6354 (review of w5631): the seeding follows no link a worker planted in the editor\'s home, and writes nothing outside it', LINUX_ONLY, () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631link-'));
   const real = path.join(tmp, 'real');
   const home = path.join(tmp, 'ffw', 'home');
@@ -157,7 +162,8 @@ test('w5631: with no licensing client running, no fenced launcher or no fence, t
 });
 
 test('w5631: the daemon reads <root>/home/.unity-mcp from its start on Linux too, and picks the Linux fence there', () => {
-  const src = fs.readFileSync(new URL('../machine/daemon.ts', import.meta.url), 'utf8');
+  // a Windows checkout with core.autocrlf has CRLF line ends (w6475)
+  const src = fs.readFileSync(new URL('../machine/daemon.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
   const setup = src.slice(src.indexOf('private async fenceSetup()'), src.indexOf('private editorFence()'));
   const add = setup.indexOf("if (process.platform !== 'win32' && this.cfg.root) addMcpStatusDir(macEditorStatusDir(this.cfg.root));");
   assert.ok(add > 0 && add < setup.indexOf("if (this.fence.state.state !== 'setting_up') return;"));

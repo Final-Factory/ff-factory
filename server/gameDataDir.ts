@@ -88,7 +88,7 @@ export function otherPlayerIn(said: string, commit: string, where = 'legacy_data
   const c = commit.toLowerCase();
   const sha = (said.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).find((h) => /\d/.test(h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
   const version = /\b0\.50\.\d+\.\d+\b/.exec(said)?.[0];
-  const installed = sha || version ? undefined : INSTALLED_BUILD.map((r) => r.exec(said)?.[0]).find(Boolean);
+  const installed = sha || version ? undefined : installedBuildIn(said);
   if (!sha && !version && !installed) return undefined;
   const named = sha ? `commit ${sha.slice(0, 10)}` : version ? `build ${version}` : `a build no commit is ("${clip(installed!.replace(/\s+/g, ' '), 60)}")`;
   return `its ${where} names ${named}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
@@ -106,7 +106,44 @@ export const INSTALLED_BUILD: readonly RegExp[] = [
   /\b(?:installed|downloaded)\s+(?:from|via|through|on)\s+steam\b/i,
   /\b(?:installed|published|public|released|release|shipped|live|retail)\s+(?:[\w.-]+\s+){0,2}?(?:build|player|version|copy|game)\b/i,
   /\b(?:pre-1\.0|0\.50(?:\.\d+)*)\s+release\b(?!\s+(?:branch|line))/i,
+  // w6467 (w6463's review of PR #1487): "the client runs Steam 0.50" names Steam's build by a short version, no build word.
+  /\bsteam(?:'s)?\s+(?:pre-1\.0|0\.50(?:\.\d+)*)(?![\w-]|\.\d)/i,
 ];
+
+/**
+ * w6467 (w6463's review of PR #1487): a match is no other player when it is the PR's own build ("a release player of the PR
+ * head", "the Steam game client of the PR build": at most two build nouns, then of/at/from/for/on the PR head or build), or
+ * when "release" is the build config ("a debug or release build", or "build a release player" with no pre-1.0 or 0.50 after
+ * it). Only those: "the published 0.50 player and the PR head" keeps the mark, failing closed.
+ */
+export function excusedBuild(said: string, at: number, words: string): boolean {
+  // w6469's review: never excused are a match that names an installed copy (published, shipped, live, ...) and Steam with a
+  // version ("Steam 0.50"): both name a build no commit is, whatever follows.
+  const before = said.slice(0, at);
+  // The word just before counts too: "the published release or debug build" matches from "release".
+  if (/\b(?:installed|downloaded|published|public|released|shipped|live|retail)\b/i.test(`${/(\S+)\s+$/.exec(before)?.[1] ?? ''} ${words}`)) return false;
+  if (/\bsteam(?:'s)?\s+(?:pre-1\.0|0\.50)/i.test(words)) return false;
+  const after = said.slice(at + words.length);
+  // Only build nouns between the match and "of the PR head": "and clients on the PR head" or "host joins from the PR build"
+  // names a second player, so it keeps the mark (w6469).
+  if (/^\s+(?:(?:game\s+)?(?:build|player|client|copy|version|binary)s?\s+){0,2}?(?:of|at|from|for|on)\s+(?:the\s+)?(?:PR|pull request)(?:'s)?\s+(?:head|build)\b/i.test(after)) return true;
+  // A Steam or a pre-1.0/0.50 release is that line's published build, never the build config: "the Steam release or
+  // debug build" and "a debug or pre-1.0 release" keep the mark (w6474).
+  if (!/\brelease\b/i.test(words) || /^steam|\b(?:pre-1\.0|0\.50)/i.test(words)) return false;
+  return /\b(?:debug|development|dev)\b/i.test(words)
+    || /\b(?:debug|development|dev)\s+(?:or|and|vs\.?|versus)\s+$/i.test(before)
+    || /^\s+(?:or|and|vs\.?|versus)\s+(?:debug|development|dev)\b/i.test(after)
+    // "build a release player", but not "builds a release build of pre-1.0": that names the line's release (w6469).
+    || (/\bbuild(?:s|ing)?\s+an?\s+$/i.test(before) && /^release\b/i.test(words) && !/\b(?:pre-1\.0|0\.50)\b/i.test(after));
+}
+
+/** The first INSTALLED_BUILD match in said that excusedBuild does not excuse (w6467). */
+export function installedBuildIn(said: string): string | undefined {
+  for (const r of INSTALLED_BUILD) {
+    for (const m of said.matchAll(new RegExp(r.source, `${r.flags.replace('g', '')}g`))) if (!excusedBuild(said, m.index, m[0])) return m[0];
+  }
+  return undefined;
+}
 
 /**
  * w6451 (w6442's review of PR #1477): a pair run is marked from its what or brief too (mentionsLegacyPlayer), so those words

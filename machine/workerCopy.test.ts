@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { LOW_COPY_SCRIPT, linkIn, plainDirAt, workerCopier, writeFileSafe, type Ran } from './workerCopy.ts';
+import { LOW_COPY_SCRIPT, isLinkAt, linkIn, plainDirAt, workerCopier, writeFileSafe, type Ran } from './workerCopy.ts';
 
 function tmp(t: TestContext): string {
   const d = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'workercopy-')));
@@ -24,14 +24,21 @@ const realRun = async (cmd: string, argv: string[]): Promise<Ran> => {
   return { code: r.status ?? -1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 };
 const rm = async (d: string) => fs.rmSync(d, { recursive: true, force: true });
+/**
+ * A link to a folder: a junction on Windows (w6475), the link a Low worker makes there with no privilege; a symlink
+ * needs Developer Mode or SeCreateSymbolicLinkPrivilege, which a worker (and BEAST's test runs) lack. Elsewhere a symlink.
+ */
+const linkDir = (target: string, at: string) => fs.symlinkSync(target, at, 'junction');
+/** Windows has no plain copy: a worker's files are copied only in the Low node, here this test's own node. */
+const lowNode = () => process.execPath;
 
 test('linkIn finds a link anywhere in a tree, and the top itself', (t) => {
   const d = tmp(t);
   put(path.join(d, 'a', 'b', 'f'));
   assert.equal(linkIn(path.join(d, 'a')), undefined);
-  fs.symlinkSync(d, path.join(d, 'a', 'b', 'l'));
+  linkDir(d, path.join(d, 'a', 'b', 'l'));
   assert.equal(linkIn(path.join(d, 'a')), path.join('b', 'l'));
-  fs.symlinkSync(path.join(d, 'a'), path.join(d, 'top'));
+  linkDir(path.join(d, 'a'), path.join(d, 'top'));
   assert.equal(linkIn(path.join(d, 'top')), '.');
 });
 
@@ -40,7 +47,7 @@ test('plainDirAt: a folder where it should be; a link, a folder below a link, a 
   fs.mkdirSync(path.join(d, 'players', 's1'), { recursive: true });
   assert.equal(plainDirAt(path.join(d, 'players', 's1'), d, path.join('players', 's1')), true);
   fs.mkdirSync(path.join(d, 'else', 's2'), { recursive: true });
-  fs.symlinkSync(path.join(d, 'else'), path.join(d, 'linked'));
+  linkDir(path.join(d, 'else'), path.join(d, 'linked'));
   assert.equal(plainDirAt(path.join(d, 'linked'), d, 'linked'), false);
   assert.equal(plainDirAt(path.join(d, 'linked', 's2'), d, path.join('linked', 's2')), false);
   put(path.join(d, 'file'));
@@ -48,7 +55,7 @@ test('plainDirAt: a folder where it should be; a link, a folder below a link, a 
   assert.equal(plainDirAt(path.join(d, 'none'), d, 'none'), false);
 });
 
-test('writeFileSafe replaces a link at the name and never writes through it', (t) => {
+test('writeFileSafe replaces a link at the name and never writes through it', { skip: process.platform === 'win32' && 'a Windows file symlink needs a privilege a worker lacks, so none can be planted; the junction case is below' }, (t) => {
   const d = tmp(t);
   put(path.join(d, 'victim'), 'keep');
   fs.symlinkSync(path.join(d, 'victim'), path.join(d, 'slot.json'));
@@ -59,15 +66,27 @@ test('writeFileSafe replaces a link at the name and never writes through it', (t
   assert.deepEqual(fs.readdirSync(d).sort(), ['slot.json', 'victim']);
 });
 
+test('writeFileSafe replaces a folder link (a junction on Windows) at the name and never writes into its folder', (t) => {
+  const d = tmp(t);
+  put(path.join(d, 'victim', 'f'), 'keep');
+  linkDir(path.join(d, 'victim'), path.join(d, 'slot.json'));
+  writeFileSafe(path.join(d, 'slot.json'), '{}');
+  assert.deepEqual(fs.readdirSync(path.join(d, 'victim')), ['f']);
+  assert.equal(fs.readFileSync(path.join(d, 'victim', 'f'), 'utf8'), 'keep');
+  assert.equal(fs.lstatSync(path.join(d, 'slot.json')).isFile(), true);
+  assert.equal(fs.readFileSync(path.join(d, 'slot.json'), 'utf8'), '{}');
+  assert.deepEqual(fs.readdirSync(d).sort(), ['slot.json', 'victim']);
+});
+
 test('the plain copy keeps a link as a link (never follows it) for a cache, and refuses a build holding one', async (t) => {
   const d = tmp(t);
   put(path.join(d, 'secret', 'token'), 'shh');
   put(path.join(d, 'src', 'a', 'f'), 'one');
-  fs.symlinkSync(path.join(d, 'secret'), path.join(d, 'src', 'a', 'out'));
-  const copy = workerCopier({ run: realRun, removeTree: rm });
+  linkDir(path.join(d, 'secret'), path.join(d, 'src', 'a', 'out'));
+  const copy = workerCopier({ lowNode, run: realRun, removeTree: rm });
   await copy(path.join(d, 'src'), path.join(d, 'dst'), { links: 'keep' });
   assert.equal(fs.readFileSync(path.join(d, 'dst', 'a', 'f'), 'utf8'), 'one');
-  assert.equal(fs.lstatSync(path.join(d, 'dst', 'a', 'out')).isSymbolicLink(), true);
+  assert.equal(isLinkAt(path.join(d, 'dst', 'a', 'out')), true); // lstat misses the junction Windows makes here (isLinkAt)
   await assert.rejects(copy(path.join(d, 'src'), path.join(d, 'build'), { links: 'refuse' }), /holds a link or junction/);
   assert.equal(fs.existsSync(path.join(d, 'build')), false);
 });
@@ -77,6 +96,7 @@ test('a failed copy removes what it made and says why', async (t) => {
   put(path.join(d, 'src', 'f'));
   const removed: string[] = [];
   const copy = workerCopier({
+    lowNode,
     run: async () => ({ code: 1, stdout: '', stderr: 'deny file-read-data /x\n' }),
     removeTree: async (p) => void removed.push(p),
   });
@@ -105,11 +125,11 @@ test('LOW_COPY_SCRIPT walks the tree without entering a link: keep makes it agai
   const d = tmp(t);
   put(path.join(d, 'secret', 'token'), 'shh');
   put(path.join(d, 'src', 'a', 'f'), 'one');
-  fs.symlinkSync(path.join(d, 'secret'), path.join(d, 'src', 'a', 'out'));
+  linkDir(path.join(d, 'secret'), path.join(d, 'src', 'a', 'out'));
   const node = (dst: string, mode: string) => spawnSync(process.execPath, ['-e', LOW_COPY_SCRIPT, path.join(d, 'src'), dst, mode], { encoding: 'utf8' });
   const k = node(path.join(d, 'k'), 'keep');
   assert.equal(k.status, 0, k.stderr);
   assert.equal(fs.readFileSync(path.join(d, 'k', 'a', 'f'), 'utf8'), 'one');
-  assert.equal(fs.lstatSync(path.join(d, 'k', 'a', 'out')).isSymbolicLink(), true);
+  assert.equal(isLinkAt(path.join(d, 'k', 'a', 'out')), true);
   assert.equal(node(path.join(d, 'r'), 'refuse').status, 3);
 });
