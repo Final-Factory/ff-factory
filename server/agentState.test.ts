@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { HOLD_PLACE_MS, agentState, agentStateText, holdsItsPlace, holdsSandbox, isBetweenTurns, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
+import { HOLD_PLACE_MS, agentState, agentStatePlaces, agentStateText, holdsItsPlace, holdsSandbox, isBetweenTurns, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
 import { workLive } from '../shared/workState.ts';
 import { fleetOf } from '../shared/fleet.ts';
 import { Store } from './store.ts';
@@ -409,4 +409,26 @@ test('w2358: a sandbox with uncommitted changes nobody holds is not FREE (a star
   assert.equal(pc().online, false, 'no report yet: not a place');
   Object.defineProperty(machines, 'statsOf', { value: () => ({ memTotalBytes: 64e9, memFreeBytes: 32e9 }), configurable: true });
   assert.equal(pc().online, true, 'its first report: a place again');
+});
+
+test('w6428: holdsItsPlace answers as agentState says, for every mix of what it reads', () => {
+  const iso = (ms: number) => new Date(NOW + ms).toISOString();
+  const statuses: SessionInfo['status'][] = ['idle', 'running', 'starting', 'stopped', 'error', 'waiting_permission'];
+  const wakes = [undefined, iso(3_600_000), iso(-60_000), iso(-10 * 60_000), 'not a time'];
+  const helds = [undefined, iso(-60_000), iso(-HOLD_PLACE_MS - 60_000), 'not a time'];
+  let n = 0;
+  for (const status of statuses)
+    for (const wakeAt of wakes)
+      for (const heldSince of helds)
+        for (const queuedSend of [undefined, 'w1: go'])
+          for (const jobs of [0, 1])
+            for (const tasks of [undefined, 0, 2])
+              for (const queueWait of [undefined, 'a Unity slot'])
+                for (const benchHold of [undefined, 'a bench ticket'])
+                  for (const hostFailure of [undefined, { at: iso(-1000), why: 'x' }]) {
+                    const f = { ...s('a', { status, wakeAt, heldSince, queuedSend, backgroundTasks: tasks, backgroundJobs: jobs ? [{ id: 'j', description: 'CI' }] : undefined, hostFailure } as Partial<SessionInfo>), queueWait, benchHold };
+                    assert.equal(holdsItsPlace(f, NOW), agentStatePlaces(f, NOW), JSON.stringify(f));
+                    n++;
+                  }
+  assert.ok(n > 10_000);
 });

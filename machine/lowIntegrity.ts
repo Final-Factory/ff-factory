@@ -845,6 +845,15 @@ export function deleteBatches(paths: readonly string[]): string[][] {
 }
 
 /**
+ * w6417: whether this daemon makes Low copies at all: Windows, `workerIntegrity: "low"` and a worker root, the same three
+ * lowSetup starts from. The daemon makes its LowCopies the first time a copy is asked for when this holds, so a copy is
+ * there from the daemon's start, never only once the start's labelling (half an hour on LothDesktop) is done.
+ */
+export function lowCopiesWanted(cfg: { workerIntegrity?: string; root?: string }, platform: NodeJS.Platform): boolean {
+  return platform === 'win32' && cfg.workerIntegrity === 'low' && !!cfg.root;
+}
+
+/**
  * The Low-labelled copies of claude, node and gh in `<root>\tools\low` the daemon runs (w5333, w5540, w5430): a process
  * started from a Low-labelled file runs at Low. Each is named by its source's size and mtime, so a new claude gets a new
  * copy; copies of older builds are removed when nothing runs them.

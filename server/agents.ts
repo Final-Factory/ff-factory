@@ -6800,7 +6800,11 @@ A report is for a person who asked for one, and people want very few. File one w
   pageRead<T>(fn: () => T): T {
     if (this.freeMemo) return fn();
     this.freeMemo = new Map();
-    this.pageMemo = { work: new Map() };
+    // w6428: each worker's requests and the ledger's index are kept from one page build to the next while no request was
+    // saved or dropped (Store.workRev): a burst of reconnects (eight pages in one second, 18:42:51Z on 2026-11-27) built them
+    // for every page alike. Both read the requests only, nothing of the sessions but the id and title workIdsOf keys by.
+    if (this.pageKept?.rev !== this.store.workRev) this.pageKept = { rev: this.store.workRev, work: new Map() };
+    this.pageMemo = { work: this.pageKept.work };
     try {
       return this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
     } finally {
@@ -6814,6 +6818,9 @@ A report is for a person who asked for one, and people want very few. File one w
    * session id and title, at the ledger's workRev), read once: the page's placement asked both per released worker twice.
    */
   private pageMemo?: { queued?: Set<string>; work: Map<string, { rev: number; title: string | undefined; ids: string[] }> };
+
+  /** w6428: pageMemo's requests by worker, and the ledger's holdsIndex, kept across page builds at one Store.workRev. */
+  private pageKept?: { rev: number; work: Map<string, { rev: number; title: string | undefined; ids: string[] }>; holds?: { rev: number } & ReturnType<typeof holdsIndex> };
 
   private freeNow(x: { id: string; kind?: 'light'; status: string; sessionIds: string[]; lingering?: unknown[]; path?: string; git?: { dirty: number } }, machineId?: string): boolean {
     this.freeMade++;
@@ -7497,7 +7504,12 @@ A report is for a person who asked for one, and people want very few. File one w
   private holdsIndexNow(): ReturnType<typeof holdsIndex> | undefined {
     const pass = this.placesPass ?? this.holdsPass;
     if (!pass) return undefined;
-    if (pass.holds?.rev !== this.store.workRev) pass.holds = { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
+    if (pass.holds?.rev !== this.store.workRev) {
+      // w6428: within a page build, the index the last page build made, while the ledger is unchanged (pageKept).
+      const kept = this.pageMemo && this.pageKept?.rev === this.store.workRev ? this.pageKept : undefined;
+      pass.holds = kept?.holds?.rev === this.store.workRev ? kept.holds : { rev: this.store.workRev, ...holdsIndex([...this.store.work.values()]) };
+      if (kept) kept.holds = pass.holds;
+    }
     return pass.holds;
   }
 
