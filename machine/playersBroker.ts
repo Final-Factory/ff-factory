@@ -301,7 +301,8 @@ export function playersRpcHandlers(
       session?: string;
       host?: string;
     }[] = [];
-    const written = new Map<string, number>();
+    /** Per local lease: its holder's recorded start (pid_created, exact), or the latest moment it was written (after). */
+    const written = new Map<string, { at: number; exact: boolean }>();
     for (const n of names) {
       try {
         const f = path.join(ld, n);
@@ -310,13 +311,24 @@ export function playersRpcHandlers(
           session?: string;
           host?: string;
           time?: number;
+          held?: number;
+          pid_created?: number;
         };
         const local = !l.host || l.host === d.host;
         if (Number.isInteger(l.pid) && (!local || alive(l.pid!))) {
-          // The lease is written after its player started: its time, or the file's own when it has none (a later rewrite
-          // only moves that later, so it can never make a live player's lease look reused).
+          // player_slots.py records its holder's start as pid_created (holder_alive compares it the same way). Otherwise
+          // the lease was written after its player started: the latest of its time, its held (player_slots.py takes the
+          // slot first and sets held when hold() records the player) and the file's own time, so a later write can never
+          // make a live player's lease look reused (w6561's review).
+          const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x > 0 ? x * 1000 : undefined);
+          const created = num(l.pid_created);
           if (local)
-            written.set(n, typeof l.time === "number" && Number.isFinite(l.time) ? l.time * 1000 : fs.statSync(f).mtimeMs);
+            written.set(
+              n,
+              created !== undefined
+                ? { at: created, exact: true }
+                : { at: Math.max(num(l.time) ?? 0, num(l.held) ?? 0, fs.statSync(f).mtimeMs), exact: false },
+            );
           out.push({
             file: n,
             pid: l.pid!,
@@ -338,11 +350,12 @@ export function playersRpcHandlers(
     return out.filter((l) => {
       const w = written.get(l.file);
       const b = born.get(l.pid);
-      if (w === undefined || b === undefined || b <= w + REUSE_SLACK_MS) return true;
+      if (w === undefined || b === undefined) return true;
+      if (w.exact ? Math.abs(b - w.at) <= REUSE_SLACK_MS : b <= w.at + REUSE_SLACK_MS) return true;
       if (!reusedLogged.has(path.join(dir, l.file))) {
         reusedLogged.add(path.join(dir, l.file));
         d.log(
-          `players broker: ${path.basename(dir)}'s lease ${l.file} is dead: pid ${l.pid} now names a process started ${new Date(b).toISOString()}, after the lease (${new Date(w).toISOString()}) (w6549)`,
+          `players broker: ${path.basename(dir)}'s lease ${l.file} is dead: pid ${l.pid} now names a process started ${new Date(b).toISOString()}, ${w.exact ? "not its holder's start" : "after the lease"} (${new Date(w.at).toISOString()}) (w6549)`,
         );
       }
       return false;

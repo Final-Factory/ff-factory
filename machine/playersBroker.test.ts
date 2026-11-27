@@ -483,6 +483,7 @@ test("w6549: a lease whose pid answers as alive (EPERM) but now names a process 
   const written = 1_700_000_500_000;
   const lease = path.join(b.slot(), "leases", "hostA-117496-800d3f6a.json");
   put(lease, JSON.stringify({ pid: 117496, host: "hostA", time: written / 1000, session: "s0", broker: true }));
+  fs.utimesSync(lease, written / 1000, written / 1000); // the file was written then too
   // the elsewhere lease is never asked about: another computer's pid means nothing here
   put(path.join(b.slot(), "leases", "elsewhere.json"), JSON.stringify({ pid: 4242, host: "hostB", session: "sx" }));
   const blocked = /holds a running player \(pid (117496, 4242|4242, 117496)\)/;
@@ -514,6 +515,33 @@ test("w6549: a lease whose pid answers as alive (EPERM) but now names a process 
   await refused(() => b.h["players/install"](ME, { player: first }), 409, /\(pid 555\)/);
   born.set(555, mtime + 60_000);
   assert.equal(((await b.h["players/install"](ME, { player: first })) as { filled: boolean }).filled, true);
+});
+
+test("w6549 (w6561's review): a player_slots.py lease is judged by its holder's pid_created, else by its held", async (t) => {
+  const born = new Map<number, number>();
+  const b = broker(t, { deps: { startedAt: async () => born } });
+  const first = macBuild(path.join(b.sandbox, "A"));
+  const second = macBuild(path.join(b.sandbox, "B"), "a different build");
+  await b.h["players/install"](ME, { player: first });
+  // player_slots.py takes the slot (time), waits, starts the player and hold() adds pid, pid_created and held
+  const taken = 1_700_000_500;
+  const lease = path.join(b.slot(), "leases", "py-777.json");
+  put(lease, JSON.stringify({ pid: 777, time: taken, pid_created: taken + 30, held: taken + 31 }));
+  born.set(777, (taken + 30) * 1000);
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, /\(pid 777\)/);
+  born.set(777, (taken + 31.5) * 1000); // within the slack of its recorded start
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, /\(pid 777\)/);
+  born.set(777, (taken + 3600) * 1000); // a later process took the pid
+  assert.equal(((await b.h["players/install"](ME, { player: second })) as { filled: boolean }).filled, true);
+  born.set(777, (taken + 10) * 1000); // an earlier one is not the holder either
+  assert.equal(((await b.h["players/install"](ME, { player: first })) as { filled: boolean }).filled, true);
+  // no pid_created: the latest of time and held (and the file's own time) is when it was written
+  put(lease, JSON.stringify({ pid: 777, time: taken, held: taken + 30 }));
+  fs.utimesSync(lease, taken, taken);
+  born.set(777, (taken + 20) * 1000);
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, /\(pid 777\)/);
+  born.set(777, (taken + 40) * 1000);
+  assert.equal(((await b.h["players/install"](ME, { player: second })) as { filled: boolean }).filled, true);
 });
 
 test("w6549: processStartTimes names this process's start, before now, and leaves a gone pid out", async () => {
