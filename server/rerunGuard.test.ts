@@ -252,15 +252,15 @@ test('w5271: a log with escape sequences is read (with --allow-escape-sequences 
     if (!args.includes('--allow-escape-sequences')) throw Object.assign(new Error('Command failed: gh api'), { stderr: ESCAPES });
     return STOPPED_ANSI_LOG;
   };
-  assert.equal(readJobLog('Final-Factory/ffu', STOPPED.id, newGh), STOPPED_ANSI_LOG);
+  assert.equal(await readJobLog('Final-Factory/ffu', STOPPED.id, newGh), STOPPED_ANSI_LOG);
   assert.deepEqual(calls, [['api', 'repos/Final-Factory/ffu/actions/jobs/137627783371/logs'], ['api', '--allow-escape-sequences', 'repos/Final-Factory/ffu/actions/jobs/137627783371/logs']]);
 
   // An older gh answers on the first call; any other error is not retried and stays a read failure (fail closed).
   const oldCalls: string[][] = [];
-  assert.equal(readJobLog(undefined, 1, (a) => (oldCalls.push(a), 'log')), 'log');
+  assert.equal(await readJobLog(undefined, 1, (a) => (oldCalls.push(a), 'log')), 'log');
   assert.equal(oldCalls.length, 1);
   let n = 0;
-  assert.deepEqual(readJobLog(undefined, 1, () => { n++; throw Object.assign(new Error('x'), { stderr: 'HTTP 404: Not Found' }); }), { error: 'HTTP 404: Not Found' });
+  assert.deepEqual(await readJobLog(undefined, 1, () => { n++; throw Object.assign(new Error('x'), { stderr: 'HTTP 404: Not Found' }); }), { error: 'HTTP 404: Not Found' });
   assert.equal(n, 1);
 
   const cmd = 'gh run rerun 45155653650 --failed -R Final-Factory/ffu';
