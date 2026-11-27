@@ -1,0 +1,1 @@
+- The portal's "page socket open" line now says what placement cost inside a state build: `place{places … free … claims …}`, each part's time and outermost calls (w6428). The live machines and room phases (70-180 ms) do not show in the bench (4-8 ms), so this names where they go before the next cut.
