@@ -315,3 +315,35 @@ test('w6229: Python subprocess "exit -9" is a SIGKILL beside full swap; other ne
   assert.equal(oomKill(log.replace(/exit -9/g, 'exit 9')), undefined);
   assert.equal(oomKill(log.replace('swap free 13 MB', 'swap free 7900 MB').replace(/^.*swap is 100.*$/m, '')), undefined);
 });
+
+// w6409: ffu PR #1251's run 46000116814, job "test (ffu-windows)" (job 140509304310, ffu-beast-5, attempt 1, 2026-11-27):
+// BEAST's commit charge ran out. Lines 2040-2120 and 5815-5820 of its log: ffu-server's directory test got os error 1455
+// and Rust's allocation abort, so one of its tests failed with a panic; ffu_headless and mix_ff1 aborted (exit 3221226505).
+const ALLOC_LOG = text('rerun-alloc-abort-job.txt');
+const WIN_TEST: RerunJob = { id: 140509304310, name: 'test (ffu-windows)', conclusion: 'failure', run_attempt: 1, steps: [{ name: 'Set up job', conclusion: 'success' }, { name: 'Run python tools/run_tests_parallel.py', conclusion: 'failure' }] };
+
+test('w6409: a test binary that ran out of commit memory is a resource fault, its own failed test included', () => {
+  assert.match(ALLOC_LOG, /test result: FAILED\. 4 passed; 1 failed/);
+  assert.match(ALLOC_LOG, /ffu-headless\/lib\/ffu_headless \(exit 3221226505\)/);
+  assert.match(resourceFault(ALLOC_LOG)!, /paging file is too small for this operation to complete\. \(os error 1455\)$/);
+  // The abort alone, with no 1455 line, still counts.
+  assert.match(resourceFault(ALLOC_LOG.replace(/^.*os error 1455.*$/m, ''))!, /^memory allocation of 3145728 bytes failed$/);
+});
+
+test('w6409: a failed test in another binary, or a rustc error anywhere, keeps the rerun refused', () => {
+  const other = `${ALLOC_LOG}\nrunning 3 tests\ntest a ... FAILED\n\nfailures:\n\ntest result: FAILED. 2 passed; 1 failed`;
+  assert.equal(resourceFault(other), undefined);
+  assert.equal(resourceFault(`error[E0433]: failed to resolve\n${ALLOC_LOG}`), undefined);
+  // A failed test with no abort in its own binary: the fault line elsewhere does not excuse it.
+  const moved = ALLOC_LOG.replace(/^.*memory allocation of 3145728 bytes failed.*$/m, '').replace(/^.*os error 1455.*$/m, '');
+  assert.equal(resourceFault(moved), undefined);
+  // Exit 0xC0000409 alone is any abort, not out of memory.
+  assert.equal(resourceFault('run_tests_parallel: FAILED: ffu-bots/test/mix_ff1 (exit 3221226505)\n##[error]Process completed with exit code 1.'), undefined);
+});
+
+test('w6409: the rerun of that job passes at attempt 1 and is refused at attempt 2', async () => {
+  const cmd = 'gh run rerun 46000116814 --failed -R Final-Factory/ffu';
+  assert.equal(await checkFlakyRerun(cmd, { reader: reader([OK, WIN_TEST], undefined, { [WIN_TEST.id]: ALLOC_LOG }).r }), undefined);
+  const second = await checkFlakyRerun(cmd, { reader: reader([{ ...WIN_TEST, run_attempt: 2 }], undefined, { [WIN_TEST.id]: ALLOC_LOG }).r });
+  assert.match(second!, /Refused \(w3836\).*attempt 2/);
+});
