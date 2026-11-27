@@ -51,24 +51,31 @@ function Done([bool]$ok, [string]$detail) {
 # start, so its absence after a remount is the sign. Warn first (lothsahn's lockout rule): say so in the result and name
 # the recovery, which an administrator runs; restarting it here comes in a later change. Reads only the event log (no
 # dedup cmdlet: they talk to the service this checks for being stuck). '' when the service never ran a job on the drive,
-# or it logged event 6 for the drive since $since.
+# or it logged event 6 for the drive after the drive's last dismount (ReFS event
+# 303), so a mount at boot, when the service may have started first, does not warn.
 function Get-DedupMountPoints($e) {
   try { @((([xml]$e.ToXml()).Event.EventData.Data.'#text' | ConvertFrom-Json).Volume.MountPoints) } catch { @() }
 }
-function Test-DedupWatch([datetime]$since) {
+function Test-DedupWatch {
   try {
     $log = 'Microsoft-Windows-ReFsDedupSvc/Operational'
     $mp = "$($Letter):\"
     $jobs = Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 3 } -MaxEvents 60 -ErrorAction SilentlyContinue |
       Where-Object { (Get-DedupMountPoints $_) -contains $mp }
     if (-not $jobs) { return '' }
+    $guid = [regex]::Match([string](Get-Volume -DriveLetter $Letter -ErrorAction Stop).Path, '\{[0-9a-fA-F-]+\}').Value
+    if (-not $guid) { return '' }
+    # ReFS logs 303 ("volume was successfully dismounted") with the volume id for a detach, not at shutdown or boot.
+    $dm = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-ReFS/Operational'; Id = 303 } -MaxEvents 200 -ErrorAction SilentlyContinue |
+      Where-Object { $_.Message -match [regex]::Escape($guid) } | Select-Object -First 1
+    if (-not $dm) { return '' }
     for ($i = 0; $i -lt 12; $i++) {
-      $ev = Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 6; StartTime = $since } -ErrorAction SilentlyContinue |
+      $ev = Get-WinEvent -FilterHashtable @{ LogName = $log; Id = 6; StartTime = $dm.TimeCreated } -ErrorAction SilentlyContinue |
         Where-Object { (Get-DedupMountPoints $_) -contains $mp }
       if ($ev) { return '' }
       if ($i -lt 11) { Start-Sleep -Seconds 5 }
     }
-    return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $($Letter): since $($since.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: stop the volume's task under \Microsoft\Windows\ReFsDedupSvc\ if it is Running, then Restart-Service refsdedupsvc)"
+    return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $($Letter): since its dismount at $($dm.TimeCreated.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: stop the volume's task under \Microsoft\Windows\ReFsDedupSvc\ if it is Running, then Restart-Service refsdedupsvc)"
   } catch { return "; dedup watch not checked (w6573): $($_.Exception.Message)" }
 }
 
@@ -90,11 +97,10 @@ try {
         $script:Letter = $pref.ToUpper()
         if ((Get-OwnLetter) -eq $script:Letter) { Done $true "$($Letter): is already there" }
       } elseif (Drive) { Done $true "$($Letter): is already there" }
-      $t0 = Get-Date
       Mount-DevDrive
       $detail = "attached $Vhdx as $($Letter):"
       if ($LetterChangedFrom) { $detail = "$detail; the letter changed from $($LetterChangedFrom): to $($Letter): ($(Update-LetterDependents $LetterChangedFrom $Letter))" }
-      Done $true "$detail$(Test-DedupWatch $t0)"
+      Done $true "$detail$(Test-DedupWatch)"
     }
     'trim' {
       if (-not (Drive)) { Done $false "$($Letter): is not mounted" }
@@ -115,7 +121,6 @@ try {
       if (Drive) { Optimize-Volume -DriveLetter $Letter -ReTrim -ErrorAction SilentlyContinue }
       $how = ''
       if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
-      $t0 = Get-Date
       Dismount-DiskImage -ImagePath $Vhdx | Out-Null
       try {
         if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
@@ -143,7 +148,7 @@ try {
       $after = (Get-Item $Vhdx).Length
       $freed = ($before - $after) / 1GB
       $msg = "{0}: {1:N1} GB -> {2:N1} GB (reclaimed {3:N1} GB), {4}: reattached" -f $how, ($before / 1GB), ($after / 1GB), $freed, $Letter
-      $msg = "$msg$(Test-DedupWatch $t0)"
+      $msg = "$msg$(Test-DedupWatch)"
       if ($freed -lt 1) { Done $false "compaction reclaimed nothing: $msg" }
       Done $true $msg
     }
@@ -163,7 +168,6 @@ try {
       if ($users) { Done $false "refused: $(@($users).Count) Unity editor(s) use $($Letter): (stop them first)" }
       if ($Flex) { $own = Get-OwnLetter; if ($own) { $script:Letter = $own } }
       if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
-      $t0 = Get-Date
       if ((Get-DiskImage -ImagePath $Vhdx).Attached) { Dismount-DiskImage -ImagePath $Vhdx | Out-Null }
       $out = ''
       try {
@@ -182,7 +186,7 @@ try {
       $st.PSObject.Properties.Remove('wantGB')
       $st | Add-Member -NotePropertyName maxGB -NotePropertyValue $want -Force
       [IO.File]::WriteAllText($StateFile, ($st | ConvertTo-Json -Depth 8))
-      Done $true (("grew {0}: from {1} to {2} GB (its volume {3:N1} -> {4:N1} GB); devdrive.json says {2} GB" -f $Letter, $have, $want, ($before / 1GB), ($after / 1GB)) + (Test-DedupWatch $t0))
+      Done $true (("grew {0}: from {1} to {2} GB (its volume {3:N1} -> {4:N1} GB); devdrive.json says {2} GB" -f $Letter, $have, $want, ($before / 1GB), ($after / 1GB)) + (Test-DedupWatch))
     }
     'detach' {
       # For the recovery self-test (host_recovery "selftest"): the drive goes away as it did on 2026-09-24, and the

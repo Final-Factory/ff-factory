@@ -226,8 +226,8 @@ started 08:00:02, service 08:00:26, event 6 08:00:39), that job never logged an 
 reboot; a remount on 11-26 05:00Z was followed by no event 6, the 11-26 08:00Z job failed with 0x80070015
 (ERROR_NOT_READY) and no job ran after it, with the volume's scheduled task stuck in Running. An administrator's
 `Restart-Service refsdedupsvc` (and stopping the stuck task) brought event 6 back at 2026-11-27 23:00Z. Event 6, "started monitoring" a volume, has only ever been logged at a service start (measured, 10-19 to 11-27). The
-helper's `mount`, `compact` and `grow` now wait up to a minute for event 6 after their remount and, when none comes,
-say so in their result (warn only; they restart nothing; read from the event log, not the dedup cmdlets). To check by hand without admin:
+helper's `mount`, `compact` and `grow` now wait up to a minute for an event 6 newer than V:'s last dismount (ReFS event 303 naming
+V:'s volume id; shutdown and boot log none, so a mount at boot does not warn) and, when none comes, say so in their result (warn only; they restart nothing; read from the event log, not the dedup cmdlets). To check by hand without admin:
 `Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-ReFsDedupSvc/Operational'; Id=6} -MaxEvents 3`, and compare
 its time with V:'s last dismount (events 300 and 303 in `Microsoft-Windows-ReFS/Operational` naming V:'s volume
 id, f1ab3378 on LothDesktop). A remount logs no event 7 ("stopped monitoring") there; only the service's own stop
