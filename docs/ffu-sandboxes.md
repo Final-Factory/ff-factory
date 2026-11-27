@@ -141,7 +141,10 @@ person filed a request each time to free them by hand. Now the daemon acts on it
 every 2 min, `FFU_REPORT_MS`): when it names a stale slot, the stale-output setting `ffuSlotSweep`
 (`machines.cleanup.staleOutput.ffuSlotSweep`) says what happens (`machine/ffuSlotAutoSweep.ts`):
 
-- `warn` (the default, warn-only first): daemon.log says `ffu slots: auto sweep (warn-only, ffuSlotSweep warn): would free
+- `on` is the default since the enforce step (w6484, after the warn-only #1500; lothsahn: "Turn it on everywhere: free
+  stale slots by themselves."). The portal's `machines.cleanup.staleOutput.ffuSlotSweep` set to `warn` or `off` takes it
+  back on every machine at its next settings push, with nobody at the machine.
+- `warn`: daemon.log says `ffu slots: auto sweep (warn-only, ffuSlotSweep warn): would free
   <slot> on <branch>: <why>`, once per slot and holder; nothing is freed.
 - `on`: the daemon runs `ffu-slot sweep` as its own process (`runFfuSlotSweep`, no session), the same rule, lock and rescue
   as a worker's sweep, and logs each line it printed as `ffu slots: auto sweep: ...`. A failure is one log line

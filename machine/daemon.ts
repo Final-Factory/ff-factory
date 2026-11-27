@@ -837,7 +837,7 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
-  /** w6484: frees the stale slots each report names (warn-only unless staleOutput.ffuSlotSweep is on). */
+  /** w6484: frees the stale slots each report names (staleOutput.ffuSlotSweep: on by default, warn or off from the portal). */
   private readonly ffuAutoSweep = new FfuSlotAutoSweep({
     mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
     sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
