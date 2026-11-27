@@ -301,7 +301,7 @@ CREATE TABLE IF NOT EXISTS relabel_log(
 CREATE TABLE IF NOT EXISTS gate_tuning(day TEXT PRIMARY KEY, at TEXT NOT NULL, summary TEXT NOT NULL, json TEXT NOT NULL) WITHOUT ROWID;
 `;
 
-type Row = Record<string, string | number | null>;
+export type Row = Record<string, string | number | null>;
 
 export interface PendingFailure {
   id: number;
@@ -605,6 +605,14 @@ export class TestHistory {
   /** Read-only SELECTs for the queries (the ad-hoc SQL route runs apart, in a worker, on its own read-only connection). */
   all(sql: string, ...args: (string | number | null)[]): Row[] {
     return this.db.prepare(sql).all(...args) as Row[];
+  }
+
+  /**
+   * A read-only SELECT run apart, in a worker thread on its own read-only connection (allApart below), so a long one never
+   * holds the portal's loop: the gate tuning's (server/gateTuning.ts, w6370) held it 22.9 s on 2026-11-27.
+   */
+  allApart(sql: string, ...args: (string | number | null)[]): Promise<Row[]> {
+    return allApart(this.file, sql, args);
   }
 
   /** The daily merge-gate tuning's own row (server/gateTuning.ts, w4928): one per day, the newest replacing that day's. */
@@ -982,6 +990,47 @@ export function runSql(file: string, sql: string, max = SQL_MAX_ROWS, timeoutMs 
       void w.terminate();
       if (m.error) reject(new Error(`sql: ${m.error}`));
       else resolve({ rows: m.rows ?? [], more: !!m.more });
+    });
+    w.once('error', (e) => {
+      clearTimeout(timer);
+      reject(e);
+    });
+  });
+}
+
+const ALL_WORKER = `
+const { parentPort, workerData } = require('node:worker_threads');
+const { DatabaseSync } = require('node:sqlite');
+let db;
+try {
+  db = new DatabaseSync(workerData.file, { readOnly: true });
+  db.exec('PRAGMA busy_timeout = 5000');
+  parentPort.postMessage({ rows: db.prepare(workerData.sql).all(...workerData.args) });
+} catch (e) {
+  parentPort.postMessage({ error: String(e && e.message || e) });
+} finally {
+  try { db && db.close(); } catch {}
+}`;
+
+/** Each allApart query's limit: a runaway one is stopped, never left running in its thread. */
+export const APART_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * One read-only statement on the database `file`, with its arguments, every row: in a worker thread on its own read-only
+ * connection, like runSql (the portal's own queries, not a caller's SQL: no row cap and no statement check).
+ */
+export function allApart(file: string, sql: string, args: readonly (string | number | null)[] = [], timeoutMs = APART_TIMEOUT_MS): Promise<Row[]> {
+  return new Promise((resolve, reject) => {
+    const w = new Worker(ALL_WORKER, { eval: true, workerData: { file, sql, args } });
+    const timer = setTimeout(() => {
+      void w.terminate();
+      reject(new Error(`query stopped after ${timeoutMs / 1000} s`));
+    }, timeoutMs);
+    w.once('message', (m: { rows?: Row[]; error?: string }) => {
+      clearTimeout(timer);
+      void w.terminate();
+      if (m.error) reject(new Error(`sql: ${m.error}`));
+      else resolve(m.rows ?? []);
     });
     w.once('error', (e) => {
       clearTimeout(timer);
