@@ -1225,6 +1225,10 @@ const sessionRevs = new SessionRevs(undefined, { ready: false });
 const sessionRevsFile = new SnapshotFile(path.join(cfg.dataDir, SESSION_REVS_FILE), () => JSON.stringify(sessionRevs.saved(store.sessions)), { delayMs: 5_000, intervalMs: 30_000, generations: 0, label: 'session revs' });
 /** What each page connect's pageSessions worked out, kept while a session is unchanged (w6382). */
 const pageSessionsCache = new PageSessionsCache();
+// w6456: a page copy that gains or loses its report is a new rev, so a reconnect after any gap gets it again.
+pageSessionsCache.onCopy = (id, withResult) => {
+  if (sessionRevs.pageCopy(id, withResult) && sessionRevs.isReady) sessionRevsFile.changed();
+};
 bus.on('event', (e: ServerEvent) => {
   sessionRevs.note(e);
   pageSessionsCache.note(e);
