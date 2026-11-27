@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
@@ -29,7 +29,7 @@ import { MAIN_CLONE_NO_AGENTS, OLDEST_PORTAL_PROTOCOL, PROTOCOL_VERSION, RELOCAT
 import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { StallProfiler } from '../server/stallProfile.ts';
-import { useSpawnThread } from '../server/spawnThread.ts';
+import { execFileOffThread, useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
 import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
@@ -110,7 +110,7 @@ import { installPrShim } from './prFlow.ts';
 import { FFU_SLOTS_DEFAULT_MAX, installFfuSlotShim, readFfuSlotsReport, runFfuSlotSweep } from './ffuSlots.ts';
 import { FfuSlotAutoSweep } from './ffuSlotAutoSweep.ts';
 import { agentNodePathDir } from '../server/agentNode.ts';
-import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
+import { hasOwnGithub, holdKeychainLeg, judgeToolLeg, KEYCHAIN_MACH_SERVICES, keychainHeld, keychainHoldFile, machineGhEnv, machineGhToken, ownerReadDenied, ownerRunWiring, ownerSocketDenyArgs, ownerSocketPaths, ownerSocketProbeTargets, ownerToolLegs, PROBE_KEYCHAIN_ITEM, sayOwnerRules, sayOwnerLabels, ownerLabelTargets, ownerLabelMode, ghLoginStorage, machineGhStatusEnv, ghLoginToFile, ghLoginToKeyring, realGhRun, OWNER_GH_MOVED_NOTE, workerGhConfigDir, type ToolLegVerdict } from './ownerSecrets.ts';
 import { installPythonShim, trustedGh } from './evidenceGate.ts';
 import { ghAppPaths, ghAppRunEnv, ghAppSessionSetup, installGhAppShims, refreshSessionTokens, sessionTokensDir, writeGhAppTokens, type GhAppSetup } from './ghApp.ts';
 import { fetchAttachment, fetchAttachments, publishAttachmentFromMachine } from './attachments.ts';
@@ -837,7 +837,7 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
-  /** w6484: frees the stale slots each report names (warn-only unless staleOutput.ffuSlotSweep is on). */
+  /** w6484: frees the stale slots each report names (staleOutput.ffuSlotSweep: on by default, warn or off from the portal). */
   private readonly ffuAutoSweep = new FfuSlotAutoSweep({
     mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
     sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
@@ -1205,7 +1205,7 @@ export class Daemon {
         ? {
             start: async (root: string) => {
               const r = await new Promise<{ code: number; out: string; err: string }>((resolve) =>
-                execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
+                execFileOffThread('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', runnerRestartScript(root)], { timeout: 60_000 }, (e, out, err) => resolve({ code: e ? ((e as { code?: number }).code ?? 1) : 0, out: String(out), err: String(err) })),
               );
               if (r.code !== 0) throw new Error((r.err || r.out || `exit ${r.code}`).trim());
               return r.out.trim() || 'started';
@@ -1249,7 +1249,7 @@ export class Daemon {
       },
       systemctl: (args) =>
         new Promise((resolve, reject) =>
-          execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+          execFileOffThread('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
         ),
       freeBytes: async (p) => (await volumeStat(p))?.free,
       floorGB: () => this.currentPool()?.diskCriticalGB ?? DISK_CRITICAL_GB_DEFAULT,
@@ -1271,9 +1271,11 @@ export class Daemon {
           workerRoot: cfg.root,
           home: os.homedir(),
           uid: process.getuid?.() ?? 0,
+          // w6554: started (and, past its timeout, ended) from the spawn thread: on 2026-11-27 BEAST's loop was held 24.5 s
+          // in a kill under RunnerEnv's step, the timeout of one of these PowerShell runs ending it on the loop
           exec: (runnerEnvCmd, args) =>
             new Promise((resolve, reject) =>
-              execFile(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
+              execFileOffThread(runnerEnvCmd, args, { timeout: 120_000, windowsHide: true, maxBuffer: 8 << 20 }, (err, stdout, stderr) => (err ? reject(new Error(`${runnerEnvCmd} ${args[0] ?? ''}: ${(String(stderr) || err.message).trim().slice(0, 400)}`)) : resolve(String(stdout)))),
             ),
         }),
         held: (r) => {
@@ -1291,7 +1293,7 @@ export class Daemon {
     // w5322: on a CI-first machine (CI_FIRST: biscuit) FF Factory's own scopes run below its CI runners (machine/ciFirst.ts)
     const userctl = (args: string[]) =>
       new Promise<string>((resolve, reject) =>
-        execFile('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
+        execFileOffThread('systemctl', ['--user', ...args], { timeout: 60_000 }, (err, stdout, stderr) => (err ? reject(new Error(`systemctl --user ${args.join(' ')}: ${(stderr || err.message).trim()}`)) : resolve(stdout))),
       );
     this.ciFirst = new CiFirst({
       settings: real && process.platform === 'linux' ? CI_FIRST[cfg.id.toLowerCase()] : undefined,
@@ -4795,9 +4797,11 @@ export class Daemon {
    * (unlabelNoReadUp: no explicit label, as before) and, when the note says the daemon moved it, the login goes back into
    * Credential Manager. Other machines: nothing, and nothing on their system drive is looked at.
    */
-  private async applyOwnerLabels(mode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
+  private async applyOwnerLabels(fenceMode: ReadFenceMode, exec: Exec, say: (line: string) => void): Promise<void> {
     const plan = ownerLabelTargets({ platform: process.platform, home: os.homedir(), env: process.env, machineId: this.cfg.id });
     if (!plan.label.length) return;
+    // w6569: a warn-only machine (BEAST's warn stage) runs the warn branch, the way back, in on too: nothing is labelled or moved.
+    const mode = ownerLabelMode(fenceMode, plan);
     const note = path.join(appDirOfConfig(this.cfg), OWNER_GH_MOVED_NOTE);
     const tell = (l: string) => say(`worker integrity: owner secrets: ${l}`);
     if (mode === 'on') {

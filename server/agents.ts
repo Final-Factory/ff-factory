@@ -912,7 +912,9 @@ export class Agents {
     sessions.deployMove = (s, q, now) => this.deployMove(s, q, now);
     // w2043: a pilot worker whose pull request merged goes on in a fresh session at its next message (server/freshAfterMerge.ts).
     sessions.freshStart = (s, m) => this.freshStart(s, m);
-    sessions.freshStartMaybe = (s, m) => this.freshStarts.has(s.info.id) || (!this.freshRefused.has(s.info.id) && !m.images?.length && !!freshAfterMergeDue(s.info, this.store.work.values(), this.cfg));
+    // w6513: its requests from workOf (within the drain's pass, the per-worker index): freshAfterMergeDue keeps only those
+    // onRequest, so none is missed. A scan of the ledger per message the drain walked before.
+    sessions.freshStartMaybe = (s, m) => this.freshStarts.has(s.info.id) || (!this.freshRefused.has(s.info.id) && !m.images?.length && !!freshAfterMergeDue(s.info, this.workOf(s.info.id), this.cfg));
     machines.onPause = (id, p) => {
       if (p.paused) this.pauses.onPause(id);
       else {
@@ -1104,7 +1106,7 @@ export class Agents {
       if (this.placeAgain.gen !== gen) this.placementChanged();
       return why;
     };
-    sessions.placementPass = (fn) => this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn));
+    sessions.placementPass = (fn) => this.machines.withLiveCounts(() => this.withPlacesOnce(() => this.placeAgain.withClaimsMemo(fn)));
     sessions.placementFree = (fn) => this.unmemoized(fn);
     sessions.placementChanged = () => this.placementChanged();
     // w1944: a daemon that connects (every one after a portal restart, which drops a capacity ping still waiting) is room news.
@@ -4131,7 +4133,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     if (!i.machineId || isMidTurn(i)) return undefined;
     // w1863: a hold that names requests it lets through resumes their workers (lothsahn: "stop all work on LothDesktop
     // except w1785 until it's done"; at 15:15 the hold kept for w1785 queued a message to w1785's own worker).
-    const mine = [...this.store.work.values()].filter((w) => isOpen(w) && onRequest(w, i.id)).map((w) => w.id);
+    // w6513: the requests that can name it (workOf: within the drain's pass, indexed by worker once per ledger change, in
+    // ledger order); onRequest needs it in sessionIds, so none is missed. A scan of the ledger per held message before.
+    const mine = [...this.workOf(i.id)].filter((w) => isOpen(w) && onRequest(w, i.id)).map((w) => w.id);
     // w5895, w5937: a drain set to let only its running workers finish ("and none resume") holds the resume of any other
     // worker there that no exception lets through, until hold_machine lift, update_work hold lift or resumes 'all'.
     const why = holdReason(i.machineId, this.placement(false), mine) ?? this.builds.resumeHold(i) ?? (i.kind === 'worker' ? this.drainResumeHold(i, mine) : undefined);
@@ -7532,6 +7536,7 @@ A report is for a person who asked for one, and people want very few. File one w
   /** w3843: within withPlacesOnce and a claims memo, the next asks compute afresh (placesChanged and PlaceAgain.claimsChanged). */
   private placementChanged(): void {
     this.placesChanged();
+    this.machines.liveCountsChanged();
     this.placeAgain.claimsChanged();
   }
 
@@ -7539,13 +7544,16 @@ A report is for a person who asked for one, and people want very few. File one w
   private unmemoized<T>(fn: () => T): T {
     const pass = this.placesPass;
     this.placesPass = undefined;
-    return this.placeAgain.withoutClaimsMemo(() => {
-      try {
-        return fn();
-      } finally {
-        if (pass) this.placesPass = {};
-      }
-    });
+    return this.placeAgain.withoutClaimsMemo(() =>
+      this.machines.withoutLiveCounts(() => {
+        try {
+          return fn();
+        } finally {
+          // w6513: the ledger's indexes stay: each is built again once a request is saved or dropped (Store.workRev).
+          if (pass) this.placesPass = { ...(pass.holds ? { holds: pass.holds } : {}), ...(pass.byWorker ? { byWorker: pass.byWorker } : {}) };
+        }
+      }),
+    );
   }
 
   private placesNow(): Computer[] {
@@ -9873,11 +9881,13 @@ ${w.repo ?? ''}
       ),
       tool(
         'file_follow_ups',
-        'File the follow-ups a worker handed up on a request ([follow-ups to file], w2969) in one call, each with its title and brief as the worker wrote it and related to that request, through request_work and its limits. Only when your person asked for that next step or has a standing decision to file them; otherwise ask them first (w5222).',
+        'File the follow-ups a worker handed up on a request ([follow-ups to file], w2969) in one call, each with its title and brief as the worker wrote it and related to that request, through request_work and its limits. Only when your person asked for that next step or has a standing decision to file them; otherwise ask them first (w5222). With drop true it files nothing and drops them instead (w6581): when your person already decided against them or they are outdated, with reason quoting your person’s words or naming that fact; the request then no longer waits on them, and their card goes.',
         {
           request: z.string().min(2).max(16).describe('The request they were handed up on, e.g. "w5196".'),
           items: z.array(z.number().int().min(1)).max(10).optional().describe('Which, by their number in the message (default: all).'),
           priority: priority.optional().describe('For all of them; default normal.'),
+          drop: z.boolean().optional().describe('Drop them instead of filing them (w6581); needs reason.'),
+          reason: z.string().max(300).optional().describe('With drop: your person’s words, quoted, or the fact that makes them outdated.'),
         },
         wrap(async (a) => o.fileFollowUps(chat(), a)),
       ),
