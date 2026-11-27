@@ -31,7 +31,7 @@ interface Open {
 
 /** Building the first state, in parts: appState, JSON.stringify, and the whole. */
 /** `kept`: the whole parts the page kept its own of; `work`: requests sent of all (w6336, shared/pageParts.ts). */
-export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; work?: { sent: number; of: number }; phases?: readonly (readonly [string, number])[] }
+export interface FirstState { ms: number; bytes: number; sessions?: number; delta?: boolean; buildMs?: number; jsonMs?: number; kept?: string[]; checked?: number; work?: { sent: number; of: number }; phases?: readonly (readonly [string, number])[] }
 
 /**
  * What a page says once its first state is on screen (w6336, web/src/api.ts): each phase of its connect in ms, as the
@@ -134,7 +134,7 @@ export class PageSockets<S extends object> {
     this.open.set(ws, { user, addr, via, at: this.now(), state });
     const why = reconnectOf(req.url);
     if (/^why=stale\b/.test(why)) this.countDrop(user);
-    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms${state.buildMs !== undefined && state.jsonMs !== undefined ? ` (build ${Math.round(state.buildMs)}ms${phasesOf(state)} json ${Math.round(state.jsonMs)}ms)` : ''} ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}${keptOf(state)}` : ''} (${this.open.size} open)`);
+    this.log(`page socket open: ${user} from ${addr} via ${via}, ${why}${state ? `, state ${Math.round(state.ms)}ms${state.buildMs !== undefined && state.jsonMs !== undefined ? ` (build ${Math.round(state.buildMs)}ms${phasesOf(state)} json ${Math.round(state.jsonMs)}ms)` : ''} ${Math.round(state.bytes / 1024)}KB${state.sessions !== undefined ? ` ${state.sessions} sessions${state.delta ? ' changed' : ''}` : ''}${state.checked !== undefined ? ` (${state.checked} checked)` : ''}${keptOf(state)}` : ''} (${this.open.size} open)`);
   }
 
   /**

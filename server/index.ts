@@ -2876,7 +2876,7 @@ server.on('upgrade', (req, socket, head) => {
     // w5861: the log says how long the first state took to build and to hand to the network (on a slow path the last
     // of it waits for the page to take what came before), so a slow open shows where its seconds went.
     ws.send(first, () => pageSockets.sent(ws, performance.now() - t0));
-    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases });
+    pageSockets.opened(ws, user, req, { ms: built, bytes: first.length, sessions: state.sessions.length, delta: !!state.sessionsDelta, buildMs: t1 - t0, jsonMs: built - (t1 - t0), kept: state.partsKept, checked: pageSessionsCache.checked, work: state.workDelta ? { sent: state.work?.length ?? 0, of: state.workDelta.ids.length } : undefined, phases });
     if (Date.now() - lastSizesAt >= 3_600_000) {
       lastSizesAt = Date.now();
       setImmediate(() => console.log(`page state sizes: ${stateSizes(state)}`));

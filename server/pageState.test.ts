@@ -317,3 +317,18 @@ test('w6382: the page sessions cache gives what pageSessions gives, and follows 
   store.delete('live');
   same(new Set(), NOW + 4 * 86_400_000);
 });
+
+test('w6382: the cache says how many sessions a page connect looked at again', () => {
+  const store = new Map<string, SessionInfo>();
+  const cache = new PageSessionsCache();
+  for (let i = 0; i < 20; i++) store.set(`s${i}`, session(`s${i}`, 10 * 86_400_000));
+  store.set('live', session('live', 0, { status: 'running' }));
+  pageSessions(store.values(), new Set(), NOW, cache);
+  assert.equal(cache.checked, 21);
+  // Unchanged, only the one on the page is looked at again; a changed one is looked at once more.
+  pageSessions(store.values(), new Set(), NOW, cache);
+  assert.equal(cache.checked, 1);
+  cache.note({ type: 'session', session: store.get('s3')! });
+  pageSessions(store.values(), new Set(), NOW, cache);
+  assert.equal(cache.checked, 2);
+});
