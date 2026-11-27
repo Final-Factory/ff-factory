@@ -456,6 +456,27 @@ test('w6336: a worker’s requests read the same inside a placement pass as outs
   assert.deepEqual(agents.sessionWork(info.id), ['w1']);
 });
 
+// w6336: list_sandboxes runs in one placement pass, so workOver reads each worker's requests from one index of the ledger
+// (describeAllSandboxes blocked the portal 9.2 s on 2026-11-27 under workOver's scan of every request per agent line).
+test('w6336: why a worker’s work is over reads the same inside a placement pass as outside it, and a request closed or reopened mid-pass shows at once', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents } = env;
+  putRequests(store, [{ id: 'w1', title: 'Belt tooltip', brief: 'Fix it.' }, { id: 'w2', title: 'Other', brief: 'Not its.' }]);
+  const { info } = await startedFor(env, 'w1');
+  assert.equal(agents.workOver(info), undefined);
+  const close = (status: WorkItem['status']) => store.putWork({ ...store.work.get('w1')!, status });
+  agents.withPlacesOnce(() => {
+    assert.equal(agents.workOver(info), undefined);
+    close('done');
+    assert.match(agents.workOver(info) ?? '', /its request is closed \(w1 done\)/, 'closed in the pass is seen');
+    close('active');
+    assert.equal(agents.workOver(info), undefined, 'reopened is seen');
+    close('done');
+  });
+  assert.match(agents.workOver(info) ?? '', /its request is closed \(w1 done\)/);
+  assert.ok(agents.describeAllSandboxes().length > 0);
+});
+
 test('w2057: request_pair records the pull request and commit; for a pull request whose pair run is open (one filed by hand included) it joins that run and files nothing', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents } = env;
