@@ -248,6 +248,26 @@ The rule runs on every hourly pass (the daemon's `cargo-cap` scope), not only on
 21 GB of it idle `debug/incremental`), because the rule ran only in the full plan (`server/installLeftovers.ts`,
 `ffuSlotTargets`).
 
+**A busy target is judged again between passes (w6290).** A pass keeps a slot's whole target while a build or a test runs
+in or from it (`cargoTargetBusy`, `runsFromDir`): a rustc reads the rlibs it links, and a running test executable's
+siblings are files no unit graph sees in use (w6240). It also keeps one written within the settle time. On LothDesktop the
+slots build most of the day, so the next hourly pass often met the same slot busy again: on 2026-11-26/27
+(`cleanup-log.jsonl`) slot1 to slot4 were kept at 16.1 to 20.4 GB on 7 passes, and slot4 stayed kept from 15:48 to 17:59
+UTC before a pass swept 15.6 GB of it. Now every slot a pass keeps for one of those reasons is planned again, alone, every
+`staleOutput.ffuBusyRetryMinutes` (5) until the next pass is due (`machine/ffuBusyRetry.ts`, the `ffu-busy-retry` scope of
+`planInstallLeftovers`). The rule is the same one, so the re-check never takes more than an idle pass would. Still busy, the
+slot is kept again and stays watched. Once idle, the re-check plans what the pass would take then: the stale units, then
+`debug/incremental` over the cap. Each removal still asks `ffuSlotBusyNow` right before its rename.
+
+`staleOutput.ffuBusyRetry` sets the mode. `warn` is the default: it logs `would remove` lines to the clean-up history
+(`portal_logs cleanup`, trigger `ffu-busy-retry`) and removes nothing (docs/worker-fence.md: warn-only first). `on` removes,
+and only while the stale-output mode is `on` too. `off` stops the re-check. Pruning by age inside a busy target was rejected
+because a running rustc or test run can need any file in `deps/` whatever its age. The age window that is safe is the
+unit-graph sweep's, and a pass already runs it whenever nothing runs in the target.
+
+Recovery needs no person. A unit removed by mistake is one cargo rebuilds on the next build in that slot, as it does after
+any sweep. Setting `ffuBusyRetry` to `off` (portal config `cleanup.staleOutput`) turns the re-check off.
+
 **Released targets first (w6044).** A pass plans and removes the released slots' targets before every slower step (the
 `ffu-slots` scope, `cleanupPass`'s `first` step in `server/staleOutput.ts`): a slot no running or resumable worker holds and
 nothing runs from, taken whole only. On a low pass a settled one goes, with no sweep or size walk; on any other pass one idle

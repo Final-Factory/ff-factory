@@ -10,6 +10,7 @@ import type { CleanupGuard } from './cleanup.ts';
 import { installLeftoverSettings, planInstallLeftovers, type ProcLite } from './installLeftovers.ts';
 import { writeCargoUnit, type FakeUnit } from './cargoGraphFixture.ts';
 import type { ProcPlace } from './procPlaces.ts';
+import { busySlotsOf } from '../machine/ffuBusyRetry.ts';
 
 /**
  * w3764: ffu slots, per-machine ffu worktrees with warm cargo targets (machine/ffuSlots.ts), and the clean-up rule for their
@@ -186,7 +187,7 @@ function target(root: string, slot: string, ageH: number, incBytes = 10, depsByt
   return t;
 }
 
-async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; places?: ProcPlace[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' | 'ffu-slots' } = {}) {
+async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; places?: ProcPlace[]; inUse?: string[]; settings?: Record<string, unknown>; scope?: 'cargo-cap' | 'ffu-slots' | 'ffu-busy-retry'; slots?: string[] } = {}) {
   const guard: CleanupGuard = { keep: [path.join(root, 'sandboxes')], inUse: o.inUse ?? [], home: path.join(root, 'home') };
   return planInstallLeftovers({
     root,
@@ -203,6 +204,7 @@ async function plan(root: string, o: { low?: boolean; procs?: ProcLite[]; places
     alive: () => true,
     runnerLog: () => undefined,
     ...(o.scope ? { scope: o.scope } : {}),
+    ...(o.slots ? { slots: o.slots } : {}),
   });
 }
 
@@ -784,4 +786,32 @@ test('w6044: ffuSlotBusyNow keeps a target whose slot was taken, or that a build
   assert.match((await check(held)) ?? '', /holder down0001 runs or can resume again/);
   assert.match((await ffuSlotBusyNow(root, async () => [], () => { throw new Error('x'); })(held)) ?? '', /sessions could not be read again/);
   assert.match((await ffuSlotBusyNow(undefined, async () => [])(it)) ?? '', /no install root/);
+});
+
+test('w6290: a slot a pass kept over the cap for a running build is judged again alone; busy it is kept, idle it gets what the pass would plan', async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-w6290-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5 }));
+  // Both over a 3000-byte cap; a rustc writes into slot1 (LothDesktop slot2, 2026-11-27 03:16: 16.1 GB kept for an ffu_sim rustc).
+  const capGB = 3000 / 1024 ** 3;
+  const t1 = target(root, 'slot1', 1, 2000, 2000);
+  target(root, 'slot2', 1, 2000, 2000);
+  fs.writeFileSync(path.join(root, 'ffu-sandboxes', 'slots.json'), JSON.stringify({ slots: [{ id: 'slot1', holder: 'live0290' }] }));
+  const inUse = [path.join(root, 'tmp', 'ffa-live0290')];
+  const procs: ProcLite[] = [{ pid: 42, ppid: 1, cmd: `rustc --out-dir ${t1}/debug/deps` } as ProcLite];
+  const settings = { ffuSlotTargetCapGB: capGB };
+  const pass = await plan(root, { procs, inUse, settings, scope: 'cargo-cap' });
+  assert.ok(!ffuItems(root, pass).some((p) => p.startsWith('ffu-sandboxes/slot1/')), 'the pass keeps the busy slot whole');
+  assert.deepEqual(busySlotsOf(pass.held, root), ['slot1'], JSON.stringify(pass.held));
+
+  // Still building: the re-check keeps it again and names it busy; slot2 is not read at all.
+  const still = await plan(root, { procs, inUse, settings, scope: 'ffu-busy-retry', slots: ['slot1'] });
+  assert.deepEqual(ffuItems(root, still), []);
+  assert.deepEqual(busySlotsOf(still.held, root), ['slot1']);
+
+  // The build ended: the re-check plans for slot1 exactly what an idle pass plans there, and nothing elsewhere.
+  const idle = await plan(root, { procs: [], inUse, settings, scope: 'ffu-busy-retry', slots: ['slot1'] });
+  const idlePass = await plan(root, { procs: [], inUse, settings, scope: 'cargo-cap' });
+  assert.deepEqual(ffuItems(root, idle), ffuItems(root, idlePass).filter((p) => p.startsWith('ffu-sandboxes/slot1/')));
+  assert.deepEqual(ffuItems(root, idle), ['ffu-sandboxes/slot1/target/debug/incremental']);
+  assert.deepEqual(busySlotsOf(idle.held, root), []);
 });

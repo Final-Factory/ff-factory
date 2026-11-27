@@ -915,8 +915,12 @@ export async function planInstallLeftovers(o: {
   /** 'sandboxes': only each sandbox's own build and capture output (the sandbox release sweep, w913). 'cargo-cap': only the
    * cargo-target-cap rule over the sessions' temp folders, for the passes the stale-output rules skip (w3471); since w3674 it
    * covers the Unity Library copy cap (library-copy-cap) too. 'ffu-slots': only the released ffu slots' cargo targets, the
-   * first step of every pass (w6044: BEAST's released targets held 190.6 GB while every pass was cut off before the rule ran). */
-  scope?: 'all' | 'sandboxes' | 'cargo-cap' | 'ffu-slots';
+   * first step of every pass (w6044: BEAST's released targets held 190.6 GB while every pass was cut off before the rule ran).
+   * 'ffu-busy-retry': only the ffu slots in `slots`, with the same rule a pass runs on them (w6290: the re-check, minutes after a
+   * pass, of a slot target that pass kept over ffuSlotTargetCapGB because a build or a test ran from it). */
+  scope?: 'all' | 'sandboxes' | 'cargo-cap' | 'ffu-slots' | 'ffu-busy-retry';
+  /** With scope 'ffu-busy-retry': the slots (slot1, slot2, ...) to judge; the rest are not read. */
+  slots?: string[];
   /** Free space is below the soft threshold (or a person asked for a pass): stopped sessions' caches go after lowCacheSettleMinutes (w1813). */
   low?: boolean;
   /** A low pass says which check kept a temp folder's rebuildable caches once they reach this size (plan.held; default 256 MiB). */
@@ -1366,6 +1370,7 @@ export async function planInstallLeftovers(o: {
     };
     for (const e of await children(ffuBase)) {
       if (!e.isDirectory() || !/^slot\d+$/.test(e.name)) continue;
+      if (o.scope === 'ffu-busy-retry' && !(o.slots ?? []).includes(e.name)) continue;
       const slot = path.join(ffuBase, e.name);
       // The first step takes the slots' own targets only: a stray ffu/target may be in a held slot (review of #1358).
       if (!firstOnly) await strayInTreeTarget(slot, e.name);
@@ -1493,6 +1498,17 @@ export async function planInstallLeftovers(o: {
     await ffuSlotTargets();
     for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
     plan.items = [...items.values()];
+    return plan;
+  }
+
+  // w6290: the busy-slot re-check (machine/ffuBusyRetry.ts): the named slots' targets only, by the rule above, with what it
+  // kept (plan.held) so the re-check knows a slot is still busy.
+  if (o.scope === 'ffu-busy-retry') {
+    await ffuSlotTargets();
+    for (const p of [...items.keys()]) if ([...items.keys()].some((q) => q !== p && within(p, q))) items.delete(p);
+    plan.items = [...items.values()];
+    const kept = held.filter((h) => !plan.items.some((i) => within(h.path, i.path)));
+    if (kept.length) plan.held = kept;
     return plan;
   }
 
