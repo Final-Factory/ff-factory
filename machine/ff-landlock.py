@@ -32,7 +32,7 @@ anywhere else stays free, granted per sibling as --except does, so a socket an o
 one of PATH's parent folders is refused too; sockets this command's own processes make stay reachable. On an older
 kernel the option is a no-op and says so on stderr.
 """
-import ctypes, os, struct, sys
+import ctypes, os, stat, struct, sys
 
 SYS_CREATE, SYS_ADD, SYS_RESTRICT = 444, 445, 446  # x86_64 and aarch64 share these numbers
 PR_SET_NO_NEW_PRIVS = 38
@@ -156,10 +156,33 @@ def main(argv):
             cur[1].add(next(it))
         else:
             die(f'unknown option {a}')
+    # Review w6362: a symlink a worker planted under off or warn, at a --rw-children folder (cache) or among its children,
+    # must not carry the write rule to where it leads. Neither is granted, and a child is opened O_NOFOLLOW.
+    nofollow = set()
+    tops = [d for d, _ in children]
+
+    def via_link(d):
+        # d, or a folder above it that is (or is under) another --rw-children folder: cache/nuget through a symlinked cache.
+        q = d.rstrip('/')
+        while q and any(is_under(q, t.rstrip('/')) for t in tops):
+            if os.path.islink(q):
+                return True
+            q = os.path.dirname(q)
+        return False
+
     for d, skip in children:
-        for name in sorted(os.listdir(d)):
-            if name not in skip:
-                rw.append(os.path.join(d, name))
+        if via_link(d):
+            sys.stderr.write(f'ff-landlock: {d} is (or is under) a symlink; none of its children are writable\n')
+            continue
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            full = os.path.join(d, name)
+            if name not in skip and not os.path.islink(full):
+                rw.append(full)
+                nofollow.add(full)
 
     abi = libc.syscall(SYS_CREATE, None, 0, 1)  # LANDLOCK_CREATE_RULESET_VERSION
     if abi < 1:
@@ -186,8 +209,11 @@ def main(argv):
         die(f'create_ruleset failed (errno {ctypes.get_errno()})')
     for p, kind in [(p, 'rw') for p in rw] + [(p, 'sock') for p in socks] + [(p, 'create') for p in creates] + [(p, 'unix') for p in unix]:
         try:
-            fd = os.open(p, os.O_PATH | os.O_CLOEXEC)
+            fd = os.open(p, os.O_PATH | os.O_CLOEXEC | (os.O_NOFOLLOW if p in nofollow else 0))
         except (FileNotFoundError, PermissionError):
+            continue
+        if p in nofollow and stat.S_ISLNK(os.fstat(fd).st_mode):
+            os.close(fd)  # swapped for a symlink since the listing: O_PATH|O_NOFOLLOW opened the link itself
             continue
         if kind == 'unix':
             allowed = RESOLVE_UNIX

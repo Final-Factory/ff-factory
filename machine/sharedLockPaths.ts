@@ -1,7 +1,8 @@
 /**
  * w5615 (stage 2 of w5544): what the shared lock "on" makes read-only to sandbox workers, in one place for the three fences
  * (Windows labels: machine/lowIntegrity.ts lowTargets; macOS: server/workerFence.ts seatbeltProfile; Linux:
- * machine/writeLock.ts writeLockArgs). No imports beyond node: the fences and the slot caches all read it.
+ * machine/writeLock.ts writeLockArgs). No imports beyond node and server/fsLink.ts (node only): the fences and the slot
+ * caches all read it.
  *
  * Locked: the seeds of the cloned tool caches (machine/slotCaches.ts SLOT_CACHE_TOOLS, checked equal by its test), `players`
  * (the broker installs, the daemon launches) and `seed` (the Library seed, written by `worker.ts install`). In `tools`, the
@@ -15,6 +16,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { isLink } from '../server/fsLink.ts';
 
 /** The seeds of the cloned caches, under `<root>/cache` ('/'-separated). */
 export const SHARED_SEED_DIRS = ['uv', 'pip', 'npm', 'nuget/packages', 'upm', 'dotnet', 'ms-playwright'] as const;
@@ -58,13 +60,22 @@ export function sharedLockParents(withTools = true): Map<string, Set<string>> {
  * Makes the folders the lock's fences list before they apply: the workers' own cache children (a Medium `cache` on Windows,
  * and Landlock's children of `cache` listed at each start, would refuse a worker the first one) and the folders on the way
  * (ff-landlock.py lists each one it is given). Never throws: a folder it cannot make is left to the next start.
+ *
+ * Never through a link (review w6362): `cache` or `cache/nuget` a junction or symlink a worker planted under off or warn
+ * would have it make folders wherever that leads. Such a path is skipped, one folder made at a time.
  */
-export function makeSharedLockDirs(root: string, mkdir: (p: string) => void = (p) => fs.mkdirSync(p, { recursive: true })): void {
+export function makeSharedLockDirs(root: string, mkdir: (p: string) => void = (p) => fs.mkdirSync(p), link: (p: string) => boolean = isLink): void {
   for (const rel of [...WORKER_CACHE_CHILDREN.map((c) => `cache/${c}`), ...sharedLockParents().keys()]) {
-    try {
-      mkdir(path.join(root, ...rel.split('/')));
-    } catch {
-      // the next start makes it
+    let q = root;
+    for (const part of rel.split('/')) {
+      q = path.join(q, part);
+      if (link(q)) break;
+      if (fs.existsSync(q)) continue;
+      try {
+        mkdir(q);
+      } catch {
+        break; // the next start makes it
+      }
     }
   }
 }

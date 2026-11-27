@@ -45,6 +45,26 @@ test('makeSharedLockDirs makes the workers\' cache children and the folders on t
   });
 });
 
+test('makeSharedLockDirs never makes a folder through a link a worker planted at cache or cache/nuget (review w6362)', (t) => {
+  const root = tmp(t);
+  const made: string[] = [];
+  makeSharedLockDirs(root, (p) => void made.push(p), (p) => p === path.join(root, 'cache', 'nuget'));
+  assert.ok(made.includes(path.join(root, 'cache', 'slots')), JSON.stringify(made));
+  assert.ok(!made.some((p) => p.startsWith(path.join(root, 'cache', 'nuget'))), JSON.stringify(made));
+  made.length = 0;
+  makeSharedLockDirs(root, (p) => void made.push(p), (p) => p === path.join(root, 'cache'));
+  assert.ok(!made.some((p) => p.startsWith(path.join(root, 'cache'))), `nothing under a linked cache: ${JSON.stringify(made)}`);
+  // A real one: a junction on Windows (no privilege needed), a symlink elsewhere.
+  const real = tmp(t);
+  const outside = path.join(real, 'daemon');
+  fs.mkdirSync(outside);
+  fs.mkdirSync(path.join(real, 'cache'));
+  fs.symlinkSync(outside, path.join(real, 'cache', 'nuget'), process.platform === 'win32' ? 'junction' : 'dir');
+  makeSharedLockDirs(real);
+  assert.deepEqual(fs.readdirSync(outside), [], 'nothing made where the link leads');
+  assert.ok(fs.statSync(path.join(real, 'cache', 'slots')).isDirectory());
+});
+
 test('macOS: "on" denies each locked path inside the root; off and warn do not', () => {
   const root = path.resolve('/Users/p/ffw');
   const mac = (sharedLock: boolean) => fenceFor({ setting: 'seatbelt', root, platform: 'darwin', home: '/Users/p', sharedLock, exists: () => true, getconf: (n) => `/t/${n}` })!;
@@ -60,6 +80,35 @@ test('macOS: "on" denies each locked path inside the root; off and warn do not',
   }
   // The denies come after the root's allow (later Seatbelt rules win).
   assert.ok(on.indexOf(denies(on)) > on.indexOf(subpath(root)));
+  // Review w6362: the folders on the way are denied as themselves, so renaming one away is refused without relying on a
+  // rename counting as a write to every path under it.
+  for (const rel of ['cache', 'cache/nuget', 'tools']) {
+    const rule = `(literal ${JSON.stringify(path.posix.join(root, rel))})`;
+    assert.ok(denies(on).includes(rule), `on: ${rel} itself denied`);
+    assert.ok(!denies(off).includes(rule), `off: ${rel} not denied`);
+    assert.ok(!denies(on).includes(subpath(path.posix.join(root, rel))), `on: ${rel}'s other children stay writable`);
+  }
+});
+
+test('live (macOS): under "on" Seatbelt refuses a rename of cache, cache/nuget and cache/uv and a write in cache/uv, while cache/slots is written', { skip: process.platform !== 'darwin' && 'needs macOS' }, (t) => {
+  const root = tmp(t);
+  for (const d of ['cache/uv', 'cache/nuget/packages', 'players', 'seed', 'sandboxes', 'tools/git']) fs.mkdirSync(path.join(root, ...d.split('/')), { recursive: true });
+  makeSharedLockDirs(root);
+  const r = (p: string) => path.join(root, ...p.split('/'));
+  const script = [
+    'try() { if sh -c "$2" 2>/dev/null; then echo "$1 ok"; else echo "$1 refused"; fi; }',
+    `try uv "echo x > ${r('cache/uv/x')}"`,
+    `try mv-cache "mv ${r('cache')} ${r('sandboxes/cache2')}"`,
+    `try mv-nuget "mv ${r('cache/nuget')} ${r('cache/slots/nuget2')}"`,
+    `try mv-uv "mv ${r('cache/uv')} ${r('cache/slots/uv2')}"`,
+    `try mv-tools "mv ${r('tools')} ${r('sandboxes/tools2')}"`,
+    `try slots "echo x > ${r('cache/slots/x')}"`,
+    `try tools-git "echo x > ${r('tools/git/x')}"`,
+  ].join('\n');
+  const fence = fenceFor({ setting: 'seatbelt', root, platform: 'darwin', home: os.homedir(), sharedLock: true })!;
+  const on = spawnSync('sandbox-exec', ['-p', seatbeltProfile(fence), 'bash', '-c', script], { encoding: 'utf8' });
+  assert.equal(on.status, 0, on.stderr);
+  assert.deepEqual(on.stdout.trim().split('\n'), ['uv refused', 'mv-cache refused', 'mv-nuget refused', 'mv-uv refused', 'mv-tools refused', 'slots ok', 'tools-git ok']);
 });
 
 test('Linux: "on" leaves players and seed out and opens only the other children of cache, cache/nuget and tools', (t) => {
@@ -95,6 +144,19 @@ const listing: Record<string, string[]> = {
 const list = (d: string) => (listing[d] ?? []).map((name) => ({ name, dir: true }));
 const targets = (sharedLock: boolean) =>
   lowTargets({ root: W, appDir: path.join(W, 'daemon'), children: kids, toolsChildren: ['node', 'low', 'git'].map((name) => ({ name, dir: true })), exists: () => true, sharedLock, list });
+
+test('Windows: neither "on" nor off labels anything through a link at cache/nuget, cache/uv or among cache\'s children (review w6362)', () => {
+  const links = new Set(['cache/nuget', 'cache/uv', 'cache/slots'].map((r) => path.join(W, ...r.split('/'))));
+  for (const sharedLock of [true, false]) {
+    const tg = lowTargets({ root: W, appDir: path.join(W, 'daemon'), children: kids, toolsChildren: ['node', 'low', 'git'].map((name) => ({ name, dir: true })), exists: () => true, sharedLock, list, isLink: (p) => links.has(p) });
+    for (const l of links) {
+      for (const [what, ps] of Object.entries({ dirs: tg.dirs, medium: tg.medium, trees: tg.trees })) {
+        assert.ok(!ps.some((p) => p === l || p.startsWith(l + path.sep)), `${sharedLock ? 'on' : 'off'}: ${l} not in ${what}`);
+      }
+    }
+    assert.ok(tg.trees.includes(path.join(W, 'cache', 'pip')), `${sharedLock}: the rest still labelled`);
+  }
+});
 
 test('Windows: "on" keeps cache and cache/nuget Medium with their other children Low on their own, and labels the locked folders Medium whole', () => {
   const on = targets(true);
@@ -173,7 +235,7 @@ test('Windows: labelLow walks a locked folder entry by entry, never with /T, and
   const outside = path.join(d, 'secrets');
   put(path.join(outside, 's'));
   fs.symlinkSync(outside, path.join(seed, 'a', 'j'), 'junction');
-  for (const on of [true, false]) {
+  for (const on of [false, true]) {
     const calls: string[][] = [];
     const said: string[] = [];
     // Nothing reads Low or Medium of its own: every folder gets labelled.
@@ -184,8 +246,51 @@ test('Windows: labelLow walks a locked folder entry by entry, never with /T, and
     assert.ok(set.some((a) => a[0] === seed) && set.some((a) => a[0] === path.join(seed, 'a')), `${on}: ${JSON.stringify(set)}`);
     assert.ok(!calls.flat().includes('/T'), `${on}: no /T`);
     assert.ok(!calls.some((a) => a[0].startsWith(outside) || a[0] === path.join(seed, 'a', 'j')), `${on}: the junction and its target untouched: ${JSON.stringify(calls)}`);
-    assert.match(said.join('\n'), /1 link .*skipped/);
+    if (!on) assert.match(said.join('\n'), /1 link .*skipped/);
+    else {
+      // Review w6362: under "on" the link goes (its folder is Medium now, so it stays gone); its target stays.
+      assert.match(said.join('\n'), /removed link .*\bj\b/);
+      assert.ok(!fs.existsSync(path.join(seed, 'a', 'j')), 'the junction is gone');
+      assert.ok(fs.existsSync(path.join(outside, 's')), 'what it led to is kept');
+    }
   }
+});
+
+test('Windows: labelTree reads a folder again after labelling it and never walks one swapped for a junction meanwhile (review w6362)', { skip: process.platform !== 'win32' && 'junctions are Windows only' }, async (t) => {
+  const { labelTree } = await import('./transcriptLabels.ts');
+  const d = tmp(t);
+  const seed = path.join(d, 'seed');
+  put(path.join(seed, 'sub', 'f'));
+  const outside = path.join(d, 'outside');
+  put(path.join(outside, 'deep', 's'));
+  const calls: string[][] = [];
+  // The swap happens as the folder is labelled, after it was listed as a plain folder.
+  const icacls = (a: string[]) => {
+    calls.push(a);
+    if (a[0] === path.join(seed, 'sub') && !fs.lstatSync(a[0]).isSymbolicLink()) {
+      fs.rmSync(a[0], { recursive: true });
+      fs.symlinkSync(outside, a[0], 'junction');
+    }
+    return { code: 0, out: '' };
+  };
+  const found: string[] = [];
+  assert.equal(await labelTree(seed, 'medium', icacls, 'acct', found), 1);
+  assert.deepEqual(found, [path.join(seed, 'sub')]);
+  assert.ok(!calls.some((a) => a[0].startsWith(outside) || a[0].startsWith(path.join(seed, 'sub') + path.sep)), JSON.stringify(calls));
+  // The root itself, swapped while it is labelled: refused, not walked.
+  const root2 = path.join(d, 'seed2');
+  put(path.join(root2, 'f'));
+  const calls2: string[][] = [];
+  const swapRoot = (a: string[]) => {
+    calls2.push(a);
+    if (a[0] === root2 && !fs.lstatSync(root2).isSymbolicLink()) {
+      fs.rmSync(root2, { recursive: true });
+      fs.symlinkSync(outside, root2, 'junction');
+    }
+    return { code: 0, out: '' };
+  };
+  await assert.rejects(labelTree(root2, 'medium', swapRoot, 'acct'), /turned into a junction/);
+  assert.equal(calls2.length, 1, JSON.stringify(calls2));
 });
 
 test('mergeBack under "on" counts an entry only once it is locked in; one lockIn refuses is not counted', async (t) => {
@@ -322,4 +427,25 @@ test('live (Linux): under "on" Landlock refuses writes to cache/uv, players, see
   const off = run(false);
   assert.equal(off.status, 0, off.stderr);
   assert.deepEqual(off.stdout.trim().split('\n').slice(0, 4), ['uv ok', 'players ok', 'seed ok', 'packages ok']);
+});
+
+test('live (Linux, review w6362): symlinks planted under off at cache/nuget and among cache\'s children carry no write rule under "on"', { skip: !landlock && 'needs Landlock and python3' }, (t) => {
+  const root = tmp(t);
+  for (const d of ['cache/uv', 'cache/slots', 'players', 'seed', 'sandboxes', 'tools/git', 'daemon/logs', 'outside']) fs.mkdirSync(path.join(root, ...d.split('/')), { recursive: true });
+  const r = (p: string) => path.join(root, ...p.split('/'));
+  fs.symlinkSync(r('daemon'), r('cache/nuget'));
+  fs.symlinkSync(r('outside'), r('cache/evil'));
+  makeSharedLockDirs(root);
+  assert.deepEqual(fs.readdirSync(r('daemon')), ['logs'], 'nothing made through the cache/nuget link');
+  const script = [
+    'try() { if sh -c "$2" 2>/dev/null; then echo "$1 ok"; else echo "$1 refused"; fi; }',
+    `try nuget-link "echo x > ${r('cache/nuget/logs/x')}"`,
+    `try daemon "echo x > ${r('daemon/logs/x')}"`,
+    `try evil-link "echo x > ${r('cache/evil/x')}"`,
+    `try outside "echo x > ${r('outside/x')}"`,
+    `try slots "echo x > ${r('cache/slots/x')}"`,
+  ].join('\n');
+  const on = spawnSync('python3', [FF_LANDLOCK, ...writeLockArgs({ root, sharedLock: true, extra: ['/dev/null'] }), '--', 'bash', '-c', script], { encoding: 'utf8' });
+  assert.equal(on.status, 0, on.stderr);
+  assert.deepEqual(on.stdout.trim().split('\n'), ['nuget-link refused', 'daemon refused', 'evil-link refused', 'outside refused', 'slots ok']);
 });

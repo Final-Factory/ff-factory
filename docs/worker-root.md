@@ -1481,14 +1481,26 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
     uv-bin, cargo, asset-store, determinism-audit, xdg) at each start before it labels (`makeSharedLockDirs`). `tools`
     already ran this way (w5717). `off` and `warn` label the locked folders Low again, whole, with the same walk, and
     `cache` and `cache/nuget` alone: workers write the rest of `cache` (`cache/slots`), and a walk of it could meet a
-    junction they planted (review w6355 H1).
+    junction they planted (review w6355 H1). Nothing is labelled through a link (review w6362): a folder on the way or a
+    locked one that is a junction or symlink, or sits under one (a worker could plant `cache\nuget` as a junction to the
+    daemon's folder under off or warn), is left out of every list, Low and Medium, and so is a link among `cache`'s
+    children. The walk reads each folder again after labelling it and never walks one that turned into a link (the root
+    too: its parent may be Low). Under `on`, a link the walk finds inside a locked folder is removed (fsLink.ts
+    `removeLink`, the link only, never its target; the log says `worker integrity: removed link <path> from the locked
+    <seed>`): its folder is Medium by then, so it stays gone. `makeSharedLockDirs` makes one folder at a time and stops at a
+    link.
   - **Linux** (machine/writeLock.ts `writeLockArgs`): `players` and `seed` leave the write set, and `cache`, `cache/nuget`
     and `tools` are opened child by child (`--rw-children DIR --except NAME`: ff-landlock.py lists DIR at start, so a child
     made later is not writable until the agent's next start; hence `makeSharedLockDirs` there too, before the args are
-    built, review w6355 M2).
+    built, review w6355 M2). A `--rw-children` folder that is, or sits under, a symlink opens none of its children, a
+    symlink child is not granted, and each child is opened `O_NOFOLLOW` (review w6362: the write rule would otherwise land
+    on the link's target).
   - **macOS** (server/workerFence.ts `fenceFor` `sharedLocked`): a `(deny file-write* (subpath ...))` per locked path in
-    the read-only block, after the root's allow (later Seatbelt rules win). Paths are matched, so renaming a parent needs
-    no extra rule: a rename of `cache` is a write to the paths under it.
+    the read-only block, after the root's allow (later Seatbelt rules win), and a `(deny file-write* (literal ...))` on
+    each folder on the way (`cache`, `cache/nuget`, `tools`; `sharedLockParents`), so a rename or removal of one is
+    refused while its other children stay writable. That Seatbelt would refuse a parent's rename as a write to the paths
+    under it was never measured (review w6362), so it is not relied on. Measured by the live macOS leg in
+    server/sharedLock.test.ts, which runs only on a Mac (no macOS CI runner runs it).
   - **What the daemon moves in** (machine/lockIn.ts): a merge-back entry and a broker install are copied with a worker's
     rights into a folder workers write, so the moved entry is the worker's until `lockIn` has run on it. First, on every
     OS, every entry must be a plain folder or a file with one name (a symlink, a junction or a hard link the worker

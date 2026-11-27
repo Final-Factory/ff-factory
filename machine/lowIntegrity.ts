@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { sharedLockParents, sharedLockRel } from './sharedLockPaths.ts';
+import { isLink as isLinkFs, removeLink } from '../server/fsLink.ts';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES, TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
@@ -86,6 +87,8 @@ export interface LowTargetsInput {
   /** Extras the daemon owns that a worker must write although they sit in the daemon's folder (the Unity slots mailbox). */
   allowInAppDir?: (string | undefined)[];
   exists?: (p: string) => boolean;
+  /** A junction or symbolic link (server/fsLink.ts isLink); the shared lock never labels through one (review w6362). */
+  isLink?: (p: string) => boolean;
   /**
    * w5959: the tools children kept Medium because they hold a virtual disk (toolsDiskPlan, daemon.json `toolsDiskLock` "on"),
    * and those disks. Each child leaves the Low list and joins `medium` (after `tools`), its disks after it, so a Low worker
@@ -206,9 +209,10 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
  */
 function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]): string[] {
   const exists = i.exists ?? fs.existsSync;
+  const link = i.isLink ?? isLinkFs;
   const list = i.list ?? ((d: string) => {
     try {
-      return fs.readdirSync(d, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() }));
+      return fs.readdirSync(d, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() && !e.isSymbolicLink() }));
     } catch {
       return [];
     }
@@ -216,13 +220,22 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
   const abs = (rel: string) => path.join(i.root, ...rel.split('/'));
   const at = (p: string) => dirs.findIndex((d) => same(d, p));
   const under = (p: string) => dirs.some((d) => inside(p, d)) || medium.some((m) => same(m, p));
-  const locked = sharedLockRel(false).map(abs).filter((p) => under(p));
+  // Review w6362: a link a worker planted under off or warn at a folder on the way (cache/nuget a junction to the daemon's
+  // folder) or at a locked one would have icacls label its target, alone or walked. Neither it nor anything under it is
+  // labelled; labelLow's walk skips links inside a locked folder.
+  const viaLink = (p: string) => {
+    for (let q = p; inside(q, i.root) && !same(q, i.root); q = path.dirname(q)) if (link(q)) return true;
+    return false;
+  };
+  const locked = sharedLockRel(false).map(abs).filter((p) => under(p) && !viaLink(p));
   if (!i.sharedLock) {
     // Back to Low where "on" left them Medium (labelLow touches one only when it does not read Low). Only the locked folders
     // are walked whole; the parents are labelled alone (review w6355 H1): workers write the rest of `cache` (cache/slots),
     // and a walk of it could meet a junction they planted.
     const back = locked.filter((p) => exists(p));
-    const parents = [...sharedLockParents(false).keys()].map(abs).filter((p) => (under(p) || at(p) >= 0) && exists(p));
+    const all = [...sharedLockParents(false).keys()].map(abs);
+    for (const p of all.filter(viaLink)) if (at(p) >= 0) dirs.splice(at(p), 1);
+    const parents = all.filter((p) => (under(p) || at(p) >= 0) && exists(p) && !viaLink(p));
     for (const p of [...back, ...parents]) if (at(p) < 0) dirs.push(p);
     return back;
   }
@@ -230,10 +243,16 @@ function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]):
   for (const [rel, names] of [...sharedLockParents(false)].sort((a, b) => a[0].length - b[0].length)) {
     const p = abs(rel);
     if (!under(p) && !medium.some((m) => same(m, path.dirname(p)))) continue;
+    if (viaLink(p)) {
+      // Neither Low nor Medium: whatever it leads to keeps its label.
+      const k = at(p);
+      if (k >= 0) dirs.splice(k, 1);
+      continue;
+    }
     const k = at(p);
     if (k >= 0) dirs.splice(k, 1);
     medium.push(p);
-    for (const c of list(p)) if (c.dir && !names.has(c.name)) dirs.push(path.join(p, c.name));
+    for (const c of list(p)) if (c.dir && !names.has(c.name) && !link(path.join(p, c.name))) dirs.push(path.join(p, c.name));
   }
   for (const p of locked) {
     const k = at(p);
@@ -419,8 +438,21 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
     if (tree(p)) {
       // Imported here: transcriptLabels.ts imports this file.
       const { icaclsOf, labelTree } = await import('../server/transcriptLabels.ts');
-      const links = await labelTree(p, label === LOW_LABEL ? 'low' : 'medium', icaclsOf(exec), account);
-      if (links) say(`worker integrity: WARNING: ${p} holds ${links} link${links === 1 ? '' : 's'} (a junction or symlink), skipped: not followed, not labelled (w5615)`);
+      const found: string[] = [];
+      const low = label === LOW_LABEL;
+      const links = await labelTree(p, low ? 'low' : 'medium', icaclsOf(exec), account, found);
+      if (!links) return;
+      if (low) {
+        say(`worker integrity: WARNING: ${p} holds ${links} link${links === 1 ? '' : 's'} (a junction or symlink), skipped: not followed, not labelled (w5615)`);
+        return;
+      }
+      // Review w6362: a link a worker planted under off or warn, left in a locked seed, leads every reader of the seed to
+      // wherever it points (a folder the worker writes). The folder holding it is Medium now, so once removed it stays
+      // gone; only the link goes, never what it leads to (fsLink.ts removeLink).
+      for (const l of found) {
+        removeLink(l);
+        say(`worker integrity: removed link ${l} from the locked ${p} (a junction or symlink a worker made before "on"; its target is kept) (w5615)`);
+      }
       return;
     }
     let r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });

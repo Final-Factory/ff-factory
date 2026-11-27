@@ -129,7 +129,7 @@ function* labelledLow(p: string): Steps<boolean> {
  * left as it is (nothing Medium is inside one, and walking it could race a worker). A folder with no link in it is labelled
  * with one `<dir>\*` call; its sub-folders get their inheritable label after that.
  */
-function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string | undefined): Steps<number> {
+function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string | undefined, found?: string[]): Steps<number> {
   if (isLink(root)) throw new Error(`${root} is a junction or link; not labelled (w5703)`);
   const dirLabel = `(OI)(CI)${level}`;
   let links = 0;
@@ -144,12 +144,19 @@ function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string 
     const dirs = entries.filter((e) => !e.link && e.dir).map((e) => e.p);
     const skipped = entries.filter((e) => e.link).length;
     links += skipped;
+    found?.push(...entries.filter((e) => e.link).map((e) => e.p));
     if (level === 'medium') {
       if (!entries.length) return;
       if (skipped) for (const e of entries.filter((x) => !x.link && !x.dir)) yield* icaclsLabel(e.p, level, account);
       else yield* icaclsLabel(path.join(dir, '*'), level, account);
       for (const d of dirs) {
         yield* icaclsLabel(d, dirLabel, account);
+        // Review w6362: read again before walking it. Its parent is Medium by now, but what was listed is not trusted.
+        if (isLink(d)) {
+          links++;
+          found?.push(d);
+          continue;
+        }
         yield* inside(d);
       }
       return;
@@ -164,6 +171,8 @@ function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string 
   }
   if (level === 'medium') {
     yield* icaclsLabel(root, dirLabel, account);
+    // Review w6362: the root's own parent may be Low, so it could have been swapped for a link since the check above.
+    if (isLink(root)) throw new Error(`${root} turned into a junction or link while it was labelled; not walked (w6362)`);
     yield* inside(root);
   } else if (!(yield* labelledLow(root))) {
     yield* inside(root);
@@ -173,12 +182,16 @@ function* labelTreeSteps(root: string, level: 'low' | 'medium', account: string 
 }
 
 /** labelTreeSteps with a synchronous icacls (the spawner: one conversation's files). Answers the links skipped. */
-export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: IcaclsSync = realIcacls, account = currentAccount()): number {
-  return runSteps(labelTreeSteps(root, level, account), icacls);
+export function labelTreeSync(root: string, level: 'low' | 'medium', icacls: IcaclsSync = realIcacls, account = currentAccount(), found?: string[]): number {
+  return runSteps(labelTreeSteps(root, level, account, found), icacls);
 }
 
-/** labelTreeSync, without holding the event loop (the daemon's lock and unlock of every transcript). */
-export const labelTree = (root: string, level: 'low' | 'medium', icacls: Icacls, account = currentAccount()): Promise<number> => runStepsAsync(labelTreeSteps(root, level, account), icacls);
+/**
+ * labelTreeSync, without holding the event loop (the daemon's lock and unlock of every transcript). `found`, given, gets
+ * the path of each link skipped.
+ */
+export const labelTree = (root: string, level: 'low' | 'medium', icacls: Icacls, account = currentAccount(), found?: string[]): Promise<number> =>
+  runStepsAsync(labelTreeSteps(root, level, account, found), icacls);
 
 /**
  * Takes delete-child back from the account on folder `p` (this folder only, not inherited). A Low process that has it on a
