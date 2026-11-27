@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { sharedLockParents, sharedLockRel } from './sharedLockPaths.ts';
 import { DAEMON_ONLY_CHILDREN, MEDIUM_ONLY_CHILDREN, STEAM_CHILD, STEAM_SECRET_FILES, TOOLS_MEDIUM_CHILD } from '../server/claudeHome.ts';
 
 export const LOW_LABEL = '(OI)(CI)low';
@@ -96,6 +97,15 @@ export interface LowTargetsInput {
    * workers read it (the slot repos' borrowed objects) and cannot write it. Off, it is labelled Low as before.
    */
   lockStore?: boolean;
+  /**
+   * w5615: the shared lock is on (machine/sharedLockPaths.ts): players, seed and the cache seeds are labelled Medium, all
+   * of each (`trees`: a worker's files there carry an explicit Low label of their own, which a folder's label leaves), and
+   * `cache` and `cache/nuget` are kept Medium with each other child Low on its own, as `tools` (w5717). Off or warn: the
+   * same folders go back to Low, all of each, where an earlier "on" left them Medium.
+   */
+  sharedLock?: boolean;
+  /** A folder's entries (tests); fs.readdirSync otherwise. Missing: none. */
+  list?: (dir: string) => { name: string; dir: boolean }[];
 }
 
 const inside = (child: string, parent: string) => {
@@ -105,7 +115,7 @@ const inside = (child: string, parent: string) => {
 const same = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 /** The folders and files to label Low. Exported for tests. */
-export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[] } {
+export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[]; medium: string[]; trees: string[] } {
   const exists = i.exists ?? fs.existsSync;
   // The daemon's and the secrets' folders, and the daemon's own where it sits in the root: never labelled, either way.
   const keep = new Set(MEDIUM_CHILDREN.map((c) => c.toLowerCase()));
@@ -185,7 +195,49 @@ export function lowTargets(i: LowTargetsInput): { dirs: string[]; files: string[
   // are kept Medium (labelLow relabels only one that reads Low).
   const tm = i.children.find((c) => c.dir && c.name.toLowerCase() === TOOLS_MEDIUM_CHILD);
   if (tm) medium.push(path.join(i.root, tm.name), path.join(i.root, tm.name, 'shims'));
-  return { dirs, files, medium };
+  const trees = sharedLockLabels(i, dirs, medium);
+  return { dirs, files, medium, trees };
+}
+
+/**
+ * w5615: the shared lock's part of lowTargets (LowTargetsInput.sharedLock): moves its folders between `dirs` and `medium`
+ * and answers the ones labelLow labels all of (`trees`). Only folders under a worker child the fence labels (`dirs`).
+ * tools is left to lowTargets' own rule above: it already keeps node, low and unity-low Medium.
+ */
+function sharedLockLabels(i: LowTargetsInput, dirs: string[], medium: string[]): string[] {
+  const exists = i.exists ?? fs.existsSync;
+  const list = i.list ?? ((d: string) => {
+    try {
+      return fs.readdirSync(d, { withFileTypes: true }).map((e) => ({ name: e.name, dir: e.isDirectory() }));
+    } catch {
+      return [];
+    }
+  });
+  const abs = (rel: string) => path.join(i.root, ...rel.split('/'));
+  const at = (p: string) => dirs.findIndex((d) => same(d, p));
+  const under = (p: string) => dirs.some((d) => inside(p, d)) || medium.some((m) => same(m, p));
+  const locked = sharedLockRel(false).map(abs).filter((p) => under(p));
+  if (!i.sharedLock) {
+    // Back to Low where "on" left them Medium (labelLow touches one only when it does not read Low).
+    const back = [...locked, ...[...sharedLockParents(false).keys()].map(abs).filter((p) => under(p) || at(p) >= 0)].filter((p) => exists(p));
+    for (const p of back) if (at(p) < 0) dirs.push(p);
+    return back;
+  }
+  // Parents first, from the top: each leaves `dirs` for `medium`, its other children join `dirs` on their own.
+  for (const [rel, names] of [...sharedLockParents(false)].sort((a, b) => a[0].length - b[0].length)) {
+    const p = abs(rel);
+    if (!under(p) && !medium.some((m) => same(m, path.dirname(p)))) continue;
+    const k = at(p);
+    if (k >= 0) dirs.splice(k, 1);
+    medium.push(p);
+    for (const c of list(p)) if (c.dir && !names.has(c.name)) dirs.push(path.join(p, c.name));
+  }
+  for (const p of locked) {
+    const k = at(p);
+    if (k >= 0) dirs.splice(k, 1);
+    medium.push(p);
+  }
+  return locked;
 }
 
 /** The children of `<root>/tools` only the daemon and `worker.ts tools` write, kept Medium (w5717 node; w5838 the rest). */
@@ -340,6 +392,8 @@ export type Exec = (cmd: string, args: string[], o?: { timeoutMs?: number }) => 
 export const isLabelledLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level/i.test(icaclsOut);
 /** Whether icacls says this path carries a Low label of its own, not an inherited one (`(I)`). Exported for tests. */
 export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandatory Level:(?!\(I\))/i.test(icaclsOut);
+/** Whether icacls says this path carries a Medium label of its own (w5615). Exported for tests. */
+export const isExplicitMedium = (icaclsOut: string) => /Mandatory Label\\Medium Mandatory Level:(?!\(I\))/i.test(icaclsOut);
 
 /**
  * Labels each target Low unless it is already, and says what it did. icacls' label on a folder with (OI)(CI) reaches
@@ -352,15 +406,18 @@ export const isExplicitLow = (icaclsOut: string) => /Mandatory Label\\Low Mandat
  * still change the DACL, so labelLow then grants the account Full on the path and labels it again (measured on BEAST,
  * w5402: denied, then the grant, then the label succeeds and reaches the files inside).
  */
-export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[] }, exec: Exec, say: (line: string) => void, account = currentAccount()): Promise<boolean> {
+export async function labelLow(t: { dirs: string[]; files: string[]; medium?: string[]; trees?: string[] }, exec: Exec, say: (line: string) => void, account = currentAccount()): Promise<boolean> {
   let ok = true;
+  // w5615: a shared-lock folder is labelled whole (/T): files a Low worker made there carry a Low label of their own.
+  const tree = (p: string) => (t.trees ?? []).some((x) => same(x, p));
   const setLabel = async (p: string, label: string) => {
-    let r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
+    const all = tree(p) ? ['/T', '/C', '/Q'] : [];
+    let r = await exec('icacls', [p, '/setintegritylevel', label, ...all], { timeoutMs: 30 * 60_000 });
     if (r.code !== 0 && account && /access is denied/i.test(r.stderr + r.stdout)) {
       const g = await exec('icacls', [p, '/grant', `${account}:${label.startsWith('(OI)') ? '(OI)(CI)' : ''}F`], { timeoutMs: 30 * 60_000 });
       if (g.code === 0) {
         say(`worker integrity: gave ${account} Full on ${p}, which setting its label needs (WRITE_OWNER)`);
-        r = await exec('icacls', [p, '/setintegritylevel', label], { timeoutMs: 30 * 60_000 });
+        r = await exec('icacls', [p, '/setintegritylevel', label, ...all], { timeoutMs: 30 * 60_000 });
       }
     }
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(-300));
@@ -394,7 +451,8 @@ export async function labelLow(t: { dirs: string[]; files: string[]; medium?: st
     try {
       if (!fs.existsSync(p)) continue;
       const now = await exec('icacls', [p], { timeoutMs: 60_000 });
-      if (now.code !== 0 || !isLabelledLow(now.stdout)) continue;
+      // w5615: a shared-lock folder until it carries Medium of its own (its parent's Medium reaches it inherited, not its files).
+      if (now.code !== 0 || (tree(p) ? isExplicitMedium(now.stdout) : !isLabelledLow(now.stdout))) continue;
       // A child that could not get its own Low label would turn Medium with its parent, and workers could no longer write it.
       const stuck = failed.filter((f) => same(path.dirname(f), p));
       if (stuck.length) {

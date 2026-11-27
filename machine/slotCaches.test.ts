@@ -702,7 +702,7 @@ test('sharedLockLine: nothing for off; warn and on say w5615, and blockers hold 
   );
   assert.match(
     sharedLockLine("on")!,
-    /^shared lock: "on" asked, but this release enforces nothing yet and runs as warn/,
+    /^shared lock: on \(w5615\); the shared cache seeds, players, seed .* are read-only to sandbox workers.*Undo: shared_lock off/,
   );
   const held = sharedLockLine("on", ["slot2 has no clones"])!;
   assert.match(held, /on asked, but held off .*: slot2 has no clones/);

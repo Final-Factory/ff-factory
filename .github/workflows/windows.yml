@@ -68,6 +68,7 @@ on:
       - 'server/sandboxes.test.ts'
       - 'server/sandboxes.ts'
       - 'server/toolsLabelsWin.test.ts'
+      - 'server/sharedLock.test.ts'
       - 'server/agentNode.test.ts'
       - 'server/agentNode.ts'
       - 'server/storeLock.test.ts'

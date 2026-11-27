@@ -34,7 +34,9 @@ import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SC
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
-import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheDir, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
+import { makeSharedLockDirs } from './sharedLockPaths.ts';
+import { lockIn } from './lockIn.ts';
 import { playersRpcHandlers } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -3845,6 +3847,16 @@ export class Daemon {
   private sharedWrite<T>(f: () => T | Promise<T>, folders: string[]): Promise<T> {
     return this.sharedWrites.run(folders, f);
   }
+  /** w5615: an entry the daemon moved into a shared-lock folder under "on", locked in place or removed (machine/lockIn.ts). */
+  private lockShared(dst: string): Promise<boolean> {
+    return lockIn(dst, {
+      exec: (cmd, args, o) => run(cmd, args, { timeoutMs: o?.timeoutMs ?? 60_000 }),
+      removeTree: async (p) => {
+        await removeTree(p);
+      },
+      log: (l) => log(l),
+    });
+  }
   /** A uv cache warm, as the daemon's own write when its cache is a shared-lock folder (w6314, review w6316 finding 1). */
   private uvWarmAsDaemon<T>(dir: string, f: () => Promise<T>): Promise<T> {
     return asDaemonWrite(this.sharedWrites, this.cfg.root, [dir], f);
@@ -3878,6 +3890,7 @@ export class Daemon {
               removeTree: async (dir) => {
                 await removeTree(dir);
               },
+              ...(this.sharedLock === 'on' ? { lockIn: (dst: string) => this.lockShared(dst) } : {}),
               log: (l) => log(l),
             })
           : null;
@@ -3919,6 +3932,8 @@ export class Daemon {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) }),
+      // w5615: under "on" workers cannot write players: the copy is staged in the caller's own cache folder, then locked in.
+      ...(this.sharedLock === 'on' ? { stageDir: (sb: string) => slotCacheDir(root, sb), lockIn: (dst: string) => this.lockShared(dst) } : {}),
       log: (l) => log(l),
     });
     return Object.fromEntries(Object.entries(handlers).map(([k, h]): [string, RpcHandler] => [k, (c, b) => this.sharedWrite(() => h(c, b), [path.join(root, 'players')])]));
@@ -3935,7 +3950,7 @@ export class Daemon {
       let fence: WorkerFence | undefined;
       let why: string | undefined;
       try {
-        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true, lockStore: this.storeLock.locked });
+        fence = fenceFor({ setting: this.cfg.workerFence, root: this.cfg.root, home: HOME, workFolders: [this.cfg.tempDir, this.sandboxRoot()], prefDeny: this.cfg.workerPrefFence === true, lockStore: this.storeLock.locked, sharedLock: this.sharedLock === 'on' });
         if (fence) fence = { ...fence, appDir: appDirOfConfig(this.cfg), secretsDirs: this.secretsDirs };
         if (this.cfg.workerFence && !fence) why = `"${this.cfg.workerFence}" is set but cannot apply here (macOS with a worker root and ${'/usr/bin/sandbox-exec'} only)`;
         if (fence) {
@@ -4113,6 +4128,9 @@ export class Daemon {
       fs.mkdirSync(this.slotMailbox, { recursive: true });
       // w5731: <root>/steam before the listing, so it is labelled (kept Medium, and NR with the read fence on) before steamcmd exists.
       ensureDaemonOnlyDirs(root);
+      // w5615: the workers' cache children and the folders on the way to the locked seeds, before the listing: under the
+      // shared lock "on" `cache` turns Medium, so a worker could no longer make one.
+      makeSharedLockDirs(root);
       const children = fs.readdirSync(root, { withFileTypes: true }).map((d) => ({ name: d.name, dir: d.isDirectory() }));
       // w5717: tools turns Medium with each child folder but node Low on its own (lowTargets).
       let toolsChildren: { name: string; dir: boolean }[] | undefined;
@@ -4133,6 +4151,7 @@ export class Daemon {
         files: allow.filter(isFile),
         allowInAppDir: allow,
         lockStore: this.storeLock.locked,
+        sharedLock: this.sharedLock === 'on',
       });
       // w5557: the owner's own game folder inherits Low from LocalLow; an explicit Medium label refuses a Low worker's write.
       const ownerGameData = this.cfg.workerIntegrityLockGameData ? legacyGameDataRoot('win32') : undefined;
@@ -4710,7 +4729,7 @@ export class Daemon {
           waits = this.cfg.transcriptLock === 'on' ? this.transcriptMoveWaits(this.cfg.root) : [];
           if (waits.length) log(`transcript lock: on, but waiting to move the transcripts until ${waits.length} sandbox agent${waits.length === 1 ? '' : 's'} locked without the transcripts folder end${waits.length === 1 ? 's' : ''} (${waits.join(', ')}): the move would cut them off from their own (w5718); until then workers write the transcripts folder whole, as with the switch off`);
           transcripts = this.cfg.transcriptLock === 'on' && !waits.length ? this.lockTranscripts(this.cfg.root) : undefined;
-          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked, dropped: (f, why) => log(`write lock: left out the extra writable folder ${f}: ${why} (w5899)`) });
+          args = writeLockArgs({ root: this.cfg.root, appDir: appDirOfConfig(this.cfg), extraRoots: this.cfg.extraRoots, unitySlots: this.slotMailbox, runtimeDir: process.env.XDG_RUNTIME_DIR, home: os.homedir(), extra: this.cfg.writeLockExtra, workFolders: [this.cfg.tempDir, this.sandboxRoot()], transcriptLock: !!transcripts, lockStore: this.storeLock.locked, sharedLock: this.sharedLock === 'on', dropped: (f, why) => log(`write lock: left out the extra writable folder ${f}: ${why} (w5899)`) });
           // w5546: the given-back folders exist before any run, so Landlock grants them (it skips a path that is not there).
           ensureReadBackDirs(appDirOfConfig(this.cfg), this.cfg.root);
           // The probe runs with the read half too, so a read rule Landlock refuses leaves agents unlocked, not stuck.

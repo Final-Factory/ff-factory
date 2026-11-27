@@ -24,6 +24,7 @@ import path from "node:path";
 import { RpcRefused, type Caller } from "./daemonRpc.ts";
 import { PLAYER_CACHE_ENTRY } from "./playerCache.ts";
 import { okSandboxId } from "./slotCaches.ts";
+import { firstUnplain } from "./lockIn.ts";
 import { isLinkAt, linkIn, plainDirAt, real, writeFileSafe, writeNew, type WorkerCopy } from "./workerCopy.ts";
 
 /** What a running player writes into its own folder (the game's LocalMultiplayerAutomationSessionConfig): not the build. */
@@ -89,6 +90,13 @@ export interface PlayersBrokerDeps {
   now?: () => number;
   /** "warn": note it in the log; the broker answers the same either way. */
   platform?: NodeJS.Platform;
+  /**
+   * w5615: the shared lock is on, so workers cannot write players: the build is copied (with the worker's rights) into this
+   * folder of the caller's own, then moved into the slot by the daemon and locked in place (machine/lockIn.ts), or removed.
+   * Both are missing under off and warn, where the copy goes straight into the slot as before.
+   */
+  stageDir?: (sandbox: string) => string;
+  lockIn?: (dst: string) => Promise<boolean>;
 }
 
 const inside = (p: string, dir: string) => {
@@ -394,17 +402,32 @@ export function playersRpcHandlers(
         };
         writeJson(path.join(slot.dir, "slot.json"), marker);
         const t0 = now();
+        // Under "on" the copy lands in the caller's own stage first: a worker cannot write the slot (w5615).
+        const stageRoot = d.stageDir?.(slot.sandbox);
+        const into = stageRoot ? path.join(stageRoot, `.ff-player-${process.pid}-${now()}`) : dst;
         try {
           plainSlot(slot, false);
+          if (stageRoot) {
+            fs.mkdirSync(stageRoot, { recursive: true });
+            if (!plainDirAt(stageRoot, d.root, path.relative(d.root, stageRoot)))
+              throw new Error(`${stageRoot} is a link or junction, or lies below one (w6212)`);
+          }
           if (lands) {
-            fs.mkdirSync(dst);
-            await d.copy(src, path.join(dst, lands), { links: "refuse" });
-          } else await d.copy(src, dst, { links: "refuse" });
+            fs.mkdirSync(into);
+            await d.copy(src, path.join(into, lands), { links: "refuse" });
+          } else await d.copy(src, into, { links: "refuse" });
           for (const r of RUNTIME_FILES)
-            fs.rmSync(path.join(lands ? path.join(dst, lands) : dst, r), {
+            fs.rmSync(path.join(lands ? path.join(into, lands) : into, r), {
               force: true,
             });
+          if (stageRoot) {
+            plainSlot(slot, false);
+            // One disk (both lie in the root): a rename. Across disks it fails, and the install with it.
+            fs.renameSync(into, dst);
+            if (!(await d.lockIn!(dst))) throw new Error("the copy held a link or a file with a second name; removed again");
+          }
         } catch (e) {
+          if (stageRoot) await d.removeTree(into).catch(() => undefined);
           await d.removeTree(dst).catch(() => undefined);
           fs.rmSync(path.join(slot.dir, "slot.json"), { force: true });
           throw refuse(
@@ -465,6 +488,9 @@ export function playersRpcHandlers(
           );
         if (linkIn(path.join(slot.dir, "player")))
           throw refuse(409, `players/launch: ${slot.name}'s player holds a link now; players/install again (w6212)`);
+        // w5615: under "on" every file has one name too (a hard link would share it with a folder a worker writes).
+        if (d.lockIn && firstUnplain(path.join(slot.dir, "player")))
+          throw refuse(409, `players/launch: ${slot.name}'s player holds a link or a file with a second name; players/install again (w5615)`);
         const exe = m.entry.endsWith(".app") ? bundleExe(top) : top;
         // The game reads its automation config from the folder above its data folder: the exe's folder, or the .app.
         const projectRoot = m.entry.endsWith(".app") ? top : path.dirname(top);
