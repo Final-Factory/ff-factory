@@ -30,15 +30,28 @@ export function readFenceMode(appDir: string): ReadFenceMode {
 }
 
 /**
- * Why `on` is refused on this OS, or undefined (lockout re-review B4 of #1193). Linux: Landlock gives the daemon's `app`
- * folder back by inode when a run starts, and a self-update swaps `app` by rename (scripts/worker/linkJob.ts), so every run
- * going at an update would lose git's credential helper, the gh shim, ff-pr and unity-slot until it ends, and no switch can
- * lift Landlock from a running process. `warn` still probes there.
+ * Why `on` is held at warn here, or undefined. w6434: Linux enforces only once `<appDir>/app` is the code link
+ * (scripts/worker/linuxCode.ts): with the old layout an update renamed a new `app` into the daemon's folder, which
+ * Landlock (grants by inode) left unreadable to every run already going (lockout re-review B4 of #1193). The first
+ * update that runs this code moves the folder over by itself. Before w6434 Linux refused `on` outright.
  */
-export function readFenceOnRefusal(platform: string = process.platform): string | undefined {
-  return platform === 'linux'
-    ? 'read-fence-on is refused on Linux for now: a self-update swaps the daemon code folder by rename, and Landlock would leave every run already going without git push, gh, ff-pr and unity-slot until it ends (lockout re-review B4 of #1193, docs/worker-fence.md). Use read-fence-warn.'
-    : undefined;
+export function readFenceOnHeld(appDir: string, platform: string = process.platform): string | undefined {
+  if (platform !== 'linux') return undefined;
+  try {
+    if (fs.lstatSync(path.join(appDir, 'app')).isSymbolicLink()) return undefined;
+  } catch {
+    // no app at all: held, as below
+  }
+  return `${path.join(appDir, 'app')} is not the code link yet (an update renames the code into the daemon's folder, and Landlock would leave runs already going without git push, gh, ff-pr and unity-slot: B4 of #1193); the next daemon update moves it to code/app (w6434)`;
+}
+
+/**
+ * Whether a run started now gets the read rules (machine/daemon.ts readFenceEnforced): `on`, a probe that passed, and not
+ * held (readFenceOnHeld). The mode file is read at each start, so `read-fence-off` takes effect for the next run with
+ * nobody at the machine (the unattended way back).
+ */
+export function readRulesForNewRun(appDir: string, probePassed: boolean, platform: string = process.platform): boolean {
+  return readFenceMode(appDir) === 'on' && probePassed && !readFenceOnHeld(appDir, platform);
 }
 
 export function writeReadFenceMode(appDir: string, mode: ReadFenceMode): void {

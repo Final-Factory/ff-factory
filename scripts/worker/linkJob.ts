@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url';
 import { jobName } from '../../machine/osJob.ts';
 import type { LinkUpdateFlags, LinkUpdateReport } from '../../server/machineProtocol.ts';
 import { linuxControlScript } from '../../server/machineDeployLinux.ts';
+import { linuxCodeFolder, swapBackLinuxCode } from './linuxCode.ts';
 import { macControlScript } from '../../server/machineDeploy.ts';
 import * as win from '../../server/machineDeployWin.ts';
 import { jobSection, settingsOfLog } from '../../server/updateLog.ts';
@@ -245,7 +246,7 @@ function realDeps(job: UpdateJob, say: (l: string) => void): JobDeps {
   const svc = { task: job.service, only: true };
   const versionIn = (dir: string) => {
     try {
-      return fs.readFileSync(path.join(job.appDir, dir, 'machine', 'VERSION'), 'utf8').trim() || undefined;
+      return fs.readFileSync(path.join(linuxCodeFolder(job.appDir, dir as 'app' | 'app.old'), 'machine', 'VERSION'), 'utf8').trim() || undefined;
     } catch {
       return undefined;
     }
@@ -275,11 +276,7 @@ function realDeps(job: UpdateJob, say: (l: string) => void): JobDeps {
         say((await script('putting the old code back', platform, win.rollbackScript(job.appDir, svc))).trim());
         return;
       }
-      const app = path.join(job.appDir, 'app');
-      const failed = path.join(job.appDir, 'app.failed');
-      fs.rmSync(failed, { recursive: true, force: true });
-      if (fs.existsSync(app)) fs.renameSync(app, failed);
-      fs.renameSync(path.join(job.appDir, 'app.old'), app);
+      swapBackLinuxCode(job.appDir);
       await restart();
     },
     restart,

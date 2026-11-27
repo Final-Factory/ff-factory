@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, ownTranscriptOf, seatbeltProfile, sessionIdOf, type WorkerFence } from './workerFence.ts';
-import { ensureReadBackDirs, LOGIN_LABEL_ON_SYSTEM_DRIVE, loginFenceFiles, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
+import { ensureReadBackDirs, LOGIN_LABEL_ON_SYSTEM_DRIVE, loginFenceFiles, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
 import { projectSlug } from './claudeHome.ts';
 
 const F: WorkerFence = { kind: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p', darwinTemp: '/private/var/folders/xx/T', darwinCache: '/private/var/folders/xx/C' };
@@ -179,10 +179,10 @@ test('w5546: writeInPlace keeps the file (same inode), so a Landlock grant or a 
   assert.equal(fs.statSync(f).ino, ino, 'the same file');
   assert.equal(fs.readFileSync(f, 'utf8'), '{"b":1}', 'cut to the new length');
   assert.equal(readFenceMode(dir), 'off', 'off by default');
-  // Lockout re-review B4 of #1193: no `on` on Linux while a self-update swaps the code folder by rename.
-  assert.match(readFenceOnRefusal('linux') ?? '', /refused on Linux/);
-  assert.equal(readFenceOnRefusal('darwin'), undefined);
-  assert.equal(readFenceOnRefusal('win32'), undefined);
+  // w6434 (B4 of #1193): Linux holds `on` at warn until `app` is the code link (the next test); the other OSes never hold it.
+  assert.match(readFenceOnHeld(dir, 'linux') ?? '', /not the code link yet/);
+  assert.equal(readFenceOnHeld(dir, 'darwin'), undefined);
+  assert.equal(readFenceOnHeld(dir, 'win32'), undefined);
   writeReadFenceMode(dir, 'warn');
   assert.equal(readFenceMode(dir), 'warn');
   writeReadFenceMode(dir, 'on');
@@ -193,6 +193,28 @@ test('w5546: writeInPlace keeps the file (same inode), so a Landlock grant or a 
   assert.equal(fs.existsSync(readFenceModeFile(dir)), false);
   ensureReadBackDirs(dir);
   for (const d of ['logs', 'rpc', 'unity-mcp', 'unity-slots', 'gh-app/bin', 'gh-app/sessions']) assert.ok(fs.statSync(path.join(dir, d)).isDirectory(), d);
+});
+
+test('w6434: Linux enforces on only behind the code link; read-fence-off takes the rules off the next run, with nobody at the machine', { skip: process.platform === 'win32' && 'needs symlinks (the code link is Linux only)' }, (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w6434-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  writeReadFenceMode(dir, 'on');
+  assert.equal(readRulesForNewRun(dir, true, 'linux'), false, 'no app at all: held');
+  fs.mkdirSync(path.join(dir, 'app'));
+  assert.match(readFenceOnHeld(dir, 'linux') ?? '', /not the code link yet/, 'a real app folder (the old layout): held');
+  assert.equal(readRulesForNewRun(dir, true, 'linux'), false);
+  assert.equal(readRulesForNewRun(dir, true, 'darwin'), true, 'macOS has no such hold');
+  fs.rmSync(path.join(dir, 'app'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'code', 'app'), { recursive: true });
+  fs.symlinkSync(path.join('code', 'app'), path.join(dir, 'app'));
+  assert.equal(readFenceOnHeld(dir, 'linux'), undefined, 'the code link: not held');
+  assert.equal(readRulesForNewRun(dir, true, 'linux'), true, 'on, the link and a passing probe: the next run gets the read rules');
+  assert.equal(readRulesForNewRun(dir, false, 'linux'), false, 'a probe that has not passed: warn');
+  // The way back is only the mode file, as daemon_control read-fence-off writes it: read at each run's start, no restart.
+  writeReadFenceMode(dir, 'off');
+  assert.equal(readRulesForNewRun(dir, true, 'linux'), false, 'read-fence-off: the next run has no read rules');
+  writeReadFenceMode(dir, 'warn');
+  assert.equal(readRulesForNewRun(dir, true, 'linux'), false);
 });
 
 test('w5563: sessionIdOf reads the conversation a claude argv runs', () => {

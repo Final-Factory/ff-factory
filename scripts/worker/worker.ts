@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { newLinuxCode, swapInLinuxCode } from './linuxCode.ts';
 import { LABEL, MIN_NODE, agentPath, bundle, macControlScript, macProbeScript, macReloadLines, nodeSupport, parseMacProbe, parseWinProbe, plist } from '../../server/machineDeploy.ts';
 import { linuxControlScript, linuxReloadLines, parseUnitShow, systemdUnit, unitFile, unitName, unitPathOf, withUnitPath } from '../../server/machineDeployLinux.ts';
 import * as win from '../../server/machineDeployWin.ts';
@@ -870,19 +871,14 @@ async function installDaemonMac(o: InstallOptions, l: Layout, id: string, probe:
  */
 async function installDaemonLinux(o: InstallOptions, l: Layout, id: string, probe: { node?: string; claude?: string; home: string; path?: string }) {
   const support = nodeSupport((await must('node --version', probe.node!, ['-p', 'process.versions.node'])).trim());
-  const newDir = path.join(l.daemon, 'app.new');
-  fs.rmSync(newDir, { recursive: true, force: true });
-  fs.mkdirSync(newDir, { recursive: true });
+  // w6434: the code goes to code/app.new and is swapped in inside code/ (scripts/worker/linuxCode.ts).
+  const newDir = newLinuxCode(l.daemon);
   await must('copying the daemon code', 'bash', ['-c', `git -C "$1" archive --format=tar HEAD server shared machine scripts/unity-windows.ps1 package.json package-lock.json | tar -xf - -C "$2"`, 'x', l.src, newDir], { env: (await gitFence(['-C', l.src, 'archive'])).env });
   const version = (await must('git rev-parse', 'git', ['-C', l.src, 'rev-parse', '--short', 'HEAD'])).trim();
   fs.writeFileSync(path.join(newDir, 'machine', 'VERSION'), version + '\n');
   say('npm ci for the daemon...');
   await must('npm ci', 'npm', ['ci', '--omit=dev', '--no-audit', '--no-fund', '--loglevel=error'], { cwd: newDir, env: { ...process.env, PATH: `${path.dirname(probe.node!)}:${process.env.PATH}` }, timeoutMs: 10 * 60_000 });
-  const app = path.join(l.daemon, 'app');
-  const old = path.join(l.daemon, 'app.old');
-  fs.rmSync(old, { recursive: true, force: true });
-  if (fs.existsSync(app)) fs.renameSync(app, old);
-  fs.renameSync(newDir, app);
+  swapInLinuxCode(l.daemon);
   fs.mkdirSync(l.logs, { recursive: true });
   fs.mkdirSync(path.join(l.daemon, 'agents'), { recursive: true });
   fs.writeFileSync(path.join(l.daemon, 'daemon.json'), JSON.stringify(daemonJson(o, l, id, probe.claude), null, 2), { mode: 0o600 });

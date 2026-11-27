@@ -1,0 +1,10 @@
+- **Linux takes the read fence's `on` mode** (w6434, lothsahn: "Build Linux 'on' as its own request, then run the same
+  checks on biscuit"). The daemon's code on Linux now lives in `<daemon>/code/` (`app`, `app.old`, `app.new`,
+  `app.failed`) and `<daemon>/app` is a link to `code/app` that updates never touch; `code` is given back to workers as a
+  folder, so a run already going keeps git push, gh, ff-pr and unity-slot across a daemon update under Landlock (B4 of
+  #1193, which refused `on` on Linux until now). The installer moves an old `app` folder over at the next update, the
+  rollback swaps inside `code/`, and the stop script's agent-host match takes both layouts. `on` is held at warn, with a
+  logged reason, until the link is there (`readFenceOnHeld`). Below Landlock ABI 9 (Linux 7.1) `on` now enforces the
+  file rules and logs that the owner sockets stay reachable, where it used to enforce nothing (w5748). Off by default;
+  `read-fence-off` still takes the rules off the next run with nobody at the machine. Docs: worker-fence.md. Tests:
+  `scripts/worker/linuxCode.test.ts` (with a live Landlock leg across both swaps), workerFence, machineLink.

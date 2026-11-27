@@ -30,7 +30,7 @@ import { writeFileDurable } from '../server/durable.ts';
 import { LoopWatch, linkBeat, loopLabel, loopRun } from '../server/loopWatch.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
@@ -4482,9 +4482,10 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
-    const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
+    // w6434: on Linux only once the daemon's code sits behind the code link (scripts/worker/linuxCode.ts), so an update leaves
+    // runs already going their code. The owner sockets (w5748) no longer hold the file rules back: below Landlock ABI 9 they
+    // stay reachable, and the probe says so in the log.
+    return !!this.cfg.root && readRulesForNewRun(appDirOfConfig(this.cfg), !this.readProbeBlocks);
   }
 
   /**
@@ -4572,8 +4573,9 @@ export class Daemon {
         return;
       }
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
-      if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
-      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
+      if (mode === 'on' && !this.readProbeBlocks && !readFenceOnHeld(appDir) && process.platform === 'linux' && this.ownerSocketsOpen.length)
+        log(`read fence (on): runs start with the read rules; a fenced run still reaches ${this.ownerSocketsOpen.length} owner socket(s) (the line above says which), which only Landlock ABI 9 (Linux 7.1) can close (w5748, w6434)`);
+      if (mode === 'on' && readFenceOnHeld(appDir)) log(`read fence (on): not enforced here, warn only: ${readFenceOnHeld(appDir)}`);
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
@@ -4581,7 +4583,7 @@ export class Daemon {
     }
   }
 
-  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run; `on` waits for none (readFenceEnforced). */
+  /** w5748: the owner sockets the last Linux probe found reachable from a fenced run (logged; w6434: `on` no longer waits for none). */
   private ownerSocketsOpen: string[] = ['(not probed)'];
   /** w5773: counts read fence probes, so one that ends after a newer one started leaves its verdict unused. */
   private readProbeGen = 0;
@@ -4802,8 +4804,6 @@ export class Daemon {
    * 60 s wait. Until it passes, runs start without read rules (readProbeBlocks), as at start.
    */
   async setReadFence(mode: ReadFenceMode): Promise<void> {
-    const refused = mode === 'on' ? readFenceOnRefusal() : undefined;
-    if (refused) throw new Error(refused);
     const appDir = appDirOfConfig(this.cfg);
     writeReadFenceMode(appDir, mode);
     this.readProbeBlocks = true;

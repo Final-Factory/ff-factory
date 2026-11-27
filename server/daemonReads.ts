@@ -32,6 +32,9 @@ export const DAEMON_READ_ALLOW = [
   // The code that ran: the worker install's checkout (src) and the older deploys' copy (app) (server/machineDeploy*.ts).
   'src',
   'app',
+  // On Linux, the folder `app` links to (scripts/worker/linuxCode.ts, w6434): given back whole, so the code an update renames
+  // in stays readable to runs already going under Landlock.
+  'code',
   // The last self-update's job and result (machine/selfUpdate.ts UpdateJob: ids, commits, phases, no secret).
   'update/job.json',
   'update/result.json',
