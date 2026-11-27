@@ -23,7 +23,10 @@
  *   repository's credential helpers are dropped and the user's and system's added again in their order. This one has a
  *   race: a worker who writes the key between the scan and the call wins it, so it narrows the gap without closing it.
  *   Calls that start none of those programs and read no object (config, symbolic-ref, worktree list, a plain rev-parse:
- *   needsScan) skip it (w5991).
+ *   needsScan) skip it (w5991). A repository's `protocol.<name>.allow` is scanned too and refused again (w6570).
+ * - FIRST-WINS: `remote.<name>.uploadpack`, `remote.<name>.receivepack` and `core.gitProxy` keep the first value git reads,
+ *   so no override by value works (w6570). fetch, pull and ls-remote get `--upload-pack=`, push `--receive-pack=`
+ *   (firstWinsArgs); the calls that option cannot cover are warned about (firstWinsWarning) until the fence refuses them.
  * - `diff`, `log`, `show` and `whatchanged` also get `--no-ext-diff --no-textconv`: `diff.external` cannot be overridden
  *   by value (an empty one makes every `git diff` fail, measured by w5514 on git 2.50.1), and the flags need no scan.
  *
@@ -79,7 +82,7 @@ export const FIXED_GIT_CONFIG: [string, string][] = [
 
 /** Keys a repository may name a program in, read per call (canonical names: section and key lower case). */
 export const SCANNED_KEYS =
-  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof))$';
+  '^(filter\\..+\\.(clean|smudge|process)|merge\\..+\\.driver|diff\\..+\\.(command|textconv)|hook\\..+\\.command|remote\\..+\\.(uploadpack|receivepack|vcs)|submodule\\..+\\.update|lfs\\.customtransfer\\..+\\.path|lfs\\.extension\\..+\\.(clean|smudge)|lfs\\.standalonetransferagent|core\\.(sshcommand|askpass|gitproxy)|gpg\\.(.+\\.)?program|credential\\.(.+\\.)?helper|url\\..+\\.(insteadof|pushinsteadof)|protocol\\..+\\.allow)$';
 
 /** Scopes no worker writes: the user's and system's config, the caller's own command line (`unknown` is Apple git's Xcode config). */
 const TRUSTED_SCOPES = new Set(['system', 'global', 'command', 'unknown']);
@@ -97,7 +100,78 @@ function neutral(key: string): string {
   if (/^remote\..+\.receivepack$/.test(key)) return 'git-receive-pack';
   if (/^submodule\..+\.update$/.test(key)) return 'checkout';
   if (key === 'core.sshcommand') return 'ssh';
+  // A repository that allows another transport gets it refused again (w6570: a repository-set protocol.ext.allow=always ran
+  // `ext::<command>` through the fence, measured on git 2.56.1; the more specific key beat protocol.allow=never). The four
+  // allows in FIXED_GIT_CONFIG are forced there already and skipped here.
+  if (/^protocol\..+\.allow$/.test(key)) return 'never';
   return '';
+}
+
+/**
+ * Keys git keeps the FIRST value of (w6570, measured on git 2.56.1: the command-scope override, read last, loses to the
+ * repository's value and the planted program runs): remote.c's handle_config sets `uploadpack` and `receivepack` only while
+ * unset, and connect.c's git_proxy_command_options stops at the first `core.gitProxy`. An override by value does nothing for
+ * them, so the fence passes the transport's own option instead (firstWinsArgs) and warns on the calls it cannot pass one to
+ * (firstWinsWarning). core.gitProxy runs only on a git:// URL, which the protocol allows refuse unless the user's or the
+ * system's config allows git://.
+ */
+const isFirstWins = (key: string) => /^remote\..+\.(uploadpack|receivepack)$/.test(key) || key === 'core.gitproxy';
+const FIXED_KEYS = new Set(FIXED_GIT_CONFIG.map(([k]) => k.toLowerCase()));
+/** Subcommands that take the upload or receive program as an option, and the key each one replaces. */
+const PACK_OPTION: Record<string, { key: string; flag: string }> = {
+  fetch: { key: 'uploadpack', flag: '--upload-pack' },
+  pull: { key: 'uploadpack', flag: '--upload-pack' },
+  'ls-remote': { key: 'uploadpack', flag: '--upload-pack' },
+  push: { key: 'receivepack', flag: '--receive-pack' },
+};
+
+/**
+ * `args` with `--upload-pack=` or `--receive-pack=` right after the subcommand when the repository's own config sets that
+ * key (w6570): the user's or the system's value of the same key, else git's default. The caller's own option, later on the
+ * line, still wins.
+ */
+export function firstWinsArgs(args: string[], rows: { scope: string; key: string; value: string }[]): string[] {
+  const { sub } = splitGlobal(args);
+  const o = PACK_OPTION[args[sub] ?? ''];
+  if (!o) return args;
+  const planted = rows.find((r) => !TRUSTED_SCOPES.has(r.scope) && r.key.startsWith('remote.') && r.key.endsWith(`.${o.key}`));
+  if (!planted) return args;
+  const back = rows.filter((r) => TRUSTED_SCOPES.has(r.scope) && r.scope !== 'command' && r.key === planted.key).at(-1);
+  return [...args.slice(0, sub + 1), `${o.flag}=${back ? back.value : neutral(planted.key)}`, ...args.slice(sub + 1)];
+}
+
+/** Subcommands whose every upload program the option covers: fetch, pull and ls-remote start none but their own (measured). */
+const UPLOAD_COVERED = new Set(['fetch', 'pull', 'ls-remote']);
+
+/**
+ * What the fence will do once it enforces w6570 (warn-only first, lothsahn's lockout rule), or undefined: a call the option
+ * does not cover, in a repository whose own config sets a first-wins key, will be refused, and every other call there will
+ * run with lazy fetch off. Not covered: a repository-set uploadpack on any other network call (`push` runs git-lfs's
+ * pre-push hook, whose child `git ls-remote origin` starts it, measured on git 2.56.1 with git-lfs from FF Factory's
+ * hooks; `remote update`, `submodule`, `lfs`, `clone`, `archive`), core.gitProxy on any network call, and an uploadpack
+ * on a partial clone's lazy fetch under any call. A repository-set receivepack is covered: only push's own transport
+ * starts it.
+ */
+export function firstWinsWarning(args: string[], rows: { scope: string; key: string }[]): string | undefined {
+  const name = args[splitGlobal(args).sub] ?? '';
+  const planted = rows.filter((r) => !TRUSTED_SCOPES.has(r.scope));
+  const net = NETWORK.has(name);
+  const up = planted.find((r) => /^remote\..+\.uploadpack$/.test(r.key));
+  const bad = (net && !UPLOAD_COVERED.has(name) && up) || (net && planted.find((r) => r.key === 'core.gitproxy'));
+  const fix = (key: string) => `Remove it with \`git config --local --unset-all ${key}\` in that repository`;
+  if (bad)
+    return `FF Factory safeGit (w6570) warning: the repository's own config sets ${bad.key}, which git runs ahead of the fence's override (it keeps the first value) on \`git ${name}\`; this call will be refused once the fence enforces w6570. ${fix(bad.key)}`;
+  if (up && !net)
+    return `FF Factory safeGit (w6570) warning: the repository's own config sets ${up.key}, which a partial clone's lazy fetch would run under \`git ${name}\`; such calls will run with lazy fetch off once the fence enforces w6570. ${fix(up.key)}`;
+  return undefined;
+}
+
+const warned = new Set<string>();
+/** Each warning once per process (the guard runs the fence on every shell command). */
+function warnOnce(msg: string | undefined): void {
+  if (!msg || warned.has(msg)) return;
+  warned.add(msg);
+  console.warn(msg);
 }
 
 const isCredential = (key: string) => /^credential\.(.+\.)?helper$/.test(key);
@@ -140,7 +214,7 @@ export function scannedOverrides(rows: { scope: string; key: string; value: stri
   const out: [string, string][] = [];
   const seen = new Set<string>();
   for (const r of repo) {
-    if (isCredential(r.key) || isUrlRewrite(r.key) || seen.has(r.key)) continue;
+    if (isCredential(r.key) || isUrlRewrite(r.key) || isFirstWins(r.key) || FIXED_KEYS.has(r.key) || seen.has(r.key)) continue;
     seen.add(r.key);
     const back = trusted.filter((t) => t.key === r.key).at(-1);
     out.push([r.key, back ? back.value : neutral(r.key)]);
@@ -258,8 +332,9 @@ function fenced(args: string[], env: Env, scanOut: string): { args: string[]; en
       args: [`--${no.replace(/\s+/g, '-')}`],
       env: withConfigFirst(env, FIXED_GIT_CONFIG),
     };
+  warnOnce(firstWinsWarning(args, rows));
   return {
-    args: fenceArgs(args),
+    args: fenceArgs(firstWinsArgs(args, rows)),
     env: withConfigFirst(env, [...fixedFor(args), ...scannedOverrides(rows)]),
   };
 }
