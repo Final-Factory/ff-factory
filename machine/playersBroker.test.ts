@@ -11,6 +11,7 @@ import {
   bundleExe,
   logDirOf,
   playersRpcHandlers,
+  processStartTimes,
   splitPlayer,
   type BrokerLaunch,
   type PlayersBrokerDeps,
@@ -460,6 +461,71 @@ test("w6348: on Windows a light folder's install and launch are refused up front
     const r = (await l.h["players/install"](LIGHT, { player: winBuild(path.join(l.light, "build")) })) as { slot: string };
     assert.equal(r.slot, "agent3-0", platform);
   }
+});
+
+test("w6549: a lease whose pid answers as alive (EPERM) but now names a process started after the lease is dead", async (t) => {
+  const asked: number[][] = [];
+  const born = new Map<number, number>();
+  const answer = { fail: false };
+  const b = broker(t, {
+    deps: {
+      startedAt: async (pids) => {
+        asked.push(pids);
+        if (answer.fail) throw new Error("powershell failed");
+        return born;
+      },
+    },
+  });
+  const first = macBuild(path.join(b.sandbox, "A"));
+  const second = macBuild(path.join(b.sandbox, "B"), "a different build");
+  await b.h["players/install"](ME, { player: first });
+  // lothdesktop/slot3-0 (w6536): the lease's pid 117496 answered EPERM (alive) but was a conhost started an hour later
+  const written = 1_700_000_500_000;
+  const lease = path.join(b.slot(), "leases", "hostA-117496-800d3f6a.json");
+  put(lease, JSON.stringify({ pid: 117496, host: "hostA", time: written / 1000, session: "s0", broker: true }));
+  // the elsewhere lease is never asked about: another computer's pid means nothing here
+  put(path.join(b.slot(), "leases", "elsewhere.json"), JSON.stringify({ pid: 4242, host: "hostB", session: "sx" }));
+  const blocked = /holds a running player \(pid (117496, 4242|4242, 117496)\)/;
+  // the OS does not name its start time: it counts as live, as before
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, blocked);
+  assert.deepEqual(asked.at(-1), [117496]);
+  // started before the lease (or within the slack): the lease's own player, still live
+  born.set(117496, written - 60_000);
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, blocked);
+  born.set(117496, written + 1000);
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, blocked);
+  // the query fails: nothing is dropped
+  born.set(117496, written + 3_600_000);
+  answer.fail = true;
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, blocked);
+  answer.fail = false;
+  // started an hour after the lease was written: a reused pid, so the lease is dead; only the other computer's holds
+  await refused(() => b.h["players/install"](ME, { player: second }), 409, /\(pid 4242\)/);
+  const st = (await b.h["players/status"](ME, {})) as { slots: { leases: { pid: number }[] }[] };
+  assert.deepEqual(st.slots[0].leases.map((l) => l.pid), [4242]);
+  fs.rmSync(path.join(b.slot(), "leases", "elsewhere.json"));
+  assert.equal(((await b.h["players/install"](ME, { player: second })) as { filled: boolean }).filled, true);
+  assert.equal(b.log.filter((l) => /lease hostA-117496-800d3f6a\.json is dead: pid 117496 now names a process started .* \(w6549\)/.test(l)).length, 1, "logged once");
+  // a lease with no time is judged by when its file was written
+  const old = path.join(b.slot(), "leases", "py-555.json");
+  put(old, JSON.stringify({ pid: 555 }));
+  const mtime = fs.statSync(old).mtimeMs;
+  born.set(555, mtime - 5000);
+  await refused(() => b.h["players/install"](ME, { player: first }), 409, /\(pid 555\)/);
+  born.set(555, mtime + 60_000);
+  assert.equal(((await b.h["players/install"](ME, { player: first })) as { filled: boolean }).filled, true);
+});
+
+test("w6549: processStartTimes names this process's start, before now, and leaves a gone pid out", async () => {
+  const before = Date.now() - process.uptime() * 1000;
+  const m = await processStartTimes([process.pid, 2_000_000_000]);
+  const mine = m.get(process.pid);
+  assert.ok(mine !== undefined, `a start time for ${process.pid}`);
+  // ps lstart has whole seconds; the clock and the OS's view may differ a little
+  assert.ok(Math.abs(mine - before) < 5000, `${mine} near ${before}`);
+  assert.ok(mine <= Date.now());
+  assert.equal(m.has(2_000_000_000), false);
+  assert.equal((await processStartTimes([])).size, 0);
 });
 
 test("install while a live lease holds the slot is refused (409); once its process is gone it goes through", async (t) => {

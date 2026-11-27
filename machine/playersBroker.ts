@@ -22,6 +22,7 @@ import { createHash, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { RpcRefused, type Caller } from "./daemonRpc.ts";
+import { run } from "../server/proc.ts";
 import { PLAYER_CACHE_ENTRY } from "./playerCache.ts";
 import { isLightId } from "./lightFolders.ts";
 import { okSandboxId } from "./slotCaches.ts";
@@ -87,6 +88,13 @@ export interface PlayersBrokerDeps {
   /** Start the player, fenced, detached; answers its pid or why it was not started. */
   launch: (l: BrokerLaunch) => Promise<{ pid: number } | { refused: string }>;
   alive?: (pid: number) => boolean;
+  /**
+   * w6549: when each of these local pids' processes started (ms since 1970), for those the OS names; a pid left out is
+   * one it would not say for. A lease whose pid now belongs to a process that started after the lease was written is a
+   * reused pid (Windows hands pids out again soon: lothdesktop/slot3-0's lease named a conhost started an hour after it),
+   * so it is dead. Missing (as in tests) or failing, no lease is dropped this way.
+   */
+  startedAt?: (pids: number[]) => Promise<Map<number, number>>;
   log: (l: string) => void;
   now?: () => number;
   /** The OS the slots' players run on (default process.platform): on win32 a light folder has no slot (w6348). */
@@ -112,6 +120,36 @@ const alive0 = (pid: number) => {
     return (e as NodeJS.ErrnoException).code === "EPERM";
   }
 };
+
+/** How far a process may seem to start after its lease was written and still be the lease's own (clocks round). */
+export const REUSE_SLACK_MS = 2000;
+
+/**
+ * w6549: when the processes with these pids started, from one query (the daemon's start-time lookup for the broker).
+ * Windows: Win32_Process CreationDate, which WMI answers for any process, even one the daemon may not open (process.kill
+ * answers EPERM for those). Elsewhere: ps lstart. A pid that is gone, or whose time does not parse, is left out.
+ */
+export async function processStartTimes(pids: number[], platform: NodeJS.Platform = process.platform): Promise<Map<number, number>> {
+  const out = new Map<number, number>();
+  const ok = [...new Set(pids)].filter((p) => Number.isInteger(p) && p > 0);
+  if (!ok.length) return out;
+  const r =
+    platform === "win32"
+      ? await run("powershell.exe", [
+          "-NoProfile",
+          "-Command",
+          `@(Get-CimInstance Win32_Process -Filter "${ok.map((p) => `ProcessId=${p}`).join(" OR ")}" -Property ProcessId,CreationDate) | ` +
+            `Where-Object { $_.CreationDate } | ForEach-Object { '{0} {1}' -f $_.ProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }`,
+        ], { timeoutMs: 30_000 })
+      : await run("ps", ["-o", "pid=,lstart=", "-p", ok.join(",")], { env: { ...process.env, LC_ALL: "C" }, timeoutMs: 30_000 });
+  for (const line of r.stdout.split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
+    if (!m) continue;
+    const t = platform === "win32" ? Number(m[2]) : Date.parse(m[2]);
+    if (Number.isFinite(t) && t > 0) out.set(Number(m[1]), t);
+  }
+  return out;
+}
 
 /** The folder to mirror, where it lands under player/, and the entry to start (player_slots.py split_player). */
 export function splitPlayer(player: string): {
@@ -243,8 +281,13 @@ export function playersRpcHandlers(
     }
     if (make && !there(path.join(slot.dir, "leases"))) fs.mkdirSync(path.join(slot.dir, "leases"));
   };
-  /** The slot's live leases (player_slots.py live_leases: a lease whose pid is gone is dead). Reads only. */
-  const liveLeases = (dir: string) => {
+  /** Leases already logged as a reused pid's, so each is logged once (w6549). */
+  const reusedLogged = new Set<string>();
+  /**
+   * The slot's live leases (player_slots.py live_leases: a lease whose pid is gone is dead; w6549: so is one whose pid now
+   * names a process started after the lease was written). Reads only.
+   */
+  const liveLeases = async (dir: string) => {
     const ld = path.join(dir, "leases");
     let names: string[] = [];
     try {
@@ -258,26 +301,52 @@ export function playersRpcHandlers(
       session?: string;
       host?: string;
     }[] = [];
+    const written = new Map<string, number>();
     for (const n of names) {
       try {
-        const l = JSON.parse(fs.readFileSync(path.join(ld, n), "utf8")) as {
+        const f = path.join(ld, n);
+        const l = JSON.parse(fs.readFileSync(f, "utf8")) as {
           pid?: number;
           session?: string;
           host?: string;
+          time?: number;
         };
         const local = !l.host || l.host === d.host;
-        if (Number.isInteger(l.pid) && (!local || alive(l.pid!)))
+        if (Number.isInteger(l.pid) && (!local || alive(l.pid!))) {
+          // The lease is written after its player started: its time, or the file's own when it has none (a later rewrite
+          // only moves that later, so it can never make a live player's lease look reused).
+          if (local)
+            written.set(n, typeof l.time === "number" && Number.isFinite(l.time) ? l.time * 1000 : fs.statSync(f).mtimeMs);
           out.push({
             file: n,
             pid: l.pid!,
             ...(l.session ? { session: l.session } : {}),
             ...(l.host ? { host: l.host } : {}),
           });
+        }
       } catch {
         // half-written or gone
       }
     }
-    return out;
+    if (!d.startedAt || !written.size) return out;
+    let born: Map<number, number>;
+    try {
+      born = await d.startedAt(out.filter((l) => written.has(l.file)).map((l) => l.pid));
+    } catch {
+      return out; // the OS would not say: every lease counts, as before w6549
+    }
+    return out.filter((l) => {
+      const w = written.get(l.file);
+      const b = born.get(l.pid);
+      if (w === undefined || b === undefined || b <= w + REUSE_SLACK_MS) return true;
+      if (!reusedLogged.has(path.join(dir, l.file))) {
+        reusedLogged.add(path.join(dir, l.file));
+        d.log(
+          `players broker: ${path.basename(dir)}'s lease ${l.file} is dead: pid ${l.pid} now names a process started ${new Date(b).toISOString()}, after the lease (${new Date(w).toISOString()}) (w6549)`,
+        );
+      }
+      return false;
+    });
   };
   const ownTemp = (c: Caller) =>
     path.join(d.tempDir ?? path.join(d.root, "tmp"), `ffa-${c.session.replace(/[^\w-]/g, "").slice(0, 40)}`);
@@ -324,19 +393,21 @@ export function playersRpcHandlers(
   };
 
   return {
-    "players/status": (c) => {
+    "players/status": async (c) => {
       if (!okSandboxId(c.sandbox))
         throw refuse(403, "players: only a sandbox worker has player slots");
       return {
-        slots: [0, 1].map((peer) => {
-          const dir = path.join(players, `${c.sandbox}-${peer}`);
-          return {
-            slot: path.basename(dir),
-            dir,
-            marker: readMarker(dir) ?? null,
-            leases: liveLeases(dir),
-          };
-        }),
+        slots: await Promise.all(
+          [0, 1].map(async (peer) => {
+            const dir = path.join(players, `${c.sandbox}-${peer}`);
+            return {
+              slot: path.basename(dir),
+              dir,
+              marker: readMarker(dir) ?? null,
+              leases: await liveLeases(dir),
+            };
+          }),
+        ),
       };
     },
 
@@ -382,7 +453,7 @@ export function playersRpcHandlers(
             build: fingerprint,
           };
         }
-        const live = liveLeases(slot.dir);
+        const live = await liveLeases(slot.dir);
         if (live.length)
           throw refuse(
             409,
@@ -495,7 +566,7 @@ export function playersRpcHandlers(
             `players/launch: ${top} is gone; players/install again`,
           );
         // L1: one running player per slot (it shares the slot's automation config and status file).
-        const running = liveLeases(slot.dir);
+        const running = await liveLeases(slot.dir);
         if (running.length)
           throw refuse(
             409,
