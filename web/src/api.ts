@@ -157,6 +157,8 @@ export const api = {
   logout: () => request<unknown>('POST', '/api/logout'),
   /** `timeoutMs`: give up after it (the socket's failure check, w5318); absent, wait as long as the browser does. */
   state: (timeoutMs?: number) => request<AppState>('GET', '/api/state', undefined, { timeoutMs }),
+  /** Who this login is (w6336: the socket's failure check once the page has a state; 401 when signed out). */
+  me: (timeoutMs?: number) => request<{ username?: string }>('GET', '/api/me', undefined, { timeoutMs }),
   /** w5907: sessions the page's state left out (older finished ones), by id; unknown ids are left out of the answer. */
   sessions: (ids: string[]) => request<SessionInfo[]>('GET', `/api/sessions?ids=${ids.map(enc).join(',')}`),
   // What work costs (w859, docs/spend.md): each request's cost, one request in full, and the analysis.
@@ -390,6 +392,11 @@ export function connectSocket(h: SocketHandlers): () => void {
     startedAt = Date.now();
     const sock = new WebSocket(url());
     ws = sock;
+    // w6336: this attempt's phases (performance.now()), told to the server once its first state is on screen.
+    const began = performance.now();
+    const firstConnect = !everOpened;
+    let openAt = 0;
+    let told = false;
     // A hung attempt (w5318: a failing Funnel takes the connection and never answers) fires no close for minutes.
     const hung = setTimeout(() => {
       if (ws === sock && sock.readyState === WebSocket.CONNECTING) abandon('timeout', false);
@@ -398,6 +405,7 @@ export function connectSocket(h: SocketHandlers): () => void {
       clearTimeout(hung);
       if (ws !== sock) return;
       opened = true;
+      openAt = performance.now();
       attempt = 0;
       tries = 0;
       heard = Date.now();
@@ -408,13 +416,19 @@ export function connectSocket(h: SocketHandlers): () => void {
     sock.onmessage = (m) => {
       if (ws !== sock) return;
       heard = Date.now();
+      const inAt = performance.now();
       let ev: ServerEvent;
       try {
         ev = JSON.parse(typeof m.data === 'string' ? m.data : '');
       } catch {
         return;
       }
-      if (ev.type !== 'ping') h.onEvent(ev);
+      if (ev.type === 'ping') return;
+      h.onEvent(ev);
+      if (ev.type === 'state' && !told) {
+        told = true;
+        tellReady(sock, { open: openAt - began, state: inAt - openAt, parse: performance.now() - inAt }, inAt, firstConnect);
+      }
     };
     sock.onclose = async (e) => {
       clearTimeout(hung);
@@ -433,6 +447,25 @@ export function connectSocket(h: SocketHandlers): () => void {
       }
       retryLater();
     };
+  };
+
+  // w6336: once the first state is applied and drawn (the event batch flushes on the next frame; a task after it runs
+  // after that frame's paint), the server logs every phase of this connect (server/pageSockets.ts ready). A hidden tab
+  // draws no frames: it says nothing rather than a render time that is only how long it stayed hidden.
+  const tellReady = (sock: WebSocket, t: { open: number; state: number; parse: number }, inAt: number, firstConnect: boolean) => {
+    if (document.visibilityState === 'hidden') return;
+    requestAnimationFrame(() =>
+      setTimeout(() => {
+        if (ws !== sock || sock.readyState !== WebSocket.OPEN) return;
+        const now = performance.now();
+        const render = now - inAt - t.parse;
+        try {
+          sock.send(JSON.stringify({ type: 'ready', ...t, render, ...(firstConnect ? { load: now } : {}) }));
+        } catch {
+          // Closing as it was sent: the next open says it.
+        }
+      }, 0),
+    );
   };
 
   // Replace the socket in `ws` now: an open one gone silent, or an attempt that hung. Its onclose, if it ever comes, is

@@ -5,7 +5,7 @@
 import type { AppState, BenchState, HostStats, LiveViewInfo, Machine, MachineSandbox, MachinePlatform, PlayerSeen, SandboxStatus, SessionInfo, UnitySlotsReport, UnityState, UserRole, WorkItem } from './types.ts';
 import { AGENT_STATE_RANK, agentState, holdsSandbox, placeRank, sortAgents } from './agentState.ts';
 import { holdsOf, workLiveAll } from './workState.ts';
-import { newestFirst } from './blockers.ts';
+import { newestFirst, onRequest } from './blockers.ts';
 import { liveReady, type LiveReady } from './liveReady.ts';
 import { isLight } from './sandboxKind.ts';
 
@@ -70,7 +70,7 @@ export function chatLedger(work: readonly WorkItem[] | undefined, byId: Map<stri
     if (l?.state !== 'waiting' || w.approval?.state === 'pending' || w.question || w.flag) continue;
     // The worker whose wait it is (w1504: the ledger says, so a settled wait of another worker is not it), else the one that
     // declared it (waiting_on_person), else the request's current worker.
-    const declared = w.sessionIds.map((id) => byId.get(id)).find((s) => s?.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()));
+    const declared = w.sessionIds.filter((id) => onRequest(w, id)).map((id) => byId.get(id)).find((s) => s?.waitingOn && (!s.waitingOn.request || s.waitingOn.request.toLowerCase() === w.id.toLowerCase()));
     const s = byId.get(l.worker ?? '') ?? declared ?? byId.get(holders.get(w.id) ?? '');
     if (!s || s.status === 'waiting_permission' || s.pendingPermissions.length || waits.has(s.id)) continue;
     waits.set(s.id, { session: s, request: w.id, on: l.waitsOn ?? [] });

@@ -380,6 +380,61 @@ test('w2055: a timed leg pre-empts a small computer whose worker is between turn
   assert.deepEqual(hi.step.widen, ['pc', 'big']);
 });
 
+// w6336: blockerWatch's timedLegBound held the portal's loop 4-12 s at a time (stall profile, 2026-11-27 06:37-06:51Z):
+// for each queued timed leg, every machine's occupants and, for each occupant, the machine's benchPriorities (a walk of every
+// session and the whole ledger) were computed again. Within one pass they are computed once per machine, and afresh after a
+// leg starts or moves (placesChanged).
+test('w6336: one timedLegBound pass reads each machine’s occupants and bench priorities once, however many timed legs wait; a change makes them fresh', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, agents, o } = env;
+  fixTimedFacts(o);
+  agentsRoomFacts(agents, { game: ['pc'] });
+  putRequests(store, [{ id: 'w1', title: 'Belt tooltip', brief: 'Fix it.' }]);
+  const { info } = await startedFor(env, 'w1');
+  const box = (bid: string, maxAgents: number, x: Partial<Computer> = {}): Computer => ({ id: bid, online: true, live: 0, midTurn: 0, maxAgents, sandboxes: 1, maxSandboxes: 3, freeSandboxes: 1, memUsedBytes: 16 * 1024 ** 3, memTotalBytes: 64 * 1024 ** 3, editors: 0, maxEditors: 2, platform: 'win32', ...x });
+  agents.places = () => [box('pc', 1, { live: 1, freeSandboxes: 0, sandboxes: 1, maxSandboxes: 1 }), box('big', 10, { live: 3, editors: 2, maxEditors: 4 })];
+  const sb = store.machines.get('pc')!.sandboxes!.find((x) => x.id === info.machineSandbox)!;
+  // Uncommitted work: w1's worker stays, so no leg starts and the pass never changes placement.
+  sb.git = { branch: 'w1-belt', upstream: 'origin/w1-belt', ahead: 0, behind: 0, dirty: 2, untracked: 0 } as typeof sb.git;
+  const legs = ['w2', 'w3', 'w4', 'w5'];
+  putRequests(store, legs.map((id) => ({ id, title: `Timed leg for w9: belt A/B ${id}`, status: 'queued' as const, needs: 'game' as const, queuedFor: { at: new Date().toISOString(), needs: ['pc'] }, timedLeg: { for: 'w9', forSession: 'nobody', from: 'beast', small: ['pc'] } })));
+  const starts: string[] = [];
+  agents.startTimedLeg = (w) => (starts.push(w.id), true);
+  const spy = agents as unknown as { benchPrioritiesNow: (m: string) => unknown; preemptOccupantsNow: (m: string) => unknown };
+  const bench: string[] = [];
+  const occ: string[] = [];
+  const b0 = spy.benchPrioritiesNow.bind(agents);
+  const o0 = spy.preemptOccupantsNow.bind(agents);
+  spy.benchPrioritiesNow = (m) => (bench.push(m), b0(m));
+  spy.preemptOccupantsNow = (m) => (occ.push(m), o0(m));
+  // The verdict outside a pass, for the comparison below.
+  const alone = agents.timedLegStepFor(store.work.get('w2')!)!.step;
+  assert.ok('wait' in alone && /stays: its sandbox has uncommitted work/.test(alone.why), JSON.stringify(alone));
+  bench.length = 0;
+  occ.length = 0;
+  assert.deepEqual(o.timedLegBound(), [], 'nothing could start');
+  assert.deepEqual([...occ].sort(), ['big', 'pc'], `occupants once per machine for ${legs.length} legs`);
+  assert.deepEqual(bench, ['pc'], 'bench priorities once for the one occupied machine');
+  // Same answer inside a pass as outside one.
+  const inPass = agents.withPlacesOnce(() => [agents.timedLegStepFor(store.work.get('w2')!)!.step, agents.timedLegStepFor(store.work.get('w3')!)!.step]);
+  assert.deepEqual(inPass[0], alone);
+  assert.deepEqual(inPass[1], agents.timedLegStepFor(store.work.get('w3')!)!.step);
+  // After a change inside the pass the next read is fresh.
+  bench.length = 0;
+  agents.withPlacesOnce(() => {
+    agents.timedLegStepFor(store.work.get('w2')!);
+    agents.placesChanged();
+    agents.timedLegStepFor(store.work.get('w3')!);
+  });
+  assert.deepEqual(bench, ['pc', 'pc'], 'placesChanged empties the memo');
+  // Outside a pass nothing is kept.
+  bench.length = 0;
+  agents.benchPriorities('pc');
+  agents.benchPriorities('pc');
+  assert.equal(bench.length, 2);
+  assert.equal(starts.length, 0);
+});
+
 test('w2057: request_pair records the pull request and commit; for a pull request whose pair run is open (one filed by hand included) it joins that run and files nothing', async (t) => {
   const env = await setupOnMachine(t);
   const { store, agents } = env;

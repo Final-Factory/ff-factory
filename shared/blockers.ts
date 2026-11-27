@@ -211,10 +211,10 @@ export function othersGates(w: Pick<WorkItem, 'sessionIds' | 'blocked' | 'alsoBl
  * reading only the newest, the release pass stopped 0b5f813d as "with another worker now", and the CI's end resumed
  * 39772f0c, which did not know the PR was its to merge.
  */
-export function isWith(w: Pick<WorkItem, 'sessionIds' | 'links' | 'status' | 'blocked' | 'alsoBlocked'>, sessionId: string): boolean {
+export function isWith(w: Pick<WorkItem, 'sessionIds' | 'links' | 'status' | 'blocked' | 'alsoBlocked'> & Partial<Pick<WorkItem, 'movedOff'>>, sessionId: string): boolean {
   // w2026: a worker not in sessionIds is never its newest worker, so newestFirst's sort runs only for the request's own workers (the
   // release pass asks this of every request for every worker each minute: 9 s of the portal's 37 s stalls on 2026-10-24).
-  return (w.sessionIds.includes(sessionId) && latestWorker(w) === sessionId) || (w.status === 'blocked' && gatesOf(w).some((g) => gateSetter(g) === sessionId));
+  return (w.sessionIds.includes(sessionId) && latestWorker(w) === sessionId) || (w.status === 'blocked' && !offSince(w, sessionId) && gatesOf(w).some((g) => gateSetter(g) === sessionId));
 }
 
 /**
@@ -225,7 +225,7 @@ export function isWith(w: Pick<WorkItem, 'sessionIds' | 'links' | 'status' | 'bl
  * now (w665: dc19eb45)". A worker with no link record (given it before w418) is older than any with one; on a tie, the
  * later in sessionIds.
  */
-export const latestWorker = (w: Pick<WorkItem, 'sessionIds' | 'links'>): string | undefined => newestFirst(w)[0];
+export const latestWorker = (w: Pick<WorkItem, 'sessionIds' | 'links'> & Partial<Pick<WorkItem, 'movedOff'>>): string | undefined => newestFirst(w)[0];
 
 /**
  * w3855: Date.parse of a link's time, kept by its text: the release pass asks every worker's requests for their newest worker
@@ -241,14 +241,58 @@ function parsedAt(text: string): number {
   return t;
 }
 
-/** A request's workers, the one it was last sent or linked to first (latestWorker); every "its newest worker" reads this. */
-export function newestFirst(w: Pick<WorkItem, 'sessionIds' | 'links'>): string[] {
+/**
+ * w6309 (the w6302 review, R1 and R2): worker `sid` was moved off `w` and not sent or linked to it since. Off its list, or
+ * on it again only through a merge (which keeps the mark and brings no link of its own for it): either way it never takes
+ * `w` up again (w2079). Every placement and link links its worker, so a worker put on `w` again is not off it.
+ */
+export function offSince(w: Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>, sid: string): boolean {
+  const off = w.movedOff?.[sid];
+  if (!off) return false;
+  return !w.sessionIds.includes(sid) || !(parsedAt(w.links?.[sid]?.at ?? '') >= parsedAt(off));
+}
+
+/**
+ * w6309: what a worker of request `w` may do, settled here and read by every route (the w6318..w6329 reviews of #1430).
+ * A worker moved off `w` that a merge listed again (offSince while listed) is heard, not on it:
+ * - heardOn (listed): a person's [answer] or [note] to it still goes (staleResume, w2495), and what it says back is kept
+ *   with `w` (itemsOf: Findings, outcome, orchestratorStep, unfiledInReport, intakeMarkers). Its DONE is refused with why.
+ * - onRequest (listed and not offSince): it holds `w` (holdsOf, servedBy), is its newest worker (newestFirst, isWith),
+ *   is woken for it (gateOwner, deployHeld, resumeAfterDeploy, held check-ins), carries it in a move (movableWorkOf),
+ *   uses a worker tool on it (workerRequest), closes it with DONE, and its reports clear `w`'s gates (BlockerWatch
+ *   reportedSince, deliveredSince). None of these for a merged-back moved-off worker (w2079).
+ * The rule in one line: such a worker is treated as one not listed on `w`, except that it is heard. Every reader that
+ * asks who is on `w` reads onRequest; only the resume of a person's words (staleResume, asPutBack, a person's FFBox
+ * follow-up relayed to busy workers) and what keeps its reply (itemsOf) read heardOn. Closing (DONE, LEG DONE,
+ * SUPERSEDED), starting beside it (workersOn, otherWorkerOn, busyIn), legs, crash facts, gates and their hand-over,
+ * grants and read scope, heirs, wakes for builds, intake twins and FFBox, and the Waiting board all read onRequest
+ * (the w6331 sweep of every sessionIds reader).
+ */
+export function heardOn(w: Pick<WorkItem, 'sessionIds'>, sid: string): boolean {
+  return w.sessionIds.includes(sid);
+}
+
+/** w6309: worker `sid` is on request `w` (see heardOn above): listed, and not off it since a move (offSince). */
+export function onRequest(w: Pick<WorkItem, 'sessionIds' | 'links'> & Partial<Pick<WorkItem, 'movedOff'>>, sid: string): boolean {
+  return w.sessionIds.includes(sid) && !(w.movedOff && offSince(w as Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>, sid));
+}
+
+/**
+ * A request's workers on it (onRequest), the one it was last sent or linked to first (latestWorker); every "its newest
+ * worker" and "its first worker that exists" reads this. w6309 (the w6318 and w6320 reviews): one off it since its move
+ * (offSince: a merge listed it again) is left out, so no route picks it, alone on the request or not: the answer
+ * (answerNeedsYou), the release pass (isWith), a gate's end (gateOwner), a held deploy (deployHeld), a deploy's step after
+ * it (resumeAfterDeploy), the dispatcher's unblock notice.
+ */
+export function newestFirst(w: Pick<WorkItem, 'sessionIds' | 'links'> & Partial<Pick<WorkItem, 'movedOff'>>): string[] {
   const at = (sid: string) => {
     const t = parsedAt(w.links?.[sid]?.at ?? '');
     return Number.isFinite(t) ? t : -Infinity;
   };
   // A stable sort, oldest first, then reversed: on a tie the later in sessionIds comes first.
-  return w.sessionIds.map((sid, i) => ({ sid, i, t: at(sid) })).sort((a, b) => a.t - b.t || a.i - b.i).reverse().map((x) => x.sid);
+  const order = w.sessionIds.map((sid, i) => ({ sid, i, t: at(sid) })).sort((a, b) => a.t - b.t || a.i - b.i).reverse().map((x) => x.sid);
+  if (!w.movedOff) return order;
+  return order.filter((sid) => onRequest(w as Pick<WorkItem, 'sessionIds' | 'links' | 'movedOff'>, sid));
 }
 
 /** Every gate of a request, first the primary `blocked` and then `alsoBlocked` (w754); empty when it has none. */
@@ -624,8 +668,11 @@ export function blockerProblem(b: Pick<WorkBlocker, 'kind' | 'ref' | 'until' | '
       return b.ref && CI_REF.test(b.ref) ? undefined : 'blocker.ref: the pull request, "owner/repo#123"';
     case 'steam':
       return f.work(self)?.pair?.steam ? undefined : `${self} is no pair run that needs Steam: a steam gate holds only one (w2459)`;
-    case 'worker':
-      return b.ref && f.work(self)?.sessionIds.includes(b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
+    case 'worker': {
+      // w6309: a worker on it (onRequest), not one moved off it that a merge listed again.
+      const t = f.work(self);
+      return b.ref && t && onRequest(t, b.ref) ? undefined : `blocker.ref: a worker's session id on ${self} (w2476)`;
+    }
     case 'disk':
       if (!b.ref) return 'blocker.ref: the machine id';
       if (f.online && f.online(b.ref) === undefined) return `no machine "${b.ref}"`;

@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
 
-# A push to main runs only the secret scan and the identity check (w925, lothsahn: "3B"): its pull request already ran the
+# A push to main runs only the secret scan, the identity check and the typecheck (w925, lothsahn: "3B"; typecheck w6343): its pull request already ran the
 # whole suite, as FinalFactory's develop does. Each push to main is its own group, so a later merge never cancels them (68
 # of 310 main commits lost their run that way, w922). The whole suite on main by hand: gh workflow run ci.yml --ref main.
 concurrency:
@@ -41,8 +41,7 @@ env:
 # (Settings, Actions, General).
 jobs:
   checks:
-    # Not on a push to main (w925): see concurrency above.
-    if: github.event_name != 'push'
+    # A push to main runs only the typecheck steps (w6343): the web build below is skipped there.
     name: Typecheck, build (Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -62,6 +61,7 @@ jobs:
       - name: Typecheck (web)
         run: npm --prefix web run typecheck
       - name: Build the web UI
+        if: github.event_name != 'push'
         run: npm --prefix web run build
 
   unit:

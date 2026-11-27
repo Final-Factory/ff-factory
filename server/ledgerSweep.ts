@@ -61,7 +61,7 @@ import {
 } from './ledgerRules.ts';
 import type { LedgerCleanupState, Requester, SessionInfo, WorkErrorHandled, WorkItem, WorkPr } from '../shared/types.ts';
 import { handUpsPending, holdsOf, servedBy } from '../shared/workState.ts';
-import { BLOCKER_STUCK_MS } from '../shared/blockers.ts';
+import { BLOCKER_STUCK_MS, onRequest } from '../shared/blockers.ts';
 import { holdsItsPlace } from '../shared/agentState.ts';
 import { appVersion } from './version.ts';
 
@@ -245,7 +245,7 @@ export class LedgerSweep {
         if (live.approval?.state === 'pending') continue;
         // w3708: a pair run's leg that goes on without DONE after the host leg's DONE is asked once, then the run closes.
         if (this.d.orchestrators.pairLegsOverdue(live.id)) continue;
-        const workers = live.sessionIds.map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(live, s));
+        const workers = live.sessionIds.filter((id) => onRequest(live, id)).map((id) => this.d.store.sessions.get(id)).filter((s): s is SessionInfo => !!s && !replacedLeg(live, s));
         // Whose reports say what is left (w2493): its workers, or, with none (a w1600 move takes the request off its worker
         // until the dispatcher places it again), the workers it was moved off. w2443 and w2014 had no worker at 00:00Z on
         // 2026-10-29, three minutes after their move, so their last "still open" reports went unread and they closed.
