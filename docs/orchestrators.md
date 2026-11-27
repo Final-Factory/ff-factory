@@ -1197,14 +1197,15 @@ without one means it is off or failing, worth a person's look.
       call all still apply, and the first refusal stops the rest. It widens nothing: whether to file is the orchestrator's
       call under the same rule as before (its person's words or a standing decision, else ask). The `[follow-ups to file]`
       message names it when the hand-up carries briefs (a report-only hand-up still says request_work) and says to answer
-      a message from the person waiting in that turn first.
+      a message from the person waiting in that turn first. With `drop` it drops them instead (w6581, below).
     - **Handed-up follow-ups never leave a merged request waiting for days** (w4352, lothsahn). On 2026-11-15 about 20
       requests, most of them Ben's, sat 5 h to 8 days with their PRs merged, waiting on an orchestrator: the one reminder
       came at 6 h, and a stalled request was never reminded at all (`followUpStep` skips it). Now the ledger cleanup's
       `Orchestrators.handUpStep` (each full pass, open or stalled, with no busy worker on it) sends `[follow-ups to file]`
       again once 2 h after the hand-up (`HAND_UP_RESEND_MS`), saying what happens at 12 h. Until then the request's live
-      state (`handUpLive` in `shared/workState.ts`) is Waiting on input on "<Name>'s orchestrator" with `backlog` set, and
-      the Waiting tab lists it under "Orchestrators' backlog", not as a wait on a person.
+      state (`handUpLive` in `shared/workState.ts`) is Working on "<Name>'s orchestrator" (`orchestrator` and `backlog`
+      set; w6581): the orchestrator has it, so it is on nobody's Waiting on input tab. Until w6581 it read Waiting on
+      input, and lothsahn asked why w6534's row did when "it's yours".
     - **A hand-up never files itself: after 12 h it is its person's card** (w5577, rogue-worker audit w5451 item 19;
       lothsahn: "File it: after 12 h an unfiled hand-up becomes a card for me, never files itself"). From w4352 until
       w5577, FF Factory filed a hand-up left unfiled 12 h by itself (`autoFileHandUps`), so a hijacked or careless worker
@@ -1217,9 +1218,20 @@ without one means it is off or failing, worth a person's look.
       back as the repeat it is, never twice (a report-only hand-up becomes one request pointing at the report);
       **Drop them**, or a typed reason (`POST /api/work/<id>/handups/drop`, `dropHandUps`), sets `handedUp.dropped`. Either
       way nothing is pending after it and the request closes on its kept DONE (`recheckDone`). Only the person it was
-      handed up to (`handedUp.to`) may click; their orchestrator can still file them (`file_follow_ups`) or close the
-      request meanwhile. Records with `handedUp.autoFiled` from before w5577 still read as settled. Tests: "w5577: unfiled
-      handed-up follow-ups ..." in `orchestrators*.test.ts`, and the w5577 and w4352 tests in `w2969HandUp.test.ts`.
+      handed up to (`handedUp.to`) may click; their orchestrator can still file or drop them (`file_follow_ups`) or close
+      the request meanwhile. Records with `handedUp.autoFiled` from before w5577 still read as settled. Tests: "w5577:
+      unfiled handed-up follow-ups ..." in `orchestrators*.test.ts`, and the w5577 and w4352 tests in `w2969HandUp.test.ts`.
+    - **The orchestrator drops a hand-up its person decided, or one that is outdated** (w6581, lothsahn). Until w6581 the
+      orchestrator could only file them: w6534's `--waive-tests` hand-up, which lothsahn had already decided ("Keep it as
+      it is for master/development"), and others on w5599 and w5562 the same day sat unfiled and would have become
+      lothsahn's card at 12 h. `file_follow_ups` with `drop: true` and a `reason` (the person's words, quoted, or the fact
+      that made them outdated; refused without one) files nothing (`Orchestrators.dropFollowUps`). With no `items`, or
+      every item still open, it sets `handedUp.dropped` (by "<Name>'s orchestrator", the reason as its note) like the
+      card's Drop; with some items it adds them to `handedUp.droppedItems` and the rest stay to file, and a later
+      `file_follow_ups` skips a dropped item. The request's log quotes the reason. Once nothing is pending the card, if it
+      had one, is gone (`handUpCardOf`) and the request closes on its kept DONE (`recheckDone`). Only the orchestrator of
+      the person it was handed up to may drop. The `[follow-ups to file]` message says when to drop. Tests: "w6581: ..."
+      in `orchestratorsAsks.test.ts` and `w2969HandUp.test.ts`.
 - **If the blocker fails, it is flagged.** What it waited on stalled, or did not clear in its time: the request stalls
   (`stalled.kind` `blocked`) with the reason, for its people to close or reopen. What it waited on was declined or
   cancelled without delivering: a person must decide now, so it becomes a question to its requester (Waiting on input).
@@ -3073,7 +3085,7 @@ but the question it labelled ("brighten the lamps after w478?") was kept.
 | `[ledger]` | the dispatcher: after a restart or a fresh conversation, the requests still waiting (what it had not answered died with its process); and when requests are queued and a worker ends a turn, after 30 s of quiet, at least 2 minutes apart and at most 20 an hour (a wake that comes too soon waits) |
 | a failed worker of an open request | the dispatcher, as a `[work update]` |
 | a worker's still-open line handing the dispatcher legs to start ("the dispatcher starts the ten rows above"), with its report; a request running fewer legs than its people's standing "keep N running" (w2956) | the dispatcher, as a `[work update]` |
-| `[follow-ups to file]`: a worker's `hand_up_requests`, or a report saying it could not file the follow-up requests it wrote (w2969) | the orchestrator of the request's requester, once per hand-up, and once more 2 h after it while they are unfiled (w4352) |
+| `[follow-ups to file]`: a worker's `hand_up_requests`, or a report saying it could not file the follow-up requests it wrote (w2969) | the orchestrator of the request's requester, once per hand-up, and once more 2 h after it while they are unfiled (w4352); it files them, or drops them with a reason (`file_follow_ups` drop, w6581) |
 | `[standing agent]`, `[auto-delegation]` | the orchestrator of the agent's owner (the system payer when it has none): a request waiting for a click, or one its auto-approve rules filed (w527) |
 | `[unity blocked]` | the dispatcher, and the people whose workers are in that sandbox |
 | `[app restarted]`, `[machines]`, `[unity]`, `[host]`, the orchestrator inbox | the dispatcher. A person's orchestrator cut off mid-turn by a restart is told to pick its turn up again |

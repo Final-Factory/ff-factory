@@ -475,6 +475,8 @@ export class HostedSession implements SessionHandle {
   /** When its agent last did something (PROGRESS_OPS) or was given a turn: the hang watch's clock (w3673). */
   private progressAt = Date.now();
   private progressSaved = 0;
+  /** A daemon.progress write is on its way (w6554): the next waits for it rather than racing it. */
+  private progressWriting = false;
   /** The hang watch's look at it (w3673): since when, its tools' CPU then, and the status detail it set. */
   private hang?: { since: number; cpu?: Map<string, number>; flag?: string };
   private hangLooking = false;
@@ -887,13 +889,18 @@ export class HostedSession implements SessionHandle {
     }
     this.progressAt = now;
     // Kept for the next daemon (adopt), at most once a minute.
-    if (now - this.progressSaved < 60_000 || !fs.existsSync(this.files.dir)) return;
-    try {
-      fs.writeFileSync(this.files.progress, String(now));
-      this.progressSaved = now;
-    } catch {
-      // the next progress tries again
-    }
+    if (now - this.progressSaved < 60_000 || this.progressWriting) return;
+    // w6554: written without holding the loop (BEAST, 2026-11-27: this write once held it 6.6 s). A folder that is gone fails
+    // the write (ENOENT, nothing is made); a failed write lets the next progress try again, as the synchronous one did.
+    this.progressWriting = true;
+    const before = this.progressSaved;
+    this.progressSaved = now;
+    fs.promises
+      .writeFile(this.files.progress, String(now))
+      .catch(() => {
+        if (this.progressSaved === now) this.progressSaved = before;
+      })
+      .finally(() => (this.progressWriting = false));
   }
 
   /**
