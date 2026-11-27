@@ -99,7 +99,8 @@ export function linuxControlScript(action: LinuxAction, label: string, appDir?: 
   const unit = unitName(label);
   const file = `"$HOME/.config/systemd/user/${unit}"`;
   // A stop or uninstall ends this daemon's agent hosts too (w605); a restart leaves them for the next daemon.
-  const host = appDir ? `'${appDir.replace(/\/+$/, '').replace(/'/g, `'\\''`)}/app/machine/agentHost.ts'` : '"$HOME/.ff-factory/app/machine/agentHost.ts"';
+  // w6434: hosts started by a daemon on the code link run from code/app (node resolves the link), older ones from app.
+  const host = appDir ? `'${appDir.replace(/\/+$/, '').replace(/'/g, `'\\''`)}/(code/)?app/machine/agentHost\\.ts'` : '"$HOME/.ff-factory/(code/)?app/machine/agentHost\\.ts"';
   const hosts = `pkill -f ${host} 2>/dev/null || true\n`;
   switch (action) {
     case 'start':

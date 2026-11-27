@@ -32,14 +32,14 @@ import { StallProfiler } from '../server/stallProfile.ts';
 import { useSpawnThread } from '../server/spawnThread.ts';
 import { warmScopeProbes } from './linuxScope.ts';
 import { FF_LANDLOCK, makeOpenRootChildren, readLockArgs, writeLockArgs } from './writeLock.ts';
-import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
+import { ensureDaemonOnlyDirs, ensureReadBackDirs, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnHeld, readFenceProbeTargets, readRulesForNewRun, ownerSocketsAfterProbe, OWNER_SOCKET_PROBE_TIMEOUT_MS, sayOwnerSocketProbe, sayReadProbe, secretsDirs, loginFenceFiles, LOGIN_LABEL_ON_SYSTEM_DRIVE, SOCKET_PROBE_SCRIPT, writeInPlace, writeReadFenceMode, type ReadFenceMode } from './readFence.ts';
 import { FENCE_READ_ALLOW, fenceRootReadBack } from '../server/daemonReads.ts';
 import { TRANSCRIPTS, linkTranscripts, transcriptsLinked } from './transcriptLock.ts';
 import { decideStoreLock, storeLockLine, watchStore, type StoreLockDecision } from './storeLock.ts';
 import { DaemonWrites, SlotCaches, asDaemonWrite, idleForRefresh, inFolder, within, sharedLockBlockers, sharedLockedFolders, sharedLockLine, sharedLockSetting, slotCacheDir, slotCacheEnv, watchShared, type SharedLockSetting } from './slotCaches.ts';
 import { makeSharedLockDirs } from './sharedLockPaths.ts';
 import { lockIn } from './lockIn.ts';
-import { playersRpcHandlers } from './playersBroker.ts';
+import { playersRpcHandlers, processStartTimes } from './playersBroker.ts';
 import { brokerLauncher } from './playersLaunch.ts';
 import { longRunsRpcHandlers, longRunsSetting } from './longRuns.ts';
 import { playerFenceFor, type PlayerFence } from './playerFence.ts';
@@ -154,6 +154,7 @@ import { BenchProxy } from './benchProxy.ts';
 import { MEDIUM_AGENT_VAR, fixUserPath, planMediumCaches, planMediumFolders, type MediumCaches, type MediumCachesMode, type MediumFolders, type MediumFoldersMode } from './mediumFolders.ts';
 import { UvCachePruner, applyMediumUvToolDir, findUv, mediumUvCacheDir, mediumUvCacheFor, runQuiet, runQuietEnv, sandboxUvEnv, seedCargoHome, warmUvCache, workerCargoHome, workerCargoHomeDir, workerDeterminismAuditDir, workerToolCacheEnv, workerUvCacheDir } from './sharedCaches.ts';
 import { DISK_CRITICAL_GB_DEFAULT, machinePlatformOf, priorityRank, type AttachmentRef, type BenchPriority, type FfuSlotsReport, type CompactionTrigger, type HostHealth, type HostStats, type NoTimedRuns, type TimedAskMark, type PersonPlayReport, type SandboxPoolSettings, type SessionInfo, type TranscriptEvent } from '../shared/types.ts';
+import { isMainModule } from './isMain.ts';
 
 export interface DaemonConfig {
   /**
@@ -836,7 +837,7 @@ export class Daemon {
   private ffuReport?: FfuSlotsReport;
   private ffuReportAt = 0;
   private ffuReporting = false;
-  /** w6484: frees the stale slots each report names (warn-only unless staleOutput.ffuSlotSweep is on). */
+  /** w6484: frees the stale slots each report names (staleOutput.ffuSlotSweep: on by default, warn or off from the portal). */
   private readonly ffuAutoSweep = new FfuSlotAutoSweep({
     mode: () => staleOutputSettings(this.cleanupSettings.staleOutput).ffuSlotSweep,
     sweep: () => runFfuSlotSweep({ root: this.cfg.root!, factsFile: cleanupFactsFile(appDirOfConfig(this.cfg)), max: FFU_SLOTS_DEFAULT_MAX }),
@@ -4108,6 +4109,8 @@ export class Daemon {
         await this.sharedWrite(() => removeTree(dir), [dir]);
       },
       launch: brokerLauncher({ root, playerFence: () => (fence ??= playerFenceFor()), lowNode: () => this.lowMake(process.execPath) }),
+      // w6549: a lease whose pid a later process took is dead (one Win32_Process or ps query per check of a slot).
+      startedAt: (pids) => processStartTimes(pids),
       // w5615: under "on" workers cannot write players: the copy is staged in the caller's own cache folder, then locked in.
       ...(this.sharedLock === 'on' ? { stageDir: (sb: string) => slotCacheDir(root, sb), lockIn: (dst: string) => this.lockShared(dst) } : {}),
       log: (l) => log(l),
@@ -4616,9 +4619,12 @@ export class Daemon {
    * refused (lothsahn's rule for this work: warn-only first, enforce only after measured zero failures).
    */
   private readFenceEnforced(): boolean {
-    // w5748: on Linux also only once the probe found every owner socket (the Secret Service, the ssh and gpg agents) refused.
+    // w6434: on Linux only once the daemon's code sits behind the code link (scripts/worker/linuxCode.ts), so an update leaves
+    // runs already going their code. w5748: and only once the probe found every owner socket refused. Below Landlock ABI 9
+    // a run reaches systemd's (`systemd-run --user` starts a job outside every rule, w5463) and the Secret Service, so the
+    // file rules would claim the Claude and gh logins closed while one command reads them (w6443's review, B1).
     const sockets = process.platform !== 'linux' || this.ownerSocketsOpen.length === 0;
-    return !!this.cfg.root && readFenceMode(appDirOfConfig(this.cfg)) === 'on' && !this.readProbeBlocks && sockets && !readFenceOnRefusal();
+    return !!this.cfg.root && sockets && readRulesForNewRun(appDirOfConfig(this.cfg), !this.readProbeBlocks);
   }
 
   /**
@@ -4706,8 +4712,9 @@ export class Daemon {
         return;
       }
       this.readProbeBlocks = v.wronglyRefused.length > 0 || v.unknown.length > 0 || tools.blocks;
-      if (mode === 'on' && readFenceOnRefusal()) log(`read fence (on): not enforced here, warn only: ${readFenceOnRefusal()}`);
-      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length) log('read fence (on): a fenced run still reaches an owner socket (the line above says which); runs start without read rules until a probe finds every one refused, which needs Landlock ABI 9, Linux 7.1 (w5748; warn, not a lockout)');
+      if (mode === 'on' && readFenceOnHeld(appDir)) log(`read fence (on): not enforced here, warn only: ${readFenceOnHeld(appDir)}`);
+      else if (mode === 'on' && process.platform === 'linux' && this.ownerSocketsOpen.length)
+        log(`read fence (on): not enforced here, warn only: a fenced run still reaches ${this.ownerSocketsOpen.length} owner socket(s) (the line above says which; systemd's starts a job outside the lock), which only Landlock ABI 9 (Linux 7.1) can refuse; runs start without read rules until a probe finds every one refused (w5748, w6443)`);
       else if (mode === 'on' && this.readProbeBlocks) log('read fence (on): the probe found a path workers need refused, could not judge one, or a tool leg failed; runs start without read rules until a probe passes (warn, not a lockout)');
     } catch (e) {
       this.readProbeBlocks = true;
@@ -4938,8 +4945,6 @@ export class Daemon {
    * 60 s wait. Until it passes, runs start without read rules (readProbeBlocks), as at start.
    */
   async setReadFence(mode: ReadFenceMode): Promise<void> {
-    const refused = mode === 'on' ? readFenceOnRefusal() : undefined;
-    if (refused) throw new Error(refused);
     const appDir = appDirOfConfig(this.cfg);
     writeReadFenceMode(appDir, mode);
     this.readProbeBlocks = true;
@@ -5837,7 +5842,7 @@ export function githubNetEnv(token: string | undefined): NodeJS.ProcessEnv | und
 }
 
 // Run when started directly (not when imported by the tests).
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+if (isMainModule(import.meta.filename)) {
   const file = process.argv[2] ?? path.join(HOME, '.ff-factory', 'daemon.json');
   const text = fs.readFileSync(file, 'utf8');
   // configFile: where a relocate keeps the portal's new URL (w466). A BOM (an editor's) is not JSON.
