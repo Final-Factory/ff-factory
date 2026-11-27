@@ -616,8 +616,17 @@ turns it on, without the CUDA wheels (w570; measurements and the choice of model
     the new scripts and the `acl` package, so the deploy after it is the first one `fffbuild` builds.
   - **Reused `node_modules` only from `fffbuild`**: a release records who built it in root's `<release>.builder`, and
     `deps_from` links the running release's `node_modules` only when both it and the new build are `fffbuild`'s. So
-    the first `fffbuild` build runs a full `npm ci` (about 15 s), and no `node_modules` `fff` built (before w5523, or in
-    a fall back) reaches a release `fffbuild` builds.
+    the first `fffbuild` build runs a full `npm ci` of both folders (the first one, 5771a2c35a12 on 2026-11-25, built in
+    122 s, measured from the journal), and no `node_modules` `fff` built (before w5523, or in a fall back) reaches a
+    release `fffbuild` builds.
+  - **Checking a deployed release reads the journal, not the VM's files**: the ops worker has no `sudo` and
+    `/srv/fff/app` is closed to it, so a `sudo -u fff find … -writable` or `touch` there is refused (w5523, 2026-11-27);
+    it can `stat /var/lib/fff-build`. `fff-update` logs `release <sha12> built in N s, as fffbuild` only after
+    `harden_release` succeeded and `.builder` was written, and `harden_release` ends with `release_problem`, whose
+    `find` fails the build on any file in the release (`node_modules`, `web/dist` included) not root's or writable by
+    group or others; `activate` runs `release_problem` again before `switched … -> …`. So the lines `made the build
+    account`, `built … as fffbuild`, `switched` and `verified`, with no `SECURITY` line, are the proof
+    (`journalctl -u fff-update`, or `portal_logs` source `updater`).
   - **A rollback builds as `fff` again**: `fffctl rollback` to a release from before w5523 installs that release's
     scripts (`refresh_scripts`), which build as `fff`, until a release with w5523 is deployed again.
   - **Not covered**: a file descriptor passed between processes (`SCM_RIGHTS`) during the hand-over is not seen by

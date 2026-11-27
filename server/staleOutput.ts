@@ -43,8 +43,8 @@ export interface StaleOutputSettings {
   /**
    * w6290: an ffu slot's cargo target a pass kept over ffuSlotTargetCapGB because a build or a test ran from it is judged again
    * every ffuBusyRetryMinutes until the next pass (machine/ffuBusyRetry.ts), by the same rule, so the trim lands in the first idle
-   * gap between builds. warn: plan and log what it would trim, remove nothing (docs/worker-fence.md: warn-only first); on:
-   * remove (with the stale-output mode on too); off: no re-check.
+   * gap between builds. on (the default since w6290's enforce step, after a day of warn lines with zero bad plans): remove (with
+   * the stale-output mode on too); warn: plan and log what it would trim, remove nothing; off: no re-check.
    */
   ffuBusyRetry: 'off' | 'warn' | 'on';
   ffuBusyRetryMinutes: number;
@@ -65,7 +65,7 @@ export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
   logRetentionDays: 14,
   tempHours: 6,
   nightlyKeep: 2,
-  ffuBusyRetry: 'warn',
+  ffuBusyRetry: 'on',
   ffuBusyRetryMinutes: 5,
   ffuSlotSweep: 'warn',
 };
