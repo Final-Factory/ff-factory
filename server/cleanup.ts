@@ -1504,6 +1504,11 @@ export class CleanupRunner {
   }
 
   /** The periodic look (the host guard's tick, the daemon's timer). */
+  /** A pass is running now (w6290: the busy ffu slots' re-check waits for it). */
+  get inPass() {
+    return this.running;
+  }
+
   async tick(): Promise<CleanupSummary | undefined> {
     if (this.running) {
       await this.midPassLow();

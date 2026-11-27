@@ -40,6 +40,14 @@ export interface StaleOutputSettings {
   nightlyKeep: number;
   /** The nightly lab's roots; default FF_NIGHTLY_ROOT, else the worker root's nightly/ (defaultNightlyRoots). */
   nightlyRoots?: string[];
+  /**
+   * w6290: an ffu slot's cargo target a pass kept over ffuSlotTargetCapGB because a build or a test ran from it is judged again
+   * every ffuBusyRetryMinutes until the next pass (machine/ffuBusyRetry.ts), by the same rule, so the trim lands in the first idle
+   * gap between builds. warn: plan and log what it would trim, remove nothing (docs/worker-fence.md: warn-only first); on:
+   * remove (with the stale-output mode on too); off: no re-check.
+   */
+  ffuBusyRetry: 'off' | 'warn' | 'on';
+  ffuBusyRetryMinutes: number;
 }
 
 export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
@@ -51,6 +59,8 @@ export const STALE_OUTPUT_DEFAULTS: StaleOutputSettings = {
   logRetentionDays: 14,
   tempHours: 6,
   nightlyKeep: 2,
+  ffuBusyRetry: 'warn',
+  ffuBusyRetryMinutes: 5,
 };
 
 /** The settings in force: the defaults under whatever config gave (unknown or ill-typed values ignored). */
@@ -66,6 +76,8 @@ export function staleOutputSettings(raw: unknown): StaleOutputSettings {
     logRetentionDays: n('logRetentionDays', 1, 365),
     tempHours: n('tempHours', 1, 24 * 30),
     nightlyKeep: n('nightlyKeep', 1, 20),
+    ffuBusyRetry: r.ffuBusyRetry === 'off' || r.ffuBusyRetry === 'warn' || r.ffuBusyRetry === 'on' ? r.ffuBusyRetry : STALE_OUTPUT_DEFAULTS.ffuBusyRetry,
+    ffuBusyRetryMinutes: n('ffuBusyRetryMinutes', 1, 60),
     ...(Array.isArray(r.nightlyRoots) ? { nightlyRoots: r.nightlyRoots.filter((x): x is string => typeof x === 'string' && x.trim() !== '') } : {}),
   };
 }

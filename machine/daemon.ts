@@ -86,6 +86,7 @@ import { RELEASE_SETTINGS, anyBusyNow, ffuSlotBusyNow, mergePlans, planInstallLe
 import { gitBashStrayRoot, gitBashStrayTop, sweepGitBashStray } from '../server/gitBashPath.ts';
 import { publishedFile, readPublished, recordPublished } from '../server/published.ts';
 import { SessionSweeper, sweepSettings } from '../server/sessionSweep.ts';
+import { FfuBusyRetry } from './ffuBusyRetry.ts';
 import { cleanupPass, firstAlonePass, defaultNightlyRoots, planStaleOutput, staleOutputSettings, type StaleContext, type StalePlace } from '../server/staleOutput.ts';
 import { MACHINE_CLEANUP_DEFAULTS } from '../server/config.ts';
 import { editorFolderOf, ownRecheck, planOwnLeftovers, playerSlotRoots, runOwnLeftovers, type OwnLeftoverInputs } from '../server/ownLeftovers.ts';
@@ -736,6 +737,7 @@ export class Daemon {
   private ffuReporting = false;
   /** The machine's continuous clean-up (server/cleanup.ts), with the settings the portal sent. */
   readonly cleaner: CleanupRunner;
+  private ffuRetry?: FfuBusyRetry;
   /** The shared uv cache's daily `uv cache prune` (w5281); only with a worker root. */
   private uvPruner?: UvCachePruner;
   private mediumUvPruner?: UvCachePruner;
@@ -1310,6 +1312,7 @@ export class Daemon {
     if (cfg.root) this.uvPruner = new UvCachePruner({ dir: workerUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
     // w5565: the daemon's and Medium agents' own cache, pruned on its own clock.
     if (cfg.root) this.mediumUvPruner = new UvCachePruner({ dir: mediumUvCacheDir(cfg.root), uv: () => findUv(), run: runQuiet, log });
+    this.ffuRetry = this.makeFfuRetry();
     this.cleaner = new CleanupRunner({
       // Below the pool's disk_critical_gb a pass may take a live Unity cache, the last resort (w2752).
       settings: () => ({ everyMinutes: this.cleanupSettings.everyMinutes, softFreeGB: this.cleanupSettings.softFreeGB, criticalFreeGB: this.currentPool()?.diskCriticalGB, staleOutput: staleOutputSettings(this.cleanupSettings.staleOutput) }),
@@ -1355,7 +1358,7 @@ export class Daemon {
             passOpts.step?.('stale (install leftovers)', lastDone, lastSoFar);
             return mergePlans(
               output,
-              await planInstallLeftovers({
+              this.noteFfuBusy(await planInstallLeftovers({
                 root: this.cfg.root,
                 sandboxes: this.pool.list().map((x) => x.path),
                 tempRoots: this.agentTempRoots(),
@@ -1373,22 +1376,24 @@ export class Daemon {
                 // The timed runner's folders stay while one of its runs is in flight (w3502).
                 timedBusy: () => (this.timed?.busy() ? 'a timed run is in flight here' : undefined),
                 ffuSized: this.ffuSized,
-              }),
+              })),
             );
           },
           cap: async () =>
-            planInstallLeftovers({
-              root: this.cfg.root,
-              sandboxes: [],
-              tempRoots: this.agentTempRoots(),
-              guard,
-              ctx: this.staleCtx,
-              procs: await this.procs().catch(() => undefined),
-              self: [process.pid, process.ppid],
-              scope: 'cargo-cap',
-              closed: this.closedSessionDirs(),
-              ffuSized: this.ffuSized,
-            }),
+            this.noteFfuBusy(
+              await planInstallLeftovers({
+                root: this.cfg.root,
+                sandboxes: [],
+                tempRoots: this.agentTempRoots(),
+                guard,
+                ctx: this.staleCtx,
+                procs: await this.procs().catch(() => undefined),
+                self: [process.pid, process.ppid],
+                scope: 'cargo-cap',
+                closed: this.closedSessionDirs(),
+                ffuSized: this.ffuSized,
+              }),
+            ),
           // w6044: the released ffu slots' targets taken first, before the slow steps a restart cuts off.
           first: this.ffuFirstStep(low, guard, ''),
           busyNow: this.cleanupBusyNow(),
@@ -1429,6 +1434,41 @@ export class Daemon {
       },
       // w6044 stage 3: a low trigger that meets a pass in flight that is not low runs the released ffu slots' first step alone.
       firstAlone: (trigger) => this.ffuFirstAlone(trigger),
+    });
+  }
+
+  /** w6290: the slots a pass kept over the cap because something ran from them are re-checked until the next pass. */
+  private noteFfuBusy<T extends { held?: { path: string; bytes: number; why: string }[] }>(plan: T): T {
+    try {
+      this.ffuRetry?.note(plan);
+    } catch {
+      // A note that throws costs the pass nothing.
+    }
+    return plan;
+  }
+
+  /** w6290: the busy ffu slots' re-check (machine/ffuBusyRetry.ts), every ffuBusyRetryMinutes, warn-only unless ffuBusyRetry is on. */
+  private makeFfuRetry(): FfuBusyRetry | undefined {
+    if (!this.cfg.root) return undefined;
+    const roots = [this.cfg.root, ...(this.cfg.extraRoots ?? [])];
+    return new FfuBusyRetry({
+      root: () => this.cfg.root,
+      settings: () => {
+        const so = staleOutputSettings(this.cleanupSettings.staleOutput);
+        return { mode: so.ffuBusyRetry, staleMode: so.mode, everyMinutes: this.cleanupSettings.everyMinutes || 60, retryMinutes: so.ffuBusyRetryMinutes };
+      },
+      plan: async (slots) => {
+        const p = await planInstallLeftovers({ root: this.cfg.root, sandboxes: [], tempRoots: [], guard: this.cleanupGuard(), procs: await this.procs().catch(() => undefined), self: [process.pid, process.ppid], scope: 'ffu-busy-retry', slots, ffuSized: this.ffuSized });
+        return { ...p, items: fenceToRoot(p.items, roots).inside };
+      },
+      remove: (items) => runCleanup(items, this.cleanupGuard(), this.cleanupBusyNow()),
+      size: (items) => sizePlan(items),
+      passRunning: () => this.cleaner.inPass,
+      log,
+      record: (e) => {
+        appendCleanupLog(appDirOfConfig(this.cfg), e);
+        this.out({ type: 'cleanup_log', entry: trimLogEntry(e) });
+      },
     });
   }
 
@@ -2172,6 +2212,8 @@ export class Daemon {
     // w1946: not while a timed run plays here (its disk work would be in the legs' numbers); the pass comes after it.
     // A timed run defers the clean-up (its legs measure the disk), but not below disk_warn_gb + 5 GB (w3700: CleanupRunnerDeps.hold).
     this.timers.push(setInterval(loopLabel('timer cleaner.tick', () => void this.cleaner.tick().catch((e) => log(`clean-up failed: ${(e as Error).message}`))), 60_000));
+    // w6290: the busy ffu slots a pass kept over the cap, judged again between passes.
+    this.timers.push(setInterval(loopLabel('timer ffuRetry.tick', () => void this.ffuRetry?.maybeTick().catch((e) => log(`clean-up: ffu busy re-check failed (w6290): ${(e as Error).message}`))), 60_000));
     // Its own logs (w2038): every run's kept, the old ones gzipped, the folder capped (machine/logRetention.ts).
     const logsDir = path.join(appDirOfConfig(this.cfg), 'logs');
     const keepLogs = () => {
