@@ -77,6 +77,24 @@ function Test-DedupWatch {
       if ($ev) { return '' }
       if ($i -lt 11) { Start-Sleep -Seconds 5 }
     }
+    # The repair task (w6597, install-privileged-helpers.ps1 -Actions deduprepair): run it now rather than waiting for the night.
+    $rt = 'ffsb-helper-deduprepair'
+    $rj = Join-Path $PSScriptRoot 'results\dedup-repair\dedup-repair.json'
+    & schtasks.exe /query /tn $rt *> $null
+    if ($LASTEXITCODE -eq 0) {
+      $t0 = (Get-Date).ToUniversalTime()
+      & schtasks.exe /run /tn $rt *> $null
+      for ($i = 0; $i -lt 60; $i++) {
+        Start-Sleep -Seconds 3
+        try { $res = Get-Content -Raw $rj | ConvertFrom-Json } catch { $res = $null }
+        if ($res -and ([datetime]$res.at).ToUniversalTime() -ge $t0.AddSeconds(-2)) {
+          if ($res.ok -and "$($res.state)" -like 'repaired*') { return "; dedup repaired (w6597): $($res.state)" }
+          if ($res.ok) { return '' }   # the service began watching the drive meanwhile
+          return "; dedup not repaired (w6597, $rt $($res.mode)): $($res.state) $(@($res.reasons) -join '; ') $($res.detail)".TrimEnd()
+        }
+      }
+      return "; dedup not repaired (w6597): $rt wrote no result within 3 minutes of its start"
+    }
     return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $($Letter): since its dismount at $($dm.TimeCreated.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: stop the volume's task under \Microsoft\Windows\ReFsDedupSvc\ if it is Running, then Restart-Service refsdedupsvc)"
   } catch { return "; dedup watch not checked (w6573): $($_.Exception.Message)" }
 }

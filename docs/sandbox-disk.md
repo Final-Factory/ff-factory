@@ -233,6 +233,21 @@ its time with V:'s last dismount (events 300 and 303 in `Microsoft-Windows-ReFS/
 id, f1ab3378 on LothDesktop). A remount logs no event 7 ("stopped monitoring") there; only the service's own stop
 did (2026-11-27 22:59Z, measured).
 
+**The repair runs by itself (w6597).** `ffsb-helper-deduprepair` runs `refs-dedup-repair.ps1` every night at 01:30, before
+the 02:00 (local) dedup job, and the helper's `mount`, `compact` and `grow` start it at once when their watch finds no
+event 6. It reads the two event logs and the volume task's state, and calls the drive broken when V:'s last dismount is
+newer than its last event 6, when the last job failed with 0x80070015 since the last event 6, or when the volume's task
+has been Running for more than 3 hours since the last job started. To repair, it stops `refsdedupsvc`, tries `schtasks /end` on the volume's
+task if that is still Running, starts the service, and waits up to 2 minutes for a new event 6. Its result is
+`C:\ProgramData\ffsb-helpers\results\dedup-repair\dedup-repair.json` (one line per run in `dedup-repair.log` beside it),
+and each result records the account, groups and privileges that run had (`whoami`).
+It runs with only the rights the repair needs: as LOCAL SERVICE with the task's own SID (`ProcessTokenSidType
+Unrestricted`) and no privilege but `SeChangeNotifyPrivilege`. The installer grants that SID one ACE on `refsdedupsvc`
+(`LCSWRPWPLO`: query status, start, stop) and write on its own results folder, and nothing else. It saves the service's
+security descriptor as it was first found in `refsdedupsvc.sddl.orig`. Installed and updated like the other helper tasks
+(`devdrive.ps1 ensure`, `install-privileged-helpers.ps1 -Actions deduprepair`). The app's user may start it but not change it.
+`-DedupRepairMode check` installs it to find and log only. `-Uninstall` removes the task and the ACE.
+
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
 

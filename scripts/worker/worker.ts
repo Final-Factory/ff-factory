@@ -1220,6 +1220,8 @@ async function setupDevDrive(o: InstallOptions, l: Layout, f: Facts & { probe: {
   else if (had && o.devDriveMaxGB !== undefined) cancelDevDriveGrow(host, o.devDriveMaxGB, state.maxGB);
   // The weekly full ReFS dedup pass (w4517): a drive made before it gets it here; on a volume without ReFS dedup it runs nothing.
   if (had) await ensureHelperTask('ffsb-helper-dedup', 'the weekly full dedup task', host, ensureArgs(state.maxGB));
+  // The nightly dedup repair (w6597): ends a dedup service left not watching the drive after a remount, before the night's job.
+  if (had) await ensureHelperTask('ffsb-helper-deduprepair', 'the nightly dedup repair task', host, ensureArgs(state.maxGB));
   say(`Dev Drive: ${state.created ? 'created' : 'reused'} ${state.vhdx} as ${state.letter}: (${state.fileSystem || 'ReFS'}${state.devDrive ? ', Dev Drive' : ', not a Dev Drive format'}, block clone ${state.blockClone ? 'yes' : 'not reported'}, up to ${state.maxGB} GB).`);
   if (state.letterChangedFrom) say(`Dev Drive: its letter was ${state.letterChangedFrom}: and is taken, so it is ${state.letter}: now.`);
   const room = { vhdx: state.vhdx || path.join(host, 'devdrive.vhdx'), maxGB: state.maxGB || had?.maxGB || 0 };
