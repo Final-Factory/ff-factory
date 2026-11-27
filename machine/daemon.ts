@@ -5230,6 +5230,9 @@ export class Daemon {
    * or the daemon exits (keepAwakeCommand). Both end with the daemon, so a crash cannot leave the machine awake.
    */
   private awake() {
+    // w6476: none in the tests (scripts/testEnv.ts): a daemon there ends within seconds, its holder killed mid-Add-Type, and
+    // csc's files were left in the temp folder.
+    if (process.env.FF_KEEP_AWAKE === 'off') return;
     // Not after shutdown: its agents are detached but still live, and a holder started then was never killed (w3337).
     const live = !this.stopped && this.liveCount() > 0;
     const cmd = live && !this.caffeinate ? keepAwakeCommand(process.platform, process.pid) : undefined;

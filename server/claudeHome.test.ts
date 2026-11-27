@@ -2,16 +2,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { agentClaudeEnv, carrySettings, carryTranscript, claudeDirs, claudeJsonFiles, claudeLoginFiles, fencedLoginFiles, LEGACY_VAR, legacyProjectsDirs, loginClaudeEnv, MEDIUM_VAR, mediumPluginClaudeEnv, moveClaudeHome, pluginClaudeEnv, pluginsReady, WORKER_VAR, withoutLoginPaths } from './claudeHome.ts';
 import { buildOptions, type LaunchSpec } from './launch.ts';
 import { cliTranscriptPath } from './cliTranscript.ts';
 import { resolveUnityMcpServer } from '../machine/unityMcp.ts';
+import { tmpDir } from './testTmp.ts';
 
 function world() {
-  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'claudehome-'));
+  const base = tmpDir('claudehome-');
   const home = path.join(base, 'home');
   const root = path.join(base, 'ffw');
   fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
@@ -223,7 +223,10 @@ test('live: a hook planted in the workers\' folder does not run in a Medium agen
   hook(medium, own);
   const run = async (spec: LaunchSpec, wait: string) => {
     const o = buildOptions(spec, {}, env as NodeJS.ProcessEnv);
-    const runEnv = { ...o.env, ANTHROPIC_API_KEY: 'sk-ant-dummy', ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', CLAUDE_CODE_OAUTH_TOKEN: '', DISABLE_AUTOUPDATER: '1' } as NodeJS.ProcessEnv;
+    // w6476: claude writes its own probe folders (<tmp>/claude/fswatch-probe-*); they go with the test's folder.
+    const scratch = path.join(w.base, 'scratch');
+    fs.mkdirSync(scratch, { recursive: true });
+    const runEnv = { ...o.env, TEMP: scratch, TMP: scratch, TMPDIR: scratch, ANTHROPIC_API_KEY: 'sk-ant-dummy', ANTHROPIC_BASE_URL: 'http://127.0.0.1:9', CLAUDE_CODE_OAUTH_TOKEN: '', DISABLE_AUTOUPDATER: '1' } as NodeJS.ProcessEnv;
     const p = spawn(claudeBin!, ['-p', 'hi', '--setting-sources', 'user', '--max-turns', '1'], { cwd: w.base, env: runEnv, stdio: 'ignore' });
     const until = Date.now() + 60_000;
     while (!fs.existsSync(wait) && Date.now() < until) await new Promise((r) => setTimeout(r, 200));

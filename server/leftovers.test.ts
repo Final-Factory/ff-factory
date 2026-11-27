@@ -7,6 +7,7 @@ import path from 'node:path';
 import { LEFTOVER, LeftoverReaper, forPerson, personStarted, launchForPerson, personEnv, waitLoop, callerPids, envFrom, installLeftoversShim, kindOf, macEnvLine, orphanVerdict, ownLeftovers, personGames, readEnvs, readLeases, realInspect, sameRoot, sessionVerdict, sessionTempRoot, msysParents, slotOf, tempSessionInArgs, tempSessionOf, type LeftoverDeps, type PlayerLease, type ProcEnv } from '../machine/leftovers.ts';
 import { realDeps as realUnityDeps, type Proc, type UnityPlatform } from '../machine/unity.ts';
 import { playerText, unitySlotsLine } from '../shared/fleet.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * What a stopped worker left running (w1196, w1197; machine/leftovers.ts). The kill cases are biscuit's of 2026-10-13: pid
@@ -527,8 +528,8 @@ test('ff-leftovers on Windows (w1219): Git Bash breaks the parent chain at the s
   assert.ok(!ownLeftovers('me', reused, env, 43776, 'win32', { callers: [32460] }).some((p) => p.pid === 6000), 'without start times a live parent is trusted: kept, never the wrong way');
 });
 
-test('readLeases: every slot\'s lease files, the session player_slots.py writes included; an unreadable one skipped', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'leases-'));
+test('readLeases: every slot\'s lease files, the session player_slots.py writes included; an unreadable one skipped', (t) => {
+  const root = tmpDir('leases-', t);
   fs.mkdirSync(path.join(root, 'slot1-1', 'leases'), { recursive: true });
   fs.writeFileSync(path.join(root, 'slot1-1', 'leases', 'biscuit-1-a.json'), JSON.stringify({ pid: 2459040, host: 'biscuit', sandbox: '/x/sandboxes/slot1', time: 5, session: 'a33e1437' }));
   fs.writeFileSync(path.join(root, 'slot1-1', 'leases', 'biscuit-2-b.json'), '{half');
@@ -569,10 +570,10 @@ test('readEnvs on this machine finds the session of a process started with it, a
 // (NtCreateDirectoryObject 0xC0000022, measured on BEAST).
 const BASH = process.platform === 'win32' ? [process.env.CLAUDE_CODE_GIT_BASH_PATH, 'C:\\Program Files\\Git\\bin\\bash.exe'].find((b) => !!b && fs.existsSync(b)) : '/bin/bash';
 
-test('on this machine: `ff-leftovers end` run through its shim from a bash pipeline ends the agent\'s background job, never the agent or its shell (w1219)', { skip: (!BASH && 'no Git Bash') || PS_REFUSED }, async () => {
+test('on this machine: `ff-leftovers end` run through its shim from a bash pipeline ends the agent\'s background job, never the agent or its shell (w1219)', { skip: (!BASH && 'no Git Bash') || PS_REFUSED }, async (t) => {
   // A throwaway session of its own: only this test's processes carry it, so nothing else can be listed or ended.
   const session = `w1219t${process.pid}`;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffleft-'));
+  const root = tmpDir('ffleft-', t);
   const bin = path.join(root, 'bin');
   installLeftoversShim(bin);
   const shim = path.join(bin, 'ff-leftovers').replace(/\\/g, '/');
@@ -609,11 +610,11 @@ test('on this machine: `ff-leftovers end` run through its shim from a bash pipel
 // Linux and a Mac (w1197: the m5's path is this one, with `ps -E` for the environments; the macOS CI job runs this file).
 const posixPlatform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : undefined;
 
-test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: (!posixPlatform && 'Linux and macOS only') || PS_REFUSED }, async () => {
+test('on a real Linux machine or Mac: a detached "player" and "Xvfb" of a stopped session end, a live session\'s player stays', { skip: (!posixPlatform && 'Linux and macOS only') || PS_REFUSED }, async (t) => {
   const plat = posixPlatform!;
   // A Mac's player is the binary inside finalfactory.app, a Linux one finalfactory.x86_64 (unitySlots.ts gamePlayers).
   const playerIn = (slot: string) => (plat === 'darwin' ? path.join(root, 'players', slot, 'player', 'finalfactory.app', 'Contents', 'MacOS', 'finalfactory') : path.join(root, 'players', slot, 'player', 'finalfactory.x86_64'));
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffw-'));
+  const root = tmpDir('ffw-', t);
   // node under the player's and Xvfb's names (a symlink: argv[0] and so the command line keep the name; Ubuntu's sleep is a
   // multicall binary that refuses to run under another one).
   const bin = (p: string) => {
@@ -941,9 +942,9 @@ test('w4047: personEnv drops the worker\'s ownership variables and credentials, 
   assert.deepEqual(w, { Path: 'C:\\Windows', TEMP: 'C:\\Users\\b\\AppData\\Local\\Temp', TMP: 'C:\\Users\\b\\AppData\\Local\\Temp', LOCALAPPDATA: 'C:\\Users\\b\\AppData\\Local', FF_FOR_PERSON: 'cf018e8d' });
 });
 
-test('on this machine (w4047): a program started with `ff-leftovers launch` survives a sweep of its stopped worker, whose ordinary leftover is ended', { skip: PS_REFUSED }, async () => {
+test('on this machine (w4047): a program started with `ff-leftovers launch` survives a sweep of its stopped worker, whose ordinary leftover is ended', { skip: PS_REFUSED }, async (t) => {
   const session = `w4047t${process.pid}`;
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffperson-'));
+  const dir = tmpDir('ffperson-', t);
   const out = path.join(dir, 'env.json');
   const ownEnv = { FF_SESSION_ID: session, FF_SANDBOX_ID: 'slot9', FF_MACHINE_ID: 'testbox', FF_WORKER_ROOT: dir };
   const e = { ...process.env, ...ownEnv, GH_TOKEN: 'ghs_test', TMPDIR: path.join(dir, `ffa-${session}`), TEMP: path.join(dir, `ffa-${session}`) };

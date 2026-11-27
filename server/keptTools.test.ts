@@ -11,6 +11,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CATALOG } from './launch.ts';
 import { refreshKeptTools, refreshKeptToolsAsync, sdkToolsNow, type ToolNow } from './keptTools.ts';
 import { scanFile } from './keptToolsScan.ts';
+import { tmpDir } from './testTmp.ts';
 import { threadGenForTests } from './transcriptThreadClient.ts';
 import { AgentSession, setQueryForTesting } from './sessions.ts';
 import { fakeQuery } from '../e2e/fakeAgent.ts';
@@ -170,12 +171,11 @@ test('w2626: a line still being written (no JSON yet) is left alone, and the res
 });
 
 test("w2626: a worker's resumed conversation, in a new process with a tool that gained an enum value, finds the new schema in tool search", async (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-kept-session-'));
+  // w6476: removed when the file ends: the session seals its transcript (store/transcript-seals) after the test, and a
+  // folder removed in t.after was made again.
+  const dir = tmpDir('ffsb-kept-session-');
   const store = new Store(path.join(dir, 'store'));
-  t.after(() => {
-    store.flush();
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+  t.after(() => store.flush());
   const cwd = path.join(dir, 'sandboxes', 'slot3');
   const env = { ...process.env, CLAUDE_CONFIG_DIR: path.join(dir, 'claude') };
   const file = path.join(env.CLAUDE_CONFIG_DIR, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'), 'conv-2626.jsonl');

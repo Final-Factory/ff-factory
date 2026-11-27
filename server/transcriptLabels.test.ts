@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync, type spawn } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { deniesDeleteChild, explicitMedium, isLink, labelTree, labelTreeSync, liveSessionIds, lockTranscripts, lowTranscriptSpawner, ownFiles, probeTranscriptLock, setLabelSync, unlockTranscripts, type IcaclsSync } from './transcriptLabels.ts';
 import { projectSlug } from './claudeHome.ts';
 import type { Exec } from '../machine/lowIntegrity.ts';
 import { removePrivileges } from './winPrivileges.fixtures.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w5703: the Windows half of "transcripts are read-only to workers". Everywhere: which files a claude argv owns, the label
@@ -18,7 +18,7 @@ import { removePrivileges } from './winPrivileges.fixtures.ts';
  * through, and the spawner runs a stand-in CLI that refuses a pre-made file the way Claude Code does.
  */
 
-const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'w5703-'));
+const tmp = () => tmpDir('w5703-');
 const tick = () => new Promise((r) => setImmediate(r));
 const SID = 'aaaaaaaa-1111-2222-3333-444444444444';
 

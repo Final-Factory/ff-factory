@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import {
   CORE_VOCABULARY,
@@ -19,6 +18,7 @@ import {
 import { VoiceService } from './voice.ts';
 import { modelDir, requirementsHash, setupNeeded, voicePaths } from './voiceSetup.ts';
 import { VOICE_REMOTE_DEFAULTS, type Config, type VoiceConfig } from './config.ts';
+import { tmpDir } from './testTmp.ts';
 
 const empty: VocabularySource = { sandboxes: [], agentNames: [], machines: [], specs: [], extra: [] };
 
@@ -120,7 +120,7 @@ test('isEmptyTranscript: Whisper markers for silence count as nothing, words do 
 // ---- the service, without a real install
 
 function voiceCfg(over: Partial<VoiceConfig> = {}): { cfg: Config; dir: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-voice-'));
+  const dir = tmpDir('ffsb-voice-');
   const voice: VoiceConfig = { enabled: true, toolsDir: path.join(dir, 'tools'), model: 'tiny.en', device: 'auto', language: 'en', idleMinutes: 20, cpuThreads: 4, autoInstall: false, keepAudio: false, vocabulary: [], tts: false, ttsVoice: 'af_heart', ttsDevice: 'auto', remote: { ...VOICE_REMOTE_DEFAULTS }, ...over };
   return { cfg: { dataDir: dir, voice } as Config, dir };
 }

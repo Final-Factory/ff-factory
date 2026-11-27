@@ -8,6 +8,7 @@ import { buildOptions, type LaunchSpec } from './launch.ts';
 import { SANDBOX_EXEC, fenceEnv, fenceFor, fencedArgv, ownTranscriptOf, seatbeltProfile, sessionIdOf, type WorkerFence } from './workerFence.ts';
 import { ensureReadBackDirs, LOGIN_LABEL_ON_SYSTEM_DRIVE, loginFenceFiles, judgeReadProbe, READ_PROBE_SCRIPT, readFenceMode, readFenceModeFile, readFenceOnRefusal, readFenceProbeTargets, secretsDirs, writeInPlace, writeReadFenceMode } from '../machine/readFence.ts';
 import { projectSlug } from './claudeHome.ts';
+import { tmpDir } from './testTmp.ts';
 
 const F: WorkerFence = { kind: 'seatbelt', root: '/Users/p/ffw', home: '/Users/p', darwinTemp: '/private/var/folders/xx/T', darwinCache: '/private/var/folders/xx/C' };
 
@@ -170,8 +171,7 @@ test('w5546: with the read fence switched off the profile has no read rules; the
 });
 
 test('w5546: writeInPlace keeps the file (same inode), so a Landlock grant or a Windows label on it holds; the marker and the given-back folders', (t) => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffrf-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const dir = tmpDir('ffrf-', t);
   const f = path.join(dir, 'cleanup-facts.json');
   writeInPlace(f, '{"a":"long contents here"}');
   const ino = fs.statSync(f).ino;
@@ -221,8 +221,7 @@ test("w5563: the profile takes the Claude home's transcripts back after the root
 });
 
 test("w5563: ownTranscriptOf names the conversation in a Claude home inside the root, and makes the cwd's project folder first", (t) => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'fence-own-')));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const root = fs.realpathSync(tmpDir('fence-own-', t));
   const f: WorkerFence = { ...F, root };
   const cwd = path.join(root, 'sandboxes', 's1');
   const env = { CLAUDE_CONFIG_DIR: path.join(root, 'claude') };
@@ -402,8 +401,8 @@ test('w5639: <root>/steam (steamcmd\'s cached login, the upload config) is read-
   }
 });
 
-test('w5546 lockout review B1: the probe opens each path without reading it and says what would lock workers out', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffprobe-'));
+test('w5546 lockout review B1: the probe opens each path without reading it and says what would lock workers out', (tc) => {
+  const dir = tmpDir('ffprobe-', tc);
   const root = path.join(dir, 'ffw');
   const app = path.join(root, 'daemon');
   for (const d of ['secrets', 'daemon/logs', 'daemon/gh-app', 'daemon/app/machine']) fs.mkdirSync(path.join(root, d), { recursive: true });

@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 import { SessionManager, setQueryForTesting, type QueuedSend } from './sessions.ts';
 import { MachineManager } from './machines.ts';
 import { Agents } from './agents.ts';
@@ -48,7 +48,7 @@ async function until(what: string, cond: () => boolean, ms = 5000) {
 }
 
 function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: Config['ledger'] = {}, now = NOW) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-ledger-'));
+  const dir = tmpDir('ffsb-ledger-');
   const cfg = {
     dataDir: dir,
     sandboxRoot: dir,
@@ -96,7 +96,7 @@ function setup(t: { after: (fn: () => void | Promise<void>) => void }, ledger: C
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    removeTmp(dir);
   });
   const request = (id: string, over: Partial<WorkItem> = {}): WorkItem => {
     const w = {

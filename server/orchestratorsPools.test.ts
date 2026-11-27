@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { Store } from './store.ts';
 import { promptText, reportClip, SessionManager, setQueryForTesting, type SessionHandle } from './sessions.ts';
@@ -115,6 +114,7 @@ import {
   toldPeople,
   relayAsCard,
 } from './orchestratorsTestKit.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * The orchestrator tests (docs/orchestrators.md), end to end on a real Agents with the scripted agent: Claude pool holds, usage gates, two accounts, queued and timed work, the bench.
@@ -705,7 +705,7 @@ test('w2446: a timed run sent to an xlarge computer carries "here" in its bench 
   assert.equal(p[local.id].timed?.verdict, 'here', 'a worker of this computer with a run here and no verdict: here too');
   assert.deepEqual(agents.benchPriorities('elsewhere'), {}, 'no run there: nothing');
   // what the daemon writes and the guard reads back (machine/benchLock.ts), on a computer that asks first (timed_ask)
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w2446-'));
+  const root = tmpDir('w2446-', t);
   writeBenchPriorities(root, p, new Date(), false, undefined, { required: true, why: 'lothdesktop is a xlarge computer (10 agent slots)' });
   assert.equal(readTimedAsk(root, 'sess-on-m3')?.verdict?.verdict, 'here');
   runs.length = 0;

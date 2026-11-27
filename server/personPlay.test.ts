@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { BenchTurn, closedRefusal, type BenchTurnDeps, type Holder, type TurnEditor, type TurnPlayer } from '../machine/benchTurn.ts';
 import { GRACE_MIN, PersonPlay, personEnds, personFile, personHoldReason, personTicket, readPersonFile, STALE_MS, treeOf, type PersonPlaySettings } from '../machine/personPlay.ts';
@@ -11,6 +10,7 @@ import { machinePersonPlay, PERSON_PLAY_DEFAULTS } from './config.ts';
 import { setAppConfig } from './appConfig.ts';
 import { playHolds, playLine } from '../shared/personPlay.ts';
 import type { PersonPlayReport } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 /**
  * w1894 (lothsahn's request, item 1 of w1785's ranked list): while lothsahn plays Final Factory on LothDesktop, FF
@@ -22,7 +22,7 @@ import type { PersonPlayReport } from '../shared/types.ts';
 
 const T0 = Date.parse('2026-10-23T19:00:00Z');
 const MIN = 60_000;
-const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'w1894-'));
+const tmpRoot = () => tmpDir('w1894-');
 
 function watch(o: { root?: string; settings?: Partial<PersonPlaySettings> } = {}) {
   const s = { now: T0, log: [] as string[], settings: { enabled: true, graceMinutes: GRACE_MIN, who: 'lothsahn', ...o.settings } as PersonPlaySettings };

@@ -6,14 +6,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { putBackMats, snapshotMats } from '../machine/liveIdle.ts';
+import { tmpDir } from './testTmp.ts';
 
 const MAT = (color: string) => `%YAML 1.1\nMaterial:\n  m_Name: Tier1Body\n  m_SavedProperties:\n    m_Colors:\n    - _ColorBR: {r: ${color}, g: 0.2, b: 0.2, a: 1}\n`;
 
 function worktree() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w2255-'));
+  const dir = tmpDir('w2255-');
   const git = (...a: string[]) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
   git('init', '-q');
   git('config', 'user.email', 'test@example.com');
@@ -73,7 +73,7 @@ test('w2255: a close that wrote no .mat changes nothing and says nothing', async
 });
 
 test('w2255: no git there: says so, never throws', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'w2255-nogit-'));
+  const dir = tmpDir('w2255-nogit-');
   const text = await putBackMats(path.join(dir, 'missing'), new Map(), new Date());
   assert.match(text ?? '', /^could not read git status to put back the \.mat files the close wrote/);
 });

@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { HOLD_PLACE_MS, agentState, agentStateText, holdsItsPlace, holdsSandbox, isBetweenTurns, sortAgents, sortPlaces, utcTime } from '../shared/agentState.ts';
 import { workLive } from '../shared/workState.ts';
 import { fleetOf } from '../shared/fleet.ts';
 import { Store } from './store.ts';
+import { removeTmp, tmpDir } from './testTmp.ts';
 import { SessionManager, setQueryForTesting } from './sessions.ts';
 import { MachineManager, type RemoteSession } from './machines.ts';
 import { Agents } from './agents.ts';
@@ -170,7 +169,7 @@ test("the Overview lists a place's agents Working, Waiting, Idle, a stopped one 
 const PEOPLE: UserInfo[] = [{ ...BEN, role: 'owner' }];
 
 async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-agent-state-'));
+  const dir = tmpDir('ffsb-agent-state-');
   const cfg = {
     dataDir: dir,
     sandboxRoot: dir,
@@ -204,7 +203,7 @@ async function setup(t: { after: (fn: () => void | Promise<void>) => void }) {
     sessions.stopAll();
     await new Promise((r) => setTimeout(r, 60));
     store.flush();
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
+    removeTmp(dir);
   });
   await pc.connect(machines);
   return { store, sessions, agents, pc, machines };

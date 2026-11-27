@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import os from 'node:os';
 import path from 'node:path';
 import { EDITOR_HOME_SEED, MacUnity, linuxEditorFenceFor, seedEditorHomeFenced, linuxLicensingClientRunning, macEditorStatusDir, seedLinuxEditorHome, type EditorFence, type Proc, type UnityDeps } from '../machine/unity.ts';
 import { FF_LANDLOCK, writeLockArgs } from '../machine/writeLock.ts';
+import { tmpDir } from './testTmp.ts';
 
 const ROOT = '/home/u/ffw';
 const REPO = `${ROOT}/sandboxes/slot1`;
@@ -45,8 +45,8 @@ function landlockRuns(): boolean {
   return spawnSync('python3', [FF_LANDLOCK, '--rw', '/', '--', '/bin/true']).status === 0;
 }
 
-test('w5631: under the enforced rules the editor cannot make a folder outside the root; warn-only can (Linux with Landlock)', { skip: !landlockRuns() }, () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631-'));
+test('w5631: under the enforced rules the editor cannot make a folder outside the root; warn-only can (Linux with Landlock)', { skip: !landlockRuns() }, (t) => {
+  const tmp = tmpDir('w5631-', t);
   const root = path.join(tmp, 'ffw');
   for (const d of ['home', 'sandboxes', 'daemon']) fs.mkdirSync(path.join(root, d), { recursive: true });
   const outside = path.join(tmp, 'outside');
@@ -61,8 +61,8 @@ test('w5631: under the enforced rules the editor cannot make a folder outside th
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs once; a prefs file already there is kept', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631seed-'));
+test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs once; a prefs file already there is kept', (t) => {
+  const tmp = tmpDir('w5631seed-', t);
   const real = path.join(tmp, 'real');
   const home = path.join(tmp, 'ffw', 'home');
   fs.mkdirSync(path.join(real, '.local', 'share', 'unity3d'), { recursive: true });
@@ -76,8 +76,8 @@ test('w5631: the moved home gets Unity\'s prefs folders and the person\'s prefs 
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-test('w6354 (review of w5631): the seeding follows no link a worker planted in the editor\'s home, and writes nothing outside it', () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631link-'));
+test('w6354 (review of w5631): the seeding follows no link a worker planted in the editor\'s home, and writes nothing outside it', (t) => {
+  const tmp = tmpDir('w5631link-', t);
   const real = path.join(tmp, 'real');
   const home = path.join(tmp, 'ffw', 'home');
   const outside = path.join(tmp, 'outside');
@@ -176,21 +176,21 @@ test('w6354 (review of w5631): a fenced launch that throws starts the editor unf
 
 const BURST_OFF = '<unity_prefs version_major="1"><pref name="BurstCompilation" type="int">0</pref></unity_prefs>';
 
-test('w6356 (review of w5631): the daemon seeds the home in a child under ff-landlock.py that may write only that home', async () => {
+test('w6356 (review of w5631): the daemon seeds the home in a child under ff-landlock.py that may write only that home', async (t) => {
   const calls: string[][] = [];
-  const r = await seedEditorHomeFenced(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'w5631argv-')), 'home'), '/home/u', async (cmd, args) => (calls.push([cmd, ...args]), { code: 0, stdout: '{"seeded":[],"refused":[],"safe":[]}\n', stderr: '' }) as never);
+  const r = await seedEditorHomeFenced(path.join(tmpDir('w5631argv-', t), 'home'), '/home/u', async (cmd, args) => (calls.push([cmd, ...args]), { code: 0, stdout: '{"seeded":[],"refused":[],"safe":[]}\n', stderr: '' }) as never);
   assert.deepEqual(r, { seeded: [], refused: [], safe: [] });
   const [cmd, lock, ...rest] = calls[0];
   assert.equal(cmd, 'python3');
   assert.equal(lock, FF_LANDLOCK);
   assert.deepEqual(rest.slice(0, 3), ['--rw', rest[1], '--'], 'one writable folder, the home');
   assert.ok(rest.includes(EDITOR_HOME_SEED));
-  const fail = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'w5631fail-')), 'home');
+  const fail = path.join(tmpDir('w5631fail-', t), 'home');
   await assert.rejects(seedEditorHomeFenced(fail, '/home/u', async () => ({ code: 1, stdout: '', stderr: 'boom' }) as never), /seeding the editor's home failed \(exit 1\): boom/);
 });
 
-test('w6356 (review of w5631): under Landlock the seeding child seeds the home and turns Burst on, and cannot write outside it (Linux with Landlock)', { skip: !landlockRuns() }, async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'w5631child-'));
+test('w6356 (review of w5631): under Landlock the seeding child seeds the home and turns Burst on, and cannot write outside it (Linux with Landlock)', { skip: !landlockRuns() }, async (t) => {
+  const tmp = tmpDir('w5631child-', t);
   const real = path.join(tmp, 'real');
   const home = path.join(tmp, 'ffw', 'home');
   fs.mkdirSync(path.join(real, '.local', 'share', 'unity3d'), { recursive: true });
@@ -214,10 +214,10 @@ test('w5631: the Linux editor fence is off unless daemon.json says editorFence t
   assert.ok(body.indexOf('editorFence !== true') < body.indexOf('linuxEditorFenceFor('), 'decided before any rules are made');
 });
 
-test('w6371 (review of #1448): the daemon fences Linux editors, enforced, only with editorFence true and the write lock on', { skip: !landlockRuns() }, async () => {
+test('w6371 (review of #1448): the daemon fences Linux editors, enforced, only with editorFence true and the write lock on', { skip: !landlockRuns() }, async (t) => {
   const { Daemon } = await import('../machine/daemon.ts');
   const pick = (Daemon.prototype as unknown as { linuxEditorFence(this: object): ReturnType<typeof linuxEditorFenceFor> }).linuxEditorFence;
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'w6371-'));
+  const root = tmpDir('w6371-', t);
   const self = (editorFence: boolean | undefined, writeLock: string[] | undefined) => ({ cfg: { editorFence, root }, writeLock, lockRules: () => ['--rw', root], lockMemo: undefined });
   assert.equal(pick.call(self(undefined, ['--rw', root])), undefined, 'unset: unfenced');
   assert.equal(pick.call(self(false, ['--rw', root])), undefined);

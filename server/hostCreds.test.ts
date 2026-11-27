@@ -6,12 +6,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { spawn } from 'node:child_process';
 import { HostedSession, credsOf, hostFiles, type HostDeps, type HostStart } from '../machine/agentHost.ts';
 import type { SessionInfo } from '../shared/types.ts';
+import { tmpDir } from './testTmp.ts';
 
 const until = async (what: string, cond: () => boolean, ms = 15_000) => {
   const end = Date.now() + ms;
@@ -27,8 +27,8 @@ const info = (id: string): SessionInfo => ({ id, kind: 'worker', title: `w1745 $
 const TOKEN_OUT = 'fake-oauth-token-out-0001';
 const TOKEN_ROOM = 'fake-oauth-token-room-0002';
 
-function rig(id: string) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ffsb-w1745-creds-'));
+function rig(id: string, t: { after: (fn: () => void) => void }) {
+  const root = tmpDir('ffsb-w1745-creds-', t);
   let env: Record<string, string> = { CLAUDE_CODE_OAUTH_TOKEN: TOKEN_OUT, GH_TOKEN: 'fake-gh-token' };
   const launched: HostStart[] = [];
   const deps: HostDeps = {
@@ -55,8 +55,7 @@ function rig(id: string) {
 }
 
 test('w1745: a message for another token while the host is closing starts a new host on that token, never the agent again in the old one', { timeout: 30_000 }, async (t) => {
-  const r = rig('m1');
-  t.after(() => fs.rmSync(r.root, { recursive: true, force: true }));
+  const r = rig('m1', t);
   r.s.send('first turn', 'system');
   assert.equal(r.launched.length, 1);
   assert.equal(r.launched[0].spec.env?.CLAUDE_CODE_OAUTH_TOKEN, TOKEN_OUT);
@@ -83,8 +82,7 @@ test('w1745: a message for another token while the host is closing starts a new 
 });
 
 test('w1745: the same token keeps today\'s path: a message while the host closes goes to it (its close hands any it did not carry out to a new host)', { timeout: 30_000 }, async (t) => {
-  const r = rig('m2');
-  t.after(() => fs.rmSync(r.root, { recursive: true, force: true }));
+  const r = rig('m2', t);
   r.s.send('first turn', 'system');
   r.hostSays({ op: 'state', info: { ...info('m2'), status: 'idle' }, live: false, lastFrom: 'system' });
   await until('the session reads not live', () => !r.s.live);
@@ -96,12 +94,9 @@ test('w1745: the same token keeps today\'s path: a message while the host closes
 test('w1745: a host an older daemon started (no creds.sha), taken back across the update, gets no message once its agent ended: a new host on the new token carries it', { timeout: 30_000 }, async (t) => {
   // Worker 9888f324 on Biscuit, 2026-10-22: its host predated the daemon fix, so its credentials were unknown, and at
   // 19:10:37Z the resume went into it and ran on vault-ben-1 again. A process stands in for the old host (alive, its own pid).
-  const r = rig('m4');
+  const r = rig('m4', t);
   const old = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
-  t.after(() => {
-    old.kill();
-    fs.rmSync(r.root, { recursive: true, force: true });
-  });
+  t.after(() => old.kill());
   fs.mkdirSync(r.f.dir, { recursive: true });
   fs.writeFileSync(r.f.host, JSON.stringify({ hostProtocol: 1, sessionId: 'm4', pid: old.pid, startedAt: new Date().toISOString() }));
   fs.writeFileSync(r.f.beat, '');
@@ -120,8 +115,7 @@ test('w1745: a host an older daemon started (no creds.sha), taken back across th
 });
 
 test('w1745: a message the old host did not carry out goes to the new host ahead of one sent after the stop',{ timeout: 30_000 }, async (t) => {
-  const r = rig('m3');
-  t.after(() => fs.rmSync(r.root, { recursive: true, force: true }));
+  const r = rig('m3', t);
   r.s.send('first turn', 'system');
   // A message reached the old host while its agent ran; then its agent ended and the run moved to another token.
   r.s.send('sent before the move', 'system');
