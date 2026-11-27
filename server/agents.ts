@@ -131,7 +131,7 @@ import { RELEASE_RULES } from './releaseLanes.ts';
 import { canPushWorkflows, changesWorkflows, ghBriefLine, ghLoginLabel, ghMachineLine } from '../shared/ghLogin.ts';
 import { steamLabel, steamLacks } from '../shared/steam.ts';
 import { desktopLabel, desktopLacks, linuxLockWarn, needsWindow, pairDrivesMenus, saysNone, screenUnlockAskProblem, windowLacks } from '../shared/desktop.ts';
-import { dataDirClearedText, gameCommitAt, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
+import { dataDirClearedText, gameCommitAt, otherPlayerIn, gameDataDirAt, type CommitVerdict, type DataDirVerdict } from './gameDataDir.ts';
 import { FACTORY_BRANCH_PREFIX, sandboxBranchFor, sourceTag, workerRules } from './intakeRules.ts';
 import { DEV_LIMITS, buildSubmit } from './providerProtocol.ts';
 import { TITLE_HELP, TITLE_MAX, jobTitle } from './jobTitle.ts';
@@ -2347,6 +2347,51 @@ export class Agents {
     } catch (e) {
       return { reads: false, checked: false, why: `FF Factory could not check ${commit.slice(0, 10)} for the FF_GAME_DATA_DIR backport (${clip((e as Error).message, 160)}; w6189)` };
     }
+  }
+
+  /**
+   * w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR is no such run: clear its mark and say why (by:
+   * start_agent, or the queue's re-check). w6235: words that name another player (a Steam 0.50 build, another sha) keep the
+   * mark, since only the commit is read, and so does a verdict for another commit. True when it cleared the mark.
+   */
+  private async clearLegacyByCommit(w: WorkItem, by: string): Promise<boolean> {
+    const commit = w.pair?.commit;
+    if (!w.pair?.legacyData || !commit) return false;
+    if (otherPlayerIn(w.pair.legacyData, commit)) return false;
+    const v = await this.gameDataDirAt(commit).catch((): undefined => undefined);
+    if (!v?.reads || !sameCommit(v.commit, commit)) return false;
+    // The read awaited GitHub: act on the request as it is now, and only while it is still marked for that same commit.
+    const now = this.store.work.get(w.id) ?? w;
+    if (!now.pair?.legacyData || now.pair.commit !== commit) return false;
+    const cleared = dataDirClearedText(v.commit);
+    const { legacyData: was, ...rest } = now.pair;
+    now.pair = { ...rest, dataDirChecked: cleared };
+    now.log = [...now.log, logLine(new Date(), `${by}: ${cleared}; it was marked "${clip(was ?? '', 120)}"`)].slice(-40);
+    this.store.putWork(now);
+    if (now !== w) w.pair = now.pair;
+    return true;
+  }
+
+  /** w6235: when each queued marked pair run's commit was last read, so a commit that cannot be checked is not asked every minute. */
+  private legacyRechecked = new Map<string, number>();
+
+  /**
+   * w6235 (w6192's review of PR #1402, nit 3): a queued pair run marked pre-w5297 before w6189, or by hand, waited outside
+   * placement until someone called start_agent on it. BlockerWatch runs this each minute, before the queue is read: each
+   * such run's commit is read (at most once per 10 minutes per run and commit) and the mark cleared where it reads
+   * FF_GAME_DATA_DIR. Answers the ids it cleared.
+   */
+  async recheckLegacyPairs(nowMs = Date.now()): Promise<string[]> {
+    const done: string[] = [];
+    for (const w of [...this.store.work.values()]) {
+      // Not yet started: filed (new) or waiting for room (queued); a started run's legs already passed start_agent's check.
+      if ((w.status !== 'new' && w.status !== 'queued') || w.sessionIds.length || !w.pair?.legacyData || !w.pair.commit) continue;
+      const key = `${w.id} ${w.pair.commit.toLowerCase()}`;
+      if (nowMs - (this.legacyRechecked.get(key) ?? -Infinity) < 10 * 60_000) continue;
+      this.legacyRechecked.set(key, nowMs);
+      if (await this.clearLegacyByCommit(w, 'the queue re-check')) done.push(w.id);
+    }
+    return done;
   }
 
   private async requestPair(sessionId: string, a: Record<string, unknown>): Promise<string> {
@@ -6801,16 +6846,7 @@ A report is for a person who asked for one, and people want very few. File one w
     // w6189: a pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR (one filed before this check, or by hand) is
     // decided per commit here too, so start_agent and request_pair agree; a commit that does not, or that cannot be checked,
     // keeps the refusal below.
-    if (w.pair?.legacyData && w.pair.commit) {
-      const v = await this.gameDataDirAt(w.pair.commit).catch((): undefined => undefined);
-      if (v?.reads) {
-        const cleared = dataDirClearedText(v.commit);
-        const { legacyData: _was, ...rest } = w.pair;
-        w.pair = { ...rest, dataDirChecked: cleared };
-        w.log = [...w.log, logLine(new Date(), `start_agent: ${cleared}; it was marked "${clip(_was ?? '', 120)}"`)].slice(-40);
-        this.store.putWork(w);
-      }
-    }
+    await this.clearLegacyByCommit(w, 'start_agent');
     // Every leg checked before any starts.
     const legs = refs.map((ref, i) => {
       const t = this.target(ref, i ? undefined : a.machine);
@@ -8374,10 +8410,11 @@ ${w.repo ?? ''}
             host_restage: z.enum(['warn', 'on']).optional().describe("action machine_update: w6305: what the daemon does with an idle agent whose host was adopted across a sharedLock switch (w6287, docs/worker-root.md \"After a sharedLock switch\"): warn (the default, and the recovery) logs one line per such host; on ends that agent between turns, never mid-turn, so its next message starts a new host on the new mode's cache paths and FF_PLAYER_BROKER. Written as daemon.json hostRestage; takes effect at the daemon's next start, which this update makes. Send on only with a person's go, after the warn lines of a real switch were read (lothsahn's lockout rule; docs/worker-root.md 4.4); warn needs none."),
             long_runs: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6367: the long-run route (machine/longRuns.ts) that starts a sanctioned long run (the nightly) outside its worker's agent host; warn (the default) logs and refuses so the caller starts it as before, on starts it, off refuses; warn or off is the way back, though off does not end runs already live (they end at their 20 h limit or by runs/stop). Written as daemon.json longRuns; takes effect at the daemon's next start, which this update makes. Send on only with a person's go (lothsahn's lockout rule; docs/worker-fence.md 'Long runs'); warn and off need none."),
             live_run_guard: z.enum(['off', 'warn']).optional().describe("action machine_update: w6378: daemon.json liveRunGuard: warn (the default) logs a WARNING when a sandbox trim, release or delete would hit a sandbox where a run of its worker still lives; off stops the look. The way back with nobody at the machine."),
+            editor_git_packages: z.enum(['off', 'warn', 'on']).optional().describe("action machine_update: w6412: daemon.json editorGitPackages: how a sandbox editor gets a git package its Packages/manifest.json names that Library/PackageCache lacks (machine/gitPackages.ts). warn (the default) only names the missing packages in the start note, unity status and the Package Manager dialog notice; on also fetches each into a mirror under <root>/cache-medium/git-packages with the daemon's own git and credential, and gives a Windows Low-integrity editor the workers' Git on PATH and a url.insteadOf to that mirror, so its Package Manager fetches without a credential; off looks at nothing (the way back). Takes effect at the editor's next start. The way back with nobody at the machine."),
             runner_priority: z.enum(['off', 'warn', 'enforce']).optional().describe("action machine_update: w6163, Windows only: the ffu CI runners' scheduled tasks and listeners at Normal priority (machine/runnerPriority.ts): warn only logs what it reads (the default everywhere but the machines in RUNNER_PRIORITY_ENFORCE, and the recovery), enforce sets the tasks to priority 4 and raises the listeners to Normal, off stops it. Written as daemon.json runnerPriority; takes effect at the daemon's next start. Unset leaves it as it is."),
             medium_agent_folders: z.enum(['warn', 'on']).optional().describe("action machine_update: Medium agents' own temp root and cargo home (w5862, w5869; docs/worker-root.md \"Medium agents' temp folders and cargo home\"): on moves Medium agents (outside a sandbox) to <root>/tmp-medium and <root>/cache-medium/cargo; warn only logs the exposure. Written as daemon.json mediumAgentFolders; the daemon restarts with it"),
           },
-          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, tools_disk_lock, win_ci_first, shared_lock, runner_priority, host_restage, long_runs, live_run_guard, words }) => {
+          wrap(async ({ action, text, fresh, follow_up, work_ids, machine, max_sandboxes, max_agents_per_sandbox, max_unity, dev_drive, move_to_dev_drive, dev_drive_max_gb, worker_fence, worker_caps, transcript_lock, store_lock, editor_tmpdir, path_fence, medium_agent_folders, daemon_tmpdir, tools_disk_lock, win_ci_first, shared_lock, runner_priority, host_restage, long_runs, live_run_guard, editor_git_packages, words }) => {
             const caller = ctx.sessionId ? this.store.sessions.get(ctx.sessionId) : undefined;
             if (ctx.role !== 'personal' || !opsAllowedOrchestrator(caller)) throw new Error(OPS_REFUSED);
             if (action === 'send') return this.ops.send(caller, text ?? '', fresh === true, work_ids ?? [], false, follow_up === true, words);
@@ -8385,7 +8422,7 @@ ${w.repo ?? ''}
             if (action === 'restart') return this.ops.restart(caller, text ?? '', work_ids ?? [], words);
             if (action === 'machine_update') {
               if (!machine || (work_ids ?? []).length !== 1) throw new Error('machine_update takes machine and exactly one work_ids entry: the person\'s own open request that asks for the update');
-              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir, toolsDiskLock: tools_disk_lock, winCiFirst: win_ci_first, sharedLock: shared_lock, runnerPriority: runner_priority, hostRestage: host_restage, longRuns: long_runs, liveRunGuard: live_run_guard });
+              return this.ops.machineInstall(caller, { machine, workId: work_ids![0], maxSandboxes: max_sandboxes, maxAgentsPerSandbox: max_agents_per_sandbox, maxUnity: max_unity, devDrive: dev_drive, moveToDevDrive: move_to_dev_drive, devDriveMaxGB: dev_drive_max_gb, workerFence: worker_fence, workerCaps: worker_caps, transcriptLock: transcript_lock, storeLock: store_lock, editorTmpdir: editor_tmpdir, pathFence: path_fence, mediumAgentFolders: medium_agent_folders, daemonTmpdir: daemon_tmpdir, toolsDiskLock: tools_disk_lock, winCiFirst: win_ci_first, sharedLock: shared_lock, runnerPriority: runner_priority, hostRestage: host_restage, longRuns: long_runs, liveRunGuard: live_run_guard, editorGitPackages: editor_git_packages });
             }
             if (action === 'status') return `${this.ops.status()}\nIts timers (w1106): ${describeTimers(this.timers.list(OPS_ID), this.timers.deliveredToday(OPS_ID))}\n${this.condensed(this.store.readTranscript(OPS_ID, 20))}`;
             return this.ops.control(caller, action);

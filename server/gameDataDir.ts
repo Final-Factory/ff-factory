@@ -77,6 +77,21 @@ export async function gameDataDirAt(gh: Runner, repo: string, commit: string): P
 export const dataDirClearedText = (commit: string): string =>
   `its player at ${commit.slice(0, 10)} reads FF_GAME_DATA_DIR (${GAME_DATA_PATHS}, the backport of game PR #4357), so it is not a pre-w5297 player and its legs may go where sandbox agents measure Low (w6189)`;
 
+/**
+ * w6235 (w6192's review of PR #1402): the check reads only the pair's `commit`, but a pair run can run more than one player
+ * (pairCommitsOf), and a worker's legacy_data may be about another one: "the host runs the Steam pre-1.0 0.50.0.47 build"
+ * while `commit` is the PR head checked against it. Such words keep the mark. A sha is a hex word of 7 to 40 characters with
+ * a digit in it (so English words such as "acceded" are none); one that is `commit` (either a prefix of the other) is the
+ * checked player. Any 0.50.x.y version is a build, not a commit, so nothing here checked it. Answers why, or undefined.
+ */
+export function otherPlayerIn(said: string, commit: string): string | undefined {
+  const c = commit.toLowerCase();
+  const sha = (said.match(/\b[0-9a-f]{7,40}\b/gi) ?? []).find((h) => /\d/.test(h) && !(h.toLowerCase().startsWith(c) || c.startsWith(h.toLowerCase())));
+  const version = /\b0\.50\.\d+\.\d+\b/.exec(said)?.[0];
+  if (!sha && !version) return undefined;
+  return `its legacy_data names ${sha ? `commit ${sha.slice(0, 10)}` : `build ${version}`}, but FF Factory checked only ${c.slice(0, 10)} for the FF_GAME_DATA_DIR backport, so the mark stays (w6235)`;
+}
+
 // w6206: w6187's pair run was filed with a mistyped full sha (20786882d8bd6c1a…) whose first 10 characters matched the real
 // head of game PR #4382 (20786882d8c3f540…), and only its leg's own `gh pr view` caught it. request_pair and start_agent now
 // ask GitHub whether the commit exists before a run is placed, through the same read as gameDataDirAt.

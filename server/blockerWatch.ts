@@ -108,6 +108,8 @@ export interface BlockerWatchDeps {
   room?: () => string[];
   /** Room for each kind of work and the held computers (w1089, w1098); preferred over `room`. */
   roomFacts?: () => RoomNow;
+  /** w6235: clear the pre-w5297 mark of queued pair runs whose commit reads FF_GAME_DATA_DIR (Agents.recheckLegacyPairs). */
+  legacyPairs?: () => Promise<string[]>;
   now?: () => number;
 }
 
@@ -295,6 +297,8 @@ export class BlockerWatch {
     }
     this.busy = true;
     try {
+      // w6235: a queued pair run marked pre-w5297 whose commit reads FF_GAME_DATA_DIR is placed like any other, before the queue is read.
+      for (const id of await this.d.legacyPairs?.().catch((): string[] => []) ?? []) did.set(id, 'its commit reads FF_GAME_DATA_DIR: no longer a pre-w5297 pair run');
       // w1089: a block that is only a wait for capacity is Queued, not Blocked, whoever set it and whenever.
       for (const id of this.d.orchestrators.requeueCapacityBlocks?.() ?? []) did.set(id, 'requeued: a block that waited only for capacity');
       // w2304: a pair run that lost a leg mid-run starts again whole, Queued, never Stalled.

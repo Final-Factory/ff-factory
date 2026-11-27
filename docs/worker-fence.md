@@ -101,6 +101,12 @@ anywhere the user could. Now `machine/playerFence.ts` wraps it on Linux and macO
   closed: no commit given, a commit GitHub does not know, a failed read, or a file without the read keeps the mark, with that
   reason added to it, so the refusal says which. `start_agent` makes the same check for a marked pair run that has a commit
   (one filed before w6189, or by hand) and clears the mark on the request before its legs are checked.
+  Only `commit` is read (w6235, from w6192's review of PR #1402), so `legacy_data` that names another player, a sha that
+  is not `commit` or a `0.50.x.y` build ("the host runs the Steam 0.50.0.47 build"), keeps the mark and says so
+  (`server/gameDataDir.ts` `otherPlayerIn`), and a verdict for another commit than the pair's clears nothing. A queued
+  pair run still marked (filed before w6189, or by hand) is re-checked each minute by BlockerWatch before the queue is
+  read (`Agents.recheckLegacyPairs`, at most once per 10 minutes per run and commit), so it no longer waits for a
+  `start_agent` call to be placed.
 
 ## Long runs the daemon starts for a worker (w6367, Windows)
 
