@@ -403,8 +403,11 @@ function startSocket() {
     have: (gapMs) => sessionsHave(state.app ?? undefined, gapMs),
     onFailure: async () => {
       try {
-        // Bounded: a path that hangs (w5318) must not hold the next attempt.
-        gotState(await api.state(SOCKET_FAILURE_CHECK_MS));
+        // Bounded: a path that hangs (w5318) must not hold the next attempt. w6336: a page that has its state only asks
+        // whether its login is still good (/api/me, bytes): the whole state (megabytes) on every failed attempt cost the
+        // portal a full build each time it was slowest, and the socket that opens next brings the state anyway.
+        if (state.app) await api.me(SOCKET_FAILURE_CHECK_MS);
+        else gotState(await api.state(SOCKET_FAILURE_CHECK_MS));
         return true;
       } catch (e) {
         return !(e instanceof UnauthorizedError);
