@@ -68,6 +68,10 @@ export const SETTABLE_KEYS = [
   // docs/machines.md): "warn" (unset: journal and report only), "on" (stop or skip them, when a started new worker holds
   // each of their requests) or "off" (no check: the recovery switch); null puts back "warn".
   'movedAwayWorkers',
+  // w5985: what placement counts on a machine (server/agentCensus.ts): "on" (as capFull counts, and the larger of that and
+  // its daemon's fresh census) or "off" (unset: reported mid-turn sandbox sessions, as before; the recovery switch); null
+  // puts back "off".
+  'placementAgentCount',
   'tmpWriteFence',
   // The privacy guards (w17, docs/privacy.md), the owner's only: true or false; null puts back the default (on for every
   // factory but Final Factory).
@@ -208,7 +212,7 @@ export type SettableKey = (typeof SETTABLE_KEYS)[number];
 const NO_HOST = '; "this host" is no place for work any more (w510): name this host\'s own daemon (e.g. "beast")';
 
 /** Keys only an owner may set (docs/identity.md roles): what the intake files and starts by itself. */
-export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount', 'movedAwayWorkers', 'tmpWriteFence']);
+export const OWNER_ONLY_KEYS: ReadonlySet<SettableKey> = new Set(['live.enabled', 'live.idleCloseMinutes', 'intake.ffbox', 'intake.reviewers', 'providers.ffbox.devRequests', 'claudeAccounts.dispatcher', 'machines.githubFromVault', 'vault.unattributed.intake', 'vault.unattributed.ffbox', 'vault.unattributed.nightly', 'orchestrator.timerFilingsPerMessage', 'trustProxy', 'deviceApproval', 'ownerDeviceApproval', 'privacyGuards', 'machineLinkTailnet', 'agentAccount', 'movedAwayWorkers', 'placementAgentCount', 'tmpWriteFence']);
 
 const FFBOX_INTAKE_FLAGS = ['enabled', 'branches', 'diagnoses', 'requests', 'boardCheck', 'escalations'] as const;
 const FFBOX_INTAKE_KEYS = [...FFBOX_INTAKE_FLAGS, 'repo', 'dailyCap', 'match', 'autoApprove', 'desync', 'crash'];
@@ -635,6 +639,11 @@ export function normalizeSetting(key: SettableKey, value: unknown, cfg?: Config,
       if (value === undefined || value === null) return undefined;
       if (value === 'on' || value === 'warn' || value === 'off') return value;
       throw new Error('movedAwayWorkers is "warn" (journal and report a worker whose work moved to another computer that its daemon still runs or a resume would wake), "on" (stop it after saving its sandbox\'s work to a side branch, or skip its resume, but only when a started new worker holds each of its requests) or "off" (no check: the recovery switch); null puts back "warn"');
+    }
+    case 'placementAgentCount': {
+      if (value === undefined || value === null) return undefined;
+      if (value === 'on' || value === 'off') return value;
+      throw new Error(`placementAgentCount is "on" (placement counts a machine's agents as its agent cap does, turns sent and not yet reported included, and takes the larger of that and its daemon's census while it is under 45 s old) or "off" (the default: reported mid-turn sandbox sessions, as before; the recovery switch); null puts back "off" (w5985)`);
     }
     case 'tmpWriteFence': {
       if (value === undefined || value === null) return undefined;
@@ -1128,6 +1137,7 @@ export function setAppConfig(file: string, cfg: Config, key: SettableKey, value:
   else if (key === 'machineLinkTailnet') cfg.machineLinkTailnet = v as 'off' | 'warn' | 'enforce' | undefined;
   else if (key === 'agentAccount') cfg.agentAccount = v as 'off' | 'warn' | 'on' | undefined;
   else if (key === 'movedAwayWorkers') cfg.movedAwayWorkers = v as 'off' | 'warn' | 'on' | undefined;
+  else if (key === 'placementAgentCount') cfg.placementAgentCount = v as 'off' | 'on' | undefined;
   else if (key === 'tmpWriteFence') cfg.tmpWriteFence = v as 'warn' | 'on' | undefined;
   else if (key === 'privacyGuards') {
     if (v === undefined) delete cfg.privacyGuards;

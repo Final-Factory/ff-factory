@@ -7400,8 +7400,11 @@ A report is for a person who asked for one, and people want very few. File one w
       const lights = lightFolders(m.sandboxes);
       const offersLight = this.machines.offersLight(m.id);
       const mine = placed.get(m.id) ?? [];
-      const midTurnIn = new Map<string, number>();
-      for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
+      // w5985, config placementAgentCount "on": counted as its agent cap counts (turns sent, not yet reported, and standing
+      // agents too), and the larger of that and its daemon's fresh census, which refuses a start past it.
+      const counted = this.machines.placementCount(m.id, sbs.map((x) => x.id));
+      const midTurnIn = new Map<string, number>(counted?.inSandbox);
+      if (!counted) for (const x of mine) if (isMidTurn(x.info)) midTurnIn.set(x.info.machineSandbox!, (midTurnIn.get(x.info.machineSandbox!) ?? 0) + 1);
       // Its daemon reports its load; this host's own daemon's is this host's.
       const st = this.machines.statsOf(m.id);
       const used = st ? (st.memUsedBytes ?? st.memTotalBytes - st.memFreeBytes) : m.local ? mem.total - mem.free : undefined;
@@ -7420,7 +7423,7 @@ A report is for a person who asked for one, and people want very few. File one w
         ...(m.fence?.agentIntegrity ? { agentIntegrity: m.fence.agentIntegrity } : {}),
         ...(m.fence?.agentIntegrityWhy ? { agentIntegrityWhy: m.fence.agentIntegrityWhy } : {}),
         live: mine.filter((s) => s.live).length,
-        midTurn: mine.filter((s) => isMidTurn(s.info)).length,
+        midTurn: counted?.midTurn ?? mine.filter((s) => isMidTurn(s.info)).length,
         maxAgents: agentCap(m),
         sandboxes: sbs.length,
         maxSandboxes: pool.maxSandboxes,

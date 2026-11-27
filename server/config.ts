@@ -345,6 +345,13 @@ export interface Config {
    */
   movedAwayWorkers?: 'off' | 'warn' | 'on';
   /**
+   * w5985 (server/agentCensus.ts, placementCountOf): "on" makes placement count a machine's agents as capFull does (turns
+   * sent and not yet reported included, standing agents too) and take the larger of that and its daemon's census while
+   * the census is under 45 s old; "off" (unset) counts reported mid-turn sandbox sessions, as before (the recovery switch).
+   * It never stops or ends an agent. Read live.
+   */
+  placementAgentCount?: 'off' | 'on';
+  /**
    * w6050 (server/tmpWriteFence.ts): a worker's shell write into /tmp, /var/tmp, /private/tmp, /var/folders or a Windows
    * system temp folder outside its own folders. "on" (unset) refuses it in the PreToolUse guard; "warn" only notes it after
    * it ran (the w6008 stage: the recovery switch). Read when a worker's process starts, so a change reaches each worker at its
