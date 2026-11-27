@@ -231,6 +231,8 @@ const ROWS: Row[] = [
   { name: 'twins: answered on the moved one, the asker keeps the other', build: (k) => { const w = k.req([A], 'w5869', { [A]: 2 * H }); k.moveOff(w); k.place(w, N); k.req([A], 'w5871', { [A]: H }); return w; }, resumed: [N, A], never: [] },
   { name: 'twins: both handed back', build: (k) => { const w = k.req([A], 'w5869', { [A]: H }); k.handBack(w); const x = k.req([A], 'w5871', { [A]: H }); k.handBack(x); return w; }, resumed: [], never: [A], handOff: ['w5869', 'w5871'] },
   { name: 'twins: the other has an old hand-off and a co-worker on it, the asker moved off it', build: (k) => { const x = k.req([], 'w5871'); k.oldHandBack(x); k.place(x, E, H); k.place(x, A, H / 2); k.moveOff(x); return k.req([A], 'w5869', { [A]: H }); }, resumed: [A, E], never: [Z], noHandOff: ['w5871'] },
+  { name: 'W6335-X1 asker moved off, a worker placed after, the asker merged back: the placed one takes it', build: (k) => { const w = k.req([A], 'w5869', { [A]: 2 * H }); k.moveOff(w); k.place(w, N); k.merge(w, [A], { [A]: -1000 }); return w; }, resumed: [N], never: [A] },
+  { name: 'W6335-X2 asker moved off and handed back, the asker merged back: the hand-off takes it', build: (k) => { const w = k.req([A], 'w5869', { [A]: 2 * H }); k.moveOff(w); k.handBack(w); k.merge(w, [A], { [A]: -1000 }); return w; }, resumed: [], never: [A], handOff: ['w5869'] },
 ];
 
 for (const row of ROWS) {
@@ -546,4 +548,11 @@ test('w6331 sweep: a merged-back moved-off worker gets no read scope of it and i
   assert.ok(!readScope([...env.store.work.values()], E).own.includes('w5869'), 'readScope');
   const waits = [{ id: E, kind: 'worker', status: 'idle', waitingOn: { who: 'lothsahn', what: 'an OK', at: OLD, request: 'w5869' } }] as SessionInfo[];
   assert.equal(holdsWorker(w, waits), false, 'holdsWorker');
+});
+test('w6335 follow-up: a merged-back moved-off worker followed up about its closed request never reopens it (followUpRequest)', async (t) => {
+  const env = await setup(t, 'on');
+  const w = aloneMergedBack(env);
+  w.status = 'done'; env.store.putWork(w);
+  const s = env.store.sessions.get(E)!; s.followUpOn = { id: w.id, at: new Date().toISOString(), by: 'Lothsahn' }; env.store.putSession(s);
+  assert.equal(env.agents.orchestrators.followUpRequest(E), undefined, 'its timed work attaches to (and a hand-off reopens) the request');
 });

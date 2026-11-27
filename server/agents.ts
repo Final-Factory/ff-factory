@@ -3173,7 +3173,9 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
       ...(m.attachments?.length ? { attachments: m.attachments.map((a) => a.id) } : {}),
     }).then(
       (said) => {
-        const to = this.store.work.get(w.id)?.sessionIds.at(-1);
+        // w6309 (the w6335 review): the new session is the newest worker on it, never one moved off it that a merge listed again.
+        const x = this.store.work.get(w.id);
+        const to = x?.sessionIds.filter((sid) => onRequest(x, sid)).at(-1);
         if (!to || to === id || !this.store.sessions.get(to)) throw new Error(`no new session: ${String(said).slice(0, 200)}`);
         this.carryOver(id, to, w.id);
         console.log(`fresh-after-merge pilot (w2043): ${w.id}: worker ${id} ended after PR ${prs} merged; fresh session ${to} goes on (pilot arm)`);

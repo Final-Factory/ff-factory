@@ -1510,7 +1510,8 @@ It is for your part of the work, not an answer to another worker's question.`;
     // the answer in its hand-off, which its next worker reads when it starts. Each worker hears it once, naming only the
     // requests it holds.
     const asker = r.worker;
-    const holds = (x: WorkItem) => !!asker && x.sessionIds.includes(asker);
+    // w6309 (the w6335 review): an asker moved off it that a merge listed again does not hold it (onRequest).
+    const holds = (x: WorkItem) => !!asker && onRequest(x, asker);
     // The w6248 and w6253 reviews: a request's newest worker other than the asker is on it now unless the request was handed
     // back after that worker's link (a hand-back leaves it with nobody, and sessionIds keeps every worker it ever had): such an
     // earlier worker is never resumed on it (w2079). A worker with no link time counts only when there is no hand-back (a
@@ -9375,7 +9376,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
   private attachFollowUp(worker: SessionInfo, about: readonly WorkItem[], by: string) {
     const serving = servedBy(worker.id, [...this.store.work.values()]).size > 0;
     const first = about[0];
-    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' ? { id: first.id, at: this.now().toISOString(), by } : undefined;
+    // w6309 (the w6335 review): a worker moved off it that a merge listed again hears the follow-up but never reopens it.
+    const next = !serving && first && !isOpen(first) && first.status !== 'stalled' && onRequest(first, worker.id) ? { id: first.id, at: this.now().toISOString(), by } : undefined;
     if (!next && !worker.followUpOn) return;
     if (next) {
       worker.followUpOn = next;
@@ -9393,7 +9395,7 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
     const f = this.store.sessions.get(sessionId)?.followUpOn;
     if (!f || this.now().getTime() - Date.parse(f.at) > FOLLOW_UP_TIMED_MS) return undefined;
     const w = this.store.work.get(f.id);
-    if (!w || isOpen(w) || !w.sessionIds.includes(sessionId)) return undefined;
+    if (!w || isOpen(w) || !onRequest(w, sessionId)) return undefined;
     if (servedBy(sessionId, [...this.store.work.values()]).size) return undefined;
     return w;
   }
