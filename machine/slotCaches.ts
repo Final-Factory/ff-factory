@@ -380,11 +380,30 @@ export class SlotCaches {
    */
   retryNow(): void {
     this.retryAt.clear();
+    // w6292 review: asked while a tick runs, it would be lost (that tick's failure sets the wait again): that tick makes
+    // one more pass once it ends.
+    if (this.busy) this.retryAsked = true;
   }
+  private retryAsked = false;
 
   async tick(): Promise<string | undefined> {
     if (this.d.setting === "off" || this.busy) return undefined;
     this.busy = true;
+    try {
+      let line = await this.pass();
+      while (this.retryAsked) {
+        this.retryAsked = false;
+        this.retryAt.clear();
+        line = (await this.pass()) ?? line;
+      }
+      return line;
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  /** One sandbox at most: the first that lacks a cache, else the first idle one due its refresh. */
+  private async pass(): Promise<string | undefined> {
     try {
       const all = this.d.sandboxes().filter((s) => okSandboxId(s.id));
       // First the sandboxes with no clone or a part of one, idle or not (a clone of a seed nobody else writes is safe while
@@ -397,22 +416,36 @@ export class SlotCaches {
       const none =
         lacking.find((s) => !readMarker(slotCacheDir(this.d.root, s.id))) ??
         lacking[0];
-      if (none) return await this.make(none.id, false);
+      if (none) return await this.attempt(none.id, false);
       const old = all.find(
         (s) =>
           s.idle &&
+          due(s.id) &&
           this.now() -
             (readMarker(slotCacheDir(this.d.root, s.id))?.made ?? 0) >
             (this.d.refreshMs ?? REFRESH_MS),
       );
-      if (old) return await this.make(old.id, true);
+      if (old) return await this.attempt(old.id, true);
       return undefined;
     } catch (e) {
       const l = `slot caches: ${(e as Error).message}`;
       this.d.log(l);
       return l;
-    } finally {
-      this.busy = false;
+    }
+  }
+
+  /**
+   * make, and a sandbox whose make throws before its per-cache step (a junction at its folder, a mkdir or marker write that
+   * fails) waits RETRY_MS too, so it is not picked first at every tick, logging each time, while the others wait (w6292).
+   */
+  private async attempt(sandbox: string, refresh: boolean): Promise<string> {
+    try {
+      return await this.make(sandbox, refresh);
+    } catch (e) {
+      this.retryAt.set(sandbox, this.now() + RETRY_MS);
+      const l = `slot caches: ${sandbox}: ${(e as Error).message}; tried again in ${RETRY_MS / 60_000} min (w6284)`;
+      this.d.log(l);
+      return l;
     }
   }
 

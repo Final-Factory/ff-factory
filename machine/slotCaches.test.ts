@@ -891,3 +891,43 @@ test("w6284: without retryNow a failed sandbox is tried again after RETRY_MS; a 
   assert.match(sharedLockBlockers(p.root, ["slot1"])[0], /lacks 1 of its 7 cache clones \(pip;/);
   assert.match((await p.caches.tick())!, /completed .*made pip; already there: uv, npm/);
 });
+
+test("w6292 review: a sandbox whose make throws (a junction at its folder) waits RETRY_MS and holds back no other", async (t) => {
+  const p = pool(t, [{ id: "slot1", idle: true }, { id: "slot2", idle: true }]);
+  const elsewhere = path.join(p.root, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.mkdirSync(path.join(p.root, "cache", "slots"), { recursive: true });
+  fs.symlinkSync(elsewhere, slotCacheDir(p.root, "slot1"), "junction");
+  const first = await p.caches.tick();
+  assert.match(first!, /^slot caches: slot1: .*link or junction.*; tried again in 60 min \(w6284\)$/);
+  for (let i = 0; i < 3; i++) {
+    p.clock.t += 600_000;
+    await p.caches.tick();
+  }
+  assert.ok(readMarker(slotCacheDir(p.root, "slot2")), "slot2 got its clone");
+  assert.equal(p.log.filter((l) => l.startsWith("slot caches: slot1:")).length, 1, "slot1 logged once, not every tick");
+  assert.deepEqual(fs.readdirSync(elsewhere), [], "nothing written through the junction");
+});
+
+test("w6292 review: retryNow while a tick runs is kept: that tick makes one more pass once it ends", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((r) => (release = r));
+  let calls = 0;
+  const p = pool(t, [{ id: "slot1", idle: false }], {
+    copy: async (src, dst) => {
+      if (calls++ === 0) {
+        await gate;
+        throw new Error("no Low node copy to copy with");
+      }
+      await copyTree(src, dst);
+    },
+  });
+  const running = p.caches.tick();
+  await new Promise((r) => setImmediate(r));
+  p.caches.retryNow(); // the daemon's Low copies came while the first pass was copying
+  release();
+  const line = await running;
+  assert.match(line!, /^slot caches: slot1: completed .*made uv;/);
+  assert.deepEqual(missingSlotCaches(p.root, "slot1"), []);
+  assert.equal(p.log.length, 2, "the failed pass, then the completing one");
+});

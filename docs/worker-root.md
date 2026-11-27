@@ -1384,7 +1384,8 @@ tools, Mac/Linux per-slot fences". This is stage 2. One daemon.json setting, `sh
 - **A clone counts cache by cache** (w6284): the marker lists the caches whose clone was made, and a sandbox whose marker
   lacks one, or whose folder for one is gone, is completed at a later tick (`missingSlotCaches`): the caches it lacks are
   cloned, the ones there kept, and the line says which (`completed ... made uv, npm; already there: ...`). A clone with a
-  failed cache is tried again after an hour, or at once when the Windows daemon makes its Low node copies (`retryNow`): on
+  failed cache, or whose clone threw before any cache (a junction at its folder), is tried again after an hour, or at once
+  when the Windows daemon makes its Low node copies (`retryNow`, kept for one more pass when a tick is running): on
   LothDesktop the start's first tick ran before them and slot1's uv, npm, upm and dotnet copies failed with "no Low node
   copy". The `With "on" it would stay off` list names each sandbox's missing caches too (`sandbox slot1 lacks 4 of its 7
   cache clones (...)`), so "on" holds off until every cache of every sandbox is cloned.
