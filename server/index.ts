@@ -1249,7 +1249,8 @@ function appState(user: string | undefined, have?: string | null, phases?: [stri
   // w6336: one placement pass for the whole build (it changes no placement). Outside one, each machine's free() rebuilt
   // every sandbox's claims over all sessions, and roomNow/roomExtras computed places() three times: 0.6-1.2 s of the
   // page's connect (stall profiles 2026-11-27, appState > free > claimedBy > claims).
-  return agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(() => appStateIn(me, mine, have, lap)));
+  // w6428: and each sandbox's FREE once (Agents.pageRead): placesNow asked it twice more after the machine views.
+  return agents.pageRead(() => appStateIn(me, mine, have, lap));
 }
 
 /**

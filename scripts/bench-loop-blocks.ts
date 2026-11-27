@@ -135,6 +135,24 @@ time('pushBenchPriorities: every machine (bare)', () => ms.map((m) => agents.ben
 time('pushBenchPriorities: every machine (one pass)', () => agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(() => ms.map((m) => agents.benchPriorities(m.id)))));
 time('describeAllSandboxes (places once only, before)', () => agents.withPlacesOnce(() => (agents as unknown as { describeAllSandboxesNow(d: boolean): string }).describeAllSandboxesNow(false)));
 time('describeAllSandboxes (w6381)', () => agents.describeAllSandboxes());
+// w6428: a page's state build, its 'machines' and 'room' phases (server/index.ts appStateIn): each machine's view, then the
+// room and its extras. Before: places once and one claims memo; after: pageRead, each sandbox's FREE once as well.
+const pagePlacement = () => {
+  ms.map((m) => agents.sandboxesFree(m.id, m.sandboxes!));
+  agents.roomNow();
+  agents.roomExtras();
+};
+time('page build machines + room (one pass, before)', () => agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(pagePlacement)));
+time('page build machines + room (pageRead, w6428)', () => agents.pageRead(pagePlacement));
+{
+  const sbCount = ms.reduce((n, m) => n + m.sandboxes!.length, 0);
+  let f0 = agents.freeMade;
+  agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(pagePlacement));
+  const before = agents.freeMade - f0;
+  f0 = agents.freeMade;
+  agents.pageRead(pagePlacement);
+  console.log(`page build machines + room: free() worked out ${before} times before, ${agents.freeMade - f0} with pageRead, for ${sbCount} sandboxes`);
+}
 const persisted = () => ({ sandboxes: [], sessions: [...store.sessions.values()], machines: [...store.machines.values()], settings: store.settings });
 const work = () => ({ seq: W, items: [...store.work.values()] });
 time('state.json JSON.stringify(.., null, 2)', () => JSON.stringify(persisted(), null, 2), 3);
