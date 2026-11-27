@@ -12,7 +12,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { DEFAULT_USAGE_POLL_MINUTES, ROOT, type Config } from './config.ts';
 import { emit, type Store } from './store.ts';
 import { COMPACTING, isMidTurn, type AutoCompaction, type SessionHandle, type SessionManager } from './sessions.ts';
-import { CensusWatch, censusOf, type PortalCounted, type PortalSeen } from './agentCensus.ts';
+import { CensusWatch, censusOf, placementCountMode, placementCountOf, type PlacementCount, type PortalCounted, type PortalSeen } from './agentCensus.ts';
 import type { CatalogTool, LaunchSpec, ToolHandler } from './launch.ts';
 import type { RemoteVoiceStatus } from '../shared/voice.ts';
 import { AnsweredCalls } from './answeredCalls.ts';
@@ -1632,13 +1632,24 @@ export class MachineManager {
       const h = this.sessions.sessions.get(sid);
       return h ? { ...(h.info.machineId ? { machine: h.info.machineId } : {}), status: h.info.status, live: h.live } : undefined;
     };
-    const line = this.census.note(id, census, portal, seen, Date.now());
+    const line = this.census.note(id, census, portal, seen, Date.now(), { placement: placementCountMode(this.cfg.placementAgentCount), movedAway: movedAwayMode(this.cfg.movedAwayWorkers) });
     if (line) console.warn(`machine ${id}: ${line}`);
   }
 
-  /** The census `id`'s daemon sent last, and when (w5972; for the enforce stage, read by nothing that acts yet). */
+  /** The census `id`'s daemon sent last, and when (w5972; placement reads it with placementAgentCount "on", w5985). */
   daemonCensus(id: string) {
     return this.census.lastOf(id);
+  }
+
+  /**
+   * w5985: what placement counts on `id` with config placementAgentCount "on" (server/agentCensus.ts): capFull's count
+   * (midTurnTotal, turns sent and not yet reported included) and runningIn per sandbox of `sandboxes`, each the larger of
+   * that and its daemon's census while it is fresh. Undefined with "off" (the default): placement counts as before.
+   */
+  placementCount(id: string, sandboxes: readonly string[], now = Date.now()): (PlacementCount & { daemon?: number }) | undefined {
+    if (placementCountMode(this.cfg.placementAgentCount) !== 'on') return undefined;
+    const portal: PlacementCount = { midTurn: this.midTurnTotal(id), inSandbox: new Map(sandboxes.map((sb) => [sb, this.runningIn(id, sb)])) };
+    return placementCountOf(portal, this.census.lastOf(id), now);
   }
 
   /** Agents mid-turn on a machine, in its sandboxes and standing agents together: what its agent cap counts (w536). */

@@ -44,6 +44,41 @@ export const CENSUS_GRACE_MS = 60_000;
 /** A mismatch still there is warned of again this often. */
 export const CENSUS_REMIND_MS = 30 * 60_000;
 
+/**
+ * w5985, the enforce stage: config `placementAgentCount` (an owner's setting, set_app_config, read live, no restart).
+ * - "off" (unset, the default): placement counts a machine's sandbox sessions reported mid-turn, as before.
+ * - "on": placement counts as capFull and runningIn do (reported mid-turn, or a turn sent and not yet reported, sandboxes
+ *   and standing agents together), and takes the larger of that and its daemon's last census while the census is fresh
+ *   (under CENSUS_FRESH_MS old), per sandbox too. It only keeps work off a machine its daemon would refuse; it never stops,
+ *   drops or ends an agent (lothsahn's lockout rule). An agent only the daemon counts (a stale adopted host of a moved
+ *   request) is w5950's to stop (movedAwayWorkers "on"), and is counted here until its daemon stops counting it.
+ * Recovery needs nobody at the machine: "off" (or null) puts back the old count; a census older than CENSUS_FRESH_MS (a
+ * daemon that stopped reporting) or none (a daemon before w5972) is ignored by itself.
+ */
+export type PlacementCountMode = 'off' | 'on';
+
+/** The setting as read (unset or unknown is "off"). */
+export function placementCountMode(v: unknown): PlacementCountMode {
+  return v === 'on' ? 'on' : 'off';
+}
+
+/** A census older than this is no longer trusted for placement: three stats reports (every 15 s) have gone by. */
+export const CENSUS_FRESH_MS = 45_000;
+
+/** The portal's own count of a machine, as capFull counts it: in all, and per sandbox. */
+export type PlacementCount = { midTurn: number; inSandbox: ReadonlyMap<string, number> };
+
+/** The count placement uses with "on": the larger of the portal's count and the daemon's census, in all and per sandbox. */
+export function placementCountOf(portal: PlacementCount, last: { at: number; census: AgentCensus } | undefined, now: number): PlacementCount & { daemon?: number } {
+  const census = last && now - last.at >= 0 && now - last.at < CENSUS_FRESH_MS ? last.census : undefined;
+  if (!census) return portal;
+  const bySandbox = new Map<string, number>();
+  for (const a of census.midTurn) if (a.sandbox) bySandbox.set(a.sandbox, (bySandbox.get(a.sandbox) ?? 0) + 1);
+  const inSandbox = new Map(portal.inSandbox);
+  for (const [sb, n] of inSandbox) inSandbox.set(sb, Math.max(n, bySandbox.get(sb) ?? 0));
+  return { midTurn: Math.max(portal.midTurn, census.midTurn.length), inSandbox, daemon: census.midTurn.length };
+}
+
 type Pending = { since: number; reports: number };
 
 /**
@@ -67,7 +102,11 @@ export class CensusWatch {
     this.last.delete(machine);
   }
 
-  note(machine: string, census: AgentCensus, portal: readonly PortalCounted[], seen: (id: string) => PortalSeen, now: number): string | undefined {
+  /**
+   * `opts` (w5985): `placement` "on" says placement counts the larger of the two; `movedAway` is w5950's mode, named
+   * beside an agent only its daemon counts that the portal holds on another computer (a moved request's stale copy).
+   */
+  note(machine: string, census: AgentCensus, portal: readonly PortalCounted[], seen: (id: string) => PortalSeen, now: number, opts: { placement?: PlacementCountMode; movedAway?: string } = {}): string | undefined {
     this.last.set(machine, { at: now, census });
     const daemonIds = new Set(census.midTurn.map((a) => a.id));
     const portalIds = new Set(portal.map((p) => p.id));
@@ -92,18 +131,23 @@ export class CensusWatch {
     if (w && w.key === key && now - w.at < CENSUS_REMIND_MS) return undefined;
     this.warned.set(machine, { key, at: now });
     const last = new Set(lasting);
+    let elsewhere = 0;
     const dOnly = daemonOnly.filter((a) => last.has(`d:${a.id}`)).map((a) => {
       const s = seen(a.id);
+      if (s?.machine && s.machine !== machine) elsewhere++;
       const where = !s ? 'unknown to the portal' : s.machine && s.machine !== machine ? `on ${s.machine} for the portal` : `portal: ${s.status}${s.live ? '' : ', no process'}`;
       return `${describeCounted([a])} [${where}]`;
     });
     const pOnly = portalOnly.filter((p) => last.has(`p:${p.id}`)).map((p) => `${describeCounted([p])}${p.starting ? ' [sent, not yet reported]' : ''}`);
     const reported = portal.filter((p) => !p.starting).length;
+    const on = opts.placement === 'on';
+    const mode = opts.movedAway ?? 'warn';
     return [
-      `agent count: ${machine}'s daemon counts ${census.midTurn.length} agent(s) mid-turn (${describeCounted(census.midTurn)}), the portal ${portal.length} (${reported} reported mid-turn, which placement counts, and ${portal.length - reported} sent, not yet reported)`,
+      `agent count: ${machine}'s daemon counts ${census.midTurn.length} agent(s) mid-turn (${describeCounted(census.midTurn)}), the portal ${portal.length} (${reported} reported mid-turn${on ? '' : ', which placement counts'}, and ${portal.length - reported} sent, not yet reported)`,
       ...(dOnly.length ? [`counted by its daemon only: ${dOnly.join('; ')}`] : []),
+      ...(elsewhere ? [`w5950's movedAwayWorkers is "${mode}": ${mode === 'on' ? 'it stops a moved request\'s old worker at its daemon\'s next hello, once a started new worker holds its work' : 'with "on" it would stop a moved request\'s old worker at its daemon\'s next hello; nothing here does'}`] : []),
       ...(pOnly.length ? [`counted by the portal only: ${pOnly.join('; ')}`] : []),
-      'warn only: nothing is stopped or placed by it (w5972)',
+      on ? `placement counts the larger of the two (placementAgentCount "on", w5985); nothing is stopped by it` : 'warn only: nothing is stopped or placed by it (w5972)',
     ].join('; ');
   }
 }
