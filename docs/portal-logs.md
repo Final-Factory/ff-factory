@@ -188,7 +188,10 @@ is back, the same worker session's calls work again with nothing restarted. Read
    their own time and the portal's functions on the stack under them (the minute's totals), then up to three `stall profile:
    block of 1.4 s ending …` lines from the samples taken in each longest block alone (w2044: a once-a-second save sums to
    seconds a minute without ever being the block), and keeps the profile in `<dataDir>/profiles` (the
-   newest six; an ops worker opens one in Chrome DevTools' Performance panel). A window with no stall is dropped.
+   newest six; an ops worker opens one in Chrome DevTools' Performance panel). A window with no stall is dropped. A page's
+   state build of 300 ms or more gets its own line at its window's end, stall or none (w6382): `stall profile: state build
+   of 711 ms ending … Own time: … In the portal's functions: …`, from that build's samples alone (10 ms apart, so a
+   function under 10 ms may be missed); match it to the `page socket open` line whose phases it explains by the time.
 3. `regex: "review:|attachments:"` after that: a worker's publish landing (`publishes N file(s) … from <machine>`) is
    the proof that machine's path works again.
 

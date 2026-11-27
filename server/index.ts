@@ -207,7 +207,7 @@ setInterval(() => writeAlive(cfg.dataDir), 30_000);
 // A blocked event loop says so in the log, and /api/health carries the last minute's worst lag (w1377).
 const loopWatch = new LoopWatch().start();
 // A stall names the functions that held the loop, from V8's sampling profiler in this process (w2026, server/stallProfile.ts).
-if (!isDryRun) new StallProfiler({ dataDir: cfg.dataDir, worstLagSince: (t) => loopWatch.worstLagSince(t), blocksSince: (t) => loopWatch.blocksSince(t) }).start();
+const stallProfiler = isDryRun ? undefined : new StallProfiler({ dataDir: cfg.dataDir, worstLagSince: (t) => loopWatch.worstLagSince(t), blocksSince: (t) => loopWatch.blocksSince(t) }).start();
 
 const store = new Store(cfg.dataDir);
 // What each request costs (w859, docs/spend.md): fed by every transcript event, whether the session runs here or on a machine.
@@ -2861,6 +2861,8 @@ server.on('upgrade', (req, socket, head) => {
     const state = dropKeptParts(whole, q.get('parts'));
     const t1 = performance.now();
     phases.push(['kept', t1 - tKeep]);
+    // w6382: a slow build is named function by function in the journal at the profile window's end (stallProfile.ts noteSpan).
+    stallProfiler?.noteSpan('state build', t1 - t0);
     const first = JSON.stringify({ type: 'state', state } satisfies ServerEvent);
     const built = performance.now() - t0;
     firstStateUntil.set(ws, Date.now() + FIRST_STATE_GRACE_MS);

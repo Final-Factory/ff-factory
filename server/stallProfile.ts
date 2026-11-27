@@ -20,6 +20,14 @@ const SAMPLE_US = 10_000;
 const BLOCK_LINES = 3;
 /** Profiles kept. */
 const KEEP = 6;
+/**
+ * w6382: a page's state build at least this long gets a line of its own from the window's samples, stall or none: the open line's
+ * phases (pageSockets.ts phasesOf) say which part was slow, this says which functions in it (a phase of 150-290 ms on the
+ * portal's data was 3-5 ms on a synthetic one, so only the portal's own samples can name them).
+ */
+export const PROFILE_SLOW_SPAN_MS = 300;
+/** Slow spans of a window that get a line, the longest first. */
+const SPAN_LINES = 3;
 
 type CallFrame = { functionName: string; url: string; lineNumber: number; columnNumber: number };
 type ProfileNode = { id: number; callFrame: CallFrame; hitCount?: number; children?: number[] };
@@ -91,6 +99,8 @@ export class StallProfiler {
   private readonly worstLagSince: (since: number) => number;
   private readonly blocksSince: (since: number) => [number, number][];
   private readonly log: (line: string) => void;
+  /** Slow spans noted in this window (noteSpan): what, when it ended (epoch ms) and how long. */
+  private spans: { what: string; end: number; ms: number }[] = [];
 
   constructor(o: { dataDir: string; worstLagSince: (since: number) => number; blocksSince?: (since: number) => [number, number][]; log?: (line: string) => void }) {
     this.dir = path.join(o.dataDir, 'profiles');
@@ -126,6 +136,11 @@ export class StallProfiler {
     this.session = undefined;
   }
 
+  /** w6382: a span of work that took `ms` and ended now; one of PROFILE_SLOW_SPAN_MS or more is named at the window's end. */
+  noteSpan(what: string, ms: number, end = Date.now()) {
+    if (this.session && ms >= PROFILE_SLOW_SPAN_MS) this.spans.push({ what, end, ms });
+  }
+
   private begin() {
     this.windowStart = Date.now();
     this.session?.post('Profiler.start');
@@ -139,12 +154,25 @@ export class StallProfiler {
     const from = this.windowStart;
     const lag = this.worstLagSince(from);
     const blocks = this.blocksSince(from).filter(([, l]) => l >= PROFILE_STALL_MS);
+    const spans = this.spans;
+    this.spans = [];
     s.post('Profiler.stop', (err, res) => {
       this.begin();
       this.busy = false;
-      if (err || !res?.profile || lag < PROFILE_STALL_MS) return;
+      if (err || !res?.profile) return;
+      this.logSpans(res.profile as unknown as CpuProfile, from, spans);
+      if (lag < PROFILE_STALL_MS) return;
       void this.keep(res.profile as unknown as CpuProfile, lag, from, blocks);
     });
+  }
+
+  /** w6382: the slow spans' own lines, from their samples only; the profile itself is kept only for a stall (keep). */
+  logSpans(p: CpuProfile, from: number, spans: readonly { what: string; end: number; ms: number }[]) {
+    const fmt = (l: { fn: string; ms: number }[]) => l.map((x) => `${x.fn} ${x.ms} ms`).join('; ') || 'none';
+    for (const sp of [...spans].sort((a, b) => b.ms - a.ms).slice(0, SPAN_LINES)) {
+      const b = summarizeProfile(p, 10, [[sp.end - sp.ms - from, sp.end - from]]);
+      this.log(`stall profile: ${sp.what} of ${Math.round(sp.ms)} ms ending ${new Date(sp.end).toISOString()}. Own time: ${fmt(b.self)}. In the portal's functions: ${fmt(b.under)}`);
+    }
   }
 
   private async keep(p: CpuProfile, lag: number, from: number, blocks: [number, number][] = []) {
