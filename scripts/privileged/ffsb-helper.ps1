@@ -57,6 +57,8 @@ function Get-DedupMountPoints($e) {
   try { @((([xml]$e.ToXml()).Event.EventData.Data.'#text' | ConvertFrom-Json).Volume.MountPoints) } catch { @() }
 }
 function Test-DedupWatch {
+  # No event log to read (PowerShell off Windows, as in the helper's own tests): nothing to say.
+  if (-not (Get-Command Get-WinEvent -ErrorAction SilentlyContinue)) { return '' }
   try {
     $log = 'Microsoft-Windows-ReFsDedupSvc/Operational'
     $mp = "$($Letter):\"
