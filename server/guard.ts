@@ -8,6 +8,7 @@ import { daemonShell, daemonToolProblem, type DaemonReads } from './daemonReads.
 import { readTargets } from './secretGuard.ts';
 import { checkOffDriveScan, checkOutsideRootDelete } from './rootFence.ts';
 import { checkSystemTempWrite } from './tmpWriteFence.ts';
+import { junctionRmLogLine, junctionRmMessage, junctionRmScan } from './junctionRmWarn.ts';
 import { headBranch, isUrgentBranch } from './releaseHandBack.ts';
 import fs from 'node:fs';
 import { checkMainCloneShell, flatten, normPath, pathSpellings, spellingsRegex, type MainCloneGrant } from './mainCloneGuard.ts';
@@ -127,6 +128,13 @@ export function sandboxGuard(opts: {
    */
   tmpWriteEnforce?: boolean;
   /**
+   * w6266: on Windows, a Bash `rm -r` whose target folder holds a link (a junction Git Bash's rm deletes through) is logged
+   * and the agent warned; the command still runs (server/junctionRmWarn.ts). Absent: the platform decides (on for win32).
+   */
+  junctionRmWarn?: boolean;
+  /** Where the guard's warn lines go. Default: console.log with a timestamp (the daemon's log). */
+  log?: (line: string) => void;
+  /**
    * w3670: the machine daemon's folder (a protected path) and its install root: the worker READS the daemon's diagnostic files
    * there (server/daemonReads.ts DAEMON_READ_ALLOW), every other read there and of the install's secrets folder is refused, and
    * writes stay refused. Absent: the folder is only a protected path.
@@ -217,7 +225,20 @@ export function sandboxGuard(opts: {
       ? checkTiming(tool, args, { project: opts.sandboxPath, cwd, env: opts.env, root: opts.workerRoot, session: opts.session, sandbox: opts.sandboxId, host: opts.host, ownHold: opts.timingHold })
       : undefined;
 
-  return async (input) => {
+  const junctionWarn = opts.junctionRmWarn ?? (opts.platform ?? process.platform) === 'win32';
+  const log = opts.log ?? ((line: string) => console.log(`${new Date().toISOString()} ${line}`));
+  // w6266: the warning rides on a command every other check let through, never on a refusal, and never refuses itself.
+  const warned: HookCallback = async (input, toolUseID, o) => {
+    const r = await check(input, toolUseID, o);
+    if (!junctionWarn || input.hook_event_name !== 'PreToolUse' || input.tool_name !== 'Bash' || Object.keys(r).length) return r;
+    const args = (input.tool_input ?? {}) as Record<string, unknown>;
+    const scan = junctionRmScan(String(args.command ?? ''), { cwd: input.cwd || opts.sandboxPath, env: opts.env });
+    const line = junctionRmLogLine(opts.session ?? opts.env?.FF_SESSION_ID, scan);
+    if (line) log(line);
+    return scan.found.length ? { hookSpecificOutput: { hookEventName: 'PreToolUse' as const, additionalContext: junctionRmMessage(scan.found) } } : r;
+  };
+
+  const check: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
     const tool = input.tool_name;
     const args = (input.tool_input ?? {}) as Record<string, unknown>;
@@ -349,6 +370,7 @@ export function sandboxGuard(opts: {
     }
     return {};
   };
+  return warned;
 }
 
 const PROTECTED_BRANCH = /^(?:refs\/heads\/)?(?:master|main)$/i;
