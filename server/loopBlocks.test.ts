@@ -222,3 +222,79 @@ test('w6381: a drain delivers a message with no fresh start due inside its memo,
   assert.equal(freshAsked, 0, 'freshStart, which empties the memo, is not asked when none is due');
   assert.equal(frees, 1, 'the memo emptied once, for the send');
 });
+
+test('w6381: a drain checks a held computer\'s pause for each message inside its memo, emptying it only for a drop', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions } = env;
+  putRequests(store, [
+    { id: 'w1', by: LOTH, status: 'active' },
+    { id: 'w2', by: LOTH, status: 'active' },
+    { id: 'w3', by: LOTH, status: 'active' },
+  ]);
+  const a = await startedFor(env, 'w1');
+  const b = await startedFor(env, 'w2');
+  const c = await startedFor(env, 'w3');
+  for (const x of [a, b, c]) sessions.sessions.get(x.id)!.stop(true);
+  await until('their processes stopped', () => [a, b, c].every((x) => !sessions.sessions.get(x.id)?.live));
+  const s = sessions as unknown as {
+    placementFree: <T>(fn: () => T) => T;
+    machineHold?: (h: unknown) => string | undefined;
+    pauseHeld?: (h: unknown, text: string) => boolean;
+    roomMove?: unknown;
+  };
+  const free0 = s.placementFree;
+  let frees = 0;
+  s.placementFree = (fn) => (frees++, free0(fn));
+  s.machineHold = () => 'pc is on hold (a test hold)';
+  s.roomMove = undefined;
+  let asked = 0;
+  let paused = false;
+  s.pauseHeld = (_h, text) => (asked++, paused && /^\[FF Factory\] PAUSE:/.test(text));
+  sessions.send(a.id, 'carry on.');
+  sessions.send(b.id, 'carry on too.');
+  assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'both held');
+  asked = 0;
+  frees = 0;
+  sessions.drain();
+  assert.equal(asked, 2, 'each held message had its pause checked');
+  assert.equal(frees, 0, 'no check emptied the memo');
+  assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'both still wait for the hold');
+  // A pause notice queued before the pause began is dropped by the drain, and only that drop empties the memo.
+  sessions.send(c.id, '[FF Factory] PAUSE: pc is paused.');
+  assert.equal(sessions.queued().filter((q) => q.id === c.id).length, 1, 'the notice is held too');
+  paused = true;
+  frees = 0;
+  sessions.drain();
+  assert.equal(frees, 1, 'the drop emptied it once');
+  assert.equal(sessions.queued().filter((q) => q.id === c.id).length, 0, 'the notice went');
+  assert.equal(sessions.queued().filter((q) => q.id === a.id || q.id === b.id).length, 2, 'the others still wait');
+});
+
+test('w6428: a page build\'s placement (pageRead) works out each sandbox\'s FREE once, with the same answers and room', async (t) => {
+  const env = await setupOnMachine(t, {}, { sandboxes: ['alpha', 'beta', 'gamma', 'delta'] });
+  const { agents, store } = env;
+  const sbs = store.machines.get('pc')!.sandboxes!;
+  const read = () => ({ free: agents.sandboxesFree('pc', sbs), room: agents.roomNow(), extras: agents.roomExtras() });
+  let f0 = agents.freeMade;
+  const before = agents.withPlacesOnce(() => agents.placeAgain.withClaimsMemo(read));
+  const askedBefore = agents.freeMade - f0;
+  f0 = agents.freeMade;
+  const after = agents.pageRead(read);
+  assert.deepEqual(after.free, before.free);
+  assert.deepEqual(after.room, before.room);
+  assert.deepEqual(after.extras, before.extras);
+  assert.equal(agents.freeMade - f0, sbs.length, `once per sandbox (${askedBefore} times outside pageRead)`);
+  assert.ok(askedBefore > sbs.length, `outside pageRead each sandbox was asked more than once (${askedBefore})`);
+  // A sandbox the daemon reported again is a new object: asked afresh, not answered from the memo.
+  agents.pageRead(() => {
+    agents.sandboxesFree('pc', sbs);
+    f0 = agents.freeMade;
+    agents.sandboxesFree('pc', sbs.map((sb) => ({ ...sb })));
+    assert.equal(agents.freeMade - f0, sbs.length);
+  });
+  // Outside pageRead nothing is kept.
+  f0 = agents.freeMade;
+  agents.sandboxFree('pc', sbs[0]);
+  agents.sandboxFree('pc', sbs[0]);
+  assert.equal(agents.freeMade - f0, 2);
+});
