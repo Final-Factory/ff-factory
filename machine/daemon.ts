@@ -4115,8 +4115,8 @@ export class Daemon {
   private linuxEditorMemo?: { fence?: LandlockEditorFence };
   /**
    * w5631 (w5540 stage 3): the Linux editor fence, decided once: the workers' Landlock write rules (only while their write
-   * lock is on and probed) with `<root>/home` as the editor's HOME (machine/unity.ts LandlockEditorFence). Warn-only unless
-   * daemon.json says `editorFence: true`. Probed with a no-op first: rules the kernel refuses leave editors unfenced, as
+   * lock is on and probed) with `<root>/home` as the editor's HOME (machine/unity.ts LandlockEditorFence). Off unless
+   * daemon.json says `editorFence: true`, which enforces. Probed with a no-op first: rules the kernel refuses leave editors unfenced, as
    * before, and say so in the log.
    */
   private linuxEditorFence(): LandlockEditorFence | undefined {
@@ -4125,7 +4125,11 @@ export class Daemon {
     try {
       const root = this.cfg.root;
       const agents = this.writeLock;
-      if (!agents || !root) log('editor fence: sandbox editors start unfenced (the Landlock write lock is off here)');
+      // w5631: off unless daemon.json says `editorFence: true`. Any Landlock domain, warn-only too, forbids mount topology
+      // changes (kernel docs, "Current limitations"), so GTK's glycin image loader (bwrap --unshare-all) fails and a
+      // windowed editor aborts at start (biscuit, 2026-11-27: "Gtk:ERROR ... Loader process exited early").
+      if (this.cfg.editorFence !== true) log("editor fence: sandbox editors start unfenced (Landlock breaks GTK's sandboxed image loader, so a windowed editor aborts; editorFence true fences them)");
+      else if (!agents || !root) log('editor fence: sandbox editors start unfenced (the Landlock write lock is off here)');
       else {
         fence = linuxEditorFenceFor(this.lockRules(root, path.join(root, 'home'), !!this.lockMemo?.transcripts), root, this.cfg.editorFence === true ? 'enforce' : 'warn')!;
         const probe = probeFence(['python3', FF_LANDLOCK, ...fence.args, '--', '/bin/true']);
