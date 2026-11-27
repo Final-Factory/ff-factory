@@ -179,6 +179,20 @@ job starts at 08:00Z, which is 03:00 local, even though the task's trigger and `
 from 2026-11-12 to 11-19). Total savings fell from 238 GB to 203 GB between 11-17 and 11-19 while every run
 succeeded. That is the decay described below, not a fault.
 
+**A remount of V: can stop the dedup service watching it (w6573).** Each time V: is detached and attached again (the
+helper's `mount`, `compact` and `grow`, or a tool that remounts the VHDX), `ReFsDedupSvc` should log event 6, "started
+monitoring" V:. Twice it did not, and the daily job then failed or never ran until the service restarted (measured):
+after a remount on 2026-11-08 20:33Z no event 6 came until the 11-09 08:00Z job itself started the service (job
+started 08:00:02, service 08:00:26, event 6 08:00:39), that job never logged an end, and nothing ran until the 11-11
+reboot; a remount on 11-26 05:00Z was followed by no event 6, the 11-26 08:00Z job failed with 0x80070015
+(ERROR_NOT_READY) and no job ran after it, with the volume's scheduled task stuck in Running. An administrator's
+`Restart-Service refsdedupsvc` (and stopping the stuck task) brought event 6 back at 2026-11-27 23:00Z. The helper's
+`mount`, `compact` and `grow` now wait up to a minute for event 6 after their remount and, when none comes, say so in
+their result (warn only; they restart nothing). To check by hand without admin:
+`Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-ReFsDedupSvc/Operational'; Id=6} -MaxEvents 3`, and compare
+its time with V:'s last remount. A remount logs no event 7 ("stopped monitoring") there; only the service's own stop
+did (2026-11-27 22:59Z, measured).
+
 The full log is `C:\ProgramData\ffsb-helpers\results\refs-dedup-trial.log`. To undo:
 `Clear-ReFSDedupSchedule -Volume V:` then `Disable-ReFSDedup -Volume V:`. Data already shared stays shared (sourced).
 

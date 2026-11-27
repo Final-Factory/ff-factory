@@ -43,6 +43,29 @@ function Done([bool]$ok, [string]$detail) {
   [IO.File]::WriteAllText((Join-Path $ResultDir "$Action.json"), ($r | ConvertTo-Json -Compress))
   exit ([int](!$ok))
 }
+# w6573: after the drive is detached and attached again, the ReFS dedup service (refsdedupsvc) may stop deduplicating it
+# until the service restarts. On LothDesktop's V: it happened twice (measured from the ReFS and ReFsDedupSvc logs):
+# a remount on 2026-11-08 20:33Z, then the 11-09 job never finished and none ran until the 11-11 reboot; and the grow's
+# remount on 11-26 05:00Z, then the 11-26 job failed after 2 s with 0x80070015 (not ready) and none started after it. Each
+# time the service logged no event 6 ("started monitoring a volume") for the drive after the remount, while every service
+# start (boot) logs one. Warn first (lothsahn's lockout rule): say so in the result and name the recovery, which an
+# administrator runs (`Restart-Service refsdedupsvc`); restarting it here comes in a later change. '' when dedup is not
+# enabled on the drive, or the service did log event 6 for it since $since.
+function Test-DedupWatch([datetime]$since) {
+  try {
+    if (-not (Get-Command Get-ReFSDedupStatus -ErrorAction SilentlyContinue)) { return '' }
+    $vol = "$($Letter):"
+    $en = Get-ReFSDedupStatus -Volume $vol -ErrorAction Stop
+    if (-not $en.Enabled) { return '' }
+    for ($i = 0; $i -lt 12; $i++) {
+      $ev = Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-ReFsDedupSvc/Operational'; Id = 6; StartTime = $since } -ErrorAction SilentlyContinue |
+        Where-Object { $_.Message.Contains("$($Letter):\") }
+      if ($ev) { return '' }
+      Start-Sleep -Seconds 5
+    }
+    return "; warn-only (w6573): the ReFS dedup service logged no 'started monitoring' for $vol since $($since.ToUniversalTime().ToString('s'))Z, so its scheduled dedup may not run again until the service restarts (an administrator: Restart-Service refsdedupsvc)"
+  } catch { return "; dedup watch not checked (w6573): $($_.Exception.Message)" }
+}
 
 try {
   switch ($Action) {
@@ -62,10 +85,11 @@ try {
         $script:Letter = $pref.ToUpper()
         if ((Get-OwnLetter) -eq $script:Letter) { Done $true "$($Letter): is already there" }
       } elseif (Drive) { Done $true "$($Letter): is already there" }
+      $t0 = Get-Date
       Mount-DevDrive
       $detail = "attached $Vhdx as $($Letter):"
       if ($LetterChangedFrom) { $detail = "$detail; the letter changed from $($LetterChangedFrom): to $($Letter): ($(Update-LetterDependents $LetterChangedFrom $Letter))" }
-      Done $true $detail
+      Done $true "$detail$(Test-DedupWatch $t0)"
     }
     'trim' {
       if (-not (Drive)) { Done $false "$($Letter): is not mounted" }
@@ -86,6 +110,7 @@ try {
       if (Drive) { Optimize-Volume -DriveLetter $Letter -ReTrim -ErrorAction SilentlyContinue }
       $how = ''
       if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
+      $t0 = Get-Date
       Dismount-DiskImage -ImagePath $Vhdx | Out-Null
       try {
         if (Get-Command Optimize-VHD -ErrorAction SilentlyContinue) {
@@ -113,6 +138,7 @@ try {
       $after = (Get-Item $Vhdx).Length
       $freed = ($before - $after) / 1GB
       $msg = "{0}: {1:N1} GB -> {2:N1} GB (reclaimed {3:N1} GB), {4}: reattached" -f $how, ($before / 1GB), ($after / 1GB), $freed, $Letter
+      $msg = "$msg$(Test-DedupWatch $t0)"
       if ($freed -lt 1) { Done $false "compaction reclaimed nothing: $msg" }
       Done $true $msg
     }
@@ -132,6 +158,7 @@ try {
       if ($users) { Done $false "refused: $(@($users).Count) Unity editor(s) use $($Letter): (stop them first)" }
       if ($Flex) { $own = Get-OwnLetter; if ($own) { $script:Letter = $own } }
       if (Drive) { Write-VolumeCache -DriveLetter $Letter -ErrorAction SilentlyContinue }
+      $t0 = Get-Date
       if ((Get-DiskImage -ImagePath $Vhdx).Attached) { Dismount-DiskImage -ImagePath $Vhdx | Out-Null }
       $out = ''
       try {
@@ -150,7 +177,7 @@ try {
       $st.PSObject.Properties.Remove('wantGB')
       $st | Add-Member -NotePropertyName maxGB -NotePropertyValue $want -Force
       [IO.File]::WriteAllText($StateFile, ($st | ConvertTo-Json -Depth 8))
-      Done $true ("grew {0}: from {1} to {2} GB (its volume {3:N1} -> {4:N1} GB); devdrive.json says {2} GB" -f $Letter, $have, $want, ($before / 1GB), ($after / 1GB))
+      Done $true (("grew {0}: from {1} to {2} GB (its volume {3:N1} -> {4:N1} GB); devdrive.json says {2} GB" -f $Letter, $have, $want, ($before / 1GB), ($after / 1GB)) + (Test-DedupWatch $t0))
     }
     'detach' {
       # For the recovery self-test (host_recovery "selftest"): the drive goes away as it did on 2026-09-24, and the
