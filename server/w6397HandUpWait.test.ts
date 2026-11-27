@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BlockerWatch } from './blockerWatch.ts';
-import { BEN, firstTurn, setupOnMachine } from './orchestratorsTestKit.ts';
+import { BEN, firstTurn, setupOnMachine, until } from './orchestratorsTestKit.ts';
 import { blockerName } from '../shared/blockers.ts';
 import { handUpWaitIn, handUpWaitRef, workLive } from '../shared/workState.ts';
 
@@ -13,12 +13,30 @@ const W6096_LINE = 'w1: still open: blocked on a fix for the flaky ffu-server ga
 
 test('w6397: a line waits on a handed-up follow-up only when the wait itself says so', () => {
   assert.equal(handUpWaitIn(W6096_LINE), true);
-  for (const line of ['w1: still open: blocked on the follow-up I handed up', 'w9: still open: waiting for the hand-up to be fixed', 'needs the follow-up request to land']) assert.equal(handUpWaitIn(line), true, line);
+  for (const line of [
+    'w1: still open: blocked on the follow-up I handed up',
+    'w9: still open: waiting for the hand-up to be fixed',
+    'w1: still open: blocked on the gateway fix (a follow-up), then CI on PR #12',
+    'w1: still open: waits on the handed-up follow-up request',
+  ])
+    assert.equal(handUpWaitIn(line), true, line);
   for (const line of [
     'w1: still open: blocked on CI on Final-Factory/ffu#1213; the follow-up is handed up',
     'w1: still open: blocked on CI on PR #12, then the follow-up',
     'Handed up two follow-ups. w1: still open: blocked on CI on PR #12',
     'w1: still open: waiting on "the follow-up" review',
+    // w6401 (the review of PR #1459): its probe lines, each a wait on something else.
+    'w1: still open: blocked on CI on PR #12, and the follow-up is handed up separately',
+    'w1: still open: blocked on CI on PR #12; nothing here needs the follow-up',
+    'w1: still open: blocked on CI on PR #12, not on the follow-up I handed up',
+    'w1: still open: needs the follow-up request to land',
+    'w1: still open: blocked on CI on PR #12 and the follow-up I handed up stays separate',
+    'w1: still open: blocked on CI on PR #12 but not on the follow-up',
+    'w1: still open: blocked on CI (the follow-up is handed up separately)',
+    'w1: still open: not blocked on the follow-up I handed up; waiting on Ben to decide',
+    "w1: still open: isn't waiting on the follow-up I handed up",
+    'w1: still open: no longer blocked on the hand-up',
+    'w1: still open: until the follow-up lands, nothing',
   ])
     assert.equal(handUpWaitIn(line), false, line);
   const work = new Map([['w2', { status: 'done' as const }], ['w3', { status: 'active' as const }], ['w4', { status: 'queued' as const }]]);
@@ -98,4 +116,23 @@ test('w6397: a worker mid-turn when its follow-up is filed is told the id, to wa
   const fid = /Filed (w\d+)/.exec((await call(ben, 'file_follow_ups', { request: 'w1' })).text)![1];
   assert.match(agents.waker.pending(id)?.note ?? '', new RegExp(`^\\[follow-up filed\\] The follow-up you handed up for w1, ".*", is filed as ${fid} \\(w6397\\)\\. If w1 waits on it, call blocked_on with requests \\["${fid}"\\]`));
   assert.ok(w().log.some((l) => l.includes(`is told its follow-up's id ${fid} (w6397)`)));
+});
+
+test('w6397: a line that only mentions its follow-up is no wait on it: no gate, so the request is not shown Blocked (w6401)', async (t) => {
+  const { store, ben, call, info, clock, watch, w } = await handedUp(t);
+  Object.assign(info, { status: 'stopped', lastResult: 'w1: still open: blocked on CI on PR #12, and the follow-up is handed up separately', lastResultAt: new Date(clock - 60_000).toISOString() });
+  const fid = /Filed (w\d+)/.exec((await call(ben, 'file_follow_ups', { request: 'w1' })).text)![1];
+  assert.ok(store.work.get(fid));
+  assert.equal((await watch.tick()).get('w1')?.startsWith('recorded:') ?? false, false);
+  assert.ok(!w().blocked || w().blocked?.ref !== fid, JSON.stringify(w().blocked));
+});
+
+test('w6397: a worker that says DONE after it was told its follow-up id mid-turn is not resumed for it (w6401)', async (t) => {
+  const { agents, ben, call, id, info, sessions, w } = await handedUp(t);
+  info.status = 'running';
+  await call(ben, 'file_follow_ups', { request: 'w1' });
+  assert.match(agents.waker.pending(id)?.note ?? '', /^\[follow-up filed\]/);
+  sessions.events.emit('turnEnd', sessions.get(id), 'Fixed it; the flaky test is its own request.\n\nDONE: w1\nLearned: nothing new');
+  await until('its DONE is recorded', () => !!w().done?.[id]);
+  assert.equal(agents.waker.pending(id), undefined, 'the [follow-up filed] wake is cancelled');
 });

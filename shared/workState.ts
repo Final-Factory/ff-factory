@@ -364,13 +364,25 @@ export function requestWaitOf(line: string, selfId: string): string | undefined 
  * w6397: a wait on a follow-up the worker handed up (hand_up_requests, w2969), which has no id in the line because the worker
  * was never told one: cc0f9074 on w6096 wrote "w6096: still open: blocked on a fix for the flaky ffu-server gateway_standby
  * test (handed up), then CI on Final-Factory/ffu#1213" at 01:29 UTC on 2026-11-27, its follow-up was filed as w6254 that
- * minute, and w6096 sat Stalled 8 h after w6254 closed as done. The wait's own words (up to a ; or ., or a "then") must say
- * handed up or follow-up.
+ * minute, and w6096 sat Stalled 8 h after w6254 closed as done. Only a stated wait counts ("blocked on", "waiting for/on",
+ * "waits for/on"; not "needs" or "until", which also describe work), and not a negated one ("not blocked on", "no longer
+ * waiting on"). Its own clause, cut at a , ; . or "then", "and", "but", "not", must name the hand-up or follow-up. A bracket
+ * counts only when it says nothing else ("(handed up)"): "blocked on CI (the follow-up is handed up separately)" is a wait
+ * on CI. w6401 (the review of PR #1459) gated requests on such lines, and they showed Blocked, not Stalled.
  */
 const HANDED_UP = /\bhand(?:ed)?[- ]?ups?\b|\bfollow[- ]?ups?\b/i;
+const HAND_UP_WAIT = /\b(?:blocked on|waiting (?:for|on)|waits (?:for|on))\b([^;.]{0,140})/gi;
+const HAND_UP_BRACKET = /^\s*(?:handed[- ]up|hand[- ]?up|(?:an?|the|my)?\s*follow[- ]?up(?: request)?(?: I handed up)?)\s*$/i;
+const NEGATED = /(?:\b(?:not|never|no longer|nothing|none)|n't)\s+(?:(?:be|been|being|is|am|are|was|currently|yet|really)\s+)*$/i;
 export function handUpWaitIn(line: string): boolean {
-  const body = line.replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '').replace(QUOTED, ' ');
-  for (const m of body.matchAll(WAITS_ON_WORK)) if (HANDED_UP.test(m[1].split(/\bthen\b/i)[0])) return true;
+  const body = line
+    .replace(/^\s*w\d+\s*[:—–-]\s*(?:still open|not done)\s*:?/i, '')
+    .replace(QUOTED, ' ')
+    .replace(/\(([^()]*)\)/g, (_, inner: string) => (HAND_UP_BRACKET.test(inner) ? ` ${inner} ` : ' '));
+  for (const m of body.matchAll(HAND_UP_WAIT)) {
+    if (NEGATED.test(body.slice(0, m.index))) continue;
+    if (HANDED_UP.test(m[1].split(/,|\b(?:then|and|but|not)\b/i)[0])) return true;
+  }
   return false;
 }
 

@@ -7580,6 +7580,8 @@ ${x.pair ? `It is a pair run (w2426): the host leg's (leg 1) report with a line 
       w.done = { ...doneOf(w), [s.id]: { at: this.now().toISOString(), report, text: (was ? `${was}\n\n${text}` : text).slice(-DONE_TEXT_CHARS) } };
       this.releaseAfterDone(w);
       if (!ops) this.dropWorkerWaitsOf(w, s.id);
+      // w6397: its follow-up's id, sent mid-turn (tellFollowUpFiled), would resume it after this DONE for nothing (w6401).
+      if (this.d.pendingWake?.(s.id)?.note.startsWith(`[follow-up filed] The follow-up you handed up for ${w.id},`)) this.d.cancelWake?.(s.id);
       const others = this.stillOn(w, s.id);
       if (others.length && !ops) this.tellLegsRunOver(w, s.id, others);
       if (others.length) {
