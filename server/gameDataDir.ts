@@ -112,19 +112,27 @@ export const INSTALLED_BUILD: readonly RegExp[] = [
 
 /**
  * w6467 (w6463's review of PR #1487): a match is no other player when it is the PR's own build ("a release player of the PR
- * head", "the Steam game client of the PR build": at most two words, then of/at/from/for/on the PR head or build), or when
- * "release" is the build config (next to debug or development, or "build a release player"). Only those: "the published 0.50
- * player and the PR head" keeps the mark, failing closed.
+ * head", "the Steam game client of the PR build": at most two build nouns, then of/at/from/for/on the PR head or build), or
+ * when "release" is the build config ("a debug or release build", or "build a release player" with no pre-1.0 or 0.50 after
+ * it). Only those: "the published 0.50 player and the PR head" keeps the mark, failing closed.
  */
 export function excusedBuild(said: string, at: number, words: string): boolean {
-  const after = said.slice(at + words.length);
-  if (/^\s+(?:[\w.-]+\s+){0,2}?(?:of|at|from|for|on)\s+(?:the\s+)?(?:PR|pull request)(?:'s)?\s+(?:head|build)\b/i.test(after)) return true;
-  if (!/\brelease\b/i.test(words)) return false;
+  // w6469's review: never excused are a match that names an installed copy (published, shipped, live, ...) and Steam with a
+  // version ("Steam 0.50"): both name a build no commit is, whatever follows.
   const before = said.slice(0, at);
+  // The word just before counts too: "the published release or debug build" matches from "release".
+  if (/\b(?:installed|downloaded|published|public|released|shipped|live|retail)\b/i.test(`${/(\S+)\s+$/.exec(before)?.[1] ?? ''} ${words}`)) return false;
+  if (/\bsteam(?:'s)?\s+(?:pre-1\.0|0\.50)/i.test(words)) return false;
+  const after = said.slice(at + words.length);
+  // Only build nouns between the match and "of the PR head": "and clients on the PR head" or "host joins from the PR build"
+  // names a second player, so it keeps the mark (w6469).
+  if (/^\s+(?:(?:game\s+)?(?:build|player|client|copy|version|binary)s?\s+){0,2}?(?:of|at|from|for|on)\s+(?:the\s+)?(?:PR|pull request)(?:'s)?\s+(?:head|build)\b/i.test(after)) return true;
+  if (!/\brelease\b/i.test(words)) return false;
   return /\b(?:debug|development|dev)\b/i.test(words)
-    || /\b(?:debug|development|dev)\s*(?:or|and|vs\.?|versus|\/|,)\s*$/i.test(before)
-    || /^\s*(?:or|and|vs\.?|versus|\/|,)\s*(?:debug|development|dev)\b/i.test(after)
-    || (/\bbuild(?:s|ing)?\s+an?\s+$/i.test(before) && /^release\b/i.test(words));
+    || /\b(?:debug|development|dev)\s+(?:or|and|vs\.?|versus)\s+$/i.test(before)
+    || /^\s+(?:or|and|vs\.?|versus)\s+(?:debug|development|dev)\b/i.test(after)
+    // "build a release player", but not "builds a release build of pre-1.0": that names the line's release (w6469).
+    || (/\bbuild(?:s|ing)?\s+an?\s+$/i.test(before) && /^release\b/i.test(words) && !/\b(?:pre-1\.0|0\.50)\b/i.test(after));
 }
 
 /** The first INSTALLED_BUILD match in said that excusedBuild does not excuse (w6467). */
