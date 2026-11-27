@@ -961,6 +961,8 @@ export interface VaultContext {
   usageOf?: (fingerprint: string) => PlanUsage | undefined;
   /** Live processes on a token, not counting `exceptSession`'s own. */
   liveOn?: (fingerprint: string, exceptSession?: string) => number;
+  /** w6381: liveOn for one pick, counted in one pass (secrets.ts liveCounter); used before liveOn when set. */
+  liveOnNow?: () => (fingerprint: string, exceptSession?: string) => number;
   /** The system-wide pool limits in effect (config vault.pool), read at each pick. */
   limits?: PoolLimitsOf;
   /** Whether a Claude entry (by fingerprint) is also the dispatcher's credential or the host token, and for whom its reserve is kept (w971). */
