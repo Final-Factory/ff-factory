@@ -1,7 +1,7 @@
 // A computer's desktop session (w2459, rerun 2 of w2460, 2026-10-28: the host leg went to m5, signed in to Steam but with its
 // screen locked, and the game's menus take no clicks on a Mac with a locked screen, so neither check ran). The daemon reads it
 // beside its Steam client (machine/steamClient.ts): on macOS CGSessionCopyCurrentDictionary (machine/macDialogs.ts
-// SESSION_SCRIPT), on Windows whether LogonUI.exe (the lock screen) runs. A pair run whose legs click the game's menus (every
+// SESSION_SCRIPT), on Windows whether LogonUI.exe (the lock screen) runs, on Linux (w6311) GNOME's ScreenSaver or loginctl. A pair run whose legs click the game's menus (every
 // pair that needs Steam, a request_pair `menus` mark, or words that name a menu, a lobby or a click) goes only where it is
 // unlocked (shared/capacity.ts unfitWhy), and a leg is refused on a locked one (server/agents.ts startPairLegs).
 import type { WorkPair } from './types.ts';
@@ -13,23 +13,66 @@ export interface DesktopSession {
   locked?: boolean;
   /** Another user has the console (macOS fast user switching: kCGSSessionOnConsoleKey false). */
   away?: boolean;
+  /**
+   * Linux only (w6311): what read it. "gnome": org.gnome.ScreenSaver GetActive; "loginctl": the graphical session's
+   * LockedHint or IdleHint; "none": neither could tell (no GNOME, no graphical session), which counts as locked for work
+   * that draws a window. A Windows or Mac reading has none.
+   */
+  via?: LinuxLockVia;
+}
+
+export type LinuxLockVia = 'gnome' | 'loginctl' | 'none';
+const VIAS: readonly LinuxLockVia[] = ['gnome', 'loginctl', 'none'];
+
+/**
+ * Whether placement acts on a Linux reading (w6311). w6282, a windowed pair run, went on biscuit/slot3 behind a locked GNOME
+ * desktop (GetActive answered (true,), its session idle 4 days) and drew no frames, because a Linux daemon reported no
+ * session and that locked nothing out. lothsahn's lockout rule: warn first (linuxLockWarn logs "would not place"), enforce
+ * in its own PR.
+ */
+export const LINUX_LOCK_ENFORCED = false;
+
+/** The reading placement acts on: a Linux one only once LINUX_LOCK_ENFORCED, its "can't tell" then counting as locked. */
+function heeded(d: DesktopSession | undefined): DesktopSession | undefined {
+  if (!d?.via) return d;
+  if (!LINUX_LOCK_ENFORCED) return undefined;
+  return d.via === 'none' ? { ...d, locked: true } : d;
+}
+
+/** A Linux reading's why, for a refusal: how it was read, or that it could not be. */
+const viaWhy = (d: DesktopSession | undefined): string => (d?.via === 'none' ? " (its lock state can't be read: no GNOME screensaver and no graphical loginctl session, which counts as locked)" : d?.via ? ` (read by ${d.via})` : '');
+
+/**
+ * "would not place: biscuit screen locked (gnome)" while a Linux reading is warn-only (w6311): what LINUX_LOCK_ENFORCED would
+ * refuse, for work that draws a window or clicks the game's menus. Undefined once enforced, or when nothing would be refused.
+ */
+export function linuxLockWarn(id: string, d: DesktopSession | undefined): string | undefined {
+  if (LINUX_LOCK_ENFORCED || !d?.via) return undefined;
+  if (d.via === 'none') return `would not place: ${id} screen lock unknown (no GNOME screensaver and no graphical loginctl session; w6311 counts that as locked once enforced)`;
+  return d.locked ? `would not place: ${id} screen locked (${d.via}; w6311, warn-only)` : undefined;
 }
 
 export function sanitizeDesktop(raw: unknown): DesktopSession | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const r = raw as Record<string, unknown>;
   if (typeof r.checkedAt !== 'string' || Number.isNaN(Date.parse(r.checkedAt))) return undefined;
-  return { checkedAt: new Date(r.checkedAt).toISOString(), ...(r.locked === true ? { locked: true } : {}), ...(r.away === true ? { away: true } : {}) };
+  const via = VIAS.find((v) => v === r.via);
+  return { checkedAt: new Date(r.checkedAt).toISOString(), ...(r.locked === true ? { locked: true } : {}), ...(r.away === true ? { away: true } : {}), ...(via ? { via } : {}) };
 }
 
-/** Why computer `id`'s game menus take no clicks now, or undefined: unlocked, or never reported (Linux, an older daemon). */
-export function desktopLacks(id: string, d: DesktopSession | undefined): string | undefined {
-  if (d?.locked) return `${id}'s screen is locked`;
+/** Why computer `id`'s game menus take no clicks now, or undefined: unlocked, or never reported (an older daemon). */
+export function desktopLacks(id: string, raw: DesktopSession | undefined): string | undefined {
+  const d = heeded(raw);
+  if (d?.locked) return `${id}'s screen is locked${viaWhy(d)}`;
   if (d?.away) return `${id}'s console is another user's session`;
   return undefined;
 }
 
-export const desktopLabel = (d: DesktopSession | undefined): string => (!d ? 'not reported' : d.locked ? 'locked' : d.away ? "another user's session" : 'unlocked');
+export const desktopLabel = (d: DesktopSession | undefined): string => {
+  if (!d) return 'not reported';
+  const base = d.via === 'none' ? "unknown (no GNOME screensaver, no graphical loginctl session)" : d.locked ? 'locked' : d.away ? "another user's session" : 'unlocked';
+  return d.via && d.via !== 'none' ? `${base} (${d.via}${LINUX_LOCK_ENFORCED ? '' : ', warn-only'})` : d.via && !LINUX_LOCK_ENFORCED ? `${base}, warn-only` : base;
+};
 
 const MENU_WORDS = [/\bmenus?\b/i, /\blobb(y|ies)\b/i, /\bclick(s|ed|ing)?\b/i, /\bbuttons?\b/i, /\bdialogs?\b/i];
 
@@ -94,8 +137,9 @@ export function needsWindow(w: { title?: string; brief?: string; notes?: readonl
 }
 
 /** "screen locked on m3": why work that draws a window does not go on computer `id` now, or undefined (desktopLacks). */
-export function windowLacks(id: string, d: DesktopSession | undefined): string | undefined {
-  if (d?.locked) return `screen locked on ${id}`;
+export function windowLacks(id: string, raw: DesktopSession | undefined): string | undefined {
+  const d = heeded(raw);
+  if (d?.locked) return `screen locked on ${id}${viaWhy(d)}`;
   if (d?.away) return `${id}'s console is another user's session`;
   return undefined;
 }
