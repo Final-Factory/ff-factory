@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { gitSpawnSync } from '../server/safeGit.ts';
+import { gitOffThread } from '../server/safeGit.ts';
 
 type PlatformPath = typeof path.posix;
 
@@ -137,7 +137,7 @@ const REFRESHED = 'ff-refreshed';
 
 export interface TrustedRefreshDeps {
   /** git, run synchronously: the guard answers a tool call synchronously (server/guard.ts). */
-  git?: (args: string[]) => { code: number; stderr: string };
+  git?: (args: string[]) => { code: number; stderr: string } | Promise<{ code: number; stderr: string }>;
   now?: () => number;
   /** The host's environment for git: never the worker's PATH or git settings. */
   env?: NodeJS.ProcessEnv;
@@ -149,12 +149,13 @@ export interface TrustedRefreshDeps {
  * clone goes to a folder of its own and is renamed into place, so two agent hosts never see half a clone. Answers what
  * failed, or undefined; a failed fetch leaves the copy it had.
  */
-export function refreshTrustedCheckout(co: string, d: TrustedRefreshDeps = {}, opts: { maxAgeMs?: number; force?: boolean } = {}): string | undefined {
+export async function refreshTrustedCheckout(co: string, d: TrustedRefreshDeps = {}, opts: { maxAgeMs?: number; force?: boolean } = {}): Promise<string | undefined> {
   const now = d.now ?? Date.now;
   const env: NodeJS.ProcessEnv = { ...(d.env ?? process.env), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' };
-  const git = d.git ?? ((args: string[]) => {
-    const r = gitSpawnSync([...ANON_GIT, ...args], { encoding: 'utf8', timeout: 2 * 60_000, windowsHide: true, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    return { code: r.status ?? 1, stderr: String(r.stderr || r.error?.message || '') };
+  // w6237: the guard refreshes this inside the portal: its clone and fetch run on the probe thread, never on the loop.
+  const git = d.git ?? (async (args: string[]) => {
+    const r = await gitOffThread([...ANON_GIT, ...args], { env, timeoutMs: 2 * 60_000 });
+    return { code: r.code < 0 ? 1 : r.code, stderr: r.stderr };
   });
   const said = (r: { code: number; stderr: string }) => r.stderr.replace(/\s+/g, ' ').trim().slice(0, 200) || `exit ${r.code}`;
   const marker = path.join(co, '.git', REFRESHED);
@@ -162,7 +163,7 @@ export function refreshTrustedCheckout(co: string, d: TrustedRefreshDeps = {}, o
     if (!fs.existsSync(path.join(co, '.git'))) {
       fs.mkdirSync(path.dirname(co), { recursive: true });
       const tmp = `${co}.clone-${process.pid}-${now()}`;
-      const r = git(['clone', '--quiet', '--depth', '1', '--branch', AGENTS_BRANCH, AGENTS_REPO, tmp]);
+      const r = await git(['clone', '--quiet', '--depth', '1', '--branch', AGENTS_BRANCH, AGENTS_REPO, tmp]);
       if (r.code !== 0) {
         fs.rmSync(tmp, { recursive: true, force: true });
         return `git clone ${AGENTS_REPO}: ${said(r)}`;
@@ -180,9 +181,9 @@ export function refreshTrustedCheckout(co: string, d: TrustedRefreshDeps = {}, o
     let age = Infinity;
     try { age = now() - fs.statSync(marker).mtimeMs; } catch { /* never refreshed */ }
     if (!opts.force && age < (opts.maxAgeMs ?? TRUSTED_MAX_AGE_MS)) return undefined;
-    const f = git(['-C', co, 'fetch', '--quiet', '--depth', '1', 'origin', AGENTS_BRANCH]);
+    const f = await git(['-C', co, 'fetch', '--quiet', '--depth', '1', 'origin', AGENTS_BRANCH]);
     if (f.code !== 0) return `git fetch in ${co}: ${said(f)}`;
-    const r = git(['-C', co, 'reset', '--quiet', '--hard', 'FETCH_HEAD']);
+    const r = await git(['-C', co, 'reset', '--quiet', '--hard', 'FETCH_HEAD']);
     if (r.code !== 0) return `git reset in ${co}: ${said(r)}`;
     fs.writeFileSync(marker, '');
     return undefined;
