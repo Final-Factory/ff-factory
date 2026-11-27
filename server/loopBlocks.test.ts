@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { joinedPieces, stringifyPrettyPieces, stringifyPrettySliced, textPieces, writeFileDurableAsync } from './durable.ts';
-import { setup, setupOnMachine, putRequests, LOTH } from './orchestratorsTestKit.ts';
+import { setup, setupOnMachine, putRequests, startedFor, until, LOTH } from './orchestratorsTestKit.ts';
 import type { BenchPriority } from '../shared/types.ts';
 
 const pretty = (v: unknown) => JSON.stringify(v, null, 2);
@@ -191,4 +191,34 @@ test('w6381: switch_branch reads its sandbox\'s agent seats from one holds index
   a.holdsIndexNow = real;
   assert.deepEqual(agents.workInSandbox('pc', 'alpha').requests, [], 'no live workers there');
   assert.deepEqual(ids.filter((id) => a.onAgentSeat(id)), seatsAlone);
+});
+
+test('w6381: a drain delivers a message with no fresh start due inside its memo, emptying it only for the send', async (t) => {
+  const env = await setupOnMachine(t);
+  const { store, sessions } = env;
+  putRequests(store, [{ id: 'w1', by: LOTH, status: 'active' }]);
+  const a = await startedFor(env, 'w1');
+  sessions.sessions.get(a.id)!.stop(true);
+  await until('its process stopped', () => !sessions.sessions.get(a.id)?.live);
+  const s = sessions as unknown as { placementFree: <T>(fn: () => T) => T; freshStart: (...x: unknown[]) => boolean; freshStartMaybe: (...x: unknown[]) => boolean };
+  assert.equal(s.freshStartMaybe(sessions.sessions.get(a.id)!, { text: 'x' }), false, 'nothing merged: none due');
+  const free0 = s.placementFree;
+  let frees = 0;
+  s.placementFree = (fn) => (frees++, free0(fn));
+  const fresh0 = s.freshStart;
+  let freshAsked = 0;
+  s.freshStart = (...x) => (freshAsked++, fresh0(...x));
+  // Queued while its computer is full, then the drain delivers it once room is back.
+  const full = sessions as unknown as { placeFull?: (s: unknown) => string | undefined };
+  const placeFull = full.placeFull;
+  full.placeFull = () => 'no sandbox on pc is free';
+  sessions.send(a.id, 'carry on.');
+  full.placeFull = placeFull;
+  assert.equal(sessions.queued().filter((q) => q.id === a.id).length, 1, 'queued');
+  freshAsked = 0;
+  frees = 0;
+  sessions.drain();
+  await until('delivered', () => !!sessions.sessions.get(a.id)?.live);
+  assert.equal(freshAsked, 0, 'freshStart, which empties the memo, is not asked when none is due');
+  assert.equal(frees, 1, 'the memo emptied once, for the send');
 });

@@ -911,6 +911,7 @@ export class Agents {
     sessions.deployMove = (s, q, now) => this.deployMove(s, q, now);
     // w2043: a pilot worker whose pull request merged goes on in a fresh session at its next message (server/freshAfterMerge.ts).
     sessions.freshStart = (s, m) => this.freshStart(s, m);
+    sessions.freshStartMaybe = (s, m) => this.freshStarts.has(s.info.id) || (!this.freshRefused.has(s.info.id) && !m.images?.length && !!freshAfterMergeDue(s.info, this.store.work.values(), this.cfg));
     machines.onPause = (id, p) => {
       if (p.paused) this.pauses.onPause(id);
       else {
@@ -6276,8 +6277,12 @@ Note: ${secrets.problems.join('; ')}` : ''}`;
     const out: [string, string][] = [];
     const now = Date.now();
     const queued = new Set(this.sessions.queued().map((q) => q.id));
-    const items = [...this.store.work.values()].filter((w) => isOpen(w));
+    // w6381: each session's open requests from one index, in ledger order (every open request per session was 0.1-0.2 s
+    // of the blockerWatch tick's blocks on 2026-11-27, own time in resumeBenchWaits and onRequest).
+    const bySession = this.workBySession([...this.store.work.values()].filter((w) => isOpen(w)));
     for (const s of this.store.sessions.values()) {
+      const items = bySession.get(s.id);
+      if (!items) continue;
       if (s.kind !== 'worker' || !s.lastResult || isMidTurn(s) || s.status === 'waiting_permission' || queued.has(s.id)) continue;
       const key = `${s.id}@${s.lastResultAt ?? s.lastActivityAt}`;
       if (this.benchTold.has(key)) continue;
@@ -10041,7 +10046,8 @@ ${w.repo ?? ''}
 
   /** Room for each kind of work and the held computers with room (w1089, w1098); `game` follows roomNow(), which tests replace. */
   roomFacts(): RoomNow {
-    const r: RoomNow = { ...roomNow(this.places(), this.placement()), game: this.roomNow() };
+    // w6381: places() once for both (each built claims for every machine; the blockerWatch tick's 1.1-1.3 s blocks).
+    const r: RoomNow = this.withPlacesOnce(() => ({ ...roomNow(this.places(), this.placement()), game: this.roomNow() }));
     // w1944: since when, read at every read of the room (the page, list_work, the blocker watch each minute, the capacity ping),
     // on the clock the WRONG flag reads (Orchestrators.now).
     const now = this.orchestrators?.now().getTime() ?? Date.now();
