@@ -78,12 +78,29 @@ export function linuxCodeFolder(appDir: string, which: 'app' | 'app.old' | 'app.
   return isLink(path.join(appDir, 'app')) ? path.join(linuxCodeDir(appDir), which) : path.join(appDir, which);
 }
 
-/** app -> app.failed, app.old -> app, on either layout. Throws when there is no app.old. */
+/**
+ * app -> app.failed, app.old -> app, on either layout. Throws when there is no app.old.
+ *
+ * w6443's re-review: code from before w6434 (no machine/isMain.ts) cannot start behind the link, since its main-module
+ * check compares argv[1] (the link path) with the real path, so the daemon would start and do nothing. A rollback of
+ * the first update to this layout therefore puts the old layout back too: a real `<appDir>/app` folder, the new code
+ * as `<appDir>/app.failed`, and no link. The next update moves it over again (swapInLinuxCode).
+ */
 export function swapBackLinuxCode(appDir: string) {
   const app = linuxCodeFolder(appDir, 'app');
   const old = linuxCodeFolder(appDir, 'app.old');
   const failed = linuxCodeFolder(appDir, 'app.failed');
   if (!fs.existsSync(old)) throw new Error(`there is no ${old} to put back`);
+  const link = path.join(appDir, 'app');
+  if (isLink(link) && !fs.existsSync(path.join(old, 'machine', 'isMain.ts'))) {
+    const oldFailed = path.join(appDir, 'app.failed');
+    fs.rmSync(oldFailed, { recursive: true, force: true });
+    fs.rmSync(failed, { recursive: true, force: true });
+    fs.unlinkSync(link);
+    fs.renameSync(old, link);
+    if (fs.existsSync(app)) fs.renameSync(app, oldFailed);
+    return;
+  }
   fs.rmSync(failed, { recursive: true, force: true });
   if (fs.existsSync(app)) fs.renameSync(app, failed);
   fs.renameSync(old, app);

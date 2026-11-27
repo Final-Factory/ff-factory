@@ -17,6 +17,8 @@ function build(appDir: string, v: string) {
   fs.mkdirSync(path.join(dir, 'machine'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'machine', 'VERSION'), v + '\n');
   fs.writeFileSync(path.join(dir, 'machine', 'ghApp.ts'), `// ${v}\n`);
+  // Code from w6434 on: it starts behind the link (machine/isMain.ts), so a rollback to it keeps the link.
+  fs.writeFileSync(path.join(dir, 'machine', 'isMain.ts'), '');
 }
 
 test('w6434: an update moves the old layout behind the code link, swaps inside code/, and a rollback puts the old code back', { skip: !links && 'needs symlinks (the layout is Linux only)' }, (t) => {
@@ -26,6 +28,7 @@ test('w6434: an update moves the old layout behind the code link, swaps inside c
   for (const [d, v] of [['app', 'A'], ['app.old', 'Z']]) {
     fs.mkdirSync(path.join(appDir, d, 'machine'), { recursive: true });
     fs.writeFileSync(path.join(appDir, d, 'machine', 'VERSION'), v + '\n');
+    fs.writeFileSync(path.join(appDir, d, 'machine', 'isMain.ts'), '');
   }
   assert.equal(version(appDir, 'app.old'), 'Z', 'the old layout reads its own app.old');
   build(appDir, 'B');
@@ -43,6 +46,28 @@ test('w6434: an update moves the old layout behind the code link, swaps inside c
   assert.deepEqual([version(appDir, 'app'), version(appDir, 'app.failed')], ['B', 'C'], 'the rollback: app.old back, the new code aside');
   assert.throws(() => swapBackLinuxCode(appDir), /no .*app\.old to put back/);
   assert.equal(version(appDir, 'app'), 'B', 'a refused rollback moves nothing');
+});
+
+test('w6443: a rollback of the first update to the link puts the old layout back, since code from before w6434 cannot start behind it', { skip: !links && 'needs symlinks' }, (t) => {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'w6443-'));
+  t.after(() => fs.rmSync(appDir, { recursive: true, force: true }));
+  // A pre-w6434 daemon: a real app folder with no machine/isMain.ts, and an earlier failed copy of its own lying about.
+  fs.mkdirSync(path.join(appDir, 'app', 'machine'), { recursive: true });
+  fs.writeFileSync(path.join(appDir, 'app', 'machine', 'VERSION'), 'PRE\n');
+  fs.mkdirSync(path.join(appDir, 'app.failed'));
+  build(appDir, 'B');
+  swapInLinuxCode(appDir);
+  const app = path.join(appDir, 'app');
+  assert.equal(fs.lstatSync(app).isSymbolicLink(), true);
+  swapBackLinuxCode(appDir);
+  assert.equal(fs.lstatSync(app).isSymbolicLink(), false, 'app is a real folder again');
+  assert.equal(fs.readFileSync(path.join(app, 'machine', 'VERSION'), 'utf8').trim(), 'PRE');
+  assert.equal(version(appDir, 'app.failed'), 'B', 'the new code is aside as <appDir>/app.failed');
+  assert.deepEqual(fs.readdirSync(path.join(appDir, 'code')), [], 'nothing left in code/');
+  // The next update moves it over again.
+  build(appDir, 'C');
+  swapInLinuxCode(appDir);
+  assert.deepEqual([version(appDir, 'app'), version(appDir, 'app.old')], ['C', 'PRE']);
 });
 
 test('w6434: after a downgrade put a real app folder back, the next update moves it over and drops the stale code/app', { skip: !links && 'needs symlinks' }, (t) => {

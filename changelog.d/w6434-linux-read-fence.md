@@ -11,3 +11,5 @@
   `scripts/worker/linuxCode.test.ts` (with a live Landlock leg across both swaps), workerFence, machineLink. The daemon's entry points (daemon, agent host, gh helper, ff-pr,
   unity-slot, leftovers, ffu slots) tell they are the script node started by real path (`machine/isMain.ts`), so they still
   run through the link.
+  A rollback of the first update to the link (back to code from before w6434, which cannot start behind it) puts the
+  old layout back too: a real `app` folder, the new code as `app.failed`, no link (w6443's re-review).
