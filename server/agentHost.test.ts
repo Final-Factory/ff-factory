@@ -188,7 +188,7 @@ test('w605: a host that died with its agent is not taken back; the portal resume
   assert.ok(hostAlive(hostDir(id)));
 });
 
-for (let round = 1; round <= 20; round++) test(`w2625: a host started before a daemon update that added a worker tool: the worker's next turn, restarted on the new code, runs in a new host and sees the tool (diag ${round})`, { timeout: 180_000 }, async (t) => {
+test("w2625: a host started before a daemon update that added a worker tool: the worker's next turn, restarted on the new code, runs in a new host and sees the tool", { timeout: 180_000 }, async (t) => {
   // w2618, worker bcd8d4e5 on beast, 2026-10-30: its agent host (pid 50752) started at 19:51:45 MDT, during the daemon
   // update that finished at 19:52:09, so it loaded the code from before PR #773 (the bug-thread listing). At 19:54:19 the
   // portal stopped its idle process to start it again on the new code (w1166, agents.ts codeMove), and the daemon handed
@@ -245,7 +245,7 @@ for (let round = 1; round <= 20; round++) test(`w2625: a host started before a d
   assert.notEqual(hostPid(id), pid, `in a new host, on the code the machine runs now: ${saw()}`);
 });
 
-for (let round = 1; round <= 20; round++) test(`w6548: a daemon killed before its offset save landed: the next daemon reads the host's lines again from that offset, and its turn end reaches the portal once (diag ${round})`, { timeout: 180_000 }, async (t) => {
+test("w6548: a daemon killed before its offset save landed: the next daemon reads the host's lines again from that offset, and its turn end reaches the portal once", { timeout: 180_000 }, async (t) => {
   const { sessions, mm, daemon, kill, hostDir, hostPid, cleanup, logs } = await setup();
   t.after(cleanup);
   const turnEnds: string[] = [];
